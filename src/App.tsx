@@ -26,6 +26,11 @@ import AssignedLeadsPage from './pages/Leads/AssignedLeadsPage';
 import ManualUploadLeadsPage from './pages/Leads/ManualUploadLeadsPage';
 import FolderUploadLeadsPage from './pages/Leads/FolderUploadLeadsPage';
 import LeadDetailPage from './pages/Leads/LeadDetailPage';
+import AllRFQsPage from './pages/Procurement/RFQs/AllRFQsPage';
+import DraftRFQsPage from './pages/Procurement/RFQs/DraftRFQsPage';
+import OutstandingRFQsPage from './pages/Procurement/RFQs/OutstandingRFQsPage';
+import ProcessRFQPage from './pages/Procurement/RFQs/ProcessRFQPage';
+import ViewRFQPage from './pages/Procurement/RFQs/ViewRFQPage';
 import { Box, Typography, Paper } from '@mui/material';
 
 function App() {
@@ -43,6 +48,12 @@ function App() {
         </MainLayout>
       } />
       <Route path="/procurement/rfqs" element={<Navigate to="/procurement/rfqs/all" replace />} />
+      <Route path="/procurement/rfqs/all" element={<MainLayout><AllRFQsPage /></MainLayout>} />
+      <Route path="/procurement/rfqs/draft" element={<MainLayout><DraftRFQsPage /></MainLayout>} />
+      <Route path="/procurement/rfqs/outstanding" element={<MainLayout><OutstandingRFQsPage /></MainLayout>} />
+      <Route path="/procurement/rfqs/process/:id" element={<MainLayout><ProcessRFQPage /></MainLayout>} />
+      <Route path="/procurement/rfqs/view/:id" element={<MainLayout><ViewRFQPage /></MainLayout>} />
+      <Route path="/rfqs/view/:id" element={<MainLayout><ViewRFQPage /></MainLayout>} />
       <Route path="/rfqs" element={<Navigate to="/procurement/rfqs/all" replace />} />
       <Route path="/setup/master" element={<MainLayout><SetupMaster /></MainLayout>} />
       <Route path="/setup/currency" element={<MainLayout><CurrencyPage /></MainLayout>} />

@@ -350,9 +350,11 @@ const OutstandingLeadsPage: React.FC = () => {
 
         <MenuItem
           onClick={() => {
-            const row = menuAnchor!.row;
-            setMenuAnchor(null);
-            navigate(`/procurement/leads/view/${row.leadId}`);
+            const row = menuAnchor?.row;
+            if (row) {
+              setMenuAnchor(null);
+              navigate(`/procurement/leads/view/${row.id}`);
+            }
           }}
           sx={{ fontSize: '0.8rem', fontWeight: 600, py: 1 }}
         >

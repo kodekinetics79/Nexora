@@ -62,6 +62,11 @@ const customerService = {
     await axiosInstance.delete(`/api/Customer/${id}`);
   },
 
+  getCustomerByEmail: async (email: string, businessUnitId: number): Promise<CustomerDTO | null> => {
+    const r = await axiosInstance.get('/api/Customer/by-email', { params: { email, businessUnitId } });
+    return r.data;
+  },
+
   // Upload / Export
   downloadTemplate: () =>
     axiosInstance.get('/api/CustomerUploader/download-template', { responseType: 'blob' }),

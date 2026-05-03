@@ -63,6 +63,16 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
     { key: 'orders', label: t('orders'), icon: <OrderIcon />, path: '/orders' },
     { key: 'shipments', label: t('shipments'), icon: <ShipmentIcon />, path: '/shipments' },
     {
+      key: 'rfq_mgmt',
+      label: 'RFQ Management',
+      icon: <QuotationIcon />,
+      children: [
+        { key: 'rfqs-all', label: 'All RFQs', path: '/procurement/rfqs/all' },
+        { key: 'rfqs-draft', label: 'Draft RFQs', path: '/procurement/rfqs/draft' },
+        { key: 'rfqs-outstanding', label: 'Outstanding RFQs', path: '/procurement/rfqs/outstanding' },
+      ]
+    },
+    {
       key: 'lead_mgmt',
       label: 'Lead Management',
       icon: <LeadIcon />,

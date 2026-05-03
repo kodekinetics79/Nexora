@@ -51,7 +51,6 @@ const EmailPromptDialog: React.FC<EmailPromptDialogProps> = ({
   const [selectedCustomerId, setSelectedCustomerId] = useState<number | null>(null);
   const [customers, setCustomers] = useState<CustomerDTO[]>([]);
   const [fetchingCustomers, setFetchingCustomers] = useState(false);
-  const [isEmailReadonly, setIsEmailReadonly] = useState(false);
 
   useEffect(() => {
     if (open) {
@@ -59,15 +58,22 @@ const EmailPromptDialog: React.FC<EmailPromptDialogProps> = ({
       setSubject(initialSubject || '');
       setBody(initialBody || '');
       setSelectedCustomerId(preselectedCustomerId || null);
-      setIsEmailReadonly(!!preselectedCustomerId && !!initialEmail);
+      
+      // Fetch initial customers
+      fetchCustomers('');
     }
   }, [open, initialEmail, initialSubject, initialBody, preselectedCustomerId]);
 
   const fetchCustomers = debounce(async (search: string) => {
-    if (!businessUnitId) return;
     setFetchingCustomers(true);
     try {
-      const res = await customerService.getAll({ name: search });
+      // Pass businessUnitId if available to filter relevant customers
+      const res = await customerService.getAll({ 
+        name: search, 
+        pageSize: 50,
+        // @ts-ignore - adding buid if supported by backend
+        businessUnitId: businessUnitId 
+      });
       setCustomers(res.items);
     } catch (error) {
       console.error('Failed to fetch customers', error);
@@ -109,9 +115,6 @@ const EmailPromptDialog: React.FC<EmailPromptDialogProps> = ({
                 setSelectedCustomerId(val?.id || null);
                 if (val?.contactEmail) {
                   setEmail(val.contactEmail);
-                  setIsEmailReadonly(true);
-                } else {
-                  setIsEmailReadonly(false);
                 }
               }}
               renderInput={(params) => (
@@ -132,7 +135,6 @@ const EmailPromptDialog: React.FC<EmailPromptDialogProps> = ({
             label="Recipient Email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            disabled={isEmailReadonly}
             placeholder="customer@example.com"
             slotProps={{ input: { sx: { fontWeight: 800 } } }}
           />

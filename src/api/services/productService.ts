@@ -156,6 +156,15 @@ const productService = {
     const r = await axiosInstance.get(`/api/Product/${id}/purchase-history`);
     return r.data;
   },
+
+  matchProduct: async (query: { name?: string; partNo?: string; manufacturer?: string }) => {
+    const response = await axiosInstance.post<{
+      hasExactMatch: boolean;
+      exactMatch: ProductDTO | null;
+      fuzzyMatches: ProductDTO[];
+    }>('/api/Product/match-product', query);
+    return response.data;
+  },
 };
 
 export default productService;

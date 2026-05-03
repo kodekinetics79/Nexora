@@ -82,6 +82,63 @@ export interface AcceptedLeadResponseDTO {
   // Add other fields as needed
 }
 
+export interface AcceptedLeadFullResponseDTO {
+  id: number;
+  rfqno?: string;
+  buyersName?: string;
+  recDate: string;
+  bidClosingDate?: string;
+  biddingDecision?: string;
+  acknowledgmentDate?: string;
+  subDate?: string;
+  headerRemarks?: string;
+  opportunityNo?: string;
+  noOfLineItems?: number;
+  rfqtype?: string;
+  durationAgreement?: string;
+  aiconfidence?: number;
+  leadSource: string;
+  emailSource?: string;
+  clientemail?: string;
+  createdDate: string;
+  modifiedDate?: string;
+  assignedToId?: number;
+  assignedToFullName?: string;
+  assignedOn?: string;
+  assignComment?: string;
+  leadItems: AcceptedLeadItemDTO[];
+  attachments: AttachmentResponseDTO[];
+}
+
+export interface AcceptedLeadItemDTO {
+  id: number;
+  companyRef?: string;
+  customerAccountPortalId?: string;
+  customerRfqno?: string;
+  itemMaterialCode?: string;
+  commodityProduct?: string;
+  buyerName?: string;
+  lineItemNo?: string;
+  productShortName?: string;
+  alternative?: string;
+  productShortDescription?: string;
+  currency?: string;
+  unitOfMeasure?: string;
+  unitPrice?: number;
+  quantity: number;
+  storageLocation?: string;
+  manufacturerName?: string;
+  manufacturerPartNumber?: string;
+  alternateProductName?: string;
+  alternatePartNumber?: string;
+  itemText?: string;
+  materialPotext?: string;
+  leadTime?: string;
+  receivedDate?: string;
+  bidClosingDateLine?: string;
+  aiconfidence?: number;
+}
+
 export interface PaginatedResponse<T> {
   items: T[];
   totalCount: number;
@@ -101,17 +158,17 @@ const leadService = {
   },
 
   getOutstandingLeads: async (params: any): Promise<PaginatedResponse<AcceptedLeadResponseDTO>> => {
-    const r = await axiosInstance.get('/api/UnAssignedLead', { 
-      params: { 
-        excludeAssigned: true, // default
-        ...params 
-      } 
-    });
+    const r = await axiosInstance.get('/api/UnAssignedLead', { params });
     return r.data;
   },
 
   getAssignedLeads: async (params: any): Promise<PaginatedResponse<AcceptedLeadResponseDTO>> => {
     const r = await axiosInstance.get('/api/UnAssignedLead/assigned', { params });
+    return r.data;
+  },
+
+  getAcceptedLeadById: async (id: number): Promise<AcceptedLeadFullResponseDTO> => {
+    const r = await axiosInstance.get(`/api/UnAssignedLead/${id}`);
     return r.data;
   },
 
