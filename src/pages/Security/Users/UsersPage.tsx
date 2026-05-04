@@ -165,11 +165,24 @@ const UsersPage: React.FC = () => {
 
   const handleSave = () => {
     const data = new FormData();
-    Object.entries(formData).forEach(([key, value]) => {
-      if (value !== undefined && value !== null) data.append(key, value.toString());
-    });
+    
+    // Explicitly map to PascalCase as expected by the backend [FromForm] DTO
+    data.append('FirstName', formData.firstName || '');
+    data.append('MiddleName', formData.middleName || '');
+    data.append('LastName', formData.lastName || '');
+    data.append('Email', formData.email || '');
+    data.append('RoleId', formData.roleId?.toString() || '');
+    data.append('TeamId', formData.teamId?.toString() || '');
+    data.append('Timezone', formData.timezone || '');
+    data.append('Region', formData.region || '');
+    data.append('ManagerId', formData.managerId?.toString() || '');
+    data.append('Buid', (formData.buid || userData.businessUnitId || 1).toString());
+    data.append('UserGroupId', formData.userGroupId?.toString() || '');
+    data.append('IsActive', (formData.isActive ?? true).toString());
+
     if (selectedImage) data.append('ImageFile', selectedImage);
     if (!selectedRecord) data.append('Password', createPassword || 'Welcome@123');
+    
     saveMutation.mutate(data);
   };
 

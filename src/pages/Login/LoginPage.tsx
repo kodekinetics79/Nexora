@@ -34,6 +34,7 @@ import { useAppTheme } from '../../context/ThemeContext';
 import Branding from '../../components/common/Branding';
 import axiosInstance from '../../api/axiosInstance';
 import { useNavigate } from 'react-router-dom';
+import rolePermissionService from '../../api/services/rolePermissionService';
 
 // --- Animations ---
 const gridFloat = keyframes`
@@ -362,6 +363,15 @@ const LoginPage: React.FC = () => {
       });
       const data = response.data;
       setToken(data.token);
+      
+      // Fetch permissions for the logged in role
+      let permissions: any[] = [];
+      try {
+        permissions = await rolePermissionService.getPermissionsByRole(data.roleId, data.businessUnitId);
+      } catch (permErr) {
+        console.error("Failed to fetch permissions", permErr);
+      }
+
       setUserData({
         id: data.id,
         email: data.email,
@@ -369,6 +379,7 @@ const LoginPage: React.FC = () => {
         roleName: data.roleName,
         roleId: data.roleId,
         businessUnitId: data.businessUnitId,
+        permissions: permissions,
       });
       navigate('/dashboard');
     } catch (err: any) {

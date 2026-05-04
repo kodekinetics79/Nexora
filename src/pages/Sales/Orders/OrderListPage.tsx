@@ -18,6 +18,8 @@ import { useAuth } from '../../../context/AuthContext';
 import orderService from '../../../api/services/orderService';
 import dayjs from 'dayjs';
 
+import PermissionGuard from '../../../components/common/PermissionGuard';
+
 const OrderListPage: React.FC = () => {
   const navigate = useNavigate();
   const { userData } = useAuth();
@@ -59,9 +61,11 @@ const OrderListPage: React.FC = () => {
           </Typography>
           <Typography variant="body2" color="text.secondary">Manage customer orders and conversions</Typography>
         </Box>
-        <Button variant="contained" startIcon={<AddIcon />} onClick={() => navigate('/sales/orders/create')}>
-          Create Order
-        </Button>
+        <PermissionGuard moduleName="Orders" action="create">
+          <Button variant="contained" startIcon={<AddIcon />} onClick={() => navigate('/sales/orders/create')}>
+            Create Order
+          </Button>
+        </PermissionGuard>
       </Stack>
 
       <Paper sx={{ p: 2, mb: 3, borderRadius: 2, boxShadow: 'none', border: '1px solid', borderColor: 'divider' }}>
@@ -128,17 +132,19 @@ const OrderListPage: React.FC = () => {
                           <InvoiceIcon fontSize="small" />
                         </IconButton>
                       </Tooltip>
-                      {!order.hasShipments && !['Shipped', 'Delivered', 'Cancelled'].includes(order.status) && (
-                        <Tooltip title="Create Shipment">
-                          <IconButton 
-                            size="small" 
-                            color="secondary" 
-                            onClick={() => navigate(`/sales/shipments/create?orderId=${order.id}`)}
-                          >
-                            <ShipmentIcon fontSize="small" />
-                          </IconButton>
-                        </Tooltip>
-                      )}
+                      <PermissionGuard moduleName="Shipments" action="create">
+                        {!order.hasShipments && !['Shipped', 'Delivered', 'Cancelled'].includes(order.status) && (
+                          <Tooltip title="Create Shipment">
+                            <IconButton 
+                              size="small" 
+                              color="secondary" 
+                              onClick={() => navigate(`/sales/shipments/create?orderId=${order.id}`)}
+                            >
+                              <ShipmentIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+                        )}
+                      </PermissionGuard>
                     </Stack>
                   </TableCell>
                 </TableRow>

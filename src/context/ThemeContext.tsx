@@ -14,10 +14,10 @@ const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 
 export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [mode, setModeState] = useState<PaletteMode>(() => {
-    return (localStorage.getItem('themeMode') as PaletteMode) || 'dark';
+    return (localStorage.getItem('themeMode') as PaletteMode) || 'light';
   });
   const [primaryColor, setPrimaryColorState] = useState(() => {
-    return localStorage.getItem('primaryColor') || '#4f46e5';
+    return localStorage.getItem('primaryColor') || '#4682B4';
   });
 
   const setPrimaryColor = (color: string) => {

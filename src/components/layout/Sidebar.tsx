@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import {
   Box,
@@ -26,6 +26,7 @@ import {
   FiberManualRecord as BulletIcon,
   TrendingUp as LeadIcon,
 } from '@mui/icons-material';
+import { useAuth } from '../../context/AuthContext';
 
 interface SidebarProps {
   collapsed: boolean;
@@ -36,14 +37,17 @@ interface MenuItem {
   label: string;
   icon: React.ReactNode;
   path?: string;
+  moduleName?: string;
   activePrefixes?: string[];
-  children?: { key: string; label: string; path: string; icon?: React.ReactNode; activePrefixes?: string[] }[];
+  children?: { key: string; label: string; path: string; moduleName?: string; icon?: React.ReactNode; activePrefixes?: string[] }[];
 }
 
 const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useTranslation();
+  const { hasPermission } = useAuth();
+  
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
     'rfq_mgmt': location.pathname.includes('/rfqs'),
     'setup': location.pathname.includes('/setup'),
@@ -57,78 +61,97 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
     setOpenGroups(prev => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const menuItems: MenuItem[] = [
-    { key: 'dashboard', label: t('dashboard'), icon: <DashboardIcon />, path: '/dashboard' },
-    {
-      key: 'lead_mgmt',
-      label: t('lead_management'),
-      icon: <LeadIcon />,
-      children: [
-        { key: 'leads-all', label: t('leads'), path: '/procurement/leads/all', activePrefixes: ['/procurement/leads/view', '/leads/view'] },
-        { key: 'leads-outstanding', label: t('outstanding_leads'), path: '/procurement/leads/outstanding' },
-        { key: 'leads-assigned', label: t('assigned_leads'), path: '/procurement/leads/assigned' },
-        { key: 'leads-manual', label: t('manual_upload'), path: '/procurement/leads/manual-upload' },
-        { key: 'leads-folder', label: t('upload_folder_leads'), path: '/procurement/leads/folder-upload' },
-      ]
-    },
-    {
-      key: 'rfq_mgmt',
-      label: t('rfq_management'),
-      icon: <QuotationIcon />,
-      children: [
-        { key: 'rfqs-all', label: t('all_rfqs'), path: '/procurement/rfqs/all', activePrefixes: ['/procurement/rfqs/process', '/procurement/rfqs/view', '/rfqs/view', '/rfqs/process'] },
-        { key: 'rfqs-draft', label: t('draft_rfqs'), path: '/procurement/rfqs/draft' },
-        { key: 'rfqs-outstanding', label: t('outstanding_rfqs'), path: '/procurement/rfqs/outstanding' },
-      ]
-    },
-    { key: 'quotes', label: t('quotations'), icon: <QuotationIcon />, path: '/sales/quotes', activePrefixes: ['/sales/quotes'] },
-    { key: 'orders', label: t('orders'), icon: <OrderIcon />, path: '/sales/orders', activePrefixes: ['/sales/orders'] },
-    { key: 'shipments', label: t('shipments'), icon: <ShipmentIcon />, path: '/sales/shipments', activePrefixes: ['/sales/shipments'] },
-    {
-      key: 'supplier_mgmt',
-      label: t('supplier_management'),
-      icon: <SupplierIcon />,
-      children: [
-        { key: 'suppliers', label: t('suppliers'), path: '/suppliers', activePrefixes: ['/suppliers/'] },
-        { key: 'quoted-items', label: t('quoted_items'), path: '/suppliers/quoted-items' },
-        { key: 'purchase-orders', label: t('purchase_orders'), path: '/suppliers/purchase-orders' },
-      ]
-    },
-    { key: 'customers', label: t('customers'), icon: <CustomerIcon />, path: '/customers', activePrefixes: ['/customers/'] },
-    {
-      key: 'inventory',
-      label: t('inventory'),
-      icon: <InventoryIcon />,
-      children: [
-        { key: 'products', label: t('products'), path: '/inventory/products', activePrefixes: ['/inventory/products/'] },
-        { key: 'categories', label: t('categories'), path: '/inventory/categories' },
-        { key: 'sub-categories', label: t('sub_categories'), path: '/inventory/sub-categories' },
-      ]
-    },
-    {
-      key: 'security',
-      label: t('user_and_access'),
-      icon: <SecurityIcon />,
-      children: [
-        { key: 'users', label: t('users'), path: '/security/users' },
-        { key: 'roles', label: t('roles_and_permissions'), path: '/security/roles' },
-      ]
-    },
-    {
-      key: 'setup',
-      label: t('setup_master'),
-      icon: <SetupIcon />,
-      children: [
-        { key: 'currency', label: t('currency'), path: '/setup/currency' },
-        { key: 'warehouse', label: t('warehouse'), path: '/setup/warehouse' },
-        { key: 'master', label: t('master_sub'), path: '/setup/master' },
-        { key: 'uom', label: t('uom'), path: '/setup/uom' },
-        { key: 'locations', label: t('locations'), path: '/setup/locations' },
-        { key: 'quote-format', label: t('quote_format'), path: '/setup/quote-format' },
-        { key: 'business-unit', label: t('business_unit'), path: '/setup/business-unit' },
-      ]
-    },
-  ];
+  const menuItems: MenuItem[] = useMemo(() => {
+    const rawItems: MenuItem[] = [
+      { key: 'dashboard', label: t('dashboard'), icon: <DashboardIcon />, path: '/dashboard', moduleName: 'Dashboard' },
+      {
+        key: 'lead_mgmt',
+        label: t('lead_management'),
+        icon: <LeadIcon />,
+        moduleName: 'Leads',
+        children: [
+          { key: 'leads-all', label: t('leads'), path: '/procurement/leads/all', moduleName: 'Leads', activePrefixes: ['/procurement/leads/view', '/leads/view'] },
+          { key: 'leads-outstanding', label: t('outstanding_leads'), path: '/procurement/leads/outstanding', moduleName: 'Leads' },
+          { key: 'leads-assigned', label: t('assigned_leads'), path: '/procurement/leads/assigned', moduleName: 'Leads' },
+          { key: 'leads-manual', label: t('manual_upload'), path: '/procurement/leads/manual-upload', moduleName: 'Leads' },
+          { key: 'leads-folder', label: t('upload_folder_leads'), path: '/procurement/leads/folder-upload', moduleName: 'Leads' },
+        ]
+      },
+      {
+        key: 'rfq_mgmt',
+        label: t('rfq_management'),
+        icon: <QuotationIcon />,
+        moduleName: 'RFQ Management',
+        children: [
+          { key: 'rfqs-all', label: t('all_rfqs'), path: '/procurement/rfqs/all', moduleName: 'RFQ Management', activePrefixes: ['/procurement/rfqs/process', '/procurement/rfqs/view', '/rfqs/view', '/rfqs/process'] },
+          { key: 'rfqs-draft', label: t('draft_rfqs'), path: '/procurement/rfqs/draft', moduleName: 'RFQ Management' },
+          { key: 'rfqs-outstanding', label: t('outstanding_rfqs'), path: '/procurement/rfqs/outstanding', moduleName: 'RFQ Management' },
+        ]
+      },
+      { key: 'quotes', label: t('quotations'), icon: <QuotationIcon />, path: '/sales/quotes', moduleName: 'Quotations', activePrefixes: ['/sales/quotes'] },
+      { key: 'orders', label: t('orders'), icon: <OrderIcon />, path: '/sales/orders', moduleName: 'Orders', activePrefixes: ['/sales/orders'] },
+      { key: 'shipments', label: t('shipments'), icon: <ShipmentIcon />, path: '/sales/shipments', moduleName: 'Shipments', activePrefixes: ['/sales/shipments'] },
+      {
+        key: 'supplier_mgmt',
+        label: t('supplier_management'),
+        icon: <SupplierIcon />,
+        moduleName: 'Suppliers',
+        children: [
+          { key: 'suppliers', label: t('suppliers'), path: '/suppliers', moduleName: 'Suppliers', activePrefixes: ['/suppliers/'] },
+          { key: 'quoted-items', label: t('quoted_items'), path: '/suppliers/quoted-items', moduleName: 'Supplier History' },
+          { key: 'purchase-orders', label: t('purchase_orders'), path: '/suppliers/purchase-orders', moduleName: 'Orders' },
+        ]
+      },
+      { key: 'customers', label: t('customers'), icon: <CustomerIcon />, path: '/customers', moduleName: 'Customers', activePrefixes: ['/customers/'] },
+      {
+        key: 'inventory',
+        label: t('inventory'),
+        icon: <InventoryIcon />,
+        moduleName: 'Products',
+        children: [
+          { key: 'products', label: t('products'), path: '/inventory/products', moduleName: 'Products', activePrefixes: ['/inventory/products/'] },
+          { key: 'categories', label: t('categories'), path: '/inventory/categories', moduleName: 'Product Categories' },
+          { key: 'sub-categories', label: t('sub_categories'), path: '/inventory/sub-categories', moduleName: 'Product Categories' },
+        ]
+      },
+      {
+        key: 'security',
+        label: t('user_and_access'),
+        icon: <SecurityIcon />,
+        moduleName: 'Users',
+        children: [
+          { key: 'users', label: t('users'), path: '/security/users', moduleName: 'Users' },
+          { key: 'roles', label: t('roles_and_permissions'), path: '/security/roles', moduleName: 'Roles & Permissions' },
+        ]
+      },
+      {
+        key: 'setup',
+        label: t('setup_master'),
+        icon: <SetupIcon />,
+        moduleName: 'Business Units',
+        children: [
+          { key: 'currency', label: t('currency'), path: '/setup/currency', moduleName: 'Currency' },
+          { key: 'warehouse', label: t('warehouse'), path: '/setup/warehouse', moduleName: 'Warehouse' },
+          { key: 'master', label: t('master_sub'), path: '/setup/master', moduleName: 'UOM' },
+          { key: 'uom', label: t('uom'), path: '/setup/uom', moduleName: 'UOM' },
+          { key: 'locations', label: t('locations'), path: '/setup/locations', moduleName: 'Locations' },
+          { key: 'quote-format', label: t('quote_format'), path: '/setup/quote-format', moduleName: 'Quote Configuration' },
+          { key: 'business-unit', label: t('business_unit'), path: '/setup/business-unit', moduleName: 'Business Units' },
+        ]
+      },
+    ];
+
+    // Filter items based on permissions
+    return rawItems.filter(item => {
+      if (item.children) {
+        // Filter children
+        item.children = item.children.filter(child => !child.moduleName || hasPermission(child.moduleName));
+        // Only show group if it has at least one visible child
+        return item.children.length > 0;
+      }
+      return !item.moduleName || hasPermission(item.moduleName);
+    });
+  }, [t, hasPermission]);
 
   const renderMenuItem = (item: MenuItem) => {
     const hasChildren = !!item.children;

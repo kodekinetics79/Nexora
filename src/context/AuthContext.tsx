@@ -7,6 +7,16 @@ import React, {
 } from "react";
 import axiosInstance from "../api/axiosInstance";
 
+export interface Permission {
+  id: number;
+  roleId: number;
+  moduleId: number;
+  moduleName: string;
+  canCreate: boolean;
+  canEdit: boolean;
+  canDelete: boolean;
+}
+
 interface BusinessUnit {
   id: number;
   businessUnitName: string;
@@ -19,6 +29,7 @@ interface UserData {
   roleId?: number;
   roleName?: string;
   businessUnitId?: number;
+  permissions?: Permission[];
 }
 
 interface AuthContextType {
@@ -29,6 +40,7 @@ interface AuthContextType {
   setToken: (token: string | null) => void;
   setUserData: (data: UserData) => void;
   logout: () => void;
+  hasPermission: (moduleName: string, action?: 'view' | 'create' | 'edit' | 'delete') => boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -63,6 +75,27 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     window.location.href = "/login";
   };
 
+  const hasPermission = (moduleName: string, action: 'view' | 'create' | 'edit' | 'delete' = 'view') => {
+    if (!userData.permissions) return false;
+    
+    // Super Admin or similar role logic could go here
+    if (userData.roleName === 'Super Admin') return true;
+
+    const permission = userData.permissions.find(
+      p => p.moduleName.toLowerCase() === moduleName.toLowerCase()
+    );
+
+    if (!permission) return false;
+
+    switch (action) {
+      case 'create': return permission.canCreate;
+      case 'edit': return permission.canEdit;
+      case 'delete': return permission.canDelete;
+      case 'view': return true; // If they are in the list, they can at least view
+      default: return false;
+    }
+  };
+
   useEffect(() => {
     const fetchBusinessUnits = async () => {
       setLoadingBusinessUnits(true);
@@ -88,6 +121,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         logout,
         businessUnits,
         loadingBusinessUnits,
+        hasPermission,
       }}
     >
       {children}

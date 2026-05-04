@@ -45,71 +45,84 @@ import CreateShipmentPage from './pages/Sales/Shipments/CreateShipmentPage';
 import ShipmentViewPage from './pages/Sales/Shipments/ShipmentViewPage';
 import { Box } from '@mui/material';
 import ShipmentInvoicePage from './pages/Sales/Shipments/ShipmentInvoicePage';
+import PermissionGuard from './components/common/PermissionGuard';
 
 function App() {
   return (
     <Routes>
       <Route path="/" element={<Navigate to="/dashboard" replace />} />
-      <Route path="/dashboard" element={<MainLayout><DashboardPage /></MainLayout>} />
-      <Route path="/sales/quotes" element={<MainLayout><QuotesPage /></MainLayout>} />
-      <Route path="/sales/quotes/create" element={<MainLayout><CreateQuotePage /></MainLayout>} />
-      <Route path="/sales/quotes/view/:id" element={<MainLayout><QuoteViewPage /></MainLayout>} />
-      <Route path="/sales/quotes/edit/:id" element={<MainLayout><EditQuotePage /></MainLayout>} />
-      <Route path="/sales/orders" element={<MainLayout><OrderListPage /></MainLayout>} />
-      <Route path="/sales/orders/create" element={<MainLayout><CreateOrderPage /></MainLayout>} />
-      <Route path="/sales/orders/edit/:id" element={<MainLayout><CreateOrderPage /></MainLayout>} />
-      <Route path="/sales/orders/:id" element={<MainLayout><OrderViewPage /></MainLayout>} />
-      <Route path="/sales/shipments" element={<MainLayout><ShipmentListPage /></MainLayout>} />
-      <Route path="/sales/shipments/create" element={<MainLayout><CreateShipmentPage /></MainLayout>} />
-      <Route path="/sales/shipments/from-order/:id" element={<MainLayout><CreateShipmentPage /></MainLayout>} />
-      <Route path="/sales/shipments/edit/:id" element={<MainLayout><CreateShipmentPage /></MainLayout>} />
-      <Route path="/sales/shipments/:id" element={<MainLayout><ShipmentViewPage /></MainLayout>} />
+      <Route path="/dashboard" element={<MainLayout><PermissionGuard moduleName="Dashboard" redirect><DashboardPage /></PermissionGuard></MainLayout>} />
+      
+      {/* Sales Routes */}
+      <Route path="/sales/quotes" element={<MainLayout><PermissionGuard moduleName="Quotations" redirect><QuotesPage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/quotes/create" element={<MainLayout><PermissionGuard moduleName="Quotations" action="create" redirect><CreateQuotePage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/quotes/view/:id" element={<MainLayout><PermissionGuard moduleName="Quotations" redirect><QuoteViewPage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/quotes/edit/:id" element={<MainLayout><PermissionGuard moduleName="Quotations" action="edit" redirect><EditQuotePage /></PermissionGuard></MainLayout>} />
+      
+      <Route path="/sales/orders" element={<MainLayout><PermissionGuard moduleName="Orders" redirect><OrderListPage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/orders/create" element={<MainLayout><PermissionGuard moduleName="Orders" action="create" redirect><CreateOrderPage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/orders/edit/:id" element={<MainLayout><PermissionGuard moduleName="Orders" action="edit" redirect><CreateOrderPage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/orders/:id" element={<MainLayout><PermissionGuard moduleName="Orders" redirect><OrderViewPage /></PermissionGuard></MainLayout>} />
+      
+      <Route path="/sales/shipments" element={<MainLayout><PermissionGuard moduleName="Shipments" redirect><ShipmentListPage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/shipments/create" element={<MainLayout><PermissionGuard moduleName="Shipments" action="create" redirect><CreateShipmentPage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/shipments/from-order/:id" element={<MainLayout><PermissionGuard moduleName="Shipments" action="create" redirect><CreateShipmentPage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/shipments/edit/:id" element={<MainLayout><PermissionGuard moduleName="Shipments" action="edit" redirect><CreateShipmentPage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/shipments/:id" element={<MainLayout><PermissionGuard moduleName="Shipments" redirect><ShipmentViewPage /></PermissionGuard></MainLayout>} />
+      
       {/* Sales Invoices/Documents */}
-      <Route path="/sales/orders/invoice/:id" element={<OrderInvoicePage />} />
-      <Route path="/sales/shipments/invoice/:id" element={<ShipmentInvoicePage />} />
+      <Route path="/sales/orders/invoice/:id" element={<PermissionGuard moduleName="Orders" redirect><OrderInvoicePage /></PermissionGuard>} />
+      <Route path="/sales/shipments/invoice/:id" element={<PermissionGuard moduleName="Shipments" redirect><ShipmentInvoicePage /></PermissionGuard>} />
+      
       <Route path="/orders" element={<Navigate to="/sales/orders" replace />} />
       <Route path="/quotations" element={<Navigate to="/sales/quotes" replace />} />
+      
+      {/* RFQ Routes */}
       <Route path="/procurement/rfqs" element={<Navigate to="/procurement/rfqs/all" replace />} />
-      <Route path="/procurement/rfqs/all" element={<MainLayout><AllRFQsPage /></MainLayout>} />
-      <Route path="/procurement/rfqs/draft" element={<MainLayout><DraftRFQsPage /></MainLayout>} />
-      <Route path="/procurement/rfqs/outstanding" element={<MainLayout><OutstandingRFQsPage /></MainLayout>} />
-      <Route path="/procurement/rfqs/process/:id" element={<MainLayout><ProcessRFQPage /></MainLayout>} />
-      <Route path="/procurement/rfqs/view/:id" element={<MainLayout><ViewRFQPage /></MainLayout>} />
-      <Route path="/rfqs/view/:id" element={<MainLayout><ViewRFQPage /></MainLayout>} />
+      <Route path="/procurement/rfqs/all" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><AllRFQsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/procurement/rfqs/draft" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><DraftRFQsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/procurement/rfqs/outstanding" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><OutstandingRFQsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/procurement/rfqs/process/:id" element={<MainLayout><PermissionGuard moduleName="RFQ Management" action="edit" redirect><ProcessRFQPage /></PermissionGuard></MainLayout>} />
+      <Route path="/procurement/rfqs/view/:id" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><ViewRFQPage /></PermissionGuard></MainLayout>} />
+      <Route path="/rfqs/view/:id" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><ViewRFQPage /></PermissionGuard></MainLayout>} />
       <Route path="/rfqs" element={<Navigate to="/procurement/rfqs/all" replace />} />
-      <Route path="/setup/master" element={<MainLayout><SetupMaster /></MainLayout>} />
-      <Route path="/setup/currency" element={<MainLayout><CurrencyPage /></MainLayout>} />
-      <Route path="/setup/warehouse" element={<MainLayout><WarehousePage /></MainLayout>} />
-      <Route path="/setup/uom" element={<MainLayout><UomPage /></MainLayout>} />
-      <Route path="/setup/locations" element={<MainLayout><LocationMaster /></MainLayout>} />
-      <Route path="/setup/quote-format" element={<MainLayout><QuoteFormatPage /></MainLayout>} />
-      <Route path="/setup/business-unit" element={<MainLayout><BusinessUnitPage /></MainLayout>} />
+      
+      {/* Setup Routes */}
+      <Route path="/setup/master" element={<MainLayout><PermissionGuard moduleName="UOM" redirect><SetupMaster /></PermissionGuard></MainLayout>} />
+      <Route path="/setup/currency" element={<MainLayout><PermissionGuard moduleName="Currency" redirect><CurrencyPage /></PermissionGuard></MainLayout>} />
+      <Route path="/setup/warehouse" element={<MainLayout><PermissionGuard moduleName="Warehouse" redirect><WarehousePage /></PermissionGuard></MainLayout>} />
+      <Route path="/setup/uom" element={<MainLayout><PermissionGuard moduleName="UOM" redirect><UomPage /></PermissionGuard></MainLayout>} />
+      <Route path="/setup/locations" element={<MainLayout><PermissionGuard moduleName="Locations" redirect><LocationMaster /></PermissionGuard></MainLayout>} />
+      <Route path="/setup/quote-format" element={<MainLayout><PermissionGuard moduleName="Quote Configuration" redirect><QuoteFormatPage /></PermissionGuard></MainLayout>} />
+      <Route path="/setup/business-unit" element={<MainLayout><PermissionGuard moduleName="Business Units" redirect><BusinessUnitPage /></PermissionGuard></MainLayout>} />
 
       {/* Security Routes */}
-      <Route path="/security/users" element={<MainLayout><UsersPage /></MainLayout>} />
-      <Route path="/security/roles" element={<MainLayout><RolesPermissionsPage /></MainLayout>} />
+      <Route path="/security/users" element={<MainLayout><PermissionGuard moduleName="Users" redirect><UsersPage /></PermissionGuard></MainLayout>} />
+      <Route path="/security/roles" element={<MainLayout><PermissionGuard moduleName="Roles & Permissions" redirect><RolesPermissionsPage /></PermissionGuard></MainLayout>} />
 
       {/* Inventory Routes */}
-      <Route path="/inventory/products" element={<MainLayout><ProductsPage /></MainLayout>} />
-      <Route path="/inventory/products/:id" element={<MainLayout><ProductDetailPage /></MainLayout>} />
-      <Route path="/inventory/categories" element={<MainLayout><ProductCategoryPage /></MainLayout>} />
-      <Route path="/inventory/sub-categories" element={<MainLayout><ProductSubCategoryPage /></MainLayout>} />
+      <Route path="/inventory/products" element={<MainLayout><PermissionGuard moduleName="Products" redirect><ProductsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/products/:id" element={<MainLayout><PermissionGuard moduleName="Products" redirect><ProductDetailPage /></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/categories" element={<MainLayout><PermissionGuard moduleName="Product Categories" redirect><ProductCategoryPage /></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/sub-categories" element={<MainLayout><PermissionGuard moduleName="Product Categories" redirect><ProductSubCategoryPage /></PermissionGuard></MainLayout>} />
+      
       {/* Supplier Routes */}
-      <Route path="/suppliers" element={<MainLayout><SuppliersPage /></MainLayout>} />
-      <Route path="/suppliers/:id" element={<MainLayout><SupplierDetailPage /></MainLayout>} />
-      <Route path="/suppliers/quoted-items" element={<MainLayout><QuotedItemsPage /></MainLayout>} />
-      <Route path="/suppliers/purchase-orders" element={<MainLayout><PurchaseOrdersPage /></MainLayout>} />
+      <Route path="/suppliers" element={<MainLayout><PermissionGuard moduleName="Suppliers" redirect><SuppliersPage /></PermissionGuard></MainLayout>} />
+      <Route path="/suppliers/:id" element={<MainLayout><PermissionGuard moduleName="Suppliers" redirect><SupplierDetailPage /></PermissionGuard></MainLayout>} />
+      <Route path="/suppliers/quoted-items" element={<MainLayout><PermissionGuard moduleName="Supplier History" redirect><QuotedItemsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/suppliers/purchase-orders" element={<MainLayout><PermissionGuard moduleName="Orders" redirect><PurchaseOrdersPage /></PermissionGuard></MainLayout>} />
+      
       {/* Customer Routes */}
-      <Route path="/customers" element={<MainLayout><CustomersPage /></MainLayout>} />
-      <Route path="/customers/:id" element={<MainLayout><CustomerDetailPage /></MainLayout>} />
+      <Route path="/customers" element={<MainLayout><PermissionGuard moduleName="Customers" redirect><CustomersPage /></PermissionGuard></MainLayout>} />
+      <Route path="/customers/:id" element={<MainLayout><PermissionGuard moduleName="Customers" redirect><CustomerDetailPage /></PermissionGuard></MainLayout>} />
 
       {/* Lead Management Routes */}
-      <Route path="/procurement/leads/all" element={<MainLayout><LeadsPage /></MainLayout>} />
-      <Route path="/procurement/leads/outstanding" element={<MainLayout><OutstandingLeadsPage /></MainLayout>} />
-      <Route path="/procurement/leads/assigned" element={<MainLayout><AssignedLeadsPage /></MainLayout>} />
-      <Route path="/procurement/leads/manual-upload" element={<MainLayout><ManualUploadLeadsPage /></MainLayout>} />
-      <Route path="/procurement/leads/folder-upload" element={<MainLayout><FolderUploadLeadsPage /></MainLayout>} />
-      <Route path="/procurement/leads/view/:id" element={<MainLayout><LeadDetailPage /></MainLayout>} />
+      <Route path="/procurement/leads/all" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><LeadsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/procurement/leads/outstanding" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><OutstandingLeadsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/procurement/leads/assigned" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><AssignedLeadsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/procurement/leads/manual-upload" element={<MainLayout><PermissionGuard moduleName="Leads" action="create" redirect><ManualUploadLeadsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/procurement/leads/folder-upload" element={<MainLayout><PermissionGuard moduleName="Leads" action="create" redirect><FolderUploadLeadsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/procurement/leads/view/:id" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><LeadDetailPage /></PermissionGuard></MainLayout>} />
       
       {/* Short Lead Routes */}
       <Route path="/leads/all" element={<Navigate to="/procurement/leads/all" replace />} />
@@ -117,7 +130,7 @@ function App() {
       <Route path="/leads/assigned" element={<Navigate to="/procurement/leads/assigned" replace />} />
       <Route path="/leads/manual-upload" element={<Navigate to="/procurement/leads/manual-upload" replace />} />
       <Route path="/leads/folder-upload" element={<Navigate to="/procurement/leads/folder-upload" replace />} />
-      <Route path="/leads/view/:id" element={<MainLayout><LeadDetailPage /></MainLayout>} />
+      <Route path="/leads/view/:id" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><LeadDetailPage /></PermissionGuard></MainLayout>} />
       <Route path="/leads" element={<Navigate to="/procurement/leads/all" replace />} />
 
       <Route path="/login" element={<LoginPage />} />

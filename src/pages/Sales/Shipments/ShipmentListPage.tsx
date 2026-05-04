@@ -20,6 +20,9 @@ import shipmentService from '../../../api/services/shipmentService';
 import { useAuth } from '../../../context/AuthContext';
 import dayjs from 'dayjs';
 
+import PermissionGuard from '../../../components/common/PermissionGuard';
+import { Add as AddIcon } from '@mui/icons-material';
+
 const ShipmentListPage: React.FC = () => {
   const navigate = useNavigate();
   const { userData } = useAuth();
@@ -186,11 +189,13 @@ const ShipmentListPage: React.FC = () => {
               <ViewIcon fontSize="small" />
             </IconButton>
           </Tooltip>
-          <Tooltip title="Edit">
-            <IconButton size="small" color="primary">
-              <EditIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
+          <PermissionGuard moduleName="Shipments" action="edit">
+            <Tooltip title="Edit">
+              <IconButton size="small" color="primary" onClick={() => navigate(`/sales/shipments/edit/${p.row.id}`)}>
+                <EditIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          </PermissionGuard>
         </Stack>
       )
     }
@@ -209,6 +214,16 @@ const ShipmentListPage: React.FC = () => {
           </Typography>
         </Box>
         <Stack direction="row" spacing={2}>
+          <PermissionGuard moduleName="Shipments" action="create">
+            <Button 
+              variant="contained" 
+              startIcon={<AddIcon />} 
+              onClick={() => navigate('/sales/shipments/create')}
+              sx={{ borderRadius: 2, textTransform: 'none', fontWeight: 700 }}
+            >
+              New Shipment
+            </Button>
+          </PermissionGuard>
           <Tooltip title="Refresh Logistics Data">
             <Button 
               variant="outlined" 

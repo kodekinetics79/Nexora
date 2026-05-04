@@ -53,6 +53,13 @@ const rolePermissionService = {
   delete: async (id: number, businessUnitId?: number) => {
     const response = await axiosInstance.delete(`/api/RolePermission/${id}`, { params: { businessUnitId } });
     return response.data;
+  },
+
+  getPermissionsByRole: async (roleId: number, businessUnitId: number) => {
+    const response = await axiosInstance.get<RolePermissionPaginatedResponse>('/api/RolePermission', {
+      params: { roleId, businessUnitId, pageSize: 1000 }
+    });
+    return response.data.items;
   }
 };
 
