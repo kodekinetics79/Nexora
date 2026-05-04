@@ -44,12 +44,12 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
   const location = useLocation();
   const { t } = useTranslation();
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
-    'rfq_mgmt': location.pathname.includes('/procurement/rfqs'),
+    'rfq_mgmt': location.pathname.includes('/procurement/rfqs') || location.pathname.includes('/rfqs'),
     'setup': location.pathname.includes('/setup'),
     'security': location.pathname.includes('/security'),
     'inventory': location.pathname.includes('/inventory'),
     'supplier_mgmt': location.pathname.includes('/suppliers') || location.pathname.includes('/quoted-items') || location.pathname.includes('/purchase-orders'),
-    'lead_mgmt': location.pathname.includes('/procurement/leads'),
+    'lead_mgmt': location.pathname.includes('/procurement/leads') || location.pathname.includes('/leads'),
   });
 
   const handleGroupClick = (key: string) => {
@@ -135,8 +135,12 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
     const isOpen = openGroups[item.key];
 
     const isSelected = hasChildren
-      ? item.children!.some(child => location.pathname.startsWith(child.path))
-      : item.path ? location.pathname === item.path : false;
+      ? item.children!.some(child => 
+          location.pathname === child.path || 
+          location.pathname.startsWith(child.path) ||
+          (child.path.startsWith('/procurement') && location.pathname.startsWith(child.path.replace('/procurement', '')))
+        )
+      : item.path ? (location.pathname === item.path || (item.path.startsWith('/procurement') && location.pathname === item.path.replace('/procurement', ''))) : false;
 
     return (
       <React.Fragment key={item.key}>

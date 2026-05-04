@@ -88,6 +88,14 @@ function App() {
       <Route path="/procurement/leads/manual-upload" element={<MainLayout><ManualUploadLeadsPage /></MainLayout>} />
       <Route path="/procurement/leads/folder-upload" element={<MainLayout><FolderUploadLeadsPage /></MainLayout>} />
       <Route path="/procurement/leads/view/:id" element={<MainLayout><LeadDetailPage /></MainLayout>} />
+      
+      {/* Short Lead Routes */}
+      <Route path="/leads/all" element={<Navigate to="/procurement/leads/all" replace />} />
+      <Route path="/leads/outstanding" element={<Navigate to="/procurement/leads/outstanding" replace />} />
+      <Route path="/leads/assigned" element={<Navigate to="/procurement/leads/assigned" replace />} />
+      <Route path="/leads/manual-upload" element={<Navigate to="/procurement/leads/manual-upload" replace />} />
+      <Route path="/leads/folder-upload" element={<Navigate to="/procurement/leads/folder-upload" replace />} />
+      <Route path="/leads/view/:id" element={<MainLayout><LeadDetailPage /></MainLayout>} />
       <Route path="/leads" element={<Navigate to="/procurement/leads/all" replace />} />
 
       <Route path="/login" element={<LoginPage />} />

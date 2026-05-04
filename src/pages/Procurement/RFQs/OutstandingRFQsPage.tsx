@@ -6,7 +6,7 @@ import {
   Box, Typography, Paper, Button, IconButton,
   Stack, Dialog, DialogTitle, DialogContent,
   DialogActions, TextField, MenuItem, Chip,
-  Menu,
+  Tooltip,
 } from '@mui/material';
 import {
   DataGrid, type GridColDef, type GridPaginationModel
@@ -15,8 +15,8 @@ import {
   Visibility as ViewIcon,
   Refresh as RefreshIcon,
   Email as EmailIcon,
-  MoreHoriz as MenuIcon,
   FlashOn as ProcessIcon,
+  Layers as ItemsIcon,
 } from '@mui/icons-material';
 import leadService from '../../../api/services/leadService';
 import SearchField from '../../../components/common/SearchField';
@@ -30,7 +30,6 @@ const OutstandingRFQsPage: React.FC = () => {
   const { enqueueSnackbar } = useSnackbar();
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
   const [search, setSearch] = useState('');
-  const [menuAnchor, setMenuAnchor] = useState<{ el: HTMLElement, row: any } | null>(null);
 
   const formatDate = (dateStr: string | null) => {
     if (!dateStr) return '—';
@@ -64,6 +63,7 @@ const OutstandingRFQsPage: React.FC = () => {
       search: search || undefined,
       businessUnitId: userData?.businessUnitId,
       assignedToId: isAdminOrManager ? undefined : userData?.id,
+      onlyAssigned: true,
     }),
   });
 
@@ -131,6 +131,17 @@ const OutstandingRFQsPage: React.FC = () => {
       )
     },
     {
+      field: 'noOfLineItems',
+      headerName: 'Line Items',
+      width: 110,
+      renderCell: (p) => (
+        <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', height: '100%' }}>
+          <ItemsIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
+          <Typography sx={{ fontSize: '0.85rem', fontWeight: 800 }}>{p.row.noOfLineItems || 0}</Typography>
+        </Stack>
+      )
+    },
+    {
       field: 'aiconfidence',
       headerName: 'AI Confidence',
       width: 130,
@@ -168,15 +179,29 @@ const OutstandingRFQsPage: React.FC = () => {
     {
       field: 'actions',
       headerName: 'Actions',
-      width: 80,
+      width: 100,
       sortable: false,
       renderCell: (p) => (
-        <IconButton
-          size="small"
-          onClick={(e) => setMenuAnchor({ el: e.currentTarget, row: p.row })}
-        >
-          <MenuIcon />
-        </IconButton>
+        <Stack direction="row" spacing={1} sx={{ height: '100%', alignItems: 'center' }}>
+          <Tooltip title="View Lead">
+            <IconButton
+              size="small"
+              sx={{ color: 'primary.main', bgcolor: 'primary.lighter', '&:hover': { bgcolor: 'primary.light', color: 'white' } }}
+              onClick={() => navigate(`/procurement/leads/view/${p.row.id}`)}
+            >
+              <ViewIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="Process to RFQ">
+            <IconButton
+              size="small"
+              sx={{ color: 'success.main', bgcolor: 'success.lighter', '&:hover': { bgcolor: 'success.light', color: 'white' } }}
+              onClick={() => navigate(`/procurement/rfqs/process/${p.row.id}`)}
+            >
+              <ProcessIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        </Stack>
       ),
     },
   ];
@@ -249,33 +274,6 @@ const OutstandingRFQsPage: React.FC = () => {
         </DialogActions>
       </Dialog>
 
-      <Menu
-        anchorEl={menuAnchor?.el}
-        open={Boolean(menuAnchor)}
-        onClose={() => setMenuAnchor(null)}
-      >
-        <MenuItem
-          onClick={() => {
-            const row = menuAnchor!.row;
-            setMenuAnchor(null);
-            navigate(`/procurement/leads/view/${row.id}`);
-          }}
-          sx={{ fontSize: '0.85rem', fontWeight: 600 }}
-        >
-          <ViewIcon sx={{ fontSize: 16, mr: 1, color: 'primary.main' }} /> View Lead
-        </MenuItem>
-        <MenuItem
-          onClick={() => {
-            const row = menuAnchor!.row;
-            setMenuAnchor(null);
-            navigate(`/procurement/rfqs/process/${row.id}`);
-          }}
-          sx={{ fontSize: '0.85rem', fontWeight: 600 }}
-        >
-          <ProcessIcon sx={{ fontSize: 16, mr: 1, color: 'success.main' }} /> Process to RFQ
-        </MenuItem>
-
-      </Menu>
     </Box>
   );
 };

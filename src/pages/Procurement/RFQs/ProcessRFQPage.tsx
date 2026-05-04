@@ -7,7 +7,7 @@ import {
   IconButton, TextField, Autocomplete, CircularProgress,
   MenuItem, Dialog, DialogTitle, DialogContent, DialogActions,
   Divider, Tabs, Tab, InputAdornment, List, ListItem, ListItemText,
-  ListItemAvatar, Avatar, Checkbox
+  ListItemAvatar, Avatar, Checkbox, TablePagination
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
@@ -21,6 +21,8 @@ import {
   Dns as DatabaseIcon,
   Business as SupplierIcon,
   Send as SendIcon,
+  AutoFixHigh as AutoFixIcon,
+  Delete as DeleteIcon,
 } from '@mui/icons-material';
 import { Breadcrumbs, Link } from '@mui/material';
 
@@ -29,6 +31,7 @@ import type { AcceptedLeadFullResponseDTO, AcceptedLeadItemDTO } from '../../../
 import productService from '../../../api/services/productService';
 import rfqService from '../../../api/services/rfqService';
 import customerService from '../../../api/services/customerService';
+import supplierService from '../../../api/services/supplierService';
 import { useAuth } from '../../../context/AuthContext';
 import { toast } from 'react-hot-toast';
 import supplierQuotedItemService from '../../../api/services/supplierQuotedItemService';
@@ -39,11 +42,13 @@ interface ProcessItem extends AcceptedLeadItemDTO {
   selectionSource: 'product' | 'quotedItem';
   productId: number | null;
   supplierQuotedItemId: number | null;
-  matchStatus: 'pending' | 'loading' | 'matched' | 'no-match';
+  matchStatus: 'pending' | 'loading' | 'matched' | 'no-match' | 'sourced-web';
   finalSalesPrice?: number;
   finalLandedCost?: number;
   qtyOnHand?: number;
   include: boolean;
+  preferredSupplierName?: string;
+  preferredSupplierEmail?: string;
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -193,6 +198,17 @@ interface ItemRowProps {
 }
 
 const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onRemove, onViewDetails, onToggleSelect, businessUnitId }) => {
+  const [isEditing, setIsEditing] = useState(false);
+  const [webSearchOpen, setWebSearchOpen] = useState(false);
+
+  const handleWebSupplierSelect = useCallback((supp: any) => {
+    onUpdate(index, {
+      preferredSupplierName: supp.name,
+      preferredSupplierEmail: supp.contactEmail,
+      matchStatus: 'sourced-web'
+    });
+  }, [index, onUpdate]);
+
   const handleSourceChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     onUpdate(index, {
       selectionSource: e.target.value as 'product' | 'quotedItem',
@@ -207,6 +223,7 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
       unitPrice: p?.finalSalesPrice ?? p?.sellingPrice ?? 0,
       qtyOnHand: p?.qtyOnHand ?? 0,
     });
+    setIsEditing(false);
   }, [index, onUpdate]);
 
   const handleQuoteChange = useCallback((q: any) => {
@@ -214,6 +231,7 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
       supplierQuotedItemId: q?.id ?? null,
       unitPrice: q?.unitPrice ?? 0,
     });
+    setIsEditing(false);
   }, [index, onUpdate]);
 
   const handleQtyChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -226,6 +244,29 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
 
   const handleRemove = useCallback(() => onRemove(index), [index, onRemove]);
   const handleViewDetails = useCallback(() => onViewDetails(item), [item, onViewDetails]);
+
+  const handleSmartMatch = useCallback(async () => {
+    onUpdate(index, { matchStatus: 'loading' });
+    try {
+      const res = await productService.matchProduct({
+        name: item.productShortName,
+        partNo: item.manufacturerPartNumber,
+        manufacturer: item.manufacturerName
+      });
+      if (res.hasExactMatch && res.exactMatch) {
+        onUpdate(index, {
+          matchStatus: 'matched',
+          productId: res.exactMatch.id,
+          unitPrice: res.exactMatch.finalSalesPrice ?? res.exactMatch.sellingPrice ?? 0,
+          qtyOnHand: res.exactMatch.qtyOnHand ?? 0
+        });
+      } else {
+        onUpdate(index, { matchStatus: 'no-match' });
+      }
+    } catch (e) {
+      onUpdate(index, { matchStatus: 'no-match' });
+    }
+  }, [item, index, onUpdate]);
 
   return (
     <TableRow sx={{ '& td': { borderBottom: '1px solid #f0f0f0' }, bgcolor: item.include ? 'transparent' : '#fafafa' }}>
@@ -256,11 +297,44 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
               />
             )}
             {item.matchStatus === 'no-match' && (
+              <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+                <Chip
+                  label="New Item"
+                  size="small"
+                  sx={{ height: 16, fontSize: '0.55rem', fontWeight: 900, bgcolor: '#fff3e0', color: '#ef6c00', borderRadius: 1 }}
+                />
+                <Button
+                  size="small"
+                  variant="outlined"
+                  onClick={() => setWebSearchOpen(true)}
+                  sx={{ height: 20, fontSize: '0.62rem', textTransform: 'none', fontWeight: 800, p: 0, px: 1, minWidth: 40, borderRadius: 1 }}
+                >
+                  Search Internet for Supplier
+                </Button>
+                <SearchWebSupplierDialog
+                  open={webSearchOpen}
+                  onClose={() => setWebSearchOpen(false)}
+                  query={item.productShortName || ''}
+                  onSelectSupplier={handleWebSupplierSelect}
+                />
+              </Stack>
+            )}
+            {item.matchStatus === 'sourced-web' && (
               <Chip
-                label="New Item"
+                label={`Sourced: ${item.preferredSupplierName || 'Web'}`}
                 size="small"
-                sx={{ height: 16, fontSize: '0.55rem', fontWeight: 900, bgcolor: '#fff3e0', color: '#ef6c00', borderRadius: 1 }}
+                sx={{ height: 18, fontSize: '0.62rem', fontWeight: 900, bgcolor: '#e1f5fe', color: '#0288d1', borderRadius: 1 }}
               />
+            )}
+            {item.matchStatus === 'pending' && (
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={handleSmartMatch}
+                sx={{ height: 16, fontSize: '0.6rem', textTransform: 'none', fontWeight: 800, p: 0, px: 1, minWidth: 40, borderRadius: 1 }}
+              >
+                Smart Match
+              </Button>
             )}
             {item.matchStatus === 'loading' && (
               <CircularProgress size={10} thickness={6} />
@@ -293,18 +367,58 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
             <MenuItem value="quotedItem" sx={{ fontSize: '0.75rem' }}>Quote ..</MenuItem>
           </TextField>
 
-          {item.selectionSource === 'product' ? (
-            <ProductSelector
-              value={item.productId}
-              onChange={handleProductChange}
-              businessUnitId={businessUnitId}
-            />
+          {isEditing ? (
+            <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+              <Box sx={{ flex: 1 }}>
+                {item.selectionSource === 'product' ? (
+                  <ProductSelector
+                    value={item.productId}
+                    onChange={handleProductChange}
+                    businessUnitId={businessUnitId}
+                  />
+                ) : (
+                  <QuoteSelector
+                    value={item.supplierQuotedItemId}
+                    onChange={handleQuoteChange}
+                    businessUnitId={businessUnitId}
+                  />
+                )}
+              </Box>
+              <Button
+                size="small"
+                variant="text"
+                onClick={() => setIsEditing(false)}
+                sx={{ minWidth: 40, height: 32, fontSize: '0.65rem', textTransform: 'none', fontWeight: 800, color: '#666' }}
+              >
+                Cancel
+              </Button>
+            </Stack>
           ) : (
-            <QuoteSelector
-              value={item.supplierQuotedItemId}
-              onChange={handleQuoteChange}
-              businessUnitId={businessUnitId}
-            />
+            <Box
+              onClick={() => setIsEditing(true)}
+              sx={{
+                width: '100%',
+                minHeight: 32,
+                p: 1,
+                border: '1px solid #ddd',
+                borderRadius: 1.5,
+                bgcolor: 'white',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                '&:hover': { borderColor: '#1976d2', bgcolor: '#fafafa' }
+              }}
+            >
+              <Typography sx={{ fontSize: '0.75rem', color: item.productId || item.supplierQuotedItemId ? 'text.primary' : 'text.secondary', fontWeight: 600 }}>
+                {item.selectionSource === 'product'
+                  ? item.productId
+                    ? `Product ID: ${item.productId} (Click to change)`
+                    : 'Select Product...'
+                  : item.supplierQuotedItemId
+                  ? `Quote ID: ${item.supplierQuotedItemId} (Click to change)`
+                  : 'Select Quote...'}
+              </Typography>
+            </Box>
           )}
         </Stack>
       </TableCell>
@@ -332,13 +446,98 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
 
       {/* Action */}
       <TableCell align="center">
-        <IconButton size="small" onClick={handleRemove}>
-          <ViewIcon sx={{ fontSize: 18, color: '#888' }} />
+        <IconButton size="small" onClick={handleRemove} color="error">
+          <DeleteIcon sx={{ fontSize: 18 }} />
         </IconButton>
       </TableCell>
     </TableRow>
   );
 });
+
+const SearchWebSupplierDialog: React.FC<{
+  open: boolean;
+  onClose: () => void;
+  query: string;
+  onSelectSupplier: (supp: any) => void;
+}> = ({ open, onClose, query, onSelectSupplier }) => {
+  const [results, setResults] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (open && query) {
+      setLoading(true);
+      supplierService.searchWebSuppliers(query)
+        .then(res => {
+          setResults(res || []);
+        })
+        .catch(() => {
+          setResults([]);
+        })
+        .finally(() => {
+          setLoading(false);
+        });
+    }
+  }, [open, query]);
+
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle sx={{ fontWeight: 800, p: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <Typography sx={{ fontSize: '1rem', fontWeight: 800, color: '#1a237e' }}>
+          Search Internet for Supplier
+        </Typography>
+        <IconButton onClick={onClose} size="small"><CloseIcon /></IconButton>
+      </DialogTitle>
+      <DialogContent dividers>
+        <Typography variant="caption" sx={{ color: '#666', mb: 2, display: 'block' }}>
+          Searching for: <strong>{query}</strong>
+        </Typography>
+        {loading ? (
+          <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
+            <CircularProgress size={30} />
+          </Box>
+        ) : results.length === 0 ? (
+          <Typography sx={{ py: 2, fontSize: '0.75rem', color: '#888' }}>No suppliers found on the internet.</Typography>
+        ) : (
+          <List dense sx={{ p: 0 }}>
+            {results.map((supp, i) => (
+              <React.Fragment key={supp.id || i}>
+                {i > 0 && <Divider />}
+                <ListItem
+                  secondaryAction={
+                    <Button
+                      size="small"
+                      variant="contained"
+                      onClick={() => {
+                        onSelectSupplier(supp);
+                        onClose();
+                      }}
+                      sx={{ fontSize: '0.65rem', fontWeight: 800, textTransform: 'none' }}
+                    >
+                      Select
+                    </Button>
+                  }
+                  sx={{ py: 1, px: 0 }}
+                >
+                  <ListItemAvatar>
+                    <Avatar sx={{ bgcolor: '#e8f5e9', color: '#2e7d32' }}><SupplierIcon /></Avatar>
+                  </ListItemAvatar>
+                  <ListItemText
+                    primary={<Typography sx={{ fontSize: '0.75rem', fontWeight: 700, color: '#333' }}>{supp.name}</Typography>}
+                    secondary={
+                      <Typography sx={{ fontSize: '0.65rem', color: '#666' }}>
+                        Email: {supp.contactEmail} • Location: {supp.city}, {supp.countryName}
+                      </Typography>
+                    }
+                  />
+                </ListItem>
+              </React.Fragment>
+            ))}
+          </List>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+};
 
 // ─── Supplier Search & Quote Dialogs ──────────────────────────────────────────
 
@@ -405,6 +604,7 @@ Best regards`;
                   <TableCell sx={{ fontSize: '0.7rem', fontWeight: 800 }}>Item</TableCell>
                   <TableCell sx={{ fontSize: '0.7rem', fontWeight: 800 }}>Description</TableCell>
                   <TableCell sx={{ fontSize: '0.7rem', fontWeight: 800 }}>Qty</TableCell>
+                  <TableCell sx={{ fontSize: '0.7rem', fontWeight: 800 }}>Supplier</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
@@ -413,6 +613,7 @@ Best regards`;
                     <TableCell sx={{ fontSize: '0.75rem' }}>{item.manufacturerPartNumber}</TableCell>
                     <TableCell sx={{ fontSize: '0.75rem' }}>{item.productShortDescription || item.productShortName}</TableCell>
                     <TableCell sx={{ fontSize: '0.75rem' }}>{item.quantity}</TableCell>
+                    <TableCell sx={{ fontSize: '0.75rem', fontWeight: 700 }}>{item.preferredSupplierName || supplier?.name || 'No Supplier'}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -450,11 +651,55 @@ const ItemDetailsDialog: React.FC<{
   onClose: () => void;
   rfqNo: string;
 }> = ({ item, open, onClose, rfqNo }) => {
-  const [searchTab, setSearchTab] = useState(1); // Default to Internet Search as per UI
+  const { userData } = useAuth();
+  const businessUnitId = userData?.businessUnitId || 0;
+
+  const [searchTab, setSearchTab] = useState(0); // 0 = Internal, 1 = Internet
   const [matchingResult, setMatchingResult] = useState<any>(null);
   const [isLoadingMatch, setIsLoadingMatch] = useState(false);
   const [showSupplierSearch, setShowSupplierSearch] = useState(false);
   const [selectedSupplier, setSelectedSupplier] = useState<any>(null);
+
+  const [searchQuery, setSearchQuery] = useState('');
+  const [suppliers, setSuppliers] = useState<any[]>([]);
+  const [loadingSuppliers, setLoadingSuppliers] = useState(false);
+
+  useEffect(() => {
+    if (item && searchQuery === '') {
+      setSearchQuery(item.manufacturerName || '');
+    }
+  }, [item]);
+
+  useEffect(() => {
+    let active = true;
+    if (open && showSupplierSearch && item) {
+      setLoadingSuppliers(true);
+      if (searchTab === 0) {
+        supplierService.searchSuppliers(searchQuery, '', businessUnitId)
+          .then(res => {
+            if (active) setSuppliers(res || []);
+          })
+          .catch(() => {
+            if (active) setSuppliers([]);
+          })
+          .finally(() => {
+            if (active) setLoadingSuppliers(false);
+          });
+      } else {
+        supplierService.searchWebSuppliers(searchQuery || item.productShortName || '')
+          .then(res => {
+            if (active) setSuppliers(res || []);
+          })
+          .catch(() => {
+            if (active) setSuppliers([]);
+          })
+          .finally(() => {
+            if (active) setLoadingSuppliers(false);
+          });
+      }
+    }
+    return () => { active = false; };
+  }, [open, showSupplierSearch, searchTab, searchQuery, item]);
 
   useEffect(() => {
     if (open && item && !showSupplierSearch) {
@@ -505,7 +750,8 @@ const ItemDetailsDialog: React.FC<{
                 <TextField
                   fullWidth
                   size="small"
-                  defaultValue={item.manufacturerName}
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder="Search Suppliers..."
                   slotProps={{
                     input: {
@@ -520,44 +766,55 @@ const ItemDetailsDialog: React.FC<{
                   }}
                 />
 
-                <List sx={{ mt: 2 }}>
-                  {[
-                    { id: 1, name: `${item.manufacturerName} Supplies Inc.`, email: `sales@${(item.manufacturerName || '').toLowerCase().replace(/\s+/g, '')}supplies.com`, location: 'New York, USA', source: 'External' },
-                    { id: 2, name: `Global ${item.manufacturerName} Distributors`, email: `info@global${(item.manufacturerName || '').toLowerCase().replace(/\s+/g, '')}dist.com`, location: 'London, UK', source: 'External' }
-                  ].map((s) => (
-                    <ListItem
-                      key={s.id}
-                      sx={{ border: '1px solid #f0f0f0', borderRadius: 2, mb: 1, p: 2, alignItems: 'flex-start' }}
-                      secondaryAction={
-                        <Button
-                          variant="contained"
-                          size="small"
-                          startIcon={<SupplierIcon fontSize="small" />}
-                          onClick={() => setSelectedSupplier(s)}
-                          sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 1.5, fontSize: '0.75rem' }}
-                        >
-                          Select & Quote
-                        </Button>
-                      }
-                    >
-                      <ListItemAvatar sx={{ mt: 0.5 }}>
-                        <Avatar sx={{ bgcolor: '#e3f2fd', color: '#1976d2' }}><InternetIcon fontSize="small" /></Avatar>
-                      </ListItemAvatar>
-                      <ListItemText
-                        primary={<Typography variant="subtitle2" sx={{ fontWeight: 800 }}>{s.name}</Typography>}
-                        secondary={
-                          <Box sx={{ mt: 0.5 }}>
-                            <Typography variant="caption" sx={{ display: 'block', color: '#888', fontWeight: 600 }}>{s.email}</Typography>
-                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 0.5 }}>
-                              <Typography variant="caption" sx={{ color: '#888' }}>{s.location}</Typography>
-                              <Chip label="External Source" size="small" sx={{ height: 16, fontSize: '0.5rem', fontWeight: 900, borderRadius: 1, bgcolor: '#e3f2fd', color: '#1976d2' }} />
-                            </Box>
-                          </Box>
+                {loadingSuppliers ? (
+                  <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
+                    <CircularProgress size={24} />
+                  </Box>
+                ) : suppliers.length === 0 ? (
+                  <Typography variant="body2" sx={{ color: '#888', py: 3, textAlign: 'center' }}>
+                    {searchTab === 0
+                      ? 'No results found in internal database.'
+                      : 'No results found on the internet.'}
+                  </Typography>
+                ) : (
+                  <List sx={{ mt: 2 }}>
+                    {suppliers.map((s, idx) => (
+                      <ListItem
+                        key={s.id || idx}
+                        sx={{ border: '1px solid #f0f0f0', borderRadius: 2, mb: 1, p: 2, alignItems: 'flex-start' }}
+                        secondaryAction={
+                          <Button
+                            variant="contained"
+                            size="small"
+                            startIcon={<SupplierIcon fontSize="small" />}
+                            onClick={() => setSelectedSupplier(s)}
+                            sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 1.5, fontSize: '0.75rem' }}
+                          >
+                            Select & Quote
+                          </Button>
                         }
-                      />
-                    </ListItem>
-                  ))}
-                </List>
+                      >
+                        <ListItemAvatar sx={{ mt: 0.5 }}>
+                          <Avatar sx={{ bgcolor: searchTab === 0 ? '#ede7f6' : '#e3f2fd', color: searchTab === 0 ? '#512da8' : '#1976d2' }}>
+                            {searchTab === 0 ? <DatabaseIcon fontSize="small" /> : <InternetIcon fontSize="small" />}
+                          </Avatar>
+                        </ListItemAvatar>
+                        <ListItemText
+                          primary={<Typography variant="subtitle2" sx={{ fontWeight: 800 }}>{s.name}</Typography>}
+                          secondary={
+                            <Box sx={{ mt: 0.5 }}>
+                              <Typography variant="caption" sx={{ display: 'block', color: '#888', fontWeight: 600 }}>{s.contactEmail || s.email || 'No email'}</Typography>
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 0.5 }}>
+                                <Typography variant="caption" sx={{ color: '#888' }}>{s.cityName || s.city || 'No Location'}</Typography>
+                                <Chip label={searchTab === 0 ? "Internal DB" : "External Source"} size="small" sx={{ height: 16, fontSize: '0.5rem', fontWeight: 900, borderRadius: 1, bgcolor: searchTab === 0 ? '#ede7f6' : '#e3f2fd', color: searchTab === 0 ? '#512da8' : '#1976d2' }} />
+                              </Box>
+                            </Box>
+                          }
+                        />
+                      </ListItem>
+                    ))}
+                  </List>
+                )}
               </Box>
             </Box>
           ) : (
@@ -670,6 +927,31 @@ const ProcessRFQPage: React.FC = () => {
   const [showBatchSupplierSearch, setShowBatchSupplierSearch] = useState(false);
   const [selectedSupplierForBatch, setSelectedSupplierForBatch] = useState<any>(null);
 
+  const [batchSearchQuery, setBatchSearchQuery] = useState('');
+  const [batchSuppliers, setBatchSuppliers] = useState<any[]>([]);
+  const [loadingBatchSuppliers, setLoadingBatchSuppliers] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    if (showBatchSupplierSearch) {
+      setLoadingBatchSuppliers(true);
+      supplierService.searchWebSuppliers(batchSearchQuery || 'Supplies')
+        .then(res => {
+          if (active) setBatchSuppliers(res || []);
+        })
+        .catch(() => {
+          if (active) setBatchSuppliers([]);
+        })
+        .finally(() => {
+          if (active) setLoadingBatchSuppliers(false);
+        });
+    }
+    return () => { active = false; };
+  }, [showBatchSupplierSearch, batchSearchQuery]);
+
+  const [page, setPage] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(20);
+
   // ── Data fetching ──────────────────────────────────────────────────────────
 
   const { data: lead, isLoading } = useQuery({
@@ -703,31 +985,6 @@ const ProcessRFQPage: React.FC = () => {
       return next;
     });
   }, []);
-
-  const handleSmartMatch = useCallback(async (item: ProcessItem, index: number) => {
-    updateItem(index, { matchStatus: 'loading' });
-    try {
-      const res = await productService.matchProduct({
-        name: item.productShortName,
-        partNo: item.manufacturerPartNumber,
-        manufacturer: item.manufacturerName
-      });
-      if (res.hasExactMatch && res.exactMatch) {
-        updateItem(index, {
-          matchStatus: 'matched',
-          productId: res.exactMatch.id,
-          unitPrice: res.exactMatch.finalSalesPrice ?? res.exactMatch.sellingPrice ?? 0,
-          qtyOnHand: res.exactMatch.qtyOnHand ?? 0
-        });
-      } else {
-        updateItem(index, { matchStatus: 'no-match' });
-      }
-    } catch (e) {
-      console.error('Batch match failed for item', index, e);
-      updateItem(index, { matchStatus: 'no-match' });
-    }
-  }, [updateItem]);
-
   // Single stable effect — only runs when lead first becomes available
   React.useEffect(() => {
     if (!lead || hasInitialized) return;
@@ -744,12 +1001,53 @@ const ProcessRFQPage: React.FC = () => {
     setItems(initialItems);
     setHasInitialized(true);
     findMatchedCustomer(lead);
+  }, [lead, hasInitialized, findMatchedCustomer]);
 
-    // Trigger Smart Matching for each item
-    initialItems.forEach((it, idx) => {
-      handleSmartMatch(it, idx);
-    });
-  }, [lead, hasInitialized, findMatchedCustomer, handleSmartMatch]);
+  const handleRunSmartMatchAll = useCallback(async () => {
+    // Mark all pending items as loading
+    setItems(prev => prev.map(i => i.matchStatus === 'pending' ? { ...i, matchStatus: 'loading' } : i));
+
+    const chunkSize = 5;
+    for (let i = 0; i < items.length; i += chunkSize) {
+      const chunk = items.slice(i, i + chunkSize);
+
+      const matches = await Promise.all(
+        chunk.map(async (it) => {
+          if (it.matchStatus !== 'pending' && it.matchStatus !== 'loading') {
+            return null;
+          }
+          try {
+            const res = await productService.matchProduct({
+              name: it.productShortName,
+              partNo: it.manufacturerPartNumber,
+              manufacturer: it.manufacturerName
+            });
+            if (res.hasExactMatch && res.exactMatch) {
+              return {
+                matchStatus: 'matched' as const,
+                productId: res.exactMatch.id,
+                unitPrice: res.exactMatch.finalSalesPrice ?? res.exactMatch.sellingPrice ?? 0,
+                qtyOnHand: res.exactMatch.qtyOnHand ?? 0
+              };
+            }
+            return { matchStatus: 'no-match' as const };
+          } catch (e) {
+            return { matchStatus: 'no-match' as const };
+          }
+        })
+      );
+
+      setItems(prev => {
+        const next = [...prev];
+        matches.forEach((res, idx) => {
+          if (res && next[i + idx]) {
+            next[i + idx] = { ...next[i + idx], ...res };
+          }
+        });
+        return next;
+      });
+    }
+  }, [items]);
 
   const removeItem = useCallback((index: number) => {
     setItems(prev => prev.filter((_, i) => i !== index));
@@ -798,6 +1096,12 @@ const ProcessRFQPage: React.FC = () => {
     const includedItems = items.filter(i => i.include);
     if (includedItems.length === 0) {
       toast.error('Please select at least one item to include');
+      return;
+    }
+
+    const itemsWithoutProduct = includedItems.filter(i => !i.productId && !i.supplierQuotedItemId && !i.preferredSupplierName);
+    if (itemsWithoutProduct.length > 0) {
+      toast.error('Please match or source a product/supplier for all included items before creating a draft.');
       return;
     }
 
@@ -865,6 +1169,13 @@ const ProcessRFQPage: React.FC = () => {
               sx={{ bgcolor: 'white', borderColor: '#ddd', color: '#666', fontWeight: 800, textTransform: 'none', px: 2 }}
             >
               Batch Quote
+            </Button>
+            <Button
+              variant="outlined" size="small" startIcon={<AutoFixIcon />}
+              onClick={handleRunSmartMatchAll}
+              sx={{ bgcolor: 'white', borderColor: '#1976d2', color: '#1976d2', fontWeight: 800, textTransform: 'none', px: 2 }}
+            >
+              Smart Match All
             </Button>
             <Button
               variant="contained" size="small" startIcon={<SaveIcon />}
@@ -983,38 +1294,38 @@ const ProcessRFQPage: React.FC = () => {
             </TableRow>
           </TableHead>
           <TableBody>
-            {items.map((item, index) => (
-              <ItemRow
-                key={item.id || index}
-                item={item}
-                index={index}
-                onUpdate={updateItem}
-                onRemove={removeItem}
-                onViewDetails={setDetailsItem}
-                onToggleSelect={toggleSelectItem}
-                businessUnitId={businessUnitId}
-              />
-            ))}
+            {items.slice(page * rowsPerPage, page * rowsPerPage + rowsPerPage).map((item, localIndex) => {
+              const actualIndex = page * rowsPerPage + localIndex;
+              return (
+                <ItemRow
+                  key={item.id || actualIndex}
+                  item={item}
+                  index={actualIndex}
+                  onUpdate={updateItem}
+                  onRemove={removeItem}
+                  onViewDetails={setDetailsItem}
+                  onToggleSelect={toggleSelectItem}
+                  businessUnitId={businessUnitId}
+                />
+              );
+            })}
           </TableBody>
         </Table>
 
         {/* Footer / Pagination */}
-        <Box sx={{ p: 2, display: 'flex', justifyContent: 'flex-end', borderTop: '1px solid #eee' }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-            <Typography variant="caption" sx={{ color: '#666', fontWeight: 600 }}>
-              Total {items.length} Items
-            </Typography>
-            <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center' }}>
-              <Button size="small" sx={{ minWidth: 24, p: 0, height: 24, border: '1px solid #ddd', fontSize: '0.7rem' }}>{'<'}</Button>
-              <Box sx={{ minWidth: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1px solid #1976d2', color: '#1976d2', fontSize: '0.7rem', fontWeight: 800 }}>1</Box>
-              <Button size="small" sx={{ minWidth: 24, p: 0, height: 24, border: '1px solid #ddd', fontSize: '0.7rem' }}>{'>'}</Button>
-            </Box>
-            <TextField select size="small" defaultValue="20" sx={{ '& .MuiInputBase-root': { height: 24, fontSize: '0.7rem' } }}>
-              <MenuItem value="10">10 / page</MenuItem>
-              <MenuItem value="20">20 / page</MenuItem>
-            </TextField>
-          </Box>
-        </Box>
+        <TablePagination
+          component="div"
+          count={items.length}
+          page={page}
+          onPageChange={(_, newPage) => setPage(newPage)}
+          rowsPerPage={rowsPerPage}
+          onRowsPerPageChange={(e) => {
+            setRowsPerPage(parseInt(e.target.value, 10));
+            setPage(0);
+          }}
+          rowsPerPageOptions={[10, 20, 50, 100]}
+          sx={{ borderTop: '1px solid #eee' }}
+        />
       </Paper>
 
       {/* Add Item */}
@@ -1047,32 +1358,87 @@ const ProcessRFQPage: React.FC = () => {
           <IconButton onClick={() => setShowBatchSupplierSearch(false)} size="small"><CloseIcon /></IconButton>
         </DialogTitle>
         <DialogContent dividers>
-          <TextField fullWidth size="small" placeholder="Search Suppliers..." />
-          <List sx={{ mt: 2 }}>
-            {[
-              { id: 1, name: 'Generic Supplier A', email: 'sales@supplier-a.com', location: 'Dubai, UAE' },
-              { id: 2, name: 'Generic Supplier B', email: 'info@supplier-b.com', location: 'New York, USA' }
-            ].map(s => (
-              <ListItem
-                key={s.id}
-                sx={{ border: '1px solid #f0f0f0', borderRadius: 2, mb: 1 }}
-                secondaryAction={
-                  <Button
-                    variant="contained" size="small"
-                    onClick={() => {
-                      setSelectedSupplierForBatch(s);
-                      setShowBatchSupplierSearch(false);
-                    }}
-                    sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 1.5 }}
-                  >
-                    Select & Quote
-                  </Button>
-                }
-              >
-                <ListItemText primary={s.name} secondary={s.email} />
-              </ListItem>
-            ))}
-          </List>
+          <Box sx={{ mb: 2, p: 1.5, bgcolor: '#fafafa', borderRadius: 1.5, border: '1px solid #eee' }}>
+            <Typography variant="caption" sx={{ fontWeight: 900, color: '#333', mb: 1, display: 'block' }}>
+              Selected Items to be Sourced:
+            </Typography>
+            <List dense sx={{ p: 0 }}>
+              {items.filter(i => i.include).map((item, idx) => (
+                <ListItem key={idx} sx={{ p: 0, mb: 0.5 }}>
+                  <ListItemText
+                    primary={
+                      <Typography sx={{ fontSize: '0.75rem', fontWeight: 700 }}>
+                        {item.manufacturerPartNumber || 'N/A'} - {item.productShortDescription || item.productShortName}
+                      </Typography>
+                    }
+                    secondary={
+                      item.preferredSupplierName ? (
+                        <Chip
+                          label={`Current Supplier: ${item.preferredSupplierName}`}
+                          size="small"
+                          sx={{ height: 16, fontSize: '0.6rem', mt: 0.5, bgcolor: '#e8f5e9', color: '#2e7d32', borderRadius: 1 }}
+                        />
+                      ) : (
+                        <Chip
+                          label="No Supplier Selected Yet"
+                          size="small"
+                          sx={{ height: 16, fontSize: '0.6rem', mt: 0.5, bgcolor: '#fff3e0', color: '#e65100', borderRadius: 1 }}
+                        />
+                      )
+                    }
+                  />
+                </ListItem>
+              ))}
+            </List>
+          </Box>
+
+          <TextField
+            fullWidth size="small"
+            value={batchSearchQuery}
+            onChange={(e) => setBatchSearchQuery(e.target.value)}
+            placeholder="Search Suppliers..."
+          />
+          {loadingBatchSuppliers ? (
+            <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
+              <CircularProgress size={24} />
+            </Box>
+          ) : batchSuppliers.length === 0 ? (
+            <Typography variant="body2" sx={{ color: '#888', py: 3, textAlign: 'center' }}>
+              No suppliers found.
+            </Typography>
+          ) : (
+            <List sx={{ mt: 2 }}>
+              {batchSuppliers.map((s, idx) => (
+                <ListItem
+                  key={s.id || idx}
+                  sx={{ border: '1px solid #f0f0f0', borderRadius: 2, mb: 1 }}
+                  secondaryAction={
+                    <Button
+                      variant="contained" size="small"
+                      onClick={() => {
+                        setSelectedSupplierForBatch(s);
+                        setShowBatchSupplierSearch(false);
+                        setItems(prev => prev.map(item => item.include ? {
+                          ...item,
+                          preferredSupplierName: s.name,
+                          preferredSupplierEmail: s.contactEmail || s.email,
+                          matchStatus: 'sourced-web'
+                        } : item));
+                      }}
+                      sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 1.5 }}
+                    >
+                      Select & Quote
+                    </Button>
+                  }
+                >
+                  <ListItemText
+                    primary={<Typography sx={{ fontWeight: 700, fontSize: '0.8rem' }}>{s.name}</Typography>}
+                    secondary={<Typography sx={{ fontSize: '0.75rem', color: '#666' }}>{s.contactEmail || s.email || 'No email'}</Typography>}
+                  />
+                </ListItem>
+              ))}
+            </List>
+          )}
         </DialogContent>
       </Dialog>
 

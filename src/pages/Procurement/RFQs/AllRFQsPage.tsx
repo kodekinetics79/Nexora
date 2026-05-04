@@ -66,16 +66,18 @@ const AllRFQsPage: React.FC = () => {
       headerName: 'RFQ #',
       width: 180,
       renderCell: (p) => (
-        <Box sx={{ py: 1.5 }}>
-          <Typography sx={{ fontWeight: 900, fontSize: '0.85rem', color: 'primary.main', fontFamily: 'monospace', letterSpacing: '-0.02em' }}>
+        <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
+          <Typography sx={{ fontWeight: 900, fontSize: '0.85rem', color: 'primary.main', fontFamily: 'monospace', letterSpacing: '-0.02em', mb: 0.2 }}>
             {p.row.rfqno || `RFQ-${p.row.id}`}
           </Typography>
           {p.row.leadId && (
-            <Chip
-              label="From Lead"
-              size="small"
-              sx={{ height: 16, fontSize: '0.6rem', fontWeight: 900, bgcolor: 'warning.lighter', color: 'warning.dark', mt: 0.5 }}
-            />
+            <Box sx={{ display: 'flex' }}>
+              <Chip
+                label="From Lead"
+                size="small"
+                sx={{ height: 16, fontSize: '0.6rem', fontWeight: 900, bgcolor: 'warning.lighter', color: 'warning.dark' }}
+              />
+            </Box>
           )}
         </Box>
       )
@@ -86,7 +88,7 @@ const AllRFQsPage: React.FC = () => {
       flex: 1,
       minWidth: 200,
       renderCell: (p) => (
-        <Box sx={{ py: 1.5 }}>
+        <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
           <Typography sx={{ fontWeight: 700, fontSize: '0.85rem', color: 'text.primary', mb: 0.2 }}>
             {p.row.buyersName || 'Unknown Buyer'}
           </Typography>
@@ -97,18 +99,30 @@ const AllRFQsPage: React.FC = () => {
       )
     },
     {
+      field: 'noOfLineItems',
+      headerName: 'Items',
+      width: 80,
+      renderCell: (p) => (
+        <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', height: '100%' }}>
+          <ItemsIcon sx={{ fontSize: 14, color: 'text.secondary' }} />
+          <Typography sx={{ fontSize: '0.85rem', fontWeight: 800 }}>{p.value || 0}</Typography>
+        </Stack>
+      )
+    },
+    {
       field: 'timelines',
       headerName: 'Dates',
-      width: 140,
+      width: 260,
       renderCell: (p) => (
-        <Box sx={{ py: 1.5 }}>
-          <Box sx={{ mb: 1 }}>
-            <Typography sx={{ fontSize: '0.6rem', fontWeight: 900, color: 'text.disabled', textTransform: 'uppercase' }}>Received</Typography>
-            <Typography sx={{ fontSize: '0.75rem', fontWeight: 700 }}>{formatDate(p.row.recDate)}</Typography>
-          </Box>
+        <Box sx={{ display: 'flex', alignItems: 'center', height: '100%', gap: 2 }}>
           <Box>
-            <Typography sx={{ fontSize: '0.6rem', fontWeight: 900, color: 'text.disabled', textTransform: 'uppercase' }}>Deadline</Typography>
-            <Typography sx={{ fontSize: '0.8rem', fontWeight: 900, color: getUrgencyColor(p.row.bidClosingDate) }}>
+            <Typography sx={{ fontSize: '0.65rem', fontWeight: 900, color: 'text.disabled', textTransform: 'uppercase' }}>Received</Typography>
+            <Typography sx={{ fontSize: '0.8rem', fontWeight: 700 }}>{formatDate(p.row.recDate)}</Typography>
+          </Box>
+          <Box sx={{ borderLeft: '1px solid', borderColor: 'divider', height: 24 }} />
+          <Box>
+            <Typography sx={{ fontSize: '0.65rem', fontWeight: 900, color: 'text.disabled', textTransform: 'uppercase' }}>Deadline</Typography>
+            <Typography sx={{ fontSize: '0.85rem', fontWeight: 900, color: getUrgencyColor(p.row.bidClosingDate) }}>
               {formatDate(p.row.bidClosingDate)}
             </Typography>
           </Box>
@@ -130,17 +144,6 @@ const AllRFQsPage: React.FC = () => {
           />
         );
       }
-    },
-    {
-      field: 'noOfLineItems',
-      headerName: 'Items',
-      width: 80,
-      renderCell: (p) => (
-        <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', height: '100%' }}>
-          <ItemsIcon sx={{ fontSize: 14, color: 'text.secondary' }} />
-          <Typography sx={{ fontSize: '0.85rem', fontWeight: 800 }}>{p.value || 0}</Typography>
-        </Stack>
-      )
     },
     {
       field: 'actions',

@@ -14,6 +14,7 @@ import {
   CheckCircle as ApproveIcon,
   Delete as DeleteIcon,
   ElectricBolt as ProcessIcon,
+  Layers as ItemsIcon,
 } from '@mui/icons-material';
 import rfqService from '../../../api/services/rfqService';
 import SearchField from '../../../components/common/SearchField';
@@ -82,15 +83,17 @@ const DraftRFQsPage: React.FC = () => {
       headerName: 'RFQ #',
       width: 180,
       renderCell: (p) => (
-        <Box sx={{ py: 1.5 }}>
-          <Typography sx={{ fontWeight: 900, fontSize: '0.85rem', color: 'primary.main', fontFamily: 'monospace' }}>
+        <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
+          <Typography sx={{ fontWeight: 900, fontSize: '0.85rem', color: 'primary.main', fontFamily: 'monospace', mb: 0.2 }}>
             {p.row.rfqno || `RFQ-${p.row.id}`}
           </Typography>
-          <Chip
-            label={p.row.leadId ? "From Lead" : "Manual"}
-            size="small"
-            sx={{ height: 16, fontSize: '0.6rem', fontWeight: 900, bgcolor: p.row.leadId ? 'warning.lighter' : 'info.lighter', color: p.row.leadId ? 'warning.dark' : 'info.dark', mt: 0.5 }}
-          />
+          <Box sx={{ display: 'flex' }}>
+            <Chip
+              label={p.row.leadId ? "From Lead" : "Manual"}
+              size="small"
+              sx={{ height: 16, fontSize: '0.6rem', fontWeight: 900, bgcolor: p.row.leadId ? 'warning.lighter' : 'info.lighter', color: p.row.leadId ? 'warning.dark' : 'info.dark' }}
+            />
+          </Box>
         </Box>
       )
     },
@@ -100,7 +103,7 @@ const DraftRFQsPage: React.FC = () => {
       flex: 1,
       minWidth: 200,
       renderCell: (p) => (
-        <Box sx={{ py: 1.5 }}>
+        <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
           <Typography sx={{ fontWeight: 700, fontSize: '0.85rem', color: 'text.primary', mb: 0.2 }}>
             {p.row.buyersName || 'Unknown Buyer'}
           </Typography>
@@ -108,6 +111,17 @@ const DraftRFQsPage: React.FC = () => {
             {p.row.customerEmail || p.row.leadEmail || 'No Email'}
           </Typography>
         </Box>
+      )
+    },
+    {
+      field: 'noOfLineItems',
+      headerName: 'Items',
+      width: 80,
+      renderCell: (p) => (
+        <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', height: '100%' }}>
+          <ItemsIcon sx={{ fontSize: 14, color: 'text.secondary' }} />
+          <Typography sx={{ fontSize: '0.85rem', fontWeight: 800 }}>{p.row.noOfLineItems || p.value || 0}</Typography>
+        </Stack>
       )
     },
     {
