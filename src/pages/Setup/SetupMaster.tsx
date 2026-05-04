@@ -40,9 +40,9 @@ import SearchField from '../../components/common/SearchField';
 import lodash from 'lodash';
 
 const SetupMaster: React.FC = () => {
+  const { t } = useTranslation();
   const { userData } = useAuth();
   const location = useLocation();
-  useTranslation();
   const queryClient = useQueryClient();
 
   const getSetupTypeFromPath = (path: string) => {
@@ -182,7 +182,7 @@ const SetupMaster: React.FC = () => {
         <Box>
           <Typography variant="h4" sx={{ fontWeight: 900, color: 'text.primary', display: 'flex', alignItems: 'center', gap: 1.5 }}>
             <SettingsIcon sx={{ fontSize: 32, color: 'primary.main' }} />
-            {setupType || 'Setup Master'}
+            {setupType || t('setup_master')}
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600, ml: 6, mt: -0.5 }}>
             Manage master categories and configuration entries.
@@ -201,7 +201,7 @@ const SetupMaster: React.FC = () => {
             boxShadow: '0 4px 12px rgba(0,0,0,0.1)'
           }}
         >
-          New Item
+          {t('create_new')}
         </Button>
       </Box>
 
@@ -429,7 +429,7 @@ const SetupMaster: React.FC = () => {
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
           <Button onClick={() => setIsModalOpen(false)} color="inherit">
-            Cancel
+            {t('cancel') || 'Cancel'}
           </Button>
           <Button
             onClick={handleSave}

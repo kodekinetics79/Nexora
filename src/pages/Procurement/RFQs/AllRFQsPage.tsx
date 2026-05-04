@@ -1,7 +1,7 @@
-
 import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Chip, IconButton,
   Tooltip, Stack,
@@ -21,6 +21,7 @@ import SearchField from '../../../components/common/SearchField';
 import { useAuth } from '../../../context/AuthContext';
 
 const AllRFQsPage: React.FC = () => {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const { userData } = useAuth();
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
@@ -63,7 +64,7 @@ const AllRFQsPage: React.FC = () => {
   const columns: GridColDef[] = [
     {
       field: 'rfqno',
-      headerName: 'RFQ #',
+      headerName: t('rfq_management'),
       width: 180,
       renderCell: (p) => (
         <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
@@ -100,7 +101,7 @@ const AllRFQsPage: React.FC = () => {
     },
     {
       field: 'noOfLineItems',
-      headerName: 'Items',
+      headerName: t('invoice_items'),
       width: 80,
       renderCell: (p) => (
         <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', height: '100%' }}>
@@ -111,7 +112,7 @@ const AllRFQsPage: React.FC = () => {
     },
     {
       field: 'timelines',
-      headerName: 'Dates',
+      headerName: t('date'),
       width: 260,
       renderCell: (p) => (
         <Box sx={{ display: 'flex', alignItems: 'center', height: '100%', gap: 2 }}>
@@ -131,7 +132,7 @@ const AllRFQsPage: React.FC = () => {
     },
     {
       field: 'rfqstatusValue',
-      headerName: 'Status',
+      headerName: t('status'),
       width: 120,
       renderCell: (p) => {
         const status = statusColorMap[p.row.rfqstatusId] || { label: p.row.rfqstatusValue || 'Unknown', color: 'default' };
@@ -147,7 +148,7 @@ const AllRFQsPage: React.FC = () => {
     },
     {
       field: 'actions',
-      headerName: 'View',
+      headerName: t('actions'),
       width: 80,
       renderCell: (p) => (
         <Box sx={{ display: 'flex', alignItems: 'center', height: '100%' }}>
@@ -171,7 +172,7 @@ const AllRFQsPage: React.FC = () => {
       <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
         <Box>
           <Typography variant="h4" sx={{ fontWeight: 900, letterSpacing: '-0.02em', mb: 0.5 }}>
-            All RFQs
+            {t('all_rfqs')}
           </Typography>
           <Typography variant="body2" color="text.secondary">
             Manage and track all Request for Quotations

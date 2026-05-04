@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useTranslation } from 'react-i18next';
 import {
   Dialog, DialogTitle, DialogContent, DialogActions,
   Button, TextField, MenuItem, Grid, FormControlLabel,
@@ -16,6 +17,7 @@ interface Props {
 }
 
 const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
+  const { t } = useTranslation();
   const { userData } = useAuth();
   const { enqueueSnackbar } = useSnackbar();
   const queryClient = useQueryClient();
@@ -141,13 +143,13 @@ const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
             <TextField fullWidth label="Model No" value={form.modelNo} onChange={f('modelNo')} />
           </Grid>
           <Grid size={{ xs: 12, sm: 3 }}>
-            <TextField select fullWidth label="Category" value={form.categoryId} onChange={f('categoryId')}>
+            <TextField select fullWidth label={t('categories') || 'Category'} value={form.categoryId} onChange={f('categoryId')}>
               <MenuItem value="">None</MenuItem>
               {categories?.map((c: any) => <MenuItem key={c.id ?? c.categoryId} value={c.id ?? c.categoryId}>{c.name ?? c.categoryName}</MenuItem>)}
             </TextField>
           </Grid>
           <Grid size={{ xs: 12, sm: 3 }}>
-            <TextField select fullWidth label="Sub-Category" value={form.subCategoryId} onChange={f('subCategoryId')}>
+            <TextField select fullWidth label={t('sub_categories') || 'Sub-Category'} value={form.subCategoryId} onChange={f('subCategoryId')}>
               <MenuItem value="">None</MenuItem>
               {subCategories?.map((c: any) => <MenuItem key={c.id ?? c.subCategoryId} value={c.id ?? c.subCategoryId}>{c.name ?? c.subCategoryName}</MenuItem>)}
             </TextField>
@@ -159,13 +161,13 @@ const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
           {/* Pricing & Stock */}
           <SectionTitle label="Pricing & Stock" />
           <Grid size={{ xs: 6, sm: 3 }}>
-            <TextField fullWidth type="number" label="Qty on Hand" value={form.qtyOnHand} onChange={f('qtyOnHand')} />
+            <TextField fullWidth type="number" label={t('quantity') || 'Qty on Hand'} value={form.qtyOnHand} onChange={f('qtyOnHand')} />
           </Grid>
           <Grid size={{ xs: 6, sm: 3 }}>
             <TextField fullWidth type="number" label="Reorder Point" value={form.reorderPoint} onChange={f('reorderPoint')} />
           </Grid>
           <Grid size={{ xs: 12, sm: 3 }}>
-            <TextField select fullWidth label="UOM" value={form.uomId} onChange={f('uomId')}>
+            <TextField select fullWidth label={t('uom') || 'UOM'} value={form.uomId} onChange={f('uomId')}>
               <MenuItem value="">None</MenuItem>
               {uoms?.map((u: any) => <MenuItem key={u.id} value={String(u.id)}>{u.value ?? u.name ?? u.uomName}</MenuItem>)}
             </TextField>
@@ -186,13 +188,13 @@ const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
           {/* Logistics */}
           <SectionTitle label="Logistics" />
           <Grid size={{ xs: 12, sm: 4 }}>
-            <TextField select fullWidth label="Warehouse" value={form.warehouseId} onChange={f('warehouseId')}>
+            <TextField select fullWidth label={t('warehouse') || 'Warehouse'} value={form.warehouseId} onChange={f('warehouseId')}>
               <MenuItem value="">None</MenuItem>
               {warehouses?.map((w: any) => <MenuItem key={w.id ?? w.warehouseId} value={w.id ?? w.warehouseId}>{w.name ?? w.warehouseName}</MenuItem>)}
             </TextField>
           </Grid>
           <Grid size={{ xs: 12, sm: 4 }}>
-            <TextField select fullWidth label="Preferred Supplier" value={form.preferredSupplierId} onChange={f('preferredSupplierId')}>
+            <TextField select fullWidth label={t('supplier') || 'Preferred Supplier'} value={form.preferredSupplierId} onChange={f('preferredSupplierId')}>
               <MenuItem value="">None</MenuItem>
               {suppliers?.map((s: any) => <MenuItem key={s.id} value={s.id}>{s.name}</MenuItem>)}
             </TextField>
@@ -201,7 +203,7 @@ const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
             <TextField fullWidth type="number" label="Lead Time (days)" value={form.leadTime} onChange={f('leadTime')} />
           </Grid>
           <Grid size={{ xs: 12, sm: 2 }}>
-            <TextField fullWidth label="Country of Origin" value={form.countryOfOrigin} onChange={f('countryOfOrigin')} />
+            <TextField fullWidth label={t('country') || 'Country of Origin'} value={form.countryOfOrigin} onChange={f('countryOfOrigin')} />
           </Grid>
           <Grid size={{ xs: 12, sm: 4 }}>
             <TextField fullWidth label="HS Code" value={form.hscode} onChange={f('hscode')} />
@@ -246,7 +248,7 @@ const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
         </Grid>
       </DialogContent>
       <DialogActions sx={{ p: 2 }}>
-        <Button onClick={handleClose} color="inherit">Cancel</Button>
+        <Button onClick={handleClose} color="inherit">{t('cancel') || 'Cancel'}</Button>
         <Button variant="contained" onClick={handleSave} disabled={saveMutation.isPending} sx={{ px: 4 }}>
           {saveMutation.isPending ? <CircularProgress size={22} /> : (isEdit ? 'Update Product' : 'Create Product')}
         </Button>

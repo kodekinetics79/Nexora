@@ -35,6 +35,7 @@ import supplierService from '../../../api/services/supplierService';
 import { useAuth } from '../../../context/AuthContext';
 import { toast } from 'react-hot-toast';
 import supplierQuotedItemService from '../../../api/services/supplierQuotedItemService';
+import { useTranslation } from 'react-i18next';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -916,6 +917,7 @@ const ItemDetailsDialog: React.FC<{
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 const ProcessRFQPage: React.FC = () => {
+  const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { userData } = useAuth();
@@ -1142,12 +1144,12 @@ const ProcessRFQPage: React.FC = () => {
           <Link underline="hover" color="inherit" href="/procurement/rfqs/outstanding" sx={{ cursor: 'pointer' }}>
             Outstanding Rfqs
           </Link>
-          <Typography sx={{ fontSize: '0.75rem', fontWeight: 600 }} color="text.primary">Process Lead</Typography>
+          <Typography sx={{ fontSize: '0.75rem', fontWeight: 600 }} color="text.primary">{t('process_lead') || 'Process Lead'}</Typography>
         </Breadcrumbs>
 
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
           <Typography variant="h5" sx={{ fontWeight: 950, letterSpacing: '-0.02em', color: '#1a237e' }}>
-            Process Lead To RFQ
+            {t('process_lead_to_rfq') || 'Process Lead To RFQ'}
           </Typography>
           <Stack direction="row" spacing={1.5}>
             <Button

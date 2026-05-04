@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Chip, IconButton,
   Dialog, DialogTitle, DialogContent, DialogActions,
@@ -53,13 +54,14 @@ const ContactSubForm: React.FC<{
   isSaving: boolean;
   isEdit: boolean;
 }> = ({ value, onChange, onSave, onCancel, isSaving, isEdit }) => {
+  const { t } = useTranslation();
   const f = (field: string) => (e: React.ChangeEvent<HTMLInputElement>) =>
     onChange({ ...value, [field]: e.target.value });
 
   return (
     <Box sx={{ p: 2, bgcolor: 'action.hover', borderRadius: 2, border: '1px dashed', borderColor: 'primary.main', mb: 2 }}>
       <Typography variant="caption" sx={{ fontWeight: 800, color: 'primary.main', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'block', mb: 1.5 }}>
-        {isEdit ? 'Edit Contact' : 'New Contact'}
+        {isEdit ? t('edit_supplier') : t('create_new')}
       </Typography>
       <Grid container spacing={1.5}>
         <Grid size={{ xs: 12, sm: 4 }}>
@@ -97,7 +99,7 @@ const ContactSubForm: React.FC<{
           <Button size="small" onClick={onCancel} color="inherit" startIcon={<CloseIcon />}>Cancel</Button>
           <Button size="small" variant="contained" onClick={onSave} disabled={isSaving}
             startIcon={isSaving ? <CircularProgress size={14} /> : <SaveIcon />}>
-            Save Contact
+            {t('save_contact')}
           </Button>
         </Grid>
       </Grid>
@@ -107,6 +109,7 @@ const ContactSubForm: React.FC<{
 
 // ─── Main Page ─────────────────────────────────────────────────────────────
 const CustomersPage: React.FC = () => {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const { userData } = useAuth();
   const queryClient = useQueryClient();
@@ -300,14 +303,14 @@ const CustomersPage: React.FC = () => {
   // ── Grid columns ──
   const columns: GridColDef[] = [
     { field: 'docId', headerName: 'Doc ID', width: 110, renderCell: (p) => <Typography sx={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>{p.value ?? '—'}</Typography> },
-    { field: 'name', headerName: 'Customer Name', flex: 1.5, minWidth: 160 },
-    { field: 'contactEmail', headerName: 'Email', flex: 1.2, minWidth: 180 },
-    { field: 'billingCity', headerName: 'City', width: 120, renderCell: (p) => p.value ?? '—' },
-    { field: 'billingCountry', headerName: 'Country', width: 120, renderCell: (p) => p.value ?? '—' },
-    { field: 'isActive', headerName: 'Status', width: 100, renderCell: (p) => <Chip label={p.value ? 'Active' : 'Inactive'} color={p.value ? 'success' : 'error'} size="small" variant="outlined" /> },
+    { field: 'name', headerName: t('customers'), flex: 1.5, minWidth: 160 },
+    { field: 'contactEmail', headerName: t('email'), flex: 1.2, minWidth: 180 },
+    { field: 'billingCity', headerName: t('city'), width: 120, renderCell: (p) => p.value ?? '—' },
+    { field: 'billingCountry', headerName: t('country'), width: 120, renderCell: (p) => p.value ?? '—' },
+    { field: 'isActive', headerName: t('status'), width: 100, renderCell: (p) => <Chip label={p.value ? 'Active' : 'Inactive'} color={p.value ? 'success' : 'error'} size="small" variant="outlined" /> },
     { 
       field: 'actions', 
-      headerName: 'Actions', 
+      headerName: t('actions'), 
       width: 120, 
       sortable: false, 
       renderCell: (p) => (
@@ -328,7 +331,7 @@ const CustomersPage: React.FC = () => {
       {/* Header */}
       <Box sx={{ mb: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <Box>
-          <Typography variant="h5" sx={{ fontWeight: 800, letterSpacing: '-0.02em', mb: 0.5 }}>Customer Management</Typography>
+          <Typography variant="h5" sx={{ fontWeight: 800, letterSpacing: '-0.02em', mb: 0.5 }}>{t('customers')}</Typography>
           <Typography variant="body2" color="text.secondary">Manage your customer accounts and billing information</Typography>
         </Box>
         <Box sx={{ display: 'flex', gap: 1.5, alignItems: 'center' }}>
@@ -446,10 +449,10 @@ const CustomersPage: React.FC = () => {
               </Grid>
               <Grid size={{ xs: 12, sm: 6 }}>
                 <FormControl fullWidth size="small">
-                  <InputLabel>Country</InputLabel>
+                  <InputLabel>{t('country')}</InputLabel>
                   <Select
                     value={formData.billingCountry}
-                    label="Country"
+                    label={t('country')}
                     onChange={(e) => setFormData(p => ({ ...p, billingCountry: e.target.value as string, billingState: '', billingCity: '' }))}
                   >
                     <MenuItem value=""><em>None</em></MenuItem>
@@ -473,10 +476,10 @@ const CustomersPage: React.FC = () => {
               </Grid>
               <Grid size={{ xs: 12, sm: 4 }}>
                 <FormControl fullWidth size="small">
-                  <InputLabel>City</InputLabel>
+                  <InputLabel>{t('city')}</InputLabel>
                   <Select
                     value={formData.billingCity}
-                    label="City"
+                    label={t('city')}
                     onChange={(e) => setFormData(p => ({ ...p, billingCity: e.target.value as string }))}
                     disabled={!formData.billingState}
                   >
@@ -514,10 +517,10 @@ const CustomersPage: React.FC = () => {
               </Grid>
               <Grid size={{ xs: 12, sm: 6 }}>
                 <FormControl fullWidth size="small">
-                  <InputLabel>Country</InputLabel>
+                  <InputLabel>{t('country')}</InputLabel>
                   <Select
                     value={formData.shippingCountry}
-                    label="Country"
+                    label={t('country')}
                     onChange={(e) => setFormData(p => ({ ...p, shippingCountry: e.target.value as string, shippingState: '', shippingCity: '' }))}
                     disabled={sameAsB}
                   >
@@ -542,10 +545,10 @@ const CustomersPage: React.FC = () => {
               </Grid>
               <Grid size={{ xs: 12, sm: 4 }}>
                 <FormControl fullWidth size="small">
-                  <InputLabel>City</InputLabel>
+                  <InputLabel>{t('city')}</InputLabel>
                   <Select
                     value={formData.shippingCity}
-                    label="City"
+                    label={t('city')}
                     onChange={(e) => setFormData(p => ({ ...p, shippingCity: e.target.value as string }))}
                     disabled={sameAsB || !formData.shippingState}
                   >

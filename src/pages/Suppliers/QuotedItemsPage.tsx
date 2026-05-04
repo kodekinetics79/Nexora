@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, IconButton,
   Dialog, DialogTitle, DialogContent, DialogActions,
@@ -37,6 +38,7 @@ const emptyItem: Partial<SupplierQuotedItemDTO> = {
 };
 
 const QuotedItemsPage: React.FC = () => {
+  const { t } = useTranslation();
   const { userData } = useAuth();
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
@@ -148,7 +150,7 @@ const QuotedItemsPage: React.FC = () => {
         </Box>
       )
     },
-    { field: 'supplierName', headerName: 'Supplier', flex: 1, renderCell: (p) => <Chip label={p.value || '—'} size="small" variant="outlined" sx={{ fontWeight: 600 }} /> },
+    { field: 'supplierName', headerName: t('supplier'), flex: 1, renderCell: (p) => <Chip label={p.value || '—'} size="small" variant="outlined" sx={{ fontWeight: 600 }} /> },
     { 
       field: 'quantity', 
       headerName: 'Quantity', 
@@ -173,7 +175,7 @@ const QuotedItemsPage: React.FC = () => {
     { field: 'validUntil', headerName: 'Valid Until', width: 120, renderCell: (p) => p.value ? new Date(p.value).toLocaleDateString() : '—' },
     {
       field: 'actions',
-      headerName: 'Actions',
+      headerName: t('actions'),
       width: 100,
       sortable: false,
       renderCell: (p) => (

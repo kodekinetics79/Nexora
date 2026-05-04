@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Chip, IconButton,
   Dialog, DialogTitle, DialogContent, DialogActions,
@@ -16,6 +17,7 @@ import { useSnackbar } from 'notistack';
 const empty = { categoryName: '', description: '', parentCategoryId: '', isActive: true };
 
 const ProductCategoryPage: React.FC = () => {
+  const { t } = useTranslation();
   const { userData } = useAuth();
   const { enqueueSnackbar } = useSnackbar();
   const queryClient = useQueryClient();
@@ -68,8 +70,8 @@ const ProductCategoryPage: React.FC = () => {
     { field: 'categoryName', headerName: 'Category Name', flex: 1.5, minWidth: 160 },
     { field: 'description', headerName: 'Description', flex: 2, minWidth: 200 },
     { field: 'parentCategoryName', headerName: 'Parent Category', flex: 1, minWidth: 140, renderCell: (p) => p.value || <span style={{ opacity: 0.35 }}>—</span> },
-    { field: 'isActive', headerName: 'Status', width: 100, renderCell: (p) => <Chip label={p.value ? 'Active' : 'Inactive'} color={p.value ? 'success' : 'default'} size="small" variant="outlined" /> },
-    { field: 'actions', headerName: 'Actions', width: 80, sortable: false, renderCell: (p) => <IconButton size="small" color="primary" onClick={() => openEdit(p.row)}><EditIcon fontSize="small" /></IconButton> },
+    { field: 'isActive', headerName: t('status'), width: 100, renderCell: (p) => <Chip label={p.value ? 'Active' : 'Inactive'} color={p.value ? 'success' : 'default'} size="small" variant="outlined" /> },
+    { field: 'actions', headerName: t('actions'), width: 80, sortable: false, renderCell: (p) => <IconButton size="small" color="primary" onClick={() => openEdit(p.row)}><EditIcon fontSize="small" /></IconButton> },
   ];
 
   return (
@@ -78,7 +80,7 @@ const ProductCategoryPage: React.FC = () => {
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 2 }}>
         <Box>
           <Typography variant="h5" sx={{ fontWeight: 800, display: 'flex', alignItems: 'center', gap: 1 }}>
-            <CategoryIcon color="primary" /> Product Categories
+            <CategoryIcon color="primary" /> {t('categories')}
           </Typography>
           <Typography variant="body2" color="text.secondary">Manage product category master data</Typography>
         </Box>

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, IconButton,
   Stack, Dialog, DialogTitle, DialogContent,
@@ -25,6 +26,7 @@ import { useSnackbar } from 'notistack';
 import { useAuth } from '../../context/AuthContext';
 
 const OutstandingLeadsPage: React.FC = () => {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const { userData } = useAuth();
   const queryClient = useQueryClient();
@@ -105,7 +107,7 @@ const OutstandingLeadsPage: React.FC = () => {
   const columns: GridColDef[] = [
     {
       field: 'rfqno',
-      headerName: 'RFQ #',
+      headerName: t('rfq_management'),
       width: 200,
       renderCell: (p) => (
         <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
@@ -165,7 +167,7 @@ const OutstandingLeadsPage: React.FC = () => {
     },
     {
       field: 'recDate',
-      headerName: 'Receive Date',
+      headerName: t('date'),
       width: 120,
       renderCell: (p) => (
         <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
@@ -189,7 +191,7 @@ const OutstandingLeadsPage: React.FC = () => {
     },
     {
       field: 'itemCount',
-      headerName: 'Items',
+      headerName: t('invoice_items'),
       width: 80,
       renderCell: (p) => (
         <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', height: '100%' }}>
@@ -235,7 +237,7 @@ const OutstandingLeadsPage: React.FC = () => {
     },
     {
       field: 'actions',
-      headerName: 'Actions',
+      headerName: t('actions'),
       width: 80,
       sortable: false,
       renderCell: (p) => (
@@ -254,7 +256,7 @@ const OutstandingLeadsPage: React.FC = () => {
       {/* Header */}
       <Box sx={{ mb: 3, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <Box>
-          <Typography variant="h5" sx={{ fontWeight: 950, letterSpacing: '-0.02em', mb: 0.5 }}>Outstanding Leads</Typography>
+          <Typography variant="h5" sx={{ fontWeight: 950, letterSpacing: '-0.02em', mb: 0.5 }}>{t('outstanding_leads')}</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>Accepted leads waiting for team assignment</Typography>
         </Box>
         <Button variant="outlined" startIcon={<RefreshIcon />} onClick={() => refetch()} size="small" sx={{ fontWeight: 800 }}>Refresh Dashboard</Button>

@@ -19,6 +19,7 @@ import currencyService from '../../api/services/currencyService';
 import productService from '../../api/services/productService';
 import { useAuth } from '../../context/AuthContext';
 import { useSnackbar } from 'notistack';
+import { useTranslation } from 'react-i18next';
 import SearchField from '../../components/common/SearchField';
 
 const emptyPO: any = {
@@ -37,6 +38,7 @@ const PurchaseOrdersPage: React.FC = () => {
   const { userData, businessUnits } = useAuth();
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
+  const { t } = useTranslation();
   const buid = userData?.businessUnitId || 0;
 
   const activeBU = (businessUnits || []).find((b: any) => b.id === buid);
@@ -114,9 +116,9 @@ const PurchaseOrdersPage: React.FC = () => {
           <body>
             <div class="invoice-header">
               <div>
-                <h1 class="invoice-title">SUPPLIER INVOICE</h1>
-                <div class="invoice-meta">Invoice #: INV-${selectedInvoicePO.orderNumber}</div>
-                <div class="invoice-meta">Date: ${new Date().toLocaleDateString()}</div>
+                <h1 class="invoice-title">${t('supplier_invoice')}</h1>
+                <div class="invoice-meta">${t('invoice_no')} INV-${selectedInvoicePO.orderNumber}</div>
+                <div class="invoice-meta">${t('date')}: ${new Date().toLocaleDateString()}</div>
               </div>
               <div style="text-align: right;">
                 <h2 style="font-size: 20px; font-weight: 800; color: #1d4ed8; margin: 0 0 4px 0;">${activeBUName}</h2>
@@ -125,13 +127,13 @@ const PurchaseOrdersPage: React.FC = () => {
 
             <div class="invoice-grid">
               <div class="invoice-col">
-                <div class="section-caption">Bill From:</div>
+                <div class="section-caption">${t('bill_from')}:</div>
                 <div class="info-card">
                   <div class="company-title">${supplierName}</div>
                 </div>
               </div>
               <div class="invoice-col">
-                <div class="section-caption">Bill To:</div>
+                <div class="section-caption">${t('bill_to')}:</div>
                 <div class="info-card">
                   <div class="company-title">${activeBUName}</div>
                   <div style="color: #64748b;">PO Ref: ${selectedInvoicePO.orderNumber}</div>
@@ -139,16 +141,16 @@ const PurchaseOrdersPage: React.FC = () => {
               </div>
             </div>
 
-            <div class="section-caption">Invoice Items:</div>
+            <div class="section-caption">${t('invoice_items')}:</div>
             <table class="invoice-table">
               <thead>
                 <tr>
                   <th style="width: 50px; text-align: center;">#</th>
-                  <th>Product</th>
-                  <th style="width: 80px; text-align: right;">Qty</th>
-                  <th style="width: 120px; text-align: right;">Price</th>
-                  <th style="width: 80px; text-align: right;">Tax %</th>
-                  <th style="width: 130px; text-align: right;">Total</th>
+                  <th>${t('product')}</th>
+                  <th style="width: 80px; text-align: right;">${t('quantity')}</th>
+                  <th style="width: 120px; text-align: right;">${t('price')}</th>
+                  <th style="width: 80px; text-align: right;">${t('tax_percent')}</th>
+                  <th style="width: 130px; text-align: right;">${t('total')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -159,15 +161,15 @@ const PurchaseOrdersPage: React.FC = () => {
             <div class="totals-container">
               <div class="totals-box">
                 <div class="totals-row">
-                  <span style="color: #475569; font-weight: 600;">Grand Total (excl. Tax):</span>
+                  <span style="color: #475569; font-weight: 600;">${t('grand_total')}:</span>
                   <span style="color: #1e293b; font-weight: 700;">${subtotalSum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${selectedInvoicePO.currency || 'PKR'}</span>
                 </div>
                 <div class="totals-row">
-                  <span style="color: #475569; font-weight: 600;">Tax Amount:</span>
+                  <span style="color: #475569; font-weight: 600;">${t('tax_amount')}:</span>
                   <span style="color: #1e293b; font-weight: 700;">${taxSum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${selectedInvoicePO.currency || 'PKR'}</span>
                 </div>
                 <div class="totals-row grand-total">
-                  <span>Total (incl. Tax):</span>
+                  <span>${t('total_incl_tax')}:</span>
                   <span>${Number(selectedInvoicePO.totalAmount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${selectedInvoicePO.currency || 'PKR'}</span>
                 </div>
               </div>
@@ -363,7 +365,7 @@ const PurchaseOrdersPage: React.FC = () => {
     });
   };
 
-  const f = (field: string) => (e: any) => setFormData(p => ({ ...p, [field]: e.target.value }));
+  const f = (field: string) => (e: any) => setFormData((p: any) => ({ ...p, [field]: e.target.value }));
 
   // ── Grid Columns ──
   const columns: GridColDef[] = [
@@ -435,11 +437,11 @@ const PurchaseOrdersPage: React.FC = () => {
       {/* Header */}
       <Box sx={{ mb: 3, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <Box>
-          <Typography variant="h4" sx={{ fontWeight: 800, letterSpacing: '-0.02em', mb: 0.5 }}>Purchase Orders</Typography>
+          <Typography variant="h4" sx={{ fontWeight: 800, letterSpacing: '-0.02em', mb: 0.5 }}>{t('purchase_orders')}</Typography>
           <Typography variant="body2" color="text.secondary">Manage and track all purchase orders issued to your suppliers</Typography>
         </Box>
         <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3, borderRadius: 2, height: 48 }}>
-          Create New PO
+          {t('create_new')}
         </Button>
       </Box>
 
@@ -878,13 +880,13 @@ const PurchaseOrdersPage: React.FC = () => {
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 4, borderBottom: '2px solid #F1F5F9', pb: 3 }}>
                 <Box>
                   <Typography variant="h5" sx={{ fontWeight: 900, color: '#0F172A', letterSpacing: '-0.02em', mb: 0.5 }}>
-                    SUPPLIER INVOICE
+                    {t('supplier_invoice')}
                   </Typography>
                   <Typography variant="body2" sx={{ color: '#475569', fontWeight: 600 }}>
-                    Invoice #: INV-{selectedInvoicePO.orderNumber}
+                    {t('invoice_no')} INV-{selectedInvoicePO.orderNumber}
                   </Typography>
                   <Typography variant="caption" sx={{ color: '#64748B', display: 'block', mt: 0.5 }}>
-                    Date: {new Date().toLocaleDateString()}
+                    {t('date')}: {new Date().toLocaleDateString()}
                   </Typography>
                 </Box>
                 <Box sx={{ textAlign: 'right' }}>
@@ -898,7 +900,7 @@ const PurchaseOrdersPage: React.FC = () => {
               <Grid container spacing={3} sx={{ mb: 4 }}>
                 <Grid size={{ xs: 6 }}>
                   <Typography variant="caption" sx={{ display: 'block', fontWeight: 800, color: '#475569', mb: 0.5, letterSpacing: '0.05em' }}>
-                    BILL FROM:
+                    {t('bill_from')}:
                   </Typography>
                   <Paper elevation={0} sx={{ p: 2, bgcolor: '#F8FAFC', borderRadius: 2, border: '1px solid #E2E8F0' }}>
                     <Typography variant="subtitle2" sx={{ fontWeight: 800, color: '#1E293B' }}>
@@ -912,7 +914,7 @@ const PurchaseOrdersPage: React.FC = () => {
 
                 <Grid size={{ xs: 6 }}>
                   <Typography variant="caption" sx={{ display: 'block', fontWeight: 800, color: '#475569', mb: 0.5, letterSpacing: '0.05em' }}>
-                    BILL TO:
+                    {t('bill_to')}:
                   </Typography>
                   <Paper elevation={0} sx={{ p: 2, bgcolor: '#F8FAFC', borderRadius: 2, border: '1px solid #E2E8F0' }}>
                     <Typography variant="subtitle2" sx={{ fontWeight: 800, color: '#1E293B' }}>
@@ -928,17 +930,17 @@ const PurchaseOrdersPage: React.FC = () => {
               {/* Items List inside the invoice */}
               <Box sx={{ mb: 4 }}>
                 <Typography variant="caption" sx={{ display: 'block', fontWeight: 800, color: '#475569', mb: 1, letterSpacing: '0.05em' }}>
-                  INVOICE ITEMS:
+                  {t('invoice_items')}:
                 </Typography>
                 <Paper elevation={0} sx={{ border: '1px solid #E2E8F0', borderRadius: 2, overflow: 'hidden' }}>
                   {/* Table Headers */}
                   <Grid container spacing={1} sx={{ px: 2, py: 1.25, bgcolor: '#F1F5F9', borderBottom: '1px solid #E2E8F0' }}>
                     <Grid size={{ xs: 1 }}><Typography variant="caption" sx={{ fontWeight: 800, color: '#475569' }}>#</Typography></Grid>
-                    <Grid size={{ xs: 5 }}><Typography variant="caption" sx={{ fontWeight: 800, color: '#475569' }}>PRODUCT</Typography></Grid>
-                    <Grid size={{ xs: 1.5 }}><Typography variant="caption" sx={{ fontWeight: 800, color: '#475569', textAlign: 'right' }}>QTY</Typography></Grid>
-                    <Grid size={{ xs: 1.5 }}><Typography variant="caption" sx={{ fontWeight: 800, color: '#475569', textAlign: 'right' }}>PRICE</Typography></Grid>
-                    <Grid size={{ xs: 1.5 }}><Typography variant="caption" sx={{ fontWeight: 800, color: '#475569', textAlign: 'right' }}>TAX %</Typography></Grid>
-                    <Grid size={{ xs: 1.5 }}><Typography variant="caption" sx={{ fontWeight: 800, color: '#475569', textAlign: 'right' }}>TOTAL</Typography></Grid>
+                    <Grid size={{ xs: 5 }}><Typography variant="caption" sx={{ fontWeight: 800, color: '#475569' }}>{t('product')}</Typography></Grid>
+                    <Grid size={{ xs: 1.5 }}><Typography variant="caption" sx={{ fontWeight: 800, color: '#475569', textAlign: 'right' }}>{t('quantity')}</Typography></Grid>
+                    <Grid size={{ xs: 1.5 }}><Typography variant="caption" sx={{ fontWeight: 800, color: '#475569', textAlign: 'right' }}>{t('price')}</Typography></Grid>
+                    <Grid size={{ xs: 1.5 }}><Typography variant="caption" sx={{ fontWeight: 800, color: '#475569', textAlign: 'right' }}>{t('tax_percent')}</Typography></Grid>
+                    <Grid size={{ xs: 1.5 }}><Typography variant="caption" sx={{ fontWeight: 800, color: '#475569', textAlign: 'right' }}>{t('total')}</Typography></Grid>
                   </Grid>
 
                   {/* Dynamic Table Items */}
@@ -966,7 +968,7 @@ const PurchaseOrdersPage: React.FC = () => {
               <Box sx={{ display: 'flex', justifyContent: 'flex-end', borderTop: '2px solid #F1F5F9', pt: 2.5 }}>
                 <Box sx={{ minWidth: 280 }}>
                   <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
-                    <Typography variant="body2" sx={{ color: '#475569', fontWeight: 600 }}>Grand Total (excl. Tax):</Typography>
+                    <Typography variant="body2" sx={{ color: '#475569', fontWeight: 600 }}>{t('grand_total')}:</Typography>
                     <Typography variant="body2" sx={{ color: '#1E293B', fontWeight: 700 }}>
                       {(() => {
                         let total = 0;
@@ -978,7 +980,7 @@ const PurchaseOrdersPage: React.FC = () => {
                     </Typography>
                   </Box>
                   <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1.5 }}>
-                    <Typography variant="body2" sx={{ color: '#475569', fontWeight: 600 }}>Tax Amount:</Typography>
+                    <Typography variant="body2" sx={{ color: '#475569', fontWeight: 600 }}>{t('tax_amount')}:</Typography>
                     <Typography variant="body2" sx={{ color: '#1E293B', fontWeight: 700 }}>
                       {(() => {
                         let tax = 0;
@@ -990,7 +992,7 @@ const PurchaseOrdersPage: React.FC = () => {
                     </Typography>
                   </Box>
                   <Paper elevation={0} sx={{ p: 1.5, bgcolor: '#F0F7FF', border: '1.5px solid', borderColor: '#3B82F6', borderRadius: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <Typography variant="subtitle2" sx={{ color: '#1D4ED8', fontWeight: 900 }}>Total (incl. Tax):</Typography>
+                    <Typography variant="subtitle2" sx={{ color: '#1D4ED8', fontWeight: 900 }}>{t('total_incl_tax')}:</Typography>
                     <Typography variant="subtitle1" sx={{ color: '#1D4ED8', fontWeight: 900 }}>
                       {Number(selectedInvoicePO.totalAmount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} {selectedInvoicePO.currency || 'PKR'}
                     </Typography>

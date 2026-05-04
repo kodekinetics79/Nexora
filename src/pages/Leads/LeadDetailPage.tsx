@@ -1,6 +1,7 @@
 import React from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
+import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Chip, Grid,
   CircularProgress, Stack, Table, TableHead,
@@ -41,6 +42,7 @@ const DataField: React.FC<{ label: string; value: string | number | null; boldVa
 import axiosInstance from '../../api/axiosInstance';
 
 const LeadDetailPage: React.FC = () => {
+  const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
 
@@ -95,10 +97,10 @@ const LeadDetailPage: React.FC = () => {
       {/* Breadcrumb Header */}
       <Breadcrumbs separator={<NextIcon sx={{ fontSize: 14 }} />} sx={{ mb: 2 }}>
         <Link component="button" variant="caption" onClick={() => navigate('/dashboard')} sx={{ color: 'text.secondary', fontWeight: 700, textDecoration: 'none', textTransform: 'uppercase' }}>
-          RFQs Management
+          {t('rfqs_management') || 'RFQs Management'}
         </Link>
         <Link component="button" variant="caption" onClick={() => navigate('/procurement/leads/all')} sx={{ color: 'text.secondary', fontWeight: 700, textDecoration: 'none', textTransform: 'uppercase' }}>
-          Leads
+          {t('leads') || 'Leads'}
         </Link>
         <Typography variant="caption" sx={{ color: 'primary.main', fontWeight: 900, textTransform: 'uppercase' }}>
           {lead.rfqno}
@@ -111,7 +113,7 @@ const LeadDetailPage: React.FC = () => {
             {lead.rfqno}
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>
-            Lead Details Analysis Engine
+            {t('lead_detail_analysis') || 'Lead Details Analysis Engine'}
           </Typography>
         </Box>
         {(!lead.isAccepted && !lead.isRejected && lead.status?.toLowerCase() !== 'accepted' && lead.status?.toLowerCase() !== 'rejected') && (
@@ -124,7 +126,7 @@ const LeadDetailPage: React.FC = () => {
               onClick={handleReject}
               sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
             >
-              Reject
+              {t('reject') || 'Reject'}
             </Button>
             <Button
               variant="contained"
@@ -135,7 +137,7 @@ const LeadDetailPage: React.FC = () => {
               disabled={isProcessing}
               sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
             >
-              Accept
+              {t('accept') || 'Accept'}
             </Button>
           </Stack>
         )}
@@ -145,7 +147,7 @@ const LeadDetailPage: React.FC = () => {
         {/* Left Column: General Information */}
         <Grid size={{ xs: 12, lg: 9 }} component="div">
           <Paper sx={{ p: 3, borderRadius: 3, border: '1px solid', borderColor: 'divider', height: '100%' }}>
-            <SectionTitle title="General Information" />
+            <SectionTitle title={t('general_information') || 'General Information'} />
             <Grid container spacing={2} component="div">
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="RFQ #" value={lead.rfqno} /></Grid>
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Buyer Name" value={lead.buyersName} /></Grid>
@@ -173,7 +175,7 @@ const LeadDetailPage: React.FC = () => {
         {/* Right Column: Attachments */}
         <Grid size={{ xs: 12, lg: 3 }} component="div">
           <Paper sx={{ p: 3, borderRadius: 3, border: '1px solid', borderColor: 'divider', height: '100%' }}>
-            <SectionTitle title="Attachments" count={lead.attachments?.length || 0} />
+            <SectionTitle title={t('attachments') || 'Attachments'} count={lead.attachments?.length || 0} />
             <Stack spacing={1.5} sx={{ mt: 1 }}>
               {lead.attachments?.map((file: any) => (
                 <Paper
@@ -215,7 +217,7 @@ const LeadDetailPage: React.FC = () => {
         {/* Full Width Bottom: Line Items */}
         <Grid size={{ xs: 12 }} component="div">
           <Box sx={{ mt: 2 }}>
-            <SectionTitle title="Extracted Line Items" count={lead.leadItems?.length || 0} />
+            <SectionTitle title={t('extracted_line_items') || 'Extracted Line Items'} count={lead.leadItems?.length || 0} />
             <Paper sx={{ borderRadius: 3, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>
               <Table size="small">
                 <TableHead>

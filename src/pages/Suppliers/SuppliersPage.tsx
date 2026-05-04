@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Chip, IconButton,
   Dialog, DialogTitle, DialogContent, DialogActions,
@@ -52,13 +53,14 @@ const ContactSubForm: React.FC<{
   isSaving: boolean;
   isEdit: boolean;
 }> = ({ value, onChange, onSave, onCancel, isSaving, isEdit }) => {
+  const { t } = useTranslation();
   const f = (field: string) => (e: React.ChangeEvent<HTMLInputElement>) =>
     onChange({ ...value, [field]: e.target.value });
 
   return (
     <Box sx={{ p: 2, bgcolor: 'action.hover', borderRadius: 2, border: '1px dashed', borderColor: 'primary.main', mb: 2 }}>
       <Typography variant="caption" sx={{ fontWeight: 800, color: 'primary.main', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'block', mb: 1.5 }}>
-        {isEdit ? 'Edit Contact' : 'New Contact'}
+        {isEdit ? t('edit_supplier') : t('create_new')}
       </Typography>
       <Grid container spacing={1.5}>
         <Grid size={{ xs: 12, sm: 4 }}>
@@ -95,7 +97,7 @@ const ContactSubForm: React.FC<{
         <Grid size={{ xs: 12 }} sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1 }}>
           <Button size="small" onClick={onCancel} color="inherit" startIcon={<CloseIcon />}>Cancel</Button>
           <Button size="small" variant="contained" onClick={onSave} disabled={isSaving} startIcon={isSaving ? <CircularProgress size={14} /> : <SaveIcon />}>
-            Save Contact
+            {t('save_contact')}
           </Button>
         </Grid>
       </Grid>
@@ -105,6 +107,7 @@ const ContactSubForm: React.FC<{
 
 // ─── Main Page ─────────────────────────────────────────────────────────────
 const SuppliersPage: React.FC = () => {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const { userData } = useAuth();
   const queryClient = useQueryClient();
@@ -297,15 +300,15 @@ const SuppliersPage: React.FC = () => {
   // ── Grid columns ──
   const columns: GridColDef[] = [
     { field: 'docId', headerName: 'Doc ID', width: 110, renderCell: (p) => <Typography sx={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>{p.value ?? '—'}</Typography> },
-    { field: 'name', headerName: 'Supplier Name', flex: 1.5, minWidth: 160 },
-    { field: 'contactEmail', headerName: 'Email', flex: 1.2, minWidth: 180 },
-    { field: 'countryName', headerName: 'Country', width: 120, renderCell: (p) => p.value ?? '—' },
-    { field: 'currencyName', headerName: 'Currency', width: 100, renderCell: (p) => p.value ?? '—' },
-    { field: 'paymentTerms', headerName: 'Payment Terms', width: 140, renderCell: (p) => p.value ?? '—' },
-    { field: 'isActive', headerName: 'Status', width: 100, renderCell: (p) => <Chip label={p.value ? 'Active' : 'Inactive'} color={p.value ? 'success' : 'error'} size="small" variant="outlined" /> },
+    { field: 'name', headerName: t('supplier_name'), flex: 1.5, minWidth: 160 },
+    { field: 'contactEmail', headerName: t('email'), flex: 1.2, minWidth: 180 },
+    { field: 'countryName', headerName: t('country'), width: 120, renderCell: (p) => p.value ?? '—' },
+    { field: 'currencyName', headerName: t('currency'), width: 100, renderCell: (p) => p.value ?? '—' },
+    { field: 'paymentTerms', headerName: t('payment_terms'), width: 140, renderCell: (p) => p.value ?? '—' },
+    { field: 'isActive', headerName: t('status'), width: 100, renderCell: (p) => <Chip label={p.value ? 'Active' : 'Inactive'} color={p.value ? 'success' : 'error'} size="small" variant="outlined" /> },
     { 
       field: 'actions', 
-      headerName: 'Actions', 
+      headerName: t('actions'), 
       width: 120, 
       sortable: false, 
       renderCell: (p) => (
@@ -326,18 +329,18 @@ const SuppliersPage: React.FC = () => {
       {/* Header */}
       <Box sx={{ mb: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <Box>
-          <Typography variant="h5" sx={{ fontWeight: 800, letterSpacing: '-0.02em', mb: 0.5 }}>Supplier Management</Typography>
-          <Typography variant="body2" color="text.secondary">Manage your supplier network and vendor relationships</Typography>
+          <Typography variant="h5" sx={{ fontWeight: 800, letterSpacing: '-0.02em', mb: 0.5 }}>{t('supplier_management')}</Typography>
+          <Typography variant="body2" color="text.secondary">{t('manage_supplier_network')}</Typography>
         </Box>
         <Box sx={{ display: 'flex', gap: 1.5, alignItems: 'center' }}>
           <UploadExportToolbar onDownloadTemplate={supplierService.downloadTemplate} onUpload={supplierService.uploadTemplate} onExport={supplierService.export} templateFileName="SupplierTemplate.xlsx" exportFileName="Suppliers.xlsx" />
-          <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3 }}>Add Supplier</Button>
+          <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3 }}>{t('add_supplier')}</Button>
         </Box>
       </Box>
 
       {/* Search */}
       <Paper sx={{ p: 1, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', backgroundColor: 'background.paper', borderRadius: 2 }}>
-        <SearchField value={search} onChange={setSearch} placeholder="Search suppliers..." />
+        <SearchField value={search} onChange={setSearch} placeholder={t('search_suppliers')} />
       </Paper>
 
       {/* Grid */}
@@ -348,7 +351,7 @@ const SuppliersPage: React.FC = () => {
       {/* ── Dialog ─────────────────────────────────────────────────────────── */}
       <Dialog open={isModalOpen} onClose={() => setIsModalOpen(false)} fullWidth maxWidth="md">
         <DialogTitle sx={{ fontWeight: 800 }}>
-          {selectedRecord ? `Edit: ${selectedRecord.name}` : 'Add New Supplier'}
+          {selectedRecord ? `${t('edit_supplier')}: ${selectedRecord.name}` : t('add_new_supplier')}
         </DialogTitle>
 
         <DialogContent dividers sx={{ p: 3 }}>
@@ -407,21 +410,21 @@ const SuppliersPage: React.FC = () => {
 
             <Grid container spacing={2} sx={{ flex: 1 }}>
               <Grid size={{ xs: 12, sm: 6 }}>
-                <TextField fullWidth label="Supplier Name *" value={formData.name} onChange={f('name')} variant="outlined" />
+                <TextField fullWidth label={`${t('supplier_name')} *`} value={formData.name} onChange={f('name')} variant="outlined" />
               </Grid>
               <Grid size={{ xs: 12, sm: 6 }}>
-                <TextField fullWidth label="Contact Email" type="email" value={formData.contactEmail} onChange={f('contactEmail')} />
+                <TextField fullWidth label={t('contact_email')} type="email" value={formData.contactEmail} onChange={f('contactEmail')} />
               </Grid>
               <Grid size={{ xs: 12, sm: 6 }}>
-                <TextField fullWidth label="Payment Terms" value={formData.paymentTerms} onChange={f('paymentTerms')} placeholder="e.g. Net 30" />
+                <TextField fullWidth label={t('payment_terms')} value={formData.paymentTerms} onChange={f('paymentTerms')} placeholder="e.g. Net 30" />
               </Grid>
               <Grid size={{ xs: 12, sm: 6 }}>
-                <TextField fullWidth label="Tags" value={formData.tags} onChange={f('tags')} placeholder="electronics, preferred" />
+                <TextField fullWidth label={t('tags')} value={formData.tags} onChange={f('tags')} placeholder="electronics, preferred" />
               </Grid>
               <Grid size={{ xs: 12 }}>
                 <FormControlLabel
                   control={<Switch checked={formData.isActive} onChange={(e) => setFormData(p => ({ ...p, isActive: e.target.checked }))} color="success" />}
-                  label={<Typography variant="subtitle2" sx={{ fontWeight: 700 }}>Active Status</Typography>}
+                  label={<Typography variant="subtitle2" sx={{ fontWeight: 700 }}>{t('active_status')}</Typography>}
                 />
               </Grid>
             </Grid>
@@ -432,26 +435,26 @@ const SuppliersPage: React.FC = () => {
             <Stack direction="row" spacing={1} sx={{ mb: 2, alignItems: 'center' }}>
               <LocationIcon color="primary" fontSize="small" />
               <Typography variant="subtitle2" sx={{ fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                Location & Address
+                {t('location_address')}
               </Typography>
             </Stack>
             <Grid container spacing={2}>
               <Grid size={{ xs: 12 }}>
-                <TextField fullWidth label="Address Line 1" value={formData.addressLine1} onChange={f('addressLine1')} size="small" />
+                <TextField fullWidth label={t('address_line_1')} value={formData.addressLine1} onChange={f('addressLine1')} size="small" />
               </Grid>
               <Grid size={{ xs: 12, sm: 6 }}>
-                <TextField fullWidth label="Address Line 2" value={formData.addressLine2} onChange={f('addressLine2')} size="small" />
+                <TextField fullWidth label={t('address_line_2')} value={formData.addressLine2} onChange={f('addressLine2')} size="small" />
               </Grid>
               <Grid size={{ xs: 12, sm: 6 }}>
-                <TextField fullWidth label="Postal Code" value={formData.postalCode} onChange={f('postalCode')} size="small" />
+                <TextField fullWidth label={t('postal_code')} value={formData.postalCode} onChange={f('postalCode')} size="small" />
               </Grid>
 
               <Grid size={{ xs: 12, sm: 6 }}>
                 <FormControl fullWidth size="small">
-                  <InputLabel>Country</InputLabel>
+                  <InputLabel>{t('country')}</InputLabel>
                   <Select
                     value={formData.countryId}
-                    label="Country"
+                    label={t('country')}
                     onChange={(e) => setFormData(p => ({ ...p, countryId: e.target.value as number, cityId: '' as any }))}
                   >
                     <MenuItem value=""><em>None</em></MenuItem>
@@ -463,10 +466,10 @@ const SuppliersPage: React.FC = () => {
               </Grid>
               <Grid size={{ xs: 12, sm: 6 }}>
                 <FormControl fullWidth size="small">
-                  <InputLabel>City</InputLabel>
+                  <InputLabel>{t('city')}</InputLabel>
                   <Select
                     value={formData.cityId}
-                    label="City"
+                    label={t('city')}
                     onChange={(e) => setFormData(p => ({ ...p, cityId: e.target.value as number }))}
                     disabled={!formData.countryId}
                   >
@@ -485,16 +488,16 @@ const SuppliersPage: React.FC = () => {
             <Stack direction="row" spacing={1} sx={{ mb: 2, alignItems: 'center' }}>
               <CurrencyIcon color="primary" fontSize="small" />
               <Typography variant="subtitle2" sx={{ fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                Financials & Metrics
+                {t('financials_metrics')}
               </Typography>
             </Stack>
             <Grid container spacing={2}>
               <Grid size={{ xs: 12, sm: 4 }}>
                 <FormControl fullWidth size="small">
-                  <InputLabel>Currency</InputLabel>
+                  <InputLabel>{t('currency')}</InputLabel>
                   <Select
                     value={formData.currencyId}
-                    label="Currency"
+                    label={t('currency')}
                     onChange={(e) => setFormData(p => ({ ...p, currencyId: e.target.value as number }))}
                   >
                     <MenuItem value=""><em>None</em></MenuItem>
@@ -505,13 +508,13 @@ const SuppliersPage: React.FC = () => {
                 </FormControl>
               </Grid>
               <Grid size={{ xs: 12, sm: 4 }}>
-                <TextField fullWidth type="number" label="Success Rate (%)" value={formData.successRate} onChange={f('successRate')} size="small" />
+                <TextField fullWidth type="number" label={t('success_rate')} value={formData.successRate} onChange={f('successRate')} size="small" />
               </Grid>
               <Grid size={{ xs: 12, sm: 4 }}>
-                <TextField fullWidth type="number" label="Avg Response Time (days)" value={formData.avgResponseTime} onChange={f('avgResponseTime')} size="small" />
+                <TextField fullWidth type="number" label={t('avg_response_time')} value={formData.avgResponseTime} onChange={f('avgResponseTime')} size="small" />
               </Grid>
               <Grid size={{ xs: 12 }}>
-                <TextField fullWidth multiline rows={2} label="Comments" value={formData.comments} onChange={f('comments')} size="small" />
+                <TextField fullWidth multiline rows={2} label={t('comments')} value={formData.comments} onChange={f('comments')} size="small" />
               </Grid>
             </Grid>
           </Box>
@@ -520,13 +523,13 @@ const SuppliersPage: React.FC = () => {
           <Divider sx={{ my: 3 }} />
           <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1.5 }}>
             <Typography variant="overline" sx={{ fontWeight: 800, color: 'text.secondary', letterSpacing: '0.08em' }}>
-              Contacts {selectedRecord && !contactsLoading && `(${contacts.length})`}
+              {t('contacts')} {selectedRecord && !contactsLoading && `(${contacts.length})`}
             </Typography>
             {selectedRecord && !showContactForm && (
               <Button size="small" variant="outlined" startIcon={<PersonAddIcon />}
                 onClick={() => { setEditingContact(null); setContactForm(emptyContact); setShowContactForm(true); }}
                 sx={{ fontWeight: 700, textTransform: 'none' }}>
-                Add Contact
+                {t('add_contact')}
               </Button>
             )}
           </Box>
@@ -607,7 +610,7 @@ const SuppliersPage: React.FC = () => {
         <DialogActions sx={{ p: 2 }}>
           <Button onClick={() => setIsModalOpen(false)} color="inherit">Cancel</Button>
           <Button variant="contained" onClick={handleSaveSupplier} disabled={isBusy}>
-            {isBusy ? <CircularProgress size={22} /> : 'Save Supplier'}
+            {isBusy ? <CircularProgress size={22} /> : t('save_supplier')}
           </Button>
         </DialogActions>
       </Dialog>

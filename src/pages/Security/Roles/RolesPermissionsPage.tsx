@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useTranslation } from 'react-i18next';
 import {
   Box,
   Typography,
@@ -24,6 +25,7 @@ import SearchField from '../../../components/common/SearchField';
 import { useSnackbar } from 'notistack';
 
 const RolesPermissionsPage: React.FC = () => {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
 
@@ -90,7 +92,7 @@ const RolesPermissionsPage: React.FC = () => {
     if (!selectedRoleId) return;
 
     // This is a simplified version - in a real app, you might want a bulk API endpoint
-    enqueueSnackbar(`Applying permissions to ${filteredModules.length} modules...`, { variant: 'info' });
+    enqueueSnackbar(t('applying_permissions_modules') || `Applying permissions to ${filteredModules.length} modules...`, { variant: 'info' });
 
     for (const module of filteredModules) {
       const moduleId = module.id;
@@ -114,7 +116,7 @@ const RolesPermissionsPage: React.FC = () => {
 
     queryClient.invalidateQueries({ queryKey: ['permissions-global'] });
     queryClient.invalidateQueries({ queryKey: ['modules'] });
-    enqueueSnackbar('Column permissions updated', { variant: 'success' });
+    enqueueSnackbar(t('column_permissions_updated') || 'Column permissions updated', { variant: 'success' });
   };
 
   const handleBulkToggleRow = async (module: any, checked: boolean, skipInvalidate = false) => {
@@ -145,21 +147,21 @@ const RolesPermissionsPage: React.FC = () => {
   };
 
   const handleAllRowsToggle = async (checked: boolean) => {
-    enqueueSnackbar(`Updating ${filteredModules.length} modules...`, { variant: 'info' });
+    enqueueSnackbar(t('updating_modules') || `Updating ${filteredModules.length} modules...`, { variant: 'info' });
     for (const m of filteredModules) {
       await handleBulkToggleRow(m, checked, true);
     }
     queryClient.invalidateQueries({ queryKey: ['permissions-global'] });
     queryClient.invalidateQueries({ queryKey: ['modules'] });
-    enqueueSnackbar('All modules updated', { variant: 'success' });
+    enqueueSnackbar(t('all_modules_updated') || 'All modules updated', { variant: 'success' });
   };
 
   return (
     <Box sx={{ width: '100%', px: 1, py: 1 }}>
       <Box sx={{ mb: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <Box>
-          <Typography variant="h5" sx={{ fontWeight: 800 }}>Roles & Permissions</Typography>
-          <Typography variant="body2" color="text.secondary">Configure module-level access for system roles</Typography>
+          <Typography variant="h5" sx={{ fontWeight: 800 }}>{t('roles_and_permissions') || 'Roles & Permissions'}</Typography>
+          <Typography variant="body2" color="text.secondary">{t('configure_module_access') || 'Configure module-level access for system roles'}</Typography>
         </Box>
       </Box>
 
@@ -167,7 +169,7 @@ const RolesPermissionsPage: React.FC = () => {
         <Box sx={{ display: 'flex', gap: 3, alignItems: 'center' }}>
           <TextField
             select
-            label="Select Role"
+            label={t('select_role') || 'Select Role'}
             value={selectedRoleId}
             onChange={(e) => setSelectedRoleId(Number(e.target.value))}
             sx={{ minWidth: 250 }}
@@ -184,7 +186,7 @@ const RolesPermissionsPage: React.FC = () => {
                 onClick={() => handleAllRowsToggle(true)}
                 disabled={loadingPermissions}
               >
-                Grant Full Access
+                {t('grant_full_access') || 'Grant Full Access'}
               </Button>
               <Button
                 variant="outlined"
@@ -193,12 +195,12 @@ const RolesPermissionsPage: React.FC = () => {
                 onClick={() => handleAllRowsToggle(false)}
                 disabled={loadingPermissions}
               >
-                Revoke All Access
+                {t('revoke_all_access') || 'Revoke All Access'}
               </Button>
             </Box>
           )}
         </Box>
-        <SearchField value={search} onChange={setSearch} placeholder="Search modules..." width={300} />
+        <SearchField value={search} onChange={setSearch} placeholder={t('search_modules') || 'Search modules...'} width={300} />
       </Paper>
 
       <TableContainer component={Paper} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
@@ -207,11 +209,11 @@ const RolesPermissionsPage: React.FC = () => {
             <TableRow sx={{ backgroundColor: 'action.hover' }}>
               <TableCell sx={{ fontWeight: 700, py: 1.5 }}>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  Module Name
+                  {t('module_name') || 'Module Name'}
                   {selectedRoleId && (
                     <Checkbox
                       size="small"
-                      title="Toggle All Rows"
+                      title={t('toggle_all_rows') || 'Toggle All Rows'}
                       onChange={(e) => handleAllRowsToggle(e.target.checked)}
                     />
                   )}
@@ -219,7 +221,7 @@ const RolesPermissionsPage: React.FC = () => {
               </TableCell>
               <TableCell align="center" sx={{ fontWeight: 700 }}>
                 <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-                  Can Create
+                  {t('can_create') || 'Can Create'}
                   {selectedRoleId && (
                     <Checkbox
                       size="small"
@@ -230,7 +232,7 @@ const RolesPermissionsPage: React.FC = () => {
               </TableCell>
               <TableCell align="center" sx={{ fontWeight: 700 }}>
                 <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-                  Can Edit
+                  {t('can_edit') || 'Can Edit'}
                   {selectedRoleId && (
                     <Checkbox
                       size="small"
@@ -241,7 +243,7 @@ const RolesPermissionsPage: React.FC = () => {
               </TableCell>
               <TableCell align="center" sx={{ fontWeight: 700 }}>
                 <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-                  Can Delete
+                  {t('can_delete') || 'Can Delete'}
                   {selectedRoleId && (
                     <Checkbox
                       size="small"
@@ -256,7 +258,7 @@ const RolesPermissionsPage: React.FC = () => {
             {!selectedRoleId ? (
               <TableRow>
                 <TableCell colSpan={4} align="center" sx={{ py: 8, color: 'text.secondary' }}>
-                  Please select a role above to view and configure permissions
+                  {t('please_select_role') || 'Please select a role above to view and configure permissions'}
                 </TableCell>
               </TableRow>
             ) : loadingPermissions ? (

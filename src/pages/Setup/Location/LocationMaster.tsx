@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useTranslation } from 'react-i18next';
 import {
   Box,
   Typography,
@@ -37,6 +38,7 @@ import { handleApiError } from '../../../utils/errorHandler';
 import { useSnackbar } from 'notistack';
 
 const LocationMaster: React.FC = () => {
+  const { t } = useTranslation();
   const { userData } = useAuth();
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
@@ -100,12 +102,8 @@ const LocationMaster: React.FC = () => {
       if (type === 'city') return id ? cityService.update(id, payload) : cityService.create(payload);
     },
     onSuccess: (_, variables) => {
-      // Invalidate the specific list that changed.
-      // Using a broad invalidation to ensure all related components refresh.
       queryClient.invalidateQueries({ queryKey: [variables.type + 's'] });
-      
       enqueueSnackbar(`${variables.type.charAt(0).toUpperCase() + variables.type.slice(1)} saved successfully`, { variant: 'success' });
-      
       setModalType(null);
       setEditingRecord(null);
       setFormData({});
@@ -130,7 +128,7 @@ const LocationMaster: React.FC = () => {
   return (
     <Box sx={{ height: 'calc(100vh - 120px)', px: 1, py: 1 }}>
       <Box sx={{ mb: 2 }}>
-        <Typography variant="h5" sx={{ fontWeight: 800 }}>Location Master</Typography>
+        <Typography variant="h5" sx={{ fontWeight: 800 }}>{t('locations')}</Typography>
         <Typography variant="body2" color="text.secondary">Manage countries, states, and cities in a single unified view</Typography>
       </Box>
 
@@ -141,7 +139,7 @@ const LocationMaster: React.FC = () => {
             <Box sx={{ p: 1.5, borderBottom: '1px solid', borderColor: 'divider', backgroundColor: 'rgba(0,0,0,0.01)' }}>
               <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 1.5 }}>
                 <Typography variant="subtitle2" sx={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: 1 }}>
-                  <CountryIcon fontSize="small" color="primary" /> Countries
+                  <CountryIcon fontSize="small" color="primary" /> {t('country') || 'Countries'}
                 </Typography>
                 <Button size="small" startIcon={<AddIcon />} onClick={() => handleOpenModal('country')}>Add</Button>
               </Stack>
@@ -228,7 +226,7 @@ const LocationMaster: React.FC = () => {
             <Box sx={{ p: 1.5, borderBottom: '1px solid', borderColor: 'divider', backgroundColor: 'rgba(0,0,0,0.01)' }}>
               <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 1.5 }}>
                 <Typography variant="subtitle2" sx={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: 1 }}>
-                  <CityIcon fontSize="small" color="success" /> Cities {selectedState && <Chip label={selectedState.stateName} size="small" sx={{ height: 18, fontSize: 10 }} />}
+                  <CityIcon fontSize="small" color="success" /> {t('city') || 'Cities'} {selectedState && <Chip label={selectedState.stateName} size="small" sx={{ height: 18, fontSize: 10 }} />}
                 </Typography>
                 <Button size="small" startIcon={<AddIcon />} disabled={!selectedState} onClick={() => handleOpenModal('city')}>Add</Button>
               </Stack>

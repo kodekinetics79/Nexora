@@ -1,19 +1,17 @@
-
 import React from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Grid, Stack, Chip,
   Table, TableHead, TableRow, TableCell, TableBody,
-  IconButton, CircularProgress, Divider, Breadcrumbs, Link,
-  Tooltip
+  CircularProgress, Divider, Breadcrumbs, Link,
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
   Edit as EditIcon,
   CheckCircle as ApproveIcon,
   Download as ExportIcon,
-  Email as EmailIcon,
   NavigateNext as NextIcon,
   Schedule as HistoryIcon,
 } from '@mui/icons-material';
@@ -34,6 +32,7 @@ const DataField: React.FC<{ label: string; value: string | number | null; bold?:
 );
 
 const ViewRFQPage: React.FC = () => {
+  const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { userData } = useAuth();
@@ -76,7 +75,7 @@ const ViewRFQPage: React.FC = () => {
       <Box sx={{ mb: 3 }}>
         <Breadcrumbs separator={<NextIcon sx={{ fontSize: 14 }} />} sx={{ mb: 2 }}>
           <Link component="button" variant="caption" onClick={() => navigate('/procurement/rfqs/all')} sx={{ color: 'text.secondary', fontWeight: 700, textDecoration: 'none', textTransform: 'uppercase' }}>
-            RFQs Management
+            {t('rfq_management')}
           </Link>
           <Typography variant="caption" sx={{ color: 'primary.main', fontWeight: 900, textTransform: 'uppercase' }}>
             {rfq.rfqno}
@@ -158,7 +157,7 @@ const ViewRFQPage: React.FC = () => {
 
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="Created By" value={rfq.createdBy} /></Grid>
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="Created On" value={formatDate(rfq.createdDate)} /></Grid>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Business Unit" value={rfq.businessUnitName} /></Grid>
+                <Grid size={{ xs: 12, md: 4 }}><DataField label="Business Unit" value={rfq.businessUnitName || null} /></Grid>
               </Grid>
 
               {rfq.headerRemarks && (
@@ -173,7 +172,7 @@ const ViewRFQPage: React.FC = () => {
             <Paper sx={{ borderRadius: 3, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>
               <Box sx={{ p: 2.5, bgcolor: '#fafafa', borderBottom: '1px solid', borderColor: 'divider' }}>
                 <Typography sx={{ fontWeight: 950, fontSize: '0.9rem', color: 'text.primary', textTransform: 'uppercase' }}>
-                  RFQ Line Items ({rfq.rfqitems.length})
+                  {t('invoice_items')} ({rfq.rfqitems.length})
                 </Typography>
               </Box>
               <Table size="small">

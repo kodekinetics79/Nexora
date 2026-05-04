@@ -15,8 +15,10 @@ import {
 } from '@mui/icons-material';
 import quoteConfigurationService, { type QuoteConfigurationDTO } from '../../../api/services/quoteConfigurationService';
 import { useAuth } from '../../../context/AuthContext';
+import { useTranslation } from 'react-i18next';
 
 const QuoteFormatPage: React.FC = () => {
+  const { t } = useTranslation();
   const { userData } = useAuth();
   const queryClient = useQueryClient();
 
@@ -73,7 +75,7 @@ const QuoteFormatPage: React.FC = () => {
     <Box sx={{ width: '100%', px: 1, py: 1 }}>
       <Box sx={{ mb: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <Box>
-          <Typography variant="h5" sx={{ fontWeight: 800, letterSpacing: '-0.02em', mb: 0.5 }}>Quote Format Setup</Typography>
+          <Typography variant="h5" sx={{ fontWeight: 800, letterSpacing: '-0.02em', mb: 0.5 }}>{t('quote_format') || 'Quote Format Setup'}</Typography>
           <Typography variant="body2" color="text.secondary">Configure document appearance and company details for quotations</Typography>
         </Box>
         <Button variant="contained" startIcon={<SaveIcon />} onClick={handleSave} disabled={saveMutation.isPending} sx={{ px: 4 }}>

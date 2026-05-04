@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
+import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Stack,
   CircularProgress, Alert, Tabs, Tab,
@@ -16,6 +17,7 @@ import leadService from '../../api/services/leadService';
 import { useSnackbar } from 'notistack';
 
 const FolderUploadLeadsPage: React.FC = () => {
+  const { t } = useTranslation();
   const { enqueueSnackbar } = useSnackbar();
   const [tabValue, setTabValue] = useState(0); // 0 = SEC (Customer 1), 1 = Aramco (Customer 2)
   const [files, setFiles] = useState<File[]>([]);
@@ -79,7 +81,7 @@ const FolderUploadLeadsPage: React.FC = () => {
       {/* Header */}
       <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
         <Typography variant="h5" sx={{ fontWeight: 800 }}>
-          Upload Folder Lead
+          {t('upload_folder_leads') || 'Upload Folder Lead'}
         </Typography>
         <Button
           variant="contained"

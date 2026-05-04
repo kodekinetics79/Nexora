@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useTranslation } from 'react-i18next';
 import {
   Box,
   Typography,
@@ -29,6 +30,7 @@ import { handleApiError } from '../../../utils/errorHandler';
 import { useSnackbar } from 'notistack';
 
 const CurrencyPage: React.FC = () => {
+  const { t } = useTranslation();
   const { userData } = useAuth();
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
@@ -137,7 +139,7 @@ const CurrencyPage: React.FC = () => {
     },
     {
       field: 'isActive',
-      headerName: 'Status',
+      headerName: t('status'),
       flex: 1,
       minWidth: 100,
       renderCell: (params) => (
@@ -151,7 +153,7 @@ const CurrencyPage: React.FC = () => {
     },
     {
       field: 'actions',
-      headerName: 'Actions',
+      headerName: t('actions'),
       width: 80,
       sortable: false,
       renderCell: (params) => (
@@ -164,20 +166,23 @@ const CurrencyPage: React.FC = () => {
 
   return (
     <Box sx={{ width: '100%', px: 1, py: 1 }}>
+      {/* Header */}
       <Box sx={{ mb: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <Box>
-          <Typography variant="h5" sx={{ fontWeight: 800, letterSpacing: '-0.02em', mb: 0.5 }}>Currency Setup</Typography>
+          <Typography variant="h5" sx={{ fontWeight: 800, letterSpacing: '-0.02em', mb: 0.5 }}>{t('currency')}</Typography>
           <Typography variant="body2" color="text.secondary">Manage global currencies and exchange rates</Typography>
         </Box>
         <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3 }}>
-          Add Currency
+          {t('create_new')}
         </Button>
       </Box>
 
+      {/* Filter */}
       <Paper sx={{ p: 1, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', backgroundColor: 'background.paper', borderRadius: 2 }}>
         <SearchField value={search} onChange={setSearch} placeholder="Search currencies..." />
       </Paper>
 
+      {/* Grid */}
       <Paper sx={{ height: 'calc(100vh - 220px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
         <DataGrid
           rows={data?.items || []}
@@ -193,6 +198,7 @@ const CurrencyPage: React.FC = () => {
         />
       </Paper>
 
+      {/* Modal */}
       <Dialog open={isModalOpen} onClose={() => setIsModalOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle sx={{ fontWeight: 800 }}>{selectedRecord ? 'Edit Currency' : 'Add New Currency'}</DialogTitle>
         <DialogContent dividers sx={{ p: 3 }}>

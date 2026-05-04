@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Chip, IconButton,
   Tooltip, Stack, TextField, MenuItem, CircularProgress,
@@ -22,6 +23,7 @@ import SearchField from '../../components/common/SearchField';
 import { useSnackbar } from 'notistack';
 
 const LeadsPage: React.FC = () => {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
@@ -109,7 +111,7 @@ const LeadsPage: React.FC = () => {
   const columns: GridColDef[] = [
     {
       field: 'rfqno',
-      headerName: 'RFQ #',
+      headerName: t('rfq_management'),
       width: 200,
       renderCell: (p) => (
         <Box sx={{ py: 1.5 }}>
@@ -170,7 +172,7 @@ const LeadsPage: React.FC = () => {
     },
     {
       field: 'itemCount',
-      headerName: 'Items',
+      headerName: t('invoice_items'),
       width: 80,
       renderCell: (p) => (
         <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', height: '100%' }}>
@@ -231,7 +233,7 @@ const LeadsPage: React.FC = () => {
     },
     {
       field: 'actions',
-      headerName: 'Actions',
+      headerName: t('actions'),
       width: 100,
       sortable: false,
       renderCell: (p) => (
@@ -268,7 +270,7 @@ const LeadsPage: React.FC = () => {
       <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
         <Box>
           <Typography variant="h4" sx={{ fontWeight: 900, letterSpacing: '-0.02em', mb: 0.5 }}>
-            Leads
+            {t('leads')}
           </Typography>
           <Typography variant="body2" color="text.secondary">
             Master Lead Dashboard

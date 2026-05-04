@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useTranslation } from 'react-i18next';
 import {
   Box,
   Typography,
@@ -35,6 +36,7 @@ import { handleApiError } from '../../../utils/errorHandler';
 import { useSnackbar } from 'notistack';
 
 const UsersPage: React.FC = () => {
+  const { t } = useTranslation();
   const { userData } = useAuth();
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
@@ -109,7 +111,7 @@ const UsersPage: React.FC = () => {
     mutationFn: (data: FormData) => selectedRecord ? userService.update(selectedRecord.id, data) : userService.create(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['users'] });
-      enqueueSnackbar(selectedRecord ? 'User updated successfully' : 'User created successfully', { variant: 'success' });
+      enqueueSnackbar(selectedRecord ? t('user_updated') || 'User updated successfully' : t('user_created') || 'User created successfully', { variant: 'success' });
       setIsModalOpen(false);
       resetForm();
     },
@@ -119,7 +121,7 @@ const UsersPage: React.FC = () => {
   const passwordMutation = useMutation({
     mutationFn: (data: any) => userService.changePassword(selectedRecord!.id, data),
     onSuccess: () => {
-      enqueueSnackbar('Password changed successfully', { variant: 'success' });
+      enqueueSnackbar(t('password_changed') || 'Password changed successfully', { variant: 'success' });
       setIsPasswordModalOpen(false);
       setNewPassword('');
     },
@@ -186,18 +188,18 @@ const UsersPage: React.FC = () => {
         </Avatar>
       ),
     },
-    { field: 'firstName', headerName: 'First Name', flex: 1, minWidth: 120 },
-    { field: 'lastName', headerName: 'Last Name', flex: 1, minWidth: 120 },
-    { field: 'email', headerName: 'Email', flex: 1.5, minWidth: 200 },
-    { field: 'roleName', headerName: 'Role', flex: 1, minWidth: 120 },
+    { field: 'firstName', headerName: t('first_name') || 'First Name', flex: 1, minWidth: 120 },
+    { field: 'lastName', headerName: t('last_name') || 'Last Name', flex: 1, minWidth: 120 },
+    { field: 'email', headerName: t('email') || 'Email', flex: 1.5, minWidth: 200 },
+    { field: 'roleName', headerName: t('role') || 'Role', flex: 1, minWidth: 120 },
     {
       field: 'isActive',
-      headerName: 'Status',
+      headerName: t('status') || 'Status',
       flex: 0.8,
       minWidth: 100,
       renderCell: (params) => (
         <Chip
-          label={params.value ? 'Active' : 'Inactive'}
+          label={params.value ? t('active') || 'Active' : t('inactive') || 'Inactive'}
           color={params.value ? 'success' : 'error'}
           size="small"
           variant="outlined"
@@ -206,17 +208,17 @@ const UsersPage: React.FC = () => {
     },
     {
       field: 'actions',
-      headerName: 'Actions',
+      headerName: t('actions') || 'Actions',
       width: 120,
       sortable: false,
       renderCell: (params) => (
         <Box>
-          <Tooltip title="Edit User">
+          <Tooltip title={t('edit_user') || 'Edit User'}>
             <IconButton size="small" color="primary" onClick={() => handleEdit(params.row)}>
               <EditIcon fontSize="small" />
             </IconButton>
           </Tooltip>
-          <Tooltip title="Change Password">
+          <Tooltip title={t('change_password') || 'Change Password'}>
             <IconButton size="small" color="secondary" onClick={() => { setSelectedRecord(params.row); setIsPasswordModalOpen(true); }}>
               <KeyIcon fontSize="small" />
             </IconButton>
@@ -230,30 +232,30 @@ const UsersPage: React.FC = () => {
     <Box sx={{ width: '100%', px: 1, py: 1 }}>
       <Box sx={{ mb: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <Box>
-          <Typography variant="h5" sx={{ fontWeight: 800 }}>User Management</Typography>
-          <Typography variant="body2" color="text.secondary">Create and manage user accounts and system access</Typography>
+          <Typography variant="h5" sx={{ fontWeight: 800 }}>{t('user_management') || 'User Management'}</Typography>
+          <Typography variant="body2" color="text.secondary">{t('manage_user_accounts') || 'Create and manage user accounts and system access'}</Typography>
         </Box>
         <Button variant="contained" startIcon={<AddIcon />} onClick={() => { setSelectedRecord(null); resetForm(); setIsModalOpen(true); }} sx={{ px: 3 }}>
-          Add User
+          {t('add_user') || 'Add User'}
         </Button>
       </Box>
 
       <Paper sx={{ p: 1, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', backgroundColor: 'background.paper', borderRadius: 2 }}>
         <Grid container spacing={2} sx={{ width: '100%' }}>
           <Grid size={{ xs: 12, md: 4 }}>
-            <SearchField width="100%" value={search} onChange={setSearch} placeholder="Search users..." />
+            <SearchField width="100%" value={search} onChange={setSearch} placeholder={t('search_users') || 'Search users...'} />
           </Grid>
           <Grid size={{ xs: 12, md: 3 }}>
-            <TextField select fullWidth size="small" label="Role" value={filterRole} onChange={(e) => setFilterRole(e.target.value as any)}>
-              <MenuItem value="all">All Roles</MenuItem>
+            <TextField select fullWidth size="small" label={t('role') || 'Role'} value={filterRole} onChange={(e) => setFilterRole(e.target.value as any)}>
+              <MenuItem value="all">{t('all_roles') || 'All Roles'}</MenuItem>
               {roles?.map(r => <MenuItem key={r.setupId} value={r.setupId}>{r.setupName}</MenuItem>)}
             </TextField>
           </Grid>
           <Grid size={{ xs: 12, md: 3 }}>
-            <TextField select fullWidth size="small" label="Status" value={filterActive} onChange={(e) => setFilterActive(e.target.value as any)}>
-              <MenuItem value="all">All Status</MenuItem>
-              <MenuItem value="true">Active</MenuItem>
-              <MenuItem value="false">Inactive</MenuItem>
+            <TextField select fullWidth size="small" label={t('status') || 'Status'} value={filterActive} onChange={(e) => setFilterActive(e.target.value as any)}>
+              <MenuItem value="all">{t('all_status') || 'All Status'}</MenuItem>
+              <MenuItem value="true">{t('active') || 'Active'}</MenuItem>
+              <MenuItem value="false">{t('inactive') || 'Inactive'}</MenuItem>
             </TextField>
           </Grid>
         </Grid>
@@ -275,7 +277,7 @@ const UsersPage: React.FC = () => {
 
       {/* User Modal - Full Fields */}
       <Dialog open={isModalOpen} onClose={() => setIsModalOpen(false)} fullWidth maxWidth="md">
-        <DialogTitle sx={{ fontWeight: 800 }}>{selectedRecord ? 'Edit User' : 'Create New User'}</DialogTitle>
+        <DialogTitle sx={{ fontWeight: 800 }}>{selectedRecord ? t('edit_user') || 'Edit User' : t('create_new_user') || 'Create New User'}</DialogTitle>
         <DialogContent dividers sx={{ p: 3 }}>
           <Grid container spacing={3}>
 
@@ -285,37 +287,37 @@ const UsersPage: React.FC = () => {
                 {!imagePreview && <PersonIcon sx={{ fontSize: 60 }} />}
               </Avatar>
               <Button variant="outlined" component="label" size="small">
-                Upload Image
+                {t('upload_image') || 'Upload Image'}
                 <input type="file" hidden accept="image/*" onChange={handleImageChange} />
               </Button>
             </Grid>
 
             {/* Personal Info */}
             <Grid size={{ xs: 12, md: 9 }}>
-              <Typography variant="overline" sx={{ fontWeight: 700, color: 'text.secondary', letterSpacing: 1 }}>Personal Information</Typography>
+              <Typography variant="overline" sx={{ fontWeight: 700, color: 'text.secondary', letterSpacing: 1 }}>{t('personal_information') || 'Personal Information'}</Typography>
               <Grid container spacing={2} sx={{ mt: 0.5 }}>
                 <Grid size={{ xs: 12, sm: 4 }}>
-                  <TextField fullWidth label="First Name" value={formData.firstName || ''} onChange={(e) => setFormData({ ...formData, firstName: e.target.value })} required />
+                  <TextField fullWidth label={(t('first_name') || 'First Name')} value={formData.firstName || ''} onChange={(e) => setFormData({ ...formData, firstName: e.target.value })} required />
                 </Grid>
                 <Grid size={{ xs: 12, sm: 4 }}>
-                  <TextField fullWidth label="Middle Name" value={formData.middleName || ''} onChange={(e) => setFormData({ ...formData, middleName: e.target.value })} />
+                  <TextField fullWidth label={(t('middle_name') || 'Middle Name')} value={formData.middleName || ''} onChange={(e) => setFormData({ ...formData, middleName: e.target.value })} />
                 </Grid>
                 <Grid size={{ xs: 12, sm: 4 }}>
-                  <TextField fullWidth label="Last Name" value={formData.lastName || ''} onChange={(e) => setFormData({ ...formData, lastName: e.target.value })} required />
+                  <TextField fullWidth label={(t('last_name') || 'Last Name')} value={formData.lastName || ''} onChange={(e) => setFormData({ ...formData, lastName: e.target.value })} required />
                 </Grid>
                 <Grid size={{ xs: 12 }}>
-                  <TextField fullWidth label="Email Address" type="email" value={formData.email || ''} onChange={(e) => setFormData({ ...formData, email: e.target.value })} required />
+                  <TextField fullWidth label={(t('email_address') || 'Email Address')} type="email" value={formData.email || ''} onChange={(e) => setFormData({ ...formData, email: e.target.value })} required />
                 </Grid>
                 {!selectedRecord && (
                   <Grid size={{ xs: 12 }}>
                     <TextField
                       fullWidth
-                      label="Password"
+                      label={(t('password') || 'Password')}
                       type="password"
                       value={createPassword}
                       onChange={(e) => setCreatePassword(e.target.value)}
-                      placeholder="Leave blank to use default (Welcome@123)"
-                      helperText="Default password is Welcome@123 if left empty."
+                      placeholder={t('password_placeholder') || 'Leave blank to use default (Welcome@123)'}
+                      helperText={t('password_helper') || 'Default password is Welcome@123 if left empty.'}
                     />
                   </Grid>
                 )}
@@ -325,29 +327,29 @@ const UsersPage: React.FC = () => {
             {/* Divider - Roles & Access */}
             <Grid size={{ xs: 12 }}>
               <Divider />
-              <Typography variant="overline" sx={{ fontWeight: 700, color: 'text.secondary', letterSpacing: 1, mt: 1.5, display: 'block' }}>Roles & Access</Typography>
+              <Typography variant="overline" sx={{ fontWeight: 700, color: 'text.secondary', letterSpacing: 1, mt: 1.5, display: 'block' }}>{t('roles_and_access') || 'Roles & Access'}</Typography>
             </Grid>
 
             <Grid size={{ xs: 12, sm: 6, md: 4 }}>
-              <TextField select fullWidth label="Role" value={formData.roleId || ''} onChange={(e) => setFormData({ ...formData, roleId: Number(e.target.value) })} required>
+              <TextField select fullWidth label={t('role') || 'Role'} value={formData.roleId || ''} onChange={(e) => setFormData({ ...formData, roleId: Number(e.target.value) })} required>
                 {roles?.map(r => <MenuItem key={r.setupId} value={r.setupId}>{r.setupName}</MenuItem>)}
               </TextField>
             </Grid>
             <Grid size={{ xs: 12, sm: 6, md: 4 }}>
-              <TextField select fullWidth label="Team" value={formData.teamId || ''} onChange={(e) => setFormData({ ...formData, teamId: Number(e.target.value) })}>
-                <MenuItem value="">None</MenuItem>
+              <TextField select fullWidth label={t('team') || 'Team'} value={formData.teamId || ''} onChange={(e) => setFormData({ ...formData, teamId: Number(e.target.value) })}>
+                <MenuItem value="">{t('none') || 'None'}</MenuItem>
                 {teams?.map((t: any) => <MenuItem key={t.id} value={t.id}>{t.teamName}</MenuItem>)}
               </TextField>
             </Grid>
             <Grid size={{ xs: 12, sm: 6, md: 4 }}>
-              <TextField select fullWidth label="User Group" value={formData.userGroupId || ''} onChange={(e) => setFormData({ ...formData, userGroupId: Number(e.target.value) })}>
-                <MenuItem value="">None</MenuItem>
+              <TextField select fullWidth label={t('user_group') || 'User Group'} value={formData.userGroupId || ''} onChange={(e) => setFormData({ ...formData, userGroupId: Number(e.target.value) })}>
+                <MenuItem value="">{t('none') || 'None'}</MenuItem>
                 {userGroups?.map((g: any) => <MenuItem key={g.id} value={g.id}>{g.userGroupsName}</MenuItem>)}
               </TextField>
             </Grid>
             <Grid size={{ xs: 12, sm: 6, md: 4 }}>
-              <TextField select fullWidth label="Manager" value={formData.managerId || ''} onChange={(e) => setFormData({ ...formData, managerId: Number(e.target.value) })}>
-                <MenuItem value="">None</MenuItem>
+              <TextField select fullWidth label={t('manager') || 'Manager'} value={formData.managerId || ''} onChange={(e) => setFormData({ ...formData, managerId: Number(e.target.value) })}>
+                <MenuItem value="">{t('none') || 'None'}</MenuItem>
                 {allUsers?.items?.filter(u => u.id !== selectedRecord?.id).map(u => (
                   <MenuItem key={u.id} value={u.id}>{u.firstName} {u.lastName}</MenuItem>
                 ))}
@@ -357,43 +359,43 @@ const UsersPage: React.FC = () => {
             {/* Divider - Location & Settings */}
             <Grid size={{ xs: 12 }}>
               <Divider />
-              <Typography variant="overline" sx={{ fontWeight: 700, color: 'text.secondary', letterSpacing: 1, mt: 1.5, display: 'block' }}>Location & Settings</Typography>
+              <Typography variant="overline" sx={{ fontWeight: 700, color: 'text.secondary', letterSpacing: 1, mt: 1.5, display: 'block' }}>{t('location_settings') || 'Location & Settings'}</Typography>
             </Grid>
 
             <Grid size={{ xs: 12, sm: 6, md: 4 }}>
-              <TextField fullWidth label="Timezone" value={formData.timezone || ''} onChange={(e) => setFormData({ ...formData, timezone: e.target.value })} placeholder="e.g. UTC, Asia/Karachi" />
+              <TextField fullWidth label={t('timezone') || 'Timezone'} value={formData.timezone || ''} onChange={(e) => setFormData({ ...formData, timezone: e.target.value })} placeholder="e.g. UTC, Asia/Karachi" />
             </Grid>
             <Grid size={{ xs: 12, sm: 6, md: 4 }}>
-              <TextField fullWidth label="Region" value={formData.region || ''} onChange={(e) => setFormData({ ...formData, region: e.target.value })} placeholder="e.g. North America, Pakistan" />
+              <TextField fullWidth label={t('region') || 'Region'} value={formData.region || ''} onChange={(e) => setFormData({ ...formData, region: e.target.value })} placeholder="e.g. North America, Pakistan" />
             </Grid>
             <Grid size={{ xs: 12, sm: 6, md: 4 }} sx={{ display: 'flex', alignItems: 'center' }}>
               <FormControlLabel
                 control={<Switch checked={!!formData.isActive} onChange={(e) => setFormData({ ...formData, isActive: e.target.checked })} color="primary" />}
-                label="Active Account"
+                label={t('active_account') || 'Active Account'}
               />
             </Grid>
 
           </Grid>
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
-          <Button onClick={() => setIsModalOpen(false)} color="inherit">Cancel</Button>
+          <Button onClick={() => setIsModalOpen(false)} color="inherit">{t('cancel') || 'Cancel'}</Button>
           <Button variant="contained" onClick={handleSave} disabled={saveMutation.isPending} sx={{ px: 4 }}>
-            {saveMutation.isPending ? <CircularProgress size={24} /> : (selectedRecord ? 'Update User' : 'Create User')}
+            {saveMutation.isPending ? <CircularProgress size={24} /> : (selectedRecord ? (t('update_user') || 'Update User') : (t('create_user') || 'Create User'))}
           </Button>
         </DialogActions>
       </Dialog>
 
       {/* Password Modal */}
       <Dialog open={isPasswordModalOpen} onClose={() => setIsPasswordModalOpen(false)} fullWidth maxWidth="xs">
-        <DialogTitle sx={{ fontWeight: 800 }}>Change Password</DialogTitle>
+        <DialogTitle sx={{ fontWeight: 800 }}>{t('change_password') || 'Change Password'}</DialogTitle>
         <DialogContent dividers sx={{ p: 3 }}>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>Changing password for <strong>{selectedRecord?.firstName} {selectedRecord?.lastName}</strong></Typography>
-          <TextField fullWidth type="password" label="New Password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} />
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>{t('changing_password_for') || 'Changing password for'} <strong>{selectedRecord?.firstName} {selectedRecord?.lastName}</strong></Typography>
+          <TextField fullWidth type="password" label={t('new_password') || 'New Password'} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} />
         </DialogContent>
         <DialogActions sx={{ p: 3 }}>
-          <Button onClick={() => setIsPasswordModalOpen(false)}>Cancel</Button>
+          <Button onClick={() => setIsPasswordModalOpen(false)}>{t('cancel') || 'Cancel'}</Button>
           <Button variant="contained" color="secondary" onClick={() => passwordMutation.mutate({ newPassword })} disabled={passwordMutation.isPending || !newPassword}>
-            {passwordMutation.isPending ? <CircularProgress size={24} /> : 'Update Password'}
+            {passwordMutation.isPending ? <CircularProgress size={24} /> : (t('update_password') || 'Update Password')}
           </Button>
         </DialogActions>
       </Dialog>

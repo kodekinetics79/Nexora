@@ -1,7 +1,7 @@
-
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Chip, IconButton,
   Tooltip, Stack,
@@ -23,6 +23,7 @@ import { useSnackbar } from 'notistack';
 import { useAuth } from '../../../context/AuthContext';
 
 const DraftRFQsPage: React.FC = () => {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { userData } = useAuth();
@@ -80,7 +81,7 @@ const DraftRFQsPage: React.FC = () => {
   const columns: GridColDef[] = [
     {
       field: 'rfqno',
-      headerName: 'RFQ #',
+      headerName: t('rfq_management'),
       width: 180,
       renderCell: (p) => (
         <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
@@ -115,7 +116,7 @@ const DraftRFQsPage: React.FC = () => {
     },
     {
       field: 'noOfLineItems',
-      headerName: 'Items',
+      headerName: t('invoice_items'),
       width: 80,
       renderCell: (p) => (
         <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', height: '100%' }}>
@@ -126,7 +127,7 @@ const DraftRFQsPage: React.FC = () => {
     },
     {
       field: 'recDate',
-      headerName: 'Rec. Date',
+      headerName: t('date'),
       width: 120,
       renderCell: (p) => <Typography sx={{ fontSize: '0.8rem', fontWeight: 700, py: 1.5 }}>{formatDate(p.row.recDate)}</Typography>
     },
@@ -138,7 +139,7 @@ const DraftRFQsPage: React.FC = () => {
     },
     {
       field: 'actions',
-      headerName: 'Actions',
+      headerName: t('actions'),
       width: 150,
       sortable: false,
       renderCell: (p) => (
@@ -164,7 +165,7 @@ const DraftRFQsPage: React.FC = () => {
       <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
         <Box>
           <Typography variant="h4" sx={{ fontWeight: 900, letterSpacing: '-0.02em', mb: 0.5 }}>
-            Draft RFQs
+            {t('draft_rfqs')}
           </Typography>
           <Typography variant="body2" color="text.secondary">
             Review and approve pending RFQ drafts

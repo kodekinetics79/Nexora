@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useTranslation } from 'react-i18next';
 import {
   Box,
   Typography,
@@ -33,6 +34,7 @@ import stateService from '../../../api/services/stateService';
 import cityService from '../../../api/services/cityService';
 
 const WarehousePage: React.FC = () => {
+  const { t } = useTranslation();
   const { userData } = useAuth();
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
@@ -169,7 +171,7 @@ const WarehousePage: React.FC = () => {
     { field: 'managerName', headerName: 'Manager', flex: 1, minWidth: 120 },
     {
       field: 'isActive',
-      headerName: 'Status',
+      headerName: t('status'),
       flex: 0.8,
       minWidth: 100,
       renderCell: (params) => (
@@ -183,7 +185,7 @@ const WarehousePage: React.FC = () => {
     },
     {
       field: 'actions',
-      headerName: 'Actions',
+      headerName: t('actions'),
       width: 80,
       sortable: false,
       renderCell: (params) => (
@@ -196,6 +198,7 @@ const WarehousePage: React.FC = () => {
 
   return (
     <Box sx={{ width: '100%', px: 1, py: 1 }}>
+      {/* Header */}
       <Box sx={{ mb: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <Box>
           <Typography variant="h5" sx={{ fontWeight: 800, letterSpacing: '-0.02em', mb: 0.5 }}>Warehouse Setup</Typography>
@@ -206,10 +209,12 @@ const WarehousePage: React.FC = () => {
         </Button>
       </Box>
 
+      {/* Search */}
       <Paper sx={{ p: 1, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', backgroundColor: 'background.paper', borderRadius: 2 }}>
         <SearchField value={search} onChange={setSearch} placeholder="Search warehouses..." />
       </Paper>
 
+      {/* Grid */}
       <Paper sx={{ height: 'calc(100vh - 220px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
         <DataGrid
           rows={data?.items || []}
@@ -225,6 +230,7 @@ const WarehousePage: React.FC = () => {
         />
       </Paper>
 
+      {/* Modal */}
       <Dialog open={isModalOpen} onClose={() => setIsModalOpen(false)} fullWidth maxWidth="md">
         <DialogTitle sx={{ fontWeight: 800 }}>{selectedRecord ? 'Edit Warehouse' : 'Add New Warehouse'}</DialogTitle>
         <DialogContent dividers sx={{ p: 3 }}>

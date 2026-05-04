@@ -64,54 +64,54 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
     { key: 'shipments', label: t('shipments'), icon: <ShipmentIcon />, path: '/shipments' },
     {
       key: 'rfq_mgmt',
-      label: 'RFQ Management',
+      label: t('rfq_management'),
       icon: <QuotationIcon />,
       children: [
-        { key: 'rfqs-all', label: 'All RFQs', path: '/procurement/rfqs/all' },
-        { key: 'rfqs-draft', label: 'Draft RFQs', path: '/procurement/rfqs/draft' },
-        { key: 'rfqs-outstanding', label: 'Outstanding RFQs', path: '/procurement/rfqs/outstanding' },
+        { key: 'rfqs-all', label: t('all_rfqs'), path: '/procurement/rfqs/all' },
+        { key: 'rfqs-draft', label: t('draft_rfqs'), path: '/procurement/rfqs/draft' },
+        { key: 'rfqs-outstanding', label: t('outstanding_rfqs'), path: '/procurement/rfqs/outstanding' },
       ]
     },
     {
       key: 'lead_mgmt',
-      label: 'Lead Management',
+      label: t('lead_management'),
       icon: <LeadIcon />,
       children: [
-        { key: 'leads-all', label: 'Leads', path: '/procurement/leads/all' },
-        { key: 'leads-outstanding', label: 'Outstanding Leads', path: '/procurement/leads/outstanding' },
-        { key: 'leads-assigned', label: 'Assigned Leads', path: '/procurement/leads/assigned' },
-        { key: 'leads-manual', label: 'Manual Upload', path: '/procurement/leads/manual-upload' },
-        { key: 'leads-folder', label: 'Upload Folder Leads', path: '/procurement/leads/folder-upload' },
+        { key: 'leads-all', label: t('leads'), path: '/procurement/leads/all' },
+        { key: 'leads-outstanding', label: t('outstanding_leads'), path: '/procurement/leads/outstanding' },
+        { key: 'leads-assigned', label: t('assigned_leads'), path: '/procurement/leads/assigned' },
+        { key: 'leads-manual', label: t('manual_upload'), path: '/procurement/leads/manual-upload' },
+        { key: 'leads-folder', label: t('upload_folder_leads'), path: '/procurement/leads/folder-upload' },
       ]
     },
     {
       key: 'supplier_mgmt',
-      label: 'Supplier Management',
+      label: t('supplier_management'),
       icon: <SupplierIcon />,
       children: [
-        { key: 'suppliers', label: 'Suppliers', path: '/suppliers' },
-        { key: 'quoted-items', label: 'Quoted Items', path: '/suppliers/quoted-items' },
-        { key: 'purchase-orders', label: 'Purchase Orders', path: '/suppliers/purchase-orders' },
+        { key: 'suppliers', label: t('suppliers'), path: '/suppliers' },
+        { key: 'quoted-items', label: t('quoted_items'), path: '/suppliers/quoted-items' },
+        { key: 'purchase-orders', label: t('purchase_orders'), path: '/suppliers/purchase-orders' },
       ]
     },
-    { key: 'customers', label: 'Customers', icon: <CustomerIcon />, path: '/customers' },
+    { key: 'customers', label: t('customers'), icon: <CustomerIcon />, path: '/customers' },
     {
       key: 'inventory',
-      label: 'Inventory',
+      label: t('inventory'),
       icon: <InventoryIcon />,
       children: [
-        { key: 'products', label: 'Products', path: '/inventory/products' },
-        { key: 'categories', label: 'Categories', path: '/inventory/categories' },
-        { key: 'sub-categories', label: 'Sub-Categories', path: '/inventory/sub-categories' },
+        { key: 'products', label: t('products'), path: '/inventory/products' },
+        { key: 'categories', label: t('categories'), path: '/inventory/categories' },
+        { key: 'sub-categories', label: t('sub_categories'), path: '/inventory/sub-categories' },
       ]
     },
     {
       key: 'security',
-      label: 'User & Access',
+      label: t('user_and_access'),
       icon: <SecurityIcon />,
       children: [
-        { key: 'users', label: 'Users', path: '/security/users' },
-        { key: 'roles', label: 'Roles & Permissions', path: '/security/roles' },
+        { key: 'users', label: t('users'), path: '/security/users' },
+        { key: 'roles', label: t('roles_and_permissions'), path: '/security/roles' },
       ]
     },
     {
@@ -119,13 +119,13 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
       label: t('setup_master'),
       icon: <SetupIcon />,
       children: [
-        { key: 'currency', label: 'Currency', path: '/setup/currency' },
-        { key: 'warehouse', label: 'Warehouse', path: '/setup/warehouse' },
-        { key: 'master', label: 'Master Sub', path: '/setup/master' },
-        { key: 'uom', label: 'UOM', path: '/setup/uom' },
-        { key: 'locations', label: 'Locations', path: '/setup/locations' },
-        { key: 'quote-format', label: 'Quote Format', path: '/setup/quote-format' },
-        { key: 'business-unit', label: 'Business Unit', path: '/setup/business-unit' },
+        { key: 'currency', label: t('currency'), path: '/setup/currency' },
+        { key: 'warehouse', label: t('warehouse'), path: '/setup/warehouse' },
+        { key: 'master', label: t('master_sub'), path: '/setup/master' },
+        { key: 'uom', label: t('uom'), path: '/setup/uom' },
+        { key: 'locations', label: t('locations'), path: '/setup/locations' },
+        { key: 'quote-format', label: t('quote_format'), path: '/setup/quote-format' },
+        { key: 'business-unit', label: t('business_unit'), path: '/setup/business-unit' },
       ]
     },
   ];

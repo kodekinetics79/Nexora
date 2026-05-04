@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
+import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Stack,
   CircularProgress, Alert, IconButton, List,
@@ -16,6 +17,7 @@ import leadService from '../../api/services/leadService';
 import { useSnackbar } from 'notistack';
 
 const ManualUploadLeadsPage: React.FC = () => {
+  const { t } = useTranslation();
   const { enqueueSnackbar } = useSnackbar();
   const [files, setFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -55,7 +57,7 @@ const ManualUploadLeadsPage: React.FC = () => {
       {/* Header */}
       <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
         <Typography variant="h5" sx={{ fontWeight: 800 }}>
-          Manual Lead Upload
+          {t('manual_upload') || 'Manual Lead Upload'}
         </Typography>
       </Stack>
 

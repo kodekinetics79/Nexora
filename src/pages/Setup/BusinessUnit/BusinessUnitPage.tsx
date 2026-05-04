@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useTranslation } from 'react-i18next';
 import {
   Box,
   Typography,
@@ -28,6 +29,7 @@ import { handleApiError } from '../../../utils/errorHandler';
 import { useSnackbar } from 'notistack';
 
 const BusinessUnitPage: React.FC = () => {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
 
@@ -116,7 +118,7 @@ const BusinessUnitPage: React.FC = () => {
     { field: 'description', headerName: 'Description', flex: 2, minWidth: 250 },
     {
       field: 'isActive',
-      headerName: 'Status',
+      headerName: t('status'),
       flex: 1,
       minWidth: 100,
       renderCell: (params) => (
@@ -130,7 +132,7 @@ const BusinessUnitPage: React.FC = () => {
     },
     {
       field: 'actions',
-      headerName: 'Actions',
+      headerName: t('actions'),
       width: 80,
       sortable: false,
       renderCell: (params) => (
@@ -145,11 +147,11 @@ const BusinessUnitPage: React.FC = () => {
     <Box sx={{ width: '100%', px: 1, py: 1 }}>
       <Box sx={{ mb: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <Box>
-          <Typography variant="h5" sx={{ fontWeight: 800, letterSpacing: '-0.02em', mb: 0.5 }}>Business Unit Management</Typography>
+          <Typography variant="h5" sx={{ fontWeight: 800, letterSpacing: '-0.02em', mb: 0.5 }}>{t('business_unit')}</Typography>
           <Typography variant="body2" color="text.secondary">Configure and manage corporate business units</Typography>
         </Box>
         <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3 }}>
-          Add Business Unit
+          {t('create_new')}
         </Button>
       </Box>
 

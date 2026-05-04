@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, TextField, MenuItem,
   Chip, IconButton, Tooltip, Dialog, DialogTitle,
@@ -24,6 +25,7 @@ import UploadExportToolbar from '../../components/common/UploadExportToolbar';
 import ProductFormDialog from './ProductFormDialog';
 
 const PurchaseHistoryDialog: React.FC<{ open: boolean; onClose: () => void; productId: number | null }> = ({ open, onClose, productId }) => {
+  const { t } = useTranslation();
   const { data: history, isLoading } = useQuery({
     queryKey: ['product-history', productId],
     queryFn: () => productService.getPurchaseHistory(productId!),
@@ -47,8 +49,8 @@ const PurchaseHistoryDialog: React.FC<{ open: boolean; onClose: () => void; prod
           <Table>
             <TableHead>
               <TableRow sx={{ bgcolor: 'action.hover' }}>
-                <TableCell sx={{ fontWeight: 800 }}>Date</TableCell>
-                <TableCell sx={{ fontWeight: 800 }}>Supplier</TableCell>
+                <TableCell sx={{ fontWeight: 800 }}>{t('date')}</TableCell>
+                <TableCell sx={{ fontWeight: 800 }}>{t('supplier')}</TableCell>
                 <TableCell sx={{ fontWeight: 800 }} align="right">Qty</TableCell>
                 <TableCell sx={{ fontWeight: 800 }} align="right">Unit Price</TableCell>
                 <TableCell sx={{ fontWeight: 800 }} align="right">Total</TableCell>
@@ -75,6 +77,7 @@ const PurchaseHistoryDialog: React.FC<{ open: boolean; onClose: () => void; prod
 };
 
 const ProductsPage: React.FC = () => {
+  const { t } = useTranslation();
   const navigate = useNavigate();
 
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ page: 0, pageSize: 10 });
@@ -121,9 +124,9 @@ const ProductsPage: React.FC = () => {
 
   const columns: GridColDef[] = [
     { field: 'partNo', headerName: 'Part No', width: 120, renderCell: (p) => <Typography variant="body2" sx={{ fontWeight: 700, fontFamily: 'monospace' }}>{p.value}</Typography> },
-    { field: 'productName', headerName: 'Product Name', flex: 1.5, minWidth: 180 },
-    { field: 'categoryName', headerName: 'Category', flex: 1, minWidth: 130 },
-    { field: 'warehouseName', headerName: 'Warehouse', flex: 1, minWidth: 120 },
+    { field: 'productName', headerName: t('product'), flex: 1.5, minWidth: 180 },
+    { field: 'categoryName', headerName: t('categories'), flex: 1, minWidth: 130 },
+    { field: 'warehouseName', headerName: t('warehouse'), flex: 1, minWidth: 120 },
     {
       field: 'qtyOnHand',
       headerName: 'Qty on Hand',
@@ -139,13 +142,13 @@ const ProductsPage: React.FC = () => {
     { field: 'sellingPrice', headerName: 'Selling Price', width: 120, renderCell: (p) => p.value ? `$${Number(p.value).toFixed(2)}` : '—' },
     {
       field: 'isActive',
-      headerName: 'Status',
+      headerName: t('status'),
       width: 100,
       renderCell: (p) => <Chip label={p.value ? 'Active' : 'Inactive'} color={p.value ? 'success' : 'default'} size="small" variant="outlined" />,
     },
     {
       field: 'actions',
-      headerName: 'Actions',
+      headerName: t('actions'),
       width: 150,
       sortable: false,
       renderCell: (p) => (
@@ -177,7 +180,7 @@ const ProductsPage: React.FC = () => {
         <Box>
           <Typography variant="h5" sx={{ fontWeight: 800, display: 'flex', alignItems: 'center', gap: 1 }}>
             <InventoryIcon color="primary" />
-            Products
+            {t('products')}
           </Typography>
           <Typography variant="body2" color="text.secondary">Browse, search and manage your inventory items</Typography>
         </Box>

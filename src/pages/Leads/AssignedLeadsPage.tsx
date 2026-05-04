@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, IconButton,
   Tooltip, Chip, Stack,
@@ -19,6 +20,7 @@ import leadService from '../../api/services/leadService';
 import SearchField from '../../components/common/SearchField';
 
 const AssignedLeadsPage: React.FC = () => {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
   const [search, setSearch] = useState('');
@@ -51,7 +53,7 @@ const AssignedLeadsPage: React.FC = () => {
   const columns: GridColDef[] = [
     {
       field: 'rfqno',
-      headerName: 'RFQ #',
+      headerName: t('rfq_management'),
       width: 200,
       renderCell: (p) => (
         <Box sx={{ py: 1.5 }}>
@@ -111,7 +113,7 @@ const AssignedLeadsPage: React.FC = () => {
     },
     {
       field: 'recDate',
-      headerName: 'Receive Date',
+      headerName: t('date'),
       width: 120,
       renderCell: (p) => (
         <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
@@ -154,7 +156,7 @@ const AssignedLeadsPage: React.FC = () => {
     },
     {
       field: 'itemCount',
-      headerName: 'Items',
+      headerName: t('invoice_items'),
       width: 80,
       renderCell: (p) => (
         <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', height: '100%' }}>
@@ -189,7 +191,7 @@ const AssignedLeadsPage: React.FC = () => {
       {/* Header */}
       <Box sx={{ mb: 3, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <Box>
-          <Typography variant="h5" sx={{ fontWeight: 950, letterSpacing: '-0.02em', mb: 0.5 }}>Assigned Leads</Typography>
+          <Typography variant="h5" sx={{ fontWeight: 950, letterSpacing: '-0.02em', mb: 0.5 }}>{t('assigned_leads')}</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>Leads currently being processed by the sales team</Typography>
         </Box>
         <Button variant="outlined" startIcon={<RefreshIcon />} onClick={() => refetch()} size="small" sx={{ fontWeight: 800 }}>Refresh Dashboard</Button>

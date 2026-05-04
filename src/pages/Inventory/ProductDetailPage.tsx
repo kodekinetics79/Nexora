@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
+import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Chip, Grid,
   CircularProgress, Divider,
@@ -52,6 +53,7 @@ const StatBox: React.FC<{ label: string; value: React.ReactNode }> = ({ label, v
 
 // ─── Main ─────────────────────────────────────────────────────────────────
 const ProductDetailPage: React.FC = () => {
+  const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [editOpen, setEditOpen] = useState(false);
@@ -101,7 +103,7 @@ const ProductDetailPage: React.FC = () => {
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
             <InventoryIcon sx={{ fontSize: 20, color: 'text.secondary' }} />
             <Typography sx={{ fontWeight: 700, fontSize: '0.9rem', color: 'text.secondary' }}>
-              Inventory / Products /
+              Inventory / {t('products') || 'Products'} /
             </Typography>
             <Typography sx={{ fontWeight: 800, fontSize: '0.9rem' }}>
               {product.partNo}
@@ -115,7 +117,7 @@ const ProductDetailPage: React.FC = () => {
           disableElevation
           sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 1.5 }}
         >
-          Edit Product
+          {t('edit') || 'Edit Product'}
         </Button>
       </Box>
 
@@ -155,11 +157,10 @@ const ProductDetailPage: React.FC = () => {
 
         {/* Stats Strip */}
         <Box sx={{ display: 'flex', mt: 0 }}>
-          <StatBox label="Qty on Hand" value={product.qtyOnHand} />
+          <StatBox label={t('quantity') || 'Qty on Hand'} value={product.qtyOnHand} />
           <StatBox label="Reorder Point" value={product.reorderPoint} />
-          <StatBox label="UOM" value={product.uomName} />
-          <StatBox label="Unit Cost" value={product.unitCost != null ? `$${product.unitCost.toFixed(2)}` : null} />
-          <StatBox label="Selling Price" value={product.sellingPrice != null ? `$${product.sellingPrice.toFixed(2)}` : null} />
+          <StatBox label={t('uom') || 'UOM'} value={product.uomName} />
+          <StatBox label={t('price') || 'Selling Price'} value={product.sellingPrice != null ? `$${product.sellingPrice.toFixed(2)}` : null} />
           <StatBox label="Lead Time" value={product.leadTime ? `${product.leadTime}d` : null} />
         </Box>
       </Paper>
@@ -173,27 +174,27 @@ const ProductDetailPage: React.FC = () => {
 
             {/* Classification */}
             <Section title="Classification">
-              <InfoRow label="Category" value={product.categoryName} />
-              <InfoRow label="Sub-Category" value={product.subCategoryName} />
-              <InfoRow label="UOM" value={product.uomName} />
+              <InfoRow label={t('categories') || 'Category'} value={product.categoryName} />
+              <InfoRow label={t('sub_categories') || 'Sub-Category'} value={product.subCategoryName} />
+              <InfoRow label={t('uom') || 'UOM'} value={product.uomName} />
               <InfoRow label="Catalog Item" value={product.isCatalogItem ? 'Yes' : 'No'} />
             </Section>
 
             {/* Pricing */}
             <Section title="Pricing">
               <InfoRow label="Unit Cost" value={product.unitCost != null ? `$${product.unitCost.toFixed(2)}` : null} />
-              <InfoRow label="Selling Price" value={product.sellingPrice != null ? `$${product.sellingPrice.toFixed(2)}` : null} />
+              <InfoRow label={t('price') || 'Selling Price'} value={product.sellingPrice != null ? `$${product.sellingPrice.toFixed(2)}` : null} />
               <InfoRow label="Final Landed Cost" value={product.finalLandedCost != null ? `$${product.finalLandedCost.toFixed(2)}` : null} />
               <InfoRow label="Final Sales Price" value={product.finalSalesPrice != null ? `$${product.finalSalesPrice.toFixed(2)}` : null} />
             </Section>
 
             {/* Logistics */}
             <Section title="Logistics & Supply">
-              <InfoRow label="Warehouse" value={product.warehouseName} />
-              <InfoRow label="Preferred Supplier" value={product.preferredSupplierName} />
+              <InfoRow label={t('warehouse') || 'Warehouse'} value={product.warehouseName} />
+              <InfoRow label={t('supplier') || 'Preferred Supplier'} value={product.preferredSupplierName} />
               <InfoRow label="Supplier Email" value={product.preferredSupplierEmail} />
               <InfoRow label="Lead Time" value={product.leadTime ? `${product.leadTime} days` : null} />
-              <InfoRow label="Country of Origin" value={product.countryOfOrigin} />
+              <InfoRow label={t('country') || 'Country of Origin'} value={product.countryOfOrigin} />
               <InfoRow label="HS Code" value={product.hscode} mono />
             </Section>
 
@@ -206,7 +207,7 @@ const ProductDetailPage: React.FC = () => {
 
             {/* Stock */}
             <Section title="Stock">
-              <InfoRow label="Qty on Hand" value={
+              <InfoRow label={t('quantity') || 'Qty on Hand'} value={
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                   <strong>{product.qtyOnHand}</strong>
                   {stockChip()}

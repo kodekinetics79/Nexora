@@ -1,7 +1,7 @@
-
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, IconButton,
   Stack, Dialog, DialogTitle, DialogContent,
@@ -24,6 +24,7 @@ import { useSnackbar } from 'notistack';
 import { useAuth } from '../../../context/AuthContext';
 
 const OutstandingRFQsPage: React.FC = () => {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const { userData } = useAuth();
   const queryClient = useQueryClient();
@@ -85,7 +86,6 @@ const OutstandingRFQsPage: React.FC = () => {
     onError: (err: any) => enqueueSnackbar(err.response?.data?.error || 'Failed to assign lead', { variant: 'error' }),
   });
 
-
   const handleConfirmAssign = () => {
     if (selectedAcceptedLeadId && assignToUserId) {
       assignMutation.mutate({
@@ -99,7 +99,7 @@ const OutstandingRFQsPage: React.FC = () => {
   const columns: GridColDef[] = [
     {
       field: 'rfqno',
-      headerName: 'Lead / RFQ #',
+      headerName: t('rfq_management'),
       width: 200,
       renderCell: (p) => (
         <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
@@ -132,7 +132,7 @@ const OutstandingRFQsPage: React.FC = () => {
     },
     {
       field: 'noOfLineItems',
-      headerName: 'Line Items',
+      headerName: t('invoice_items'),
       width: 110,
       renderCell: (p) => (
         <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', height: '100%' }}>
@@ -178,7 +178,7 @@ const OutstandingRFQsPage: React.FC = () => {
     },
     {
       field: 'actions',
-      headerName: 'Actions',
+      headerName: t('actions'),
       width: 100,
       sortable: false,
       renderCell: (p) => (
@@ -210,7 +210,7 @@ const OutstandingRFQsPage: React.FC = () => {
     <Box sx={{ p: 3 }}>
       <Box sx={{ mb: 3, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <Box>
-          <Typography variant="h4" sx={{ fontWeight: 950, letterSpacing: '-0.02em', mb: 0.5 }}>Outstanding RFQs</Typography>
+          <Typography variant="h4" sx={{ fontWeight: 950, letterSpacing: '-0.02em', mb: 0.5 }}>{t('outstanding_rfqs')}</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>Accepted leads waiting for further processing</Typography>
         </Box>
         <Button variant="outlined" startIcon={<RefreshIcon />} onClick={() => refetch()} size="small" sx={{ fontWeight: 800 }}>Refresh</Button>
