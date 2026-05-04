@@ -50,7 +50,7 @@ import PermissionGuard from './components/common/PermissionGuard';
 function App() {
   return (
     <Routes>
-      <Route path="/" element={<Navigate to="/dashboard" replace />} />
+      <Route path="/" element={<Navigate to="/login" replace />} />
       <Route path="/dashboard" element={<MainLayout><PermissionGuard moduleName="Dashboard" redirect><DashboardPage /></PermissionGuard></MainLayout>} />
       
       {/* Sales Routes */}
