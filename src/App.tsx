@@ -31,22 +31,14 @@ import DraftRFQsPage from './pages/Procurement/RFQs/DraftRFQsPage';
 import OutstandingRFQsPage from './pages/Procurement/RFQs/OutstandingRFQsPage';
 import ProcessRFQPage from './pages/Procurement/RFQs/ProcessRFQPage';
 import ViewRFQPage from './pages/Procurement/RFQs/ViewRFQPage';
-import { Box, Typography, Paper } from '@mui/material';
+import DashboardPage from './pages/Dashboard/DashboardPage';
+import { Box } from '@mui/material';
 
 function App() {
   return (
     <Routes>
       <Route path="/" element={<Navigate to="/dashboard" replace />} />
-      <Route path="/dashboard" element={
-        <MainLayout>
-          <Typography variant="h4" gutterBottom sx={{ fontWeight: 'bold' }}>Dashboard</Typography>
-          <Paper sx={{ p: 3 }}>
-            <Typography variant="body1">
-              Welcome to the new RFQ Automation Dashboard. This version is built with Vite, React 19, and MUI 6.
-            </Typography>
-          </Paper>
-        </MainLayout>
-      } />
+      <Route path="/dashboard" element={<MainLayout><DashboardPage /></MainLayout>} />
       <Route path="/procurement/rfqs" element={<Navigate to="/procurement/rfqs/all" replace />} />
       <Route path="/procurement/rfqs/all" element={<MainLayout><AllRFQsPage /></MainLayout>} />
       <Route path="/procurement/rfqs/draft" element={<MainLayout><DraftRFQsPage /></MainLayout>} />

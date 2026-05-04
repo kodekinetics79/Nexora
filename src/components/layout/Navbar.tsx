@@ -74,20 +74,18 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
   };
 
   const colorOptions = [
-    { name: 'Indigo Night', color: '#4f46e5' },
-    { name: 'Royal Blue', color: '#2563eb' },
-    { name: 'Cyan Future', color: '#0891b2' },
-    { name: 'Emerald City', color: '#059669' },
-    { name: 'Electric Violet', color: '#7c3aed' },
-    { name: 'Crimson Rose', color: '#e11d48' },
-    { name: 'Solar Amber', color: '#d97706' },
-    { name: 'Slate Harbor', color: '#475569' },
-    { name: 'Ocean Teal', color: '#0d9488' },
-    { name: 'Deep Navy', color: '#1e3a8a' },
-    { name: 'Bold Magenta', color: '#c026d3' },
-    { name: 'Royal Gold', color: '#ca8a04' },
-    { name: 'Forest Green', color: '#16a34a' },
-    { name: 'Sunset Coral', color: '#ea580c' },
+    { name: 'Executive Navy', color: '#1e3a8a' },
+    { name: 'Corporate Blue', color: '#0056b3' },
+    { name: 'Trust Blue', color: '#2563eb' },
+    { name: 'Steel Blue', color: '#4682b4' },
+    { name: 'Slate Gray', color: '#475569' },
+    { name: 'Charcoal', color: '#334155' },
+    { name: 'Graphite', color: '#3f3f46' },
+    { name: 'Banking Teal', color: '#0f766e' },
+    { name: 'Financial Green', color: '#0d9488' },
+    { name: 'Professional Green', color: '#16a34a' },
+    { name: 'Subtle Burgundy', color: '#831843' },
+    { name: 'Crimson', color: '#be123c' },
   ];
 
   return (
@@ -142,11 +140,10 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
 
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
           <Tooltip title="Switch Language">
-            <IconButton color="inherit" onClick={handleLangMenuOpen} sx={{ backgroundColor: 'action.hover', px: 1.5, py: 0.8, borderRadius: 2 }}>
-              <Typography variant="body2" sx={{ fontWeight: 800, display: 'flex', alignItems: 'center', gap: 1 }}>
+            <IconButton color="inherit" onClick={handleLangMenuOpen} sx={{ backgroundColor: 'action.hover', width: 40, height: 40, borderRadius: 2 }}>
+              <Box component="span" sx={{ fontSize: 22, display: 'flex', alignItems: 'center' }}>
                 {languages.find(l => l.code === i18n.language)?.flag || '🇺🇸'}
-                <Box component="span" sx={{ fontSize: 11, opacity: 0.8 }}>{i18n.language.toUpperCase()}</Box>
-              </Typography>
+              </Box>
             </IconButton>
           </Tooltip>
 
@@ -154,6 +151,8 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
             anchorEl={langAnchor}
             open={Boolean(langAnchor)}
             onClose={handleClose}
+            transformOrigin={{ horizontal: 'right', vertical: 'top' }}
+            anchorOrigin={{ horizontal: 'right', vertical: 'bottom' }}
             slotProps={{
               paper: {
                 sx: {
@@ -175,7 +174,8 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
                 sx={{ 
                   borderRadius: 2, 
                   py: 1,
-                  backgroundColor: i18n.language === lang.code ? 'action.selected' : 'transparent'
+                  backgroundColor: i18n.language === lang.code ? 'action.selected' : 'transparent',
+                  '&:hover': { backgroundColor: 'action.hover' }
                 }}
               >
                 <Typography sx={{ mr: 1.5, fontSize: 18 }}>{lang.flag}</Typography>
@@ -193,13 +193,13 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
           </Menu>
 
           <Tooltip title="Toggle Theme">
-            <IconButton color="inherit" onClick={() => setMode(mode === 'dark' ? 'light' : 'dark')} sx={{ backgroundColor: 'action.hover' }}>
+            <IconButton color="inherit" onClick={() => setMode(mode === 'dark' ? 'light' : 'dark')} sx={{ backgroundColor: 'action.hover', width: 40, height: 40, borderRadius: 2 }}>
               {mode === 'dark' ? <SunIcon sx={{ fontSize: 20 }} /> : <MoonIcon sx={{ fontSize: 20 }} />}
             </IconButton>
           </Tooltip>
 
           <Tooltip title="Notifications">
-            <IconButton color="inherit" sx={{ backgroundColor: 'action.hover' }}>
+            <IconButton color="inherit" sx={{ backgroundColor: 'action.hover', width: 40, height: 40, borderRadius: 2 }}>
               <Box sx={{ position: 'relative' }}>
                 <NotificationsIcon sx={{ fontSize: 20 }} />
                 <Box sx={{ position: 'absolute', top: -2, right: -2, width: 8, height: 8, bgcolor: 'error.main', borderRadius: '50%', border: '2px solid', borderColor: 'background.paper' }} />
@@ -276,16 +276,6 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
                 {colorOptions.find(c => c.color === primaryColor)?.name || 'Custom'}
               </Typography>
             </Box>
-          </MenuItem>
-
-          <MenuItem onClick={handleClose} sx={{ borderRadius: 2, py: 1.5 }}>
-            <ListItemIcon><MenuIcon fontSize="small" sx={{ opacity: 0.7 }} /></ListItemIcon>
-            <ListItemText
-              primary="System Settings"
-              slotProps={{
-                primary: { variant: 'body2', sx: { fontWeight: 600 } }
-              }}
-            />
           </MenuItem>
 
           <Divider sx={{ my: 1, opacity: 0.5 }} />

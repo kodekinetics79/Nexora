@@ -243,6 +243,66 @@ const OrbitRing = styled.circle<{ primary: string }>`
   stroke-dasharray: 4 4;
 `;
 
+// --- Custom Form Inputs ---
+const StyledTextField = styled(TextField)<{ mode?: string }>(({ theme, mode }: any) => ({
+  '& .MuiOutlinedInput-root': {
+    backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 0.6)' : 'rgba(255, 255, 255, 0.8)',
+    borderRadius: '16px',
+    transition: 'all 0.3s ease-in-out',
+    boxShadow: mode === 'dark' ? '0 4px 20px rgba(0,0,0,0.2)' : '0 4px 20px rgba(13, 71, 161, 0.05)',
+    border: '1px solid transparent',
+    '& fieldset': { border: 'none' },
+    '&:hover': {
+      backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 0.9)' : '#ffffff',
+      boxShadow: mode === 'dark' ? '0 6px 24px rgba(0,0,0,0.4)' : '0 8px 24px rgba(13, 71, 161, 0.12)',
+      transform: 'translateY(-2px)',
+    },
+    '&.Mui-focused': {
+      backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 1)' : '#ffffff',
+      border: `1px solid ${theme.palette.primary.main}80`,
+      boxShadow: `0 8px 32px ${theme.palette.primary.main}33`,
+      transform: 'translateY(-2px)',
+    }
+  },
+  '& input': {
+    '&:-webkit-autofill, &:-webkit-autofill:hover, &:-webkit-autofill:focus, &:-webkit-autofill:active': {
+      WebkitBoxShadow: mode === 'dark' ? '0 0 0 30px #131c33 inset !important' : '0 0 0 30px #ffffff inset !important',
+      WebkitTextFillColor: mode === 'dark' ? '#ffffff !important' : '#000000 !important',
+      transition: 'background-color 5000s ease-in-out 0s',
+      borderRadius: '0px',
+    }
+  },
+  '& .MuiInputLabel-root': {
+    fontWeight: 500,
+    '&.Mui-focused, &.MuiFormLabel-filled': {
+      transform: 'translate(14px, -11px) scale(0.75)',
+      backgroundColor: mode === 'dark' ? '#0a0f1c' : '#ffffff',
+      padding: '0 6px',
+      borderRadius: '4px',
+    }
+  }
+}));
+
+const StyledSelect = styled(Select)<{ mode?: string }>(({ theme, mode }: any) => ({
+  backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 0.6)' : 'rgba(255, 255, 255, 0.8)',
+  borderRadius: '16px',
+  transition: 'all 0.3s ease-in-out',
+  boxShadow: mode === 'dark' ? '0 4px 20px rgba(0,0,0,0.2)' : '0 4px 20px rgba(13, 71, 161, 0.05)',
+  border: '1px solid transparent',
+  '& fieldset': { border: 'none' },
+  '&:hover': {
+    backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 0.9)' : '#ffffff',
+    boxShadow: mode === 'dark' ? '0 6px 24px rgba(0,0,0,0.4)' : '0 8px 24px rgba(13, 71, 161, 0.12)',
+    transform: 'translateY(-2px)',
+  },
+  '&.Mui-focused': {
+    backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 1)' : '#ffffff',
+    border: `1px solid ${theme.palette.primary.main}80`,
+    boxShadow: `0 8px 32px ${theme.palette.primary.main}33`,
+    transform: 'translateY(-2px)',
+  }
+}));
+
 // --- Data ---
 const industrialFlow = [
   { key: "DEMAND", title: "Smart Sourcing", icon: <RocketIcon />, color: "#6366f1" },
@@ -419,7 +479,8 @@ const LoginPage: React.FC = () => {
             <form onSubmit={handleLogin}>
               <FormControl fullWidth sx={{ mb: 3 }}>
                 <InputLabel id="bu-label">Select Business Unit</InputLabel>
-                <Select
+                <StyledSelect
+                  mode={mode}
                   labelId="bu-label"
                   label="Select Business Unit"
                   value={businessUnitId}
@@ -433,10 +494,11 @@ const LoginPage: React.FC = () => {
                     </MenuItem>
                   ))}
                   {loadingBusinessUnits && <MenuItem disabled><CircularProgress size={20} /></MenuItem>}
-                </Select>
+                </StyledSelect>
               </FormControl>
 
-              <TextField
+              <StyledTextField
+                mode={mode}
                 fullWidth
                 label="Email Address"
                 variant="outlined"
@@ -455,7 +517,8 @@ const LoginPage: React.FC = () => {
                 }}
               />
 
-              <TextField
+              <StyledTextField
+                mode={mode}
                 fullWidth
                 label="Password"
                 type={showPassword ? 'text' : 'password'}

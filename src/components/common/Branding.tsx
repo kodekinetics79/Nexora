@@ -49,7 +49,7 @@ const Branding: React.FC<BrandingProps> = ({
               whiteSpace: 'nowrap',
             }}
           >
-            FLUXA
+            NEXORA
           </Typography>
           <Typography
             sx={{
@@ -62,7 +62,7 @@ const Branding: React.FC<BrandingProps> = ({
               opacity: 0.8
             }}
           >
-            Enterprise AI
+            The Intelligence Platform
           </Typography>
         </Box>
       )}
