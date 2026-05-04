@@ -137,7 +137,7 @@ const QuoteViewPage: React.FC = () => {
               <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Email</Typography><Typography sx={{ fontWeight: 700 }}>{quote.customerEmail || 'N/A'}</Typography></Grid>
               <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Reference RFQ</Typography><Typography sx={{ fontWeight: 700, color: 'primary.main' }}>{quote.rfqNo || 'None'}</Typography></Grid>
               <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Validity</Typography><Typography sx={{ fontWeight: 700 }}>Until {dayjs(quote.validUntil).format('DD MMM YYYY')}</Typography></Grid>
-              {quote.discountValue > 0 && (
+              {(quote.discountValue || 0) > 0 && (
                 <Grid size={{ xs: 12, sm: 6 }}>
                   <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Header Discount</Typography>
                   <Typography sx={{ fontWeight: 700, color: 'error.main' }}>

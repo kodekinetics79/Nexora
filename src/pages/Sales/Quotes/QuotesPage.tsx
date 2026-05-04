@@ -17,13 +17,13 @@ import {
   Delete as DeleteIcon,
   Add as AddIcon,
 } from '@mui/icons-material';
-import quoteService, { type QuoteDTO } from '../../../api/services/quoteService';
+import quoteService from '../../../api/services/quoteService';
 import SearchField from '../../../components/common/SearchField';
 import { useAuth } from '../../../context/AuthContext';
 import dayjs from 'dayjs';
 
 const QuotesPage: React.FC = () => {
-  const { t } = useTranslation();
+  const { t: _t } = useTranslation();
   const navigate = useNavigate();
   const { userData } = useAuth();
   const queryClient = useQueryClient();
