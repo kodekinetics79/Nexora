@@ -35,7 +35,7 @@ export interface PaginatedCustomerResponse {
 }
 
 const customerService = {
-  getAll: async (params: { pageNumber?: number; pageSize?: number; name?: string; isActive?: boolean }): Promise<PaginatedCustomerResponse> => {
+  getAll: async (params: { pageNumber?: number; pageSize?: number; name?: string; isActive?: boolean; businessUnitId?: number }): Promise<PaginatedCustomerResponse> => {
     const r = await axiosInstance.get('/api/Customer', { params });
     return r.data;
   },

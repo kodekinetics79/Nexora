@@ -59,20 +59,6 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
 
   const menuItems: MenuItem[] = [
     { key: 'dashboard', label: t('dashboard'), icon: <DashboardIcon />, path: '/dashboard' },
-
-    { key: 'quotations', label: t('quotations'), icon: <QuotationIcon />, path: '/quotations' },
-    { key: 'orders', label: t('orders'), icon: <OrderIcon />, path: '/orders' },
-    { key: 'shipments', label: t('shipments'), icon: <ShipmentIcon />, path: '/shipments' },
-    {
-      key: 'rfq_mgmt',
-      label: t('rfq_management'),
-      icon: <QuotationIcon />,
-      children: [
-        { key: 'rfqs-all', label: t('all_rfqs'), path: '/procurement/rfqs/all', activePrefixes: ['/procurement/rfqs/process', '/procurement/rfqs/view', '/rfqs/view', '/rfqs/process'] },
-        { key: 'rfqs-draft', label: t('draft_rfqs'), path: '/procurement/rfqs/draft' },
-        { key: 'rfqs-outstanding', label: t('outstanding_rfqs'), path: '/procurement/rfqs/outstanding' },
-      ]
-    },
     {
       key: 'lead_mgmt',
       label: t('lead_management'),
@@ -85,6 +71,19 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
         { key: 'leads-folder', label: t('upload_folder_leads'), path: '/procurement/leads/folder-upload' },
       ]
     },
+    {
+      key: 'rfq_mgmt',
+      label: t('rfq_management'),
+      icon: <QuotationIcon />,
+      children: [
+        { key: 'rfqs-all', label: t('all_rfqs'), path: '/procurement/rfqs/all', activePrefixes: ['/procurement/rfqs/process', '/procurement/rfqs/view', '/rfqs/view', '/rfqs/process'] },
+        { key: 'rfqs-draft', label: t('draft_rfqs'), path: '/procurement/rfqs/draft' },
+        { key: 'rfqs-outstanding', label: t('outstanding_rfqs'), path: '/procurement/rfqs/outstanding' },
+      ]
+    },
+    { key: 'quotes', label: t('quotations'), icon: <QuotationIcon />, path: '/sales/quotes', activePrefixes: ['/sales/quotes'] },
+    { key: 'orders', label: t('orders'), icon: <OrderIcon />, path: '/sales/orders', activePrefixes: ['/sales/orders'] },
+    { key: 'shipments', label: t('shipments'), icon: <ShipmentIcon />, path: '/sales/shipments', activePrefixes: ['/sales/shipments'] },
     {
       key: 'supplier_mgmt',
       label: t('supplier_management'),

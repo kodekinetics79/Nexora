@@ -2,14 +2,49 @@ import axiosInstance from '../axiosInstance';
 
 export interface OrderDTO {
   id: number;
-  orderNumber: string;
+  orderNo: string;
+  orderNumber?: string; // Legacy support
   customerId: number;
-  customerName?: string;
-  orderDate: string;
-  totalAmount: number;
+  customerName: string;
+  quoteId?: number;
+  quoteNo?: string;
+  rfqId?: number;
+  rfqNo?: string;
+  leadId?: number;
+  leadNo?: string;
+  statusId: number;
   status: string;
+  paymentStatusId?: number;
+  paymentStatus: string;
+  paymentMethodId?: number;
+  totalAmount: number;
+  subTotal: number;
+  taxAmount: number;
+  discountAmount: number;
+  paidAmount: number;
+  balanceAmount: number;
+  orderDate: string;
+  deliveryDate?: string;
+  paymentReference?: string;
+  notes?: string;
+  termsAndConditions?: string;
+  hasShipments: boolean;
   businessUnitId: number;
-  // Add other fields as needed based on OrderDto.cs
+  items: OrderItemDTO[];
+}
+
+export interface OrderItemDTO {
+  id: number;
+  productId: number;
+  productName: string;
+  description?: string;
+  quantity: number;
+  unitPrice: number;
+  discount: number;
+  taxAmount: number;
+  totalAmount: number;
+  uomId?: number;
+  warehouseId?: number;
 }
 
 export interface OrderStatsDTO {
@@ -20,8 +55,8 @@ export interface OrderStatsDTO {
 }
 
 const orderService = {
-  getAll: async (businessUnitId: number) => {
-    const response = await axiosInstance.get<OrderDTO[]>(`/api/Order`, { params: { businessUnitId } });
+  getAll: async (params: { businessUnitId: number; pageNumber?: number; pageSize?: number; search?: string }) => {
+    const response = await axiosInstance.get<OrderDTO[]>(`/api/Order`, { params });
     return response.data;
   },
 
@@ -37,6 +72,11 @@ const orderService = {
 
   createFromRfq: async (rfqId: number, businessUnitId: number) => {
     const response = await axiosInstance.post<OrderDTO>(`/api/Order/from-rfq/${rfqId}`, null, { params: { businessUnitId } });
+    return response.data;
+  },
+
+  createFromQuote: async (quoteId: number, businessUnitId: number) => {
+    const response = await axiosInstance.post<OrderDTO>(`/api/Order/from-quote/${quoteId}`, null, { params: { businessUnitId } });
     return response.data;
   },
 

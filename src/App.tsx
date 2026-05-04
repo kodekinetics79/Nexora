@@ -32,13 +32,43 @@ import OutstandingRFQsPage from './pages/Procurement/RFQs/OutstandingRFQsPage';
 import ProcessRFQPage from './pages/Procurement/RFQs/ProcessRFQPage';
 import ViewRFQPage from './pages/Procurement/RFQs/ViewRFQPage';
 import DashboardPage from './pages/Dashboard/DashboardPage';
+import QuotesPage from './pages/Sales/Quotes/QuotesPage';
+import CreateQuotePage from './pages/Sales/Quotes/CreateQuotePage';
+import QuoteViewPage from './pages/Sales/Quotes/QuoteViewPage';
+import EditQuotePage from './pages/Sales/Quotes/EditQuotePage';
+import OrderListPage from './pages/Sales/Orders/OrderListPage';
+import CreateOrderPage from './pages/Sales/Orders/CreateOrderPage';
+import OrderViewPage from './pages/Sales/Orders/OrderViewPage';
+import OrderInvoicePage from './pages/Sales/Shipments/OrderInvoicePage';
+import ShipmentListPage from './pages/Sales/Shipments/ShipmentListPage';
+import CreateShipmentPage from './pages/Sales/Shipments/CreateShipmentPage';
+import ShipmentViewPage from './pages/Sales/Shipments/ShipmentViewPage';
 import { Box } from '@mui/material';
+import ShipmentInvoicePage from './pages/Sales/Shipments/ShipmentInvoicePage';
 
 function App() {
   return (
     <Routes>
       <Route path="/" element={<Navigate to="/dashboard" replace />} />
       <Route path="/dashboard" element={<MainLayout><DashboardPage /></MainLayout>} />
+      <Route path="/sales/quotes" element={<MainLayout><QuotesPage /></MainLayout>} />
+      <Route path="/sales/quotes/create" element={<MainLayout><CreateQuotePage /></MainLayout>} />
+      <Route path="/sales/quotes/view/:id" element={<MainLayout><QuoteViewPage /></MainLayout>} />
+      <Route path="/sales/quotes/edit/:id" element={<MainLayout><EditQuotePage /></MainLayout>} />
+      <Route path="/sales/orders" element={<MainLayout><OrderListPage /></MainLayout>} />
+      <Route path="/sales/orders/create" element={<MainLayout><CreateOrderPage /></MainLayout>} />
+      <Route path="/sales/orders/edit/:id" element={<MainLayout><CreateOrderPage /></MainLayout>} />
+      <Route path="/sales/orders/:id" element={<MainLayout><OrderViewPage /></MainLayout>} />
+      <Route path="/sales/shipments" element={<MainLayout><ShipmentListPage /></MainLayout>} />
+      <Route path="/sales/shipments/create" element={<MainLayout><CreateShipmentPage /></MainLayout>} />
+      <Route path="/sales/shipments/from-order/:id" element={<MainLayout><CreateShipmentPage /></MainLayout>} />
+      <Route path="/sales/shipments/edit/:id" element={<MainLayout><CreateShipmentPage /></MainLayout>} />
+      <Route path="/sales/shipments/:id" element={<MainLayout><ShipmentViewPage /></MainLayout>} />
+      {/* Sales Invoices/Documents */}
+      <Route path="/sales/orders/invoice/:id" element={<OrderInvoicePage />} />
+      <Route path="/sales/shipments/invoice/:id" element={<ShipmentInvoicePage />} />
+      <Route path="/orders" element={<Navigate to="/sales/orders" replace />} />
+      <Route path="/quotations" element={<Navigate to="/sales/quotes" replace />} />
       <Route path="/procurement/rfqs" element={<Navigate to="/procurement/rfqs/all" replace />} />
       <Route path="/procurement/rfqs/all" element={<MainLayout><AllRFQsPage /></MainLayout>} />
       <Route path="/procurement/rfqs/draft" element={<MainLayout><DraftRFQsPage /></MainLayout>} />
