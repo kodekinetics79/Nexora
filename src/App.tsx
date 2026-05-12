@@ -46,6 +46,7 @@ import ShipmentViewPage from './pages/Sales/Shipments/ShipmentViewPage';
 import { Box } from '@mui/material';
 import ShipmentInvoicePage from './pages/Sales/Shipments/ShipmentInvoicePage';
 import PermissionGuard from './components/common/PermissionGuard';
+import PriceStructurePage from './pages/Setup/PriceStructure/PriceStructurePage';
 
 function App() {
   return (
@@ -95,6 +96,7 @@ function App() {
       <Route path="/setup/locations" element={<MainLayout><PermissionGuard moduleName="Locations" redirect><LocationMaster /></PermissionGuard></MainLayout>} />
       <Route path="/setup/quote-format" element={<MainLayout><PermissionGuard moduleName="Quote Configuration" redirect><QuoteFormatPage /></PermissionGuard></MainLayout>} />
       <Route path="/setup/business-unit" element={<MainLayout><PermissionGuard moduleName="Business Units" redirect><BusinessUnitPage /></PermissionGuard></MainLayout>} />
+      <Route path="/setup/price-structure" element={<MainLayout><PermissionGuard moduleName="UOM" redirect><PriceStructurePage /></PermissionGuard></MainLayout>} />
 
       {/* Security Routes */}
       <Route path="/security/users" element={<MainLayout><PermissionGuard moduleName="Users" redirect><UsersPage /></PermissionGuard></MainLayout>} />

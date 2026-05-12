@@ -157,7 +157,7 @@ const productService = {
     return r.data;
   },
 
-  matchProduct: async (query: { name?: string; partNo?: string; manufacturer?: string }) => {
+  matchProduct: async (query: { name?: string; partNo?: string; manufacturer?: string; businessUnitId?: number }) => {
     const response = await axiosInstance.post<{
       hasExactMatch: boolean;
       exactMatch: ProductDTO | null;

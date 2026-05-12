@@ -96,45 +96,10 @@ const supplierService = {
   },
 
   searchWebSuppliers: async (query: string): Promise<any[]> => {
-    // Advanced simulation of an intelligent web search
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    
-    // Normalize query
-    const term = query.trim().split(' ').slice(0, 3).join(' ');
-    const domain = query.replace(/\s+/g, '').toLowerCase();
-
-    return [
-      {
-        id: -100,
-        name: `${term} Solutions Global`,
-        contactEmail: `sales@${domain}-solutions.com`,
-        addressLine1: "Tech Park, Suite 400",
-        city: "San Jose",
-        countryName: "USA",
-        tags: `External, ${term}, Preferred`,
-        isExternal: true
-      },
-      {
-        id: -200,
-        name: `Integrated ${term} Group`,
-        contactEmail: `procurement@${domain}-group.net`,
-        addressLine1: "Industrial Zone B",
-        city: "Dubai",
-        countryName: "UAE",
-        tags: `External, ${term}, Global`,
-        isExternal: true
-      },
-      {
-        id: -300,
-        name: `${term} Distribution Ltd.`,
-        contactEmail: `info@${domain}dist.co.uk`,
-        addressLine1: "Commerce House",
-        city: "London",
-        countryName: "UK",
-        tags: `External, ${term}, Logistics`,
-        isExternal: true
-      }
-    ];
+    const response = await axiosInstance.get<any[]>("/api/Supplier/web-search", {
+      params: { query }
+    });
+    return response.data;
   },
 };
 

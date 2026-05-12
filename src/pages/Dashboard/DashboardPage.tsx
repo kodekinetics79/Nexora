@@ -94,6 +94,7 @@ export interface DashboardDataDTO {
   operationalHealth: RadarDataDTO[];
   responseIntegrity: ScatterDataDTO[];
   recentItems: RecentItemDTO[];
+  sourceDistribution: CategoryDistributionDTO[];
 }
 
 const StatCard = ({ title, value, icon, trend, trendValue, color, delay }: any) => {
@@ -193,6 +194,12 @@ export default function DashboardPage() {
   const scatterData = data?.responseIntegrity || [];
   const barData = data?.efficiencyVelocity || [];
   const recentItems = data?.recentItems || [];
+  
+  const sourcePieData = (data?.sourceDistribution || []).map((item, index) => ({
+    name: item.categoryName,
+    value: item.count,
+    color: ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6'][index % 4]
+  }));
 
   return (
     <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1600, margin: '0 auto' }}>
@@ -354,6 +361,66 @@ export default function DashboardPage() {
                 </Box>
               ))}
             </Box>
+          </Paper>
+        </Grid>
+      </Grid>
+
+      {/* Row 2.5: Lead Source Analysis */}
+      <Grid container spacing={3} sx={{ mb: 4 }}>
+        <Grid size={{ xs: 12 }}>
+          <Paper sx={{ 
+            p: 3, 
+            borderRadius: 4, 
+            bgcolor: mode === 'dark' ? 'rgba(30, 41, 59, 0.4)' : '#ffffff',
+            boxShadow: mode === 'dark' ? '0 4px 20px rgba(0,0,0,0.2)' : '0 10px 40px rgba(0,0,0,0.03)',
+            border: '1px solid',
+            borderColor: mode === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)',
+          }}>
+            <Typography variant="h6" sx={{ fontWeight: 800, mb: 3, display: 'flex', alignItems: 'center', gap: 1.5, fontSize: '1.1rem' }}>
+              <Speed sx={{ color: '#3b82f6' }} /> Lead Source Completeness (Email vs Manual vs Folder)
+            </Typography>
+            <Grid container spacing={3} sx={{ alignItems: 'center' }}>
+              <Grid size={{ xs: 12, md: 5 }}>
+                <Box sx={{ height: 200 }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={sourcePieData}
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={60}
+                        outerRadius={80}
+                        paddingAngle={5}
+                        dataKey="value"
+                        stroke="none"
+                      >
+                        {sourcePieData.map((entry, index) => (
+                          <Cell key={`cell-${index}`} fill={entry.color} />
+                        ))}
+                      </Pie>
+                      <RechartsTooltip 
+                        contentStyle={{ backgroundColor: mode === 'dark' ? '#0f172a' : '#fff', borderRadius: 12, border: 'none' }}
+                      />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </Box>
+              </Grid>
+              <Grid size={{ xs: 12, md: 7 }}>
+                <Grid container spacing={2}>
+                  {sourcePieData.map((item) => (
+                    <Grid size={{ xs: 12, sm: 4 }} key={item.name}>
+                      <Box sx={{ p: 2, borderRadius: 3, bgcolor: mode === 'dark' ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.01)', border: '1px solid', borderColor: 'divider' }}>
+                        <Typography variant="caption" sx={{ fontWeight: 700, color: 'text.secondary', textTransform: 'uppercase' }}>{item.name}</Typography>
+                        <Typography variant="h5" sx={{ fontWeight: 800, color: item.color, mt: 0.5 }}>{item.value}</Typography>
+                        <Box sx={{ width: '100%', height: 4, bgcolor: mode === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)', borderRadius: 2, mt: 1, overflow: 'hidden' }}>
+                          <Box sx={{ width: `${(item.value / (data?.stats?.totalLeads || 1)) * 100}%`, height: '100%', bgcolor: item.color }} />
+                        </Box>
+                      </Box>
+                    </Grid>
+                  ))}
+                </Grid>
+              </Grid>
+            </Grid>
           </Paper>
         </Grid>
       </Grid>

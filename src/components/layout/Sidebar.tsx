@@ -136,6 +136,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
           { key: 'uom', label: t('uom'), path: '/setup/uom', moduleName: 'UOM' },
           { key: 'locations', label: t('locations'), path: '/setup/locations', moduleName: 'Locations' },
           { key: 'quote-format', label: t('quote_format'), path: '/setup/quote-format', moduleName: 'Quote Configuration' },
+          { key: 'price-structure', label: 'Price Structure', path: '/setup/price-structure', moduleName: 'UOM' },
           { key: 'business-unit', label: t('business_unit'), path: '/setup/business-unit', moduleName: 'Business Units' },
         ]
       },

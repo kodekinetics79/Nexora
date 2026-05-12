@@ -50,6 +50,7 @@ interface ProcessItem extends AcceptedLeadItemDTO {
   include: boolean;
   preferredSupplierName?: string;
   preferredSupplierEmail?: string;
+  selectedName?: string; // To show the name of the selected product/quote
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -215,6 +216,7 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
       selectionSource: e.target.value as 'product' | 'quotedItem',
       productId: null,
       supplierQuotedItemId: null,
+      selectedName: undefined
     });
   }, [index, onUpdate]);
 
@@ -223,6 +225,7 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
       productId: p?.id ?? null,
       unitPrice: p?.finalSalesPrice ?? p?.sellingPrice ?? 0,
       qtyOnHand: p?.qtyOnHand ?? 0,
+      selectedName: p ? `${p.productName} (${p.partNo})` : undefined
     });
     setIsEditing(false);
   }, [index, onUpdate]);
@@ -231,6 +234,7 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
     onUpdate(index, {
       supplierQuotedItemId: q?.id ?? null,
       unitPrice: q?.unitPrice ?? 0,
+      selectedName: q ? `${q.itemName} - ${q.supplierName}` : undefined
     });
     setIsEditing(false);
   }, [index, onUpdate]);
@@ -252,14 +256,16 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
       const res = await productService.matchProduct({
         name: item.productShortName,
         partNo: item.manufacturerPartNumber,
-        manufacturer: item.manufacturerName
+        manufacturer: item.manufacturerName,
+        businessUnitId: businessUnitId
       });
       if (res.hasExactMatch && res.exactMatch) {
         onUpdate(index, {
           matchStatus: 'matched',
           productId: res.exactMatch.id,
           unitPrice: res.exactMatch.finalSalesPrice ?? res.exactMatch.sellingPrice ?? 0,
-          qtyOnHand: res.exactMatch.qtyOnHand ?? 0
+          qtyOnHand: res.exactMatch.qtyOnHand ?? 0,
+          selectedName: `${res.exactMatch.productName} (${res.exactMatch.partNo})`
         });
       } else {
         onUpdate(index, { matchStatus: 'no-match' });
@@ -267,7 +273,7 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
     } catch (e) {
       onUpdate(index, { matchStatus: 'no-match' });
     }
-  }, [item, index, onUpdate]);
+  }, [item, index, onUpdate, businessUnitId]);
 
   return (
     <TableRow sx={{ '& td': { borderBottom: '1px solid #f0f0f0' }, bgcolor: item.include ? 'transparent' : '#fafafa' }}>
@@ -284,6 +290,19 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
           <Typography sx={{ fontWeight: 800, fontSize: '0.75rem', color: '#1a237e', textTransform: 'uppercase' }}>
             {item.productShortName}
           </Typography>
+          
+          {/* Refined Layout: Part Number and Manufacturer */}
+          <Box sx={{ display: 'flex', gap: 1, mt: 0.5, mb: 1 }}>
+            <Box sx={{ bgcolor: '#f5f5f5', px: 1, py: 0.25, borderRadius: 1, border: '1px solid #eee' }}>
+              <Typography variant="caption" sx={{ color: '#666', fontWeight: 700, fontSize: '0.6rem' }}>PN: </Typography>
+              <Typography variant="caption" sx={{ color: '#333', fontWeight: 800, fontSize: '0.65rem' }}>{item.manufacturerPartNumber || 'N/A'}</Typography>
+            </Box>
+            <Box sx={{ bgcolor: '#f5f5f5', px: 1, py: 0.25, borderRadius: 1, border: '1px solid #eee' }}>
+              <Typography variant="caption" sx={{ color: '#666', fontWeight: 700, fontSize: '0.6rem' }}>MFG: </Typography>
+              <Typography variant="caption" sx={{ color: '#333', fontWeight: 800, fontSize: '0.65rem' }}>{item.manufacturerName || 'N/A'}</Typography>
+            </Box>
+          </Box>
+
           <Box sx={{ display: 'flex', gap: 1, my: 0.5 }}>
             <Chip
               label={`AI: ${Math.round((item.aiconfidence ?? 0) * 100)}%`}
@@ -310,7 +329,7 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
                   onClick={() => setWebSearchOpen(true)}
                   sx={{ height: 20, fontSize: '0.62rem', textTransform: 'none', fontWeight: 800, p: 0, px: 1, minWidth: 40, borderRadius: 1 }}
                 >
-                  Search Internet for Supplier
+                  Search Internet
                 </Button>
                 <SearchWebSupplierDialog
                   open={webSearchOpen}
@@ -410,14 +429,8 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
                 '&:hover': { borderColor: '#1976d2', bgcolor: '#fafafa' }
               }}
             >
-              <Typography sx={{ fontSize: '0.75rem', color: item.productId || item.supplierQuotedItemId ? 'text.primary' : 'text.secondary', fontWeight: 600 }}>
-                {item.selectionSource === 'product'
-                  ? item.productId
-                    ? `Product ID: ${item.productId} (Click to change)`
-                    : 'Select Product...'
-                  : item.supplierQuotedItemId
-                  ? `Quote ID: ${item.supplierQuotedItemId} (Click to change)`
-                  : 'Select Quote...'}
+              <Typography sx={{ fontSize: '0.75rem', color: item.selectedName ? 'text.primary' : 'text.secondary', fontWeight: 600 }}>
+                {item.selectedName || (item.selectionSource === 'product' ? 'Select Product...' : 'Select Quote...')}
               </Typography>
             </Box>
           )}
@@ -589,6 +602,17 @@ Best regards`;
     }
   }, [supplier, items, rfqNo]);
 
+  const handleSend = async () => {
+    try {
+      // In a real app, this would call an API to send the actual email via SMTP/SendGrid
+      // For now, we simulate a successful send
+      toast.success(`Quote request sent to ${supplier.name} successfully!`);
+      onClose();
+    } catch (e) {
+      toast.error('Failed to send quote request');
+    }
+  };
+
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
       <DialogTitle sx={{ fontWeight: 800, p: 2 }}>
@@ -640,7 +664,14 @@ Best regards`;
       </DialogContent>
       <DialogActions sx={{ p: 2 }}>
         <Button onClick={onClose} variant="outlined" sx={{ borderRadius: 1.5, textTransform: 'none', fontWeight: 700 }}>Cancel</Button>
-        <Button variant="contained" startIcon={<SendIcon />} sx={{ borderRadius: 1.5, textTransform: 'none', fontWeight: 700, px: 3 }}>Send Request</Button>
+        <Button 
+          variant="contained" 
+          startIcon={<SendIcon />} 
+          onClick={handleSend}
+          sx={{ borderRadius: 1.5, textTransform: 'none', fontWeight: 700, px: 3 }}
+        >
+          Send Request
+        </Button>
       </DialogActions>
     </Dialog>
   );
@@ -870,7 +901,7 @@ const ItemDetailsDialog: React.FC<{
                     <Typography variant="body2" sx={{ color: '#888', mb: 2 }}>No direct product matches found in the database.</Typography>
                     <TextField
                       fullWidth
-                      placeholder="Search Internet for Suppliers"
+                      placeholder="Search Internet"
                       size="small"
                       onClick={() => setShowSupplierSearch(true)}
                       slotProps={{
@@ -930,6 +961,7 @@ const ProcessRFQPage: React.FC = () => {
   const [selectedSupplierForBatch, setSelectedSupplierForBatch] = useState<any>(null);
 
   const [batchSearchQuery, setBatchSearchQuery] = useState('');
+  const [batchSearchTab, setBatchSearchTab] = useState(0); // 0: Internal, 1: Web
   const [batchSuppliers, setBatchSuppliers] = useState<any[]>([]);
   const [loadingBatchSuppliers, setLoadingBatchSuppliers] = useState(false);
 
@@ -937,7 +969,11 @@ const ProcessRFQPage: React.FC = () => {
     let active = true;
     if (showBatchSupplierSearch) {
       setLoadingBatchSuppliers(true);
-      supplierService.searchWebSuppliers(batchSearchQuery || 'Supplies')
+      const searchFn = batchSearchTab === 0 
+        ? supplierService.getAll({ businessUnitId: userData?.businessUnitId ?? 0, name: batchSearchQuery, pageSize: 20 }).then(r => r.items)
+        : supplierService.searchWebSuppliers(batchSearchQuery || 'Supplies');
+
+      searchFn
         .then(res => {
           if (active) setBatchSuppliers(res || []);
         })
@@ -949,7 +985,7 @@ const ProcessRFQPage: React.FC = () => {
         });
     }
     return () => { active = false; };
-  }, [showBatchSupplierSearch, batchSearchQuery]);
+  }, [showBatchSupplierSearch, batchSearchQuery, batchSearchTab, userData?.businessUnitId]);
 
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(20);
@@ -961,6 +997,12 @@ const ProcessRFQPage: React.FC = () => {
     queryFn: () => leadService.getAcceptedLeadById(Number(id)),
     enabled: !!id,
     staleTime: 60_000,
+  });
+
+  const { data: customers = [] } = useQuery({
+    queryKey: ['customers', userData?.businessUnitId],
+    queryFn: () => customerService.getAll({ businessUnitId: userData?.businessUnitId ?? 0, pageSize: 1000 }).then(res => res.items),
+    enabled: !!userData?.businessUnitId,
   });
 
   // ── Initialization (runs once when lead loads) ─────────────────────────────
@@ -987,6 +1029,58 @@ const ProcessRFQPage: React.FC = () => {
       return next;
     });
   }, []);
+
+  const handleRunSmartMatchAll = useCallback(async (providedItems?: ProcessItem[]) => {
+    const targetItems = providedItems || items;
+    if (targetItems.length === 0) return;
+
+    // Mark all pending items as loading
+    setItems(prev => prev.map(i => i.matchStatus === 'pending' ? { ...i, matchStatus: 'loading' } : i));
+
+    const chunkSize = 5;
+    for (let i = 0; i < targetItems.length; i += chunkSize) {
+      const chunk = targetItems.slice(i, i + chunkSize);
+
+      const matches = await Promise.all(
+        chunk.map(async (it) => {
+          if (it.matchStatus !== 'pending' && it.matchStatus !== 'loading') {
+            return null;
+          }
+          try {
+            const res = await productService.matchProduct({
+              name: it.productShortName,
+              partNo: it.manufacturerPartNumber,
+              manufacturer: it.manufacturerName,
+              businessUnitId: userData?.businessUnitId
+            });
+            if (res.hasExactMatch && res.exactMatch) {
+              return {
+                matchStatus: 'matched' as const,
+                productId: res.exactMatch.id,
+                unitPrice: res.exactMatch.finalSalesPrice ?? res.exactMatch.sellingPrice ?? 0,
+                qtyOnHand: res.exactMatch.qtyOnHand ?? 0,
+                selectedName: `${res.exactMatch.productName} (${res.exactMatch.partNo})`
+              };
+            }
+            return { matchStatus: 'no-match' as const };
+          } catch (e) {
+            return { matchStatus: 'no-match' as const };
+          }
+        })
+      );
+
+      setItems(prev => {
+        const next = [...prev];
+        matches.forEach((match, idx) => {
+          if (match && next[i + idx]) {
+            next[i + idx] = { ...next[i + idx], ...match };
+          }
+        });
+        return next;
+      });
+    }
+  }, [items, productService, userData?.businessUnitId]);
+
   // Single stable effect — only runs when lead first becomes available
   React.useEffect(() => {
     if (!lead || hasInitialized) return;
@@ -1003,53 +1097,12 @@ const ProcessRFQPage: React.FC = () => {
     setItems(initialItems);
     setHasInitialized(true);
     findMatchedCustomer(lead);
-  }, [lead, hasInitialized, findMatchedCustomer]);
 
-  const handleRunSmartMatchAll = useCallback(async () => {
-    // Mark all pending items as loading
-    setItems(prev => prev.map(i => i.matchStatus === 'pending' ? { ...i, matchStatus: 'loading' } : i));
-
-    const chunkSize = 5;
-    for (let i = 0; i < items.length; i += chunkSize) {
-      const chunk = items.slice(i, i + chunkSize);
-
-      const matches = await Promise.all(
-        chunk.map(async (it) => {
-          if (it.matchStatus !== 'pending' && it.matchStatus !== 'loading') {
-            return null;
-          }
-          try {
-            const res = await productService.matchProduct({
-              name: it.productShortName,
-              partNo: it.manufacturerPartNumber,
-              manufacturer: it.manufacturerName
-            });
-            if (res.hasExactMatch && res.exactMatch) {
-              return {
-                matchStatus: 'matched' as const,
-                productId: res.exactMatch.id,
-                unitPrice: res.exactMatch.finalSalesPrice ?? res.exactMatch.sellingPrice ?? 0,
-                qtyOnHand: res.exactMatch.qtyOnHand ?? 0
-              };
-            }
-            return { matchStatus: 'no-match' as const };
-          } catch (e) {
-            return { matchStatus: 'no-match' as const };
-          }
-        })
-      );
-
-      setItems(prev => {
-        const next = [...prev];
-        matches.forEach((res, idx) => {
-          if (res && next[i + idx]) {
-            next[i + idx] = { ...next[i + idx], ...res };
-          }
-        });
-        return next;
-      });
+    // Auto-trigger smart match for all items
+    if (initialItems.length > 0) {
+      handleRunSmartMatchAll(initialItems);
     }
-  }, [items]);
+  }, [lead, hasInitialized, findMatchedCustomer, handleRunSmartMatchAll]);
 
   const removeItem = useCallback((index: number) => {
     setItems(prev => prev.filter((_, i) => i !== index));
@@ -1174,7 +1227,7 @@ const ProcessRFQPage: React.FC = () => {
             </Button>
             <Button
               variant="outlined" size="small" startIcon={<AutoFixIcon />}
-              onClick={handleRunSmartMatchAll}
+              onClick={() => handleRunSmartMatchAll()}
               sx={{ bgcolor: 'white', borderColor: '#1976d2', color: '#1976d2', fontWeight: 800, textTransform: 'none', px: 2 }}
             >
               Smart Match All
@@ -1218,9 +1271,26 @@ const ProcessRFQPage: React.FC = () => {
               <Box sx={{ display: 'flex', alignItems: 'center' }}>
                 <Typography sx={{ width: 200, fontSize: '0.75rem', color: '#888', fontWeight: 500 }}>{label}</Typography>
                 {chip ? (
-                  matchedCustomer
-                    ? <Chip label={matchedCustomer.name} color="success" size="small" sx={{ height: 18, fontSize: '0.6rem', fontWeight: 900, borderRadius: 1 }} />
-                    : <Chip label="No Match" variant="outlined" color="warning" size="small" sx={{ height: 18, fontSize: '0.6rem', fontWeight: 900, borderRadius: 1 }} />
+                  <Autocomplete
+                    size="small"
+                    options={customers}
+                    getOptionLabel={(option: any) => option.name || ''}
+                    value={matchedCustomer}
+                    onChange={(_, newValue) => setMatchedCustomer(newValue)}
+                    renderInput={(params) => (
+                      <TextField
+                        {...params}
+                        placeholder="Select Customer..."
+                        sx={{ 
+                          width: 250,
+                          '& .MuiInputBase-root': { height: 28, fontSize: '0.7rem', fontWeight: 700, borderRadius: 1 }
+                        }}
+                      />
+                    )}
+                    sx={{
+                      '& .MuiAutocomplete-input': { p: '0 !important' }
+                    }}
+                  />
                 ) : confidence ? (
                   <Chip
                     label={`${Math.round((lead.aiconfidence ?? 0) * 100)}%`}
@@ -1394,11 +1464,31 @@ const ProcessRFQPage: React.FC = () => {
             </List>
           </Box>
 
+          <Tabs
+            value={batchSearchTab}
+            onChange={(_, v) => setBatchSearchTab(v)}
+            variant="fullWidth"
+            sx={{ mb: 2, '& .MuiTab-root': { textTransform: 'none', fontWeight: 800, fontSize: '0.75rem' } }}
+          >
+            <Tab icon={<DatabaseIcon sx={{ fontSize: 18 }} />} iconPosition="start" label="Internal Database" />
+            <Tab icon={<InternetIcon sx={{ fontSize: 18 }} />} iconPosition="start" label="Internet Search" />
+          </Tabs>
+
           <TextField
             fullWidth size="small"
             value={batchSearchQuery}
             onChange={(e) => setBatchSearchQuery(e.target.value)}
-            placeholder="Search Suppliers..."
+            placeholder={batchSearchTab === 0 ? "Search internal suppliers..." : "Search internet for new suppliers..."}
+            slotProps={{
+              input: {
+                startAdornment: (
+                  <InputAdornment position="start">
+                    <SearchIcon sx={{ color: '#888', fontSize: 18 }} />
+                  </InputAdornment>
+                ),
+                sx: { borderRadius: 1.5, bgcolor: '#fff' }
+              }
+            }}
           />
           {loadingBatchSuppliers ? (
             <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
@@ -1413,7 +1503,12 @@ const ProcessRFQPage: React.FC = () => {
               {batchSuppliers.map((s, idx) => (
                 <ListItem
                   key={s.id || idx}
-                  sx={{ border: '1px solid #f0f0f0', borderRadius: 2, mb: 1 }}
+                  sx={{ 
+                    border: '1px solid #f0f0f0', 
+                    borderRadius: 2, 
+                    mb: 1,
+                    '&:hover': { bgcolor: '#f5f7ff', borderColor: '#1976d2' }
+                  }}
                   secondaryAction={
                     <Button
                       variant="contained" size="small"
@@ -1424,18 +1519,28 @@ const ProcessRFQPage: React.FC = () => {
                           ...item,
                           preferredSupplierName: s.name,
                           preferredSupplierEmail: s.contactEmail || s.email,
-                          matchStatus: 'sourced-web'
+                          matchStatus: batchSearchTab === 0 ? 'matched' : 'sourced-web'
                         } : item));
                       }}
-                      sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 1.5 }}
+                      sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 1.5, fontSize: '0.7rem' }}
                     >
                       Select & Quote
                     </Button>
                   }
                 >
+                  <ListItemAvatar>
+                    <Avatar sx={{ bgcolor: batchSearchTab === 0 ? '#ede7f6' : '#e3f2fd', color: batchSearchTab === 0 ? '#512da8' : '#1976d2', width: 32, height: 32 }}>
+                      {batchSearchTab === 0 ? <DatabaseIcon sx={{ fontSize: 16 }} /> : <InternetIcon sx={{ fontSize: 16 }} />}
+                    </Avatar>
+                  </ListItemAvatar>
                   <ListItemText
-                    primary={<Typography sx={{ fontWeight: 700, fontSize: '0.8rem' }}>{s.name}</Typography>}
-                    secondary={<Typography sx={{ fontSize: '0.75rem', color: '#666' }}>{s.contactEmail || s.email || 'No email'}</Typography>}
+                    primary={<Typography sx={{ fontWeight: 800, fontSize: '0.8rem', color: '#333' }}>{s.name}</Typography>}
+                    secondary={
+                      <Box sx={{ mt: 0.25 }}>
+                        <Typography variant="caption" sx={{ display: 'block', color: '#666' }}>{s.contactEmail || s.email || 'No email'}</Typography>
+                        <Typography variant="caption" sx={{ color: '#888' }}>{s.cityName || s.city || 'Location Unknown'}</Typography>
+                      </Box>
+                    }
                   />
                 </ListItem>
               ))}

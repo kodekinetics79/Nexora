@@ -5,6 +5,7 @@ import {
   Dialog, DialogContent, DialogActions,
   Grid, TextField, MenuItem, Select, FormControl,
   Chip,
+  Tooltip,
 } from '@mui/material';
 import {
   Add as AddIcon, Edit as EditIcon,
@@ -21,6 +22,8 @@ import { useAuth } from '../../context/AuthContext';
 import { useSnackbar } from 'notistack';
 import { useTranslation } from 'react-i18next';
 import SearchField from '../../components/common/SearchField';
+import * as XLSX from 'xlsx';
+import { Upload as UploadIcon, FileDownload as DownloadIcon } from '@mui/icons-material';
 
 const emptyPO: any = {
   orderNumber: '',
@@ -323,7 +326,6 @@ const PurchaseOrdersPage: React.FC = () => {
       items: validItems,
       businessUnitId: buid,
     };
-
     if (selectedPO) {
       deleteMutation.mutate(selectedPO.orderNumber, {
         onSuccess: () => createMutation.mutate(data),
@@ -331,6 +333,77 @@ const PurchaseOrdersPage: React.FC = () => {
     } else {
       createMutation.mutate(data);
     }
+  };
+
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      try {
+        const data = new Uint8Array(e.target?.result as ArrayBuffer);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const firstSheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[firstSheetName];
+        const jsonData: any[] = XLSX.utils.sheet_to_json(worksheet);
+
+        if (jsonData.length === 0) {
+          enqueueSnackbar('The selected file is empty', { variant: 'warning' });
+          return;
+        }
+
+        // Map Excel columns to API expected format
+        // Expected columns: "Product ID", "Supplier ID", "Purchase Date", "Quantity", "Unit Price", "Currency", "Batch No", "Expiry Date"
+        const validItems = jsonData.map((row: any) => ({
+          productId: Number(row['Product ID'] || row['productId']),
+          supplierId: Number(row['Supplier ID'] || row['supplierId']),
+          purchaseDate: row['Purchase Date'] ? new Date(row['Purchase Date']).toISOString() : new Date().toISOString(),
+          quantity: Number(row['Quantity'] || row['quantity'] || 0),
+          unitPrice: Number(row['Unit Price'] || row['unitPrice'] || 0),
+          currency: row['Currency'] || row['currency'] || 'PKR',
+          batchNo: String(row['Batch No'] || row['batchNo'] || ''),
+          expiryDate: row['Expiry Date'] ? new Date(row['Expiry Date']).toISOString() : '',
+          createdBy: userData?.userName || 'system',
+        })).filter(i => i.productId && i.supplierId);
+
+        if (validItems.length === 0) {
+          enqueueSnackbar('No valid items found in the file. Ensure "Product ID" and "Supplier ID" columns exist.', { variant: 'error' });
+          return;
+        }
+
+        await createMutation.mutateAsync({
+          items: validItems,
+          businessUnitId: buid,
+        });
+        
+        enqueueSnackbar(`Successfully uploaded ${validItems.length} records`, { variant: 'success' });
+      } catch (err: any) {
+        enqueueSnackbar('Failed to parse Excel file: ' + err.message, { variant: 'error' });
+      }
+    };
+    reader.readAsArrayBuffer(file);
+    // Reset input
+    event.target.value = '';
+  };
+
+  const downloadTemplate = () => {
+    const templateData = [
+      {
+        'Product ID': 1,
+        'Supplier ID': 1,
+        'Purchase Date': new Date().toISOString().split('T')[0],
+        'Quantity': 100,
+        'Unit Price': 50.5,
+        'Currency': 'USD',
+        'Batch No': 'B123',
+        'Expiry Date': new Date(Date.now() + 365*24*60*60*1000).toISOString().split('T')[0]
+      }
+    ];
+    const ws = XLSX.utils.json_to_sheet(templateData);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Template");
+    XLSX.writeFile(wb, "PO_History_Template.xlsx");
   };
 
   const handleAddItem = () => {
@@ -440,9 +513,38 @@ const PurchaseOrdersPage: React.FC = () => {
           <Typography variant="h4" sx={{ fontWeight: 800, letterSpacing: '-0.02em', mb: 0.5 }}>{t('purchase_orders')}</Typography>
           <Typography variant="body2" color="text.secondary">Manage and track all purchase orders issued to your suppliers</Typography>
         </Box>
-        <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3, borderRadius: 2, height: 48 }}>
-          {t('create_new')}
-        </Button>
+        <Box sx={{ display: 'flex', gap: 1 }}>
+          <input
+            type="file"
+            accept=".xlsx, .xls"
+            style={{ display: 'none' }}
+            id="po-history-upload"
+            onChange={handleFileUpload}
+          />
+          <Tooltip title="Download Excel Template">
+            <Button 
+              variant="outlined" 
+              startIcon={<DownloadIcon />} 
+              onClick={downloadTemplate}
+              sx={{ borderRadius: 2, height: 48, textTransform: 'none' }}
+            >
+              Template
+            </Button>
+          </Tooltip>
+          <label htmlFor="po-history-upload">
+            <Button 
+              variant="outlined" 
+              component="span" 
+              startIcon={<UploadIcon />} 
+              sx={{ borderRadius: 2, height: 48, textTransform: 'none' }}
+            >
+              Upload History
+            </Button>
+          </label>
+          <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3, borderRadius: 2, height: 48 }}>
+            {t('create_new')}
+          </Button>
+        </Box>
       </Box>
 
 
