@@ -22,7 +22,7 @@ const ProductSubCategoryPage: React.FC = () => {
   const { enqueueSnackbar } = useSnackbar();
   const queryClient = useQueryClient();
 
-  const [pagination, setPagination] = useState<GridPaginationModel>({ page: 0, pageSize: 20 });
+  const [pagination, setPagination] = useState<GridPaginationModel>({ page: 0, pageSize: 10 });
   const [search, setSearch] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
   const [selected, setSelected] = useState<ProductSubCategoryDTO | null>(null);
@@ -92,13 +92,14 @@ const ProductSubCategoryPage: React.FC = () => {
       </Paper>
 
       {/* Grid */}
-      <Paper sx={{ height: 'calc(100vh - 250px)', border: '1px solid', borderColor: 'divider', boxShadow: 'none', borderRadius: 2, overflow: 'hidden' }}>
+      <Paper sx={{ border: '1px solid', borderColor: 'divider', boxShadow: 'none', borderRadius: 2, overflow: 'hidden' }}>
         <DataGrid
+          autoHeight
           rows={data?.items ?? []}
           columns={columns}
           rowCount={data?.totalItems ?? 0}
           loading={isLoading}
-          pageSizeOptions={[10, 20, 50]}
+          pageSizeOptions={[10, 25, 50]}
           paginationModel={pagination}
           paginationMode="server"
           onPaginationModelChange={setPagination}

@@ -1,50 +1,93 @@
 import React from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useTranslation } from 'react-i18next';
 import {
-  Box, Typography, Paper, Button, Grid, Stack, Chip,
-  Table, TableHead, TableRow, TableCell, TableBody,
-  CircularProgress, Divider, Breadcrumbs, Link,
+  Box,
+  Breadcrumbs,
+  Button,
+  Grid,
+  Link,
+  Paper,
+  Stack,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableRow,
+  Typography,
+  alpha,
+  useTheme,
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
-  Edit as EditIcon,
   CheckCircle as ApproveIcon,
   Download as ExportIcon,
-  NavigateNext as NextIcon,
-  Schedule as HistoryIcon,
+  Edit as EditIcon,
+  History as HistoryIcon,
+  Inventory2 as ItemsIcon,
+  Link as LinkIcon,
+  Notes as NotesIcon,
+  Person as PersonIcon,
+  ReceiptLong as RfqIcon,
 } from '@mui/icons-material';
 import rfqService from '../../../api/services/rfqService';
 import { useAuth } from '../../../context/AuthContext';
 import EmailPromptDialog from '../../../components/common/EmailPromptDialog';
 import { useSnackbar } from 'notistack';
+import InfoCard from '../../../components/common/InfoCard';
+import TimelineCard from '../../../components/common/TimelineCard';
+import LoadingPage from '../../../components/common/LoadingPage';
+import EmptyState from '../../../components/common/EmptyState';
+import StatusBadge from '../../../components/common/StatusBadge';
+import AttachmentCard from '../../../components/common/AttachmentCard';
+import ActionMenu from '../../../components/common/ActionMenu';
 
-const DataField: React.FC<{ label: string; value: string | number | null; bold?: boolean; color?: string }> = ({ label, value, bold = true, color = 'text.primary' }) => (
-  <Box sx={{ mb: 1.5 }}>
-    <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase', display: 'block', mb: 0.2, fontSize: '0.65rem' }}>
+const DataField: React.FC<{ label: string; value: React.ReactNode; tone?: 'default' | 'danger' | 'success' }> = ({
+  label,
+  value,
+  tone = 'default',
+}) => (
+  <Box
+    sx={{
+      p: 1.5,
+      borderRadius: 2,
+      bgcolor: 'action.hover',
+      border: '1px solid',
+      borderColor: 'divider',
+      minHeight: 78,
+    }}
+  >
+    <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 850, textTransform: 'uppercase' }}>
       {label}
     </Typography>
-    <Typography sx={{ fontWeight: bold ? 800 : 500, fontSize: '0.85rem', color: color, whiteSpace: 'pre-wrap' }}>
-      {value || '—'}
+    <Typography
+      variant="body2"
+      sx={{
+        mt: 0.5,
+        fontWeight: 850,
+        color: tone === 'danger' ? 'error.main' : tone === 'success' ? 'success.main' : 'text.primary',
+        overflowWrap: 'anywhere',
+      }}
+    >
+      {value || '-'}
     </Typography>
   </Box>
 );
 
 const ViewRFQPage: React.FC = () => {
-  const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const theme = useTheme();
   const { userData } = useAuth();
   const { enqueueSnackbar } = useSnackbar();
   const queryClient = useQueryClient();
-
   const [approvalDialogOpen, setApprovalDialogOpen] = React.useState(false);
 
   const { data: rfq, isLoading } = useQuery({
     queryKey: ['rfq-detail', Number(id)],
     queryFn: () => rfqService.getById(Number(id), userData?.businessUnitId || 0),
     enabled: !!id && !!userData?.businessUnitId,
+    staleTime: 2 * 60_000,
   });
 
   const approveMutation = useMutation({
@@ -58,265 +101,240 @@ const ViewRFQPage: React.FC = () => {
     onError: () => enqueueSnackbar('Failed to approve RFQ', { variant: 'error' }),
   });
 
-  const formatDate = (dateStr: string | null) => {
-    if (!dateStr) return '—';
+  const formatDate = (dateStr: string | null | undefined) => {
+    if (!dateStr) return '-';
     const d = new Date(dateStr);
-    return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+    return Number.isNaN(d.getTime()) ? '-' : d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
   };
 
-  if (isLoading) return <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '60vh' }}><CircularProgress /></Box>;
-  if (!rfq) return <Box sx={{ p: 4 }}><Typography>RFQ not found.</Typography></Box>;
+  const formatMoney = (amount: number, currency = '$') =>
+    `${currency} ${Number(amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
+  if (isLoading) return <LoadingPage variant="form" />;
+  if (!rfq) return <EmptyState title="RFQ not found" message="The selected RFQ could not be loaded." onAction={() => navigate('/procurement/rfqs/all')} actionLabel="Back to RFQs" />;
+
+  const items = rfq.rfqitems || [];
   const isDraft = rfq.rfqstatusId === 34;
+  const total = items.reduce((sum, item) => sum + ((item.quantity || 0) * (item.unitPrice || 0)), 0);
 
   return (
-    <Box sx={{ p: 3, maxWidth: 1800, mx: 'auto' }}>
-      {/* Header */}
-      <Box sx={{ mb: 3 }}>
-        <Breadcrumbs separator={<NextIcon sx={{ fontSize: 14 }} />} sx={{ mb: 2 }}>
-          <Link component="button" variant="caption" onClick={() => navigate('/procurement/rfqs/all')} sx={{ color: 'text.secondary', fontWeight: 700, textDecoration: 'none', textTransform: 'uppercase' }}>
-            {t('rfq_management')}
-          </Link>
-          <Typography variant="caption" sx={{ color: 'primary.main', fontWeight: 900, textTransform: 'uppercase' }}>
-            {rfq.rfqno}
-          </Typography>
-        </Breadcrumbs>
-
-        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-            <Typography variant="h4" sx={{ fontWeight: 950, color: 'text.primary', letterSpacing: '-0.02em' }}>
-              {rfq.rfqno}
-            </Typography>
-            <Chip 
-              label={rfq.rfqstatusValue || 'Unknown'} 
-              color={isDraft ? "warning" : "success"}
-              size="small"
-              sx={{ fontWeight: 900, fontSize: '0.65rem', textTransform: 'uppercase' }}
-            />
+    <Box>
+      <Box
+        sx={{
+          mb: 2.5,
+        }}
+      >
+        <Stack direction={{ xs: 'column', lg: 'row' }} sx={{ justifyContent: 'space-between', gap: 2.5, alignItems: { lg: 'flex-end' } }}>
+          <Box>
+            <Breadcrumbs separator=">" sx={{ mb: 1.25, '& .MuiBreadcrumbs-separator': { color: 'text.secondary', fontWeight: 800 } }}>
+              <Link component="button" onClick={() => navigate('/procurement/rfqs/all')} sx={{ color: 'text.secondary', fontWeight: 850, textDecoration: 'none' }}>
+                RFQ Management
+              </Link>
+              <Typography sx={{ fontWeight: 900, color: 'text.primary' }}>RFQ Details</Typography>
+            </Breadcrumbs>
+            <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
+              <Box
+                sx={{
+                  width: 48,
+                  height: 48,
+                  borderRadius: 2,
+                  display: 'grid',
+                  placeItems: 'center',
+                  color: '#fff',
+                  background: `linear-gradient(135deg, ${theme.palette.primary.main}, ${theme.palette.primary.dark})`,
+                  boxShadow: `0 16px 30px ${alpha(theme.palette.primary.main, 0.22)}`,
+                }}
+              >
+                <RfqIcon />
+              </Box>
+              <Box>
+                <Stack direction="row" spacing={1.25} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
+                  <Typography variant="h4" sx={{ fontWeight: 950, lineHeight: 1.05 }}>
+                    RFQ # - {rfq.rfqno}
+                  </Typography>
+                  <StatusBadge label={rfq.rfqstatusValue || 'Unknown'} tone={isDraft ? 'warning' : 'success'} />
+                </Stack>
+                <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, fontWeight: 650 }}>
+                  {rfq.buyersName || rfq.customerName || 'Customer not assigned'} / {items.length} line items / {formatDate(rfq.recDate)}
+                </Typography>
+              </Box>
+            </Stack>
           </Box>
-          <Stack direction="row" spacing={1.5}>
-            <Button
-              variant="outlined"
-              startIcon={<BackIcon />}
-              onClick={() => navigate(-1)}
-              sx={{ fontWeight: 800, borderRadius: 2, px: 3, borderColor: 'divider', color: 'text.secondary' }}
-            >
+
+          <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
+            <Button variant="outlined" startIcon={<BackIcon />} onClick={() => navigate(-1)}>
               Back
             </Button>
-            {isDraft && (
-              <>
-                <Button
-                  variant="outlined"
-                  color="primary"
-                  startIcon={<EditIcon />}
-                  sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
-                >
-                  Edit Draft
-                </Button>
-                <Button
-                  variant="contained"
-                  color="success"
-                  startIcon={<ApproveIcon />}
-                  onClick={() => setApprovalDialogOpen(true)}
-                  sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
-                >
-                  Approve & Send
-                </Button>
-              </>
-            )}
-            <Button
-              variant="outlined"
-              startIcon={<ExportIcon />}
-              sx={{ fontWeight: 800, borderRadius: 2, px: 3, borderColor: 'divider', color: 'text.secondary' }}
-            >
+            <Button variant="outlined" startIcon={<ExportIcon />} onClick={() => window.print()}>
               Export
             </Button>
+            <ActionMenu
+              items={[
+                ...(isDraft
+                  ? [
+                      { label: 'Edit Draft', icon: <EditIcon fontSize="small" />, onClick: () => navigate(`/procurement/rfqs/process/${rfq.id}`) },
+                      { label: 'Approve & Send', icon: <ApproveIcon fontSize="small" />, onClick: () => setApprovalDialogOpen(true) },
+                    ]
+                  : []),
+                { label: 'Print / Export', icon: <ExportIcon fontSize="small" />, onClick: () => window.print() },
+              ]}
+            />
           </Stack>
-        </Box>
+        </Stack>
       </Box>
 
-      <Grid container spacing={3}>
-        {/* RFQ Details */}
-        <Grid size={{ xs: 12, lg: 9 }}>
-          <Stack spacing={3}>
-            {/* General Info */}
-            <Paper sx={{ p: 3, borderRadius: 3, border: '1px solid', borderColor: 'divider' }}>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 3 }}>
-                <Typography sx={{ fontWeight: 900, fontSize: '1rem', color: 'text.primary', textTransform: 'uppercase', letterSpacing: '0.025em' }}>
-                  General Information
-                </Typography>
-              </Box>
-              <Grid container spacing={2}>
+      <Grid container spacing={2.5}>
+        <Grid size={{ xs: 12, lg: 8.5 }}>
+          <Stack spacing={2.5}>
+            <InfoCard title="General Information" subtitle="Customer, dates, ownership, and business unit context." icon={<PersonIcon />} accent={theme.palette.primary.main}>
+              <Grid container spacing={1.5}>
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="RFQ #" value={rfq.rfqno} /></Grid>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Customer / Buyer" value={rfq.buyersName || rfq.customerName || 'N/A'} /></Grid>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Customer Email" value={rfq.customerEmail || rfq.leadEmail || 'N/A'} /></Grid>
-                
+                <Grid size={{ xs: 12, md: 4 }}><DataField label="Customer / Buyer" value={rfq.buyersName || rfq.customerName} /></Grid>
+                <Grid size={{ xs: 12, md: 4 }}><DataField label="Customer Email" value={rfq.customerEmail || rfq.leadEmail} /></Grid>
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="Received Date" value={formatDate(rfq.recDate)} /></Grid>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Bid Closing Date" value={formatDate(rfq.bidClosingDate || null)} color="error.main" /></Grid>
+                <Grid size={{ xs: 12, md: 4 }}><DataField label="Bid Closing Date" value={formatDate(rfq.bidClosingDate)} tone="danger" /></Grid>
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="RFQ Type" value={rfq.rfqtype || 'Agreement'} /></Grid>
-
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="Created By" value={rfq.createdBy} /></Grid>
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="Created On" value={formatDate(rfq.createdDate)} /></Grid>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Business Unit" value={rfq.businessUnitName || null} /></Grid>
+                <Grid size={{ xs: 12, md: 4 }}><DataField label="Business Unit" value={rfq.businessUnitName} /></Grid>
               </Grid>
+            </InfoCard>
 
-              {rfq.headerRemarks && (
-                <Box sx={{ mt: 2 }}>
-                  <Divider sx={{ mb: 2 }} />
-                  <DataField label="Header Remarks" value={rfq.headerRemarks} bold={false} />
-                </Box>
-              )}
-            </Paper>
-
-            {/* Line Items */}
-            <Paper sx={{ borderRadius: 3, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>
-              <Box sx={{ p: 2.5, bgcolor: '#fafafa', borderBottom: '1px solid', borderColor: 'divider' }}>
-                <Typography sx={{ fontWeight: 950, fontSize: '0.9rem', color: 'text.primary', textTransform: 'uppercase' }}>
-                  {t('invoice_items')} ({rfq.rfqitems.length})
+            {rfq.headerRemarks ? (
+              <InfoCard title="Header Remarks" icon={<NotesIcon />} accent={theme.palette.warning.main}>
+                <Typography variant="body2" color="text.secondary" sx={{ whiteSpace: 'pre-wrap' }}>
+                  {rfq.headerRemarks}
                 </Typography>
-              </Box>
-              <Table size="small">
-                <TableHead sx={{ bgcolor: '#fcfcfc' }}>
-                  <TableRow>
-                    <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>#</TableCell>
-                    <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Product / Description</TableCell>
-                    <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Manufacturer / Part #</TableCell>
-                    <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }} align="center">Qty</TableCell>
-                    <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }} align="right">Unit Price</TableCell>
-                    <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }} align="right">Total</TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {rfq.rfqitems.map((item, idx) => (
-                    <TableRow key={item.id} hover sx={{ '&:last-child td': { border: 0 } }}>
-                      <TableCell sx={{ fontSize: '0.8rem', fontWeight: 700, color: 'text.secondary' }}>{idx + 1}</TableCell>
-                      <TableCell>
-                        <Typography sx={{ fontSize: '0.8rem', fontWeight: 800, color: 'primary.main' }}>
-                          {item.productName || item.productShortName || 'Unknown Product'}
-                        </Typography>
-                        <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block' }}>
-                          {item.productShortDescription || 'No description'}
-                        </Typography>
-                      </TableCell>
-                      <TableCell>
-                        <Typography sx={{ fontSize: '0.8rem', fontWeight: 700 }}>
-                          {item.manufacturerName || 'N/A'}
-                        </Typography>
-                        <Typography variant="caption" sx={{ color: 'text.disabled' }}>
-                          {item.manufacturerPartNumber || 'N/A'}
-                        </Typography>
-                      </TableCell>
-                      <TableCell align="center" sx={{ fontSize: '0.85rem', fontWeight: 900 }}>
-                        {item.quantity} {item.unitOfMeasure || 'EA'}
-                      </TableCell>
-                      <TableCell align="right" sx={{ fontSize: '0.8rem', fontWeight: 800 }}>
-                        {item.currency || '$'} {(item.unitPrice || 0).toFixed(2)}
-                      </TableCell>
-                      <TableCell align="right" sx={{ fontSize: '0.85rem', fontWeight: 950, color: 'primary.main' }}>
-                        {item.currency || '$'} {((item.quantity || 0) * (item.unitPrice || 0)).toFixed(2)}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                  {rfq.rfqitems.length === 0 && (
+              </InfoCard>
+            ) : null}
+
+            <InfoCard title={`Invoice Items (${items.length})`} subtitle="Quoted products, quantities, pricing, and totals." icon={<ItemsIcon />} accent={theme.palette.primary.main}>
+              <Box sx={{ overflowX: 'auto', mx: -2.5, mb: -2.5 }}>
+                <Table size="small" stickyHeader>
+                  <TableHead>
                     <TableRow>
-                      <TableCell colSpan={6} sx={{ py: 4, textAlign: 'center', color: 'text.disabled' }}>
-                        No items found in this RFQ.
-                      </TableCell>
+                      <TableCell>#</TableCell>
+                      <TableCell>Product / Description</TableCell>
+                      <TableCell>Manufacturer / Part #</TableCell>
+                      <TableCell align="center">Qty</TableCell>
+                      <TableCell align="right">Unit Price</TableCell>
+                      <TableCell align="right">Total</TableCell>
                     </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-              <Box sx={{ p: 2, display: 'flex', justifyContent: 'flex-end', bgcolor: '#fafafa' }}>
-                <Stack direction="row" spacing={4}>
-                   <Box sx={{ textAlign: 'right' }}>
-                      <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase' }}>Total Items</Typography>
-                      <Typography sx={{ fontWeight: 900, fontSize: '1.1rem' }}>{rfq.rfqitems.length}</Typography>
-                   </Box>
-                   <Box sx={{ textAlign: 'right' }}>
-                      <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase' }}>Grand Total</Typography>
-                      <Typography sx={{ fontWeight: 950, fontSize: '1.2rem', color: 'success.main' }}>
-                        $ {rfq.rfqitems.reduce((sum, item) => sum + (item.quantity * (item.unitPrice || 0)), 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                      </Typography>
-                   </Box>
+                  </TableHead>
+                  <TableBody>
+                    {items.map((item, idx) => {
+                      const currency = item.currency || '$';
+                      return (
+                        <TableRow key={item.id || idx} hover>
+                          <TableCell sx={{ fontWeight: 850, color: 'text.secondary' }}>{idx + 1}</TableCell>
+                          <TableCell sx={{ minWidth: 260 }}>
+                            <Typography variant="body2" sx={{ fontWeight: 850, color: 'primary.main' }}>
+                              {item.productName || item.productShortName || 'Unknown Product'}
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              {item.productShortDescription || 'No description'}
+                            </Typography>
+                          </TableCell>
+                          <TableCell sx={{ minWidth: 190 }}>
+                            <Typography variant="body2" sx={{ fontWeight: 750 }}>{item.manufacturerName || '-'}</Typography>
+                            <Typography variant="caption" color="text.secondary">{item.manufacturerPartNumber || '-'}</Typography>
+                          </TableCell>
+                          <TableCell align="center">
+                            <StatusBadge label={`${item.quantity || 0} ${item.unitOfMeasure || 'EA'}`} tone="primary" />
+                          </TableCell>
+                          <TableCell align="right" sx={{ fontWeight: 750 }}>{formatMoney(item.unitPrice || 0, currency)}</TableCell>
+                          <TableCell align="right" sx={{ fontWeight: 900, color: 'primary.main' }}>
+                            {formatMoney((item.quantity || 0) * (item.unitPrice || 0), currency)}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                    {items.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={6}>
+                          <EmptyState title="No RFQ items" message="This RFQ does not include line items yet." />
+                        </TableCell>
+                      </TableRow>
+                    ) : null}
+                  </TableBody>
+                </Table>
+                <Stack direction="row" spacing={4} sx={{ justifyContent: 'flex-end', p: 2, bgcolor: 'action.hover', borderTop: '1px solid', borderColor: 'divider' }}>
+                  <Box sx={{ textAlign: 'right' }}>
+                    <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 850, textTransform: 'uppercase' }}>Total Items</Typography>
+                    <Typography sx={{ fontWeight: 900 }}>{items.length}</Typography>
+                  </Box>
+                  <Box sx={{ textAlign: 'right' }}>
+                    <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 850, textTransform: 'uppercase' }}>Grand Total</Typography>
+                    <Typography variant="h6" sx={{ fontWeight: 950, color: 'primary.main' }}>{formatMoney(total)}</Typography>
+                  </Box>
                 </Stack>
               </Box>
-            </Paper>
+            </InfoCard>
           </Stack>
         </Grid>
 
-        {/* Sidebar */}
-        <Grid size={{ xs: 12, lg: 3 }}>
-          <Stack spacing={3}>
-            {/* Lead Connection */}
-            {rfq.leadId && (
-              <Paper sx={{ p: 2.5, borderRadius: 3, border: '1px solid', borderColor: 'divider', bgcolor: 'primary.lighter' }}>
-                <Typography variant="caption" sx={{ fontWeight: 900, color: 'primary.main', textTransform: 'uppercase', mb: 1, display: 'block' }}>
-                  Connected Lead
+        <Grid size={{ xs: 12, lg: 3.5 }}>
+          <Stack spacing={2.5} sx={{ position: { lg: 'sticky' }, top: { lg: 92 } }}>
+            {rfq.leadId ? (
+              <Paper
+                sx={{
+                  p: 2.5,
+                  background: 'background.paper',
+                }}
+              >
+                <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', mb: 1.5 }}>
+                  <Box sx={{ width: 38, height: 38, borderRadius: 2, display: 'grid', placeItems: 'center', bgcolor: alpha(theme.palette.primary.main, 0.12), color: 'primary.main' }}>
+                    <LinkIcon />
+                  </Box>
+                  <Box>
+                    <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>Connected Lead</Typography>
+                    <Typography variant="caption" color="text.secondary">Lead #{rfq.leadId}</Typography>
+                  </Box>
+                </Stack>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                  This RFQ was generated from a procurement lead and keeps the original context connected.
                 </Typography>
-                <Typography sx={{ fontWeight: 800, fontSize: '0.9rem', mb: 1.5 }}>
-                  This RFQ was generated from Lead #{rfq.leadId}
-                </Typography>
-                <Button 
-                  fullWidth variant="contained" size="small" 
-                  onClick={() => navigate(`/procurement/leads/view/${rfq.leadId}`)}
-                  sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 2 }}
-                >
+                <Button fullWidth variant="outlined" onClick={() => navigate(`/procurement/leads/view/${rfq.leadId}`)}>
                   View Original Lead
                 </Button>
               </Paper>
-            )}
+            ) : null}
 
-            {/* Audit / Timeline */}
-            <Paper sx={{ p: 2.5, borderRadius: 3, border: '1px solid', borderColor: 'divider' }}>
-               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
-                 <HistoryIcon sx={{ color: 'text.secondary', fontSize: 20 }} />
-                 <Typography sx={{ fontWeight: 900, fontSize: '0.85rem', textTransform: 'uppercase' }}>Workflow History</Typography>
-               </Box>
-               <Stack spacing={2}>
-                  {[
-                    { title: 'RFQ Created', user: rfq.createdBy, date: rfq.createdDate, icon: <EditIcon sx={{ fontSize: 14 }} /> },
-                    rfq.modifiedBy && { title: 'Last Modified', user: rfq.modifiedBy, date: rfq.modifiedDate, icon: <HistoryIcon sx={{ fontSize: 14 }} /> },
-                    !isDraft && { title: 'Approved & Sent', user: userData?.userName, date: new Date().toISOString(), icon: <ApproveIcon sx={{ fontSize: 14 }} /> }
-                  ].filter(Boolean).map((log: any, i) => (
-                    <Box key={i} sx={{ display: 'flex', gap: 1.5 }}>
-                       <Box sx={{ mt: 0.5, p: 0.5, borderRadius: '50%', bgcolor: 'action.hover', display: 'flex' }}>
-                         {log.icon}
-                       </Box>
-                       <Box>
-                          <Typography sx={{ fontSize: '0.75rem', fontWeight: 800 }}>{log.title}</Typography>
-                          <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block' }}>by {log.user}</Typography>
-                          <Typography variant="caption" sx={{ color: 'text.disabled', fontSize: '0.65rem' }}>{formatDate(log.date)}</Typography>
-                       </Box>
-                    </Box>
-                  ))}
-               </Stack>
-            </Paper>
+            <TimelineCard
+              title="Workflow History"
+              subtitle="Recent RFQ lifecycle activity."
+              items={[
+                { title: 'RFQ Created', description: `by ${rfq.createdBy || 'System'}`, meta: formatDate(rfq.createdDate), icon: <EditIcon sx={{ fontSize: 15 }} /> },
+                ...(rfq.modifiedBy ? [{ title: 'Last Modified', description: `by ${rfq.modifiedBy}`, meta: formatDate(rfq.modifiedDate), icon: <HistoryIcon sx={{ fontSize: 15 }} />, color: theme.palette.warning.main }] : []),
+                ...(!isDraft ? [{ title: 'Approved & Sent', description: `by ${userData?.userName || 'System'}`, meta: rfq.rfqstatusValue || 'Approved', icon: <ApproveIcon sx={{ fontSize: 15 }} />, color: theme.palette.success.main }] : []),
+              ]}
+            />
+
+            <AttachmentCard />
           </Stack>
         </Grid>
       </Grid>
 
-      {rfq && (
-        <EmailPromptDialog
-          open={approvalDialogOpen}
-          initialEmail={rfq.customerEmail || rfq.leadEmail}
-          initialSubject={`Quote for RFQ #${rfq.rfqno}`}
-          initialBody={`Dear Customer,\n\nPlease find the quote for your RFQ #${rfq.rfqno} attached.\n\nBest Regards,\n${userData?.userName}`}
-          businessUnitId={userData?.businessUnitId || 0}
-          customerId={rfq.customerId}
-          loading={approveMutation.isPending}
-          onCancel={() => setApprovalDialogOpen(false)}
-          onConfirm={(email, subject, body, customerId) => {
-            approveMutation.mutate({
-              id: rfq.id,
-              approvedBy: userData?.userName || 'System',
-              email,
-              subject,
-              body,
-              customerId
-            });
-          }}
-        />
-      )}
+      <EmailPromptDialog
+        open={approvalDialogOpen}
+        initialEmail={rfq.customerEmail || rfq.leadEmail}
+        initialSubject={`Quote for RFQ #${rfq.rfqno}`}
+        initialBody={`Dear Customer,\n\nPlease find the quote for your RFQ #${rfq.rfqno} attached.\n\nBest Regards,\n${userData?.userName}`}
+        businessUnitId={userData?.businessUnitId || 0}
+        customerId={rfq.customerId}
+        loading={approveMutation.isPending}
+        onCancel={() => setApprovalDialogOpen(false)}
+        onConfirm={(email, subject, body, customerId) => {
+          approveMutation.mutate({
+            id: rfq.id,
+            approvedBy: userData?.userName || 'System',
+            email,
+            subject,
+            body,
+            customerId,
+          });
+        }}
+      />
     </Box>
   );
 };

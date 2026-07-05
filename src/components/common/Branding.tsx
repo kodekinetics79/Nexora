@@ -6,12 +6,14 @@ interface BrandingProps {
   fontSize?: number;
   logoSize?: number;
   showText?: boolean;
+  inverse?: boolean;
 }
 
 const Branding: React.FC<BrandingProps> = ({
   fontSize = 24,
   logoSize = 40,
   showText = true,
+  inverse = false,
 }) => {
   const theme = useTheme();
 
@@ -22,12 +24,13 @@ const Branding: React.FC<BrandingProps> = ({
           width: logoSize,
           height: logoSize,
           borderRadius: 2,
-          backgroundColor: theme.palette.primary.main,
+          backgroundColor: inverse ? 'rgba(255,255,255,0.08)' : theme.palette.primary.main,
+          border: inverse ? '1px solid rgba(255,255,255,0.14)' : 'none',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
           flexShrink: 0,
-          boxShadow: '0 4px 12px rgba(13, 71, 161, 0.2)',
+          boxShadow: inverse ? '0 10px 24px rgba(0,0,0,0.28)' : '0 4px 12px rgba(225, 29, 46, 0.22)',
         }}
       >
         <img 
@@ -43,7 +46,7 @@ const Branding: React.FC<BrandingProps> = ({
             sx={{
               fontSize: fontSize,
               fontWeight: 900,
-              color: 'text.primary',
+              color: inverse ? '#FFFFFF' : 'text.primary',
               fontFamily: '"Outfit", sans-serif',
               letterSpacing: '-1px',
               whiteSpace: 'nowrap',
@@ -55,7 +58,7 @@ const Branding: React.FC<BrandingProps> = ({
             sx={{
               fontSize: Math.max(9, Math.round(fontSize * 0.35)),
               fontWeight: 700,
-              color: 'primary.main',
+              color: inverse ? 'rgba(255,255,255,0.78)' : 'primary.main',
               letterSpacing: '0.1em',
               textTransform: 'uppercase',
               whiteSpace: 'nowrap',

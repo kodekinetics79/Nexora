@@ -265,7 +265,7 @@ const ShipmentListPage: React.FC = () => {
       </Paper>
 
       {/* Grid Container */}
-      <Paper sx={{ height: 'calc(100vh - 260px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
+      <Paper sx={{ width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
         {isLoading ? (
           <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', height: '100%', gap: 2 }}>
             <CircularProgress size={40} thickness={4} />
@@ -273,11 +273,12 @@ const ShipmentListPage: React.FC = () => {
           </Box>
         ) : (
           <DataGrid
+            autoHeight
             rows={filteredShipments}
             columns={columns}
             pageSizeOptions={[10, 25, 50]}
             initialState={{
-              pagination: { paginationModel: { pageSize: 15 } },
+              pagination: { paginationModel: { pageSize: 10 } },
             }}
             disableRowSelectionOnClick
             getRowId={(r) => r.id}

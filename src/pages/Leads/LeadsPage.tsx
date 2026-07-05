@@ -5,11 +5,8 @@ import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Chip, IconButton,
   Tooltip, Stack, TextField, MenuItem, CircularProgress,
-  Dialog, DialogTitle, DialogContent, DialogActions,
 } from '@mui/material';
-import {
-  DataGrid, type GridColDef, type GridPaginationModel
-} from '@mui/x-data-grid';
+import { type GridColDef, type GridPaginationModel } from '@mui/x-data-grid';
 import {
   CheckCircle as AcceptIcon,
   Cancel as RejectIcon,
@@ -21,6 +18,9 @@ import {
 import leadService from '../../api/services/leadService';
 import SearchField from '../../components/common/SearchField';
 import { useSnackbar } from 'notistack';
+import PageHeader from '../../components/common/PageHeader';
+import DataTable from '../../components/common/DataTable';
+import ConfirmDialog from '../../components/common/ConfirmDialog';
 
 const LeadsPage: React.FC = () => {
   const { t } = useTranslation();
@@ -265,37 +265,32 @@ const LeadsPage: React.FC = () => {
   ];
 
   return (
-    <Box sx={{ p: 3, bgcolor: 'background.default', minHeight: '100vh' }}>
-      {/* Header Section */}
-      <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-        <Box>
-          <Typography variant="h4" sx={{ fontWeight: 900, letterSpacing: '-0.02em', mb: 0.5 }}>
-            {t('leads')}
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Master Lead Dashboard
-          </Typography>
-        </Box>
-        <Stack direction="row" spacing={2}>
+    <Box>
+      <PageHeader
+        eyebrow="Procurement intake"
+        title={t('leads')}
+        subtitle="Review, qualify, accept, and reject inbound RFQ leads from email, manual uploads, and folders."
+        actions={
+          <>
           <Button
             variant="outlined"
             startIcon={syncEmailsMutation.isPending ? <CircularProgress size={20} color="inherit" /> : <EmailIcon />}
             onClick={() => syncEmailsMutation.mutate()}
             disabled={syncEmailsMutation.isPending}
-            sx={{ fontWeight: 800, borderRadius: 2, border: '2px solid' }}
           >
             {syncEmailsMutation.isPending ? 'Getting Leads...' : 'Get New Leads'}
           </Button>
           <Tooltip title="Refresh Data">
-            <IconButton onClick={() => refetch()} sx={{ bgcolor: 'white', boxShadow: 1 }}>
+            <IconButton onClick={() => refetch()} sx={{ bgcolor: 'background.paper', border: '1px solid', borderColor: 'divider' }}>
               <RefreshIcon />
             </IconButton>
           </Tooltip>
-        </Stack>
-      </Stack>
+          </>
+        }
+      />
 
       {/* Filters */}
-      <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
+      <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
         <SearchField width="360px" value={search} onChange={setSearch} placeholder="Search by RFQ No, Buyer Name..." />
         <TextField select size="small" value={leadSource} onChange={(e) => setLeadSource(e.target.value)} sx={{ minWidth: 160 }} label="Lead Source">
           <MenuItem value="all">All Sources</MenuItem>
@@ -306,8 +301,7 @@ const LeadsPage: React.FC = () => {
       </Paper>
 
       {/* Grid */}
-      <Paper sx={{ height: 'calc(100vh - 240px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
-        <DataGrid
+      <DataTable
           rows={data?.items ?? []}
           columns={columns}
           rowCount={data?.totalCount ?? 0}
@@ -316,17 +310,21 @@ const LeadsPage: React.FC = () => {
           paginationModel={paginationModel}
           paginationMode="server"
           onPaginationModelChange={setPaginationModel}
-          disableRowSelectionOnClick
           getRowId={(r) => r.id}
           rowHeight={100}
-        />
-      </Paper>
+      />
 
       {/* Rejection Dialog */}
-      <Dialog open={rejectionDialogOpen} onClose={() => setRejectionDialogOpen(false)}>
-        <DialogTitle sx={{ fontWeight: 800 }}>Reject Lead</DialogTitle>
-        <DialogContent dividers>
-          <Typography variant="body2" sx={{ mb: 2 }}>Please select a reason for rejecting this lead.</Typography>
+      <ConfirmDialog
+        open={rejectionDialogOpen}
+        onClose={() => setRejectionDialogOpen(false)}
+        title="Reject Lead"
+        description="Please select a reason for rejecting this lead."
+        confirmLabel="Confirm Rejection"
+        color="error"
+        loading={rejectMutation.isPending}
+        onConfirm={handleConfirmReject}
+      >
           <TextField
             select
             fullWidth
@@ -338,19 +336,7 @@ const LeadsPage: React.FC = () => {
               <MenuItem key={r.id} value={r.id}>{r.reasonName}</MenuItem>
             ))}
           </TextField>
-        </DialogContent>
-        <DialogActions sx={{ p: 2 }}>
-          <Button onClick={() => setRejectionDialogOpen(false)} color="inherit">Cancel</Button>
-          <Button
-            variant="contained"
-            color="error"
-            onClick={handleConfirmReject}
-            disabled={!rejectionReasonId || rejectMutation.isPending}
-          >
-            Confirm Rejection
-          </Button>
-        </DialogActions>
-      </Dialog>
+      </ConfirmDialog>
     </Box>
   );
 };

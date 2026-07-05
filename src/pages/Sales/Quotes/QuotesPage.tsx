@@ -3,12 +3,10 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
-  Box, Typography, Paper, Button, Chip, IconButton,
+  Box, Typography, Paper, Button, IconButton,
   Tooltip, Stack, Alert, Snackbar
 } from '@mui/material';
-import {
-  DataGrid, type GridColDef, type GridPaginationModel
-} from '@mui/x-data-grid';
+import { type GridColDef, type GridPaginationModel } from '@mui/x-data-grid';
 import {
   Visibility as ViewIcon,
   Refresh as RefreshIcon,
@@ -21,6 +19,9 @@ import quoteService from '../../../api/services/quoteService';
 import SearchField from '../../../components/common/SearchField';
 import { useAuth } from '../../../context/AuthContext';
 import dayjs from 'dayjs';
+import PageHeader from '../../../components/common/PageHeader';
+import DataTable from '../../../components/common/DataTable';
+import StatusBadge from '../../../components/common/StatusBadge';
 
 const QuotesPage: React.FC = () => {
   const { t: _t } = useTranslation();
@@ -126,19 +127,7 @@ const QuotesPage: React.FC = () => {
       headerName: 'Status',
       width: 120,
       renderCell: (p) => (
-        <Chip
-          label={p.value}
-          size="small"
-          sx={{ 
-            fontWeight: 900, 
-            height: 24, 
-            fontSize: '0.7rem',
-            bgcolor: p.value === 'Sent' ? 'success.lighter' : 'action.hover',
-            color: p.value === 'Sent' ? 'success.main' : 'text.secondary',
-            border: '1px solid',
-            borderColor: p.value === 'Sent' ? 'success.light' : 'divider'
-          }}
-        />
+        <StatusBadge label={p.value || 'Draft'} />
       )
     },
     {
@@ -178,39 +167,34 @@ const QuotesPage: React.FC = () => {
   ];
 
   return (
-    <Box sx={{ p: 3, bgcolor: 'background.default', minHeight: '100vh' }}>
-      <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-        <Box>
-          <Typography variant="h4" sx={{ fontWeight: 900, letterSpacing: '-0.02em', mb: 0.5 }}>
-            Quote Management
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Manage sales quotations and customer offers
-          </Typography>
-        </Box>
-        <Stack direction="row" spacing={2}>
+    <Box>
+      <PageHeader
+        eyebrow="Sales workspace"
+        title="Quote Management"
+        subtitle="Create, send, download, and track customer quotations from one streamlined sales desk."
+        actions={
+          <>
           <Button
             variant="contained"
             startIcon={<AddIcon />}
             onClick={() => navigate('/sales/quotes/create')}
-            sx={{ fontWeight: 800, borderRadius: 2 }}
           >
             Create Quote
           </Button>
           <Tooltip title="Refresh Data">
-            <IconButton onClick={() => refetch()} sx={{ bgcolor: 'white', boxShadow: 1 }}>
+            <IconButton onClick={() => refetch()} sx={{ bgcolor: 'background.paper', border: '1px solid', borderColor: 'divider' }}>
               <RefreshIcon />
             </IconButton>
           </Tooltip>
-        </Stack>
-      </Stack>
+          </>
+        }
+      />
 
-      <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
+      <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
         <SearchField width="400px" value={search} onChange={setSearch} placeholder="Search by Quote No, Customer, RFQ No..." />
       </Paper>
 
-      <Paper sx={{ height: 'calc(100vh - 240px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
-        <DataGrid
+      <DataTable
           rows={data?.items ?? []}
           columns={columns}
           rowCount={data?.totalItems ?? 0}
@@ -219,11 +203,9 @@ const QuotesPage: React.FC = () => {
           paginationModel={paginationModel}
           paginationMode="server"
           onPaginationModelChange={setPaginationModel}
-          disableRowSelectionOnClick
           getRowId={(r) => r.id}
           rowHeight={70}
-        />
-      </Paper>
+      />
 
       <Snackbar 
         open={snackbar.open} 

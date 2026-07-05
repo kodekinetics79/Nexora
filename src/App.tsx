@@ -1,57 +1,61 @@
+import { lazy, Suspense } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import MainLayout from './components/layout/MainLayout';
-import LoginPage from './pages/Login/LoginPage';
-import SetupMaster from './pages/Setup/SetupMaster';
-import CurrencyPage from './pages/Setup/Currency/CurrencyPage';
-import WarehousePage from './pages/Setup/Warehouse/WarehousePage';
-import UomPage from './pages/Setup/UOM/UomPage';
-import QuoteFormatPage from './pages/Setup/QuoteFormat/QuoteFormatPage';
-import LocationMaster from './pages/Setup/Location/LocationMaster';
-import UsersPage from './pages/Security/Users/UsersPage';
-import RolesPermissionsPage from './pages/Security/Roles/RolesPermissionsPage';
-import BusinessUnitPage from './pages/Setup/BusinessUnit/BusinessUnitPage';
-import ProductsPage from './pages/Inventory/ProductsPage';
-import ProductDetailPage from './pages/Inventory/ProductDetailPage';
-import ProductCategoryPage from './pages/Inventory/ProductCategoryPage';
-import ProductSubCategoryPage from './pages/Inventory/ProductSubCategoryPage';
-import SuppliersPage from './pages/Suppliers/SuppliersPage';
-import SupplierDetailPage from './pages/Suppliers/SupplierDetailPage';
-import QuotedItemsPage from './pages/Suppliers/QuotedItemsPage';
-import PurchaseOrdersPage from './pages/Suppliers/PurchaseOrdersPage';
-import CustomersPage from './pages/Customers/CustomersPage';
-import CustomerDetailPage from './pages/Customers/CustomerDetailPage';
-import LeadsPage from './pages/Leads/LeadsPage';
-import OutstandingLeadsPage from './pages/Leads/OutstandingLeadsPage';
-import AssignedLeadsPage from './pages/Leads/AssignedLeadsPage';
-import ManualUploadLeadsPage from './pages/Leads/ManualUploadLeadsPage';
-import FolderUploadLeadsPage from './pages/Leads/FolderUploadLeadsPage';
-import LeadDetailPage from './pages/Leads/LeadDetailPage';
-import AllRFQsPage from './pages/Procurement/RFQs/AllRFQsPage';
-import DraftRFQsPage from './pages/Procurement/RFQs/DraftRFQsPage';
-import OutstandingRFQsPage from './pages/Procurement/RFQs/OutstandingRFQsPage';
-import ProcessRFQPage from './pages/Procurement/RFQs/ProcessRFQPage';
-import ViewRFQPage from './pages/Procurement/RFQs/ViewRFQPage';
-import DashboardPage from './pages/Dashboard/DashboardPage';
-import QuotesPage from './pages/Sales/Quotes/QuotesPage';
-import CreateQuotePage from './pages/Sales/Quotes/CreateQuotePage';
-import QuoteViewPage from './pages/Sales/Quotes/QuoteViewPage';
-import EditQuotePage from './pages/Sales/Quotes/EditQuotePage';
-import OrderListPage from './pages/Sales/Orders/OrderListPage';
-import CreateOrderPage from './pages/Sales/Orders/CreateOrderPage';
-import OrderViewPage from './pages/Sales/Orders/OrderViewPage';
-import OrderInvoicePage from './pages/Sales/Shipments/OrderInvoicePage';
-import ShipmentListPage from './pages/Sales/Shipments/ShipmentListPage';
-import CreateShipmentPage from './pages/Sales/Shipments/CreateShipmentPage';
-import ShipmentViewPage from './pages/Sales/Shipments/ShipmentViewPage';
 import { Box } from '@mui/material';
-import ShipmentInvoicePage from './pages/Sales/Shipments/ShipmentInvoicePage';
 import PermissionGuard from './components/common/PermissionGuard';
-import PriceStructurePage from './pages/Setup/PriceStructure/PriceStructurePage';
+import LoadingSkeleton from './components/common/LoadingSkeleton';
+
+const LoginPage = lazy(() => import('./pages/Login/LoginPage'));
+const DashboardPage = lazy(() => import('./pages/Dashboard/DashboardPage'));
+const SetupMaster = lazy(() => import('./pages/Setup/SetupMaster'));
+const CurrencyPage = lazy(() => import('./pages/Setup/Currency/CurrencyPage'));
+const WarehousePage = lazy(() => import('./pages/Setup/Warehouse/WarehousePage'));
+const UomPage = lazy(() => import('./pages/Setup/UOM/UomPage'));
+const QuoteFormatPage = lazy(() => import('./pages/Setup/QuoteFormat/QuoteFormatPage'));
+const LocationMaster = lazy(() => import('./pages/Setup/Location/LocationMaster'));
+const UsersPage = lazy(() => import('./pages/Security/Users/UsersPage'));
+const RolesPermissionsPage = lazy(() => import('./pages/Security/Roles/RolesPermissionsPage'));
+const BusinessUnitPage = lazy(() => import('./pages/Setup/BusinessUnit/BusinessUnitPage'));
+const ProductsPage = lazy(() => import('./pages/Inventory/ProductsPage'));
+const ProductDetailPage = lazy(() => import('./pages/Inventory/ProductDetailPage'));
+const ProductCategoryPage = lazy(() => import('./pages/Inventory/ProductCategoryPage'));
+const ProductSubCategoryPage = lazy(() => import('./pages/Inventory/ProductSubCategoryPage'));
+const SuppliersPage = lazy(() => import('./pages/Suppliers/SuppliersPage'));
+const SupplierDetailPage = lazy(() => import('./pages/Suppliers/SupplierDetailPage'));
+const QuotedItemsPage = lazy(() => import('./pages/Suppliers/QuotedItemsPage'));
+const PurchaseOrdersPage = lazy(() => import('./pages/Suppliers/PurchaseOrdersPage'));
+const CustomersPage = lazy(() => import('./pages/Customers/CustomersPage'));
+const CustomerDetailPage = lazy(() => import('./pages/Customers/CustomerDetailPage'));
+const LeadsPage = lazy(() => import('./pages/Leads/LeadsPage'));
+const OutstandingLeadsPage = lazy(() => import('./pages/Leads/OutstandingLeadsPage'));
+const AssignedLeadsPage = lazy(() => import('./pages/Leads/AssignedLeadsPage'));
+const ManualUploadLeadsPage = lazy(() => import('./pages/Leads/ManualUploadLeadsPage'));
+const FolderUploadLeadsPage = lazy(() => import('./pages/Leads/FolderUploadLeadsPage'));
+const LeadDetailPage = lazy(() => import('./pages/Leads/LeadDetailPage'));
+const AllRFQsPage = lazy(() => import('./pages/Procurement/RFQs/AllRFQsPage'));
+const DraftRFQsPage = lazy(() => import('./pages/Procurement/RFQs/DraftRFQsPage'));
+const OutstandingRFQsPage = lazy(() => import('./pages/Procurement/RFQs/OutstandingRFQsPage'));
+const ProcessRFQPage = lazy(() => import('./pages/Procurement/RFQs/ProcessRFQPage'));
+const ViewRFQPage = lazy(() => import('./pages/Procurement/RFQs/ViewRFQPage'));
+const QuotesPage = lazy(() => import('./pages/Sales/Quotes/QuotesPage'));
+const CreateQuotePage = lazy(() => import('./pages/Sales/Quotes/CreateQuotePage'));
+const QuoteViewPage = lazy(() => import('./pages/Sales/Quotes/QuoteViewPage'));
+const EditQuotePage = lazy(() => import('./pages/Sales/Quotes/EditQuotePage'));
+const OrderListPage = lazy(() => import('./pages/Sales/Orders/OrderListPage'));
+const CreateOrderPage = lazy(() => import('./pages/Sales/Orders/CreateOrderPage'));
+const OrderViewPage = lazy(() => import('./pages/Sales/Orders/OrderViewPage'));
+const OrderInvoicePage = lazy(() => import('./pages/Sales/Shipments/OrderInvoicePage'));
+const ShipmentListPage = lazy(() => import('./pages/Sales/Shipments/ShipmentListPage'));
+const CreateShipmentPage = lazy(() => import('./pages/Sales/Shipments/CreateShipmentPage'));
+const ShipmentViewPage = lazy(() => import('./pages/Sales/Shipments/ShipmentViewPage'));
+const ShipmentInvoicePage = lazy(() => import('./pages/Sales/Shipments/ShipmentInvoicePage'));
+const PriceStructurePage = lazy(() => import('./pages/Setup/PriceStructure/PriceStructurePage'));
 
 function App() {
   return (
-    <Routes>
-      <Route path="/" element={<Navigate to="/login" replace />} />
+    <Suspense fallback={<Box sx={{ p: 3 }}><LoadingSkeleton variant="table" /></Box>}>
+      <Routes>
+        <Route path="/" element={<Navigate to="/login" replace />} />
       <Route path="/dashboard" element={<MainLayout><PermissionGuard moduleName="Dashboard" redirect><DashboardPage /></PermissionGuard></MainLayout>} />
       
       {/* Sales Routes */}
@@ -136,8 +140,9 @@ function App() {
       <Route path="/leads" element={<Navigate to="/procurement/leads/all" replace />} />
 
       <Route path="/login" element={<LoginPage />} />
-      <Route path="*" element={<Box sx={{ p: 4 }}>404 Not Found</Box>} />
-    </Routes>
+        <Route path="*" element={<Box sx={{ p: 4 }}>404 Not Found</Box>} />
+      </Routes>
+    </Suspense>
   );
 }
 

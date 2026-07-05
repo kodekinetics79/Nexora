@@ -9,6 +9,9 @@ import {
   ListItemText,
   Collapse,
   Tooltip,
+  Typography,
+  alpha,
+  useTheme,
 } from '@mui/material';
 import { useTranslation } from 'react-i18next';
 import {
@@ -30,6 +33,7 @@ import { useAuth } from '../../context/AuthContext';
 
 interface SidebarProps {
   collapsed: boolean;
+  onNavigate?: () => void;
 }
 
 interface MenuItem {
@@ -39,14 +43,27 @@ interface MenuItem {
   path?: string;
   moduleName?: string;
   activePrefixes?: string[];
-  children?: { key: string; label: string; path: string; moduleName?: string; icon?: React.ReactNode; activePrefixes?: string[] }[];
+  excludeActivePrefixes?: string[];
+  children?: {
+    key: string;
+    label: string;
+    path: string;
+    moduleName?: string;
+    icon?: React.ReactNode;
+    activePrefixes?: string[];
+    excludeActivePrefixes?: string[];
+  }[];
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
+const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
+  const theme = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useTranslation();
   const { hasPermission } = useAuth();
+  const sidebarText = 'rgba(226, 232, 240, 0.9)';
+  const sidebarMuted = 'rgba(148, 163, 184, 0.92)';
+  const sidebarHover = 'rgba(255, 255, 255, 0.075)';
   
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
     'rfq_mgmt': location.pathname.includes('/rfqs'),
@@ -97,7 +114,14 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
         icon: <SupplierIcon />,
         moduleName: 'Suppliers',
         children: [
-          { key: 'suppliers', label: t('suppliers'), path: '/suppliers', moduleName: 'Suppliers', activePrefixes: ['/suppliers/'] },
+          {
+            key: 'suppliers',
+            label: t('suppliers'),
+            path: '/suppliers',
+            moduleName: 'Suppliers',
+            activePrefixes: ['/suppliers/'],
+            excludeActivePrefixes: ['/suppliers/quoted-items', '/suppliers/purchase-orders'],
+          },
           { key: 'quoted-items', label: t('quoted_items'), path: '/suppliers/quoted-items', moduleName: 'Supplier History' },
           { key: 'purchase-orders', label: t('purchase_orders'), path: '/suppliers/purchase-orders', moduleName: 'Orders' },
         ]
@@ -158,35 +182,47 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
     const hasChildren = !!item.children;
     const isOpen = openGroups[item.key];
 
-    const isPathMatched = (path: string, prefixes?: string[]) => {
+    const isPathMatched = (path: string, prefixes?: string[], excludePrefixes?: string[]) => {
+      if (excludePrefixes?.some((prefix) => location.pathname === prefix || location.pathname.startsWith(`${prefix}/`))) return false;
       if (location.pathname === path || (path.startsWith('/procurement') && location.pathname === path.replace('/procurement', ''))) return true;
       if (prefixes && prefixes.some(p => location.pathname.startsWith(p))) return true;
       return false;
     };
 
     const isSelected = hasChildren
-      ? item.children!.some(child => isPathMatched(child.path, child.activePrefixes))
-      : item.path ? isPathMatched(item.path, item.activePrefixes) : false;
+      ? item.children!.some(child => isPathMatched(child.path, child.activePrefixes, child.excludeActivePrefixes))
+      : item.path ? isPathMatched(item.path, item.activePrefixes, item.excludeActivePrefixes) : false;
 
     return (
       <React.Fragment key={item.key}>
         <ListItem disablePadding sx={{ display: 'block', mb: 0.5 }}>
           <Tooltip title={collapsed ? item.label : ""} placement="right">
             <ListItemButton
-              onClick={() => hasChildren ? handleGroupClick(item.key) : navigate(item.path!)}
+              onClick={() => {
+                if (hasChildren) {
+                  handleGroupClick(item.key);
+                } else {
+                  navigate(item.path!);
+                  onNavigate?.();
+                }
+              }}
               sx={{
-                minHeight: 44,
+                minHeight: 42,
                 justifyContent: collapsed ? 'center' : 'initial',
-                px: 2,
-                borderRadius: '10px',
-                backgroundColor: isSelected ? 'primary.main' : 'transparent',
-                color: isSelected ? 'primary.contrastText' : 'text.primary',
+                px: collapsed ? 1 : 1.5,
+                borderRadius: 2,
+                background: isSelected
+                  ? `linear-gradient(135deg, ${theme.palette.primary.main}, ${theme.palette.primary.dark})`
+                  : 'transparent',
+                color: isSelected ? theme.palette.primary.contrastText : sidebarText,
                 '&:hover': {
-                  backgroundColor: isSelected ? 'primary.dark' : 'action.hover',
-                  transform: 'translateX(4px)',
+                  background: isSelected
+                    ? `linear-gradient(135deg, ${theme.palette.primary.dark}, ${theme.palette.primary.main})`
+                    : sidebarHover,
+                  transform: collapsed ? 'translateY(-1px)' : 'translateX(3px)',
                 },
                 transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
-                boxShadow: isSelected ? (theme) => `0 10px 15px -3px ${theme.palette.primary.main}4D` : 'none',
+                boxShadow: isSelected ? `0 18px 34px -18px ${theme.palette.primary.main}` : 'none',
               }}
             >
               <ListItemIcon
@@ -205,7 +241,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
                   <ListItemText
                     primary={item.label}
                     slotProps={{
-                      primary: { sx: { fontSize: '0.875rem', fontWeight: isSelected ? 600 : 500 } }
+                      primary: { sx: { fontSize: '0.85rem', fontWeight: isSelected ? 800 : 700 } }
                     }}
                   />
                   {hasChildren ? (isOpen ? <ExpandLess /> : <ExpandMore />) : null}
@@ -219,22 +255,29 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
           <Collapse in={isOpen} timeout="auto" unmountOnExit>
             <List component="div" disablePadding>
               {item.children?.map((child) => {
-                const isChildSelected = isPathMatched(child.path, child.activePrefixes);
+                const isChildSelected = isPathMatched(child.path, child.activePrefixes, child.excludeActivePrefixes);
                 return (
                   <ListItemButton
                     key={child.key}
-                    onClick={() => navigate(child.path)}
+                    onClick={() => {
+                      navigate(child.path);
+                      onNavigate?.();
+                    }}
                     sx={{
-                      minHeight: 40,
-                      pl: 4,
+                      minHeight: 36,
+                      pl: 4.5,
                       pr: 2,
-                      mx: 1,
+                      mx: 0.75,
                       mb: 0.2,
                       borderRadius: 1.5,
-                      color: isChildSelected ? 'primary.main' : 'text.secondary',
-                      backgroundColor: isChildSelected ? 'rgba(25, 118, 210, 0.08)' : 'transparent',
+                      color: isChildSelected ? '#fff' : sidebarMuted,
+                      backgroundColor: isChildSelected ? alpha(theme.palette.primary.main, 0.22) : 'transparent',
+                      border: '1px solid',
+                      borderColor: isChildSelected ? alpha(theme.palette.primary.main, 0.35) : 'transparent',
+                      boxShadow: isChildSelected ? `inset 3px 0 0 ${theme.palette.primary.main}` : 'none',
                       '&:hover': {
-                        backgroundColor: 'rgba(0, 0, 0, 0.03)',
+                        backgroundColor: isChildSelected ? alpha(theme.palette.primary.main, 0.28) : sidebarHover,
+                        color: '#fff',
                       },
                     }}
                   >
@@ -244,7 +287,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
                     <ListItemText
                       primary={child.label}
                       slotProps={{
-                        primary: { sx: { fontSize: '0.8rem', fontWeight: isChildSelected ? 600 : 400 } }
+                        primary: { sx: { fontSize: '0.78rem', fontWeight: isChildSelected ? 800 : 650 } }
                       }}
                     />
                   </ListItemButton>
@@ -262,10 +305,38 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
       overflowY: 'auto',
       overflowX: 'hidden',
       height: '100%',
-      pt: 2,
-      pb: 4,
-      px: 1.5,
+      pt: 1,
+      pb: 2,
+      px: 0.5,
+      scrollbarWidth: 'none',
+      msOverflowStyle: 'none',
+      '&::-webkit-scrollbar': {
+        width: 0,
+        height: 0,
+        display: 'none',
+      },
     }}>
+      {!collapsed ? (
+        <Box
+          sx={{
+            mx: 0.5,
+            mb: 1.5,
+            p: 1.5,
+            borderRadius: 2,
+            border: '1px solid',
+            borderColor: 'rgba(255,255,255,0.08)',
+            background: `linear-gradient(135deg, ${alpha(theme.palette.primary.main, 0.22)}, rgba(255,255,255,0.04))`,
+            boxShadow: `inset 0 1px 0 rgba(255,255,255,0.08), 0 18px 40px ${alpha('#000', 0.16)}`,
+          }}
+        >
+          <Typography variant="caption" sx={{ color: sidebarMuted, fontWeight: 800, textTransform: 'uppercase' }}>
+            Procurement OS
+          </Typography>
+          <Typography variant="body2" sx={{ color: '#fff', fontWeight: 850, mt: 0.25 }}>
+            Live RFQ workspace
+          </Typography>
+        </Box>
+      ) : null}
       <List sx={{ px: 0 }}>
         {menuItems.map(renderMenuItem)}
       </List>

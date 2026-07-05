@@ -1,9 +1,7 @@
-import { useEffect, useState } from 'react';
-import { Box, Typography, Paper, Card, CircularProgress, IconButton, Tooltip, useTheme, Avatar, Grid, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Chip } from '@mui/material';
+import { Box, Typography, Paper, IconButton, Tooltip, useTheme, Grid, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Chip } from '@mui/material';
+import { useQuery } from '@tanstack/react-query';
 
 import { 
-  TrendingUp, 
-  TrendingDown, 
   LocalAtm, 
   Assignment, 
   People,
@@ -24,6 +22,9 @@ import {
   ScatterChart, Scatter, ZAxis
 } from 'recharts';
 import dayjs from 'dayjs';
+import PageHeader from '../../components/common/PageHeader';
+import StatCard from '../../components/common/StatCard';
+import LoadingSkeleton from '../../components/common/LoadingSkeleton';
 
 export interface StatTrendDTO {
   value: string;
@@ -97,78 +98,25 @@ export interface DashboardDataDTO {
   sourceDistribution: CategoryDistributionDTO[];
 }
 
-const StatCard = ({ title, value, icon, trend, trendValue, color, delay }: any) => {
-  const { mode } = useAppTheme();
-  return (
-    <Card sx={{ 
-      borderRadius: 4, 
-      p: 3, 
-      backgroundColor: mode === 'dark' ? 'rgba(30, 41, 59, 0.7)' : 'rgba(255, 255, 255, 0.8)',
-      backdropFilter: 'blur(12px)',
-      border: '1px solid',
-      borderColor: mode === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)',
-      boxShadow: mode === 'dark' ? `0 8px 32px ${color}1A` : `0 8px 32px ${color}15`,
-      transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-      animation: `slideUp 0.5s ease-out ${delay}s both`,
-      '@keyframes slideUp': {
-        from: { opacity: 0, transform: 'translateY(20px)' },
-        to: { opacity: 1, transform: 'translateY(0)' }
-      },
-      '&:hover': {
-        transform: 'translateY(-4px)',
-        boxShadow: mode === 'dark' ? `0 12px 40px ${color}33` : `0 12px 40px ${color}25`,
-        borderColor: `${color}40`,
-      }
-    }}>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 3 }}>
-        <Box>
-          <Typography variant="overline" sx={{ color: 'text.secondary', fontWeight: 700, letterSpacing: 1 }}>{title}</Typography>
-          <Typography variant="h4" sx={{ fontWeight: 800, mt: 0.5, color: 'text.primary' }}>{value}</Typography>
-        </Box>
-        <Avatar sx={{ bgcolor: `${color}15`, color: color, width: 48, height: 48, borderRadius: 3 }}>
-          {icon}
-        </Avatar>
-      </Box>
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', bgcolor: trend === 'up' ? 'success.main' : 'error.main', color: '#fff', px: 0.8, py: 0.2, borderRadius: 1 }}>
-          {trend === 'up' ? <TrendingUp sx={{ fontSize: 14, mr: 0.5 }} /> : <TrendingDown sx={{ fontSize: 14, mr: 0.5 }} />}
-          <Typography variant="caption" sx={{ fontWeight: 700 }}>
-            {trendValue}
-          </Typography>
-        </Box>
-        <Typography variant="caption" sx={{ color: 'text.secondary', fontWeight: 500 }}>vs last month</Typography>
-      </Box>
-    </Card>
-  );
-};
-
 export default function DashboardPage() {
   const { mode, primaryColor } = useAppTheme();
   const theme = useTheme();
-  const [loading, setLoading] = useState(true);
-  const [data, setData] = useState<DashboardDataDTO | null>(null);
 
   const fetchDashboardData = async () => {
-    setLoading(true);
-    try {
-      const response = await axiosInstance.get('/api/Dashboard/1');
-      setData(response.data);
-    } catch (error) {
-      console.error("Failed to fetch dashboard data, using mock", error);
-      // Removed extensive mock since user has data now, but keep empty state fallback
-    } finally {
-      setLoading(false);
-    }
+    const response = await axiosInstance.get<DashboardDataDTO>('/api/Dashboard/1');
+    return response.data;
   };
 
-  useEffect(() => {
-    fetchDashboardData();
-  }, []);
+  const { data, isLoading, refetch } = useQuery({
+    queryKey: ['dashboard', 1],
+    queryFn: fetchDashboardData,
+    staleTime: 5 * 60_000,
+  });
 
-  if (loading) {
+  if (isLoading) {
     return (
-      <Box sx={{ display: 'flex', height: '80vh', alignItems: 'center', justifyContent: 'center' }}>
-        <CircularProgress size={60} thickness={4} sx={{ color: primaryColor }} />
+      <Box sx={{ p: { xs: 1, md: 2 } }}>
+        <LoadingSkeleton variant="dashboard" />
       </Box>
     );
   }
@@ -181,7 +129,7 @@ export default function DashboardPage() {
   };
 
   // Extract variables
-  const pieColors = ['#f59e0b', '#3b82f6', '#10b981', '#ef4444', '#8b5cf6', '#ec4899'];
+  const pieColors = ['#E11D2E', '#0F1B2D', '#16A34A', '#F59E0B', '#64748B', '#DC2626'];
   const chartData = data?.volumeTrend || [];
   
   const mappedPieData = (data?.statusDistribution || []).map((item, index) => ({
@@ -198,26 +146,23 @@ export default function DashboardPage() {
   const sourcePieData = (data?.sourceDistribution || []).map((item, index) => ({
     name: item.categoryName,
     value: item.count,
-    color: ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6'][index % 4]
+    color: ['#E11D2E', '#0F1B2D', '#16A34A', '#F59E0B'][index % 4]
   }));
 
   return (
-    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1600, margin: '0 auto' }}>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', mb: 4 }}>
-        <Box>
-          <Typography variant="h4" sx={{ fontWeight: 800, color: 'text.primary', mb: 1, letterSpacing: '-0.5px' }}>
-            NEXORA Intelligence
-          </Typography>
-          <Typography variant="body1" sx={{ color: 'text.secondary', fontWeight: 500 }}>
-            Real-time procurement & sales analytics overview.
-          </Typography>
-        </Box>
-        <Tooltip title="Refresh Data">
-          <IconButton onClick={fetchDashboardData} sx={{ bgcolor: mode === 'dark' ? 'rgba(255,255,255,0.05)' : '#fff', boxShadow: '0 2px 12px rgba(0,0,0,0.08)', borderRadius: 3, width: 44, height: 44 }}>
-            <Refresh />
-          </IconButton>
-        </Tooltip>
-      </Box>
+    <Box>
+      <PageHeader
+        eyebrow="Executive analytics"
+        title="RFQ Intelligence"
+        subtitle="Real-time procurement, quotation, order, and lead performance across the active business unit."
+        actions={
+          <Tooltip title="Refresh Data">
+            <IconButton onClick={() => refetch()} sx={{ bgcolor: 'background.paper', border: '1px solid', borderColor: 'divider' }}>
+              <Refresh />
+            </IconButton>
+          </Tooltip>
+        }
+      />
 
       {/* Row 1: Key Stats */}
       <Grid container spacing={3} sx={{ mb: 4 }}>
@@ -229,7 +174,7 @@ export default function DashboardPage() {
             trend={data?.stats?.ordersTrend?.isUp ? "up" : "down"}
             trendValue={data?.stats?.ordersTrend?.value || "0%"}
             color="#10b981"
-            delay={0.1}
+            caption="vs last month"
           />
         </Grid>
         <Grid size={{ xs: 12, sm: 6, md: 3 }}>
@@ -240,7 +185,7 @@ export default function DashboardPage() {
             trend={data?.stats?.rfqsTrend?.isUp ? "up" : "down"}
             trendValue={data?.stats?.rfqsTrend?.value || "0%"}
             color={primaryColor}
-            delay={0.2}
+            caption="vs last month"
           />
         </Grid>
         <Grid size={{ xs: 12, sm: 6, md: 3 }}>
@@ -250,8 +195,8 @@ export default function DashboardPage() {
             icon={<Speed />}
             trend="up"
             trendValue="Auto"
-            color="#3b82f6"
-            delay={0.3}
+            color="#0F1B2D"
+            caption="calculated pipeline"
           />
         </Grid>
         <Grid size={{ xs: 12, sm: 6, md: 3 }}>
@@ -262,7 +207,7 @@ export default function DashboardPage() {
             trend={data?.stats?.leadsTrend?.isUp ? "up" : "down"}
             trendValue={data?.stats?.leadsTrend?.value || "0%"}
             color="#f59e0b"
-            delay={0.4}
+            caption="vs last month"
           />
         </Grid>
       </Grid>
@@ -377,7 +322,7 @@ export default function DashboardPage() {
             borderColor: mode === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)',
           }}>
             <Typography variant="h6" sx={{ fontWeight: 800, mb: 3, display: 'flex', alignItems: 'center', gap: 1.5, fontSize: '1.1rem' }}>
-              <Speed sx={{ color: '#3b82f6' }} /> Lead Source Completeness (Email vs Manual vs Folder)
+              <Speed sx={{ color: 'primary.main' }} /> Lead Source Completeness (Email vs Manual vs Folder)
             </Typography>
             <Grid container spacing={3} sx={{ alignItems: 'center' }}>
               <Grid size={{ xs: 12, md: 5 }}>

@@ -130,10 +130,18 @@ const ProductsPage: React.FC = () => {
     {
       field: 'qtyOnHand',
       headerName: 'Qty on Hand',
-      width: 140,
+      width: 120,
+      align: 'right',
+      headerAlign: 'right',
+      renderCell: (p) => <Typography variant="body2" sx={{ fontWeight: 800 }}>{p.value}</Typography>,
+    },
+    {
+      field: 'stockStatus',
+      headerName: 'Stock',
+      width: 120,
+      sortable: false,
       renderCell: (p) => (
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-          <Typography variant="body2" sx={{ fontWeight: 700 }}>{p.value}</Typography>
+        <Box sx={{ display: 'flex', alignItems: 'center' }}>
           {getStockChip(p.row.qtyOnHand, p.row.reorderPoint)}
         </Box>
       ),
@@ -226,8 +234,9 @@ const ProductsPage: React.FC = () => {
       </Paper>
 
       {/* Data Grid */}
-      <Paper sx={{ height: 'calc(100vh - 310px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
+      <Paper sx={{ width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
         <DataGrid
+          autoHeight
           rows={products}
           columns={columns}
           rowCount={totalItems}

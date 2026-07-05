@@ -70,10 +70,10 @@ const ManualUploadLeadsPage: React.FC = () => {
             sx={{
               mb: 4,
               borderRadius: 2,
-              bgcolor: '#eff6ff',
-              color: '#1e40af',
-              border: '1px solid #bfdbfe',
-              '& .MuiAlert-icon': { color: '#3b82f6' }
+              bgcolor: 'rgba(225, 29, 46, 0.06)',
+              color: 'text.primary',
+              border: '1px solid rgba(225, 29, 46, 0.16)',
+              '& .MuiAlert-icon': { color: 'primary.main' }
             }}
           >
             <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>AI-Powered Lead Extraction</Typography>

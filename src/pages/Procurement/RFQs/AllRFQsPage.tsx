@@ -6,9 +6,7 @@ import {
   Box, Typography, Paper, Button, Chip, IconButton,
   Tooltip, Stack,
 } from '@mui/material';
-import {
-  DataGrid, type GridColDef, type GridPaginationModel
-} from '@mui/x-data-grid';
+import { type GridColDef, type GridPaginationModel } from '@mui/x-data-grid';
 import {
   Visibility as ViewIcon,
   Refresh as RefreshIcon,
@@ -19,6 +17,9 @@ import {
 import rfqService from '../../../api/services/rfqService';
 import SearchField from '../../../components/common/SearchField';
 import { useAuth } from '../../../context/AuthContext';
+import PageHeader from '../../../components/common/PageHeader';
+import DataTable from '../../../components/common/DataTable';
+import StatusBadge from '../../../components/common/StatusBadge';
 
 const AllRFQsPage: React.FC = () => {
   const { t } = useTranslation();
@@ -137,12 +138,7 @@ const AllRFQsPage: React.FC = () => {
       renderCell: (p) => {
         const status = statusColorMap[p.row.rfqstatusId] || { label: p.row.rfqstatusValue || 'Unknown', color: 'default' };
         return (
-          <Chip
-            label={status.label}
-            size="small"
-            color={status.color}
-            sx={{ fontWeight: 900, height: 22, fontSize: '0.7rem', borderRadius: 1.5 }}
-          />
+          <StatusBadge label={status.label} tone={status.color === 'success' ? 'success' : status.color === 'error' ? 'error' : status.color === 'primary' ? 'primary' : 'warning'} />
         );
       }
     },
@@ -167,22 +163,16 @@ const AllRFQsPage: React.FC = () => {
   ];
 
   return (
-    <Box sx={{ p: 3, bgcolor: 'background.default', minHeight: '100vh' }}>
-      {/* Header Section */}
-      <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-        <Box>
-          <Typography variant="h4" sx={{ fontWeight: 900, letterSpacing: '-0.02em', mb: 0.5 }}>
-            {t('all_rfqs')}
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Manage and track all Request for Quotations
-          </Typography>
-        </Box>
-        <Stack direction="row" spacing={2}>
+    <Box>
+      <PageHeader
+        eyebrow="RFQ command center"
+        title={t('all_rfqs')}
+        subtitle="Manage incoming requests, deadlines, line items, and linked customer opportunities."
+        actions={
+          <>
           <Button
             variant="outlined"
             startIcon={<UploadIcon />}
-            sx={{ fontWeight: 800, borderRadius: 2 }}
           >
             Upload RFQ
           </Button>
@@ -190,26 +180,25 @@ const AllRFQsPage: React.FC = () => {
             variant="contained"
             startIcon={<AddIcon />}
             onClick={() => navigate('/procurement/rfqs/create')}
-            sx={{ fontWeight: 800, borderRadius: 2 }}
           >
             Create RFQ
           </Button>
           <Tooltip title="Refresh Data">
-            <IconButton onClick={() => refetch()} sx={{ bgcolor: 'white', boxShadow: 1 }}>
+            <IconButton onClick={() => refetch()} sx={{ bgcolor: 'background.paper', border: '1px solid', borderColor: 'divider' }}>
               <RefreshIcon />
             </IconButton>
           </Tooltip>
-        </Stack>
-      </Stack>
+          </>
+        }
+      />
 
       {/* Filters */}
-      <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
+      <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
         <SearchField width="400px" value={search} onChange={setSearch} placeholder="Search by RFQ No, Title, Buyer..." />
       </Paper>
 
       {/* Grid */}
-      <Paper sx={{ height: 'calc(100vh - 240px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
-        <DataGrid
+      <DataTable
           rows={data?.items ?? []}
           columns={columns}
           rowCount={data?.totalItems ?? 0}
@@ -218,11 +207,9 @@ const AllRFQsPage: React.FC = () => {
           paginationModel={paginationModel}
           paginationMode="server"
           onPaginationModelChange={setPaginationModel}
-          disableRowSelectionOnClick
           getRowId={(r) => r.id}
           rowHeight={85}
-        />
-      </Paper>
+      />
     </Box>
   );
 };

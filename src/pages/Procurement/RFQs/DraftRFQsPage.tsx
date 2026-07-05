@@ -186,8 +186,9 @@ const DraftRFQsPage: React.FC = () => {
         <SearchField width="400px" value={search} onChange={setSearch} placeholder="Search draft RFQs..." />
       </Paper>
 
-      <Paper sx={{ height: 'calc(100vh - 240px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
+      <Paper sx={{ width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
         <DataGrid
+          autoHeight
           rows={data?.items ?? []}
           columns={columns}
           rowCount={data?.totalItems ?? 0}

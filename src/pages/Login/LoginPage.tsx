@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Box,
   Typography,
@@ -35,6 +35,7 @@ import Branding from '../../components/common/Branding';
 import axiosInstance from '../../api/axiosInstance';
 import { useNavigate } from 'react-router-dom';
 import rolePermissionService from '../../api/services/rolePermissionService';
+import { useQueryClient } from '@tanstack/react-query';
 
 // --- Animations ---
 const gridFloat = keyframes`
@@ -342,6 +343,7 @@ const LoginPage: React.FC = () => {
   const { mode, setMode, primaryColor } = useAppTheme();
   const { setToken, setUserData, businessUnits, loadingBusinessUnits } = useAuth();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -350,6 +352,10 @@ const LoginPage: React.FC = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [businessUnitId, setBusinessUnitId] = useState<number | string>('');
+
+  useEffect(() => {
+    void import('../Dashboard/DashboardPage');
+  }, []);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -380,6 +386,15 @@ const LoginPage: React.FC = () => {
         roleId: data.roleId,
         businessUnitId: data.businessUnitId,
         permissions: permissions,
+      });
+
+      void queryClient.prefetchQuery({
+        queryKey: ['dashboard', 1],
+        queryFn: async () => {
+          const dashboardResponse = await axiosInstance.get('/api/Dashboard/1');
+          return dashboardResponse.data;
+        },
+        staleTime: 5 * 60_000,
       });
       navigate('/dashboard');
     } catch (err: any) {

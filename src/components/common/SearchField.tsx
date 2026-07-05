@@ -73,7 +73,7 @@ const SearchField: React.FC<SearchFieldProps> = ({
                   borderColor: 'divider',
                   opacity: 0.5
                 }}>
-                  <Typography variant="caption" sx={{ fontWeight: 800, fontSize: 9 }}>⌘ K</Typography>
+                  <Typography variant="caption" sx={{ fontWeight: 800, fontSize: 9 }}>Ctrl K</Typography>
                 </Box>
               </InputAdornment>
             ),

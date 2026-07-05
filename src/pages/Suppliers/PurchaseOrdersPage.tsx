@@ -108,7 +108,7 @@ const PurchaseOrdersPage: React.FC = () => {
               .totals-container { display: flex; justify-content: flex-end; margin-top: 16px; }
               .totals-box { min-width: 320px; padding: 16px; border: 1px solid #e2e8f0; border-radius: 8px; background: #f8fafc; }
               .totals-row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 14px; }
-              .totals-row.grand-total { margin-top: 12px; border-top: 2px solid #3b82f6; padding-top: 12px; font-size: 16px; font-weight: 900; color: #1d4ed8; }
+              .totals-row.grand-total { margin-top: 12px; border-top: 2px solid #E11D2E; padding-top: 12px; font-size: 16px; font-weight: 900; color: #E11D2E; }
               @media print {
                 body { padding: 0; margin: 0; }
                 .info-card, .invoice-table th { background: #fff !important; }
@@ -124,7 +124,7 @@ const PurchaseOrdersPage: React.FC = () => {
                 <div class="invoice-meta">${t('date')}: ${new Date().toLocaleDateString()}</div>
               </div>
               <div style="text-align: right;">
-                <h2 style="font-size: 20px; font-weight: 800; color: #1d4ed8; margin: 0 0 4px 0;">${activeBUName}</h2>
+                <h2 style="font-size: 20px; font-weight: 800; color: #E11D2E; margin: 0 0 4px 0;">${activeBUName}</h2>
               </div>
             </div>
 
@@ -555,12 +555,17 @@ const PurchaseOrdersPage: React.FC = () => {
       </Paper>
 
       {/* Grid */}
-      <Paper sx={{ height: 'calc(100vh - 340px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
+      <Paper sx={{ width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
         <DataGrid
+          autoHeight
           rows={orders}
           columns={columns}
           loading={isLoading}
           getRowId={(r) => r.id}
+          pageSizeOptions={[10, 25, 50]}
+          initialState={{
+            pagination: { paginationModel: { pageSize: 10 } },
+          }}
           disableRowSelectionOnClick
           sx={{ border: 'none' }}
         />
