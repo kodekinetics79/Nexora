@@ -1,6 +1,6 @@
 # RFQ Automation Frontend
 
-React frontend for an ERP-style RFQ automation platform. The app gives users a role-aware workspace for leads, RFQs, quotations, orders, shipments, suppliers, customers, inventory, setup data, and security administration.
+React frontend for an ERP-style RFQ automation platform. The app gives users a role-aware workspace for leads, RFQs, quotations, orders, shipments, suppliers, customers, inventory, setup data, and security administration. 
 
 ## Project Overview
 
