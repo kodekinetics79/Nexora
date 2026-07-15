@@ -9,7 +9,39 @@ Demo impact: **blocker** (breaks/embarrasses in a live demo) · **risk** · **co
 
 > Discovery workstreams: ARCH (architecture/lifecycle), ING (ingestion truth
 > layer), FIN (financial control), SEC (security/tenant), FE (frontend/UX),
-> DATA (data/DB/reliability). SEC/FE/DATA pending at time of writing.
+> DATA (data/DB/reliability).
+
+---
+
+## Remediation status — pilot-hardening pass (committed, builds green)
+
+**FIXED** (committed on `main`; not yet pushed — remote disabled):
+
+- **Security:** SEC-01, SEC-02, SEC-03, SEC-04, SEC-05, SEC-06, SEC-07,
+  SEC-09, SEC-10, SEC-12, SEC-13, SEC-15, SEC-16, ARCH-07 (all controllers now
+  `[Authorize]`, claim-wins tenant scoping, self-service password change,
+  restricted CORS + security headers, generic error handler).
+- **Stability/runtime:** DATA-01, DATA-04, DATA-05, DATA-06, DATA-07, DATA-12.
+- **Chain:** ARCH-01 (Lead→RFQ convert), ARCH-10 (approve no longer dead-ends).
+- **Finance:** FIN-02, FIN-05, FIN-09, FIN-12; **FIN-01 partial** (tax routed
+  through a server-side resolver; real tax engine blocked — `Taxis` unmapped).
+- **Ingestion:** ING-01 (no silent loss), ING-03 (no AI value fabrication),
+  ING-04 (scanned-PDF OCR fallback / NeedsReview).
+- **Frontend:** FE-01, FE-02, FE-03, FE-04, FE-05, FE-06, FE-07, FE-08, FE-13.
+
+**Still OPEN — recommended next (not pilot-blocking, or blocked on schema/DB):**
+
+- **DATA-02 (P0 runtime):** no local/seed DB — pilot still depends on the remote
+  SQL Server being reachable. Stand up a seeded local/containerized DB.
+- **DATA-03:** baseline EF migration (schema-as-code / rollback).
+- **FIN-01 (full):** map `Taxis`, add a BU/country/state tax resolver.
+- **SEC-08:** per-action RBAC policies (only class-level `[Authorize]` today).
+- **SEC-11:** validate upload content by magic bytes; serve user content safely.
+- **ARCH-02/03:** unify quote-status scheme; resolve status magic numbers by code.
+- **ARCH-05/FIN-08/DATA-09:** unique doc-number constraints + idempotency keys.
+- **ING-02/05/06:** field-level provenance persistence, content-hash dedup,
+  thread reconstruction. **DATA-08:** tenant column on master data.
+- Secret rotation (JWT/DB/Ollama) — owner action, see `SECURITY.md`.
 
 ---
 
