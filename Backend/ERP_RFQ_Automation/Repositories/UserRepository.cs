@@ -173,7 +173,10 @@ namespace ERP_RFQ_Automation.Repositories
 
         public async Task UpdateAsync(User user)
         {
-            var existing = await _context.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == user.Id);
+            // SEC-14: scope the update lookup to the caller's business unit so a write can never
+            // resolve another tenant's row even if the controller's BU guard is bypassed.
+            var existing = await _context.Users.AsNoTracking()
+                .FirstOrDefaultAsync(u => u.Id == user.Id && u.Buid == user.Buid);
             if (existing == null)
                 throw new KeyNotFoundException($"User with ID {user.Id} not found.");
 

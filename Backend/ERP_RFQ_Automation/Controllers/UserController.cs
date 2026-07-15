@@ -4,6 +4,7 @@ using ERP_RFQ_Automation.DTOs.UserDTO;
 using ERP_RFQ_Automation.DTOs.UserGroup;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Http;
@@ -109,12 +110,18 @@ namespace ERP_RFQ_Automation.Controllers
                 string? imagePath = null;
                 if (request.ImageFile != null)
                 {
+                    // SEC-11: validate the upload by magic bytes (not the client extension) and
+                    // derive a safe extension from the detected type before writing to wwwroot,
+                    // so a disguised script payload can never be stored and served (stored XSS).
+                    var validation = await FileContentValidator.ValidateImageAsync(request.ImageFile);
+                    if (!validation.IsValid)
+                        return BadRequest(validation.Error);
+
                     var uploadsFolder = Path.Combine(_environment.WebRootPath, "UserImages");
                     if (!Directory.Exists(uploadsFolder))
                         Directory.CreateDirectory(uploadsFolder);
 
-                    var ext = Path.GetExtension(request.ImageFile.FileName);
-                    var uniqueFileName = $"{Guid.NewGuid()}{ext}";
+                    var uniqueFileName = $"{Guid.NewGuid()}{validation.Extension}";
                     var filePath = Path.Combine(uploadsFolder, uniqueFileName);
                     using (var fileStream = new FileStream(filePath, FileMode.Create))
                     {
@@ -182,12 +189,18 @@ namespace ERP_RFQ_Automation.Controllers
                 string? imagePath = existing.ImageUrl;
                 if (request.ImageFile != null)
                 {
+                    // SEC-11: validate the upload by magic bytes (not the client extension) and
+                    // derive a safe extension from the detected type before writing to wwwroot,
+                    // so a disguised script payload can never be stored and served (stored XSS).
+                    var validation = await FileContentValidator.ValidateImageAsync(request.ImageFile);
+                    if (!validation.IsValid)
+                        return BadRequest(validation.Error);
+
                     var uploadsFolder = Path.Combine(_environment.WebRootPath, "UserImages");
                     if (!Directory.Exists(uploadsFolder))
                         Directory.CreateDirectory(uploadsFolder);
 
-                    var ext = Path.GetExtension(request.ImageFile.FileName);
-                    var uniqueFileName = $"{Guid.NewGuid()}{ext}";
+                    var uniqueFileName = $"{Guid.NewGuid()}{validation.Extension}";
                     var filePath = Path.Combine(uploadsFolder, uniqueFileName);
                     using (var fileStream = new FileStream(filePath, FileMode.Create))
                     {

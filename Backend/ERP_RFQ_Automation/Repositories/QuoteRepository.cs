@@ -147,9 +147,11 @@ namespace ERP_RFQ_Automation.Repositories
 
         public async Task UpdateAsync(Quote quote)
         {
+            // SEC-14: scope the update lookup to the quote's business unit so a write can never
+            // resolve another tenant's row even if the caller's BU guard is bypassed.
             var existing = await _context.Quotes
                 .Include(q => q.QuoteItems)
-                .FirstOrDefaultAsync(q => q.Id == quote.Id);
+                .FirstOrDefaultAsync(q => q.Id == quote.Id && q.BusinessUnitId == quote.BusinessUnitId);
 
             if (existing == null)
                 throw new KeyNotFoundException($"Quote with ID {quote.Id} not found.");

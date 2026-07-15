@@ -3,6 +3,7 @@ using DocumentFormat.OpenXml.Presentation;
 using DocumentFormat.OpenXml.Spreadsheet;
 using DocumentFormat.OpenXml.Wordprocessing;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Security;
 using ERP_RFQ_Automation.Services.Interfaces;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
@@ -378,6 +379,20 @@ namespace ERP_RFQ_Automation.Services
             }
         }
 
+        // SEC-11: image content types accepted by the manual-upload attachment path. These mirror
+        // the image extensions IsSupportedExtension allows (jpg/jpeg/png/bmp/tiff) and are validated
+        // by magic bytes below so a disguised payload can never be persisted under a spoofed extension.
+        private static readonly IReadOnlyCollection<string> AllowedAttachmentImageTypes = new[]
+        {
+            "image/jpeg", "image/png", "image/bmp", "image/tiff"
+        };
+
+        private static bool IsImageExtension(string ext) => ext switch
+        {
+            ".jpg" or ".jpeg" or ".png" or ".bmp" or ".tiff" => true,
+            _ => false
+        };
+
         private async Task SaveAttachmentsAsync(List<Microsoft.AspNetCore.Http.IFormFile> files, long leadId)
         {
             const long maxBytes = 25 * 1024 * 1024; // 25 MB limit
@@ -385,12 +400,27 @@ namespace ERP_RFQ_Automation.Services
             foreach (var file in files)
             {
                 if (file.Length == 0) continue;
-                
+
                 // SECURITY FIX: Check file size BEFORE writing to disk
                 if (file.Length > maxBytes)
                 {
                     _logger.LogWarning("Skipping large file: {File} ({Size} bytes)", file.FileName, file.Length);
                     continue;
+                }
+
+                // SEC-11: for files claiming to be images (by extension), verify the actual content
+                // by magic bytes before writing to disk. A file whose bytes don't match a whitelisted
+                // image signature is skipped (never persisted) rather than trusting the client name.
+                var ext = Path.GetExtension(file.FileName).ToLowerInvariant();
+                if (IsImageExtension(ext))
+                {
+                    var validation = await FileContentValidator.ValidateImageAsync(file, AllowedAttachmentImageTypes);
+                    if (!validation.IsValid)
+                    {
+                        _logger.LogWarning("Skipping attachment with mismatched image content: {File}. {Reason}",
+                            file.FileName, validation.Error);
+                        continue;
+                    }
                 }
 
                 var safeName = SanitizeFileName(file.FileName);

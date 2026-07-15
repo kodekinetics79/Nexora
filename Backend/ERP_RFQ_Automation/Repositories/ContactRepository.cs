@@ -151,15 +151,12 @@ namespace ERP_RFQ_Automation.Repositories
 
         public async Task UpdateAsync(Contact contact)
         {
-            var existing = await _context.Contacts.AsNoTracking().FirstOrDefaultAsync(c => c.Id == contact.Id);
-            if (existing == null)
-                throw new KeyNotFoundException($"Contact with ID {contact.Id} not found.");
-
             // Validate at least one parent
             if (!contact.CustomerId.HasValue && !contact.SupplierId.HasValue)
                 throw new ArgumentException("Contact must be associated with at least one Customer or Supplier.");
 
-            // Validate foreign keys using AsNoTracking to avoid tracking conflicts
+            // Validate foreign keys using AsNoTracking to avoid tracking conflicts, and derive the
+            // owning Business Unit from the parent Customer/Supplier (Contact has no direct BU column).
             long? buId = null;
             if (contact.CustomerId.HasValue)
             {
@@ -177,6 +174,16 @@ namespace ERP_RFQ_Automation.Repositories
                     throw new ArgumentException("Customer and Supplier must belong to the same Business Unit.");
                 buId = supplier.Buid;
             }
+
+            // SEC-14: Contact is scoped to a tenant through its parent Customer/Supplier. Resolve the
+            // existing row only within the owning Business Unit so a write can never resolve (and then
+            // overwrite) another tenant's contact even if the controller's BU guard is bypassed.
+            var existing = await _context.Contacts.AsNoTracking()
+                .FirstOrDefaultAsync(c => c.Id == contact.Id &&
+                    (c.Customer != null && c.Customer.Buid == buId ||
+                     c.Supplier != null && c.Supplier.Buid == buId));
+            if (existing == null)
+                throw new KeyNotFoundException($"Contact with ID {contact.Id} not found.");
 
             // Unique email per parent (excluding self)
             if (!string.IsNullOrEmpty(contact.Email))
