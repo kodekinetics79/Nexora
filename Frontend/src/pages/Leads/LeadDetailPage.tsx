@@ -6,7 +6,8 @@ import {
   Box, Typography, Paper, Button, Chip, Grid,
   CircularProgress, Stack, Table, TableHead,
   TableRow, TableCell, TableBody, IconButton,
-  Breadcrumbs, Link,
+  Breadcrumbs, Link, Dialog, DialogTitle, DialogContent,
+  DialogActions, TextField, MenuItem,
 } from '@mui/material';
 import {
   Description as FileIcon,
@@ -52,6 +53,12 @@ const LeadDetailPage: React.FC = () => {
     enabled: !!id,
   });
 
+  // FE-14: fetch the real rejection reasons instead of hardcoding reason id 1.
+  const { data: rejectionReasons = [] } = useQuery({
+    queryKey: ['rejection-reasons'],
+    queryFn: () => leadService.getRejectionReasons(),
+  });
+
   const formatDate = (dateStr: string | null) => {
     if (!dateStr) return '—';
     const d = new Date(dateStr);
@@ -59,6 +66,8 @@ const LeadDetailPage: React.FC = () => {
   };
 
   const [isProcessing, setIsProcessing] = React.useState(false);
+  const [rejectDialogOpen, setRejectDialogOpen] = React.useState(false);
+  const [rejectReasonId, setRejectReasonId] = React.useState<string>('');
 
   const handleAccept = async () => {
     if (!lead) return;
@@ -75,15 +84,18 @@ const LeadDetailPage: React.FC = () => {
     }
   };
 
-  const handleReject = async () => {
-    // Basic rejection for now
-    if (!lead) return;
+  const handleConfirmReject = async () => {
+    if (!lead || !rejectReasonId) return;
+    setIsProcessing(true);
     try {
-      await leadService.rejectLead(lead.id, 1); // Default reason
+      await leadService.rejectLead(lead.id, Number(rejectReasonId));
       toast.success('Lead rejected');
+      setRejectDialogOpen(false);
       navigate('/procurement/leads/all');
-    } catch (error) {
-      toast.error('Failed to reject lead');
+    } catch (error: any) {
+      toast.error(error.response?.data?.message || 'Failed to reject lead');
+    } finally {
+      setIsProcessing(false);
     }
   };
 
@@ -123,7 +135,8 @@ const LeadDetailPage: React.FC = () => {
               color="error"
               startIcon={<RejectIcon />}
               size="small"
-              onClick={handleReject}
+              onClick={() => { setRejectReasonId(''); setRejectDialogOpen(true); }}
+              disabled={isProcessing}
               sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
             >
               {t('reject') || 'Reject'}
@@ -271,6 +284,36 @@ const LeadDetailPage: React.FC = () => {
           </Box>
         </Grid>
       </Grid>
+
+      {/* FE-14: real rejection-reason selector (no more hardcoded reason id 1) */}
+      <Dialog open={rejectDialogOpen} onClose={() => setRejectDialogOpen(false)} fullWidth maxWidth="xs">
+        <DialogTitle sx={{ fontWeight: 800 }}>{t('reject') || 'Reject'} {lead.rfqno}</DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="body2" sx={{ mb: 2 }}>Please select a reason for rejecting this lead.</Typography>
+          <TextField
+            select
+            fullWidth
+            label="Rejection Reason"
+            value={rejectReasonId}
+            onChange={(e) => setRejectReasonId(e.target.value)}
+          >
+            {rejectionReasons.map((r: any) => (
+              <MenuItem key={r.id} value={r.id}>{r.reasonName}</MenuItem>
+            ))}
+          </TextField>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button onClick={() => setRejectDialogOpen(false)} color="inherit">{t('cancel') || 'Cancel'}</Button>
+          <Button
+            variant="contained"
+            color="error"
+            onClick={handleConfirmReject}
+            disabled={!rejectReasonId || isProcessing}
+          >
+            {t('reject') || 'Reject'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 };

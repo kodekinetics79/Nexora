@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Box,
   Typography,
@@ -345,7 +345,18 @@ const LoginPage: React.FC = () => {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
+
+  // FE-12: show a friendly message when we were redirected here because the
+  // session expired (set by AuthContext), then clear it so it shows only once.
+  useEffect(() => {
+    const message = sessionStorage.getItem('authNotice');
+    if (message) {
+      setNotice(message);
+      sessionStorage.removeItem('authNotice');
+    }
+  }, []);
   
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -486,6 +497,8 @@ const LoginPage: React.FC = () => {
             <Typography variant="body1" sx={{ color: 'text.secondary', mb: 6 }}>
               Enter your operational credentials to continue.
             </Typography>
+
+            {notice && <Alert severity="info" sx={{ mb: 3, borderRadius: 3 }}>{notice}</Alert>}
 
             <form onSubmit={handleLogin}>
               <FormControl fullWidth sx={{ mb: 3 }}>

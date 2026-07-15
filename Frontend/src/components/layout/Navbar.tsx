@@ -1,5 +1,4 @@
 import React from 'react';
-import { useTranslation } from 'react-i18next';
 import {
   AppBar,
   Toolbar,
@@ -36,13 +35,24 @@ interface NavbarProps {
 const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
   const { mode, setMode, primaryColor, setPrimaryColor } = useAppTheme();
   const { userData, logout } = useAuth();
-  const { i18n } = useTranslation();
   const navigate = useNavigate();
   const searchInputRef = React.useRef<HTMLInputElement>(null);
   const [searchValue, setSearchValue] = React.useState('');
-  const [langAnchor, setLangAnchor] = React.useState<null | HTMLElement>(null);
   const [anchorEl, setAnchorEl] = React.useState<null | HTMLElement>(null);
   const [colorMenuAnchor, setColorMenuAnchor] = React.useState<null | HTMLElement>(null);
+
+  // FE-14: never fall back to a hardcoded person's name/role — derive a label
+  // and initials from the real userData, with a neutral generic fallback while
+  // userData is briefly empty (e.g. during auth bootstrap).
+  const displayName = userData.userName?.trim() || '';
+  const initials = displayName
+    ? displayName
+        .split(/\s+/)
+        .map((part) => part.charAt(0))
+        .slice(0, 2)
+        .join('')
+        .toUpperCase()
+    : '';
 
   // Quick-jump destinations for the command bar (⌘K / Ctrl+K to focus, Enter to jump).
   const quickNav: { keywords: string[]; path: string }[] = [
@@ -81,25 +91,6 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  const handleLangMenuOpen = (event: React.MouseEvent<HTMLElement>) => {
-    setLangAnchor(event.currentTarget);
-  };
-
-  const handleLanguageChange = (lang: string) => {
-    i18n.changeLanguage(lang);
-    document.dir = (lang === 'ar' || lang === 'ur') ? 'rtl' : 'ltr';
-    setLangAnchor(null);
-  };
-
-  const languages = [
-    { code: 'en', name: 'English', flag: '🇺🇸' },
-    { code: 'ar', name: 'العربية', flag: '🇸🇦' },
-    { code: 'ur', name: 'اردو', flag: '🇵🇰' },
-    { code: 'es', name: 'Español', flag: '🇪🇸' },
-    { code: 'fr', name: 'Français', flag: '🇫🇷' },
-    { code: 'de', name: 'Deutsch', flag: '🇩🇪' },
-  ];
-
   const handleProfileClick = (event: React.MouseEvent<HTMLElement>) => {
     setAnchorEl(event.currentTarget);
   };
@@ -111,7 +102,6 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
   const handleClose = () => {
     setAnchorEl(null);
     setColorMenuAnchor(null);
-    setLangAnchor(null);
   };
 
   const colorOptions = [
@@ -192,59 +182,9 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
         </Box>
 
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-          <Tooltip title="Switch Language">
-            <IconButton color="inherit" onClick={handleLangMenuOpen} sx={{ backgroundColor: 'action.hover', width: 40, height: 40, borderRadius: 2 }}>
-              <Box component="span" sx={{ fontSize: 22, display: 'flex', alignItems: 'center' }}>
-                {languages.find(l => l.code === i18n.language)?.flag || '🇺🇸'}
-              </Box>
-            </IconButton>
-          </Tooltip>
-
-          <Menu
-            anchorEl={langAnchor}
-            open={Boolean(langAnchor)}
-            onClose={handleClose}
-            transformOrigin={{ horizontal: 'right', vertical: 'top' }}
-            anchorOrigin={{ horizontal: 'right', vertical: 'bottom' }}
-            slotProps={{
-              paper: {
-                sx: {
-                  mt: 1.5,
-                  minWidth: 160,
-                  borderRadius: 3,
-                  boxShadow: '0 10px 40px rgba(0,0,0,0.1)',
-                  p: 0.5,
-                  border: '1px solid',
-                  borderColor: 'divider',
-                }
-              }
-            }}
-          >
-            {languages.map((lang) => (
-              <MenuItem 
-                key={lang.code} 
-                onClick={() => handleLanguageChange(lang.code)}
-                sx={{ 
-                  borderRadius: 2, 
-                  py: 1,
-                  backgroundColor: i18n.language === lang.code ? 'action.selected' : 'transparent',
-                  '&:hover': { backgroundColor: 'action.hover' }
-                }}
-              >
-                <Typography sx={{ mr: 1.5, fontSize: 18 }}>{lang.flag}</Typography>
-                <ListItemText 
-                  primary={lang.name} 
-                  slotProps={{
-                    primary: {
-                      variant: 'body2', 
-                      sx: { fontWeight: i18n.language === lang.code ? 800 : 600 }
-                    }
-                  }} 
-                />
-              </MenuItem>
-            ))}
-          </Menu>
-
+          {/* FE-10: language switcher hidden for the pilot — page bodies are not
+              fully translated, so switching languages would produce a mixed
+              English/localized UI. The app is locked to English (see i18n.ts). */}
           <Tooltip title="Toggle Theme">
             <IconButton color="inherit" onClick={() => setMode(mode === 'dark' ? 'light' : 'dark')} sx={{ backgroundColor: 'action.hover', width: 40, height: 40, borderRadius: 2 }}>
               {mode === 'dark' ? <SunIcon sx={{ fontSize: 20 }} /> : <MoonIcon sx={{ fontSize: 20 }} />}
@@ -264,14 +204,14 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
                 boxShadow: `0 0 0 2px ${mode === 'dark' ? '#0f172a' : '#fff'}, 0 0 0 4px ${primaryColor}44`
               }}
             >
-              {userData.userName?.charAt(0) || 'A'}
+              {initials || <Person sx={{ fontSize: 18 }} />}
             </Avatar>
             <Box sx={{ display: { xs: 'none', sm: 'block' }, textAlign: 'left' }}>
               <Typography variant="subtitle2" sx={{ fontWeight: 800, lineHeight: 1.2, fontSize: '0.85rem' }}>
-                {userData.userName || 'Abdullah Afzal'}
+                {displayName || 'User'}
               </Typography>
               <Typography variant="caption" sx={{ color: 'text.secondary', fontWeight: 600, fontSize: '0.75rem', opacity: 0.7 }}>
-                {userData.roleName || 'Admin'}
+                {userData.roleName || 'Member'}
               </Typography>
             </Box>
           </Box>

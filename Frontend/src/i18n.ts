@@ -1,6 +1,5 @@
 import i18n from 'i18next';
 import { initReactI18next } from 'react-i18next';
-import LanguageDetector from 'i18next-browser-languagedetector';
 
 const resources = {
   en: {
@@ -968,10 +967,13 @@ const resources = {
 };
 
 i18n
-  .use(LanguageDetector)
   .use(initReactI18next)
   .init({
     resources,
+    // FE-10: lock the pilot to English. Page bodies are still hardcoded English,
+    // so allowing language switching / browser detection would render a mixed
+    // English/localized UI. The in-app language switcher is hidden (see Navbar).
+    lng: 'en',
     fallbackLng: 'en',
     interpolation: {
       escapeValue: false,
