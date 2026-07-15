@@ -1,0 +1,1 @@
+﻿Scaffold-DbContext "Data Source=__DB_SERVER__;Initial Catalog=__DB_NAME__;User ID=__DB_USER__;Password=__DB_PASSWORD__;TrustServerCertificate=True" Microsoft.EntityFrameworkCore.SqlServer -OutputDir Models -Force

@@ -1,0 +1,49 @@
+# ---------------------------------------------------------------------------
+# Nexora (ERP RFQ Automation) — repository ignore rules
+# ---------------------------------------------------------------------------
+
+# === Secrets / local configuration (NEVER commit) ===
+# Real credentials live only here on the dev/demo machine, out of git history.
+**/appsettings.Development.json
+**/appsettings.*.Local.json
+**/appsettings.Local.json
+*.pfx
+*.pem
+.env.local
+.env.*.local
+secrets.json
+
+# === .NET build output ===
+[Bb]in/
+[Oo]bj/
+.vs/
+*.user
+*.suo
+*.cache
+msbuild.log
+project.lock.json
+artifacts/
+
+# === Runtime upload content (user data / PII, not source) ===
+# These stay on disk (demo still renders them) but must not enter git history.
+Backend/ERP_RFQ_Automation/Uploads/
+Backend/ERP_RFQ_Automation/wwwroot/uploads/
+Backend/ERP_RFQ_Automation/wwwroot/UserImage/
+Backend/ERP_RFQ_Automation/wwwroot/UserImages/
+Backend/ERP_RFQ_Automation/wwwroot/InventoryImages/
+Backend/ERP_RFQ_Automation/wwwroot/ProductImages/
+
+# === Node / Vite frontend ===
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+
+# === OS / editor cruft ===
+.DS_Store
+Thumbs.db
+*.swp
+*~

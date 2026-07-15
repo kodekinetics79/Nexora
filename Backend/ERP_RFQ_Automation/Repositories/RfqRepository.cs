@@ -1,0 +1,376 @@
+﻿using ERP_RFQ_Automation.DTOs.LookupDTOs;
+using ERP_RFQ_Automation.DTOs.RfqDTOs;
+using ERP_RFQ_Automation.Interfaces;
+using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace ERP_RFQ_Automation.Repositories
+{
+    public class RfqRepository : IRfqRepository
+    {
+        private readonly ErpRfqAutomationContext _context;
+
+        public RfqRepository(ErpRfqAutomationContext context)
+        {
+            _context = context;
+        }
+
+        public async Task<(IEnumerable<RfqResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null, long? assignedToId = null, string? createdBy = null, long? rfqStatusId = null)
+        {
+            IQueryable<Rfq> query = _context.Rfqs
+                .AsNoTracking()
+                .Where(r => r.BusinessUnitId == businessUnitId)
+                .Include(r => r.BusinessUnit)
+                .Include(r => r.Lead)
+                .Include(r => r.Rfqstatus)
+                .Include(r => r.RfqtypeNavigation)
+                .Include(r => r.Customer);
+
+            if (rfqStatusId.HasValue)
+            {
+                query = query.Where(r => r.RfqstatusId == rfqStatusId.Value);
+            }
+
+            if (assignedToId.HasValue || !string.IsNullOrWhiteSpace(createdBy))
+            {
+                query = query.Where(r => 
+                    (assignedToId.HasValue && r.Lead != null && r.Lead.AssignTo == assignedToId.Value) ||
+                    (!string.IsNullOrWhiteSpace(createdBy) && r.CreatedBy == createdBy)
+                );
+            }
+
+            if (!string.IsNullOrWhiteSpace(search))
+            {
+                search = search.Trim().ToLower();
+                query = query.Where(r => r.Rfqno.ToLower().Contains(search) || (r.BuyersName != null && r.BuyersName.ToLower().Contains(search)));
+            }
+
+            var totalItems = await query.CountAsync();
+
+            var rfqs = await query
+                .Skip((pageNumber - 1) * pageSize)
+                .Take(pageSize)
+                .ToListAsync();
+
+            // Batch load item counts for all RFQs in a single query
+            var rfqIds = rfqs.Select(r => r.Id).ToList();
+            var itemCounts = await _context.Rfqitems
+                .AsNoTracking()
+                .Where(ri => rfqIds.Contains(ri.Rfqid))
+                .GroupBy(ri => ri.Rfqid)
+                .Select(g => new { RfqId = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.RfqId, x => x.Count);
+
+            var dtos = rfqs.Select(r => new RfqResponseDTO
+            {
+                Id = r.Id,
+                Rfqno = r.Rfqno,
+                BuyersName = r.BuyersName,
+                RecDate = r.RecDate,
+                BidClosingDate = r.BidClosingDate,
+                BiddingDecision = r.BiddingDecision,
+                AcknowledgmentDate = r.AcknowledgmentDate,
+                SubDate = r.SubDate,
+                HeaderRemarks = r.HeaderRemarks,
+                OpportunityNo = r.OpportunityNo,
+                NoOfLineItems = r.NoOfLineItems,
+                Rfqtype = r.Rfqtype,
+                RfqtypeId = r.RfqtypeId,
+                DurationAgreement = r.DurationAgreement,
+                LeadId = r.LeadId,
+                CreatedBy = r.CreatedBy,
+                CreatedDate = r.CreatedDate,
+                ModifiedBy = r.ModifiedBy,
+                ModifiedDate = r.ModifiedDate,
+                BusinessUnitId = r.BusinessUnitId,
+                BusinessUnitName = r.BusinessUnit?.BusinessUnitName,
+                RfqstatusId = r.RfqstatusId,
+                RfqstatusValue = r.Rfqstatus?.SetupValue,
+                CustomerId = r.CustomerId,
+                CustomerName = r.Customer != null ? r.Customer.Name : null,
+                CustomerEmail = r.Customer != null ? r.Customer.ContactEmail : null,
+                LeadEmail = r.Lead != null ? r.Lead.Clientemail : null,
+                ItemCount = itemCounts.TryGetValue(r.Id, out var count) ? count : 0,
+                Rfqitems = new List<RfqitemResponseDTO>() // Empty list for list view
+            }).ToList();
+
+            return (dtos, totalItems);
+        }
+
+        public async Task<RfqResponseDTO> GetByIdAsync(long id, long businessUnitId)
+        {
+            var rfq = await _context.Rfqs
+                .Include(r => r.BusinessUnit)
+                .Include(r => r.Lead)
+                .Include(r => r.Rfqstatus)
+                .Include(r => r.RfqtypeNavigation)
+                .Include(r => r.Rfqitems).ThenInclude(i => i.CurrencyNavigation)
+                .Include(r => r.Rfqitems).ThenInclude(i => i.Product)
+                .Include(r => r.Rfqitems).ThenInclude(i => i.Supplier)
+                .Include(r => r.Rfqitems).ThenInclude(i => i.Uom)
+                .Include(r => r.Rfqitems).ThenInclude(i => i.Warehouse)
+                .Include(r => r.Customer)
+                .FirstOrDefaultAsync(r => r.Id == id && r.BusinessUnitId == businessUnitId);
+
+            if (rfq == null)
+                throw new KeyNotFoundException($"RFQ with ID {id} not found in Business Unit {businessUnitId}.");
+
+            return new RfqResponseDTO
+            {
+                Id = rfq.Id,
+                Rfqno = rfq.Rfqno,
+                BuyersName = rfq.BuyersName,
+                RecDate = rfq.RecDate,
+                BidClosingDate = rfq.BidClosingDate,
+                BiddingDecision = rfq.BiddingDecision,
+                AcknowledgmentDate = rfq.AcknowledgmentDate,
+                SubDate = rfq.SubDate,
+                HeaderRemarks = rfq.HeaderRemarks,
+                OpportunityNo = rfq.OpportunityNo,
+                NoOfLineItems = rfq.NoOfLineItems,
+                Rfqtype = rfq.Rfqtype,
+                RfqtypeId = rfq.RfqtypeId,
+                DurationAgreement = rfq.DurationAgreement,
+                LeadId = rfq.LeadId,
+                CreatedBy = rfq.CreatedBy,
+                CreatedDate = rfq.CreatedDate,
+                ModifiedBy = rfq.ModifiedBy,
+                ModifiedDate = rfq.ModifiedDate,
+                BusinessUnitId = rfq.BusinessUnitId,
+                BusinessUnitName = rfq.BusinessUnit?.BusinessUnitName,
+                RfqstatusId = rfq.RfqstatusId,
+                RfqstatusValue = rfq.Rfqstatus?.SetupValue,
+                CustomerId = rfq.CustomerId,
+                CustomerName = rfq.Customer != null ? rfq.Customer.Name : null,
+                CustomerEmail = rfq.Customer != null ? rfq.Customer.ContactEmail : null,
+                LeadEmail = rfq.Lead != null ? rfq.Lead.Clientemail : null,
+                Rfqitems = rfq.Rfqitems.Select(i => new RfqitemResponseDTO
+                {
+                    Id = i.Id,
+                    Rfqid = i.Rfqid,
+                    CompanyRef = i.CompanyRef,
+                    CustomerAccountPortalId = i.CustomerAccountPortalId,
+                    CustomerRfqno = i.CustomerRfqno,
+                    ItemMaterialCode = i.ItemMaterialCode,
+                    LineItemNo = i.LineItemNo,
+                    ProductId = i.ProductId,
+                    ProductName = i.Product?.ProductName,
+                    CommodityProduct = i.CommodityProduct,
+                    ProductShortName = i.ProductShortName,
+                    ProductShortDescription = i.ProductShortDescription,
+                    Alternative = i.Alternative,
+                    BuyerName = i.BuyerName,
+                    Currency = i.Currency,
+                    CurrencyId = i.CurrencyId,
+                    UnitOfMeasure = i.UnitOfMeasure,
+                    UomId = i.UomId,
+                    UnitPrice = i.UnitPrice,
+                    Quantity = i.Quantity,
+                    StorageLocation = i.StorageLocation,
+                    WarehouseId = i.WarehouseId,
+                    WarehouseName = i.Warehouse?.WarehouseName,
+                    ManufacturerName = i.ManufacturerName,
+                    ManufacturerPartNumber = i.ManufacturerPartNumber,
+                    SupplierId = i.SupplierId,
+                    SupplierName = i.Supplier?.Name,
+                    AlternateProductName = i.AlternateProductName,
+                    AlternatePartNumber = i.AlternatePartNumber,
+                    ItemText = i.ItemText,
+                    MaterialPotext = i.MaterialPotext,
+                    LeadTime = i.LeadTime,
+                    RequiredDesiredDate = i.RequiredDesiredDate,
+                    ReceivedDate = i.ReceivedDate,
+                    BidClosingDateLine = i.BidClosingDateLine,
+                    CreatedBy = i.CreatedBy,
+                    CreatedDate = i.CreatedDate,
+                    ModifiedBy = i.ModifiedBy,
+                    ModifiedDate = i.ModifiedDate,
+                    Aiconfidence = i.Aiconfidence
+                }).ToList()
+            };
+        }
+
+        public async Task AddAsync(Rfq rfq)
+        {
+            // Validate uniqueness of Rfqno within BusinessUnit
+            var rfqNoExists = await _context.Rfqs.AnyAsync(r => r.Rfqno == rfq.Rfqno && r.BusinessUnitId == rfq.BusinessUnitId);
+            if (rfqNoExists)
+                throw new ArgumentException($"RFQ number {rfq.Rfqno} already exists in this Business Unit.");
+
+            // Validate FKs
+            var buExists = await _context.BusinessUnits.AnyAsync(b => b.Id == rfq.BusinessUnitId);
+            if (!buExists)
+                throw new ArgumentException($"Business Unit ID {rfq.BusinessUnitId} does not exist.");
+
+            if (rfq.RfqtypeId.HasValue)
+            {
+                var typeExists = await _context.SetupMasters.AnyAsync(sm => sm.SetupId == rfq.RfqtypeId);
+                if (!typeExists)
+                    throw new ArgumentException($"RFQ Type ID {rfq.RfqtypeId} does not exist.");
+            }
+
+            if (rfq.RfqstatusId.HasValue)
+            {
+                var statusExists = await _context.SetupMasters.AnyAsync(sm => sm.SetupId == rfq.RfqstatusId);
+                if (!statusExists)
+                    throw new ArgumentException($"RFQ Status ID {rfq.RfqstatusId} does not exist.");
+            }
+
+            if (rfq.LeadId.HasValue)
+            {
+                var leadExists = await _context.Leads.AnyAsync(l => l.Id == rfq.LeadId);
+                if (!leadExists)
+                    throw new ArgumentException($"Lead ID {rfq.LeadId} does not exist.");
+            }
+
+            rfq.CreatedDate = DateTime.UtcNow;
+
+            _context.Rfqs.Add(rfq);
+            await _context.SaveChangesAsync();
+        }
+
+        public async Task UpdateAsync(Rfq rfq)
+        {
+            var existing = await _context.Rfqs.FirstOrDefaultAsync(r => r.Id == rfq.Id);
+
+            if (existing == null)
+                throw new KeyNotFoundException($"RFQ with ID {rfq.Id} not found.");
+
+            if (existing.BusinessUnitId != rfq.BusinessUnitId)
+                throw new ArgumentException("Cannot change the Business Unit of an RFQ.");
+
+            // Uniqueness check for Rfqno (exclude self)
+            var rfqNoExists = await _context.Rfqs.AnyAsync(r => r.Rfqno == rfq.Rfqno && r.BusinessUnitId == rfq.BusinessUnitId && r.Id != rfq.Id);
+            if (rfqNoExists)
+                throw new ArgumentException($"RFQ number {rfq.Rfqno} already exists in this Business Unit.");
+
+            // Update fields
+            existing.Rfqno = rfq.Rfqno;
+            existing.BuyersName = rfq.BuyersName;
+            existing.RecDate = rfq.RecDate;
+            existing.BidClosingDate = rfq.BidClosingDate;
+            existing.BiddingDecision = rfq.BiddingDecision;
+            existing.AcknowledgmentDate = rfq.AcknowledgmentDate;
+            existing.SubDate = rfq.SubDate;
+            existing.HeaderRemarks = rfq.HeaderRemarks;
+            existing.OpportunityNo = rfq.OpportunityNo;
+            existing.NoOfLineItems = rfq.NoOfLineItems;
+            existing.Rfqtype = rfq.Rfqtype;
+            existing.RfqtypeId = rfq.RfqtypeId;
+            existing.DurationAgreement = rfq.DurationAgreement;
+            existing.LeadId = rfq.LeadId;
+            existing.CustomerId = rfq.CustomerId;
+            existing.ModifiedBy = rfq.ModifiedBy;
+            existing.ModifiedDate = DateTime.UtcNow;
+            existing.BusinessUnitId = rfq.BusinessUnitId;
+            existing.RfqstatusId = rfq.RfqstatusId;
+
+            await _context.SaveChangesAsync();
+        }
+
+        public async Task<long> ApproveAsync(long id, string approvedBy, long? customerId = null)
+        {
+            var rfq = await _context.Rfqs
+                .Include(r => r.Rfqitems)
+                .Include(r => r.Lead)
+                .FirstOrDefaultAsync(r => r.Id == id);
+
+            if (rfq == null) throw new KeyNotFoundException($"RFQ with ID {id} not found.");
+
+            // Update status to 35 (Submitted/Approved)
+            rfq.RfqstatusId = 35;
+            rfq.ModifiedBy = approvedBy;
+            rfq.ModifiedDate = DateTime.UtcNow;
+
+            if (customerId.HasValue && !rfq.CustomerId.HasValue)
+            {
+                rfq.CustomerId = customerId.Value;
+            }
+
+            // Create Quote
+            var quote = new Quote
+            {
+                QuoteNo = $"QT-{rfq.Rfqno}",
+                Rfqid = rfq.Id,
+                CustomerId = rfq.CustomerId,
+                BusinessUnitId = rfq.BusinessUnitId,
+                QuoteDate = DateTime.UtcNow,
+                ValidUntil = DateTime.UtcNow.AddDays(30), // Default 30 days validity
+                StatusId = 31, // Pending Approval/Draft Quote status
+                CreatedBy = approvedBy,
+                CreatedDate = DateTime.UtcNow,
+                HeaderRemarks = rfq.HeaderRemarks,
+                CurrencyId = rfq.Rfqitems.FirstOrDefault()?.CurrencyId,
+                QuoteItems = rfq.Rfqitems.Select(i => new QuoteItem
+                {
+                    RfqitemId = i.Id,
+                    ProductId = i.ProductId,
+                    ItemDescription = i.ProductShortDescription ?? i.ProductShortName ?? i.ItemText,
+                    Quantity = i.Quantity,
+                    UnitPrice = i.UnitPrice ?? 0,
+                    TotalAmount = i.Quantity * (i.UnitPrice ?? 0),
+                    CreatedBy = approvedBy,
+                    CreatedDate = DateTime.UtcNow
+                }).ToList()
+            };
+
+            quote.TotalAmount = quote.QuoteItems.Sum(i => i.TotalAmount);
+
+            _context.Quotes.Add(quote);
+            await _context.SaveChangesAsync();
+
+            return quote.Id;
+        }
+
+        public async Task DeleteAsync(long id, long businessUnitId)
+        {
+            var rfq = await _context.Rfqs
+                .Include(r => r.Rfqitems)
+                .FirstOrDefaultAsync(r => r.Id == id && r.BusinessUnitId == businessUnitId);
+
+            if (rfq != null)
+            {
+                _context.Rfqitems.RemoveRange(rfq.Rfqitems);
+                _context.Rfqs.Remove(rfq);
+                await _context.SaveChangesAsync();
+            }
+        }
+
+
+        public async Task<List<RFQTypeLookupDTO>> GetRFQTypeAsync()
+        {
+            return await _context.SetupMasters
+                .Where(sm => sm.SetupType.Contains("RFQType") && sm.IsActive == true)
+                .Select(sm => new RFQTypeLookupDTO
+                {
+                    Id = sm.SetupId,
+                    RFQType = sm.SetupValue
+                })
+                .OrderBy(sm => sm.RFQType)
+                .ToListAsync();
+        }
+
+        public async Task<RfqStatsDTO> GetRfqStatsAsync(long businessUnitId)
+        {
+            var rfqs = await _context.Rfqs
+                .AsNoTracking()
+                .Where(r => r.BusinessUnitId == businessUnitId)
+                .ToListAsync();
+
+            var now = DateTime.UtcNow;
+            var sevenDaysLater = now.AddDays(7);
+
+            return new RfqStatsDTO
+            {
+                TotalRfqs = rfqs.Count,
+                DraftRfqs = rfqs.Count(r => r.RfqstatusId == 34),
+                SubmittedRfqs = rfqs.Count(r => r.RfqstatusId == 35),
+                ClosingSoonRfqs = rfqs.Count(r => r.BidClosingDate.HasValue && r.BidClosingDate.Value >= now && r.BidClosingDate.Value <= sevenDaysLater)
+            };
+        }
+    }
+}

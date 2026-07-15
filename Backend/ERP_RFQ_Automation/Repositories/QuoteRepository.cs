@@ -1,0 +1,224 @@
+using ERP_RFQ_Automation.DTOs.QuoteDTOs;
+using ERP_RFQ_Automation.Interfaces;
+using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace ERP_RFQ_Automation.Repositories
+{
+    public class QuoteRepository : IQuoteRepository
+    {
+        private readonly ErpRfqAutomationContext _context;
+
+        public QuoteRepository(ErpRfqAutomationContext context)
+        {
+            _context = context;
+        }
+
+        public async Task<(IEnumerable<QuoteResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber, int pageSize, string? search = null)
+        {
+            IQueryable<Quote> query = _context.Quotes
+                .AsNoTracking()
+                .Where(q => q.BusinessUnitId == businessUnitId)
+                .Include(q => q.Customer)
+                .Include(q => q.Rfq)
+                .Include(q => q.Status)
+                .Where(q => q.Status.SetupCode != "ORDERED")
+                .Include(q => q.Currency)
+                .Include(q => q.BusinessUnit)
+                .Include(q => q.DiscountType);
+
+            if (!string.IsNullOrWhiteSpace(search))
+            {
+                search = search.Trim().ToLower();
+                query = query.Where(q => q.QuoteNo.ToLower().Contains(search) || 
+                                         (q.Customer != null && q.Customer.Name.ToLower().Contains(search)));
+            }
+
+            var totalItems = await query.CountAsync();
+
+            var quotes = await query
+                .OrderByDescending(q => q.CreatedDate)
+                .Skip((pageNumber - 1) * pageSize)
+                .Take(pageSize)
+                .ToListAsync();
+
+            // Batch load item counts for all Quotes in a single query
+            var quoteIds = quotes.Select(q => q.Id).ToList();
+            var itemCounts = await _context.QuoteItems
+                .AsNoTracking()
+                .Where(qi => quoteIds.Contains(qi.QuoteId))
+                .GroupBy(qi => qi.QuoteId)
+                .Select(g => new { QuoteId = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.QuoteId, x => x.Count);
+
+            var dtos = quotes.Select(q => MapToDTO(q, itemCounts.TryGetValue(q.Id, out var count) ? count : 0)).ToList();
+
+            return (dtos, totalItems);
+        }
+
+        public async Task<QuoteResponseDTO> GetByIdAsync(long id, long businessUnitId)
+        {
+            var quote = await _context.Quotes
+                .AsNoTracking()
+                .Include(q => q.Customer)
+                .Include(q => q.Rfq)
+                .Include(q => q.Status)
+                .Include(q => q.Currency)
+                .Include(q => q.DiscountType)
+                .Include(q => q.QuoteItems).ThenInclude(qi => qi.Product)
+                .Include(q => q.QuoteItems).ThenInclude(qi => qi.DiscountType)
+                .FirstOrDefaultAsync(q => q.Id == id && q.BusinessUnitId == businessUnitId);
+
+            if (quote == null)
+                throw new KeyNotFoundException($"Quote with ID {id} not found.");
+
+            return MapToDTO(quote, -1); // -1 indicates detail view, load all items
+        }
+
+        // ... methods AddAsync, UpdateAsync, DeleteAsync skipped (unchanged) ...
+
+        private QuoteResponseDTO MapToDTO(Quote q, int itemCount = -1)
+        {
+            return new QuoteResponseDTO
+            {
+                Id = q.Id,
+                QuoteNo = q.QuoteNo,
+                RfqId = q.Rfqid,
+                RfqNo = q.Rfq?.Rfqno,
+                CustomerId = q.CustomerId,
+                CustomerName = q.Customer?.Name,
+                CustomerEmail = q.Customer?.ContactEmail,
+                BusinessUnitId = q.BusinessUnitId,
+                BusinessUnitName = q.BusinessUnit?.BusinessUnitName,
+                QuoteDate = q.QuoteDate,
+                ValidUntil = q.ValidUntil,
+                StatusId = q.StatusId,
+                StatusValue = q.Status?.SetupValue,
+                CurrencyId = q.CurrencyId,
+                CurrencyCode = q.Currency?.Code,
+                TotalAmount = q.TotalAmount,
+                HeaderRemarks = q.HeaderRemarks,
+                CreatedBy = q.CreatedBy,
+                CreatedDate = q.CreatedDate,
+                ModifiedBy = q.ModifiedBy,
+                ModifiedDate = q.ModifiedDate,
+                DiscountTypeId = q.DiscountTypeId,
+                DiscountTypeName = q.DiscountType?.Description, // or SetupName/SetupValue
+                DiscountValue = q.DiscountValue,
+                ItemCount = itemCount >= 0 ? itemCount : q.QuoteItems?.Count ?? 0,
+                QuoteItems = itemCount >= 0 ? new List<QuoteItemResponseDTO>() : q.QuoteItems.Select(i => new QuoteItemResponseDTO
+                {
+                    Id = i.Id,
+                    QuoteId = i.QuoteId,
+                    RfqItemId = i.RfqitemId,
+                    ProductId = i.ProductId,
+                    ProductName = i.Product?.ProductName,
+                    ItemDescription = i.ItemDescription,
+                    Quantity = i.Quantity,
+                    UnitPrice = i.UnitPrice,
+                    TotalAmount = i.TotalAmount,
+                    Discount = i.Discount,
+                    TaxAmount = i.TaxAmount,
+                    DeliveryLeadTime = i.DeliveryLeadTime,
+                    DiscountTypeId = i.DiscountTypeId,
+                    DiscountTypeName = i.DiscountType?.Description,
+                    DiscountValue = i.DiscountValue
+                }).ToList()
+            };
+        }
+
+        public async Task AddAsync(Quote quote)
+        {
+            // Calculate totals
+            foreach (var item in quote.QuoteItems)
+            {
+                item.TotalAmount = (item.Quantity * item.UnitPrice) - (item.Discount ?? 0) + (item.TaxAmount ?? 0);
+            }
+            quote.TotalAmount = quote.QuoteItems.Sum(i => i.TotalAmount);
+            quote.CreatedDate = DateTime.UtcNow;
+
+            _context.Quotes.Add(quote);
+            await _context.SaveChangesAsync();
+        }
+
+        public async Task UpdateAsync(Quote quote)
+        {
+            var existing = await _context.Quotes
+                .Include(q => q.QuoteItems)
+                .FirstOrDefaultAsync(q => q.Id == quote.Id);
+
+            if (existing == null)
+                throw new KeyNotFoundException($"Quote with ID {quote.Id} not found.");
+
+            // Update Header
+            existing.QuoteNo = quote.QuoteNo;
+            existing.CustomerId = quote.CustomerId;
+            existing.QuoteDate = quote.QuoteDate;
+            existing.ValidUntil = quote.ValidUntil;
+            existing.StatusId = quote.StatusId;
+            existing.CurrencyId = quote.CurrencyId;
+            existing.HeaderRemarks = quote.HeaderRemarks;
+            existing.ModifiedBy = quote.ModifiedBy;
+            existing.ModifiedDate = DateTime.UtcNow;
+
+            // Update Items logic handled via Controller or specific Item management methods
+            // For simplicity in this base update, strict replacement or specific item management is needed
+            // Here assuming Controller manages the list merging, or we implement full merge here
+            
+            // Full merge logic for items:
+            // 1. Remove items not in new list
+            // 2. Add new items
+            // 3. Update existing items
+            
+            // NOTE: Implementing naive replacement for now, controller should handle refined logic or passing correct object graph
+            _context.QuoteItems.RemoveRange(existing.QuoteItems);
+            foreach(var item in quote.QuoteItems)
+            {
+                item.QuoteId = existing.Id; // Ensure link
+                _context.QuoteItems.Add(item);
+            }
+            
+            // Recalculate Total
+             foreach (var item in quote.QuoteItems)
+            {
+                item.TotalAmount = (item.Quantity * item.UnitPrice) - (item.Discount ?? 0) + (item.TaxAmount ?? 0);
+            }
+            existing.TotalAmount = quote.QuoteItems.Sum(i => i.TotalAmount);
+
+            await _context.SaveChangesAsync();
+        }
+
+        public async Task DeleteAsync(long id, long businessUnitId)
+        {
+            var quote = await _context.Quotes.FirstOrDefaultAsync(q => q.Id == id && q.BusinessUnitId == businessUnitId);
+            if (quote != null)
+            {
+                _context.Quotes.Remove(quote);
+                await _context.SaveChangesAsync();
+            }
+        }
+
+        public async Task<QuoteStatsDTO> GetQuoteStatsAsync(long businessUnitId)
+        {
+            var quotes = await _context.Quotes
+                .AsNoTracking()
+                .Where(q => q.BusinessUnitId == businessUnitId)
+                .ToListAsync();
+
+            var now = DateTime.UtcNow;
+
+            return new QuoteStatsDTO
+            {
+                TotalQuotes = quotes.Count,
+                AcceptedQuotes = quotes.Count(q => q.StatusId == 32), // Assuming 32 is Accepted
+                PendingQuotes = quotes.Count(q => q.StatusId == 31),  // Assuming 31 is Pending
+                ExpiredQuotes = quotes.Count(q => q.ValidUntil.HasValue && q.ValidUntil.Value < now),
+                TotalQuotedAmount = quotes.Sum(q => q.TotalAmount ?? 0)
+            };
+        }
+    }
+}

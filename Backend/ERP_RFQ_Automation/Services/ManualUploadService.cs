@@ -1,0 +1,879 @@
+using DocumentFormat.OpenXml.Packaging;
+using DocumentFormat.OpenXml.Presentation;
+using DocumentFormat.OpenXml.Spreadsheet;
+using DocumentFormat.OpenXml.Wordprocessing;
+using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Services.Interfaces;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using Tesseract;
+using UglyToad.PdfPig;
+
+namespace ERP_RFQ_Automation.Services
+{
+    public class ManualUploadService
+    {
+        private readonly ErpRfqAutomationContext _context;
+        private readonly IWebHostEnvironment _env;
+        private readonly ILogger<ManualUploadService> _logger;
+        private readonly ILLMService _llmService;
+        private readonly string _attachmentPath;
+        private readonly string _tessDataPath;
+        
+        // Token limiting constants (same as EmailService)
+        private const int MAX_CHARS_FOR_LLM = 120000;
+        private const int MAX_CHARS_PER_ATTACHMENT = 50000;
+        private const int PRIORITY_EMAIL_BODY_CHARS = 10000;
+
+        public ManualUploadService(
+            ErpRfqAutomationContext context,
+            IWebHostEnvironment env,
+            ILogger<ManualUploadService> logger,
+            ILLMService llmService)
+        {
+            _context = context;
+            _env = env;
+            _logger = logger;
+            _llmService = llmService;
+            _attachmentPath = Path.Combine(_env.ContentRootPath, "Uploads", "Manual_Attachments");
+            _tessDataPath = Path.Combine(_env.ContentRootPath, "tessdata");
+            Directory.CreateDirectory(_attachmentPath);
+        }
+
+        /// <summary>
+        /// Processes multiple uploaded files, extracts lead data, and saves to the database.
+        /// </summary>
+        /// <param name="files">List of uploaded files.</param>
+        /// <param name="businessUnitId">The BusinessUnitId for the lead.</param>
+        /// <returns>A ServiceResult containing the ID of the created Lead.</returns>
+        public async Task<ServiceResult<long>> ProcessUploadedFilesAsync(List<Microsoft.AspNetCore.Http.IFormFile> files, long businessUnitId)
+        {
+            if (files == null || !files.Any())
+            {
+                _logger.LogWarning("No files provided for manual upload.");
+                return ServiceResult<long>.CreateFailure("No files were uploaded.");
+            }
+
+            const double minConfidence = 0.60;
+            string combinedExtractedText = "";
+            var fileTypes = new HashSet<string>();
+            var attachmentStreams = new List<(string FileName, MemoryStream Stream, string Extension)>();
+
+            foreach (var file in files)
+            {
+                if (file.Length == 0) continue;
+
+                var fileName = file.FileName;
+                var ext = Path.GetExtension(fileName).ToLowerInvariant();
+                if (!IsSupportedExtension(ext)) continue;
+
+                string fileType = ext switch
+                {
+                    ".pdf" => "PDF",
+                    ".doc" or ".docx" => "Word",
+                    ".xlsx" => "Excel",
+                    ".pptx" => "PowerPoint",
+                    ".jpg" or ".jpeg" => "JPEG",
+                    ".png" => "PNG",
+                    ".bmp" => "BMP",
+                    ".tiff" => "TIFF",
+                    _ => "Unknown"
+                };
+                fileTypes.Add(fileType);
+
+                try
+                {
+                    var ms = new MemoryStream();
+                    await file.CopyToAsync(ms);
+                    ms.Position = 0;
+                    attachmentStreams.Add((fileName, ms, ext));
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to read uploaded file: {FileName}", fileName);
+                }
+            }
+
+            foreach (var (fileName, ms, ext) in attachmentStreams)
+            {
+                try
+                {
+                    ms.Position = 0;
+                    var text = ext switch
+                    {
+                        ".pdf" => ExtractTextFromPdf(ms.ToArray()),
+                        ".doc" or ".docx" => ExtractTextFromDocx(ms),
+                        ".xlsx" => ExtractTextFromExcel(ms),
+                        ".pptx" => ExtractTextFromPptx(ms),
+                        ".jpg" or ".jpeg" or ".png" or ".bmp" or ".tiff" => ExtractTextFromImage(ms.ToArray()),
+                        _ => ""
+                    };
+                    if (!string.IsNullOrWhiteSpace(text))
+                        combinedExtractedText += $"\n\n[File: {fileName}]\n{text}";
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to extract text from: {FileName}", fileName);
+                }
+                finally
+                {
+                    ms.Dispose();
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(combinedExtractedText))
+            {
+                _logger.LogWarning("No text extracted from uploaded files.");
+                return ServiceResult<long>.CreateFailure("Could not extract any text from the uploaded files. Please check the file content and try again.");
+            }
+
+            // --- VALIDATION STEP 1: Content Check ---
+            // Check if extracted text looks like an RFQ
+            if (!IsLikelyRFQContent(combinedExtractedText))
+            {
+                _logger.LogWarning("Uploaded files do not appear to contain RFQ content. Processing aborted.");
+                return ServiceResult<long>.CreateFailure("The uploaded documents do not appear to be RFQ-related. Please upload a valid Request for Quotation.");
+            }
+
+            var defaultConfig = await _context.EmailConfigurations
+                .AsNoTracking()
+                .FirstOrDefaultAsync(e => e.IsActive && e.BusinessUnitId == businessUnitId);
+
+            if (defaultConfig == null)
+            {
+                defaultConfig = await _context.EmailConfigurations
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(e => e.IsActive);
+            }
+
+            if (defaultConfig == null)
+            {
+                _logger.LogError("No active email configuration found for manual upload.");
+                return ServiceResult<long>.CreateFailure("System configuration error: No active email configuration found.");
+            }
+
+            var dummyIngest = new EmailIngest
+            {
+                MessageId = $"Manual_{Guid.NewGuid()}",
+                EmailSubject = "Manual Upload",
+                FromEmail = "manual@upload.com",
+                ToEmail = "system@rfq.com",
+                EmailConfigurationId = defaultConfig.Id,
+                CreatedOn = DateTime.UtcNow,
+                ParseStatus = "Manual",
+                RawEmailPath = null,
+                ParsedAt = DateTime.UtcNow
+            };
+            _context.EmailIngests.Add(dummyIngest);
+            await _context.SaveChangesAsync();
+
+            string emailSource = fileTypes.Count > 0
+                ? string.Join(", ", fileTypes.OrderBy(x => x))
+                : "Text Only";
+
+            try
+            {
+                LeadExtractionResult? ai = null;
+                try
+                {
+                    // Apply smart token limiting before sending to LLM
+                    string limitedText = LimitTextForLLM(combinedExtractedText);
+                    ai = await _llmService.ExtractLeadDataAsync(limitedText);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "AI extraction failed – using regex fallback");
+                }
+
+                if (ai == null)
+                {
+                    ai = BuildFallbackExtraction(combinedExtractedText);
+                }
+
+                // --- VALIDATION STEP 2: AI Confidence Check ---
+                // ... (existing confidence check code) ...
+                if (ai == null || ai.OverallConfidence < minConfidence)
+                {
+                    _logger.LogWarning(
+                        "Manual upload AI confidence too low. Confidence: {Confidence:F2}, Required: {Required:F2}",
+                        ai?.OverallConfidence ?? 0, minConfidence);
+                    
+                    // Mark ingestion as failed
+                    dummyIngest.ParseStatus = "Failed - Low Confidence";
+                    await _context.SaveChangesAsync();
+                    
+                    return ServiceResult<long>.CreateFailure($"AI analysis confidence low ({ai?.OverallConfidence:P0}). Please ensure the document is clear and readable.");
+                }
+
+                // --- DUPLICATE DETECTION ---
+                bool isDuplicate = false;
+
+                if (!string.IsNullOrWhiteSpace(ai.Rfqno))
+                {
+                    // Strict check: Same RFQ No and Buyer
+                    isDuplicate = await _context.Leads
+                        .AsNoTracking()
+                        .AnyAsync(l =>
+                            l.Rfqno == ai.Rfqno &&
+                            l.BuyersName == ai.BuyersName);
+                }
+                else if (!string.IsNullOrWhiteSpace(ai.BuyersName))
+                {
+                    // Fuzzy check: Same Buyer, same item count, and at least one matching item (Quantity + Product)
+                    var firstItem = ai.Items.FirstOrDefault();
+                    if (firstItem != null && firstItem.Quantity > 0)
+                    {
+                        isDuplicate = await _context.Leads
+                            .AsNoTracking()
+                            .AnyAsync(l =>
+                                l.BuyersName == ai.BuyersName &&
+                                l.NoOfLineItems == ai.Items.Count &&
+                                l.LeadItems.Any(li =>
+                                    li.CommodityProduct == firstItem.CommodityProduct &&
+                                    li.Quantity == firstItem.Quantity));
+                    }
+                }
+
+                if (isDuplicate)
+                {
+                    _logger.LogWarning("Skipping duplicate lead from manual upload. RFQ: {Rfqno}, Buyer: {Buyer}", ai.Rfqno, ai.BuyersName);
+                    
+                    dummyIngest.ParseStatus = "Skipped - Duplicate";
+                    await _context.SaveChangesAsync();
+
+                    return ServiceResult<long>.CreateFailure($"Duplicate lead detected. RFQ '{ai.Rfqno}' from '{ai.BuyersName}' already exists.");
+                }
+
+                // Use transaction to ensure atomic Lead + Items + Attachments creation
+                using var transaction = await _context.Database.BeginTransactionAsync();
+                try
+                {
+                    DateTime recDate = ParseDate(ai.RecDate) ?? DateTime.UtcNow;
+                    DateTime? bidClosingDate = ParseDate(ai.BidClosingDate);
+                    DateTime? acknowledgmentDate = ParseDate(ai.AcknowledgmentDate);
+                    DateTime? subDate = ParseDate(ai.SubDate);
+
+                    var items = ai.Items.Where(x => x.Quantity > 0).ToList();
+
+                    var lead = new Lead
+                    {
+                        Rfqno = Truncate(ai.Rfqno, 100),
+                        BuyersName = Truncate(ai.BuyersName, 255),
+                        RecDate = recDate,
+                        BidClosingDate = bidClosingDate,
+                        BiddingDecision = Truncate(ai.BiddingDecision, 100),
+                        AcknowledgmentDate = acknowledgmentDate,
+                        SubDate = subDate,
+                        HeaderRemarks = Truncate(
+                            $"Manual upload. {(!string.IsNullOrWhiteSpace(ai.HeaderRemarks) ? "\n\nSummary:\n" + ai.HeaderRemarks : "")}", 8000),
+                        OpportunityNo = Truncate(ai.OpportunityNo, 100),
+                        NoOfLineItems = items.Count,
+                        Rfqtype = Truncate(ai.Rfqtype, 50),
+                        DurationAgreement = Truncate(ai.DurationAgreement, 100),
+                        LeadSource = "Manual",
+                        EmailSource = emailSource,
+                        Clientemail = "manual@upload.com",
+                        Aiconfidence = (decimal?)ai.OverallConfidence,
+                        CreatedBy = "System",
+                        CreatedDate = DateTime.UtcNow,
+                        BusinessUnitId = businessUnitId,
+                        EmailIngestsId = dummyIngest.Id
+                    };
+
+                    _context.Leads.Add(lead);
+                    await _context.SaveChangesAsync();
+
+                    foreach (var aiItem in items)
+                    {
+                        int? leadTime = int.TryParse(aiItem.LeadTime ?? "", out int lt) ? lt : null;
+                        DateTime? receivedDate = ParseDate(aiItem.ReceivedDate);
+                        DateTime? bidClosingDateLine = ParseDate(aiItem.BidClosingDateLine);
+
+                        _context.LeadItems.Add(new LeadItem
+                        {
+                            LeadId = lead.Id,
+                            CompanyRef = Truncate(aiItem.CompanyRef, 100),
+                            CustomerAccountPortalId = Truncate(aiItem.CustomerAccountPortalId, 100),
+                            CustomerRfqno = Truncate(aiItem.CustomerRfqno, 100),
+                            ItemMaterialCode = Truncate(aiItem.ItemMaterialCode, 100),
+                            CommodityProduct = Truncate(aiItem.CommodityProduct, 200),
+                            BuyerName = Truncate(aiItem.BuyerName, 200),
+                            LineItemNo = Truncate(aiItem.LineItemNo, 50),
+                            ProductShortName = Truncate(aiItem.ProductShortName, 1000),
+                            Alternative = Truncate(aiItem.Alternative, 100),
+                            ProductShortDescription = Truncate(aiItem.ProductShortDescription, 1000),
+                            Currency = Truncate(aiItem.Currency, 10),
+                            UnitOfMeasure = Truncate(aiItem.UnitOfMeasure, 100),
+                            UnitPrice = aiItem.UnitPrice,
+                            Quantity = aiItem.Quantity ?? 0,
+                            StorageLocation = Truncate(aiItem.StorageLocation, 100),
+                            ManufacturerName = Truncate(aiItem.ManufacturerName, 200),
+                            ManufacturerPartNumber = Truncate(aiItem.ManufacturerPartNumber, 100),
+                            AlternateProductName = Truncate(aiItem.AlternateProductName, 200),
+                            AlternatePartNumber = Truncate(aiItem.AlternatePartNumber, 100),
+                            ItemText = Truncate(aiItem.ItemText, 2000),
+                            MaterialPotext = Truncate(aiItem.MaterialPotext, 2000),
+                            LeadTime = leadTime,
+                            ReceivedDate = receivedDate,
+                            BidClosingDateLine = bidClosingDateLine,
+                            Aiconfidence = (decimal?)(aiItem.ItemConfidence ?? 0.0)
+                        });
+                    }
+
+                    if (items.Count > 0)
+                        await _context.SaveChangesAsync();
+
+                    await SaveAttachmentsAsync(files, lead.Id);
+
+                    // Update ingest status before commit
+                    dummyIngest.ParseStatus = "Success";
+                    await _context.SaveChangesAsync();
+
+                    // Commit transaction - all or nothing
+                    await transaction.CommitAsync();
+
+                    return ServiceResult<long>.CreateSuccess(lead.Id, "File processed and lead created successfully.");
+                }
+                catch (Exception txEx)
+                {
+                    await transaction.RollbackAsync();
+                    _logger.LogError(txEx, "Transaction rolled back for manual upload.");
+                    throw;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to save lead from manual upload.");
+                return ServiceResult<long>.CreateFailure("An unexpected error occurred during processing. Please contact support.");
+            }
+        }
+
+        private async Task SaveAttachmentsAsync(List<Microsoft.AspNetCore.Http.IFormFile> files, long leadId)
+        {
+            const long maxBytes = 25 * 1024 * 1024; // 25 MB limit
+
+            foreach (var file in files)
+            {
+                if (file.Length == 0) continue;
+                
+                // SECURITY FIX: Check file size BEFORE writing to disk
+                if (file.Length > maxBytes)
+                {
+                    _logger.LogWarning("Skipping large file: {File} ({Size} bytes)", file.FileName, file.Length);
+                    continue;
+                }
+
+                var safeName = SanitizeFileName(file.FileName);
+                var fileName = $"{leadId}_{Guid.NewGuid()}_{safeName}";
+                var relativePath = Path.Combine("Uploads", "Manual_Attachments", fileName);
+                var physicalPath = Path.Combine(_attachmentPath, fileName);
+
+                try
+                {
+                    // Write to disk only if size is acceptable
+                    await using var fileStream = File.Create(physicalPath);
+                    await file.CopyToAsync(fileStream);
+                    await fileStream.FlushAsync();
+                    var size = fileStream.Length;
+
+                    _context.Attachments.Add(new Attachment
+                    {
+                        ParentType = "Lead",
+                        ParentId = leadId,
+                        FileName = safeName,
+                        FilePath = relativePath,
+                        MimeType = file.ContentType,
+                        FileSize = size,
+                        ContentType = file.ContentType?.Split('/')[0],
+                        CreatedOn = DateTime.UtcNow,
+                        UploadedDate = DateTime.UtcNow
+                    });
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to save file: {File}", safeName);
+                    // Clean up file if it was created
+                    if (File.Exists(physicalPath))
+                    {
+                        try { File.Delete(physicalPath); } catch { /* Ignore cleanup errors */ }
+                    }
+                }
+            }
+
+            if (files.Any())
+                await _context.SaveChangesAsync();
+        }
+
+        // Reused methods from EmailService (duplicated here for independence; consider refactoring to a shared utility class if needed)
+        private LeadExtractionResult BuildFallbackExtraction(string extracted)
+        {
+            var rfqNo = ExtractRFQNo(extracted);
+            var rfqNoConf = rfqNo != null ? 0.8 : 0.0;
+            var buyersName = ExtractCompany(extracted);
+            var buyersNameConf = buyersName != null ? 0.8 : 0.0;
+            var bidClosing = ExtractBidClosing(extracted);
+            var bidClosingConf = bidClosing != null ? 0.8 : 0.0;
+            var biddingDecision = ExtractBiddingDecision(extracted);
+            var biddingDecisionConf = biddingDecision != null ? 0.8 : 0.0;
+            var acknowledgmentDate = ExtractAcknowledgmentDate(extracted);
+            var acknowledgmentDateConf = acknowledgmentDate != null ? 0.8 : 0.0;
+            var subDate = ExtractSubDate(extracted);
+            var subDateConf = subDate != null ? 0.8 : 0.0;
+            var opportunityNo = ExtractOpportunityNo(extracted);
+            var opportunityNoConf = opportunityNo != null ? 0.8 : 0.0;
+            var rfqType = ExtractRFQType(extracted);
+            var rfqTypeConf = rfqType != null ? 0.8 : 0.0;
+            var durationAgreement = ExtractDurationAgreement(extracted);
+            var durationAgreementConf = durationAgreement != null ? 0.8 : 0.0;
+            string? recDate = null;
+            var recDateConf = 0.0;
+            string? headerRemarks = null;
+            var headerRemarksConf = 0.0;
+            var items = BuildFallbackItems(extracted);
+            var confs = new List<double>
+            {
+                rfqNoConf, buyersNameConf, recDateConf, bidClosingConf, biddingDecisionConf,
+                acknowledgmentDateConf, subDateConf, headerRemarksConf, opportunityNoConf,
+                rfqTypeConf, durationAgreementConf
+            };
+            confs.AddRange(items.Select(i => i.ItemConfidence ?? 0.0));
+            double overall = confs.Count > 0 ? confs.Average() : 0.0;
+            return new LeadExtractionResult(
+                rfqNo, rfqNoConf,
+                buyersName, buyersNameConf,
+                recDate, recDateConf,
+                bidClosing, bidClosingConf,
+                biddingDecision, biddingDecisionConf,
+                acknowledgmentDate, acknowledgmentDateConf,
+                subDate, subDateConf,
+                headerRemarks, headerRemarksConf,
+                opportunityNo, opportunityNoConf,
+                rfqType, rfqTypeConf,
+                durationAgreement, durationAgreementConf,
+                overall,
+                items
+            );
+        }
+
+        private List<LeadItemData> BuildFallbackItems(string body)
+        {
+            var items = new List<LeadItemData>();
+            foreach (var line in body.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var m = Regex.Match(line,
+                    @"item[:\s]+(.*?)\s*-\s*qty[:\s]+(\d+)(?:\s*-\s*price[:\s]+([\d.]+))?(?:\s*-\s*currency[:\s]+(\w+))?(?:\s*-\s*unit[:\s]+(\w+))?",
+                    RegexOptions.IgnoreCase);
+                if (m.Success)
+                {
+                    var name = m.Groups[1].Value.Trim();
+                    var nameConf = !string.IsNullOrWhiteSpace(name) ? 0.8 : 0.0;
+                    var qtyStr = m.Groups[2].Value;
+                    int quantity = int.TryParse(qtyStr, out int q) ? q : 0;
+                    var qtyConf = quantity > 0 ? 0.8 : 0.0;
+                    var priceStr = m.Groups[3].Value;
+                    decimal? unitPrice = decimal.TryParse(priceStr, out decimal p) ? p : null;
+                    var priceConf = unitPrice != null ? 0.8 : 0.0;
+                    var currency = m.Groups[4].Value.Trim();
+                    var currencyConf = !string.IsNullOrWhiteSpace(currency) ? 0.8 : 0.0;
+                    var unit = m.Groups[5].Value.Trim();
+                    var unitConf = !string.IsNullOrWhiteSpace(unit) ? 0.8 : 0.0;
+                    var otherConf = 0.0;
+                    var confs = new List<double> { nameConf, qtyConf, priceConf, currencyConf, unitConf };
+                    confs.AddRange(Enumerable.Repeat(0.0, 19));
+                    double itemConf = confs.Average();
+                    items.Add(new LeadItemData(
+                        null, otherConf,
+                        null, otherConf,
+                        null, otherConf,
+                        null, otherConf,
+                        null, otherConf,
+                        null, otherConf,
+                        null, otherConf,
+                        name, nameConf,
+                        null, otherConf,
+                        null, otherConf,
+                        currency, currencyConf,
+                        unit, unitConf,
+                        unitPrice, priceConf,
+                        quantity, qtyConf,
+                        null, otherConf,
+                        null, otherConf,
+                        null, otherConf,
+                        null, otherConf,
+                        null, otherConf,
+                        null, otherConf,
+                        null, otherConf,
+                        null, otherConf,
+                        null, otherConf,
+                        null, otherConf,
+                        itemConf
+                    ));
+                }
+            }
+            return items;
+        }
+
+        private string ExtractTextFromPdf(byte[] bytes)
+        {
+            try
+            {
+                using var doc = PdfDocument.Open(bytes);
+                var sb = new StringBuilder();
+                foreach (var page in doc.GetPages())
+                    sb.AppendLine(page.Text);
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "PDF extraction failed");
+                return "";
+            }
+        }
+
+        private string ExtractTextFromDocx(MemoryStream ms)
+        {
+            try
+            {
+                ms.Position = 0;
+                using var doc = WordprocessingDocument.Open(ms, false);
+                var sb = new StringBuilder();
+                var body = doc.MainDocumentPart?.Document?.Body;
+                if (body != null)
+                {
+                    foreach (var text in body.Descendants<DocumentFormat.OpenXml.Wordprocessing.Text>())
+                        sb.Append(text.Text + " ");
+                }
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "DOCX extraction failed");
+                return "";
+            }
+        }
+
+        private string ExtractTextFromExcel(MemoryStream ms)
+        {
+            try
+            {
+                ms.Position = 0;
+                using var doc = SpreadsheetDocument.Open(ms, false);
+                var sb = new StringBuilder();
+                var workbookPart = doc.WorkbookPart;
+                var sstPart = workbookPart?.GetPartsOfType<SharedStringTablePart>().FirstOrDefault();
+                var sst = sstPart?.SharedStringTable;
+                foreach (var sheet in workbookPart.Workbook.Descendants<Sheet>())
+                {
+                    var worksheetPart = (WorksheetPart)workbookPart.GetPartById(sheet.Id);
+                    foreach (var cell in worksheetPart.Worksheet.Descendants<Cell>())
+                    {
+                        if (cell.CellValue == null) continue;
+                        string value = cell.CellValue.Text;
+                        if (cell.DataType != null && cell.DataType == CellValues.SharedString && sst != null)
+                        {
+                            int index = int.Parse(value);
+                            value = sst.ElementAt(index).InnerText;
+                        }
+                        sb.Append(value + " ");
+                    }
+                }
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "XLSX extraction failed");
+                return "";
+            }
+        }
+
+        private string ExtractTextFromPptx(MemoryStream ms)
+        {
+            try
+            {
+                ms.Position = 0;
+                using var doc = PresentationDocument.Open(ms, false);
+                var sb = new StringBuilder();
+                var presentationPart = doc.PresentationPart;
+                if (presentationPart == null) return "";
+                foreach (var slidePart in presentationPart.SlideParts)
+                {
+                    foreach (var text in slidePart.Slide.Descendants<DocumentFormat.OpenXml.Presentation.Text>())
+                    {
+                        sb.Append(text.Text + " ");
+                    }
+                }
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "PPTX extraction failed");
+                return "";
+            }
+        }
+
+        private string ExtractTextFromImage(byte[] bytes)
+        {
+            try
+            {
+                using var engine = new TesseractEngine(_tessDataPath, "eng", EngineMode.Default);
+                using var img = Pix.LoadFromMemory(bytes);
+                using var page = engine.Process(img);
+                return page.GetText();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "OCR failed");
+                return "";
+            }
+        }
+
+        private string? ExtractField(string text, string pattern, int maxLength)
+        {
+            var m = Regex.Match(text, pattern, RegexOptions.IgnoreCase | RegexOptions.Multiline);
+            if (!m.Success) return null;
+            var value = Regex.Replace(m.Groups[1].Value.Trim(), @"\s+", " ");
+            return value.Length <= maxLength ? value : value.Substring(0, maxLength - 3) + "...";
+        }
+
+        private string? ExtractRFQNo(string text) => ExtractField(text, @"RFQ[:#\s]*([A-Z0-9-]+)", 100);
+        private string? ExtractCompany(string text) => ExtractField(text, @"company[:\s]+(.+?)(?=\r?\n|$)", 510);
+        private string? ExtractBidClosing(string text) => ExtractField(text, @"bid closing[:\s]+(.+?)(?=\r?\n|$)", 100);
+        private string? ExtractBiddingDecision(string text) => ExtractField(text, @"bidding decision[:\s]+(.+?)(?=\r?\n|$)", 100);
+        private string? ExtractAcknowledgmentDate(string text) => ExtractField(text, @"acknowledgment date[:\s]+(.+?)(?=\r?\n|$)", 100);
+        private string? ExtractSubDate(string text) => ExtractField(text, @"submission date[:\s]+(.+?)(?=\r?\n|$)", 100);
+        private string? ExtractOpportunityNo(string text) => ExtractField(text, @"opportunity[:#\s]*([A-Z0-9-]+)", 100);
+        private string? ExtractRFQType(string text) => ExtractField(text, @"type[:\s]+(Agreement|Direct)", 50);
+        private string? ExtractDurationAgreement(string text) => ExtractField(text, @"duration[:\s]+(.+?)(?=\r?\n|$)", 100);
+
+        private string Truncate(string? value, int maxLength)
+        {
+            if (string.IsNullOrEmpty(value)) return null;
+            return value.Length <= maxLength ? value : value.Substring(0, maxLength - 3) + "...";
+        }
+
+        private DateTime? ParseDate(string? s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return null;
+            var formats = new[] { "yyyy-MM-dd", "dd/MM/yyyy", "MM/dd/yyyy", "dd-MM-yyyy", "d/M/yyyy" };
+            return DateTime.TryParseExact(s.Trim(), formats, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var d) ? d : null;
+        }
+
+        private string SanitizeFileName(string fileName)
+        {
+            return string.Join("_", fileName.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries)).Replace(" ", "_");
+        }
+
+        // Smart token limiting for LLM input (same as EmailService)
+        private string LimitTextForLLM(string fullText)
+        {
+            if (string.IsNullOrEmpty(fullText) || fullText.Length <= MAX_CHARS_FOR_LLM)
+                return fullText;
+
+            _logger.LogWarning("Text too long for LLM ({Length} chars), truncating to {Max} chars", 
+                fullText.Length, MAX_CHARS_FOR_LLM);
+
+            // Simple truncation with ellipsis
+            return fullText.Substring(0, MAX_CHARS_FOR_LLM - 100) + "\n\n[... Text truncated due to length ...]";
+        }
+
+        private bool IsSupportedExtension(string ext) => ext switch
+        {
+            ".pdf" or ".doc" or ".docx" or ".xlsx" or ".pptx" or ".jpg" or ".jpeg" or ".png" or ".bmp" or ".tiff" => true,
+            _ => false
+        };
+        /// <summary>
+        /// Processes a specialized RFQ Excel file for a specific customer, bypassing AI.
+        /// </summary>
+        public async Task<ServiceResult<long>> ProcessCustomerRfqExcelAsync(Microsoft.AspNetCore.Http.IFormFile file, long businessUnitId, string createdBy)
+        {
+            if (file == null || file.Length == 0)
+            {
+                return ServiceResult<long>.CreateFailure("No file uploaded.");
+            }
+
+            try
+            {
+                using var ms = new MemoryStream();
+                await file.CopyToAsync(ms);
+                ms.Position = 0;
+
+                using var doc = SpreadsheetDocument.Open(ms, false);
+                var workbookPart = doc.WorkbookPart;
+                var sheet = workbookPart?.Workbook.Descendants<Sheet>().FirstOrDefault();
+                if (sheet == null) return ServiceResult<long>.CreateFailure("No sheets found in Excel.");
+
+                var worksheetPart = (WorksheetPart)workbookPart.GetPartById(sheet.Id);
+                var rows = worksheetPart.Worksheet.Descendants<Row>().ToList();
+
+                if (rows.Count <= 1) return ServiceResult<long>.CreateFailure("Excel file is empty or contains only headers.");
+
+                var sstPart = workbookPart.GetPartsOfType<SharedStringTablePart>().FirstOrDefault();
+                var sst = sstPart?.SharedStringTable;
+
+                // Load currencies for the business unit to map the string from Excel
+                var currencies = await _context.Currencies
+                    .AsNoTracking()
+                    .Where(c => c.BusinessUnitId == businessUnitId && c.IsActive == true)
+                    .ToListAsync();
+
+                var rfqItems = new List<Rfqitem>();
+                
+                // Assuming Row 1 is header, data starts from Row 2
+                foreach (var row in rows.Skip(1))
+                {
+                    var cells = row.Elements<Cell>().ToList();
+                    if (!cells.Any()) continue;
+
+                    var item = new Rfqitem
+                    {
+                        LineItemNo = GetCellValue(workbookPart, cells, "A", sst),        // Number (Col 0)
+                        ProductShortName = GetCellValue(workbookPart, cells, "B", sst),   // Name (Col 1)
+                        Alternative = GetCellValue(workbookPart, cells, "C", sst),        // Alternative (Col 2)
+                        ProductShortDescription = GetCellValue(workbookPart, cells, "F", sst), // Description (Col 5)
+                        Currency = GetCellValue(workbookPart, cells, "I", sst),           // Currency (Col 8)
+                        UnitOfMeasure = GetCellValue(workbookPart, cells, "J", sst),      // Unit of Measure (Col 9)
+                        ItemMaterialCode = GetCellValue(workbookPart, cells, "K", sst),    // Material Number (Col 10)
+                        UnitPrice = decimal.TryParse(GetCellValue(workbookPart, cells, "M", sst), out var price) ? price : 0, // * Price (Col 12)
+                        Quantity = int.TryParse(GetCellValue(workbookPart, cells, "N", sst), out var qty) ? qty : 0,          // Quantity (Col 13)
+                        LeadTime = int.TryParse(GetCellValue(workbookPart, cells, "O", sst), out var lt) ? lt : null,         // * Lead Time (Col 14)
+                        ManufacturerPartNumber = GetCellValue(workbookPart, cells, "Q", sst), // * MPN (Col 16)
+                        ManufacturerName = GetCellValue(workbookPart, cells, "S", sst),       // Manufacturer (Col 18)
+                        CreatedBy = createdBy,
+                        CreatedDate = DateTime.UtcNow
+                    };
+
+                    // Map Currency string to CurrencyId
+                    if (!string.IsNullOrWhiteSpace(item.Currency))
+                    {
+                        var matchingCurrency = currencies.FirstOrDefault(c => 
+                            c.Code.Equals(item.Currency, StringComparison.OrdinalIgnoreCase) || 
+                            c.CurrencyName.Equals(item.Currency, StringComparison.OrdinalIgnoreCase));
+                        
+                        if (matchingCurrency != null)
+                        {
+                            item.CurrencyId = matchingCurrency.Id;
+                        }
+                    }
+
+
+                    if (!string.IsNullOrWhiteSpace(item.ProductShortName) || !string.IsNullOrWhiteSpace(item.ItemMaterialCode))
+                    {
+                        rfqItems.Add(item);
+                    }
+                }
+
+                if (!rfqItems.Any())
+                {
+                    return ServiceResult<long>.CreateFailure("No valid items found in the Excel file.");
+                }
+
+                var rfq = new Rfq
+                {
+                    Rfqno = $"RFQ_{Path.GetFileNameWithoutExtension(file.FileName)}_{DateTime.UtcNow:yyyyMMddHHmm}",
+                    BuyersName = "Specialized Customer",
+                    RecDate = DateTime.UtcNow,
+                    BusinessUnitId = businessUnitId,
+                    CreatedBy = createdBy,
+                    CreatedDate = DateTime.UtcNow,
+                    NoOfLineItems = rfqItems.Count,
+                    RfqstatusId = 34,
+                    Rfqitems = rfqItems
+                };
+
+                _context.Rfqs.Add(rfq);
+                await _context.SaveChangesAsync();
+
+                return ServiceResult<long>.CreateSuccess(rfq.Id, "RFQ created successfully from Excel.");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error processing customer RFQ Excel.");
+                return ServiceResult<long>.CreateFailure($"Error: {ex.Message}");
+            }
+        }
+
+        private string GetCellValue(WorkbookPart workbookPart, List<Cell> cells, string columnLetter, SharedStringTable sst)
+        {
+            // Find cell with exact column letter (e.g. A1, A2, but not AA1)
+            var cell = cells.FirstOrDefault(c => {
+                if (c.CellReference == null) return false;
+                string reference = c.CellReference.Value!;
+                string column = new string(reference.TakeWhile(ch => char.IsLetter(ch)).ToArray());
+                return column == columnLetter;
+            });
+
+            if (cell == null || cell.CellValue == null) return "";
+
+            string value = cell.CellValue.Text;
+            if (cell.DataType != null && cell.DataType == CellValues.SharedString && sst != null)
+            {
+                int index = int.Parse(value);
+                value = sst.ElementAt(index).InnerText;
+            }
+            return value.Trim();
+        }
+
+        private bool IsLikelyRFQContent(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return false;
+            text = text.ToLowerInvariant();
+
+            var strongIndicators = new[]
+            {
+                "rfq", "request for quotation", "request for quote",
+                "tender", "bid invitation", "procurement notice", "quotation request"
+            };
+
+            var weakIndicators = new[]
+            {
+                "quote", "bid", "proposal",
+                "purchase", "pricing", "delivery", "line item", "part no", "qty"
+            };
+
+            // Check strong indicators
+            if (strongIndicators.Any(ind => text.Contains(ind)))
+                return true;
+
+            // Check weak indicators (need multiple)
+            var weakMatches = weakIndicators.Count(ind => text.Contains(ind));
+            if (weakMatches >= 2)
+                return true;
+
+            // Check for RFQ numbers
+            if (Regex.IsMatch(text, @"RFQ[#:\s-]*[A-Z0-9-]+", RegexOptions.IgnoreCase))
+                return true;
+
+            return false;
+        }
+
+        private bool HasStrongRFQIndicators(string text, LeadExtractionResult? ai)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return false;
+            text = text.ToLowerInvariant();
+
+            // Check for RFQ number pattern in text
+            if (Regex.IsMatch(text, @"rfq\s*#?\s*([A-Z0-9-]+)", RegexOptions.IgnoreCase))
+                return true;
+
+            // Check if AI found an RFQ number
+            if (!string.IsNullOrWhiteSpace(ai?.Rfqno))
+                return true;
+
+            // Check for explicit RFQ keywords
+            var strongKeywords = new[] { "request for quotation", "rfq", "tender invitation" };
+            if (strongKeywords.Any(k => text.Contains(k)))
+                return true;
+
+            return false;
+        }
+    }
+}
