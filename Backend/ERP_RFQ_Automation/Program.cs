@@ -14,11 +14,45 @@ using ERP_RFQ_Automation.Authorization;
 using Microsoft.AspNetCore.Authorization;
 using OfficeOpenXml;
 var builder = WebApplication.CreateBuilder(args);
+
+// Fail fast on missing / placeholder critical configuration so a misconfigured
+// deploy stops at startup instead of silently using placeholders or an empty
+// signing key. (DATA-07, SEC-12)
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+if (string.IsNullOrWhiteSpace(connectionString) || connectionString.Contains("__DB_"))
+    throw new InvalidOperationException(
+        "ConnectionStrings:DefaultConnection is missing or still contains placeholders. " +
+        "Provide it via appsettings.Development.json, user-secrets, or environment variables.");
+
+var jwtKey = builder.Configuration["Jwt:Key"];
+if (string.IsNullOrWhiteSpace(jwtKey) || jwtKey.Contains("__JWT_") || Encoding.UTF8.GetByteCount(jwtKey) < 32)
+    throw new InvalidOperationException(
+        "Jwt:Key is missing, a placeholder, or shorter than 256 bits (32 bytes). " +
+        "Provide a strong signing key via secure configuration.");
+
 // Add services to the container.
-builder.Services.AddControllers();
-// Add DbContext with SQL Server
+builder.Services.AddControllers()
+    .AddJsonOptions(options =>
+    {
+        options.JsonSerializerOptions.PropertyNameCaseInsensitive = true;
+    });
+
+// Keep the host alive if a BackgroundService throws — a transient failure in the
+// email poller must not tear down the whole API. (DATA-01)
+builder.Services.Configure<HostOptions>(options =>
+    options.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
+
+// Add DbContext with SQL Server (transient-fault resilience — DATA-04)
 builder.Services.AddDbContext<ErpRfqAutomationContext>(options =>
-    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+    options.UseSqlServer(connectionString, sql =>
+    {
+        sql.EnableRetryOnFailure(maxRetryCount: 5, maxRetryDelay: TimeSpan.FromSeconds(10), errorNumbersToAdd: null);
+        sql.CommandTimeout(60);
+    }));
+
+// Readiness/liveness health checks (DATA-05)
+builder.Services.AddHealthChecks()
+    .AddCheck<ERP_RFQ_Automation.HealthChecks.DatabaseHealthCheck>("database");
 // Register repositories
 builder.Services.AddScoped<ISetupMasterRepository, SetupMasterRepository>();
 builder.Services.AddScoped<ICurrencyRepository, CurrencyRepository>();
@@ -84,25 +118,31 @@ builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<ILLMService, OllamaLlmService>();
 builder.Services.AddHttpClient<OllamaLlmService>(client =>
 {
-    client.BaseAddress = new Uri("http://localhost:11434/");
+    // DATA-06: honor the configured provider URL instead of a hardcoded localhost.
+    var ollamaBaseUrl = builder.Configuration["Ollama:BaseUrl"];
+    client.BaseAddress = new Uri(string.IsNullOrWhiteSpace(ollamaBaseUrl)
+        ? "http://localhost:11434/"
+        : ollamaBaseUrl);
 });
 
-builder.Services.AddControllers()
-    .AddJsonOptions(options =>
-    {
-        options.JsonSerializerOptions.PropertyNameCaseInsensitive = true;
-    });
-
-// Enable CORS
+// CORS restricted to configured frontend origins (SEC-13). AllowAnyOrigin is
+// unsafe for a system with authenticated, tenant-scoped data. Set
+// "Cors:AllowedOrigins" in configuration for the pilot; falls back to local dev.
+var corsOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>();
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("AllowAll",
-        policy =>
+    options.AddPolicy("DefaultCors", policy =>
+    {
+        if (corsOrigins is { Length: > 0 })
         {
-            policy.AllowAnyOrigin()
-                  .AllowAnyMethod()
-                  .AllowAnyHeader();
-        });
+            policy.WithOrigins(corsOrigins).AllowAnyMethod().AllowAnyHeader().AllowCredentials();
+        }
+        else
+        {
+            policy.WithOrigins("http://localhost:5173", "http://localhost:4173", "http://localhost:3000")
+                  .AllowAnyMethod().AllowAnyHeader();
+        }
+    });
 });
 // Configure JWT Authentication
 builder.Services.AddAuthentication(options =>
@@ -119,7 +159,7 @@ builder.Services.AddAuthentication(options =>
         ValidateIssuerSigningKey = true,
         ValidIssuer = builder.Configuration["Jwt:Issuer"] ?? "",
         ValidAudience = builder.Configuration["Jwt:Audience"] ?? "",
-        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"] ?? ""))
+        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
     };
 });
 // Configure Swagger for JWT Authentication
@@ -153,16 +193,36 @@ builder.Services.AddSwaggerGen(c =>
 });
 builder.Services.AddEndpointsApiExplorer();
 var app = builder.Build();
+
+// Global exception handler — return a generic message to clients and log the
+// detail server-side, instead of leaking exception internals. (DATA-12, SEC-16)
+app.UseExceptionHandler(errApp => errApp.Run(async ctx =>
+{
+    ctx.Response.StatusCode = StatusCodes.Status500InternalServerError;
+    ctx.Response.ContentType = "application/json";
+    await ctx.Response.WriteAsync("{\"error\":\"An unexpected error occurred.\"}");
+}));
+
+// Baseline security headers (SEC-13)
+app.Use(async (ctx, next) =>
+{
+    ctx.Response.Headers["X-Content-Type-Options"] = "nosniff";
+    ctx.Response.Headers["X-Frame-Options"] = "DENY";
+    ctx.Response.Headers["Referrer-Policy"] = "no-referrer";
+    await next();
+});
+
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI();
 }
-//app.UseHttpsRedirection();
+//app.UseHttpsRedirection(); // enable at deploy time once TLS is terminated in front of the app
 // Use CORS
-app.UseCors("AllowAll");
+app.UseCors("DefaultCors");
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
+app.MapHealthChecks("/health");
 app.Run();

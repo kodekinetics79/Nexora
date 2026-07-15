@@ -38,11 +38,28 @@ namespace ERP_RFQ_Automation.Services
                 {
                     _logger.LogError(ex, "Critical error in email background service");
                 }
-                var intervals = await dbContext.EmailConfigurations
-                    .Where(e => e.IsActive)
-                    .Select(e => e.PollingInterval)
-                    .ToListAsync(stoppingToken);
-                int minInterval = intervals.Any() ? intervals.Min() : 300; // Polling interval is in seconds
+
+                // DATA-01: this DB read must NOT be able to fault ExecuteAsync — a single
+                // transient DB error here would otherwise (with the default StopHost
+                // behavior) take down the whole API host. Guard it and fall back to a
+                // safe default polling interval so the loop always survives.
+                int minInterval = 300; // seconds
+                try
+                {
+                    var intervals = await dbContext.EmailConfigurations
+                        .Where(e => e.IsActive)
+                        .Select(e => e.PollingInterval)
+                        .ToListAsync(stoppingToken);
+                    if (intervals.Any()) minInterval = intervals.Min();
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to read polling interval; using default {DefaultInterval}s", minInterval);
+                }
                 await Task.Delay(TimeSpan.FromSeconds(minInterval), stoppingToken);
             }
             _logger.LogInformation("Email Background Service stopped.");
