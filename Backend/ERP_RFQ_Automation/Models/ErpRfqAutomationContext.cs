@@ -93,9 +93,17 @@ public partial class ErpRfqAutomationContext : DbContext
 
     public virtual DbSet<Warehouse> Warehouses { get; set; }
 
+    public virtual DbSet<Taxis> Taxes { get; set; }
+
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder) { }
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        // SQL Server is case-INSENSITIVE. Postgres is case-sensitive, so email
+        // uniqueness / lookups would silently change behavior. `citext` restores
+        // case-insensitive comparison for the email columns that carry unique
+        // indexes (Customer/Supplier ContactEmail, Users/Contact Email).
+        modelBuilder.HasPostgresExtension("citext");
+
         modelBuilder.Entity<Attachment>(entity =>
         {
             entity.HasKey(e => e.Id).HasName("PK__Attachme__3214EC2740D763DA");
@@ -104,7 +112,7 @@ public partial class ErpRfqAutomationContext : DbContext
 
             entity.Property(e => e.Id).HasColumnName("ID");
             entity.Property(e => e.ContentType).HasMaxLength(200);
-            entity.Property(e => e.CreatedOn).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.CreatedOn).HasDefaultValueSql("now()");
             entity.Property(e => e.FileName).HasMaxLength(255);
             entity.Property(e => e.FilePath).HasMaxLength(500);
             entity.Property(e => e.MimeType).HasMaxLength(100);
@@ -120,7 +128,7 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.BusinessUnitCode).HasMaxLength(50);
             entity.Property(e => e.BusinessUnitName).HasMaxLength(255);
             entity.Property(e => e.CreatedBy).HasMaxLength(255);
-            entity.Property(e => e.CreatedOn).HasDefaultValueSql("(getdate())");
+            entity.Property(e => e.CreatedOn).HasDefaultValueSql("now()");
             entity.Property(e => e.Description).HasMaxLength(500);
             entity.Property(e => e.IsActive).HasDefaultValue(true);
             entity.Property(e => e.ModifiedBy).HasMaxLength(255);
@@ -141,7 +149,7 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.Id).HasColumnName("ID");
             entity.Property(e => e.CreatedBy).HasMaxLength(255);
             entity.Property(e => e.CustomerId).HasColumnName("CustomerID");
-            entity.Property(e => e.Email).HasMaxLength(255);
+            entity.Property(e => e.Email).HasColumnType("citext"); // case-insensitive unique email
             entity.Property(e => e.FirstName).HasMaxLength(100);
             entity.Property(e => e.IsActive).HasDefaultValue(true);
             entity.Property(e => e.IsPrimary).HasDefaultValue(false);
@@ -203,7 +211,7 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.BillingPostalCode).HasMaxLength(20);
             entity.Property(e => e.BillingState).HasMaxLength(100);
             entity.Property(e => e.Buid).HasColumnName("BUID");
-            entity.Property(e => e.ContactEmail).HasMaxLength(255);
+            entity.Property(e => e.ContactEmail).HasColumnType("citext"); // case-insensitive unique email (was nvarchar(255) CI in SQL Server)
             entity.Property(e => e.CreatedBy).HasMaxLength(255);
             entity.Property(e => e.DocId)
                 .HasMaxLength(10)
@@ -235,7 +243,7 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.Id).HasColumnName("ID");
             entity.Property(e => e.BusinessUnitId).HasColumnName("BusinessUnitID");
             entity.Property(e => e.ConfigurationName).HasMaxLength(255);
-            entity.Property(e => e.CreatedOn).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.CreatedOn).HasDefaultValueSql("now()");
             entity.Property(e => e.EmailAddress).HasMaxLength(255);
             entity.Property(e => e.Host).HasMaxLength(255);
             entity.Property(e => e.IsActive).HasDefaultValue(true);
@@ -260,7 +268,7 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.HasIndex(e => e.MessageId, "UQ__EmailIng__C87C037D5950F99E").IsUnique();
 
             entity.Property(e => e.Id).HasColumnName("ID");
-            entity.Property(e => e.CreatedOn).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.CreatedOn).HasDefaultValueSql("now()");
             entity.Property(e => e.EmailConfigurationId).HasColumnName("EmailConfigurationID");
             entity.Property(e => e.EmailSubject).HasMaxLength(500);
             entity.Property(e => e.FromEmail).HasMaxLength(255);
@@ -293,7 +301,7 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.ModifiedBy).HasMaxLength(255);
             entity.Property(e => e.ResourceId).HasColumnName("ResourceID");
             entity.Property(e => e.ResourceType).HasMaxLength(100);
-            entity.Property(e => e.UploadDate).HasDefaultValueSql("(getdate())");
+            entity.Property(e => e.UploadDate).HasDefaultValueSql("now()");
         });
 
         modelBuilder.Entity<Lead>(entity =>
@@ -313,7 +321,7 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.AssignComment)
                 .HasMaxLength(500)
                 .IsUnicode(false);
-            entity.Property(e => e.AssignOn).HasColumnType("datetime");
+            entity.Property(e => e.AssignOn);
             entity.Property(e => e.BiddingDecision).HasMaxLength(100);
             entity.Property(e => e.BusinessUnitId).HasColumnName("BusinessUnitID");
             entity.Property(e => e.BuyersName).HasMaxLength(510);
@@ -321,7 +329,7 @@ public partial class ErpRfqAutomationContext : DbContext
                 .HasMaxLength(255)
                 .IsUnicode(false);
             entity.Property(e => e.CreatedBy).HasMaxLength(20);
-            entity.Property(e => e.CreatedDate).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.CreatedDate).HasDefaultValueSql("now()");
             entity.Property(e => e.DurationAgreement).HasMaxLength(100);
             entity.Property(e => e.EmailIngestsId).HasColumnName("EmailIngestsID");
             entity.Property(e => e.EmailSource)
@@ -442,19 +450,23 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.HasIndex(e => e.PaymentStatusId, "IX_Orders_PaymentStatusID");
 
             entity.Property(e => e.Id).HasColumnName("ID");
+            // Postgres supports only STORED generated columns (not the virtual /
+            // non-persisted computed column SQL Server used here). Translate the
+            // expression to Postgres-quoted identifiers and persist it. Behaviour
+            // is unchanged for the app, which computes the balance in code
+            // (OrderService) and never reads this column.
             entity.Property(e => e.BalanceAmount)
-                .HasComputedColumnSql("([TotalAmount]-[PaidAmount])", false)
+                .HasComputedColumnSql("\"TotalAmount\" - \"PaidAmount\"", stored: true)
                 .HasColumnType("decimal(19, 2)");
             entity.Property(e => e.BusinessUnitId).HasColumnName("BusinessUnitID");
             entity.Property(e => e.CreatedBy)
                 .HasMaxLength(255)
                 .IsUnicode(false);
             entity.Property(e => e.CreatedOn)
-                .HasDefaultValueSql("(getdate())")
-                .HasColumnType("datetime");
+                .HasDefaultValueSql("now()");
             entity.Property(e => e.CurrencyId).HasColumnName("CurrencyID");
             entity.Property(e => e.CustomerId).HasColumnName("CustomerID");
-            entity.Property(e => e.DeliveryDate).HasColumnType("datetime");
+            entity.Property(e => e.DeliveryDate);
             entity.Property(e => e.DiscountAmount)
                 .HasDefaultValue(0m)
                 .HasColumnType("decimal(18, 2)");
@@ -463,16 +475,15 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.ModifiedBy)
                 .HasMaxLength(255)
                 .IsUnicode(false);
-            entity.Property(e => e.ModifiedOn).HasColumnType("datetime");
+            entity.Property(e => e.ModifiedOn);
             entity.Property(e => e.Notes).IsUnicode(false);
             entity.Property(e => e.OrderDate)
-                .HasDefaultValueSql("(getdate())")
-                .HasColumnType("datetime");
+                .HasDefaultValueSql("now()");
             entity.Property(e => e.OrderNo)
                 .HasMaxLength(50)
                 .IsUnicode(false);
             entity.Property(e => e.PaidAmount).HasColumnType("decimal(18, 2)");
-            entity.Property(e => e.PaymentDate).HasColumnType("datetime");
+            entity.Property(e => e.PaymentDate);
             entity.Property(e => e.PaymentMethodId).HasColumnName("PaymentMethodID");
             entity.Property(e => e.PaymentReference)
                 .HasMaxLength(100)
@@ -543,8 +554,7 @@ public partial class ErpRfqAutomationContext : DbContext
                 .HasMaxLength(255)
                 .IsUnicode(false);
             entity.Property(e => e.CreatedDate)
-                .HasDefaultValueSql("(getdate())")
-                .HasColumnType("datetime");
+                .HasDefaultValueSql("now()");
             entity.Property(e => e.Description)
                 .HasMaxLength(500)
                 .IsUnicode(false);
@@ -553,7 +563,7 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.ModifiedBy)
                 .HasMaxLength(255)
                 .IsUnicode(false);
-            entity.Property(e => e.ModifiedDate).HasColumnType("datetime");
+            entity.Property(e => e.ModifiedDate);
             entity.Property(e => e.OrderId).HasColumnName("OrderID");
             entity.Property(e => e.ProductId).HasColumnName("ProductID");
             entity.Property(e => e.Quantity).HasColumnType("decimal(18, 6)");
@@ -675,7 +685,7 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.InventoryId).HasColumnName("InventoryID");
             entity.Property(e => e.Locations).HasMaxLength(500);
             entity.Property(e => e.ModifiedBy).HasMaxLength(255);
-            entity.Property(e => e.UploadDate).HasDefaultValueSql("(getdate())");
+            entity.Property(e => e.UploadDate).HasDefaultValueSql("now()");
 
             entity.HasOne(d => d.Inventory).WithMany(p => p.ProductAttachments)
                 .HasForeignKey(d => d.InventoryId)
@@ -725,11 +735,10 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.BusinessUnitId).HasColumnName("BusinessUnitID");
             entity.Property(e => e.CreatedBy).HasMaxLength(100);
             entity.Property(e => e.CreatedOn)
-                .HasDefaultValueSql("(getdate())")
-                .HasColumnType("datetime");
+                .HasDefaultValueSql("now()");
             entity.Property(e => e.IsActive).HasDefaultValue(true);
             entity.Property(e => e.ModifiedBy).HasMaxLength(100);
-            entity.Property(e => e.ModifiedOn).HasColumnType("datetime");
+            entity.Property(e => e.ModifiedOn);
             entity.Property(e => e.SubCategoryName).HasMaxLength(200);
 
             entity.HasOne(d => d.BusinessUnit).WithMany(p => p.ProductSubCategories)
@@ -748,12 +757,12 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.Id).HasColumnName("ID");
             entity.Property(e => e.BusinessUnitId).HasColumnName("BusinessUnitID");
             entity.Property(e => e.CreatedBy).HasMaxLength(255);
-            entity.Property(e => e.CreatedDate).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.CreatedDate).HasDefaultValueSql("now()");
             entity.Property(e => e.CurrencyId).HasColumnName("CurrencyID");
             entity.Property(e => e.CustomerId).HasColumnName("CustomerID");
             entity.Property(e => e.DiscountValue).HasColumnType("decimal(18, 2)");
             entity.Property(e => e.ModifiedBy).HasMaxLength(255);
-            entity.Property(e => e.QuoteDate).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.QuoteDate).HasDefaultValueSql("now()");
             entity.Property(e => e.QuoteNo).HasMaxLength(50);
             entity.Property(e => e.Rfqid).HasColumnName("RFQID");
             entity.Property(e => e.StatusId).HasColumnName("StatusID");
@@ -796,7 +805,7 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.CompanyPhone).HasMaxLength(100);
             entity.Property(e => e.FooterText).HasMaxLength(500);
             entity.Property(e => e.ModifiedBy).HasMaxLength(100);
-            entity.Property(e => e.ModifiedOn).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.ModifiedOn).HasDefaultValueSql("now()");
             entity.Property(e => e.PrimaryColor).HasMaxLength(20);
 
             entity.HasOne(d => d.BusinessUnit).WithOne(p => p.QuoteConfiguration)
@@ -811,7 +820,7 @@ public partial class ErpRfqAutomationContext : DbContext
 
             entity.Property(e => e.Id).HasColumnName("ID");
             entity.Property(e => e.CreatedBy).HasMaxLength(255);
-            entity.Property(e => e.CreatedDate).HasDefaultValueSql("(sysdatetime())");
+            entity.Property(e => e.CreatedDate).HasDefaultValueSql("now()");
             entity.Property(e => e.Discount)
                 .HasDefaultValue(0m)
                 .HasColumnType("decimal(18, 6)");
@@ -855,7 +864,7 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.BusinessUnitId).HasColumnName("BusinessUnitID");
             entity.Property(e => e.BuyersName).HasMaxLength(1020);
             entity.Property(e => e.CreatedBy).HasMaxLength(40);
-            entity.Property(e => e.CreatedDate).HasDefaultValueSql("(getdate())");
+            entity.Property(e => e.CreatedDate).HasDefaultValueSql("now()");
             entity.Property(e => e.CustomerId).HasColumnName("CustomerID");
             entity.Property(e => e.DurationAgreement).HasMaxLength(200);
             entity.Property(e => e.LeadId).HasColumnName("LeadID");
@@ -907,7 +916,7 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.CommodityProduct).HasMaxLength(400);
             entity.Property(e => e.CompanyRef).HasMaxLength(200);
             entity.Property(e => e.CreatedBy).HasMaxLength(40);
-            entity.Property(e => e.CreatedDate).HasDefaultValueSql("(getdate())");
+            entity.Property(e => e.CreatedDate).HasDefaultValueSql("now()");
             entity.Property(e => e.Currency).HasMaxLength(20);
             entity.Property(e => e.CurrencyId).HasColumnName("CurrencyID");
             entity.Property(e => e.CustomerAccountPortalId)
@@ -1007,12 +1016,11 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.CountryId).HasColumnName("CountryID");
             entity.Property(e => e.CreatedBy).HasMaxLength(50);
             entity.Property(e => e.CreatedDate)
-                .HasDefaultValueSql("(getdate())")
-                .HasColumnType("datetime");
+                .HasDefaultValueSql("now()");
             entity.Property(e => e.Description).HasMaxLength(255);
             entity.Property(e => e.IsActive).HasDefaultValue(true);
             entity.Property(e => e.ModifiedBy).HasMaxLength(50);
-            entity.Property(e => e.ModifiedDate).HasColumnType("datetime");
+            entity.Property(e => e.ModifiedDate);
             entity.Property(e => e.StateId).HasColumnName("StateID");
 
             entity.HasOne(d => d.Bu).WithMany(p => p.SetCities)
@@ -1042,12 +1050,11 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.CountryName).HasMaxLength(100);
             entity.Property(e => e.CreatedBy).HasMaxLength(50);
             entity.Property(e => e.CreatedDate)
-                .HasDefaultValueSql("(getdate())")
-                .HasColumnType("datetime");
+                .HasDefaultValueSql("now()");
             entity.Property(e => e.Description).HasMaxLength(255);
             entity.Property(e => e.IsActive).HasDefaultValue(true);
             entity.Property(e => e.ModifiedBy).HasMaxLength(50);
-            entity.Property(e => e.ModifiedDate).HasColumnType("datetime");
+            entity.Property(e => e.ModifiedDate);
 
             entity.HasOne(d => d.Bu).WithMany(p => p.SetCountries)
                 .HasForeignKey(d => d.Buid)
@@ -1065,12 +1072,11 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.CountryId).HasColumnName("CountryID");
             entity.Property(e => e.CreatedBy).HasMaxLength(50);
             entity.Property(e => e.CreatedDate)
-                .HasDefaultValueSql("(getdate())")
-                .HasColumnType("datetime");
+                .HasDefaultValueSql("now()");
             entity.Property(e => e.Description).HasMaxLength(255);
             entity.Property(e => e.IsActive).HasDefaultValue(true);
             entity.Property(e => e.ModifiedBy).HasMaxLength(50);
-            entity.Property(e => e.ModifiedDate).HasColumnType("datetime");
+            entity.Property(e => e.ModifiedDate);
             entity.Property(e => e.StateCode).HasMaxLength(10);
             entity.Property(e => e.StateName).HasMaxLength(100);
 
@@ -1095,12 +1101,11 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.BusinessUnitId).HasColumnName("BusinessUnitID");
             entity.Property(e => e.CreatedBy).HasMaxLength(50);
             entity.Property(e => e.CreatedDate)
-                .HasDefaultValueSql("(getdate())")
-                .HasColumnType("datetime");
+                .HasDefaultValueSql("now()");
             entity.Property(e => e.Description).HasMaxLength(255);
             entity.Property(e => e.IsActive).HasDefaultValue(true);
             entity.Property(e => e.ModifiedBy).HasMaxLength(50);
-            entity.Property(e => e.ModifiedDate).HasColumnType("datetime");
+            entity.Property(e => e.ModifiedDate);
             entity.Property(e => e.UomCode).HasMaxLength(50);
             entity.Property(e => e.UomName).HasMaxLength(100);
 
@@ -1140,26 +1145,25 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.HasKey(e => e.Id).HasName("PK__Shipment__3214EC2732EE97FF");
 
             entity.Property(e => e.Id).HasColumnName("ID");
-            entity.Property(e => e.ActualDeliveryDate).HasColumnType("datetime");
+            entity.Property(e => e.ActualDeliveryDate);
             entity.Property(e => e.BusinessUnitId).HasColumnName("BusinessUnitID");
             entity.Property(e => e.Carrier).HasMaxLength(100);
             entity.Property(e => e.CreatedBy).HasMaxLength(255);
             entity.Property(e => e.CreatedOn)
-                .HasDefaultValueSql("(getdate())")
-                .HasColumnType("datetime");
-            entity.Property(e => e.EstimatedDeliveryDate).HasColumnType("datetime");
+                .HasDefaultValueSql("now()");
+            entity.Property(e => e.EstimatedDeliveryDate);
             entity.Property(e => e.ExternalId)
                 .HasMaxLength(255)
                 .HasColumnName("ExternalID");
             entity.Property(e => e.IsActive).HasDefaultValue(true);
             entity.Property(e => e.LabelUrl).HasMaxLength(500);
             entity.Property(e => e.ModifiedBy).HasMaxLength(255);
-            entity.Property(e => e.ModifiedOn).HasColumnType("datetime");
+            entity.Property(e => e.ModifiedOn);
             entity.Property(e => e.Notes).HasMaxLength(500);
             entity.Property(e => e.OrderId).HasColumnName("OrderID");
             entity.Property(e => e.RawResponse).HasMaxLength(500);
             entity.Property(e => e.ServiceLevel).HasMaxLength(100);
-            entity.Property(e => e.ShipmentDate).HasColumnType("datetime");
+            entity.Property(e => e.ShipmentDate);
             entity.Property(e => e.ShipmentNo).HasMaxLength(50);
             entity.Property(e => e.ShippingAddress).HasMaxLength(500);
             entity.Property(e => e.ShippingCost).HasColumnType("decimal(18, 2)");
@@ -1189,11 +1193,10 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.Id).HasColumnName("ID");
             entity.Property(e => e.CreatedBy).HasMaxLength(255);
             entity.Property(e => e.CreatedOn)
-                .HasDefaultValueSql("(getdate())")
-                .HasColumnType("datetime");
+                .HasDefaultValueSql("now()");
             entity.Property(e => e.IsActive).HasDefaultValue(true);
             entity.Property(e => e.ModifiedBy).HasMaxLength(255);
-            entity.Property(e => e.ModifiedOn).HasColumnType("datetime");
+            entity.Property(e => e.ModifiedOn);
             entity.Property(e => e.Notes).HasMaxLength(500);
             entity.Property(e => e.OrderItemId).HasColumnName("OrderItemID");
             entity.Property(e => e.Quantity).HasColumnType("decimal(18, 6)");
@@ -1250,7 +1253,7 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.AddressLine2).HasMaxLength(255);
             entity.Property(e => e.Buid).HasColumnName("BUID");
             entity.Property(e => e.CityId).HasColumnName("CityID");
-            entity.Property(e => e.ContactEmail).HasMaxLength(255);
+            entity.Property(e => e.ContactEmail).HasColumnType("citext"); // case-insensitive unique email
             entity.Property(e => e.CountryId).HasColumnName("CountryID");
             entity.Property(e => e.CreatedBy).HasMaxLength(255);
             entity.Property(e => e.CurrencyId).HasColumnName("CurrencyID");
@@ -1291,13 +1294,11 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.BatchNo).HasMaxLength(100);
             entity.Property(e => e.CreatedBy).HasMaxLength(255);
             entity.Property(e => e.CreatedOn)
-                .HasDefaultValueSql("(getdate())")
-                .HasColumnType("datetime");
+                .HasDefaultValueSql("now()");
             entity.Property(e => e.Currency).HasMaxLength(10);
             entity.Property(e => e.PoDocId).HasMaxLength(10);
             entity.Property(e => e.PurchaseDate)
-                .HasDefaultValueSql("(getdate())")
-                .HasColumnType("datetime");
+                .HasDefaultValueSql("now()");
             entity.Property(e => e.Quantity).HasColumnType("decimal(18, 6)");
             entity.Property(e => e.UnitPrice).HasColumnType("decimal(18, 6)");
 
@@ -1316,19 +1317,18 @@ public partial class ErpRfqAutomationContext : DbContext
         {
             entity.Property(e => e.CreatedBy).HasMaxLength(256);
             entity.Property(e => e.CreatedDate)
-                .HasDefaultValueSql("(getdate())")
-                .HasColumnType("datetime");
+                .HasDefaultValueSql("now()");
             entity.Property(e => e.DiscountAmount).HasColumnType("decimal(18, 2)");
             entity.Property(e => e.IsActive).HasDefaultValue(true);
             entity.Property(e => e.ItemName).HasMaxLength(500);
             entity.Property(e => e.ModifiedBy).HasMaxLength(256);
-            entity.Property(e => e.ModifiedDate).HasColumnType("datetime");
+            entity.Property(e => e.ModifiedDate);
             entity.Property(e => e.Quantity).HasColumnType("decimal(18, 2)");
-            entity.Property(e => e.QuoteDate).HasColumnType("datetime");
+            entity.Property(e => e.QuoteDate);
             entity.Property(e => e.QuoteReference).HasMaxLength(100);
             entity.Property(e => e.TaxAmount).HasColumnType("decimal(18, 2)");
             entity.Property(e => e.UnitPrice).HasColumnType("decimal(18, 2)");
-            entity.Property(e => e.ValidUntil).HasColumnType("datetime");
+            entity.Property(e => e.ValidUntil);
 
             entity.HasOne(d => d.BusinessUnit).WithMany(p => p.SupplierQuotedItems)
                 .HasForeignKey(d => d.BusinessUnitId)
@@ -1391,7 +1391,7 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.Id).HasColumnName("ID");
             entity.Property(e => e.Buid).HasColumnName("BUID");
             entity.Property(e => e.CreatedBy).HasMaxLength(255);
-            entity.Property(e => e.Email).HasMaxLength(255);
+            entity.Property(e => e.Email).HasColumnType("citext"); // case-insensitive unique email
             entity.Property(e => e.FirstName).HasMaxLength(100);
             entity.Property(e => e.ImageUrl)
                 .HasMaxLength(100)
@@ -1456,7 +1456,7 @@ public partial class ErpRfqAutomationContext : DbContext
                 .ToView("View_SupplierPriceList");
 
             entity.Property(e => e.Currency).HasMaxLength(10);
-            entity.Property(e => e.LastPurchasedDate).HasColumnType("datetime");
+            entity.Property(e => e.LastPurchasedDate);
             entity.Property(e => e.LatestPrice).HasColumnType("decimal(18, 6)");
             entity.Property(e => e.PartNo).HasMaxLength(100);
             entity.Property(e => e.ProductName).HasMaxLength(100);
@@ -1479,7 +1479,7 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.ContactPhone).HasMaxLength(50);
             entity.Property(e => e.Country).HasMaxLength(100);
             entity.Property(e => e.CreatedBy).HasMaxLength(255);
-            entity.Property(e => e.CreatedOn).HasDefaultValueSql("(getdate())");
+            entity.Property(e => e.CreatedOn).HasDefaultValueSql("now()");
             entity.Property(e => e.IsActive).HasDefaultValue(true);
             entity.Property(e => e.Location).HasMaxLength(255);
             entity.Property(e => e.ManagerName).HasMaxLength(255);
@@ -1493,6 +1493,39 @@ public partial class ErpRfqAutomationContext : DbContext
                 .HasForeignKey(d => d.BusinessUnitId)
                 .OnDelete(DeleteBehavior.ClientSetNull)
                 .HasConstraintName("FK_Warehouses_BusinessUnits");
+        });
+
+        // Taxis was present in the model layer but never mapped in the DbContext.
+        // Map it so EF manages the Taxes table (unblocks server-side tax). The
+        // source database has no rows for it, so this creates a fresh table.
+        modelBuilder.Entity<Taxis>(entity =>
+        {
+            entity.ToTable("Taxes");
+
+            entity.Property(e => e.Id).HasColumnName("ID");
+            entity.Property(e => e.BusinessUnitId).HasColumnName("BusinessUnitID");
+            entity.Property(e => e.TaxCode).HasMaxLength(50);
+            entity.Property(e => e.TaxName).HasMaxLength(255);
+            entity.Property(e => e.TaxType).HasMaxLength(50);
+            entity.Property(e => e.TaxRate).HasColumnType("decimal(9, 4)");
+            entity.Property(e => e.Country).HasMaxLength(100);
+            entity.Property(e => e.State).HasMaxLength(100);
+            entity.Property(e => e.IsInclusive).HasDefaultValue(false);
+            entity.Property(e => e.IsCompound).HasDefaultValue(false);
+            entity.Property(e => e.IsActive).HasDefaultValue(true);
+            entity.Property(e => e.CreatedBy).HasMaxLength(255);
+            entity.Property(e => e.CreatedOn).HasDefaultValueSql("now()");
+            entity.Property(e => e.ModifiedBy).HasMaxLength(255);
+
+            // The orphan Inventory* classes are intentionally not mapped in this
+            // context; ignore the reverse navigation so EF model discovery does
+            // not pull them (and their whole graph) into the model.
+            entity.Ignore(e => e.Inventories);
+
+            entity.HasOne(d => d.BusinessUnit).WithMany()
+                .HasForeignKey(d => d.BusinessUnitId)
+                .OnDelete(DeleteBehavior.ClientSetNull)
+                .HasConstraintName("FK_Taxes_BusinessUnits");
         });
 
         OnModelCreatingPartial(modelBuilder);

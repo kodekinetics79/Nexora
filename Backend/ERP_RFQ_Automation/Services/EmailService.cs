@@ -320,9 +320,16 @@ namespace ERP_RFQ_Automation.Services
         }
         private bool IsDuplicateKeyException(DbUpdateException ex)
         {
+            // SQL Server unique/PK violation error numbers.
             if (ex.InnerException is Microsoft.Data.SqlClient.SqlException sqlEx)
             {
                 return sqlEx.Number == 2627 || sqlEx.Number == 2601;
+            }
+            // PostgreSQL unique_violation (SQLSTATE 23505) — after the Npgsql
+            // migration duplicate-key errors surface as PostgresException.
+            if (ex.InnerException is Npgsql.PostgresException pgEx)
+            {
+                return pgEx.SqlState == "23505";
             }
             return false;
         }
