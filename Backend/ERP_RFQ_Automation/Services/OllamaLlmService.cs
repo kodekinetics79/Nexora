@@ -197,129 +197,82 @@ namespace ERP_RFQ_Automation.Services
             _log.LogInformation("--- RAW OLLAMA RESPONSE START ---\n{RawContent}\n--- RAW OLLAMA RESPONSE END ---", rawContent);
             Console.WriteLine($"\n[Ollama Response]:\n{rawContent}\n");
 
-            string? cleaned = null;
+            // ING-03: PREFER STRICT JSON PARSING. We never rewrite/patch the model's JSON with
+            // heuristics (which can silently corrupt extracted values). If the output is not valid
+            // JSON, we FAIL the extraction and return null so the lead is routed to a needs-review
+            // state upstream — never fabricating or guessing values into a "trusted" lead.
+
+            // Attempt 1: parse exactly as returned. With format:"json" this should already be clean.
+            var strict = TryStrictParse(rawContent);
+            if (strict.parsed)
+                return strict.result;
+
+            // Attempt 2: the model wrapped JSON in prose / markdown fences. Non-destructively extract
+            // the outermost { ... } block. This only trims surrounding non-JSON text; it does NOT
+            // alter any value inside the object.
+            var extracted = ExtractJsonObject(rawContent);
+            if (!string.IsNullOrWhiteSpace(extracted) && !string.Equals(extracted, rawContent, StringComparison.Ordinal))
+            {
+                var second = TryStrictParse(extracted);
+                if (second.parsed)
+                    return second.result;
+            }
+
+            _log.LogWarning(
+                "Ollama output was not valid, trustworthy JSON after strict parsing. Failing extraction (routes lead to review). Content length: {RawLength}",
+                rawContent.Length);
+            return null;
+        }
+
+        /// <summary>
+        /// Strictly deserializes the given JSON. Returns (parsed:true) when the content is definitively
+        /// resolved — either a valid, validated result, or a valid-JSON-but-rejected result (null) that
+        /// must NOT be re-parsed. Returns (parsed:false) only when the content is not valid JSON.
+        /// </summary>
+        private (bool parsed, LeadExtractionResult? result) TryStrictParse(string? json)
+        {
+            if (string.IsNullOrWhiteSpace(json))
+                return (false, null);
+
             try
             {
-                cleaned = CleanJsonResponse(rawContent);
-                if (string.IsNullOrWhiteSpace(cleaned))
-                {
-                    _log.LogWarning("Cleaned JSON is empty.");
-                    return null;
-                }
-
-                // Since we use format: "json", the response should be clean JSON
-                var result = JsonSerializer.Deserialize<LeadExtractionResult>(cleaned, _jsonOptions);
+                var result = JsonSerializer.Deserialize<LeadExtractionResult>(json, _jsonOptions);
                 if (result == null)
                 {
                     _log.LogWarning("Deserialization resulted in null");
-                    return null;
+                    return (false, null);
                 }
 
                 if (!ValidateExtractionResult(result))
                 {
+                    // Parsed cleanly but failed sanity checks (e.g. confidence out of range).
+                    // The values themselves are untrusted -> reject definitively, do not re-parse.
                     _log.LogWarning("Extraction result failed validation");
-                    return null;
+                    return (true, null);
                 }
 
-                return result;
+                return (true, result);
             }
             catch (JsonException ex)
             {
-                _log.LogError(ex, "JSON parsing failed. Content length: {RawLength}", rawContent.Length);
-                
-                if (!string.IsNullOrEmpty(cleaned))
-                {
-                    _log.LogInformation("Cleaned content that failed parsing:\n{CleanedContent}", cleaned);
-                    
-                    if (ex.BytePositionInLine.HasValue && ex.LineNumber.HasValue)
-                    {
-                        try
-                        {
-                            var lines = cleaned.Split('\n');
-                            long lineIdx = ex.LineNumber.Value - 1;
-                            if (lineIdx >= 0 && lineIdx < lines.Length)
-                            {
-                                var errorLine = lines[lineIdx];
-                                var start = Math.Max(0, (int)ex.BytePositionInLine.Value - 20);
-                                var length = Math.Min(errorLine.Length - start, 40);
-                                var snippet = errorLine.Substring(Math.Min(start, errorLine.Length), Math.Min(length, errorLine.Length - Math.Min(start, errorLine.Length)));
-                                _log.LogError("Failing section around Line {Line}, Pos {Pos}: ...{Snippet}...", 
-                                    ex.LineNumber, ex.BytePositionInLine, snippet);
-                            }
-                        }
-                        catch { /* Best effort logging */ }
-                    }
-                }
-                
-                return null;
+                _log.LogWarning(ex, "Strict JSON parse failed. Content length: {Len}", json.Length);
+                return (false, null);
             }
         }
 
-        private string CleanJsonResponse(string content)
+        /// <summary>
+        /// Non-destructively isolates the outermost JSON object from surrounding prose / markdown
+        /// fences. It only trims text outside the braces; it never edits characters within the object.
+        /// </summary>
+        private static string ExtractJsonObject(string content)
         {
             if (string.IsNullOrWhiteSpace(content)) return content;
-
-            // 1. Extract JSON block if it's wrapped in markdown backticks
-            var cleaned = content.Trim();
-            if (cleaned.Contains("```"))
-            {
-                var startIdx = cleaned.IndexOf("{");
-                var endIdx = cleaned.LastIndexOf("}");
-                if (startIdx >= 0 && endIdx > startIdx)
-                {
-                    cleaned = cleaned.Substring(startIdx, endIdx - startIdx + 1);
-                }
-            }
-
-            // 2. Aggressively strip non-ASCII and non-printable characters
-            // This handles the '0xE6' and other corruption seen in the logs.
-            var sb = new StringBuilder(cleaned.Length);
-            foreach (char c in cleaned)
-            {
-                // Only allow standard ASCII printable characters (32-126) and basic whitespace
-                if ((c >= 32 && c <= 126) || c == '\n' || c == '\r' || c == '\t')
-                {
-                    sb.Append(c);
-                }
-                else
-                {
-                    // Replace bad characters with space to maintain structure without breaking strings
-                    sb.Append(' ');
-                }
-            }
-            cleaned = sb.ToString();
-
-            // 4. Structural Repair Logic
-            // a. Normalize whitespace
-            cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, @"\s*:\s*", ": ");
-            cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, @"\s*,\s*", ", ");
-
-            // b. Fix missing values resulted from stripping garbage.
-            cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, @":\s*,", ": null,");
-            cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, @":\s*}", ": null}");
-            cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, @":\s*\]", ": null]");
-
-            // c. Fix missing opening quotes on property names (common after stripping prefixes)
-            // Example: , Confidence": 0.9 => , "Confidence": 0.9
-            cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, @"([{,]\s*)([a-zA-Z0-9_]+)(\s*\""\s*:)", "$1\"$2$3");
-            
-            // d. Fix missing closing quotes on property names
-            // Example: , "Confidence: 0.9 => , "Confidence": 0.9
-            cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, @"([{,]\s*\"")([a-zA-Z0-9_]+)(\s*:)", "$1$2\"$3");
-
-            // e. Fix leading/trailing spaces inside property name quotes
-            // Example: "  OfMeasure": => "OfMeasure":
-            cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, @"\""\s+([a-zA-Z0-9_]+)\""\s*:", "\"$1\":");
-            cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, @"\""([a-zA-Z0-9_]+)\s+\""\s*:", "\"$1\":");
-
-            // f. Fix double quotes resulting from repairs (""Key":)
-            cleaned = cleaned.Replace("\"\"", "\"");
-
-            // g. Fix malformed JSON numbers (e.g., "0." or " .9")
-            cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, @"(?<=\d)\.(?!\d)", ".0");
-            cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, @"(?<!\d)\.(?=\d)", "0.");
-
-            return cleaned.Trim();
+            var trimmed = content.Trim();
+            int start = trimmed.IndexOf('{');
+            int end = trimmed.LastIndexOf('}');
+            if (start >= 0 && end > start)
+                return trimmed.Substring(start, end - start + 1);
+            return trimmed;
         }
 
         private bool ValidateExtractionResult(LeadExtractionResult result)

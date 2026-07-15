@@ -15,6 +15,9 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using Docnet.Core;
+using Docnet.Core.Converters;
+using Docnet.Core.Models;
 using Tesseract;
 using UglyToad.PdfPig;
 
@@ -33,6 +36,11 @@ namespace ERP_RFQ_Automation.Services
         private const int MAX_CHARS_FOR_LLM = 120000;
         private const int MAX_CHARS_PER_ATTACHMENT = 50000;
         private const int PRIORITY_EMAIL_BODY_CHARS = 10000;
+        // ING-04: internal marker returned by PDF extraction when a scanned/image-only PDF could
+        // not be OCR'd. Never fed to the LLM; used only to surface a clear scanned-PDF outcome.
+        private const string SCANNED_PDF_SENTINEL = "SCANNED_PDF_NO_TEXT";
+        // pdfium (Docnet) and the Tesseract native engine are not thread-safe; serialize OCR.
+        private static readonly object _ocrLock = new object();
 
         public ManualUploadService(
             ErpRfqAutomationContext context,
@@ -103,6 +111,7 @@ namespace ERP_RFQ_Automation.Services
                 }
             }
 
+            bool scannedPdfNeedsReview = false;
             foreach (var (fileName, ms, ext) in attachmentStreams)
             {
                 try
@@ -117,6 +126,13 @@ namespace ERP_RFQ_Automation.Services
                         ".jpg" or ".jpeg" or ".png" or ".bmp" or ".tiff" => ExtractTextFromImage(ms.ToArray()),
                         _ => ""
                     };
+                    // ING-04: a scanned/image-only PDF that could not be OCR'd is flagged (never fed
+                    // to the LLM) so we can return a clear scanned-PDF outcome instead of an empty lead.
+                    if (!string.IsNullOrEmpty(text) && text.Contains(SCANNED_PDF_SENTINEL))
+                    {
+                        scannedPdfNeedsReview = true;
+                        text = "";
+                    }
                     if (!string.IsNullOrWhiteSpace(text))
                         combinedExtractedText += $"\n\n[File: {fileName}]\n{text}";
                 }
@@ -132,6 +148,11 @@ namespace ERP_RFQ_Automation.Services
 
             if (string.IsNullOrWhiteSpace(combinedExtractedText))
             {
+                if (scannedPdfNeedsReview)
+                {
+                    _logger.LogWarning("Uploaded PDF appears to be scanned/image-only and could not be OCR'd.");
+                    return ServiceResult<long>.CreateFailure("The uploaded PDF appears to be a scanned/image-only document and no text could be extracted (OCR unavailable or produced no text). Please upload a text-based PDF or a clearer scan.");
+                }
                 _logger.LogWarning("No text extracted from uploaded files.");
                 return ServiceResult<long>.CreateFailure("Could not extract any text from the uploaded files. Please check the file content and try again.");
             }
@@ -524,20 +545,157 @@ namespace ERP_RFQ_Automation.Services
 
         private string ExtractTextFromPdf(byte[] bytes)
         {
+            string pdfPigText = "";
             try
             {
                 using var doc = PdfDocument.Open(bytes);
                 var sb = new StringBuilder();
                 foreach (var page in doc.GetPages())
                     sb.AppendLine(page.Text);
+                pdfPigText = sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "PDF text extraction failed");
+            }
+
+            // Fast path: the PDF already has an embedded text layer.
+            if (!IsNearEmptyText(pdfPigText))
+                return pdfPigText;
+
+            // ING-04: image-only / scanned PDF -> rasterize with Docnet and OCR with Tesseract.
+            _logger.LogInformation(
+                "PDF has little/no embedded text ({Chars} non-whitespace chars); attempting OCR fallback.",
+                CountNonWhitespace(pdfPigText));
+            var ocrText = TryOcrScannedPdf(bytes);
+            if (!IsNearEmptyText(ocrText))
+            {
+                // OCR text is inherently lower-confidence: label it so the LLM/reviewers use caution.
+                return "[OCR-EXTRACTED TEXT FROM SCANNED PDF - lower confidence, may contain recognition errors]\n" + ocrText;
+            }
+
+            // Scanned PDF with no recoverable text -> emit a marker so the caller can return a clear
+            // "scanned PDF, OCR needed" outcome instead of silently producing an empty lead.
+            _logger.LogWarning("Scanned PDF could not be OCR'd (OCR unavailable or produced no text).");
+            return SCANNED_PDF_SENTINEL;
+        }
+
+        /// <summary>
+        /// ING-04: rasterizes a scanned/image-only PDF with Docnet.Core and OCRs each page with the
+        /// existing Tesseract engine. Returns recognized text, or "" if OCR is unavailable/failed.
+        /// </summary>
+        private string TryOcrScannedPdf(byte[] pdfBytes)
+        {
+            const int MAX_OCR_PAGES = 10;      // bound runtime for large documents
+            const double RENDER_SCALE = 2.0;   // ~144 DPI: balances OCR accuracy vs. memory/time
+            try
+            {
+                var sb = new StringBuilder();
+                lock (_ocrLock)
+                {
+                    using var docReader = DocLib.Instance.GetDocReader(pdfBytes, new PageDimensions(RENDER_SCALE));
+                    int pageCount = docReader.GetPageCount();
+                    int pagesToProcess = Math.Min(pageCount, MAX_OCR_PAGES);
+                    if (pageCount > MAX_OCR_PAGES)
+                        _logger.LogWarning("Scanned PDF has {Total} pages; OCR limited to first {Limit}.", pageCount, MAX_OCR_PAGES);
+
+                    using var engine = new TesseractEngine(_tessDataPath, "eng", EngineMode.Default);
+                    for (int i = 0; i < pagesToProcess; i++)
+                    {
+                        try
+                        {
+                            using var pageReader = docReader.GetPageReader(i);
+                            var rawBytes = pageReader.GetImage(new NaiveTransparencyRemover()); // BGRA over white
+                            int width = pageReader.GetPageWidth();
+                            int height = pageReader.GetPageHeight();
+                            if (rawBytes == null || width <= 0 || height <= 0 ||
+                                rawBytes.Length < width * height * 4)
+                                continue;
+
+                            var bmp = BgraToBmp24(rawBytes, width, height);
+                            using var pix = Pix.LoadFromMemory(bmp);
+                            using var page = engine.Process(pix);
+                            var pageText = page.GetText();
+                            if (!string.IsNullOrWhiteSpace(pageText))
+                                sb.AppendLine(pageText);
+                        }
+                        catch (Exception exPage)
+                        {
+                            _logger.LogWarning(exPage, "OCR failed for scanned PDF page {Page}", i);
+                        }
+                    }
+                }
                 return sb.ToString();
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "PDF extraction failed");
+                _logger.LogWarning(ex, "Scanned-PDF OCR fallback unavailable or failed.");
                 return "";
             }
         }
+
+        /// <summary>Encodes a top-down BGRA buffer as a 24-bit (BGR) bottom-up BMP for Leptonica/Tesseract.</summary>
+        private static byte[] BgraToBmp24(byte[] bgra, int width, int height)
+        {
+            int rowSize = ((24 * width + 31) / 32) * 4; // rows padded to a 4-byte boundary
+            int pixelDataSize = rowSize * height;
+            const int headerSize = 54;
+            var bmp = new byte[headerSize + pixelDataSize];
+
+            bmp[0] = 0x42; // 'B'
+            bmp[1] = 0x4D; // 'M'
+            WriteInt32LE(bmp, 2, bmp.Length);
+            WriteInt32LE(bmp, 10, headerSize);
+            WriteInt32LE(bmp, 14, 40);
+            WriteInt32LE(bmp, 18, width);
+            WriteInt32LE(bmp, 22, height); // positive -> bottom-up
+            WriteInt16LE(bmp, 26, 1);
+            WriteInt16LE(bmp, 28, 24);
+            WriteInt32LE(bmp, 30, 0);      // BI_RGB
+            WriteInt32LE(bmp, 34, pixelDataSize);
+            WriteInt32LE(bmp, 38, 2835);
+            WriteInt32LE(bmp, 42, 2835);
+
+            int srcStride = width * 4;
+            for (int y = 0; y < height; y++)
+            {
+                int srcRow = y * srcStride;
+                int dst = headerSize + (height - 1 - y) * rowSize;
+                for (int x = 0; x < width; x++)
+                {
+                    int s = srcRow + x * 4;
+                    bmp[dst++] = bgra[s];     // B
+                    bmp[dst++] = bgra[s + 1]; // G
+                    bmp[dst++] = bgra[s + 2]; // R
+                }
+            }
+            return bmp;
+        }
+
+        private static void WriteInt32LE(byte[] buf, int offset, int value)
+        {
+            buf[offset] = (byte)(value & 0xFF);
+            buf[offset + 1] = (byte)((value >> 8) & 0xFF);
+            buf[offset + 2] = (byte)((value >> 16) & 0xFF);
+            buf[offset + 3] = (byte)((value >> 24) & 0xFF);
+        }
+
+        private static void WriteInt16LE(byte[] buf, int offset, short value)
+        {
+            buf[offset] = (byte)(value & 0xFF);
+            buf[offset + 1] = (byte)((value >> 8) & 0xFF);
+        }
+
+        private static int CountNonWhitespace(string? s)
+        {
+            if (string.IsNullOrEmpty(s)) return 0;
+            int n = 0;
+            foreach (var c in s) if (!char.IsWhiteSpace(c)) n++;
+            return n;
+        }
+
+        // A PDF that yields fewer than this many non-whitespace characters is treated as scanned/image-only.
+        private static bool IsNearEmptyText(string? s) => CountNonWhitespace(s) < 20;
 
         private string ExtractTextFromDocx(MemoryStream ms)
         {

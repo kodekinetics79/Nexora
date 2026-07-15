@@ -17,6 +17,9 @@ using MimeKit.Text;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Docnet.Core;
+using Docnet.Core.Converters;
+using Docnet.Core.Models;
 using Tesseract;
 using UglyToad.PdfPig;
 
@@ -41,6 +44,18 @@ namespace ERP_RFQ_Automation.Services
         private const int MAX_CHARS_FOR_LLM = 32000; // ~8k tokens (safe for most models)
         private const int MAX_CHARS_PER_ATTACHMENT = 10000; // Limit per attachment during extraction
         private const int PRIORITY_EMAIL_BODY_CHARS = 5000; // Reserve chars for email body
+        // ING-01/ING-04: durable EmailIngest.ParseStatus values (free text, HasMaxLength(50)).
+        private const string STATUS_PENDING = "Pending";
+        private const string STATUS_SUCCESS = "Success";
+        private const string STATUS_FAILED = "Failed";
+        private const string STATUS_REJECTED = "Rejected - Low Signal";        // <= 50 chars
+        private const string STATUS_SCANNED_PDF = "NeedsReview - Scanned PDF";  // <= 50 chars
+        // ING-04: internal marker returned by PDF extraction when a page image-only/scanned PDF
+        // could not be OCR'd. Never fed to the LLM; used only to route the ingest to review.
+        private const string SCANNED_PDF_SENTINEL = "SCANNED_PDF_NO_TEXT";
+        // pdfium (Docnet) and the Tesseract native engine are not thread-safe; serialize OCR so
+        // parallel attachment extraction cannot crash the native libraries.
+        private static readonly object _ocrLock = new object();
         public EmailService(ErpRfqAutomationContext context, IWebHostEnvironment env,
             ILogger<EmailService> logger, ILLMService llmService, IServiceScopeFactory scopeFactory)
         {
@@ -107,8 +122,11 @@ namespace ERP_RFQ_Automation.Services
                     try
                     {
                         var message = await inbox.GetMessageAsync(uid);
-                        await ProcessSingleEmailAsync(message, config, localContext, localLlm);
-                        
+                        // ING-01: only mark \Seen once a durable record (EmailIngest + raw .eml)
+                        // exists, so a message we fail to persist is retried on the next cycle
+                        // instead of vanishing.
+                        bool durablyPersisted = await ProcessSingleEmailAsync(message, config, localContext, localLlm);
+
                         // Check if connection is still alive before marking as seen
                         if (!client.IsConnected)
                         {
@@ -117,8 +135,15 @@ namespace ERP_RFQ_Automation.Services
                             await client.AuthenticateAsync(config.EmailAddress, config.Password);
                             await client.Inbox.OpenAsync(FolderAccess.ReadWrite);
                         }
-                        
-                        await inbox.AddFlagsAsync(uid, MessageFlags.Seen, true); // Mark as seen after processing
+
+                        if (durablyPersisted)
+                        {
+                            await inbox.AddFlagsAsync(uid, MessageFlags.Seen, true); // Mark as seen only after a durable record exists
+                        }
+                        else
+                        {
+                            _logger.LogWarning("Email UID {UID} not persisted durably; leaving unseen for retry next cycle.", uid);
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -151,26 +176,29 @@ namespace ERP_RFQ_Automation.Services
 
             return SearchQuery.SentSince(sinceDate).And(keywordQuery ?? SearchQuery.All);
         }
-        private async Task ProcessSingleEmailAsync(MimeMessage message, EmailConfiguration config,
+        /// <summary>
+        /// Processes a single fetched message. Returns true when a durable record
+        /// (EmailIngest row + raw .eml) exists for the message, meaning the caller may safely
+        /// mark it \Seen; returns false only when nothing could be persisted (retry next cycle).
+        /// </summary>
+        private async Task<bool> ProcessSingleEmailAsync(MimeMessage message, EmailConfiguration config,
             ErpRfqAutomationContext context, ILLMService llmService)
         {
             var messageId = message.MessageId ?? Guid.NewGuid().ToString();
             var from = message.From.ToString();
             var to = message.To.ToString();
             var subject = message.Subject ?? "";
-            // Check if already processed by messageId or same from/to/subject (likely duplicate send)
+            // Check if already processed by messageId or same from/to/subject (likely duplicate send).
+            // A durable record already exists from a previous run, so it is safe to mark \Seen.
             if (await context.EmailIngests.AnyAsync(e => e.MessageId == messageId ||
                 (e.FromEmail == from && e.ToEmail == to && e.EmailSubject == subject)))
             {
                 _logger.LogDebug("Skipping duplicate email: {MessageId} (From: {From}, Subject: {Subject})", messageId, from, subject);
-                return;
+                return true;
             }
-            // Pre-validation: Quick check if email looks like RFQ
-            if (!await IsLikelyRFQEmailAsync(message))
-            {
-                _logger.LogInformation("Email rejected in pre-validation: {Subject}", message.Subject);
-                return;
-            }
+
+            // ING-01: persist a durable record for EVERY fetched message BEFORE classification,
+            // so a real RFQ the keyword filter misjudges is never silently dropped.
             var ingest = new EmailIngest
             {
                 MessageId = messageId,
@@ -179,12 +207,23 @@ namespace ERP_RFQ_Automation.Services
                 ToEmail = to,
                 EmailConfigurationId = config.Id,
                 CreatedOn = DateTime.UtcNow,
-                ParseStatus = "Pending"
+                ParseStatus = STATUS_PENDING
             };
-            // Save raw email
+
+            // Save the raw email bytes first so the original is never lost, even for rejected mail.
             var rawPath = Path.Combine(_rawEmailPath, $"{Guid.NewGuid()}.eml");
-            message.WriteTo(rawPath);
-            ingest.RawEmailPath = rawPath;
+            try
+            {
+                message.WriteTo(rawPath);
+                ingest.RawEmailPath = rawPath;
+            }
+            catch (Exception ex)
+            {
+                // If we cannot even persist the raw bytes, do NOT let the caller mark it seen.
+                _logger.LogError(ex, "Failed to persist raw email bytes for {MessageId}. Will retry next cycle.", messageId);
+                return false;
+            }
+
             context.EmailIngests.Add(ingest);
             try
             {
@@ -192,15 +231,46 @@ namespace ERP_RFQ_Automation.Services
             }
             catch (DbUpdateException ex) when (IsDuplicateKeyException(ex))
             {
+                // A row already exists (concurrent/duplicate delivery) -> durable record present.
                 _logger.LogWarning("Duplicate messageId detected: {MessageId}", messageId);
-                return;
+                return true;
             }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to persist EmailIngest for {MessageId}. Will retry next cycle.", messageId);
+                try { if (File.Exists(rawPath)) File.Delete(rawPath); } catch { /* best-effort cleanup */ }
+                return false;
+            }
+
+            // From here a durable record exists: the caller may mark the message \Seen regardless
+            // of the classification/extraction outcome below.
+
+            // ING-01: classification no longer drops the message. A low-signal message is retained
+            // with a rejected status (raw bytes + DB row preserved) instead of vanishing.
+            if (!await IsLikelyRFQEmailAsync(message))
+            {
+                _logger.LogInformation("Email classified as low-signal (non-RFQ), retained for review: {Subject}", subject);
+                ingest.ParseStatus = STATUS_REJECTED;
+                ingest.ParsedAt = DateTime.UtcNow;
+                await context.SaveChangesAsync();
+                return true;
+            }
+
             // Process email with AI
             var (leadId, extractedText) = await SaveLeadFromEmailAndAttachments(
                 message, ingest, config, context, llmService);
             ingest.ParsedAt = DateTime.UtcNow;
-            ingest.ParseStatus = leadId > 0 ? "Success" : "Failed";
+            if (leadId > 0)
+            {
+                ingest.ParseStatus = STATUS_SUCCESS;
+            }
+            else if (ingest.ParseStatus == STATUS_PENDING)
+            {
+                // No lead created and no more specific status (e.g. scanned-PDF review) was set.
+                ingest.ParseStatus = STATUS_FAILED;
+            }
             await context.SaveChangesAsync();
+            return true;
         }
         private async Task<bool> IsLikelyRFQEmailAsync(MimeMessage message)
         {
@@ -303,8 +373,29 @@ namespace ERP_RFQ_Automation.Services
                 }
             });
             var attachmentResults = await Task.WhenAll(attachmentTasks);
-            attachmentsText = string.Join("", attachmentResults);
+            // ING-04: separate genuine text from the scanned-PDF marker. The marker never reaches
+            // the LLM; it only signals that a scanned/image-only PDF could not be OCR'd so the
+            // ingest is routed to review instead of silently producing an empty lead.
+            bool scannedPdfNeedsReview = false;
+            var usableResults = new List<string>();
+            foreach (var r in attachmentResults)
+            {
+                if (r.Contains(SCANNED_PDF_SENTINEL))
+                {
+                    scannedPdfNeedsReview = true;
+                    continue;
+                }
+                usableResults.Add(r);
+            }
+            attachmentsText = string.Join("", usableResults);
             extracted += attachmentsText;
+            if (scannedPdfNeedsReview)
+            {
+                // Tentative status: kept if no lead is created; overridden to Success by the caller
+                // if a lead is still extracted from the remaining (e.g. email body) content.
+                ingest.ParseStatus = STATUS_SCANNED_PDF;
+                _logger.LogWarning("Scanned/image-only PDF detected that could not be OCR'd for: {Subject}", message.Subject);
+            }
             string emailSource = fileTypes.Count > 0
                 ? string.Join(", ", fileTypes.OrderBy(x => x))
                 : "Text Only";
@@ -581,20 +672,165 @@ namespace ERP_RFQ_Automation.Services
         // Text extraction methods
         private string ExtractTextFromPdf(byte[] bytes)
         {
+            string pdfPigText = "";
             try
             {
                 using var doc = PdfDocument.Open(bytes);
                 var sb = new StringBuilder();
                 foreach (var page in doc.GetPages())
                     sb.AppendLine(page.Text);
+                pdfPigText = sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "PDF text extraction failed");
+            }
+
+            // Fast path: the PDF already has an embedded text layer.
+            if (!IsNearEmptyText(pdfPigText))
+                return pdfPigText;
+
+            // ING-04: image-only / scanned PDF yields (near) zero embedded text. Rasterize the
+            // pages with Docnet and OCR them with Tesseract as a fallback.
+            _logger.LogInformation(
+                "PDF has little/no embedded text ({Chars} non-whitespace chars); attempting OCR fallback.",
+                CountNonWhitespace(pdfPigText));
+            var ocrText = TryOcrScannedPdf(bytes);
+            if (!IsNearEmptyText(ocrText))
+            {
+                // OCR text is inherently lower-confidence: label it so the LLM and human reviewers
+                // treat it with appropriate caution (the model naturally lowers confidence on noisy input).
+                return "[OCR-EXTRACTED TEXT FROM SCANNED PDF - lower confidence, may contain recognition errors]\n" + ocrText;
+            }
+
+            // Could not obtain text from a scanned PDF (OCR unavailable/failed or blank page).
+            // Emit a marker so the caller routes the ingest to review instead of a silent empty lead.
+            _logger.LogWarning("Scanned PDF could not be OCR'd (OCR unavailable or produced no text).");
+            return SCANNED_PDF_SENTINEL;
+        }
+
+        /// <summary>
+        /// ING-04: rasterizes a scanned/image-only PDF with Docnet.Core and OCRs each page with the
+        /// existing Tesseract engine. Returns recognized text, or "" if OCR is unavailable/failed.
+        /// </summary>
+        private string TryOcrScannedPdf(byte[] pdfBytes)
+        {
+            const int MAX_OCR_PAGES = 10;      // bound runtime for large documents
+            const double RENDER_SCALE = 2.0;   // ~144 DPI: balances OCR accuracy vs. memory/time
+            try
+            {
+                var sb = new StringBuilder();
+                // Serialize native pdfium + Tesseract access (neither is thread-safe) because
+                // attachment extraction runs in parallel.
+                lock (_ocrLock)
+                {
+                    using var docReader = DocLib.Instance.GetDocReader(pdfBytes, new PageDimensions(RENDER_SCALE));
+                    int pageCount = docReader.GetPageCount();
+                    int pagesToProcess = Math.Min(pageCount, MAX_OCR_PAGES);
+                    if (pageCount > MAX_OCR_PAGES)
+                        _logger.LogWarning("Scanned PDF has {Total} pages; OCR limited to first {Limit}.", pageCount, MAX_OCR_PAGES);
+
+                    using var engine = new TesseractEngine(_tessDataPath, "eng", EngineMode.Default);
+                    for (int i = 0; i < pagesToProcess; i++)
+                    {
+                        try
+                        {
+                            using var pageReader = docReader.GetPageReader(i);
+                            // Composite any transparency over white for cleaner OCR; returns BGRA.
+                            var rawBytes = pageReader.GetImage(new NaiveTransparencyRemover());
+                            int width = pageReader.GetPageWidth();
+                            int height = pageReader.GetPageHeight();
+                            if (rawBytes == null || width <= 0 || height <= 0 ||
+                                rawBytes.Length < width * height * 4)
+                                continue;
+
+                            var bmp = BgraToBmp24(rawBytes, width, height);
+                            using var pix = Pix.LoadFromMemory(bmp);
+                            using var page = engine.Process(pix);
+                            var pageText = page.GetText();
+                            if (!string.IsNullOrWhiteSpace(pageText))
+                                sb.AppendLine(pageText);
+                        }
+                        catch (Exception exPage)
+                        {
+                            _logger.LogWarning(exPage, "OCR failed for scanned PDF page {Page}", i);
+                        }
+                    }
+                }
                 return sb.ToString();
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "PDF extraction failed");
+                // Docnet native lib unavailable (unsupported RID), malformed/encrypted PDF, etc.
+                _logger.LogWarning(ex, "Scanned-PDF OCR fallback unavailable or failed.");
                 return "";
             }
         }
+
+        /// <summary>Encodes a top-down BGRA buffer as a 24-bit (BGR) bottom-up BMP that Leptonica/Tesseract can read.</summary>
+        private static byte[] BgraToBmp24(byte[] bgra, int width, int height)
+        {
+            int rowSize = ((24 * width + 31) / 32) * 4; // rows padded to a 4-byte boundary
+            int pixelDataSize = rowSize * height;
+            const int headerSize = 54;
+            var bmp = new byte[headerSize + pixelDataSize];
+
+            // BITMAPFILEHEADER
+            bmp[0] = 0x42; // 'B'
+            bmp[1] = 0x4D; // 'M'
+            WriteInt32LE(bmp, 2, bmp.Length);
+            WriteInt32LE(bmp, 10, headerSize);
+            // BITMAPINFOHEADER
+            WriteInt32LE(bmp, 14, 40);
+            WriteInt32LE(bmp, 18, width);
+            WriteInt32LE(bmp, 22, height); // positive height -> bottom-up
+            WriteInt16LE(bmp, 26, 1);      // planes
+            WriteInt16LE(bmp, 28, 24);     // bits per pixel
+            WriteInt32LE(bmp, 30, 0);      // BI_RGB (uncompressed)
+            WriteInt32LE(bmp, 34, pixelDataSize);
+            WriteInt32LE(bmp, 38, 2835);   // ~72 DPI (x)
+            WriteInt32LE(bmp, 42, 2835);   // ~72 DPI (y)
+
+            int srcStride = width * 4;
+            for (int y = 0; y < height; y++)
+            {
+                int srcRow = y * srcStride;                               // source is top-down
+                int dst = headerSize + (height - 1 - y) * rowSize;        // dest is bottom-up
+                for (int x = 0; x < width; x++)
+                {
+                    int s = srcRow + x * 4;
+                    bmp[dst++] = bgra[s];     // B
+                    bmp[dst++] = bgra[s + 1]; // G
+                    bmp[dst++] = bgra[s + 2]; // R
+                }
+            }
+            return bmp;
+        }
+
+        private static void WriteInt32LE(byte[] buf, int offset, int value)
+        {
+            buf[offset] = (byte)(value & 0xFF);
+            buf[offset + 1] = (byte)((value >> 8) & 0xFF);
+            buf[offset + 2] = (byte)((value >> 16) & 0xFF);
+            buf[offset + 3] = (byte)((value >> 24) & 0xFF);
+        }
+
+        private static void WriteInt16LE(byte[] buf, int offset, short value)
+        {
+            buf[offset] = (byte)(value & 0xFF);
+            buf[offset + 1] = (byte)((value >> 8) & 0xFF);
+        }
+
+        private static int CountNonWhitespace(string? s)
+        {
+            if (string.IsNullOrEmpty(s)) return 0;
+            int n = 0;
+            foreach (var c in s) if (!char.IsWhiteSpace(c)) n++;
+            return n;
+        }
+
+        // A PDF that yields fewer than this many non-whitespace characters is treated as scanned/image-only.
+        private static bool IsNearEmptyText(string? s) => CountNonWhitespace(s) < 20;
         private string ExtractTextFromDocx(MemoryStream ms)
         {
             try
