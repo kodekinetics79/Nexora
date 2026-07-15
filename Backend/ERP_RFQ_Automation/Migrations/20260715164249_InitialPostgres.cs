@@ -1,31 +1,35 @@
 ﻿using System;
 using Microsoft.EntityFrameworkCore.Migrations;
+using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
 #nullable disable
 
 namespace ERP_RFQ_Automation.Migrations
 {
     /// <inheritdoc />
-    public partial class InitialBaseline : Migration
+    public partial class InitialPostgres : Migration
     {
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
+            migrationBuilder.AlterDatabase()
+                .Annotation("Npgsql:PostgresExtension:citext", ",,");
+
             migrationBuilder.CreateTable(
                 name: "Attachments",
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    ParentType = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    ParentType = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: false),
                     ParentID = table.Column<long>(type: "bigint", nullable: false),
-                    FileName = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    FilePath = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: false),
-                    MimeType = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
+                    FileName = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    FilePath = table.Column<string>(type: "character varying(500)", maxLength: 500, nullable: false),
+                    MimeType = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
                     FileSize = table.Column<long>(type: "bigint", nullable: true),
-                    ContentType = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: true),
-                    CreatedOn = table.Column<DateTime>(type: "datetime2", nullable: false, defaultValueSql: "(sysdatetime())"),
-                    UploadedDate = table.Column<DateTime>(type: "datetime2", nullable: true)
+                    ContentType = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: true),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false, defaultValueSql: "now()"),
+                    UploadedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -37,15 +41,15 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    BusinessUnitCode = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
-                    BusinessUnitName = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    Description = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: true),
-                    IsActive = table.Column<bool>(type: "bit", nullable: true, defaultValue: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    CreatedOn = table.Column<DateTime>(type: "datetime2", nullable: false, defaultValueSql: "(getdate())"),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ModifiedOn = table.Column<DateTime>(type: "datetime2", nullable: true)
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    BusinessUnitCode = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: false),
+                    BusinessUnitName = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    Description = table.Column<string>(type: "character varying(500)", maxLength: 500, nullable: true),
+                    IsActive = table.Column<bool>(type: "boolean", nullable: true, defaultValue: true),
+                    CreatedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false, defaultValueSql: "now()"),
+                    ModifiedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ModifiedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -57,20 +61,20 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    ResourceType = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    ResourceType = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
                     ResourceID = table.Column<long>(type: "bigint", nullable: false),
-                    FileName = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    FilePath = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: false),
-                    MimeType = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    Description = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    UploadDate = table.Column<DateTime>(type: "datetime2", nullable: true, defaultValueSql: "(getdate())"),
+                    FileName = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    FilePath = table.Column<string>(type: "character varying(500)", maxLength: 500, nullable: false),
+                    MimeType = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    Description = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    UploadDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true, defaultValueSql: "now()"),
                     UploadedBy = table.Column<long>(type: "bigint", nullable: true),
-                    IsPrimary = table.Column<bool>(type: "bit", nullable: true, defaultValue: false),
-                    CreatedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    CreatedOn = table.Column<DateTime>(type: "datetime2", nullable: false),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ModifiedOn = table.Column<DateTime>(type: "datetime2", nullable: true)
+                    IsPrimary = table.Column<bool>(type: "boolean", nullable: true, defaultValue: false),
+                    CreatedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false),
+                    ModifiedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ModifiedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -82,14 +86,14 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    ModuleName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
-                    Description = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    IsActive = table.Column<bool>(type: "bit", nullable: true, defaultValue: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    CreatedOn = table.Column<DateTime>(type: "datetime2", nullable: false),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ModifiedOn = table.Column<DateTime>(type: "datetime2", nullable: true)
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    ModuleName = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    Description = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    IsActive = table.Column<bool>(type: "boolean", nullable: true, defaultValue: true),
+                    CreatedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false),
+                    ModifiedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ModifiedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -101,18 +105,18 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    Code = table.Column<string>(type: "nvarchar(10)", maxLength: 10, nullable: false),
-                    CurrencyName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
-                    Symbol = table.Column<string>(type: "nvarchar(10)", maxLength: 10, nullable: true),
-                    ExchangeRate = table.Column<decimal>(type: "decimal(18,6)", nullable: true),
-                    IsBaseCurrency = table.Column<bool>(type: "bit", nullable: true, defaultValue: false),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    Code = table.Column<string>(type: "character varying(10)", maxLength: 10, nullable: false),
+                    CurrencyName = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    Symbol = table.Column<string>(type: "character varying(10)", maxLength: 10, nullable: true),
+                    ExchangeRate = table.Column<decimal>(type: "numeric(18,6)", nullable: true),
+                    IsBaseCurrency = table.Column<bool>(type: "boolean", nullable: true, defaultValue: false),
                     BusinessUnitID = table.Column<long>(type: "bigint", nullable: false),
-                    IsActive = table.Column<bool>(type: "bit", nullable: true, defaultValue: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    CreatedOn = table.Column<DateTime>(type: "datetime2", nullable: false),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ModifiedOn = table.Column<DateTime>(type: "datetime2", nullable: true)
+                    IsActive = table.Column<bool>(type: "boolean", nullable: true, defaultValue: true),
+                    CreatedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false),
+                    ModifiedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ModifiedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -129,29 +133,29 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    DocId = table.Column<string>(type: "varchar(10)", unicode: false, maxLength: 10, nullable: true),
-                    Name = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    ContactEmail = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ImageURL = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
-                    BillingAddressLine1 = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    BillingAddressLine2 = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    BillingCity = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    BillingState = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    BillingCountry = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    BillingPostalCode = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: true),
-                    ShippingAddressLine1 = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ShippingAddressLine2 = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ShippingCity = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    ShippingState = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    ShippingCountry = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    ShippingPostalCode = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: true),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    DocId = table.Column<string>(type: "character varying(10)", unicode: false, maxLength: 10, nullable: true),
+                    Name = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    ContactEmail = table.Column<string>(type: "citext", nullable: true),
+                    ImageURL = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    BillingAddressLine1 = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    BillingAddressLine2 = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    BillingCity = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    BillingState = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    BillingCountry = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    BillingPostalCode = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: true),
+                    ShippingAddressLine1 = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ShippingAddressLine2 = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ShippingCity = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    ShippingState = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    ShippingCountry = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    ShippingPostalCode = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: true),
                     BUID = table.Column<long>(type: "bigint", nullable: true),
-                    IsActive = table.Column<bool>(type: "bit", nullable: true, defaultValue: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    CreatedOn = table.Column<DateTime>(type: "datetime2", nullable: false),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ModifiedOn = table.Column<DateTime>(type: "datetime2", nullable: true)
+                    IsActive = table.Column<bool>(type: "boolean", nullable: true, defaultValue: true),
+                    CreatedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false),
+                    ModifiedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ModifiedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -168,19 +172,19 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
                     BusinessUnitID = table.Column<long>(type: "bigint", nullable: false),
-                    ConfigurationName = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    EmailAddress = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    Protocol = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
-                    Host = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    Port = table.Column<int>(type: "int", nullable: false),
-                    Username = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    Password = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    UseSSL = table.Column<bool>(type: "bit", nullable: false, defaultValue: true),
-                    PollingInterval = table.Column<int>(type: "int", nullable: false, defaultValue: 300),
-                    IsActive = table.Column<bool>(type: "bit", nullable: false, defaultValue: true),
-                    CreatedOn = table.Column<DateTime>(type: "datetime2", nullable: false, defaultValueSql: "(sysdatetime())")
+                    ConfigurationName = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    EmailAddress = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    Protocol = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: false),
+                    Host = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    Port = table.Column<int>(type: "integer", nullable: false),
+                    Username = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    Password = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    UseSSL = table.Column<bool>(type: "boolean", nullable: false, defaultValue: true),
+                    PollingInterval = table.Column<int>(type: "integer", nullable: false, defaultValue: 300),
+                    IsActive = table.Column<bool>(type: "boolean", nullable: false, defaultValue: true),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false, defaultValueSql: "now()")
                 },
                 constraints: table =>
                 {
@@ -197,16 +201,16 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    CategoryName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
-                    Description = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    CategoryName = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    Description = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
                     ParentCategoryID = table.Column<long>(type: "bigint", nullable: true),
                     BusinessUnitID = table.Column<long>(type: "bigint", nullable: false),
-                    IsActive = table.Column<bool>(type: "bit", nullable: true, defaultValue: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    CreatedOn = table.Column<DateTime>(type: "datetime2", nullable: false),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ModifiedOn = table.Column<DateTime>(type: "datetime2", nullable: true)
+                    IsActive = table.Column<bool>(type: "boolean", nullable: true, defaultValue: true),
+                    CreatedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false),
+                    ModifiedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ModifiedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -227,16 +231,16 @@ namespace ERP_RFQ_Automation.Migrations
                 name: "ProductSubCategories",
                 columns: table => new
                 {
-                    ID = table.Column<int>(type: "int", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    SubCategoryName = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: false),
-                    Description = table.Column<string>(type: "nvarchar(max)", nullable: true),
+                    ID = table.Column<int>(type: "integer", nullable: false)
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    SubCategoryName = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: false),
+                    Description = table.Column<string>(type: "text", nullable: true),
                     BusinessUnitID = table.Column<long>(type: "bigint", nullable: true),
-                    IsActive = table.Column<bool>(type: "bit", nullable: true, defaultValue: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    CreatedOn = table.Column<DateTime>(type: "datetime", nullable: true, defaultValueSql: "(getdate())"),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    ModifiedOn = table.Column<DateTime>(type: "datetime", nullable: true)
+                    IsActive = table.Column<bool>(type: "boolean", nullable: true, defaultValue: true),
+                    CreatedBy = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true, defaultValueSql: "now()"),
+                    ModifiedBy = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    ModifiedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -253,17 +257,17 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     Id = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
                     BusinessUnitId = table.Column<long>(type: "bigint", nullable: false),
-                    Logo = table.Column<string>(type: "nvarchar(max)", nullable: true),
-                    PrimaryColor = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: true),
-                    TermsAndConditions = table.Column<string>(type: "nvarchar(max)", nullable: true),
-                    CompanyAddress = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: true),
-                    CompanyPhone = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    CompanyEmail = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    FooterText = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: true),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    ModifiedOn = table.Column<DateTime>(type: "datetime2", nullable: true, defaultValueSql: "(sysdatetime())")
+                    Logo = table.Column<string>(type: "text", nullable: true),
+                    PrimaryColor = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: true),
+                    TermsAndConditions = table.Column<string>(type: "text", nullable: true),
+                    CompanyAddress = table.Column<string>(type: "character varying(500)", maxLength: 500, nullable: true),
+                    CompanyPhone = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    CompanyEmail = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    FooterText = table.Column<string>(type: "character varying(500)", maxLength: 500, nullable: true),
+                    ModifiedBy = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    ModifiedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true, defaultValueSql: "now()")
                 },
                 constraints: table =>
                 {
@@ -279,17 +283,17 @@ namespace ERP_RFQ_Automation.Migrations
                 name: "SetCountry",
                 columns: table => new
                 {
-                    CountryID = table.Column<int>(type: "int", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    CountryCode = table.Column<string>(type: "nvarchar(10)", maxLength: 10, nullable: false),
-                    CountryName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
-                    Description = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
+                    CountryID = table.Column<int>(type: "integer", nullable: false)
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    CountryCode = table.Column<string>(type: "character varying(10)", maxLength: 10, nullable: false),
+                    CountryName = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    Description = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
                     BUID = table.Column<long>(type: "bigint", nullable: false),
-                    IsActive = table.Column<bool>(type: "bit", nullable: false, defaultValue: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
-                    CreatedDate = table.Column<DateTime>(type: "datetime", nullable: false, defaultValueSql: "(getdate())"),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: true),
-                    ModifiedDate = table.Column<DateTime>(type: "datetime", nullable: true)
+                    IsActive = table.Column<bool>(type: "boolean", nullable: false, defaultValue: true),
+                    CreatedBy = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: false),
+                    CreatedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: false, defaultValueSql: "now()"),
+                    ModifiedBy = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: true),
+                    ModifiedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -306,17 +310,17 @@ namespace ERP_RFQ_Automation.Migrations
                 name: "setUOM",
                 columns: table => new
                 {
-                    UomID = table.Column<int>(type: "int", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
+                    UomID = table.Column<int>(type: "integer", nullable: false)
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
                     BusinessUnitID = table.Column<long>(type: "bigint", nullable: false),
-                    UomCode = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
-                    UomName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
-                    Description = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    IsActive = table.Column<bool>(type: "bit", nullable: false, defaultValue: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
-                    CreatedDate = table.Column<DateTime>(type: "datetime", nullable: false, defaultValueSql: "(getdate())"),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: true),
-                    ModifiedDate = table.Column<DateTime>(type: "datetime", nullable: true)
+                    UomCode = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: false),
+                    UomName = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    Description = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    IsActive = table.Column<bool>(type: "boolean", nullable: false, defaultValue: true),
+                    CreatedBy = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: false),
+                    CreatedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: false, defaultValueSql: "now()"),
+                    ModifiedBy = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: true),
+                    ModifiedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -333,18 +337,18 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     SetupID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    SetupType = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
-                    SetupCode = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    SetupValue = table.Column<string>(type: "nvarchar(max)", nullable: false),
-                    Description = table.Column<string>(type: "nvarchar(max)", nullable: true),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    SetupType = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    SetupCode = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    SetupValue = table.Column<string>(type: "text", nullable: false),
+                    Description = table.Column<string>(type: "text", nullable: true),
                     ParentSetupID = table.Column<long>(type: "bigint", nullable: true),
                     BusinessUnitID = table.Column<long>(type: "bigint", nullable: false),
-                    IsActive = table.Column<bool>(type: "bit", nullable: true, defaultValue: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(max)", nullable: false),
-                    CreatedOn = table.Column<DateTime>(type: "datetime2", nullable: false),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(max)", nullable: true),
-                    ModifiedOn = table.Column<DateTime>(type: "datetime2", nullable: true)
+                    IsActive = table.Column<bool>(type: "boolean", nullable: true, defaultValue: true),
+                    CreatedBy = table.Column<string>(type: "text", nullable: false),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false),
+                    ModifiedBy = table.Column<string>(type: "text", nullable: true),
+                    ModifiedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -362,17 +366,50 @@ namespace ERP_RFQ_Automation.Migrations
                 });
 
             migrationBuilder.CreateTable(
+                name: "Taxes",
+                columns: table => new
+                {
+                    ID = table.Column<long>(type: "bigint", nullable: false)
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    TaxCode = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: false),
+                    TaxName = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    TaxRate = table.Column<decimal>(type: "numeric(9,4)", nullable: false),
+                    TaxType = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: false),
+                    Country = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    State = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    IsInclusive = table.Column<bool>(type: "boolean", nullable: true, defaultValue: false),
+                    IsCompound = table.Column<bool>(type: "boolean", nullable: true, defaultValue: false),
+                    EffectiveDate = table.Column<DateOnly>(type: "date", nullable: false),
+                    ExpiryDate = table.Column<DateOnly>(type: "date", nullable: true),
+                    BusinessUnitID = table.Column<long>(type: "bigint", nullable: false),
+                    IsActive = table.Column<bool>(type: "boolean", nullable: true, defaultValue: true),
+                    CreatedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false, defaultValueSql: "now()"),
+                    ModifiedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ModifiedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_Taxes", x => x.ID);
+                    table.ForeignKey(
+                        name: "FK_Taxes_BusinessUnits",
+                        column: x => x.BusinessUnitID,
+                        principalTable: "BusinessUnits",
+                        principalColumn: "ID");
+                });
+
+            migrationBuilder.CreateTable(
                 name: "UserGroups",
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    UserGroupsName = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    UserGroupsName = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
                     BusinessUnitID = table.Column<long>(type: "bigint", nullable: false),
-                    CreatedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    CreatedOn = table.Column<DateTime>(type: "datetime2", nullable: false),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ModifiedOn = table.Column<DateTime>(type: "datetime2", nullable: true)
+                    CreatedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false),
+                    ModifiedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ModifiedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -389,26 +426,26 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    WarehouseCode = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
-                    WarehouseName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
-                    Location = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    AddressLine1 = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    AddressLine2 = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    City = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    State = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    Country = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    PostalCode = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: true),
-                    Capacity = table.Column<decimal>(type: "decimal(18,2)", nullable: true),
-                    ManagerName = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ContactPhone = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: true),
-                    ContactEmail = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    WarehouseCode = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: false),
+                    WarehouseName = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    Location = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    AddressLine1 = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    AddressLine2 = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    City = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    State = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    Country = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    PostalCode = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: true),
+                    Capacity = table.Column<decimal>(type: "numeric(18,2)", nullable: true),
+                    ManagerName = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ContactPhone = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: true),
+                    ContactEmail = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
                     BusinessUnitID = table.Column<long>(type: "bigint", nullable: false),
-                    IsActive = table.Column<bool>(type: "bit", nullable: true, defaultValue: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    CreatedOn = table.Column<DateTime>(type: "datetime2", nullable: false, defaultValueSql: "(getdate())"),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ModifiedOn = table.Column<DateTime>(type: "datetime2", nullable: true)
+                    IsActive = table.Column<bool>(type: "boolean", nullable: true, defaultValue: true),
+                    CreatedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false, defaultValueSql: "now()"),
+                    ModifiedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ModifiedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -425,16 +462,16 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    MessageID = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    EmailSubject = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: true),
-                    FromEmail = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    ToEmail = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    RawEmailPath = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: true),
-                    ParsedAt = table.Column<DateTime>(type: "datetime2", nullable: true),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    MessageID = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    EmailSubject = table.Column<string>(type: "character varying(500)", maxLength: 500, nullable: true),
+                    FromEmail = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    ToEmail = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    RawEmailPath = table.Column<string>(type: "character varying(500)", maxLength: 500, nullable: true),
+                    ParsedAt = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
                     EmailConfigurationID = table.Column<long>(type: "bigint", nullable: false),
-                    ParseStatus = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: true),
-                    CreatedOn = table.Column<DateTime>(type: "datetime2", nullable: false, defaultValueSql: "(sysdatetime())")
+                    ParseStatus = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: true),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false, defaultValueSql: "now()")
                 },
                 constraints: table =>
                 {
@@ -450,18 +487,18 @@ namespace ERP_RFQ_Automation.Migrations
                 name: "SetState",
                 columns: table => new
                 {
-                    StateID = table.Column<int>(type: "int", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    StateCode = table.Column<string>(type: "nvarchar(10)", maxLength: 10, nullable: false),
-                    StateName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
-                    CountryID = table.Column<int>(type: "int", nullable: false),
+                    StateID = table.Column<int>(type: "integer", nullable: false)
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    StateCode = table.Column<string>(type: "character varying(10)", maxLength: 10, nullable: false),
+                    StateName = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    CountryID = table.Column<int>(type: "integer", nullable: false),
                     BUID = table.Column<long>(type: "bigint", nullable: false),
-                    Description = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    IsActive = table.Column<bool>(type: "bit", nullable: false, defaultValue: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
-                    CreatedDate = table.Column<DateTime>(type: "datetime", nullable: false, defaultValueSql: "(getdate())"),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: true),
-                    ModifiedDate = table.Column<DateTime>(type: "datetime", nullable: true)
+                    Description = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    IsActive = table.Column<bool>(type: "boolean", nullable: false, defaultValue: true),
+                    CreatedBy = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: false),
+                    CreatedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: false, defaultValueSql: "now()"),
+                    ModifiedBy = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: true),
+                    ModifiedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -483,17 +520,17 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
                     RoleID = table.Column<long>(type: "bigint", nullable: true),
                     ModuleID = table.Column<long>(type: "bigint", nullable: false),
                     BusinessUnitID = table.Column<long>(type: "bigint", nullable: false),
-                    CanCreate = table.Column<bool>(type: "bit", nullable: true, defaultValue: false),
-                    CanEdit = table.Column<bool>(type: "bit", nullable: true, defaultValue: false),
-                    CanDelete = table.Column<bool>(type: "bit", nullable: true, defaultValue: false),
-                    CreatedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    CreatedOn = table.Column<DateTime>(type: "datetime2", nullable: false),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ModifiedOn = table.Column<DateTime>(type: "datetime2", nullable: true)
+                    CanCreate = table.Column<bool>(type: "boolean", nullable: true, defaultValue: false),
+                    CanEdit = table.Column<bool>(type: "boolean", nullable: true, defaultValue: false),
+                    CanDelete = table.Column<bool>(type: "boolean", nullable: true, defaultValue: false),
+                    CreatedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false),
+                    ModifiedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ModifiedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -519,18 +556,18 @@ namespace ERP_RFQ_Automation.Migrations
                 name: "SetCity",
                 columns: table => new
                 {
-                    CityID = table.Column<int>(type: "int", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    CityName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
-                    StateID = table.Column<int>(type: "int", nullable: false),
-                    CountryID = table.Column<int>(type: "int", nullable: false),
+                    CityID = table.Column<int>(type: "integer", nullable: false)
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    CityName = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    StateID = table.Column<int>(type: "integer", nullable: false),
+                    CountryID = table.Column<int>(type: "integer", nullable: false),
                     BUID = table.Column<long>(type: "bigint", nullable: false),
-                    Description = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    IsActive = table.Column<bool>(type: "bit", nullable: false, defaultValue: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
-                    CreatedDate = table.Column<DateTime>(type: "datetime", nullable: false, defaultValueSql: "(getdate())"),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: true),
-                    ModifiedDate = table.Column<DateTime>(type: "datetime", nullable: true)
+                    Description = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    IsActive = table.Column<bool>(type: "boolean", nullable: false, defaultValue: true),
+                    CreatedBy = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: false),
+                    CreatedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: false, defaultValueSql: "now()"),
+                    ModifiedBy = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: true),
+                    ModifiedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -558,28 +595,28 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    DocId = table.Column<string>(type: "varchar(10)", unicode: false, maxLength: 10, nullable: true),
-                    Name = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    ContactEmail = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ImageURL = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
-                    PaymentTerms = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    AddressLine1 = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    AddressLine2 = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    PostalCode = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: true),
-                    SuccessRate = table.Column<decimal>(type: "decimal(5,2)", nullable: true),
-                    AvgResponseTime = table.Column<int>(type: "int", nullable: true),
-                    Tags = table.Column<string>(type: "nvarchar(max)", nullable: true),
-                    Comments = table.Column<string>(type: "nvarchar(max)", nullable: true),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    DocId = table.Column<string>(type: "character varying(10)", unicode: false, maxLength: 10, nullable: true),
+                    Name = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    ContactEmail = table.Column<string>(type: "citext", nullable: true),
+                    ImageURL = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    PaymentTerms = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    AddressLine1 = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    AddressLine2 = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    PostalCode = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: true),
+                    SuccessRate = table.Column<decimal>(type: "numeric(5,2)", nullable: true),
+                    AvgResponseTime = table.Column<int>(type: "integer", nullable: true),
+                    Tags = table.Column<string>(type: "text", nullable: true),
+                    Comments = table.Column<string>(type: "text", nullable: true),
                     CurrencyID = table.Column<long>(type: "bigint", nullable: true),
                     BUID = table.Column<long>(type: "bigint", nullable: true),
-                    IsActive = table.Column<bool>(type: "bit", nullable: true, defaultValue: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    CreatedOn = table.Column<DateTime>(type: "datetime2", nullable: false),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ModifiedOn = table.Column<DateTime>(type: "datetime2", nullable: true),
-                    CityID = table.Column<int>(type: "int", nullable: true),
-                    CountryID = table.Column<int>(type: "int", nullable: true)
+                    IsActive = table.Column<bool>(type: "boolean", nullable: true, defaultValue: true),
+                    CreatedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false),
+                    ModifiedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ModifiedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    CityID = table.Column<int>(type: "integer", nullable: true),
+                    CountryID = table.Column<int>(type: "integer", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -611,22 +648,22 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
                     CustomerID = table.Column<long>(type: "bigint", nullable: true),
                     SupplierID = table.Column<long>(type: "bigint", nullable: true),
-                    FirstName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
-                    MiddleName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    LastName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
-                    Email = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    PhoneNo = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: true),
-                    MobileNo = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: true),
-                    Position = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    IsPrimary = table.Column<bool>(type: "bit", nullable: true, defaultValue: false),
-                    IsActive = table.Column<bool>(type: "bit", nullable: true, defaultValue: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    CreatedOn = table.Column<DateTime>(type: "datetime2", nullable: false),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ModifiedOn = table.Column<DateTime>(type: "datetime2", nullable: true)
+                    FirstName = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    MiddleName = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    LastName = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    Email = table.Column<string>(type: "citext", nullable: true),
+                    PhoneNo = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: true),
+                    MobileNo = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: true),
+                    Position = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    IsPrimary = table.Column<bool>(type: "boolean", nullable: true, defaultValue: false),
+                    IsActive = table.Column<bool>(type: "boolean", nullable: true, defaultValue: true),
+                    CreatedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false),
+                    ModifiedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ModifiedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -648,43 +685,43 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    DocId = table.Column<string>(type: "varchar(10)", unicode: false, maxLength: 10, nullable: true),
-                    ProductName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    PartNo = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
-                    ModelNo = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    Description = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: true),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    DocId = table.Column<string>(type: "character varying(10)", unicode: false, maxLength: 10, nullable: true),
+                    ProductName = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    PartNo = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    ModelNo = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    Description = table.Column<string>(type: "character varying(500)", maxLength: 500, nullable: true),
                     CategoryID = table.Column<long>(type: "bigint", nullable: true),
-                    QtyOnHand = table.Column<decimal>(type: "decimal(18,2)", nullable: false),
-                    ReorderPoint = table.Column<decimal>(type: "decimal(18,2)", nullable: false),
-                    UomID = table.Column<int>(type: "int", nullable: true),
-                    UnitCost = table.Column<decimal>(type: "decimal(18,2)", nullable: true),
-                    SellingPrice = table.Column<decimal>(type: "decimal(18,2)", nullable: true),
+                    QtyOnHand = table.Column<decimal>(type: "numeric(18,2)", nullable: false),
+                    ReorderPoint = table.Column<decimal>(type: "numeric(18,2)", nullable: false),
+                    UomID = table.Column<int>(type: "integer", nullable: true),
+                    UnitCost = table.Column<decimal>(type: "numeric(18,2)", nullable: true),
+                    SellingPrice = table.Column<decimal>(type: "numeric(18,2)", nullable: true),
                     WarehouseID = table.Column<long>(type: "bigint", nullable: true),
                     PreferredSupplierID = table.Column<long>(type: "bigint", nullable: true),
-                    BatchTracking = table.Column<bool>(type: "bit", nullable: true, defaultValue: false),
-                    SerialTracking = table.Column<bool>(type: "bit", nullable: true, defaultValue: false),
+                    BatchTracking = table.Column<bool>(type: "boolean", nullable: true, defaultValue: false),
+                    SerialTracking = table.Column<bool>(type: "boolean", nullable: true, defaultValue: false),
                     ExpirationDate = table.Column<DateOnly>(type: "date", nullable: true),
-                    Height = table.Column<decimal>(type: "decimal(18,2)", nullable: true),
-                    Width = table.Column<decimal>(type: "decimal(18,2)", nullable: true),
-                    Depth = table.Column<decimal>(type: "decimal(18,2)", nullable: true),
-                    Weight = table.Column<decimal>(type: "decimal(18,2)", nullable: true),
-                    Dimensions = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    Barcode = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    QRCode = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    LeadTime = table.Column<int>(type: "int", nullable: true),
-                    HSCode = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: true),
-                    CountryOfOrigin = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    CreatedOn = table.Column<DateTime>(type: "datetime2", nullable: false),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ModifiedOn = table.Column<DateTime>(type: "datetime2", nullable: true),
+                    Height = table.Column<decimal>(type: "numeric(18,2)", nullable: true),
+                    Width = table.Column<decimal>(type: "numeric(18,2)", nullable: true),
+                    Depth = table.Column<decimal>(type: "numeric(18,2)", nullable: true),
+                    Weight = table.Column<decimal>(type: "numeric(18,2)", nullable: true),
+                    Dimensions = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    Barcode = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    QRCode = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    LeadTime = table.Column<int>(type: "integer", nullable: true),
+                    HSCode = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: true),
+                    CountryOfOrigin = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    CreatedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false),
+                    ModifiedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ModifiedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
                     BUID = table.Column<long>(type: "bigint", nullable: true),
-                    IsActive = table.Column<bool>(type: "bit", nullable: true, defaultValue: true),
-                    IsCatalogItem = table.Column<bool>(type: "bit", nullable: true, defaultValue: true),
-                    SubCategoryID = table.Column<int>(type: "int", nullable: true),
-                    FinalLandedCost = table.Column<decimal>(type: "decimal(18,2)", nullable: true),
-                    FinalSalesPrice = table.Column<decimal>(type: "decimal(18,2)", nullable: true)
+                    IsActive = table.Column<bool>(type: "boolean", nullable: true, defaultValue: true),
+                    IsCatalogItem = table.Column<bool>(type: "boolean", nullable: true, defaultValue: true),
+                    SubCategoryID = table.Column<int>(type: "integer", nullable: true),
+                    FinalLandedCost = table.Column<decimal>(type: "numeric(18,2)", nullable: true),
+                    FinalSalesPrice = table.Column<decimal>(type: "numeric(18,2)", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -726,24 +763,24 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     Id = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
                     SupplierId = table.Column<long>(type: "bigint", nullable: false),
-                    ItemName = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: true),
-                    Description = table.Column<string>(type: "nvarchar(max)", nullable: true),
-                    UomId = table.Column<int>(type: "int", nullable: true),
-                    Quantity = table.Column<decimal>(type: "decimal(18,2)", nullable: false),
-                    UnitPrice = table.Column<decimal>(type: "decimal(18,2)", nullable: true),
+                    ItemName = table.Column<string>(type: "character varying(500)", maxLength: 500, nullable: true),
+                    Description = table.Column<string>(type: "text", nullable: true),
+                    UomId = table.Column<int>(type: "integer", nullable: true),
+                    Quantity = table.Column<decimal>(type: "numeric(18,2)", nullable: false),
+                    UnitPrice = table.Column<decimal>(type: "numeric(18,2)", nullable: true),
                     CurrencyId = table.Column<long>(type: "bigint", nullable: true),
-                    QuoteReference = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    QuoteDate = table.Column<DateTime>(type: "datetime", nullable: true),
-                    ValidUntil = table.Column<DateTime>(type: "datetime", nullable: true),
-                    TaxAmount = table.Column<decimal>(type: "decimal(18,2)", nullable: true),
-                    DiscountAmount = table.Column<decimal>(type: "decimal(18,2)", nullable: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(256)", maxLength: 256, nullable: false),
-                    CreatedDate = table.Column<DateTime>(type: "datetime", nullable: false, defaultValueSql: "(getdate())"),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(256)", maxLength: 256, nullable: true),
-                    ModifiedDate = table.Column<DateTime>(type: "datetime", nullable: true),
-                    IsActive = table.Column<bool>(type: "bit", nullable: false, defaultValue: true),
+                    QuoteReference = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    QuoteDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    ValidUntil = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    TaxAmount = table.Column<decimal>(type: "numeric(18,2)", nullable: true),
+                    DiscountAmount = table.Column<decimal>(type: "numeric(18,2)", nullable: true),
+                    CreatedBy = table.Column<string>(type: "character varying(256)", maxLength: 256, nullable: false),
+                    CreatedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: false, defaultValueSql: "now()"),
+                    ModifiedBy = table.Column<string>(type: "character varying(256)", maxLength: 256, nullable: true),
+                    ModifiedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    IsActive = table.Column<bool>(type: "boolean", nullable: false, defaultValue: true),
                     BusinessUnitId = table.Column<long>(type: "bigint", nullable: true)
                 },
                 constraints: table =>
@@ -776,18 +813,18 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     Id = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
                     ProductId = table.Column<long>(type: "bigint", nullable: false),
                     SupplierId = table.Column<long>(type: "bigint", nullable: false),
-                    PurchaseDate = table.Column<DateTime>(type: "datetime", nullable: false, defaultValueSql: "(getdate())"),
-                    Quantity = table.Column<decimal>(type: "decimal(18,6)", nullable: false),
-                    UnitPrice = table.Column<decimal>(type: "decimal(18,6)", nullable: false),
-                    Currency = table.Column<string>(type: "nvarchar(10)", maxLength: 10, nullable: true),
-                    BatchNo = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
+                    PurchaseDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: false, defaultValueSql: "now()"),
+                    Quantity = table.Column<decimal>(type: "numeric(18,6)", nullable: false),
+                    UnitPrice = table.Column<decimal>(type: "numeric(18,6)", nullable: false),
+                    Currency = table.Column<string>(type: "character varying(10)", maxLength: 10, nullable: true),
+                    BatchNo = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
                     ExpiryDate = table.Column<DateOnly>(type: "date", nullable: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    CreatedOn = table.Column<DateTime>(type: "datetime", nullable: false, defaultValueSql: "(getdate())"),
-                    PoDocId = table.Column<string>(type: "nvarchar(10)", maxLength: 10, nullable: true)
+                    CreatedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false, defaultValueSql: "now()"),
+                    PoDocId = table.Column<string>(type: "character varying(10)", maxLength: 10, nullable: true)
                 },
                 constraints: table =>
                 {
@@ -809,33 +846,33 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
                     LeadID = table.Column<long>(type: "bigint", nullable: false),
-                    CompanyRef = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    CustomerAccountPortalID = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    CustomerRFQNo = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    ItemMaterialCode = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    CommodityProduct = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: true),
-                    BuyerName = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: true),
-                    LineItemNo = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: true),
-                    ProductShortName = table.Column<string>(type: "nvarchar(1000)", maxLength: 1000, nullable: true),
-                    Alternative = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    ProductShortDescription = table.Column<string>(type: "nvarchar(1000)", maxLength: 1000, nullable: true),
-                    Currency = table.Column<string>(type: "nvarchar(10)", maxLength: 10, nullable: true),
-                    UnitOfMeasure = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    UnitPrice = table.Column<decimal>(type: "decimal(18,6)", nullable: true),
-                    Quantity = table.Column<int>(type: "int", nullable: false),
-                    StorageLocation = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    ManufacturerName = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: true),
-                    ManufacturerPartNumber = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    AlternateProductName = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: true),
-                    AlternatePartNumber = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    ItemText = table.Column<string>(type: "nvarchar(2000)", maxLength: 2000, nullable: true),
-                    MaterialPOText = table.Column<string>(type: "nvarchar(2000)", maxLength: 2000, nullable: true),
-                    LeadTime = table.Column<int>(type: "int", nullable: true),
-                    ReceivedDate = table.Column<DateTime>(type: "datetime2", nullable: true),
-                    BidClosingDateLine = table.Column<DateTime>(type: "datetime2", nullable: true),
-                    AIConfidence = table.Column<decimal>(type: "decimal(5,4)", nullable: true)
+                    CompanyRef = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    CustomerAccountPortalID = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    CustomerRFQNo = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    ItemMaterialCode = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    CommodityProduct = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: true),
+                    BuyerName = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: true),
+                    LineItemNo = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: true),
+                    ProductShortName = table.Column<string>(type: "character varying(1000)", maxLength: 1000, nullable: true),
+                    Alternative = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    ProductShortDescription = table.Column<string>(type: "character varying(1000)", maxLength: 1000, nullable: true),
+                    Currency = table.Column<string>(type: "character varying(10)", maxLength: 10, nullable: true),
+                    UnitOfMeasure = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    UnitPrice = table.Column<decimal>(type: "numeric(18,6)", nullable: true),
+                    Quantity = table.Column<int>(type: "integer", nullable: false),
+                    StorageLocation = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    ManufacturerName = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: true),
+                    ManufacturerPartNumber = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    AlternateProductName = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: true),
+                    AlternatePartNumber = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    ItemText = table.Column<string>(type: "character varying(2000)", maxLength: 2000, nullable: true),
+                    MaterialPOText = table.Column<string>(type: "character varying(2000)", maxLength: 2000, nullable: true),
+                    LeadTime = table.Column<int>(type: "integer", nullable: true),
+                    ReceivedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    BidClosingDateLine = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    AIConfidence = table.Column<decimal>(type: "numeric(5,4)", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -847,32 +884,32 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    RFQNo = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    BuyersName = table.Column<string>(type: "nvarchar(510)", maxLength: 510, nullable: true),
-                    RecDate = table.Column<DateTime>(type: "datetime2", nullable: false),
-                    BidClosingDate = table.Column<DateTime>(type: "datetime2", nullable: true),
-                    BiddingDecision = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    AcknowledgmentDate = table.Column<DateTime>(type: "datetime2", nullable: true),
-                    SubDate = table.Column<DateTime>(type: "datetime2", nullable: true),
-                    HeaderRemarks = table.Column<string>(type: "nvarchar(max)", nullable: true),
-                    OpportunityNo = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    NoOfLineItems = table.Column<int>(type: "int", nullable: true),
-                    RFQType = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: true),
-                    DurationAgreement = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    LeadSource = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
-                    AIConfidence = table.Column<decimal>(type: "decimal(5,4)", nullable: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: false),
-                    CreatedDate = table.Column<DateTime>(type: "datetime2", nullable: false, defaultValueSql: "(sysdatetime())"),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    RFQNo = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    BuyersName = table.Column<string>(type: "character varying(510)", maxLength: 510, nullable: true),
+                    RecDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: false),
+                    BidClosingDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    BiddingDecision = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    AcknowledgmentDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    SubDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    HeaderRemarks = table.Column<string>(type: "text", nullable: true),
+                    OpportunityNo = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    NoOfLineItems = table.Column<int>(type: "integer", nullable: true),
+                    RFQType = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: true),
+                    DurationAgreement = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    LeadSource = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    AIConfidence = table.Column<decimal>(type: "numeric(5,4)", nullable: true),
+                    CreatedBy = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false),
+                    CreatedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: false, defaultValueSql: "now()"),
                     BusinessUnitID = table.Column<long>(type: "bigint", nullable: false),
                     EmailIngestsID = table.Column<long>(type: "bigint", nullable: false),
-                    ModifiedDate = table.Column<DateTime>(type: "datetime2", nullable: true),
-                    EmailSource = table.Column<string>(type: "varchar(255)", unicode: false, maxLength: 255, nullable: true),
-                    Clientemail = table.Column<string>(type: "varchar(255)", unicode: false, maxLength: 255, nullable: true),
+                    ModifiedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    EmailSource = table.Column<string>(type: "character varying(255)", unicode: false, maxLength: 255, nullable: true),
+                    Clientemail = table.Column<string>(type: "character varying(255)", unicode: false, maxLength: 255, nullable: true),
                     LeadStatusId = table.Column<long>(type: "bigint", nullable: true),
                     AssignTo = table.Column<long>(type: "bigint", nullable: true),
-                    AssignOn = table.Column<DateTime>(type: "datetime", nullable: true),
-                    AssignComment = table.Column<string>(type: "varchar(500)", unicode: false, maxLength: 500, nullable: true),
+                    AssignOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    AssignComment = table.Column<string>(type: "character varying(500)", unicode: false, maxLength: 500, nullable: true),
                     LeadRejectedReasonID = table.Column<long>(type: "bigint", nullable: true)
                 },
                 constraints: table =>
@@ -905,25 +942,25 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    RFQNo = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: false),
-                    BuyersName = table.Column<string>(type: "nvarchar(1020)", maxLength: 1020, nullable: true),
-                    RecDate = table.Column<DateTime>(type: "datetime2", nullable: false),
-                    BidClosingDate = table.Column<DateTime>(type: "datetime2", nullable: true),
-                    BiddingDecision = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: true),
-                    AcknowledgmentDate = table.Column<DateTime>(type: "datetime2", nullable: true),
-                    SubDate = table.Column<DateTime>(type: "datetime2", nullable: true),
-                    HeaderRemarks = table.Column<string>(type: "nvarchar(max)", nullable: true),
-                    OpportunityNo = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: true),
-                    NoOfLineItems = table.Column<int>(type: "int", nullable: true),
-                    RFQType = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    RFQNo = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: false),
+                    BuyersName = table.Column<string>(type: "character varying(1020)", maxLength: 1020, nullable: true),
+                    RecDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: false),
+                    BidClosingDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    BiddingDecision = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: true),
+                    AcknowledgmentDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    SubDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    HeaderRemarks = table.Column<string>(type: "text", nullable: true),
+                    OpportunityNo = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: true),
+                    NoOfLineItems = table.Column<int>(type: "integer", nullable: true),
+                    RFQType = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
                     RFQTypeID = table.Column<long>(type: "bigint", nullable: true),
-                    DurationAgreement = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: true),
+                    DurationAgreement = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: true),
                     LeadID = table.Column<long>(type: "bigint", nullable: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(40)", maxLength: 40, nullable: false),
-                    CreatedDate = table.Column<DateTime>(type: "datetime2", nullable: false, defaultValueSql: "(getdate())"),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(40)", maxLength: 40, nullable: true),
-                    ModifiedDate = table.Column<DateTime>(type: "datetime2", nullable: true),
+                    CreatedBy = table.Column<string>(type: "character varying(40)", maxLength: 40, nullable: false),
+                    CreatedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: false, defaultValueSql: "now()"),
+                    ModifiedBy = table.Column<string>(type: "character varying(40)", maxLength: 40, nullable: true),
+                    ModifiedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
                     BusinessUnitID = table.Column<long>(type: "bigint", nullable: false),
                     RFQStatusID = table.Column<long>(type: "bigint", nullable: true),
                     CustomerID = table.Column<long>(type: "bigint", nullable: true)
@@ -963,23 +1000,23 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    QuoteNo = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    QuoteNo = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: false),
                     RFQID = table.Column<long>(type: "bigint", nullable: true),
                     CustomerID = table.Column<long>(type: "bigint", nullable: true),
                     BusinessUnitID = table.Column<long>(type: "bigint", nullable: false),
-                    QuoteDate = table.Column<DateTime>(type: "datetime2", nullable: true, defaultValueSql: "(sysdatetime())"),
-                    ValidUntil = table.Column<DateTime>(type: "datetime2", nullable: true),
+                    QuoteDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true, defaultValueSql: "now()"),
+                    ValidUntil = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
                     StatusID = table.Column<long>(type: "bigint", nullable: true),
                     CurrencyID = table.Column<long>(type: "bigint", nullable: true),
-                    TotalAmount = table.Column<decimal>(type: "decimal(18,2)", nullable: true),
-                    HeaderRemarks = table.Column<string>(type: "nvarchar(max)", nullable: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    CreatedDate = table.Column<DateTime>(type: "datetime2", nullable: true, defaultValueSql: "(sysdatetime())"),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ModifiedDate = table.Column<DateTime>(type: "datetime2", nullable: true),
+                    TotalAmount = table.Column<decimal>(type: "numeric(18,2)", nullable: true),
+                    HeaderRemarks = table.Column<string>(type: "text", nullable: true),
+                    CreatedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    CreatedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true, defaultValueSql: "now()"),
+                    ModifiedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ModifiedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
                     DiscountTypeId = table.Column<long>(type: "bigint", nullable: true),
-                    DiscountValue = table.Column<decimal>(type: "decimal(18,2)", nullable: true)
+                    DiscountValue = table.Column<decimal>(type: "numeric(18,2)", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -1021,43 +1058,43 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
                     RFQID = table.Column<long>(type: "bigint", nullable: false),
-                    CompanyRef = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: true),
-                    CustomerAccountPortalID = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: true),
-                    CustomerRFQNo = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: true),
-                    ItemMaterialCode = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: true),
-                    LineItemNo = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
+                    CompanyRef = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: true),
+                    CustomerAccountPortalID = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: true),
+                    CustomerRFQNo = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: true),
+                    ItemMaterialCode = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: true),
+                    LineItemNo = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
                     ProductID = table.Column<long>(type: "bigint", nullable: true),
-                    CommodityProduct = table.Column<string>(type: "nvarchar(400)", maxLength: 400, nullable: true),
-                    ProductShortName = table.Column<string>(type: "nvarchar(max)", nullable: true),
-                    ProductShortDescription = table.Column<string>(type: "nvarchar(max)", nullable: true),
-                    Alternative = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: true),
-                    BuyerName = table.Column<string>(type: "nvarchar(400)", maxLength: 400, nullable: true),
-                    Currency = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: true),
+                    CommodityProduct = table.Column<string>(type: "character varying(400)", maxLength: 400, nullable: true),
+                    ProductShortName = table.Column<string>(type: "text", nullable: true),
+                    ProductShortDescription = table.Column<string>(type: "text", nullable: true),
+                    Alternative = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: true),
+                    BuyerName = table.Column<string>(type: "character varying(400)", maxLength: 400, nullable: true),
+                    Currency = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: true),
                     CurrencyID = table.Column<long>(type: "bigint", nullable: true),
-                    UnitOfMeasure = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: true),
-                    UomId = table.Column<int>(type: "int", nullable: true),
-                    UnitPrice = table.Column<decimal>(type: "decimal(18,6)", nullable: true),
-                    Quantity = table.Column<int>(type: "int", nullable: false),
-                    StorageLocation = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: true),
+                    UnitOfMeasure = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: true),
+                    UomId = table.Column<int>(type: "integer", nullable: true),
+                    UnitPrice = table.Column<decimal>(type: "numeric(18,6)", nullable: true),
+                    Quantity = table.Column<int>(type: "integer", nullable: false),
+                    StorageLocation = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: true),
                     WarehouseID = table.Column<long>(type: "bigint", nullable: true),
-                    ManufacturerName = table.Column<string>(type: "nvarchar(400)", maxLength: 400, nullable: true),
-                    ManufacturerPartNumber = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: true),
+                    ManufacturerName = table.Column<string>(type: "character varying(400)", maxLength: 400, nullable: true),
+                    ManufacturerPartNumber = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: true),
                     SupplierID = table.Column<long>(type: "bigint", nullable: true),
-                    AlternateProductName = table.Column<string>(type: "nvarchar(400)", maxLength: 400, nullable: true),
-                    AlternatePartNumber = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: true),
-                    ItemText = table.Column<string>(type: "nvarchar(4000)", maxLength: 4000, nullable: true),
-                    MaterialPOText = table.Column<string>(type: "nvarchar(4000)", maxLength: 4000, nullable: true),
-                    LeadTime = table.Column<int>(type: "int", nullable: true),
-                    RequiredDesiredDate = table.Column<DateTime>(type: "datetime2", nullable: true),
-                    ReceivedDate = table.Column<DateTime>(type: "datetime2", nullable: true),
-                    BidClosingDateLine = table.Column<DateTime>(type: "datetime2", nullable: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(40)", maxLength: 40, nullable: false),
-                    CreatedDate = table.Column<DateTime>(type: "datetime2", nullable: false, defaultValueSql: "(getdate())"),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(40)", maxLength: 40, nullable: true),
-                    ModifiedDate = table.Column<DateTime>(type: "datetime2", nullable: true),
-                    AIConfidence = table.Column<decimal>(type: "decimal(5,4)", nullable: true),
+                    AlternateProductName = table.Column<string>(type: "character varying(400)", maxLength: 400, nullable: true),
+                    AlternatePartNumber = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: true),
+                    ItemText = table.Column<string>(type: "character varying(4000)", maxLength: 4000, nullable: true),
+                    MaterialPOText = table.Column<string>(type: "character varying(4000)", maxLength: 4000, nullable: true),
+                    LeadTime = table.Column<int>(type: "integer", nullable: true),
+                    RequiredDesiredDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    ReceivedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    BidClosingDateLine = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    CreatedBy = table.Column<string>(type: "character varying(40)", maxLength: 40, nullable: false),
+                    CreatedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: false, defaultValueSql: "now()"),
+                    ModifiedBy = table.Column<string>(type: "character varying(40)", maxLength: 40, nullable: true),
+                    ModifiedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    AIConfidence = table.Column<decimal>(type: "numeric(5,4)", nullable: true),
                     SupplierQuotedItemId = table.Column<long>(type: "bigint", nullable: true)
                 },
                 constraints: table =>
@@ -1106,8 +1143,8 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    OrderNo = table.Column<string>(type: "varchar(50)", unicode: false, maxLength: 50, nullable: false),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    OrderNo = table.Column<string>(type: "character varying(50)", unicode: false, maxLength: 50, nullable: false),
                     QuoteID = table.Column<long>(type: "bigint", nullable: true),
                     LeadID = table.Column<long>(type: "bigint", nullable: true),
                     RFQID = table.Column<long>(type: "bigint", nullable: true),
@@ -1117,23 +1154,23 @@ namespace ERP_RFQ_Automation.Migrations
                     CurrencyID = table.Column<long>(type: "bigint", nullable: true),
                     PaymentMethodID = table.Column<long>(type: "bigint", nullable: true),
                     PaymentStatusID = table.Column<long>(type: "bigint", nullable: true),
-                    PaymentDate = table.Column<DateTime>(type: "datetime", nullable: true),
-                    PaidAmount = table.Column<decimal>(type: "decimal(18,2)", nullable: false),
-                    BalanceAmount = table.Column<decimal>(type: "decimal(19,2)", nullable: true, computedColumnSql: "([TotalAmount]-[PaidAmount])", stored: false),
-                    PaymentReference = table.Column<string>(type: "varchar(100)", unicode: false, maxLength: 100, nullable: true),
-                    OrderDate = table.Column<DateTime>(type: "datetime", nullable: false, defaultValueSql: "(getdate())"),
-                    DeliveryDate = table.Column<DateTime>(type: "datetime", nullable: true),
-                    TotalAmount = table.Column<decimal>(type: "decimal(18,2)", nullable: false),
-                    SubTotal = table.Column<decimal>(type: "decimal(18,2)", nullable: true, defaultValue: 0m),
-                    TaxAmount = table.Column<decimal>(type: "decimal(18,2)", nullable: true, defaultValue: 0m),
-                    DiscountAmount = table.Column<decimal>(type: "decimal(18,2)", nullable: true, defaultValue: 0m),
-                    TermsAndConditions = table.Column<string>(type: "varchar(max)", unicode: false, nullable: true),
-                    Notes = table.Column<string>(type: "varchar(max)", unicode: false, nullable: true),
-                    CreatedBy = table.Column<string>(type: "varchar(255)", unicode: false, maxLength: 255, nullable: false),
-                    CreatedOn = table.Column<DateTime>(type: "datetime", nullable: false, defaultValueSql: "(getdate())"),
-                    ModifiedBy = table.Column<string>(type: "varchar(255)", unicode: false, maxLength: 255, nullable: true),
-                    ModifiedOn = table.Column<DateTime>(type: "datetime", nullable: true),
-                    IsActive = table.Column<bool>(type: "bit", nullable: false, defaultValue: true)
+                    PaymentDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    PaidAmount = table.Column<decimal>(type: "numeric(18,2)", nullable: false),
+                    BalanceAmount = table.Column<decimal>(type: "numeric(19,2)", nullable: true, computedColumnSql: "\"TotalAmount\" - \"PaidAmount\"", stored: true),
+                    PaymentReference = table.Column<string>(type: "character varying(100)", unicode: false, maxLength: 100, nullable: true),
+                    OrderDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: false, defaultValueSql: "now()"),
+                    DeliveryDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    TotalAmount = table.Column<decimal>(type: "numeric(18,2)", nullable: false),
+                    SubTotal = table.Column<decimal>(type: "numeric(18,2)", nullable: true, defaultValue: 0m),
+                    TaxAmount = table.Column<decimal>(type: "numeric(18,2)", nullable: true, defaultValue: 0m),
+                    DiscountAmount = table.Column<decimal>(type: "numeric(18,2)", nullable: true, defaultValue: 0m),
+                    TermsAndConditions = table.Column<string>(type: "text", unicode: false, nullable: true),
+                    Notes = table.Column<string>(type: "text", unicode: false, nullable: true),
+                    CreatedBy = table.Column<string>(type: "character varying(255)", unicode: false, maxLength: 255, nullable: false),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false, defaultValueSql: "now()"),
+                    ModifiedBy = table.Column<string>(type: "character varying(255)", unicode: false, maxLength: 255, nullable: true),
+                    ModifiedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    IsActive = table.Column<bool>(type: "boolean", nullable: false, defaultValue: true)
                 },
                 constraints: table =>
                 {
@@ -1190,23 +1227,23 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
                     QuoteID = table.Column<long>(type: "bigint", nullable: false),
                     RFQItemID = table.Column<long>(type: "bigint", nullable: true),
                     ProductID = table.Column<long>(type: "bigint", nullable: true),
-                    ItemDescription = table.Column<string>(type: "nvarchar(max)", nullable: true),
-                    Quantity = table.Column<decimal>(type: "decimal(18,6)", nullable: false),
-                    UnitPrice = table.Column<decimal>(type: "decimal(18,6)", nullable: false),
-                    TotalAmount = table.Column<decimal>(type: "decimal(18,6)", nullable: false),
-                    Discount = table.Column<decimal>(type: "decimal(18,6)", nullable: true, defaultValue: 0m),
-                    TaxAmount = table.Column<decimal>(type: "decimal(18,6)", nullable: true, defaultValue: 0m),
-                    DeliveryLeadTime = table.Column<int>(type: "int", nullable: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    CreatedDate = table.Column<DateTime>(type: "datetime2", nullable: true, defaultValueSql: "(sysdatetime())"),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ModifiedDate = table.Column<DateTime>(type: "datetime2", nullable: true),
+                    ItemDescription = table.Column<string>(type: "text", nullable: true),
+                    Quantity = table.Column<decimal>(type: "numeric(18,6)", nullable: false),
+                    UnitPrice = table.Column<decimal>(type: "numeric(18,6)", nullable: false),
+                    TotalAmount = table.Column<decimal>(type: "numeric(18,6)", nullable: false),
+                    Discount = table.Column<decimal>(type: "numeric(18,6)", nullable: true, defaultValue: 0m),
+                    TaxAmount = table.Column<decimal>(type: "numeric(18,6)", nullable: true, defaultValue: 0m),
+                    DeliveryLeadTime = table.Column<int>(type: "integer", nullable: true),
+                    CreatedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    CreatedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true, defaultValueSql: "now()"),
+                    ModifiedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ModifiedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
                     DiscountTypeId = table.Column<long>(type: "bigint", nullable: true),
-                    DiscountValue = table.Column<decimal>(type: "decimal(18,2)", nullable: true)
+                    DiscountValue = table.Column<decimal>(type: "numeric(18,2)", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -1239,22 +1276,22 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
                     OrderID = table.Column<long>(type: "bigint", nullable: false),
                     ProductID = table.Column<long>(type: "bigint", nullable: false),
-                    Description = table.Column<string>(type: "varchar(500)", unicode: false, maxLength: 500, nullable: true),
-                    Quantity = table.Column<decimal>(type: "decimal(18,6)", nullable: false),
-                    UnitPrice = table.Column<decimal>(type: "decimal(18,6)", nullable: false),
-                    Discount = table.Column<decimal>(type: "decimal(18,6)", nullable: false),
-                    TaxAmount = table.Column<decimal>(type: "decimal(18,6)", nullable: false),
-                    TotalAmount = table.Column<decimal>(type: "decimal(18,6)", nullable: false),
-                    UomID = table.Column<int>(type: "int", nullable: true),
+                    Description = table.Column<string>(type: "character varying(500)", unicode: false, maxLength: 500, nullable: true),
+                    Quantity = table.Column<decimal>(type: "numeric(18,6)", nullable: false),
+                    UnitPrice = table.Column<decimal>(type: "numeric(18,6)", nullable: false),
+                    Discount = table.Column<decimal>(type: "numeric(18,6)", nullable: false),
+                    TaxAmount = table.Column<decimal>(type: "numeric(18,6)", nullable: false),
+                    TotalAmount = table.Column<decimal>(type: "numeric(18,6)", nullable: false),
+                    UomID = table.Column<int>(type: "integer", nullable: true),
                     WarehouseID = table.Column<long>(type: "bigint", nullable: true),
-                    CreatedBy = table.Column<string>(type: "varchar(255)", unicode: false, maxLength: 255, nullable: false),
-                    CreatedDate = table.Column<DateTime>(type: "datetime", nullable: false, defaultValueSql: "(getdate())"),
-                    ModifiedBy = table.Column<string>(type: "varchar(255)", unicode: false, maxLength: 255, nullable: true),
-                    ModifiedDate = table.Column<DateTime>(type: "datetime", nullable: true),
-                    IsActive = table.Column<bool>(type: "bit", nullable: false, defaultValue: true)
+                    CreatedBy = table.Column<string>(type: "character varying(255)", unicode: false, maxLength: 255, nullable: false),
+                    CreatedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: false, defaultValueSql: "now()"),
+                    ModifiedBy = table.Column<string>(type: "character varying(255)", unicode: false, maxLength: 255, nullable: true),
+                    ModifiedDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    IsActive = table.Column<bool>(type: "boolean", nullable: false, defaultValue: true)
                 },
                 constraints: table =>
                 {
@@ -1287,28 +1324,28 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    ShipmentNo = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    ShipmentNo = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: false),
                     OrderID = table.Column<long>(type: "bigint", nullable: false),
                     BusinessUnitID = table.Column<long>(type: "bigint", nullable: false),
                     StatusID = table.Column<long>(type: "bigint", nullable: false),
-                    ShipmentDate = table.Column<DateTime>(type: "datetime", nullable: false),
-                    EstimatedDeliveryDate = table.Column<DateTime>(type: "datetime", nullable: true),
-                    ActualDeliveryDate = table.Column<DateTime>(type: "datetime", nullable: true),
-                    Carrier = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    ServiceLevel = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    TrackingNumber = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    ExternalID = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ShippingCost = table.Column<decimal>(type: "decimal(18,2)", nullable: true),
-                    LabelUrl = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: true),
-                    RawResponse = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: true),
-                    ShippingAddress = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: true),
-                    Notes = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    CreatedOn = table.Column<DateTime>(type: "datetime", nullable: false, defaultValueSql: "(getdate())"),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ModifiedOn = table.Column<DateTime>(type: "datetime", nullable: true),
-                    IsActive = table.Column<bool>(type: "bit", nullable: false, defaultValue: true)
+                    ShipmentDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: false),
+                    EstimatedDeliveryDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    ActualDeliveryDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    Carrier = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    ServiceLevel = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    TrackingNumber = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    ExternalID = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ShippingCost = table.Column<decimal>(type: "numeric(18,2)", nullable: true),
+                    LabelUrl = table.Column<string>(type: "character varying(500)", maxLength: 500, nullable: true),
+                    RawResponse = table.Column<string>(type: "character varying(500)", maxLength: 500, nullable: true),
+                    ShippingAddress = table.Column<string>(type: "character varying(500)", maxLength: 500, nullable: true),
+                    Notes = table.Column<string>(type: "character varying(500)", maxLength: 500, nullable: true),
+                    CreatedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false, defaultValueSql: "now()"),
+                    ModifiedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ModifiedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    IsActive = table.Column<bool>(type: "boolean", nullable: false, defaultValue: true)
                 },
                 constraints: table =>
                 {
@@ -1335,16 +1372,16 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
                     ShipmentID = table.Column<long>(type: "bigint", nullable: false),
                     OrderItemID = table.Column<long>(type: "bigint", nullable: false),
-                    Quantity = table.Column<decimal>(type: "decimal(18,6)", nullable: false),
-                    Notes = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    CreatedOn = table.Column<DateTime>(type: "datetime", nullable: false, defaultValueSql: "(getdate())"),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ModifiedOn = table.Column<DateTime>(type: "datetime", nullable: true),
-                    IsActive = table.Column<bool>(type: "bit", nullable: false, defaultValue: true)
+                    Quantity = table.Column<decimal>(type: "numeric(18,6)", nullable: false),
+                    Notes = table.Column<string>(type: "character varying(500)", maxLength: 500, nullable: true),
+                    CreatedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false, defaultValueSql: "now()"),
+                    ModifiedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ModifiedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    IsActive = table.Column<bool>(type: "boolean", nullable: false, defaultValue: true)
                 },
                 constraints: table =>
                 {
@@ -1366,13 +1403,13 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     Id = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
                     ShipmentId = table.Column<long>(type: "bigint", nullable: false),
                     PreviousStatusId = table.Column<long>(type: "bigint", nullable: true),
                     NewStatusId = table.Column<long>(type: "bigint", nullable: false),
-                    ChangedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    ChangedOn = table.Column<DateTime>(type: "datetime2", nullable: false),
-                    Notes = table.Column<string>(type: "nvarchar(600)", maxLength: 600, nullable: true)
+                    ChangedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    ChangedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false),
+                    Notes = table.Column<string>(type: "character varying(600)", maxLength: 600, nullable: true)
                 },
                 constraints: table =>
                 {
@@ -1400,17 +1437,17 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     AttachmentID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
                     InventoryID = table.Column<long>(type: "bigint", nullable: false),
-                    FileName = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    Locations = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: false),
-                    Description = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    UploadDate = table.Column<DateTime>(type: "datetime2", nullable: true, defaultValueSql: "(getdate())"),
+                    FileName = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    Locations = table.Column<string>(type: "character varying(500)", maxLength: 500, nullable: false),
+                    Description = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    UploadDate = table.Column<DateTime>(type: "timestamp without time zone", nullable: true, defaultValueSql: "now()"),
                     UploadedBy = table.Column<long>(type: "bigint", nullable: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    CreatedOn = table.Column<DateTime>(type: "datetime2", nullable: false),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ModifiedOn = table.Column<DateTime>(type: "datetime2", nullable: true)
+                    CreatedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false),
+                    ModifiedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ModifiedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -1428,15 +1465,15 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    TeamName = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    TeamName = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
                     SubTeamID = table.Column<long>(type: "bigint", nullable: true),
                     ManagerID = table.Column<long>(type: "bigint", nullable: true),
                     BusinessUnitID = table.Column<long>(type: "bigint", nullable: false),
-                    CreatedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    CreatedOn = table.Column<DateTime>(type: "datetime2", nullable: false),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ModifiedOn = table.Column<DateTime>(type: "datetime2", nullable: true)
+                    CreatedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false),
+                    ModifiedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ModifiedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -1458,26 +1495,26 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: table => new
                 {
                     ID = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    FirstName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
-                    MiddleName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    LastName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
-                    Email = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    Password_Hash = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    ImageURL = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    FirstName = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    MiddleName = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    LastName = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    Email = table.Column<string>(type: "citext", nullable: false),
+                    Password_Hash = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    ImageURL = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
                     RoleID = table.Column<long>(type: "bigint", nullable: true),
                     TeamID = table.Column<long>(type: "bigint", nullable: true),
-                    Timezone = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: true),
-                    LastLogin = table.Column<DateTime>(type: "datetime2", nullable: true),
-                    Region = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
+                    Timezone = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: true),
+                    LastLogin = table.Column<DateTime>(type: "timestamp without time zone", nullable: true),
+                    Region = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
                     ManagerID = table.Column<long>(type: "bigint", nullable: true),
                     BUID = table.Column<long>(type: "bigint", nullable: true),
                     UserGroupID = table.Column<long>(type: "bigint", nullable: true),
-                    IsActive = table.Column<bool>(type: "bit", nullable: true, defaultValue: true),
-                    CreatedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: false),
-                    CreatedOn = table.Column<DateTime>(type: "datetime2", nullable: false),
-                    ModifiedBy = table.Column<string>(type: "nvarchar(255)", maxLength: 255, nullable: true),
-                    ModifiedOn = table.Column<DateTime>(type: "datetime2", nullable: true)
+                    IsActive = table.Column<bool>(type: "boolean", nullable: true, defaultValue: true),
+                    CreatedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    CreatedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: false),
+                    ModifiedBy = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    ModifiedOn = table.Column<DateTime>(type: "timestamp without time zone", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -1533,8 +1570,7 @@ namespace ERP_RFQ_Automation.Migrations
                 name: "UQ__Contacts__A9D10534C4FF61F8",
                 table: "Contacts",
                 column: "Email",
-                unique: true,
-                filter: "[Email] IS NOT NULL");
+                unique: true);
 
             migrationBuilder.CreateIndex(
                 name: "IX_Currency_BusinessUnitID",
@@ -1555,8 +1591,7 @@ namespace ERP_RFQ_Automation.Migrations
                 name: "UQ__Customer__FFA796CD4707A72F",
                 table: "Customers",
                 column: "ContactEmail",
-                unique: true,
-                filter: "[ContactEmail] IS NOT NULL");
+                unique: true);
 
             migrationBuilder.CreateIndex(
                 name: "IX_Email_Configurations_BusinessUnitID",
@@ -2086,8 +2121,12 @@ namespace ERP_RFQ_Automation.Migrations
                 name: "UQ__Supplier__FFA796CDFB352BC7",
                 table: "Suppliers",
                 column: "ContactEmail",
-                unique: true,
-                filter: "[ContactEmail] IS NOT NULL");
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_Taxes_BusinessUnitID",
+                table: "Taxes",
+                column: "BusinessUnitID");
 
             migrationBuilder.CreateIndex(
                 name: "IX_Teams_BusinessUnitID",
@@ -2250,6 +2289,9 @@ namespace ERP_RFQ_Automation.Migrations
 
             migrationBuilder.DropTable(
                 name: "SupplierPurchaseHistory");
+
+            migrationBuilder.DropTable(
+                name: "Taxes");
 
             migrationBuilder.DropTable(
                 name: "RFQItems");

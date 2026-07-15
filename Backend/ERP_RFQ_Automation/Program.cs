@@ -13,6 +13,13 @@ using ERP_RFQ_Automation.Services.DocumentIntelligence;
 using ERP_RFQ_Automation.Authorization;
 using Microsoft.AspNetCore.Authorization;
 using OfficeOpenXml;
+
+// PostgreSQL migration: restore pre-6.0 Npgsql timestamp semantics so the
+// existing DateTime usage (DateTime.Now / Unspecified-kind values inherited from
+// the SQL Server codebase) maps to `timestamp without time zone` and is accepted
+// regardless of DateTimeKind. Must run before any Npgsql data source is built.
+AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Fail fast on missing / placeholder critical configuration so a misconfigured
@@ -42,12 +49,14 @@ builder.Services.AddControllers()
 builder.Services.Configure<HostOptions>(options =>
     options.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
 
-// Add DbContext with SQL Server (transient-fault resilience — DATA-04)
+// Add DbContext with PostgreSQL / Npgsql (transient-fault resilience — DATA-04).
+// Provider is chosen here; the connection string stays in configuration
+// (ConnectionStrings:DefaultConnection) so pointing at Neon later is config-only.
 builder.Services.AddDbContext<ErpRfqAutomationContext>(options =>
-    options.UseSqlServer(connectionString, sql =>
+    options.UseNpgsql(connectionString, npgsql =>
     {
-        sql.EnableRetryOnFailure(maxRetryCount: 5, maxRetryDelay: TimeSpan.FromSeconds(10), errorNumbersToAdd: null);
-        sql.CommandTimeout(60);
+        npgsql.EnableRetryOnFailure(maxRetryCount: 5, maxRetryDelay: TimeSpan.FromSeconds(10), errorCodesToAdd: null);
+        npgsql.CommandTimeout(60);
     }));
 
 // Readiness/liveness health checks (DATA-05)
@@ -139,7 +148,12 @@ builder.Services.AddCors(options =>
         }
         else
         {
-            policy.WithOrigins("http://localhost:5173", "http://localhost:4173", "http://localhost:3000")
+            // Fallback origins: local dev + the deployed Vercel frontend. In production,
+            // set Cors:AllowedOrigins (env: Cors__AllowedOrigins__0, __1, ...) to the exact
+            // frontend URL(s) instead of relying on this list.
+            policy.WithOrigins(
+                    "http://localhost:5173", "http://localhost:4173", "http://localhost:3000",
+                    "https://nexora-ai-beryl.vercel.app")
                   .AllowAnyMethod().AllowAnyHeader();
         }
     });

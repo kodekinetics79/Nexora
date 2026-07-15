@@ -43,6 +43,30 @@ Demo impact: **blocker** (breaks/embarrasses in a live demo) · **risk** · **co
   thread reconstruction. **DATA-08:** tenant column on master data.
 - Secret rotation (JWT/DB/Ollama) — owner action, see `SECURITY.md`.
 
+### Post-review corrections (independent architecture panel)
+
+The original discovery tables below reflect the pre-hardening state and two of
+them are now stale — corrected here to keep a single source of truth:
+
+- **Reliability (DATA section):** the DATA verdict said Nexora "has none" of the
+  health/metrics/tracing hardening. That was true at discovery but is now
+  **FIXED** — `Program.cs` implements health checks, `EnableRetryOnFailure`, a
+  global exception handler, restricted CORS, security headers, and fail-fast
+  config (DATA-01/04/05/06/07/12, SEC-12/13). The **genuinely still-open** item
+  is **metrics + distributed tracing** (OpenTelemetry), *not* health.
+- **Tenancy (DATA-08):** the finding "master data lacks BusinessUnitId" is
+  **factually wrong** — `Customer.Buid`, `Supplier.Buid`, `Product.Buid` exist
+  and the repositories filter on them (`CustomerRepository.cs:25`,
+  `ProductRepository.cs:55`, `SupplierRepository.cs:24`). The **real** tenancy
+  gaps are: (a) **no EF global query filters** (scoping is opt-in hand-written
+  `.Where` — add `HasQueryFilter` + a tenant provider, NOW); (b) tenant columns
+  are **nullable** (should be `NOT NULL` after backfill); (c) **inverted
+  uniqueness** — doc numbers aren't unique (duplication) while master-data emails
+  are *globally* unique (blocks multi-tenant + enumeration oracle).
+- **Scale:** the 1,000-doc / 10k-line-item load surfaced a new class of CRITICAL
+  correctness findings (document-merging, ~97–99% silent truncation) — see
+  `docs/adr/ADR-0003-scalable-ingestion-pipeline.md`.
+
 ---
 
 ## Headline (from the first 3 workstreams)
