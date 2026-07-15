@@ -12,7 +12,7 @@ namespace ERP_RFQ_Automation.Interfaces
         Task<RfqResponseDTO> GetByIdAsync(long id, long businessUnitId);
         Task AddAsync(Rfq rfq);
         Task UpdateAsync(Rfq rfq);
-        Task<long> ApproveAsync(long id, string approvedBy, long? customerId = null);
+        Task<long> ApproveAsync(long id, string approvedBy, long businessUnitId, long? customerId = null);
         Task DeleteAsync(long id, long businessUnitId);
 
         Task<List<RFQTypeLookupDTO>> GetRFQTypeAsync();

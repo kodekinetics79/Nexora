@@ -258,60 +258,63 @@ namespace ERP_RFQ_Automation.Controllers
 
         [HttpPost("{id}/approve")]
         public async Task<ActionResult> Approve(
-            long id, 
-            [FromQuery] string approvedBy, 
+            long id,
             [FromQuery] string? recipientEmail = null,
             [FromQuery] string? emailSubject = null,
             [FromQuery] string? emailBody = null,
             [FromQuery] long? customerId = null)
         {
+            // SEC-07: the business unit and the approver identity come from the token,
+            // never from client input (was a spoofable ?approvedBy= query param).
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
+            var approvedBy = User.Identity?.Name ?? "System";
+
             using var transaction = await _context.Database.BeginTransactionAsync();
             try
             {
-                var quoteId = await _repository.ApproveAsync(id, approvedBy, customerId);
+                var quoteId = await _repository.ApproveAsync(id, approvedBy, businessUnitId, customerId);
 
-                // Send Email Notification
+                // ARCH-10: the quote is generated and committed regardless of whether the
+                // notification email can be sent. A missing/failed email must NOT discard
+                // the approved quote (previously it rolled the whole approval back).
                 var quote = await _context.Quotes
                     .Include(q => q.Rfq).ThenInclude(r => r.Lead)
                     .Include(q => q.Customer)
                     .FirstOrDefaultAsync(q => q.Id == quoteId);
 
-                string selectedEmail = (!string.IsNullOrEmpty(recipientEmail) 
-                    ? recipientEmail 
+                string selectedEmail = (!string.IsNullOrEmpty(recipientEmail)
+                    ? recipientEmail
                     : (quote?.Customer?.ContactEmail ?? quote?.Rfq?.Lead?.Clientemail ?? "")).Trim();
 
+                string? emailWarning = null;
                 if (!string.IsNullOrWhiteSpace(selectedEmail) && selectedEmail.Contains("@"))
                 {
-                    try 
+                    try
                     {
                         await _quoteService.SendQuoteEmailAsync(quoteId, selectedEmail, emailSubject, emailBody);
                     }
                     catch (Exception emailEx)
                     {
-                        // Rollback transaction because email failed
-                        await transaction.RollbackAsync();
-                        return StatusCode(500, $"Approval failed: Email could not be sent. Details: {emailEx.Message}");
+                        emailWarning = $"Quote generated, but the notification email could not be sent: {emailEx.Message}";
                     }
                 }
                 else
                 {
-                    // If no email found, we shouldn't approve either (based on user request)
-                    await transaction.RollbackAsync();
-                    return BadRequest("Approval failed: No recipient email address found for the customer or lead.");
+                    emailWarning = "Quote generated, but no recipient email was found — send it manually from the quote.";
                 }
 
                 await transaction.CommitAsync();
-                return Ok(new { message = "RFQ approved and Quote generated successfully", quoteId });
+                return Ok(new { message = "RFQ approved and Quote generated successfully", quoteId, emailWarning });
+            }
+            catch (KeyNotFoundException ex)
+            {
+                try { await transaction.RollbackAsync(); } catch { /* already rolled back */ }
+                return NotFound(ex.Message);
             }
             catch (Exception ex)
             {
-                // General error, rollback if it hasn't been handled yet
-                try 
-                {
-                    await transaction.RollbackAsync();
-                }
-                catch { /* Ignore if already rolled back */ }
-                
+                try { await transaction.RollbackAsync(); } catch { /* already rolled back */ }
                 return StatusCode(500, $"Internal server error: {ex.Message}");
             }
         }

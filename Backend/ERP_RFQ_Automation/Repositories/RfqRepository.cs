@@ -272,12 +272,14 @@ namespace ERP_RFQ_Automation.Repositories
             await _context.SaveChangesAsync();
         }
 
-        public async Task<long> ApproveAsync(long id, string approvedBy, long? customerId = null)
+        public async Task<long> ApproveAsync(long id, string approvedBy, long businessUnitId, long? customerId = null)
         {
             var rfq = await _context.Rfqs
                 .Include(r => r.Rfqitems)
                 .Include(r => r.Lead)
-                .FirstOrDefaultAsync(r => r.Id == id);
+                // SEC-07: scope to the caller's business unit so one tenant cannot
+                // approve (and generate/email a quote for) another tenant's RFQ.
+                .FirstOrDefaultAsync(r => r.Id == id && r.BusinessUnitId == businessUnitId);
 
             if (rfq == null) throw new KeyNotFoundException($"RFQ with ID {id} not found.");
 

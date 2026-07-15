@@ -142,6 +142,91 @@ namespace ERP_RFQ_Automation.Repositories
             lead.ModifiedDate = DateTime.UtcNow;
             await _context.SaveChangesAsync();
         }
+
+        // ARCH-01: convert an accepted lead into a real RFQ (with LeadId set), so the
+        // end-to-end chain Lead -> RFQ -> Quote -> Order -> Shipment is continuous.
+        // Status literals (24 = Lead Accepted, 34 = RFQ Draft) follow existing code
+        // convention; resolving these via SetupMaster codes is tracked as ARCH-03.
+        public async Task<(long RfqId, string Rfqno)> ConvertLeadToRfqAsync(long id, long businessUnitId, string createdBy)
+        {
+            var lead = await _context.Leads
+                .Include(l => l.LeadItems)
+                .FirstOrDefaultAsync(l => l.Id == id && l.BusinessUnitId == businessUnitId);
+            if (lead == null)
+                throw new KeyNotFoundException($"Lead with ID {id} not found in Business Unit {businessUnitId}.");
+            if (lead.LeadStatusId != 24)
+                throw new InvalidOperationException("Only an accepted lead can be converted to an RFQ.");
+
+            // Idempotency: never create a second RFQ for the same lead.
+            var already = await _context.Rfqs
+                .FirstOrDefaultAsync(r => r.LeadId == id && r.BusinessUnitId == businessUnitId);
+            if (already != null)
+                throw new InvalidOperationException($"This lead has already been converted to RFQ {already.Rfqno}.");
+
+            // Reuse the lead's RFQ number when present and unique; otherwise derive one.
+            var rfqno = !string.IsNullOrWhiteSpace(lead.Rfqno)
+                ? lead.Rfqno!
+                : $"RFQ-{id}-{DateTime.UtcNow:yyyyMMddHHmmss}";
+            if (await _context.Rfqs.AnyAsync(r => r.Rfqno == rfqno && r.BusinessUnitId == businessUnitId))
+                rfqno = $"{rfqno}-{DateTime.UtcNow:yyyyMMddHHmmss}";
+
+            var rfq = new Rfq
+            {
+                Rfqno = rfqno,
+                BuyersName = lead.BuyersName,
+                RecDate = lead.RecDate,
+                BidClosingDate = lead.BidClosingDate,
+                AcknowledgmentDate = lead.AcknowledgmentDate,
+                SubDate = lead.SubDate,
+                HeaderRemarks = lead.HeaderRemarks,
+                OpportunityNo = lead.OpportunityNo,
+                NoOfLineItems = lead.NoOfLineItems ?? lead.LeadItems.Count,
+                Rfqtype = lead.Rfqtype,
+                DurationAgreement = lead.DurationAgreement,
+                LeadId = lead.Id,
+                BusinessUnitId = businessUnitId,
+                RfqstatusId = 34, // Draft
+                CreatedBy = createdBy,
+                CreatedDate = DateTime.UtcNow,
+                Rfqitems = lead.LeadItems.Select(li => new Rfqitem
+                {
+                    CompanyRef = li.CompanyRef,
+                    CustomerAccountPortalId = li.CustomerAccountPortalId,
+                    CustomerRfqno = li.CustomerRfqno,
+                    ItemMaterialCode = li.ItemMaterialCode,
+                    LineItemNo = li.LineItemNo,
+                    CommodityProduct = li.CommodityProduct,
+                    ProductShortName = li.ProductShortName,
+                    ProductShortDescription = li.ProductShortDescription,
+                    Alternative = li.Alternative,
+                    BuyerName = li.BuyerName,
+                    Currency = li.Currency,
+                    UnitOfMeasure = li.UnitOfMeasure,
+                    UnitPrice = li.UnitPrice,
+                    Quantity = li.Quantity,
+                    StorageLocation = li.StorageLocation,
+                    ManufacturerName = li.ManufacturerName,
+                    ManufacturerPartNumber = li.ManufacturerPartNumber,
+                    AlternateProductName = li.AlternateProductName,
+                    AlternatePartNumber = li.AlternatePartNumber,
+                    ItemText = li.ItemText,
+                    MaterialPotext = li.MaterialPotext,
+                    LeadTime = li.LeadTime,
+                    ReceivedDate = li.ReceivedDate,
+                    BidClosingDateLine = li.BidClosingDateLine,
+                    Aiconfidence = li.Aiconfidence,
+                    CreatedBy = createdBy,
+                    CreatedDate = DateTime.UtcNow
+                }).ToList()
+            };
+
+            using var tx = await _context.Database.BeginTransactionAsync();
+            _context.Rfqs.Add(rfq);
+            await _context.SaveChangesAsync();
+            await tx.CommitAsync();
+            return (rfq.Id, rfq.Rfqno);
+        }
+
         public async Task<IEnumerable<RejectionReasonDTO>> GetLeadRejectionReasonsAsync()
         {
             return await _context.SetupMasters

@@ -99,6 +99,33 @@ public class LeadController : ControllerBase
         }
     }
 
+    // ARCH-01: convert an accepted lead into a real RFQ (closes the Lead -> RFQ gap).
+    [HttpPost("{id}/convert-to-rfq")]
+    public async Task<ActionResult> ConvertLeadToRfq(long id)
+    {
+        try
+        {
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
+
+            var createdBy = User.Identity?.Name ?? "System";
+            var (rfqId, rfqno) = await _repository.ConvertLeadToRfqAsync(id, businessUnitId, createdBy);
+            return Ok(new { rfqId, rfqno, message = $"Lead converted to RFQ {rfqno}." });
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(ex.Message);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Conflict(ex.Message);
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(StatusCodes.Status500InternalServerError, $"Error converting lead: {ex.Message}");
+        }
+    }
+
     [HttpGet("rejection-reasons")]
     public async Task<ActionResult<IEnumerable<RejectionReasonDTO>>> GetRejectionReasons()
     {

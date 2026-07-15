@@ -11,6 +11,7 @@ namespace ERP_RFQ_Automation.Interfaces
 
         Task<IEnumerable<RejectionReasonDTO>> GetLeadRejectionReasonsAsync();
         Task AcceptLeadAsync(long id, long businessUnitId);
+        Task<(long RfqId, string Rfqno)> ConvertLeadToRfqAsync(long id, long businessUnitId, string createdBy);
         Task RejectLeadAsync(long id, long reasonId, long businessUnitId);
 
         //Accepted Lead Section 
