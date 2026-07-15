@@ -166,7 +166,7 @@ Quotes/RFQs on stage until FE-01 is fixed.
 ## DATA — Data/DB & reliability
 
 Verdict: **conditionally stand-uppable, but fragile.** The app runs only if (a) the
-**remote** SQL Server `168.231.72.175` is reachable AND (b) it runs in Development
+**remote** SQL Server `<DB_HOST>` is reachable AND (b) it runs in Development
 (so the git-ignored `appsettings.Development.json` overlays the placeholders).
 **No local/seed/migration fallback exists.** Bright spot: email ingestion
 idempotency is solid (unique `EmailIngest.MessageId` + dedup + dup-key catch).
