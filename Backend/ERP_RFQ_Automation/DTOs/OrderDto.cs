@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
 
 namespace ERP_RFQ_Automation.DTOs
 {
@@ -32,9 +33,13 @@ namespace ERP_RFQ_Automation.DTOs
     {
         public long ProductId { get; set; }
         public string? Description { get; set; }
+        [Range(double.Epsilon, double.MaxValue, ErrorMessage = "Quantity must be greater than zero.")]
         public decimal Quantity { get; set; }
+        [Range(double.Epsilon, double.MaxValue, ErrorMessage = "Unit price must be greater than zero.")]
         public decimal UnitPrice { get; set; }
+        [Range(0, double.MaxValue, ErrorMessage = "Discount cannot be negative.")]
         public decimal Discount { get; set; }
+        [Range(0, double.MaxValue, ErrorMessage = "Tax cannot be negative.")]
         public decimal TaxAmount { get; set; }
         public int? UomId { get; set; }
         public long? WarehouseId { get; set; }

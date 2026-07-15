@@ -81,12 +81,15 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public long? ProductId { get; set; }
         public string? ItemDescription { get; set; }
         [Required]
+        [Range(double.Epsilon, double.MaxValue, ErrorMessage = "Quantity must be greater than zero.")]
         public decimal Quantity { get; set; }
         [Required]
+        [Range(double.Epsilon, double.MaxValue, ErrorMessage = "Unit price must be greater than zero.")]
         public decimal UnitPrice { get; set; }
         [Required]
         public decimal TotalAmount { get; set; }
         public decimal? Discount { get; set; }
+        [Range(0, double.MaxValue, ErrorMessage = "Tax cannot be negative.")]
         public decimal? TaxAmount { get; set; }
         public int? DeliveryLeadTime { get; set; }
         public long? DiscountTypeId { get; set; }
@@ -119,6 +122,9 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public long? RfqItemId { get; set; }
         public long? ProductId { get; set; }
         public string? ItemDescription { get; set; }
+        // NOTE: no [Range] here — deleted items (IsDeleted=true) may carry placeholder values.
+        // Non-positive quantity/price and negative tax are enforced server-side in
+        // UpdateQuoteAsync for items that will remain on the quote (FIN-12).
         public decimal Quantity { get; set; }
         public decimal UnitPrice { get; set; }
         public decimal TotalAmount { get; set; }

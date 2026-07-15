@@ -43,6 +43,10 @@ namespace ERP_RFQ_Automation.Services
                 quoteNo = await GenerateNextQuoteNumber();
             }
 
+            // FIN-12: reject non-positive quantity/price and negative tax up front.
+            foreach (var itemDto in request.QuoteItems)
+                ValidateQuoteItemFinancials(itemDto.Quantity, itemDto.UnitPrice, itemDto.TaxAmount);
+
             var quote = new Quote
             {
                 QuoteNo = quoteNo,
@@ -117,6 +121,18 @@ namespace ERP_RFQ_Automation.Services
 
             if (quote == null) throw new KeyNotFoundException($"Quote with ID {id} not found.");
 
+            // FIN-05: a quote's financial content may only be modified while it is still in DRAFT.
+            // Once it has been SENT / ACCEPTED / ORDERED, the customer already holds a PDF with
+            // fixed totals; silently recalculating here would diverge the stored figures from that
+            // issued document. Reject the edit and require a new revision instead.
+            if (!await IsQuoteInDraftAsync(quote))
+            {
+                throw new InvalidOperationException(
+                    $"Quote '{quote.QuoteNo}' can no longer be edited: it has left DRAFT status " +
+                    "(it has been sent, accepted, or converted to an order). Editing would diverge the " +
+                    "stored totals from the quotation already issued to the customer. Create a new revision instead.");
+            }
+
             quote.QuoteNo = request.QuoteNo;
             quote.CustomerId = request.CustomerId;
             quote.QuoteDate = request.QuoteDate;
@@ -137,6 +153,10 @@ namespace ERP_RFQ_Automation.Services
              // 1. Update existing and Add new
             foreach (var itemDto in request.QuoteItems)
             {
+                // FIN-12: validate financial inputs for any item that will remain on the quote.
+                if (!itemDto.IsDeleted)
+                    ValidateQuoteItemFinancials(itemDto.Quantity, itemDto.UnitPrice, itemDto.TaxAmount);
+
                 if (itemDto.Id.HasValue && itemDto.Id.Value > 0)
                 {
                     var existingItem = quote.QuoteItems.FirstOrDefault(i => i.Id == itemDto.Id.Value);
@@ -209,7 +229,8 @@ namespace ERP_RFQ_Automation.Services
 
             foreach (var item in quote.QuoteItems)
             {
-                decimal itemTotal = item.Quantity * item.UnitPrice;
+                // FIN-09: round the gross line value to currency scale before applying discount.
+                decimal itemTotal = RoundCurrency(item.Quantity * item.UnitPrice);
                 decimal itemDiscountAmount = 0;
 
                 if (item.DiscountTypeId.HasValue && item.DiscountValue.HasValue && discountTypes.ContainsKey(item.DiscountTypeId.Value))
@@ -225,6 +246,9 @@ namespace ERP_RFQ_Automation.Services
                     }
                 }
 
+                // FIN-09: round the discount to currency scale as well.
+                itemDiscountAmount = RoundCurrency(itemDiscountAmount);
+
                 // Ensure discount doesn't exceed total? Optional business rule.
                 if (itemDiscountAmount > itemTotal) itemDiscountAmount = itemTotal;
 
@@ -235,8 +259,10 @@ namespace ERP_RFQ_Automation.Services
                 item.Discount = itemDiscountAmount; // Store calculated amount in 'Discount' column?
                 // QuoteItem has 'Discount' (decimal) and now 'DiscountValue' (decimal).
                 // 'Discount' was likely the amount. 'DiscountValue' is the input value (e.g. 10 for 10%).
-                // YES. 
-                item.TotalAmount = itemTotal - itemDiscountAmount;
+                // YES.
+                // FIN-09: round each line net to currency scale before summing so the printed
+                // line totals reconcile with the printed grand total.
+                item.TotalAmount = RoundCurrency(itemTotal - itemDiscountAmount);
                 quoteSubTotal += item.TotalAmount;
             }
 
@@ -255,9 +281,49 @@ namespace ERP_RFQ_Automation.Services
                 }
             }
 
+            quoteDiscountAmount = RoundCurrency(quoteDiscountAmount);
             if (quoteDiscountAmount > quoteSubTotal) quoteDiscountAmount = quoteSubTotal;
 
-            quote.TotalAmount = quoteSubTotal - quoteDiscountAmount;
+            quote.TotalAmount = RoundCurrency(quoteSubTotal - quoteDiscountAmount);
+        }
+
+        // Rounds a monetary value to the 2-decimal currency scale used on printed documents
+        // (FIN-09). Half-away-from-zero matches standard commercial/accounting rounding.
+        private static decimal RoundCurrency(decimal value) => Math.Round(value, 2, MidpointRounding.AwayFromZero);
+
+        // FIN-12: server-side guard rejecting non-positive quantities/prices and negative tax.
+        private static void ValidateQuoteItemFinancials(decimal quantity, decimal unitPrice, decimal? taxAmount)
+        {
+            if (quantity <= 0)
+                throw new ArgumentException($"Invalid line quantity ({quantity}). Quantity must be greater than zero.");
+            if (unitPrice <= 0)
+                throw new ArgumentException($"Invalid unit price ({unitPrice}). Unit price must be greater than zero.");
+            if (taxAmount.HasValue && taxAmount.Value < 0)
+                throw new ArgumentException($"Invalid tax amount ({taxAmount}). Tax cannot be negative.");
+        }
+
+        // FIN-05: determines whether a quote is still an editable DRAFT. Resolves the DRAFT
+        // status via SetupMaster code (BU-scoped first) rather than trusting a magic number,
+        // mirroring the resolution pattern used in OrderService. Falls back to the documented
+        // legacy id map (see TransitionStatusAsync: DRAFT=42) only when no DRAFT row is configured.
+        private const long DraftQuoteStatusIdFallback = 42;
+
+        private async Task<bool> IsQuoteInDraftAsync(Quote quote)
+        {
+            // A brand-new quote with no status yet is treated as an editable draft.
+            if (!quote.StatusId.HasValue) return true;
+
+            var draftStatus = await _context.SetupMasters
+                .FirstOrDefaultAsync(s => s.SetupType == "QuoteStatus" && s.SetupCode == "DRAFT"
+                    && s.BusinessUnitId == quote.BusinessUnitId);
+            draftStatus ??= await _context.SetupMasters
+                .FirstOrDefaultAsync(s => s.SetupType == "QuoteStatus" && s.SetupCode == "DRAFT");
+
+            if (draftStatus != null)
+                return quote.StatusId.Value == draftStatus.SetupId;
+
+            // No DRAFT QuoteStatus configured — fall back to the documented legacy id.
+            return quote.StatusId.Value == DraftQuoteStatusIdFallback;
         }
 
         private async Task<QuoteResponseDTO> GetQuoteByIdAsync(long id)
@@ -384,9 +450,11 @@ namespace ERP_RFQ_Automation.Services
             }
 
             // Calculate Totals for Display
-            decimal subTotal = quote.QuoteItems.Sum(i => i.Quantity * i.UnitPrice);
-            decimal totalItemDiscounts = quote.QuoteItems.Sum(i => i.Discount ?? 0);
-            decimal totalTax = quote.QuoteItems.Sum(i => i.TaxAmount ?? 0);
+            // FIN-09: sum per-line values already rounded to currency scale so the printed
+            // subtotal reconciles with the printed per-line totals and grand total.
+            decimal subTotal = quote.QuoteItems.Sum(i => RoundCurrency(i.Quantity * i.UnitPrice));
+            decimal totalItemDiscounts = quote.QuoteItems.Sum(i => RoundCurrency(i.Discount ?? 0));
+            decimal totalTax = quote.QuoteItems.Sum(i => RoundCurrency(i.TaxAmount ?? 0));
             
             decimal headerDiscount = 0;
             if (quote.DiscountTypeId.HasValue && quote.DiscountValue.HasValue)

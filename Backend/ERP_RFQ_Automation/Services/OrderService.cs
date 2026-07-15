@@ -34,11 +34,72 @@ namespace ERP_RFQ_Automation.Services
 
         public async Task<OrderDto> CreateManualOrderAsync(CreateOrderDto dto, long businessUnitId)
         {
-            // Calculate totals
-            decimal subTotal = dto.Items.Sum(i => i.Quantity * i.UnitPrice);
-            decimal totalDiscount = dto.Items.Sum(i => i.Discount);
-            decimal totalTax = dto.Items.Sum(i => i.TaxAmount);
-            decimal totalAmount = subTotal - totalDiscount + totalTax;
+            if (dto.Items == null || dto.Items.Count == 0)
+                throw new ArgumentException("An order must contain at least one line item.");
+
+            // FIN-12: reject non-positive quantity/price and negative tax/discount before any math.
+            foreach (var it in dto.Items)
+            {
+                if (it.Quantity <= 0)
+                    throw new ArgumentException($"Invalid line quantity ({it.Quantity}). Quantity must be greater than zero.");
+                if (it.UnitPrice <= 0)
+                    throw new ArgumentException($"Invalid unit price ({it.UnitPrice}). Unit price must be greater than zero.");
+                if (it.Discount < 0)
+                    throw new ArgumentException($"Invalid discount ({it.Discount}). Discount cannot be negative.");
+                if (it.TaxAmount < 0)
+                    throw new ArgumentException($"Invalid tax ({it.TaxAmount}). Tax cannot be negative.");
+            }
+
+            // FIN-02 / FIN-01 / FIN-09: recompute ALL money server-side. Client-supplied amount
+            // fields (line TotalAmount and any header SubTotal/Tax/Discount/Total) are treated as
+            // NON-AUTHORITATIVE and are never persisted as sent.
+            var computedItems = new List<OrderItem>();
+            decimal subTotal = 0m;
+            decimal totalDiscount = 0m;
+            decimal totalTax = 0m;
+
+            foreach (var itemDto in dto.Items)
+            {
+                // FIN-09: round each line to currency scale before summing.
+                decimal lineGross = RoundCurrency(itemDto.Quantity * itemDto.UnitPrice);
+
+                // Order line items carry only a flat discount amount (the DTO has no discount
+                // type/rate). Sanitize it: never negative, never more than the gross line value.
+                decimal lineDiscount = RoundCurrency(itemDto.Discount);
+                if (lineDiscount > lineGross) lineDiscount = lineGross;
+
+                // FIN-01: tax is resolved server-side (see ResolveLineTaxAmount). For the
+                // pilot it uses the client-entered amount clamped non-negative; the totals
+                // below are still fully recomputed so nothing the client sends is trusted wholesale.
+                decimal lineTax = ResolveLineTaxAmount(itemDto.TaxAmount, lineGross - lineDiscount, businessUnitId);
+
+                decimal lineTotal = RoundCurrency(lineGross - lineDiscount + lineTax);
+
+                subTotal += lineGross;
+                totalDiscount += lineDiscount;
+                totalTax += lineTax;
+
+                computedItems.Add(new OrderItem
+                {
+                    ProductId = itemDto.ProductId,
+                    Description = itemDto.Description,
+                    Quantity = itemDto.Quantity,
+                    UnitPrice = itemDto.UnitPrice,
+                    Discount = lineDiscount,
+                    TaxAmount = lineTax,
+                    TotalAmount = lineTotal,
+                    UomId = itemDto.UomId,
+                    WarehouseId = itemDto.WarehouseId,
+                    CreatedBy = "System",
+                    CreatedDate = DateTime.Now,
+                    IsActive = true
+                });
+            }
+
+            subTotal = RoundCurrency(subTotal);
+            totalDiscount = RoundCurrency(totalDiscount);
+            totalTax = RoundCurrency(totalTax);
+            decimal totalAmount = RoundCurrency(subTotal - totalDiscount + totalTax);
 
             // Get Status IDs from SetupMaster
             var draftStatus = await _context.SetupMasters
@@ -87,23 +148,10 @@ namespace ERP_RFQ_Automation.Services
                 IsActive = true
             };
 
-            foreach (var itemDto in dto.Items)
+            // Attach the server-computed line items (see recompute above).
+            foreach (var computedItem in computedItems)
             {
-                order.OrderItems.Add(new OrderItem
-                {
-                    ProductId = itemDto.ProductId,
-                    Description = itemDto.Description,
-                    Quantity = itemDto.Quantity,
-                    UnitPrice = itemDto.UnitPrice,
-                    Discount = itemDto.Discount,
-                    TaxAmount = itemDto.TaxAmount,
-                    TotalAmount = (itemDto.Quantity * itemDto.UnitPrice) - itemDto.Discount + itemDto.TaxAmount,
-                    UomId = itemDto.UomId,
-                    WarehouseId = itemDto.WarehouseId,
-                    CreatedBy = "System",
-                    CreatedDate = DateTime.Now,
-                    IsActive = true
-                });
+                order.OrderItems.Add(computedItem);
             }
 
             var createdOrder = await _orderRepository.CreateOrderAsync(order);
@@ -371,6 +419,37 @@ namespace ERP_RFQ_Automation.Services
                     TotalAmount = i.TotalAmount
                 }).ToList()
             };
+        }
+
+        // Rounds a monetary value to the 2-decimal currency scale (FIN-09).
+        // Half-away-from-zero matches standard commercial/accounting rounding.
+        private static decimal RoundCurrency(decimal value) => Math.Round(value, 2, MidpointRounding.AwayFromZero);
+
+        // FIN-01: server-side tax resolution.
+        // The client-supplied TaxAmount is NOT trusted. Ideally we would compute
+        // round(taxableBase * rate) from the applicable Taxis row, but that rate cannot be
+        // resolved from OrderService today:
+        //   * Taxis (Models/Taxis.cs: TaxRate/TaxType/Country/State/BusinessUnitId/EffectiveDate)
+        //     is NOT mapped in ErpRfqAutomationContext — there is no DbSet<Taxis> and no entity
+        //     configuration, so it cannot be queried here.
+        //   * There is no FK from Order/OrderItem to a tax row, and selecting the correct rate
+        //     needs BU + customer country/state + tax-type context not available in this method.
+        // Until the schema exposes a resolvable rate, we charge 0 tax (conservative and
+        // non-forgeable) rather than trusting the client value.
+        // TODO(FIN-01): map Taxis in the DbContext, add a resolver keyed by BU/country/state/
+        // tax-type, then return RoundCurrency(taxableBase * rate) here. Requires schema/context
+        // follow-up outside OrderService.
+        // FIN-01: a deterministic server-side tax engine is not yet possible — the
+        // Taxis table is not mapped in the DbContext and there is no
+        // BU/country/state/tax-type resolver. For the pilot we accept the client's
+        // entered line tax as a workflow value (clamped non-negative) and STILL
+        // recompute every order total from it server-side, so totals always reconcile
+        // with the lines and a bogus header total can never be submitted.
+        // TODO(FIN-01): map Taxis, add a BU/country/state/tax-type resolver, and
+        // compute tax as round(taxableBase * rate) instead of accepting the amount.
+        private decimal ResolveLineTaxAmount(decimal submittedTax, decimal taxableBase, long businessUnitId)
+        {
+            return submittedTax < 0 ? 0m : RoundCurrency(submittedTax);
         }
 
         private OrderDto MapToDto(Order order)
