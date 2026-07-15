@@ -148,7 +148,12 @@ builder.Services.AddCors(options =>
         }
         else
         {
-            policy.WithOrigins("http://localhost:5173", "http://localhost:4173", "http://localhost:3000")
+            // Fallback origins: local dev + the deployed Vercel frontend. In production,
+            // set Cors:AllowedOrigins (env: Cors__AllowedOrigins__0, __1, ...) to the exact
+            // frontend URL(s) instead of relying on this list.
+            policy.WithOrigins(
+                    "http://localhost:5173", "http://localhost:4173", "http://localhost:3000",
+                    "https://nexora-ai-beryl.vercel.app")
                   .AllowAnyMethod().AllowAnyHeader();
         }
     });

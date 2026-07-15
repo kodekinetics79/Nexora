@@ -1,0 +1,8 @@
+**/bin/
+**/obj/
+**/.vs/
+**/appsettings.Development.json
+**/appsettings.*.Local.json
+ERP_RFQ_Automation.Tests/
+ERP_RFQ_Automation/Uploads/
+**/*.user
