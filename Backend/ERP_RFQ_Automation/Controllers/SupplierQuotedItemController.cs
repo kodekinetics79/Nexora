@@ -12,6 +12,7 @@ namespace ERP_RFQ_Automation.Controllers
 {
     [Route("api/[controller]")]
     [ApiController]
+    [Authorize] // SEC-05: was anonymous; leaked/edited supplier pricing across tenants. BU from JWT claim.
     public class SupplierQuotedItemController : ControllerBase
     {
         private readonly ISupplierQuotedItemRepository _repository;

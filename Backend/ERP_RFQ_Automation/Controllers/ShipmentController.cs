@@ -1,6 +1,7 @@
 using ERP_RFQ_Automation.DTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System;
@@ -12,6 +13,7 @@ namespace ERP_RFQ_Automation.Controllers
 {
     [Route("api/[controller]")]
     [ApiController]
+    [Authorize] // SEC-04: was anonymous; BU resolved from the JWT claim (claim wins over dto.BusinessUnitId)
     public class ShipmentController : ControllerBase
     {
         private readonly IShipmentRepository _repository;

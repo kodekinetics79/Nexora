@@ -492,12 +492,28 @@ namespace ERP_RFQ_Automation.Services
             {
                 if (file.Length > 0)
                 {
-                    var filePath = Path.Combine(targetFolder, file.FileName);
+                    // SEC-10: never trust the client-supplied filename. Strip any directory
+                    // component, sanitize, and verify the resolved path stays inside the
+                    // target folder — prevents path traversal / arbitrary file write.
+                    var safeName = SanitizeFileName(Path.GetFileName(file.FileName));
+                    if (string.IsNullOrWhiteSpace(safeName))
+                    {
+                        _logger.LogWarning("Rejected upload with unusable filename '{FileName}'.", file.FileName);
+                        continue;
+                    }
+                    var filePath = Path.Combine(targetFolder, safeName);
+                    var fullTarget = Path.GetFullPath(targetFolder);
+                    var fullPath = Path.GetFullPath(filePath);
+                    if (!fullPath.StartsWith(fullTarget, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _logger.LogWarning("Rejected path-traversal filename '{FileName}'.", file.FileName);
+                        continue;
+                    }
                     using (var stream = new FileStream(filePath, FileMode.Create))
                     {
                         await file.CopyToAsync(stream);
                     }
-                    _logger.LogInformation("Saved file {FileName} to folder {FolderType}.", file.FileName, folderType);
+                    _logger.LogInformation("Saved file {FileName} to folder {FolderType}.", safeName, folderType);
                 }
             }
         }

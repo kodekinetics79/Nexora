@@ -7,6 +7,7 @@ using ERP_RFQ_Automation.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Http;
+using System.Security.Claims;
 
 namespace ERP_RFQ_Automation.Controllers
 {
@@ -41,7 +42,7 @@ namespace ERP_RFQ_Automation.Controllers
             try
             {
                 var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = businessUnitId ?? claimBUId;
+                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0); // SEC-06: claim wins over client-supplied businessUnitId
 
                 if (targetBUId <= 0)
                     return BadRequest("Business Unit ID is required.");
@@ -78,7 +79,7 @@ namespace ERP_RFQ_Automation.Controllers
             try
             {
                 var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = businessUnitId ?? claimBUId;
+                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0); // SEC-06: claim wins over client-supplied businessUnitId
 
                 if (targetBUId <= 0)
                     return BadRequest("Business Unit ID is required.");
@@ -239,7 +240,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
         }
 
-        // POST: api/User/ChangePassword/5
+        // POST: api/User/{id}/ChangePassword
         [HttpPost("{id}/ChangePassword")]
         public async Task<ActionResult> ChangePassword(long id, [FromBody] ChangePasswordRequestDTO request)
         {
@@ -247,6 +248,22 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 if (!ModelState.IsValid)
                     return BadRequest(ModelState);
+
+                // SEC-01: previously ANY authenticated user could reset ANY user's password
+                // in ANY tenant (account takeover). A user may now only change their OWN
+                // password, and the target is scoped to the caller's business unit.
+                // NOTE: admin-initiated resets for other users need a separate,
+                // permission-gated endpoint (follow-up SEC-01a) — intentionally not this one.
+                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+                var callerId = long.Parse(
+                    User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                    ?? User.FindFirst("sub")?.Value
+                    ?? "0");
+                if (claimBUId <= 0 || callerId <= 0) return Forbid();
+                if (callerId != id) return Forbid();
+
+                // Ensure the target user exists within the caller's business unit.
+                await _repository.GetByIdAsync(id, claimBUId);
 
                 await _repository.ChangePasswordAsync(id, request.NewPassword);
                 return NoContent();
@@ -272,7 +289,7 @@ namespace ERP_RFQ_Automation.Controllers
             try
             {
                 var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = businessUnitId ?? claimBUId;
+                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0); // SEC-06: claim wins over client-supplied businessUnitId
 
                 if (targetBUId <= 0)
                     return BadRequest("Business Unit ID is required.");
@@ -316,7 +333,7 @@ namespace ERP_RFQ_Automation.Controllers
             try
             {
                 var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = businessUnitId ?? claimBUId;
+                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0); // SEC-06: claim wins over client-supplied businessUnitId
 
                 if (targetBUId <= 0)
                     return BadRequest("Business Unit ID is required.");
@@ -353,7 +370,7 @@ namespace ERP_RFQ_Automation.Controllers
             try
             {
                 var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = businessUnitId ?? claimBUId;
+                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0); // SEC-06: claim wins over client-supplied businessUnitId
 
                 if (targetBUId <= 0)
                     return BadRequest("Business Unit ID is required.");

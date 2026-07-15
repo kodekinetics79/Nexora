@@ -22,8 +22,10 @@ namespace ERP_RFQ_Automation.Controllers
             _logger = logger;
         }
 
+        // SEC-09: was [AllowAnonymous] — anyone could download any RFQ/lead document
+        // under Uploads/ by path. Now requires authentication. (Follow-up SEC-09a:
+        // resolve by attachment id and verify the parent record's business unit.)
         [HttpGet("DownloadFile")]
-        [AllowAnonymous]
         public IActionResult DownloadFile([FromQuery] string filePath)
         {
             if (string.IsNullOrEmpty(filePath))

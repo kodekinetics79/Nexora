@@ -325,8 +325,9 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         // External Web Search Endpoint
+        // SEC-15: was [AllowAnonymous] (unauthenticated outbound-search / SSRF surface).
+        // Now requires authentication like the rest of the controller.
         [HttpGet("web-search")]
-        [AllowAnonymous] // Allow external search even if not logged in for this specific simulation (optional)
         public async Task<ActionResult<List<SupplierSearchResultDTO>>> WebSearch([FromQuery] string query)
         {
             try
