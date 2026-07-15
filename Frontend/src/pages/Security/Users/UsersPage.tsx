@@ -21,12 +21,14 @@ import {
   Avatar,
   Tooltip,
   Divider,
+  Alert,
 } from '@mui/material';
 import {
   Add as AddIcon,
   Edit as EditIcon,
   VpnKey as KeyIcon,
   Person as PersonIcon,
+  Refresh as RefreshIcon,
 } from '@mui/icons-material';
 import { DataGrid, type GridColDef, type GridPaginationModel } from '@mui/x-data-grid';
 import userService, { type UserDTO } from '../../../api/services/userService';
@@ -74,7 +76,7 @@ const UsersPage: React.FC = () => {
   const [createPassword, setCreatePassword] = useState('');
 
   // Queries
-  const { data: users, isLoading: loadingUsers } = useQuery({
+  const { data: users, isLoading: loadingUsers, isError: usersError, refetch: refetchUsers } = useQuery({
     queryKey: ['users', paginationModel, search, filterRole, filterActive],
     queryFn: () => userService.getAll({
       businessUnitId: userData.businessUnitId || 1,
@@ -275,17 +277,28 @@ const UsersPage: React.FC = () => {
       </Paper>
 
       <Paper sx={{ height: 'calc(100vh - 220px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
-        <DataGrid
-          rows={users?.items || []}
-          columns={columns}
-          rowCount={users?.totalCount || 0}
-          loading={loadingUsers}
-          pageSizeOptions={[10, 25, 50]}
-          paginationModel={paginationModel}
-          paginationMode="server"
-          onPaginationModelChange={setPaginationModel}
-          disableRowSelectionOnClick
-        />
+        {usersError ? (
+          <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, p: 3, textAlign: 'center' }}>
+            <Alert severity="error" sx={{ borderRadius: 2, maxWidth: 480 }}>
+              {t('users_load_failed') || "We couldn't load users. The service may be temporarily unavailable."}
+            </Alert>
+            <Button variant="contained" startIcon={<RefreshIcon />} onClick={() => refetchUsers()} sx={{ fontWeight: 700 }}>
+              {t('retry') || 'Retry'}
+            </Button>
+          </Box>
+        ) : (
+          <DataGrid
+            rows={users?.items || []}
+            columns={columns}
+            rowCount={users?.totalCount || 0}
+            loading={loadingUsers}
+            pageSizeOptions={[10, 25, 50]}
+            paginationModel={paginationModel}
+            paginationMode="server"
+            onPaginationModelChange={setPaginationModel}
+            disableRowSelectionOnClick
+          />
+        )}
       </Paper>
 
       {/* User Modal - Full Fields */}

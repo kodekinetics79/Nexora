@@ -7,7 +7,9 @@ import CssBaseline from '@mui/material/CssBaseline';
 import { AuthProvider } from './context/AuthContext';
 import { ThemeContextProvider } from './context/ThemeContext';
 import App from './App';
+import ErrorBoundary from './components/common/ErrorBoundary';
 import { SnackbarProvider } from 'notistack';
+import { Toaster } from 'react-hot-toast';
 import './index.css';
 import './i18n';
 
@@ -28,7 +30,10 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           <CssBaseline />
           <BrowserRouter>
             <SnackbarProvider maxSnack={3} anchorOrigin={{ vertical: 'top', horizontal: 'right' }}>
-              <App />
+              <ErrorBoundary>
+                <App />
+              </ErrorBoundary>
+              <Toaster position="top-right" />
             </SnackbarProvider>
           </BrowserRouter>
         </AuthProvider>

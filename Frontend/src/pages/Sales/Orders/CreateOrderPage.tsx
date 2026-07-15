@@ -21,6 +21,8 @@ import orderService from '../../../api/services/orderService';
 import customerService from '../../../api/services/customerService';
 import productService from '../../../api/services/productService';
 import setupService from '../../../api/services/setupService';
+import { useSnackbar } from 'notistack';
+import { handleApiError } from '../../../utils/errorHandler';
 import dayjs from 'dayjs';
 
 interface OrderItemState {
@@ -44,7 +46,10 @@ const CreateOrderPage: React.FC = () => {
   const location = useLocation();
   const queryClient = useQueryClient();
   const { userData } = useAuth();
+  const { enqueueSnackbar } = useSnackbar();
   const businessUnitId = userData?.businessUnitId || 0;
+
+  const [customerError, setCustomerError] = useState(false);
 
   const isEditMode = !!id;
   const searchParams = new URLSearchParams(location.search);
@@ -113,8 +118,10 @@ const CreateOrderPage: React.FC = () => {
     mutationFn: (data: any) => isEditMode ? orderService.update(Number(id), data) : orderService.createManual(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['orders-list'] });
+      enqueueSnackbar(isEditMode ? 'Order updated successfully' : 'Order created successfully', { variant: 'success' });
       navigate('/sales/orders');
-    }
+    },
+    onError: (error: any) => handleApiError(error),
   });
 
   const handleAddItem = () => {
@@ -181,11 +188,12 @@ const CreateOrderPage: React.FC = () => {
 
   const handleSave = () => {
     if (!customerId) {
-      alert('Please select a customer');
+      setCustomerError(true);
+      enqueueSnackbar('Please select a customer', { variant: 'warning' });
       return;
     }
     if (items.length === 0) {
-      alert('Please add at least one item');
+      enqueueSnackbar('Please add at least one item before saving', { variant: 'warning' });
       return;
     }
 
@@ -249,9 +257,16 @@ const CreateOrderPage: React.FC = () => {
                   options={customersData?.items || []}
                   getOptionLabel={(option) => option.name}
                   value={customersData?.items.find(c => c.id === customerId) || null}
-                  onChange={(_, newValue) => setCustomerId(newValue?.id || null)}
+                  onChange={(_, newValue) => { setCustomerId(newValue?.id || null); if (newValue) setCustomerError(false); }}
                   renderInput={(params) => (
-                    <TextField {...params} label="Customer" required size="small" />
+                    <TextField
+                      {...params}
+                      label="Customer"
+                      required
+                      size="small"
+                      error={customerError}
+                      helperText={customerError ? 'Customer is required' : ''}
+                    />
                   )}
                 />
               </Grid>

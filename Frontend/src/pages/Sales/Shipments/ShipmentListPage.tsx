@@ -29,6 +29,7 @@ const ShipmentListPage: React.FC = () => {
   const businessUnitId = userData?.businessUnitId || 0;
 
   const [searchQuery, setSearchQuery] = React.useState('');
+  const [statusFilter, setStatusFilter] = React.useState<'all' | 'inTransit' | 'delivered' | 'overdue'>('all');
 
   const { data: shipments = [], isLoading, refetch } = useQuery({
     queryKey: ['shipments', businessUnitId],
@@ -36,13 +37,31 @@ const ShipmentListPage: React.FC = () => {
   });
 
   const filteredShipments = React.useMemo(() => {
-    return shipments.filter(s => 
-      s.shipmentNo?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      s.orderNo?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      s.carrier?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      s.trackingNumber?.toLowerCase().includes(searchQuery.toLowerCase())
-    );
-  }, [shipments, searchQuery]);
+    const now = dayjs();
+    return shipments.filter(s => {
+      const matchesSearch =
+        s.shipmentNo?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        s.orderNo?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        s.carrier?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        s.trackingNumber?.toLowerCase().includes(searchQuery.toLowerCase());
+      if (!matchesSearch) return false;
+
+      switch (statusFilter) {
+        case 'inTransit':
+          return s.status === 'In Transit' || s.status === 'Shipped';
+        case 'delivered':
+          return s.status === 'Delivered';
+        case 'overdue':
+          return s.status !== 'Delivered' && !!s.estimatedDeliveryDate && dayjs(s.estimatedDeliveryDate).isBefore(now);
+        default:
+          return true;
+      }
+    });
+  }, [shipments, searchQuery, statusFilter]);
+
+  const toggleStatusFilter = (value: 'inTransit' | 'delivered' | 'overdue') => {
+    setStatusFilter((prev) => (prev === value ? 'all' : value));
+  };
 
   const columns: GridColDef[] = [
     {
@@ -257,10 +276,10 @@ const ShipmentListPage: React.FC = () => {
         />
         <Divider orientation="vertical" flexItem />
         <Stack direction="row" spacing={1}>
-           <Chip label="All Shipments" color="primary" onClick={() => {}} sx={{ fontWeight: 700 }} />
-           <Chip label="In Transit" variant="outlined" onClick={() => {}} sx={{ fontWeight: 700 }} />
-           <Chip label="Delivered" variant="outlined" onClick={() => {}} sx={{ fontWeight: 700 }} />
-           <Chip label="Overdue" variant="outlined" color="error" onClick={() => {}} sx={{ fontWeight: 700 }} />
+           <Chip label="All Shipments" color="primary" variant={statusFilter === 'all' ? 'filled' : 'outlined'} onClick={() => setStatusFilter('all')} sx={{ fontWeight: 700 }} />
+           <Chip label="In Transit" color="primary" variant={statusFilter === 'inTransit' ? 'filled' : 'outlined'} onClick={() => toggleStatusFilter('inTransit')} sx={{ fontWeight: 700 }} />
+           <Chip label="Delivered" color="success" variant={statusFilter === 'delivered' ? 'filled' : 'outlined'} onClick={() => toggleStatusFilter('delivered')} sx={{ fontWeight: 700 }} />
+           <Chip label="Overdue" color="error" variant={statusFilter === 'overdue' ? 'filled' : 'outlined'} onClick={() => toggleStatusFilter('overdue')} sx={{ fontWeight: 700 }} />
         </Stack>
       </Paper>
 

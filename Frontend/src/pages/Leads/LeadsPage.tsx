@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Chip, IconButton,
   Tooltip, Stack, TextField, MenuItem, CircularProgress,
-  Dialog, DialogTitle, DialogContent, DialogActions,
+  Dialog, DialogTitle, DialogContent, DialogActions, Alert,
 } from '@mui/material';
 import {
   DataGrid, type GridColDef, type GridPaginationModel
@@ -45,7 +45,7 @@ const LeadsPage: React.FC = () => {
     onError: (err: any) => enqueueSnackbar(err.response?.data || 'Sync failed', { variant: 'error' }),
   });
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['leads', paginationModel, search, leadSource],
     queryFn: () => leadService.getAll({
       pageNumber: paginationModel.page + 1,
@@ -307,19 +307,30 @@ const LeadsPage: React.FC = () => {
 
       {/* Grid */}
       <Paper sx={{ height: 'calc(100vh - 240px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
-        <DataGrid
-          rows={data?.items ?? []}
-          columns={columns}
-          rowCount={data?.totalCount ?? 0}
-          loading={isLoading}
-          pageSizeOptions={[10, 25, 50]}
-          paginationModel={paginationModel}
-          paginationMode="server"
-          onPaginationModelChange={setPaginationModel}
-          disableRowSelectionOnClick
-          getRowId={(r) => r.id}
-          rowHeight={100}
-        />
+        {isError ? (
+          <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, p: 3, textAlign: 'center' }}>
+            <Alert severity="error" sx={{ borderRadius: 2, maxWidth: 480 }}>
+              We couldn't load leads. The service may be temporarily unavailable.
+            </Alert>
+            <Button variant="contained" startIcon={<RefreshIcon />} onClick={() => refetch()} sx={{ fontWeight: 700, borderRadius: 2 }}>
+              Retry
+            </Button>
+          </Box>
+        ) : (
+          <DataGrid
+            rows={data?.items ?? []}
+            columns={columns}
+            rowCount={data?.totalCount ?? 0}
+            loading={isLoading}
+            pageSizeOptions={[10, 25, 50]}
+            paginationModel={paginationModel}
+            paginationMode="server"
+            onPaginationModelChange={setPaginationModel}
+            disableRowSelectionOnClick
+            getRowId={(r) => r.id}
+            rowHeight={100}
+          />
+        )}
       </Paper>
 
       {/* Rejection Dialog */}

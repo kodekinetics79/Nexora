@@ -13,17 +13,18 @@ import {
   Divider,
   Tooltip,
   ListItemText,
+  InputBase,
 } from '@mui/material';
 import {
   Menu as MenuIcon,
   Search as SearchIcon,
-  NotificationsNone as NotificationsIcon,
   LightMode as SunIcon,
   DarkMode as MoonIcon,
   Logout,
   Person,
   Language,
 } from '@mui/icons-material';
+import { useNavigate } from 'react-router-dom';
 import { useAppTheme } from '../../context/ThemeContext';
 import { useAuth } from '../../context/AuthContext';
 
@@ -36,9 +37,49 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
   const { mode, setMode, primaryColor, setPrimaryColor } = useAppTheme();
   const { userData, logout } = useAuth();
   const { i18n } = useTranslation();
+  const navigate = useNavigate();
+  const searchInputRef = React.useRef<HTMLInputElement>(null);
+  const [searchValue, setSearchValue] = React.useState('');
   const [langAnchor, setLangAnchor] = React.useState<null | HTMLElement>(null);
   const [anchorEl, setAnchorEl] = React.useState<null | HTMLElement>(null);
   const [colorMenuAnchor, setColorMenuAnchor] = React.useState<null | HTMLElement>(null);
+
+  // Quick-jump destinations for the command bar (⌘K / Ctrl+K to focus, Enter to jump).
+  const quickNav: { keywords: string[]; path: string }[] = [
+    { keywords: ['lead', 'leads'], path: '/procurement/leads/all' },
+    { keywords: ['rfq', 'rfqs'], path: '/procurement/rfqs/all' },
+    { keywords: ['quote', 'quotes', 'quotation', 'quotations'], path: '/sales/quotes' },
+    { keywords: ['order', 'orders'], path: '/sales/orders' },
+    { keywords: ['shipment', 'shipments', 'logistics'], path: '/sales/shipments' },
+    { keywords: ['product', 'products', 'inventory'], path: '/inventory/products' },
+    { keywords: ['supplier', 'suppliers'], path: '/suppliers' },
+    { keywords: ['customer', 'customers'], path: '/customers' },
+    { keywords: ['user', 'users'], path: '/security/users' },
+    { keywords: ['dashboard', 'home', 'overview'], path: '/dashboard' },
+  ];
+
+  const handleQuickSearch = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== 'Enter') return;
+    const query = searchValue.trim().toLowerCase();
+    if (!query) return;
+    const match = quickNav.find((entry) =>
+      entry.keywords.some((k) => k === query || k.includes(query) || query.includes(k))
+    );
+    navigate(match ? match.path : '/dashboard');
+    setSearchValue('');
+    searchInputRef.current?.blur();
+  };
+
+  React.useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   const handleLangMenuOpen = (event: React.MouseEvent<HTMLElement>) => {
     setLangAnchor(event.currentTarget);
@@ -131,7 +172,19 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
             }}
           >
             <SearchIcon sx={{ color: 'text.secondary', mr: 1, fontSize: 18 }} />
-            <Typography variant="body2" sx={{ color: 'text.secondary', opacity: 0.7 }}>Search anything...</Typography>
+            <InputBase
+              inputRef={searchInputRef}
+              value={searchValue}
+              onChange={(e) => setSearchValue(e.target.value)}
+              onKeyDown={handleQuickSearch}
+              placeholder="Search anything..."
+              sx={{
+                flex: 1,
+                fontSize: '0.875rem',
+                color: 'text.primary',
+                '& input::placeholder': { color: 'text.secondary', opacity: 0.7 },
+              }}
+            />
             <Box sx={{ ml: 'auto', px: 0.8, py: 0.2, backgroundColor: 'action.hover', borderRadius: 1, border: '1px solid', borderColor: 'divider' }}>
               <Typography variant="caption" sx={{ fontWeight: 700, fontSize: 10, opacity: 0.8 }}>⌘ K</Typography>
             </Box>
@@ -198,15 +251,6 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
             </IconButton>
           </Tooltip>
 
-          <Tooltip title="Notifications">
-            <IconButton color="inherit" sx={{ backgroundColor: 'action.hover', width: 40, height: 40, borderRadius: 2 }}>
-              <Box sx={{ position: 'relative' }}>
-                <NotificationsIcon sx={{ fontSize: 20 }} />
-                <Box sx={{ position: 'absolute', top: -2, right: -2, width: 8, height: 8, bgcolor: 'error.main', borderRadius: '50%', border: '2px solid', borderColor: 'background.paper' }} />
-              </Box>
-            </IconButton>
-          </Tooltip>
-
           <Divider orientation="vertical" flexItem sx={{ mx: 1.5, height: 24, my: 'auto' }} />
 
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, cursor: 'pointer', ml: 1 }} onClick={handleProfileClick}>
@@ -253,7 +297,7 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
             }
           }}
         >
-          <MenuItem onClick={handleClose} sx={{ borderRadius: 2, py: 1.5 }}>
+          <MenuItem onClick={() => { handleClose(); navigate('/dashboard'); }} sx={{ borderRadius: 2, py: 1.5 }}>
             <ListItemIcon><Person fontSize="small" sx={{ opacity: 0.7 }} /></ListItemIcon>
             <ListItemText
               primary="Account Profile"

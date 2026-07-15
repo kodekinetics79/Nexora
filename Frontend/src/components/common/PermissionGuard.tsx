@@ -19,13 +19,19 @@ const PermissionGuard: React.FC<PermissionGuardProps> = ({
   fallback, 
   redirect = false 
 }) => {
-  const { hasPermission } = useAuth();
+  const { token, hasPermission } = useAuth();
+
+  // Auth gate: unauthenticated users are always sent to the login screen
+  // (prevents the /dashboard -> /dashboard redirect loop / blank screen).
+  if (!token) {
+    return <Navigate to="/login" replace />;
+  }
 
   const isAuthorized = hasPermission(moduleName, action);
 
   if (!isAuthorized) {
     if (redirect) {
-      return <Navigate to="/dashboard" replace />;
+      return <Navigate to="/login" replace />;
     }
 
     if (fallback) {

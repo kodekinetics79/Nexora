@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Box, Typography, Paper, Card, CircularProgress, IconButton, Tooltip, useTheme, Avatar, Grid, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Chip } from '@mui/material';
+import { Box, Typography, Paper, Card, CircularProgress, IconButton, Tooltip, useTheme, Avatar, Grid, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Chip, Alert, Button } from '@mui/material';
+import { useAuth } from '../../context/AuthContext';
 
 import { 
   TrendingUp, 
@@ -144,18 +145,22 @@ const StatCard = ({ title, value, icon, trend, trendValue, color, delay }: any) 
 
 export default function DashboardPage() {
   const { mode, primaryColor } = useAppTheme();
+  const { userData } = useAuth();
   const theme = useTheme();
+  const businessUnitId = userData?.businessUnitId || 1;
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<DashboardDataDTO | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const fetchDashboardData = async () => {
     setLoading(true);
+    setError(null);
     try {
-      const response = await axiosInstance.get('/api/Dashboard/1');
+      const response = await axiosInstance.get(`/api/Dashboard/${businessUnitId}`);
       setData(response.data);
-    } catch (error) {
-      console.error("Failed to fetch dashboard data, using mock", error);
-      // Removed extensive mock since user has data now, but keep empty state fallback
+    } catch (err) {
+      console.error("Failed to fetch dashboard data", err);
+      setError('We could not load your dashboard analytics. Please check your connection and try again.');
     } finally {
       setLoading(false);
     }
@@ -163,12 +168,23 @@ export default function DashboardPage() {
 
   useEffect(() => {
     fetchDashboardData();
-  }, []);
+  }, [businessUnitId]);
 
   if (loading) {
     return (
       <Box sx={{ display: 'flex', height: '80vh', alignItems: 'center', justifyContent: 'center' }}>
         <CircularProgress size={60} thickness={4} sx={{ color: primaryColor }} />
+      </Box>
+    );
+  }
+
+  if (error) {
+    return (
+      <Box sx={{ display: 'flex', flexDirection: 'column', height: '80vh', alignItems: 'center', justifyContent: 'center', gap: 2, p: 3, textAlign: 'center' }}>
+        <Alert severity="error" sx={{ borderRadius: 2, maxWidth: 520 }}>{error}</Alert>
+        <Button variant="contained" startIcon={<Refresh />} onClick={fetchDashboardData} sx={{ borderRadius: 2, fontWeight: 700 }}>
+          Retry
+        </Button>
       </Box>
     );
   }

@@ -4,8 +4,9 @@ import { useQuery } from '@tanstack/react-query';
 import {
   Box, Typography, Paper, Table, TableHead, TableRow, TableCell,
   TableBody, IconButton, Button, Stack, Chip, TextField,
-  InputAdornment, Tooltip, CircularProgress, Grid
+  InputAdornment, Tooltip, CircularProgress, Grid, Alert
 } from '@mui/material';
+import { Refresh as RefreshIcon } from '@mui/icons-material';
 import {
   Add as AddIcon,
   Visibility as ViewIcon,
@@ -26,7 +27,7 @@ const OrderListPage: React.FC = () => {
   const businessUnitId = userData?.businessUnitId || 0;
   const [searchTerm, setSearchTerm] = useState('');
 
-  const { data: orders = [], isLoading } = useQuery({
+  const { data: orders = [], isLoading, isError, refetch } = useQuery({
     queryKey: ['orders-list', businessUnitId, searchTerm],
     queryFn: () => orderService.getAll({ businessUnitId, search: searchTerm }),
   });
@@ -51,6 +52,17 @@ const OrderListPage: React.FC = () => {
   };
 
   if (isLoading) return <Box sx={{ display: 'flex', justifyContent: 'center', p: 5 }}><CircularProgress /></Box>;
+
+  if (isError) return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, p: 5, textAlign: 'center' }}>
+      <Alert severity="error" sx={{ borderRadius: 2, maxWidth: 480 }}>
+        We couldn't load orders. The service may be temporarily unavailable.
+      </Alert>
+      <Button variant="contained" startIcon={<RefreshIcon />} onClick={() => refetch()} sx={{ fontWeight: 700 }}>
+        Retry
+      </Button>
+    </Box>
+  );
 
   return (
     <Box sx={{ p: 2 }}>

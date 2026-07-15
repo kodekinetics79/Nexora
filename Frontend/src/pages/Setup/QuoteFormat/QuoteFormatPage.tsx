@@ -16,11 +16,14 @@ import {
 import quoteConfigurationService, { type QuoteConfigurationDTO } from '../../../api/services/quoteConfigurationService';
 import { useAuth } from '../../../context/AuthContext';
 import { useTranslation } from 'react-i18next';
+import { useSnackbar } from 'notistack';
+import { handleApiError } from '../../../utils/errorHandler';
 
 const QuoteFormatPage: React.FC = () => {
   const { t } = useTranslation();
   const { userData } = useAuth();
   const queryClient = useQueryClient();
+  const { enqueueSnackbar } = useSnackbar();
 
   const [formData, setFormData] = useState<Partial<QuoteConfigurationDTO>>({
     logo: '',
@@ -55,8 +58,9 @@ const QuoteFormatPage: React.FC = () => {
     mutationFn: (payload: any) => quoteConfigurationService.createOrUpdate(payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['quote-configuration'] });
-      alert('Configuration saved successfully!');
+      enqueueSnackbar('Configuration saved successfully!', { variant: 'success' });
     },
+    onError: (error: any) => handleApiError(error),
   });
 
   const handleSave = () => {
