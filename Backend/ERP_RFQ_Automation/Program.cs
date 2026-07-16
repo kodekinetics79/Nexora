@@ -15,6 +15,9 @@ using Microsoft.AspNetCore.Authorization;
 using OfficeOpenXml;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Platform.Auth;
+using ERP_RFQ_Automation.Platform.Hardening;
+using ERP_RFQ_Automation.Notifications;
+using System.Text.Json.Serialization;
 
 // PostgreSQL migration: restore pre-6.0 Npgsql timestamp semantics so the
 // existing DateTime usage (DateTime.Now / Unspecified-kind values inherited from
@@ -44,6 +47,10 @@ builder.Services.AddControllers()
     .AddJsonOptions(options =>
     {
         options.JsonSerializerOptions.PropertyNameCaseInsensitive = true;
+        // Tolerate numeric fields arriving as JSON strings (e.g. grid-edited qty /
+        // unit price / lead time from the review workbench) so a corrected line
+        // item can't 400 on submit.
+        options.JsonSerializerOptions.NumberHandling = JsonNumberHandling.AllowReadingFromString;
     });
 
 // Keep the host alive if a BackgroundService throws — a transient failure in the
@@ -237,6 +244,17 @@ builder.Services.AddScoped<ILeadPersister, LeadPersister>();
 builder.Services.AddScoped<IExtractionDocumentReader, ProductionDocumentReader>();
 builder.Services.AddHostedService<ExtractionWorker>();
 
+// Transactional email / notifications (Notifications/): provider-agnostic sender
+// (defaults to the safe console provider until an SMTP/SendGrid provider is
+// configured). Powers RFQ→quote→order communications.
+builder.Services.AddNotifications(builder.Configuration);
+
+// Platform Hardening (Platform/Hardening): OpenTelemetry traces+metrics and
+// tenant/IP-fair rate limiting. Both config-driven with safe fallbacks so an
+// absent collector or missing config never breaks startup.
+builder.Services.AddPlatformObservability(builder.Configuration);
+builder.Services.AddPlatformRateLimiting(builder.Configuration);
+
 var app = builder.Build();
 
 // Global exception handler — return a generic message to clients and log the
@@ -267,7 +285,11 @@ if (app.Environment.IsDevelopment())
 // Use CORS
 app.UseCors("DefaultCors");
 app.UseAuthentication();
+// Tenant + correlation-id logging scope — AFTER auth so the businessUnitId claim exists.
+app.UsePlatformObservability();
 app.UseAuthorization();
+// Built-in rate limiter — AFTER auth so the per-tenant partition uses the claim.
+app.UseRateLimiter();
 app.MapControllers();
 app.MapHealthChecks("/health");
 app.Run();
