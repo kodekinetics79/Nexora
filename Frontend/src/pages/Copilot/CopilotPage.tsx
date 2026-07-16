@@ -10,9 +10,11 @@ import {
   IconButton,
   TextField,
   Button,
+  ButtonBase,
   Chip,
   Avatar,
   CircularProgress,
+  Collapse,
   List,
   ListItemButton,
   ListItemText,
@@ -26,19 +28,17 @@ import {
   Send as SendIcon,
   Add as AddIcon,
   Person as PersonIcon,
-  Build as ToolIcon,
-  Bolt as ActionIcon,
-  CheckCircle as OkIcon,
-  ErrorOutlined as FailIcon,
-  HourglassTop as PendingIcon,
   Inbox as ApprovalsIcon,
   History as ActivityIcon,
   ChatBubbleOutlined as ChatIcon,
+  ExpandMore as ExpandIcon,
+  KeyboardArrowRight as ArrowIcon,
 } from '@mui/icons-material';
 import copilotService, {
   type AgentStreamEvent,
   type AgentSessionSummary,
 } from '../../api/services/copilotService';
+import { humanizeTool } from './humanize';
 
 // ─── Local view models ──────────────────────────────────────────────────────
 
@@ -62,54 +62,109 @@ interface ChatMessage {
   errored?: boolean;
 }
 
-const SUGGESTED_PROMPTS = [
-  'Show RFQs closing this week',
-  'Which suppliers quoted on RFQ-1001?',
-  'Draft and send RFQ-1001 to its top 3 suppliers',
-  'Recommend an award for RFQ-1001',
+// Plain-language example prompts shown on a fresh conversation.
+const SUGGESTED_PROMPTS: { icon: string; text: string }[] = [
+  { icon: '🔍', text: 'Show me the RFQs closing this week' },
+  { icon: '🏭', text: 'Who has quoted on RFQ-1001?' },
+  { icon: '📤', text: 'Send RFQ-1001 to its top 3 suppliers' },
+  { icon: '⚖️', text: 'Which supplier should I award RFQ-1001 to?' },
 ];
 
 let idCounter = 0;
 const nextId = () => `${Date.now()}-${idCounter++}`;
 
-// ─── Inline tool-activity chip ──────────────────────────────────────────────
+// ─── Quiet, plain-English record of what the assistant did ───────────────────
 
-const ActivityChip: React.FC<{ activity: ChatActivity }> = ({ activity }) => {
-  let icon: React.ReactNode;
-  let color: 'default' | 'success' | 'error' | 'warning' | 'info' = 'default';
-  let label = activity.name;
-
-  if (activity.kind === 'tool_call') {
-    icon = <ToolIcon sx={{ fontSize: 15 }} />;
-    color = 'info';
-    label = `${activity.name}${activity.summary ? ` — ${activity.summary}` : ''}`;
-  } else if (activity.kind === 'tool_result') {
-    icon = activity.ok ? <OkIcon sx={{ fontSize: 15 }} /> : <FailIcon sx={{ fontSize: 15 }} />;
-    color = activity.ok ? 'success' : 'error';
-    label = `${activity.name}${activity.summary ? ` → ${activity.summary}` : activity.ok ? ' → done' : ' → failed'}`;
-  } else {
-    icon = <PendingIcon sx={{ fontSize: 15 }} />;
-    color = 'warning';
-    label = `${activity.name} (queued for approval)`;
+/** One human-readable line for a single activity. */
+const activityLine = (a: ChatActivity): { icon: string; text: string } => {
+  const tool = humanizeTool(a.name);
+  if (a.kind === 'approval') {
+    return { icon: '⏳', text: `Waiting for your approval to ${tool.action}` };
   }
+  if (a.kind === 'tool_result') {
+    if (a.summary) return { icon: a.ok ? '✅' : '⚠️', text: a.summary };
+    return { icon: a.ok ? '✅' : '⚠️', text: a.ok ? `${tool.label} — done` : `${tool.label} — couldn't complete` };
+  }
+  return { icon: tool.icon, text: tool.label };
+};
+
+const ToolActivityLog: React.FC<{ activities: ChatActivity[] }> = ({ activities }) => {
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+
+  const approvals = activities.filter((a) => a.kind === 'approval');
+  const steps = activities.filter((a) => a.kind !== 'approval');
 
   return (
-    <Chip
-      size="small"
-      icon={activity.kind === 'approval' ? <ActionIcon sx={{ fontSize: 15 }} /> : (icon as React.ReactElement)}
-      label={label}
-      color={color}
-      variant="outlined"
-      sx={{
-        maxWidth: '100%',
-        height: 'auto',
-        py: 0.4,
-        borderRadius: 1.5,
-        fontWeight: 600,
-        fontSize: '0.72rem',
-        '& .MuiChip-label': { whiteSpace: 'normal', py: 0.2, lineHeight: 1.35 },
-      }}
-    />
+    <Box sx={{ width: '100%' }}>
+      {/* Anything waiting on the user stays visible — it's actionable. */}
+      {approvals.length > 0 && (
+        <Paper
+          variant="outlined"
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 1,
+            px: 1.5,
+            py: 1,
+            mb: 0.75,
+            borderRadius: 2,
+            borderColor: 'warning.light',
+            bgcolor: (t) => alpha(t.palette.warning.main, 0.08),
+          }}
+        >
+          <Box component="span" sx={{ fontSize: '1rem', lineHeight: 1 }}>⏳</Box>
+          <Typography variant="body2" sx={{ flex: 1, color: 'text.secondary' }}>
+            {approvals.length === 1
+              ? 'One step needs your approval before I can finish.'
+              : `${approvals.length} steps need your approval before I can finish.`}
+          </Typography>
+          <Button size="small" variant="text" onClick={() => navigate('/copilot/approvals')} sx={{ fontWeight: 700, flexShrink: 0 }}>
+            Review
+          </Button>
+        </Paper>
+      )}
+
+      {/* Everything else is calm, secondary detail — tucked away by default. */}
+      {steps.length > 0 && (
+        <Box>
+          <ButtonBase
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 0.5,
+              px: 0.5,
+              py: 0.25,
+              borderRadius: 1,
+              color: 'text.secondary',
+              '&:hover': { color: 'text.primary' },
+            }}
+          >
+            <ExpandIcon sx={{ fontSize: 18, transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
+            <Typography variant="caption" sx={{ fontWeight: 600 }}>
+              {open ? 'Hide details' : `Show what I did (${steps.length})`}
+            </Typography>
+          </ButtonBase>
+          <Collapse in={open}>
+            <Stack spacing={0.5} sx={{ pl: 0.5, pt: 0.75 }}>
+              {steps.map((a) => {
+                const line = activityLine(a);
+                return (
+                  <Stack key={a.id} direction="row" spacing={1} sx={{ alignItems: 'flex-start' }}>
+                    <Box component="span" sx={{ fontSize: '0.9rem', lineHeight: 1.5, flexShrink: 0 }}>{line.icon}</Box>
+                    <Typography variant="body2" color="text.secondary" sx={{ lineHeight: 1.5 }}>
+                      {line.text}
+                    </Typography>
+                  </Stack>
+                );
+              })}
+            </Stack>
+          </Collapse>
+        </Box>
+      )}
+    </Box>
   );
 };
 
@@ -117,6 +172,12 @@ const ActivityChip: React.FC<{ activity: ChatActivity }> = ({ activity }) => {
 
 const MessageBubble: React.FC<{ message: ChatMessage }> = ({ message }) => {
   const isUser = message.role === 'user';
+  const working = !isUser && message.streaming && !message.content;
+  // While thinking with nothing written yet, show a gentle live status line.
+  const liveStep = working
+    ? [...message.activities].reverse().find((a) => a.kind !== 'approval')
+    : undefined;
+
   return (
     <Box sx={{ display: 'flex', gap: 1.5, flexDirection: isUser ? 'row-reverse' : 'row' }}>
       <Avatar
@@ -124,21 +185,25 @@ const MessageBubble: React.FC<{ message: ChatMessage }> = ({ message }) => {
           width: 34,
           height: 34,
           bgcolor: isUser ? 'primary.main' : 'secondary.main',
-          background: isUser ? undefined : 'linear-gradient(135deg, #6366f1 0%, #0ea5e9 100%)',
+          background: isUser ? undefined : 'linear-gradient(135deg, #4682B4 0%, #0ea5e9 100%)',
           flexShrink: 0,
         }}
       >
         {isUser ? <PersonIcon sx={{ fontSize: 19 }} /> : <SparkleIcon sx={{ fontSize: 19 }} />}
       </Avatar>
-      <Box sx={{ maxWidth: '78%', display: 'flex', flexDirection: 'column', gap: 0.75, alignItems: isUser ? 'flex-end' : 'flex-start' }}>
-        {message.activities.length > 0 && (
-          <Stack spacing={0.5} sx={{ width: '100%', alignItems: 'flex-start', mb: 0.25 }}>
-            {message.activities.map((a) => (
-              <ActivityChip key={a.id} activity={a} />
-            ))}
+      <Box sx={{ maxWidth: '82%', display: 'flex', flexDirection: 'column', gap: 0.75, alignItems: isUser ? 'flex-end' : 'flex-start' }}>
+        {!isUser && message.activities.length > 0 && <ToolActivityLog activities={message.activities} />}
+
+        {working && (
+          <Stack direction="row" spacing={1} sx={{ alignItems: 'center', px: 0.5, py: 0.5 }}>
+            <CircularProgress size={14} thickness={5} />
+            <Typography variant="body2" color="text.secondary">
+              {liveStep ? `${humanizeTool(liveStep.name).icon} ${humanizeTool(liveStep.name).label}…` : 'Thinking…'}
+            </Typography>
           </Stack>
         )}
-        {(message.content || message.streaming) && (
+
+        {(message.content || (message.streaming && !working)) && (
           <Paper
             elevation={0}
             sx={{
@@ -217,12 +282,7 @@ const CopilotPage: React.FC = () => {
             ...m,
             activities: [
               ...m.activities,
-              {
-                id: nextId(),
-                kind: 'tool_call',
-                name: event.name,
-                summary: event.input ? summarizeInput(event.input) : undefined,
-              },
+              { id: nextId(), kind: 'tool_call', name: event.name },
             ],
           }));
           break;
@@ -249,7 +309,7 @@ const CopilotPage: React.FC = () => {
           break;
         case 'error':
           patchAssistant((m) => ({ ...m, streaming: false, errored: true, content: m.content || event.message }));
-          enqueueSnackbar(event.message || 'The agent hit an error', { variant: 'error' });
+          enqueueSnackbar(event.message || 'Something went wrong', { variant: 'error' });
           break;
       }
     },
@@ -289,9 +349,9 @@ const CopilotPage: React.FC = () => {
               ...m,
               streaming: false,
               errored: true,
-              content: m.content || `Could not reach the agent: ${err.message}`,
+              content: m.content || `I couldn't reach the assistant just now. Please try again. (${err.message})`,
             }));
-            enqueueSnackbar('Lost connection to the agent', { variant: 'error' });
+            enqueueSnackbar('Lost connection — please try again', { variant: 'error' });
           },
         },
       );
@@ -352,7 +412,7 @@ const CopilotPage: React.FC = () => {
       setMessages(loaded);
       setSessionId(detail.id);
     } catch {
-      enqueueSnackbar('Could not load that conversation', { variant: 'error' });
+      enqueueSnackbar('Could not open that conversation', { variant: 'error' });
     }
   };
 
@@ -431,55 +491,82 @@ const CopilotPage: React.FC = () => {
       <Paper sx={{ flex: 1, display: 'flex', flexDirection: 'column', borderRadius: 3, overflow: 'hidden', minWidth: 0 }}>
         {/* Header */}
         <Box sx={{ px: 2.5, py: 1.75, borderBottom: '1px solid', borderColor: 'divider', display: 'flex', alignItems: 'center', gap: 1.5 }}>
-          <Avatar sx={{ width: 38, height: 38, background: 'linear-gradient(135deg, #6366f1 0%, #0ea5e9 100%)' }}>
+          <Avatar sx={{ width: 38, height: 38, background: 'linear-gradient(135deg, #4682B4 0%, #0ea5e9 100%)' }}>
             <SparkleIcon />
           </Avatar>
           <Box sx={{ minWidth: 0 }}>
             <Typography variant="subtitle1" sx={{ fontWeight: 800, letterSpacing: '-0.01em', lineHeight: 1.2 }}>
-              Sourcing Copilot
+              Sourcing Assistant
             </Typography>
             <Typography variant="caption" color="text.secondary">
-              Autonomous procurement agent · searches RFQs, drafts outreach, recommends awards
+              Here to help with your RFQs, suppliers, and orders
             </Typography>
           </Box>
           <Box sx={{ flex: 1 }} />
           <Chip
             size="small"
             icon={<Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: streaming ? 'warning.main' : 'success.main', ml: 1 }} />}
-            label={streaming ? 'Thinking…' : 'Ready'}
+            label={streaming ? 'Working…' : 'Ready'}
             variant="outlined"
             sx={{ fontWeight: 700, fontSize: '0.72rem' }}
           />
         </Box>
 
         {/* Conversation */}
-        <Box ref={scrollRef} sx={{ flex: 1, overflowY: 'auto', px: { xs: 1.5, sm: 3 }, py: 2.5 }}>
+        <Box
+          ref={scrollRef}
+          role="log"
+          aria-live="polite"
+          aria-busy={streaming}
+          aria-label="Conversation with your sourcing assistant"
+          sx={{ flex: 1, overflowY: 'auto', px: { xs: 1.5, sm: 3 }, py: 2.5 }}
+        >
           {isEmpty ? (
-            <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', gap: 2.5 }}>
-              <Avatar sx={{ width: 68, height: 68, background: 'linear-gradient(135deg, #6366f1 0%, #0ea5e9 100%)', boxShadow: (t) => `0 12px 30px -8px ${alpha(t.palette.primary.main, 0.6)}` }}>
+            <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', gap: 3, py: 4 }}>
+              <Avatar sx={{ width: 68, height: 68, background: 'linear-gradient(135deg, #4682B4 0%, #0ea5e9 100%)', boxShadow: (t) => `0 12px 30px -8px ${alpha(t.palette.primary.main, 0.6)}` }}>
                 <SparkleIcon sx={{ fontSize: 34 }} />
               </Avatar>
-              <Box>
+              <Box sx={{ maxWidth: 520 }}>
                 <Typography variant="h5" sx={{ fontWeight: 800, letterSpacing: '-0.02em' }}>
-                  How can I help you source today?
+                  Hi — I'm your sourcing assistant
                 </Typography>
-                <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, maxWidth: 460 }}>
-                  Ask about RFQs and suppliers, or delegate an action — I'll queue anything sensitive for your approval.
+                <Typography variant="body1" color="text.secondary" sx={{ mt: 1 }}>
+                  Ask me anything about your RFQs and suppliers, or try one of these:
                 </Typography>
               </Box>
-              <Stack direction="row" sx={{ flexWrap: 'wrap', justifyContent: 'center', gap: 1, maxWidth: 560 }}>
+              <Box
+                sx={{
+                  width: '100%',
+                  maxWidth: 620,
+                  display: 'grid',
+                  gap: 1.5,
+                  gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' },
+                }}
+              >
                 {SUGGESTED_PROMPTS.map((p) => (
-                  <Chip
-                    key={p}
-                    label={p}
-                    onClick={() => send(p)}
-                    clickable
-                    icon={<SparkleIcon sx={{ fontSize: 16 }} />}
-                    sx={{ fontWeight: 600, borderRadius: 2, py: 2, px: 0.5, '&:hover': { bgcolor: 'action.hover' } }}
-                    variant="outlined"
-                  />
+                  <ButtonBase
+                    key={p.text}
+                    onClick={() => send(p.text)}
+                    sx={{
+                      textAlign: 'left',
+                      justifyContent: 'flex-start',
+                      p: 2,
+                      borderRadius: 3,
+                      border: '1px solid',
+                      borderColor: 'divider',
+                      bgcolor: 'background.paper',
+                      transition: 'all 0.15s',
+                      '&:hover': { borderColor: 'primary.main', bgcolor: 'action.hover', transform: 'translateY(-1px)' },
+                    }}
+                  >
+                    <Box component="span" sx={{ fontSize: '1.4rem', mr: 1.5, lineHeight: 1 }}>{p.icon}</Box>
+                    <Typography variant="body2" sx={{ fontWeight: 600, flex: 1 }}>
+                      {p.text}
+                    </Typography>
+                    <ArrowIcon sx={{ fontSize: 18, color: 'text.disabled' }} />
+                  </ButtonBase>
                 ))}
-              </Stack>
+              </Box>
             </Box>
           ) : (
             <Stack spacing={2.5}>
@@ -500,15 +587,17 @@ const CopilotPage: React.FC = () => {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Message the Sourcing Copilot…  (Enter to send, Shift+Enter for a new line)"
+              placeholder="Type your question…  (Enter to send, Shift+Enter for a new line)"
+              aria-label="Message your sourcing assistant"
               disabled={streaming}
               size="small"
               sx={{ '& .MuiOutlinedInput-root': { borderRadius: 3 } }}
             />
-            <Tooltip title={streaming ? 'Agent is responding…' : 'Send'}>
+            <Tooltip title={streaming ? 'Working…' : 'Send'}>
               <span>
                 <IconButton
                   color="primary"
+                  aria-label="Send message"
                   onClick={() => send(input)}
                   disabled={streaming || !input.trim()}
                   sx={{
@@ -526,26 +615,12 @@ const CopilotPage: React.FC = () => {
             </Tooltip>
           </Box>
           <Typography variant="caption" color="text.disabled" sx={{ display: 'block', mt: 0.75, textAlign: 'center' }}>
-            Copilot can take actions on your behalf. Sensitive steps are held for approval in your inbox.
+            I'll always ask first before doing anything sensitive — like emailing a supplier or placing an order.
           </Typography>
         </Box>
       </Paper>
     </Box>
   );
 };
-
-// Best-effort one-line summary of a tool_call input payload for the inline chip.
-function summarizeInput(input: unknown): string | undefined {
-  if (input == null) return undefined;
-  if (typeof input === 'string') return input;
-  if (typeof input === 'number' || typeof input === 'boolean') return String(input);
-  try {
-    const entries = Object.entries(input as Record<string, unknown>).slice(0, 3);
-    if (entries.length === 0) return undefined;
-    return entries.map(([k, v]) => `${k}: ${typeof v === 'object' ? '…' : String(v)}`).join(', ');
-  } catch {
-    return undefined;
-  }
-}
 
 export default CopilotPage;
