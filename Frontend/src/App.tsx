@@ -52,6 +52,10 @@ const ShipmentViewPage = lazy(() => import('./pages/Sales/Shipments/ShipmentView
 const ShipmentInvoicePage = lazy(() => import('./pages/Sales/Shipments/ShipmentInvoicePage'));
 const PriceStructurePage = lazy(() => import('./pages/Setup/PriceStructure/PriceStructurePage'));
 
+// Platform Owner console (ADR-0005). Self-contained `/platform/*` tree with its
+// own guard + layout; see src/platform/.
+const PlatformRoutes = lazy(() => import('./platform/PlatformRoutes'));
+
 const PageLoader = () => (
   <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '60vh', width: '100%' }}>
     <CircularProgress />
@@ -145,6 +149,9 @@ function App() {
       <Route path="/leads/folder-upload" element={<Navigate to="/procurement/leads/folder-upload" replace />} />
       <Route path="/leads/view/:id" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><LeadDetailPage /></PermissionGuard></MainLayout>} />
       <Route path="/leads" element={<Navigate to="/procurement/leads/all" replace />} />
+
+      {/* Platform Owner console — owner-only control plane above tenants */}
+      <Route path="/platform/*" element={<PlatformRoutes />} />
 
       <Route path="/login" element={<LoginPage />} />
       <Route path="*" element={<Box sx={{ p: 4 }}>404 Not Found</Box>} />
