@@ -1,0 +1,256 @@
+# Platform-Owner Control Plane — Wiring Guide (ADR-0005, Phase 1)
+
+All code lives under `Platform/` and was written to **not touch any existing
+file**. To activate it, the orchestrator applies the central edits below to
+`Program.cs`, `Models/ErpRfqAutomationContext.cs`, adds a migration, and seeds one
+Owner. Nothing here changes tenant-plane behavior.
+
+The new files reference the DbContext via `context.Set<T>()`, so they compile
+today (verified: `dotnet build` → **0 errors**). They will only *run* correctly
+once the DbSets + model configs below are added and a migration is applied.
+
+---
+
+## 1. DbSets — add to `Models/ErpRfqAutomationContext.cs`
+
+Add these properties alongside the existing `DbSet` declarations:
+
+```csharp
+public virtual DbSet<ERP_RFQ_Automation.Platform.Models.PlatformUser> PlatformUsers { get; set; }
+public virtual DbSet<ERP_RFQ_Automation.Platform.Models.Tenant> Tenants { get; set; }
+public virtual DbSet<ERP_RFQ_Automation.Platform.Models.Plan> Plans { get; set; }
+public virtual DbSet<ERP_RFQ_Automation.Platform.Models.PlatformAuditLog> PlatformAuditLogs { get; set; }
+```
+
+## 2. Model configuration — add to `OnModelCreatingPartial`
+
+The tenancy partial `Models/ErpRfqAutomationContext.Tenancy.cs` already defines
+`partial void OnModelCreatingPartial(ModelBuilder modelBuilder)`. **Do not add a
+second partial with the same signature** — instead append these lines inside the
+existing method body (or create a new partial method is not allowed, so append):
+
+```csharp
+// ---- Platform-Owner control plane (ADR-0005 §3/§4) --------------------------
+// Placed in the (non-RLS'd) "platform" schema. These tables are NOT ITenantScoped
+// and carry NO query filter — the platform plane reads across tenants by design.
+
+modelBuilder.Entity<ERP_RFQ_Automation.Platform.Models.PlatformUser>(e =>
+{
+    e.ToTable("PlatformUsers", "platform");
+    e.HasKey(x => x.Id);
+    e.HasIndex(x => x.Email).IsUnique();
+    e.Property(x => x.Email).IsRequired().HasMaxLength(256);
+    e.Property(x => x.PasswordHash).IsRequired();
+    e.Property(x => x.PlatformRole).HasConversion<string>().HasMaxLength(32); // store enum as text
+    e.Property(x => x.DisplayName).HasMaxLength(200);
+});
+
+modelBuilder.Entity<ERP_RFQ_Automation.Platform.Models.Plan>(e =>
+{
+    e.ToTable("Plans", "platform");
+    e.HasKey(x => x.Id);
+    e.HasIndex(x => x.Code).IsUnique();
+    e.Property(x => x.Code).IsRequired().HasMaxLength(64);
+    e.Property(x => x.Name).IsRequired().HasMaxLength(128);
+    e.Property(x => x.Features).HasColumnType("jsonb").HasDefaultValue("{}");
+});
+
+modelBuilder.Entity<ERP_RFQ_Automation.Platform.Models.Tenant>(e =>
+{
+    e.ToTable("Tenants", "platform");
+    e.HasKey(x => x.Id);
+    e.HasIndex(x => x.Slug).IsUnique();
+    e.Property(x => x.Name).IsRequired().HasMaxLength(256);
+    e.Property(x => x.Slug).IsRequired().HasMaxLength(64);
+    e.Property(x => x.Status).HasConversion<string>().HasMaxLength(32);
+    e.Property(x => x.StatusReason).HasMaxLength(1000);
+    e.HasOne(x => x.Plan).WithMany().HasForeignKey(x => x.PlanId).OnDelete(DeleteBehavior.SetNull);
+    // PrimaryBusinessUnitId intentionally NOT an EF relationship — it bridges to the
+    // existing BusinessUnit table without coupling the platform schema to tenant FKs.
+});
+
+modelBuilder.Entity<ERP_RFQ_Automation.Platform.Models.PlatformAuditLog>(e =>
+{
+    e.ToTable("PlatformAuditLogs", "platform");
+    e.HasKey(x => x.Id);
+    e.Property(x => x.Action).IsRequired().HasMaxLength(128);
+    e.Property(x => x.TargetType).HasMaxLength(128);
+    e.Property(x => x.TargetId).HasMaxLength(128);
+    e.Property(x => x.Metadata).HasColumnType("jsonb");
+    e.Property(x => x.Ip).HasMaxLength(64);
+    e.HasIndex(x => new { x.ActorPlatformUserId, x.CreatedOn });
+    e.HasIndex(x => new { x.ActAsTenantId, x.CreatedOn });
+    // Append-only: application code never updates/deletes. Enforce at the DB layer
+    // with a trigger or a role that lacks UPDATE/DELETE on this table (see §6).
+});
+```
+
+> These entities are plain (non-`ITenantScoped`) types, so they get **no global
+> query filter** — but the new code still calls `.IgnoreQueryFilters()` on reads
+> defensively and to read across tenants (`Lead`/`Rfq`/`Quote`/`Order`).
+
+## 3. Second JWT scheme + policies — `Program.cs`
+
+The default (tenant) scheme is unchanged. Chain the platform scheme onto the
+existing `AddAuthentication().AddJwtBearer(...)` call, and add the platform
+policies to the existing `AddAuthorization(...)` call.
+
+**a) Authentication** — after the existing `.AddJwtBearer(options => { ... })`
+(around line 182), append:
+
+```csharp
+    .AddPlatformJwtBearer(builder.Configuration);   // ERP_RFQ_Automation.Platform.Auth
+```
+
+Add the using at the top of `Program.cs`:
+
+```csharp
+using ERP_RFQ_Automation.Platform.Auth;
+```
+
+**b) Authorization** — inside the existing
+`builder.Services.AddAuthorization(options => { ... })` block (Program.cs ~106),
+add one line:
+
+```csharp
+    options.AddPlatformPolicies();   // PlatformScope (default-deny) + role sub-policies
+```
+
+This registers: `PlatformScope` (default-deny gate on every `/api/platform/*`
+endpoint), `Platform.Owner`, `Platform.TenantAdmin` (Owner|SupportAdmin),
+`Platform.Billing` (Owner|BillingAdmin), `Platform.Impersonate` (Owner|SupportAdmin).
+Every policy pins the `"Platform"` scheme and requires `scope=platform`.
+
+### Why the boundary holds (five gates, ADR-0005 §3)
+- **Gate 1 (audience/scheme):** the platform scheme validates
+  `ValidAudience = "nexora-platform"`. A **tenant token** (audience `"RFQ"`) fails
+  validation on the platform scheme; a **platform token** fails on the default
+  tenant scheme. Confirmed by construction in `PlatformAuthService`.
+- **Gate 2 (default-deny policy):** `[Authorize(Policy="PlatformScope")]` on every
+  platform controller; the policy pins the `Platform` scheme + requires
+  `scope=platform`, so a tenant principal is never even authenticated against it.
+- The platform token carries **no `businessUnitId`/`roleId` claim**, so it can
+  never satisfy `HttpTenantContext` or the tenant `PermissionHandler`.
+
+## 4. DI registrations — `Program.cs`
+
+Add near the other `AddScoped` registrations (after line ~104):
+
+```csharp
+// Platform-Owner control plane (ADR-0005)
+builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Auth.IPlatformAuthService,
+                           ERP_RFQ_Automation.Platform.Auth.PlatformAuthService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Services.IPlatformAuditService,
+                           ERP_RFQ_Automation.Platform.Services.PlatformAuditService>();
+```
+
+Controllers are discovered automatically (they are `[ApiController]` in the same
+assembly) — no manual registration.
+
+## 5. Configuration keys — `appsettings*.json`
+
+The platform scheme reads these (all optional; safe fallbacks shown):
+
+```jsonc
+"Jwt": {
+  // existing tenant keys: Key, Issuer ("KodeKinetics"), Audience ("RFQ"), ExpiryMinutes
+  "PlatformKey": "<distinct 32+ byte signing key>", // RECOMMENDED; falls back to Jwt:Key
+  "PlatformIssuer": "KodeKinetics",                  // falls back to Jwt:Issuer
+  "PlatformAudience": "nexora-platform",             // default if omitted
+  "PlatformExpiryMinutes": 30,                       // default 30
+  "ImpersonationExpiryMinutes": 15                   // default 15 (tenant token)
+}
+```
+
+> Using a **distinct `Jwt:PlatformKey`** is recommended (defense in depth) but not
+> required for the boundary — the audience check alone already isolates the planes.
+> The impersonation token is deliberately a **tenant** token (signed with `Jwt:Key`,
+> audience `Jwt:Audience`) so it is accepted by the default scheme and scoped by the
+> tenant query filters; it carries `impersonated=true`, `act_sub`, and no `roleId`
+> (so RBAC-gated writes fail → read-only).
+
+## 6. Migration
+
+A migration is required to create the four `platform.*` tables + indexes.
+
+```bash
+cd Backend/ERP_RFQ_Automation
+dotnet ef migrations add PlatformControlPlane
+dotnet ef database update
+```
+
+Notes:
+- The `platform` schema is created by the migration (from `ToTable(..., "platform")`).
+- **Append-only enforcement for `PlatformAuditLogs`:** after the migration, add a
+  DB guard (a `BEFORE UPDATE OR DELETE` trigger that raises, or `REVOKE UPDATE,
+  DELETE ON platform."PlatformAuditLogs"` from the app role). The app never issues
+  those statements, but the DB should make it impossible.
+- Per ADR-0005 §3, the platform pipeline is the only one that should hold
+  `BYPASSRLS`; the `platform` schema is intentionally **not** RLS-filtered.
+
+## 7. Seed one Owner PlatformUser
+
+There is no self-service platform signup by design. Seed the first Owner out-of-band.
+
+**Option A — SQL (compute a BCrypt hash first):**
+
+```sql
+INSERT INTO platform."PlatformUsers"
+  ("Email","PasswordHash","PlatformRole","IsActive","DisplayName","CreatedOn","CreatedBy")
+VALUES
+  ('owner@nexora.app', '<bcrypt-hash>', 'Owner', true, 'Platform Owner', now(), 'seed');
+```
+
+Generate `<bcrypt-hash>` with the same library the app uses (`BCrypt.Net-Next`),
+e.g. a throwaway console line: `BCrypt.Net.BCrypt.HashPassword("<password>")`.
+`PlatformRole` is stored as **text** (`Owner` / `SupportAdmin` / `BillingAdmin` /
+`ReadOnlyOps`).
+
+**Option B — migration seed / idempotent startup task:** insert the same row via
+`migrationBuilder.InsertData(...)` (only if you want it version-controlled; keep the
+hash out of source — read the password from configuration/secret at seed time).
+
+Then log in: `POST /api/platform/auth/login { "email": "...", "password": "..." }`
+→ returns a `nexora-platform` token to use as `Authorization: Bearer` against
+`/api/platform/*`.
+
+---
+
+## New files delivered
+
+```
+Platform/
+├─ WIRING.md                                  (this file)
+├─ Models/
+│  ├─ PlatformEnums.cs      PlatformRole, TenantStatus
+│  ├─ PlatformUser.cs       control-plane operator (no tenantId)
+│  ├─ Tenant.cs             customer org (Status, PlanId, PrimaryBusinessUnitId)
+│  ├─ Plan.cs               tier (Weight, MaxConcurrentExtractionJobs, quotas, Features)
+│  ├─ PlatformAuditLog.cs   append-only audit
+│  └─ PlatformDtos.cs       login / tenant / impersonation DTOs
+├─ Auth/
+│  ├─ PlatformAuthConstants.cs   scheme/audience/claim/policy names
+│  ├─ PlatformAuthExtensions.cs  AddPlatformJwtBearer + AddPlatformPolicies
+│  └─ PlatformAuthService.cs     BCrypt login, platform-token + impersonation-token issue
+├─ Services/
+│  └─ PlatformAuditService.cs    append-only audit writer
+└─ Controllers/                  route /api/platform/*  [Authorize(PlatformScope)]
+   ├─ PlatformAuthController.cs   POST /auth/login  (anonymous)
+   ├─ TenantsController.cs        list/get/provision(txn)/suspend/resume
+   ├─ ObservabilityController.cs  cross-tenant stats (degrades if tables absent)
+   └─ ImpersonationController.cs  POST /tenants/{id}/impersonate (read-only, audited)
+```
+
+## Endpoint summary
+
+| Method & route | Policy | Notes |
+|---|---|---|
+| `POST /api/platform/auth/login` | anonymous | issues `nexora-platform` token |
+| `GET  /api/platform/tenants` | PlatformScope | `?status=` filter |
+| `GET  /api/platform/tenants/{id}` | PlatformScope | |
+| `POST /api/platform/tenants` | TenantAdmin | provision Tenant + primary BU (txn) |
+| `POST /api/platform/tenants/{id}/suspend` | TenantAdmin | reason required |
+| `POST /api/platform/tenants/{id}/resume` | TenantAdmin | reason required |
+| `GET  /api/platform/observability/stats` | PlatformScope | per-BU counts; extraction stats degrade gracefully |
+| `POST /api/platform/tenants/{id}/impersonate` | Impersonate | short-lived read-only tenant token, audited |
+```
