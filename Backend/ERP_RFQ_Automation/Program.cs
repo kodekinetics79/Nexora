@@ -17,6 +17,7 @@ using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Platform.Auth;
 using ERP_RFQ_Automation.Platform.Hardening;
 using ERP_RFQ_Automation.Notifications;
+using ERP_RFQ_Automation.Agent;
 using System.Text.Json.Serialization;
 
 // PostgreSQL migration: restore pre-6.0 Npgsql timestamp semantics so the
@@ -254,6 +255,11 @@ builder.Services.AddNotifications(builder.Configuration);
 // absent collector or missing config never breaks startup.
 builder.Services.AddPlatformObservability(builder.Configuration);
 builder.Services.AddPlatformRateLimiting(builder.Configuration);
+
+// Autonomous sourcing copilot (Agent/): Claude tool-use loop + tenant-scoped tools +
+// guardrail engine + immutable audit. Runs in mock mode until Agent:Anthropic:ApiKey is
+// set, so it is fully demoable with no key. Depends on notifications/order/dashboard above.
+builder.Services.AddAgentEngine(builder.Configuration);
 
 var app = builder.Build();
 

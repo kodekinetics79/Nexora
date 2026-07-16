@@ -1,0 +1,45 @@
+using ERP_RFQ_Automation.Agent.Guardrails;
+using ERP_RFQ_Automation.Agent.Llm;
+using ERP_RFQ_Automation.Agent.Tools;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+
+namespace ERP_RFQ_Automation.Agent;
+
+/// <summary>
+/// One-call DI wiring for the sourcing-copilot engine. The lead splices a single
+/// <c>builder.Services.AddAgentEngine(builder.Configuration);</c> into Program.cs
+/// (see Agent/AGENT-WIRING.md). Endpoints are exposed via the auto-mapped
+/// <c>AgentController</c>, so no extra MapControllers wiring is needed.
+/// </summary>
+public static class AgentServiceCollectionExtensions
+{
+    public static IServiceCollection AddAgentEngine(this IServiceCollection services, IConfiguration configuration)
+    {
+        // ---- LLM: real Claude when a key is present, deterministic mock otherwise ----
+        var apiKey = configuration["Agent:Anthropic:ApiKey"];
+        if (!string.IsNullOrWhiteSpace(apiKey))
+            services.AddHttpClient<IAgentLlm, AnthropicAgentLlm>(c => c.Timeout = TimeSpan.FromSeconds(120));
+        else
+            services.AddSingleton<IAgentLlm, MockAgentLlm>();
+
+        // ---- Tools (registered as IAgentTool; discovered by the registry) ----
+        services.AddScoped<IAgentTool, SearchRfqsTool>();
+        services.AddScoped<IAgentTool, GetRfqTool>();
+        services.AddScoped<IAgentTool, SearchSuppliersTool>();
+        services.AddScoped<IAgentTool, SearchLeadsTool>();
+        services.AddScoped<IAgentTool, SearchQuotesTool>();
+        services.AddScoped<IAgentTool, SearchOrdersTool>();
+        services.AddScoped<IAgentTool, GetDashboardSummaryTool>();
+        services.AddScoped<IAgentTool, DispatchRfqToSupplierTool>();
+        services.AddScoped<IAgentTool, RecommendAwardTool>();
+        services.AddScoped<IAgentTool, CreateOrderFromQuoteTool>();
+
+        // ---- Engine services ----
+        services.AddScoped<IAgentToolRegistry, AgentToolRegistry>();
+        services.AddScoped<IAgentGuardrail, AgentGuardrail>();
+        services.AddScoped<IAgentOrchestrator, AgentOrchestrator>();
+
+        return services;
+    }
+}

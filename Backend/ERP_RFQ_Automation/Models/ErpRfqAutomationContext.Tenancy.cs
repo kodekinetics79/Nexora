@@ -104,5 +104,11 @@ public partial class ErpRfqAutomationContext
             e.HasIndex(x => new { x.ActorPlatformUserId, x.CreatedOn });
             e.HasIndex(x => new { x.ActAsTenantId, x.CreatedOn });
         });
+
+        // ==== Sourcing-copilot ("Agent") engine (Agent/) ====
+        // Entity configuration + tenant query filters live in the NEW partial file
+        // ErpRfqAutomationContext.Agent.cs; this single delegating call is the only
+        // splice point (partial methods allow exactly one call site + implementation).
+        ConfigureAgentModel(modelBuilder);
     }
 }
