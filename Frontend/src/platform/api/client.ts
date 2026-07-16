@@ -12,7 +12,7 @@
 // import `platformApi` and never touch axios directly.
 // ==========================================================================
 
-import axiosInstance from '../../api/axiosInstance';
+import platformHttp from './platformHttp';
 import type {
   AuditEntry,
   ExtractionJob,
@@ -37,9 +37,9 @@ import {
   TENANTS,
 } from './mockData';
 
-// TODO(platform-api): drive this from an env flag once the backend is live, e.g.
-//   const USE_MOCK = import.meta.env.VITE_PLATFORM_API_MOCK !== 'false';
-const USE_MOCK = true;
+// Live by default. Set `VITE_PLATFORM_API_MOCK=true` to run the console against
+// the in-memory mock adapter for offline development / demos.
+const USE_MOCK = import.meta.env.VITE_PLATFORM_API_MOCK === 'true';
 
 export interface AuditQuery {
   action?: string;
@@ -330,48 +330,49 @@ const mockPlatformApi: PlatformApi = {
 };
 
 // ---------------------------------------------------------------------------
-// REAL (HTTP) adapter — endpoints per ADR-0005. Reuses the app axios instance
-// (auth-token interceptor already wired). Fill in as the backend lands.
+// REAL (HTTP) adapter — endpoints per ADR-0005. Uses the dedicated
+// `platformHttp` axios instance, which attaches the PLATFORM token (scope=
+// platform) — never the tenant token — and clears the platform session on 401.
 // ---------------------------------------------------------------------------
 
 const httpPlatformApi: PlatformApi = {
   // GET /api/platform/overview
-  getOverview: async () => (await axiosInstance.get<OverviewMetrics>('/api/platform/overview')).data,
+  getOverview: async () => (await platformHttp.get<OverviewMetrics>('/api/platform/overview')).data,
 
   // GET /api/platform/tenants
-  listTenants: async () => (await axiosInstance.get<Tenant[]>('/api/platform/tenants')).data,
+  listTenants: async () => (await platformHttp.get<Tenant[]>('/api/platform/tenants')).data,
   // GET /api/platform/tenants/:id
-  getTenant: async (id) => (await axiosInstance.get<TenantDetail>(`/api/platform/tenants/${id}`)).data,
+  getTenant: async (id) => (await platformHttp.get<TenantDetail>(`/api/platform/tenants/${id}`)).data,
   // POST /api/platform/tenants
-  provisionTenant: async (input) => (await axiosInstance.post<Tenant>('/api/platform/tenants', input)).data,
+  provisionTenant: async (input) => (await platformHttp.post<Tenant>('/api/platform/tenants', input)).data,
   // POST /api/platform/tenants/:id/suspend
-  suspendTenant: async (id) => (await axiosInstance.post<Tenant>(`/api/platform/tenants/${id}/suspend`)).data,
+  suspendTenant: async (id) => (await platformHttp.post<Tenant>(`/api/platform/tenants/${id}/suspend`)).data,
   // POST /api/platform/tenants/:id/resume
-  resumeTenant: async (id) => (await axiosInstance.post<Tenant>(`/api/platform/tenants/${id}/resume`)).data,
+  resumeTenant: async (id) => (await platformHttp.post<Tenant>(`/api/platform/tenants/${id}/resume`)).data,
   // POST /api/platform/tenants/:id/impersonate
-  impersonateTenant: async (id) => (await axiosInstance.post<ImpersonationTicket>(`/api/platform/tenants/${id}/impersonate`)).data,
+  impersonateTenant: async (id) => (await platformHttp.post<ImpersonationTicket>(`/api/platform/tenants/${id}/impersonate`)).data,
   // PUT /api/platform/tenants/:id/flags/:flagKey
   setTenantFlag: async (tenantId, flagKey, enabled) =>
-    (await axiosInstance.put<Record<string, boolean>>(`/api/platform/tenants/${tenantId}/flags/${flagKey}`, { enabled })).data,
+    (await platformHttp.put<Record<string, boolean>>(`/api/platform/tenants/${tenantId}/flags/${flagKey}`, { enabled })).data,
 
   // GET /api/platform/pipeline/queue
-  getQueueStats: async () => (await axiosInstance.get<QueueStats>('/api/platform/pipeline/queue')).data,
+  getQueueStats: async () => (await platformHttp.get<QueueStats>('/api/platform/pipeline/queue')).data,
   // GET /api/platform/pipeline/jobs
-  listJobs: async (query) => (await axiosInstance.get<ExtractionJob[]>('/api/platform/pipeline/jobs', { params: query })).data,
+  listJobs: async (query) => (await platformHttp.get<ExtractionJob[]>('/api/platform/pipeline/jobs', { params: query })).data,
   // POST /api/platform/pipeline/jobs/:id/requeue
-  requeueJob: async (jobId) => (await axiosInstance.post<ExtractionJob>(`/api/platform/pipeline/jobs/${jobId}/requeue`)).data,
+  requeueJob: async (jobId) => (await platformHttp.post<ExtractionJob>(`/api/platform/pipeline/jobs/${jobId}/requeue`)).data,
   // DELETE /api/platform/pipeline/jobs/:id
   discardJob: async (jobId) => {
-    await axiosInstance.delete(`/api/platform/pipeline/jobs/${jobId}`);
+    await platformHttp.delete(`/api/platform/pipeline/jobs/${jobId}`);
   },
 
   // GET /api/platform/plans
-  listPlans: async () => (await axiosInstance.get<Plan[]>('/api/platform/plans')).data,
+  listPlans: async () => (await platformHttp.get<Plan[]>('/api/platform/plans')).data,
   // GET /api/platform/feature-flags
-  listFeatureFlags: async () => (await axiosInstance.get<FeatureFlag[]>('/api/platform/feature-flags')).data,
+  listFeatureFlags: async () => (await platformHttp.get<FeatureFlag[]>('/api/platform/feature-flags')).data,
 
   // GET /api/platform/audit
-  listAudit: async (query) => (await axiosInstance.get<AuditEntry[]>('/api/platform/audit', { params: query })).data,
+  listAudit: async (query) => (await platformHttp.get<AuditEntry[]>('/api/platform/audit', { params: query })).data,
 };
 
 // The single client the whole console imports. Swap the assignment (or the

@@ -1,60 +1,68 @@
 // ---------------------------------------------------------------------------
-// Platform (owner) authentication — PLACEHOLDER
+// Platform (owner) authentication
 //
-// The platform console lives ABOVE tenants and must be gated on a
-// `scope=platform` claim / dedicated platform token (ADR-0005), NOT on the
-// tenant-scoped RBAC used elsewhere in the app.
+// The platform console is gated on a DEDICATED platform JWT (scope=platform,
+// audience nexora-platform) obtained from `POST /api/platform/auth/login`. This
+// is SEPARATE from the tenant RBAC session used elsewhere in the app.
 //
-// For now this reads a local flag so the console can be built and demoed.
-//
-// TODO(platform-auth): replace the flag check with the real gate, e.g.
-//   - decode the JWT (jwt-decode is already a dependency) and assert
-//     `payload.scope === 'platform'` / `payload.roles.includes('platform_owner')`
-//   - OR check a dedicated `platformToken` issued by the platform IdP
-//   - wire `enterPlatform` / `exitPlatform` to acquire / drop that token.
+// This hook is a thin React binding over `platformSession` (the storage-backed
+// external store) plus the login/logout side-effects. Components read
+// `isPlatformAuthed` / `platformUser` and call `platformLogin` / `platformLogout`.
 // ---------------------------------------------------------------------------
 
 import { useCallback, useSyncExternalStore } from 'react';
+import platformHttp from '../api/platformHttp';
+import {
+  clearPlatformSession,
+  getPlatformAuthedSnapshot,
+  getPlatformUser,
+  setPlatformSession,
+  subscribePlatformSession,
+  userFromLogin,
+  type PlatformSessionUser,
+} from './platformSession';
 
-const STORAGE_KEY = 'nexora.platformScope';
-
-// Simple external store so every component re-renders when the flag flips.
-const listeners = new Set<() => void>();
-const emit = () => listeners.forEach((l) => l());
-
-const subscribe = (cb: () => void) => {
-  listeners.add(cb);
-  window.addEventListener('storage', cb);
-  return () => {
-    listeners.delete(cb);
-    window.removeEventListener('storage', cb);
-  };
-};
-
-const getSnapshot = () => localStorage.getItem(STORAGE_KEY) === 'true';
+const LOGIN_PATH = '/api/platform/auth/login';
 
 export interface PlatformAuth {
-  /** Whether the current principal holds the `scope=platform` claim. */
-  isPlatformOwner: boolean;
-  /** Grant platform scope (demo shim — real impl acquires a platform token). */
-  enterPlatform: () => void;
-  /** Drop platform scope. */
-  exitPlatform: () => void;
+  /** True when a live platform-scoped token is present. */
+  isPlatformAuthed: boolean;
+  /** The signed-in platform operator (or null). */
+  platformUser: PlatformSessionUser | null;
+  /** Authenticate against the platform IdP and store the platform token. */
+  platformLogin: (email: string, password: string) => Promise<void>;
+  /** Drop the platform session (returns the console to the login screen). */
+  platformLogout: () => void;
 }
 
 export const usePlatformAuth = (): PlatformAuth => {
-  const isPlatformOwner = useSyncExternalStore(subscribe, getSnapshot, () => false);
+  const isPlatformAuthed = useSyncExternalStore(
+    subscribePlatformSession,
+    getPlatformAuthedSnapshot,
+    () => false,
+  );
+  // Re-derived on every session change (subscribe drives the re-render).
+  const platformUser = useSyncExternalStore(
+    subscribePlatformSession,
+    getPlatformUser,
+    () => null,
+  );
 
-  const enterPlatform = useCallback(() => {
-    // TODO(platform-auth): exchange for a real platform-scoped token here.
-    localStorage.setItem(STORAGE_KEY, 'true');
-    emit();
+  const platformLogin = useCallback(async (email: string, password: string) => {
+    const { data } = await platformHttp.post<Record<string, unknown>>(LOGIN_PATH, {
+      email,
+      password,
+    });
+    const token = typeof data?.token === 'string' ? data.token : undefined;
+    if (!token) {
+      throw new Error('Platform login did not return a token.');
+    }
+    setPlatformSession(token, userFromLogin(data, token, email));
   }, []);
 
-  const exitPlatform = useCallback(() => {
-    localStorage.removeItem(STORAGE_KEY);
-    emit();
+  const platformLogout = useCallback(() => {
+    clearPlatformSession();
   }, []);
 
-  return { isPlatformOwner, enterPlatform, exitPlatform };
+  return { isPlatformAuthed, platformUser, platformLogin, platformLogout };
 };

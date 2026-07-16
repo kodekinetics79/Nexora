@@ -32,7 +32,6 @@ import {
   Bolt as BoltIcon,
 } from '@mui/icons-material';
 import { useAppTheme } from '../../context/ThemeContext';
-import { useAuth } from '../../context/AuthContext';
 import { usePlatformAuth } from '../auth/usePlatformAuth';
 
 const NAV = [
@@ -132,18 +131,19 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 export default function PlatformLayout() {
   const theme = useTheme();
   const { mode, setMode } = useAppTheme();
-  const { userData } = useAuth();
-  const { exitPlatform } = usePlatformAuth();
+  const { platformUser, platformLogout } = usePlatformAuth();
   const navigate = useNavigate();
   const isMobile = useMediaQuery(theme.breakpoints.down('md'));
   const [mobileOpen, setMobileOpen] = useState(false);
 
-  const initials = (userData.userName ?? 'OP')
-    .split(/\s+/)
+  const displayName = platformUser?.name ?? platformUser?.email ?? 'Operator';
+  const initials = displayName
+    .split(/[\s@.]+/)
+    .filter(Boolean)
     .map((p) => p.charAt(0))
     .slice(0, 2)
     .join('')
-    .toUpperCase();
+    .toUpperCase() || 'OP';
 
   return (
     <Box sx={{ display: 'flex', minHeight: '100vh', bgcolor: 'background.default' }}>
@@ -210,16 +210,16 @@ export default function PlatformLayout() {
               <Avatar sx={{ width: 34, height: 34, bgcolor: 'primary.main', fontSize: 13, fontWeight: 800 }}>{initials}</Avatar>
               <Box sx={{ display: { xs: 'none', sm: 'block' }, lineHeight: 1.1 }}>
                 <Typography variant="body2" sx={{ fontWeight: 700 }}>
-                  {userData.userName ?? 'Operator'}
+                  {displayName}
                 </Typography>
                 <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                  Platform Owner
+                  {platformUser?.role ?? 'Platform Owner'}
                 </Typography>
               </Box>
             </Box>
 
-            <Tooltip title="Exit platform scope">
-              <IconButton onClick={exitPlatform} color="error" sx={{ ml: 0.5 }}>
+            <Tooltip title="Sign out of platform console">
+              <IconButton onClick={platformLogout} color="error" sx={{ ml: 0.5 }}>
                 <ExitIcon fontSize="small" />
               </IconButton>
             </Tooltip>

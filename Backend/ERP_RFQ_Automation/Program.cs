@@ -234,7 +234,7 @@ builder.Services.AddSingleton(new ExtractionWorkerOptions
 builder.Services.AddScoped<IExtractionQueue, ExtractionQueue>();
 builder.Services.AddScoped<IChunkedExtractionService, ChunkedExtractionService>();
 builder.Services.AddScoped<ILeadPersister, LeadPersister>();
-builder.Services.AddScoped<IExtractionDocumentReader, DefaultExtractionDocumentReader>();
+builder.Services.AddScoped<IExtractionDocumentReader, ProductionDocumentReader>();
 builder.Services.AddHostedService<ExtractionWorker>();
 
 var app = builder.Build();
