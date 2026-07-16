@@ -622,5 +622,188 @@ namespace ERP_RFQ_Automation.Repositories
                 TotalLeadSources = leads.Select(l => l.LeadSource).Distinct().Count()
             };
         }
+
+        // ==== Extraction review workbench ====
+
+        // Marker prefixed to HeaderRemarks when an extraction persists as low-confidence.
+        // Persisted format: "[NEEDS REVIEW] {reason} {originalRemark}" (see ExtractionWorker.PersistAsync).
+        private const string NeedsReviewMarker = "[NEEDS REVIEW]";
+
+        // Leads whose linked EmailIngest is flagged NeedsReview and that have not yet been
+        // triaged (LeadStatusId == null). BU scoping is enforced by the global query filter;
+        // the explicit BusinessUnitId predicate mirrors GetLeadListAsync for clarity.
+        public async Task<(IEnumerable<LeadNeedsReviewItemDTO>, int TotalCount)> GetNeedsReviewLeadsAsync(int pageNumber, int pageSize, long businessUnitId, string? search = null)
+        {
+            var query = _context.Leads
+                .AsNoTracking()
+                .Include(l => l.EmailIngests)
+                .Where(l => l.BusinessUnitId == businessUnitId)
+                .Where(l => l.LeadStatusId == null)
+                .Where(l => l.EmailIngests.ParseStatus == "NeedsReview");
+
+            if (!string.IsNullOrWhiteSpace(search))
+            {
+                var term = search.Trim().ToLower();
+                query = query.Where(l =>
+                    (l.Rfqno != null && l.Rfqno.ToLower().Contains(term)) ||
+                    (l.BuyersName != null && l.BuyersName.ToLower().Contains(term)));
+            }
+
+            var totalCount = await query.CountAsync();
+
+            var leads = await query
+                .OrderByDescending(l => l.RecDate)
+                .Skip((pageNumber - 1) * pageSize)
+                .Take(pageSize)
+                .Select(l => new
+                {
+                    l.Id,
+                    l.Rfqno,
+                    l.BuyersName,
+                    l.RecDate,
+                    l.BidClosingDate,
+                    l.LeadSource,
+                    l.Aiconfidence,
+                    l.HeaderRemarks,
+                    ReceivedOn = (DateTime?)l.EmailIngests.CreatedOn,
+                    ItemCount = l.LeadItems.Count
+                })
+                .ToListAsync();
+
+            var dtos = leads.Select(l => new LeadNeedsReviewItemDTO
+            {
+                Id = l.Id,
+                Rfqno = l.Rfqno,
+                BuyersName = l.BuyersName,
+                RecDate = l.RecDate,
+                BidClosingDate = l.BidClosingDate,
+                LeadSource = l.LeadSource,
+                Aiconfidence = l.Aiconfidence,
+                ItemCount = l.ItemCount,
+                ReviewReason = ExtractReviewReason(l.HeaderRemarks),
+                ReceivedOn = l.ReceivedOn
+            }).ToList();
+
+            return (dtos, totalCount);
+        }
+
+        // Persist reviewer corrections against a low-confidence lead and clear the review flag.
+        // Loads the aggregate TRACKED (LeadItems + EmailIngests) so header/item edits, inserts and
+        // deletes all flush in a single SaveChanges. Tenant ownership is enforced by the global
+        // query filter; any BusinessUnitId in the payload is ignored by design.
+        public async Task<LeadResponseDTO?> SubmitLeadReviewAsync(long id, long businessUnitId, LeadReviewSubmitDTO review)
+        {
+            var lead = await _context.Leads
+                .Include(l => l.LeadItems)
+                .Include(l => l.EmailIngests)
+                .FirstOrDefaultAsync(l => l.Id == id && l.BusinessUnitId == businessUnitId);
+
+            if (lead == null) return null;
+
+            var header = review.Header ?? new LeadReviewHeaderDTO();
+
+            // Header edits: only apply provided (non-null) fields.
+            if (header.Rfqno != null) lead.Rfqno = header.Rfqno;
+            if (header.BuyersName != null) lead.BuyersName = header.BuyersName;
+            if (header.BidClosingDate != null) lead.BidClosingDate = header.BidClosingDate;
+            if (header.OpportunityNo != null) lead.OpportunityNo = header.OpportunityNo;
+
+            // HeaderRemarks: a client-supplied value wins; otherwise strip the review marker
+            // from the existing remark so the human note (if any) survives.
+            lead.HeaderRemarks = header.HeaderRemarks ?? StripNeedsReviewPrefix(lead.HeaderRemarks);
+
+            // Upsert items: match existing by Id, insert new (Id null/0), delete the rest.
+            var items = review.Items ?? new List<LeadItemReviewDTO>();
+            var keptIds = items.Where(i => i.Id.HasValue && i.Id.Value > 0)
+                               .Select(i => i.Id!.Value)
+                               .ToHashSet();
+
+            var toRemove = lead.LeadItems.Where(li => !keptIds.Contains(li.Id)).ToList();
+            if (toRemove.Count > 0)
+                _context.LeadItems.RemoveRange(toRemove);
+
+            foreach (var dto in items)
+            {
+                if (dto.Id.HasValue && dto.Id.Value > 0)
+                {
+                    var existing = lead.LeadItems.FirstOrDefault(li => li.Id == dto.Id.Value);
+                    if (existing == null) continue; // stale/foreign id; ignore rather than trust it
+                    ApplyItemFields(existing, dto);
+                }
+                else
+                {
+                    var created = new LeadItem { LeadId = lead.Id };
+                    ApplyItemFields(created, dto);
+                    lead.LeadItems.Add(created);
+                }
+            }
+
+            // RemoveRange marks items Deleted but leaves them on the nav collection until save,
+            // so exclude them when recomputing the resulting line-item count.
+            lead.NoOfLineItems = lead.LeadItems.Count(li => !toRemove.Contains(li));
+
+            // Clear the canonical NeedsReview flag regardless of action.
+            if (lead.EmailIngests != null)
+                lead.EmailIngests.ParseStatus = "Success";
+
+            if (review.Action == "approve")
+                lead.LeadStatusId = 24;
+
+            lead.ModifiedDate = DateTime.UtcNow;
+
+            await _context.SaveChangesAsync();
+
+            // Reuse the canonical mapping for the response.
+            return await GetLeadByIdAsync(id, businessUnitId);
+        }
+
+        // Only quantity is non-nullable on the model; a null quantity keeps the existing
+        // value (update) or defaults to 0 (insert, via the model default).
+        private static void ApplyItemFields(LeadItem item, LeadItemReviewDTO dto)
+        {
+            item.LineItemNo = dto.LineItemNo;
+            item.ProductShortName = dto.ProductShortName;
+            item.ProductShortDescription = dto.ProductShortDescription;
+            item.CommodityProduct = dto.CommodityProduct;
+            item.ItemMaterialCode = dto.ItemMaterialCode;
+            item.Currency = dto.Currency;
+            item.UnitOfMeasure = dto.UnitOfMeasure;
+            item.UnitPrice = dto.UnitPrice;
+            if (dto.Quantity.HasValue) item.Quantity = dto.Quantity.Value;
+            item.ManufacturerName = dto.ManufacturerName;
+            item.ManufacturerPartNumber = dto.ManufacturerPartNumber;
+            item.AlternateProductName = dto.AlternateProductName;
+            item.AlternatePartNumber = dto.AlternatePartNumber;
+            item.ItemText = dto.ItemText;
+            item.LeadTime = dto.LeadTime;
+        }
+
+        // Returns the review reason parsed from HeaderRemarks, or null when the lead is not
+        // flagged. Persistence does not delimit the reason from the human remark, so the whole
+        // text after the marker is returned; when nothing follows the marker the raw remark is used.
+        private static string? ExtractReviewReason(string? headerRemarks)
+        {
+            if (string.IsNullOrWhiteSpace(headerRemarks)) return null;
+
+            var trimmed = headerRemarks.TrimStart();
+            if (!trimmed.StartsWith(NeedsReviewMarker, StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            var afterMarker = trimmed.Substring(NeedsReviewMarker.Length).Trim();
+            return string.IsNullOrWhiteSpace(afterMarker) ? trimmed : afterMarker;
+        }
+
+        // Removes the leading "[NEEDS REVIEW]" marker, keeping whatever human remark follows.
+        private static string? StripNeedsReviewPrefix(string? headerRemarks)
+        {
+            if (string.IsNullOrWhiteSpace(headerRemarks)) return headerRemarks;
+
+            var trimmed = headerRemarks.TrimStart();
+            if (!trimmed.StartsWith(NeedsReviewMarker, StringComparison.OrdinalIgnoreCase))
+                return headerRemarks;
+
+            var stripped = trimmed.Substring(NeedsReviewMarker.Length).Trim();
+            return stripped.Length == 0 ? null : stripped;
+        }
     }
 }

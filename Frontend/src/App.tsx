@@ -32,6 +32,8 @@ const AssignedLeadsPage = lazy(() => import('./pages/Leads/AssignedLeadsPage'));
 const ManualUploadLeadsPage = lazy(() => import('./pages/Leads/ManualUploadLeadsPage'));
 const FolderUploadLeadsPage = lazy(() => import('./pages/Leads/FolderUploadLeadsPage'));
 const LeadDetailPage = lazy(() => import('./pages/Leads/LeadDetailPage'));
+const ExtractionReviewPage = lazy(() => import('./pages/ExtractionReview/ExtractionReviewPage'));
+const ExtractionReviewDetailPage = lazy(() => import('./pages/ExtractionReview/ExtractionReviewDetailPage'));
 const AllRFQsPage = lazy(() => import('./pages/Procurement/RFQs/AllRFQsPage'));
 const DraftRFQsPage = lazy(() => import('./pages/Procurement/RFQs/DraftRFQsPage'));
 const OutstandingRFQsPage = lazy(() => import('./pages/Procurement/RFQs/OutstandingRFQsPage'));
@@ -132,6 +134,10 @@ function App() {
       {/* Customer Routes */}
       <Route path="/customers" element={<MainLayout><PermissionGuard moduleName="Customers" redirect><CustomersPage /></PermissionGuard></MainLayout>} />
       <Route path="/customers/:id" element={<MainLayout><PermissionGuard moduleName="Customers" redirect><CustomerDetailPage /></PermissionGuard></MainLayout>} />
+
+      {/* Extraction Review Routes */}
+      <Route path="/procurement/extraction/review" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><ExtractionReviewPage /></PermissionGuard></MainLayout>} />
+      <Route path="/procurement/extraction/review/:id" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><ExtractionReviewDetailPage /></PermissionGuard></MainLayout>} />
 
       {/* Lead Management Routes */}
       <Route path="/procurement/leads/all" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><LeadsPage /></PermissionGuard></MainLayout>} />

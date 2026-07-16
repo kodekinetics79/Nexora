@@ -71,6 +71,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
         moduleName: 'Leads',
         children: [
           { key: 'leads-all', label: t('leads'), path: '/procurement/leads/all', moduleName: 'Leads', activePrefixes: ['/procurement/leads/view', '/leads/view'] },
+          { key: 'leads-review', label: t('review_queue') || 'Review Queue', path: '/procurement/extraction/review', moduleName: 'Leads', activePrefixes: ['/procurement/extraction/review'] },
           { key: 'leads-outstanding', label: t('outstanding_leads'), path: '/procurement/leads/outstanding', moduleName: 'Leads' },
           { key: 'leads-assigned', label: t('assigned_leads'), path: '/procurement/leads/assigned', moduleName: 'Leads' },
           { key: 'leads-manual', label: t('manual_upload'), path: '/procurement/leads/manual-upload', moduleName: 'Leads' },

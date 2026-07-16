@@ -37,5 +37,9 @@ namespace ERP_RFQ_Automation.Interfaces
         Task<LeadResponseDTO?> GetLeadByIdAsync(long id, long businessUnitId);
 
         Task<LeadStatsDTO> GetLeadStatsAsync(long businessUnitId);
+
+        // Extraction review workbench
+        Task<(IEnumerable<LeadNeedsReviewItemDTO>, int TotalCount)> GetNeedsReviewLeadsAsync(int pageNumber, int pageSize, long businessUnitId, string? search = null);
+        Task<LeadResponseDTO?> SubmitLeadReviewAsync(long id, long businessUnitId, LeadReviewSubmitDTO review);
     }
 }

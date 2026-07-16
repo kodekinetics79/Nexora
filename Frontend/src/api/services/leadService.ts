@@ -60,6 +60,12 @@ export interface LeadItemResponseDTO {
   customerRfqno?: string;
   storageLocation?: string;
   commodityProduct?: string;
+  // Additional extraction fields surfaced by GET /api/Lead/{id} and edited in
+  // the Extraction Review workbench (all optional / additive).
+  alternateProductName?: string;
+  alternatePartNumber?: string;
+  itemText?: string;
+  leadTime?: string;
 }
 
 export interface AttachmentResponseDTO {

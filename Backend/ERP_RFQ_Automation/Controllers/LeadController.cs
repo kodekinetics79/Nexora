@@ -173,6 +173,61 @@ public class LeadController : ControllerBase
         }
     }
 
+    // Extraction review workbench: list low-confidence leads awaiting human review.
+    [HttpGet("needs-review")]
+    public async Task<ActionResult<PaginatedResponseDTO<LeadNeedsReviewItemDTO>>> GetNeedsReviewLeads(
+        [FromQuery] int pageNumber = 1,
+        [FromQuery] int pageSize = 25,
+        [FromQuery] string? search = null)
+    {
+        try
+        {
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
+
+            if (pageNumber < 1)
+                return BadRequest("Page number must be greater than or equal to 1.");
+            pageSize = Math.Clamp(pageSize, 1, 200);
+
+            (IEnumerable<LeadNeedsReviewItemDTO> leads, int totalCount) = await _repository.GetNeedsReviewLeadsAsync(pageNumber, pageSize, businessUnitId, search);
+
+            var response = new PaginatedResponseDTO<LeadNeedsReviewItemDTO>
+            {
+                Items = leads,
+                TotalCount = totalCount,
+                PageNumber = pageNumber,
+                PageSize = pageSize
+            };
+            return Ok(response);
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving needs-review leads: {ex.Message}");
+        }
+    }
+
+    // Extraction review workbench: submit reviewer corrections and clear the review flag.
+    [HttpPut("{id}/review")]
+    public async Task<ActionResult<LeadResponseDTO>> SubmitLeadReview(long id, [FromBody] LeadReviewSubmitDTO review)
+    {
+        try
+        {
+            if (!ModelState.IsValid) return BadRequest(ModelState);
+
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
+
+            var lead = await _repository.SubmitLeadReviewAsync(id, businessUnitId, review);
+            if (lead == null) return NotFound($"Lead with ID {id} not found.");
+
+            return Ok(lead);
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(StatusCodes.Status500InternalServerError, $"Error submitting lead review: {ex.Message}");
+        }
+    }
+
     [HttpGet("{id}")]
     public async Task<ActionResult<LeadResponseDTO>> GetLeadById(long id)
     {
