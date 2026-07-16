@@ -25,6 +25,7 @@ import {
   ExpandMore,
   FiberManualRecord as BulletIcon,
   TrendingUp as LeadIcon,
+  AutoAwesome as CopilotIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../../context/AuthContext';
 
@@ -55,6 +56,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
     'inventory': location.pathname.includes('/inventory'),
     'supplier_mgmt': location.pathname.includes('/suppliers') || location.pathname.includes('/quoted-items') || location.pathname.includes('/purchase-orders'),
     'lead_mgmt': location.pathname.includes('/leads'),
+    'copilot': location.pathname.includes('/copilot'),
   });
 
   const handleGroupClick = (key: string) => {
@@ -64,6 +66,18 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
   const menuItems: MenuItem[] = useMemo(() => {
     const rawItems: MenuItem[] = [
       { key: 'dashboard', label: t('dashboard'), icon: <DashboardIcon />, path: '/dashboard', moduleName: 'Dashboard' },
+      {
+        key: 'copilot',
+        label: t('copilot') || 'Copilot',
+        icon: <CopilotIcon />,
+        moduleName: 'Dashboard',
+        activePrefixes: ['/copilot'],
+        children: [
+          { key: 'copilot-chat', label: t('copilot') || 'Copilot', path: '/copilot', moduleName: 'Dashboard' },
+          { key: 'copilot-approvals', label: t('approvals') || 'Approvals', path: '/copilot/approvals', moduleName: 'Dashboard' },
+          { key: 'copilot-activity', label: t('activity') || 'Activity', path: '/copilot/activity', moduleName: 'Dashboard' },
+        ],
+      },
       {
         key: 'lead_mgmt',
         label: t('lead_management'),

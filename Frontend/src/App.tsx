@@ -54,6 +54,11 @@ const ShipmentViewPage = lazy(() => import('./pages/Sales/Shipments/ShipmentView
 const ShipmentInvoicePage = lazy(() => import('./pages/Sales/Shipments/ShipmentInvoicePage'));
 const PriceStructurePage = lazy(() => import('./pages/Setup/PriceStructure/PriceStructurePage'));
 
+// Sourcing Copilot — conversational autonomous-agent console (flagship surface).
+const CopilotPage = lazy(() => import('./pages/Copilot/CopilotPage'));
+const CopilotApprovalsPage = lazy(() => import('./pages/Copilot/ApprovalsPage'));
+const CopilotActivityPage = lazy(() => import('./pages/Copilot/ActivityPage'));
+
 // Platform Owner console (ADR-0005). Self-contained `/platform/*` tree with its
 // own guard + layout; see src/platform/.
 const PlatformRoutes = lazy(() => import('./platform/PlatformRoutes'));
@@ -70,7 +75,12 @@ function App() {
     <Routes>
       <Route path="/" element={<Navigate to="/login" replace />} />
       <Route path="/dashboard" element={<MainLayout><PermissionGuard moduleName="Dashboard" redirect><DashboardPage /></PermissionGuard></MainLayout>} />
-      
+
+      {/* Sourcing Copilot Routes */}
+      <Route path="/copilot" element={<MainLayout><PermissionGuard moduleName="Dashboard" redirect><CopilotPage /></PermissionGuard></MainLayout>} />
+      <Route path="/copilot/approvals" element={<MainLayout><PermissionGuard moduleName="Dashboard" redirect><CopilotApprovalsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/copilot/activity" element={<MainLayout><PermissionGuard moduleName="Dashboard" redirect><CopilotActivityPage /></PermissionGuard></MainLayout>} />
+
       {/* Sales Routes */}
       <Route path="/sales/quotes" element={<MainLayout><PermissionGuard moduleName="Quotations" redirect><QuotesPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/quotes/create" element={<MainLayout><PermissionGuard moduleName="Quotations" action="create" redirect><CreateQuotePage /></PermissionGuard></MainLayout>} />
