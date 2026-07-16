@@ -13,6 +13,8 @@ using ERP_RFQ_Automation.Services.DocumentIntelligence;
 using ERP_RFQ_Automation.Authorization;
 using Microsoft.AspNetCore.Authorization;
 using OfficeOpenXml;
+using ERP_RFQ_Automation.Extraction;
+using ERP_RFQ_Automation.Platform.Auth;
 
 // PostgreSQL migration: restore pre-6.0 Npgsql timestamp semantics so the
 // existing DateTime usage (DateTime.Now / Unspecified-kind values inherited from
@@ -62,6 +64,10 @@ builder.Services.AddDbContext<ErpRfqAutomationContext>(options =>
 // Per-request tenant scope for EF global query filters (ADR-0005 tenant isolation).
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ERP_RFQ_Automation.MultiTenancy.ITenantContext, ERP_RFQ_Automation.MultiTenancy.HttpTenantContext>();
+
+// Platform-Owner control-plane services (ADR-0005)
+builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Auth.IPlatformAuthService, ERP_RFQ_Automation.Platform.Auth.PlatformAuthService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Services.IPlatformAuditService, ERP_RFQ_Automation.Platform.Services.PlatformAuditService>();
 
 // Readiness/liveness health checks (DATA-05)
 builder.Services.AddHealthChecks()
@@ -114,6 +120,9 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("CanCreateQuotation", policy => policy.Requirements.Add(new PermissionRequirement("Quotation", "CanCreate")));
     options.AddPolicy("CanEditQuotation", policy => policy.Requirements.Add(new PermissionRequirement("Quotation", "CanEdit")));
     options.AddPolicy("CanDeleteQuotation", policy => policy.Requirements.Add(new PermissionRequirement("Quotation", "CanDelete")));
+
+    // Platform-Owner control plane: PlatformScope (default-deny) + role sub-policies (ADR-0005)
+    options.AddPlatformPolicies();
 });
 // Register email processing services
 builder.Services.AddHostedService<EmailBackgroundService>();
@@ -179,7 +188,10 @@ builder.Services.AddAuthentication(options =>
         ValidAudience = builder.Configuration["Jwt:Audience"] ?? "",
         IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
     };
-});
+})
+// Second JWT scheme for the Platform-Owner plane (audience nexora-platform, scope=platform).
+// A tenant token fails validation here and vice-versa — the hard boundary. (ADR-0005)
+.AddPlatformJwtBearer(builder.Configuration);
 // Configure Swagger for JWT Authentication
 builder.Services.AddSwaggerGen(c =>
 {
@@ -210,6 +222,21 @@ builder.Services.AddSwaggerGen(c =>
     });
 });
 builder.Services.AddEndpointsApiExplorer();
+// Async extraction pipeline (ADR-0003): durable job queue + bounded worker pool.
+builder.Services.AddSingleton(new ExtractionWorkerOptions
+{
+    WorkerCount = 4,
+    MaxConcurrentLlmCalls = 8,
+    PerTenantConcurrencyCap = 4,
+    LeaseDuration = TimeSpan.FromMinutes(5),
+    IdlePollDelay = TimeSpan.FromSeconds(2)
+});
+builder.Services.AddScoped<IExtractionQueue, ExtractionQueue>();
+builder.Services.AddScoped<IChunkedExtractionService, ChunkedExtractionService>();
+builder.Services.AddScoped<ILeadPersister, LeadPersister>();
+builder.Services.AddScoped<IExtractionDocumentReader, DefaultExtractionDocumentReader>();
+builder.Services.AddHostedService<ExtractionWorker>();
+
 var app = builder.Build();
 
 // Global exception handler — return a generic message to clients and log the
