@@ -59,6 +59,10 @@ builder.Services.AddDbContext<ErpRfqAutomationContext>(options =>
         npgsql.CommandTimeout(60);
     }));
 
+// Per-request tenant scope for EF global query filters (ADR-0005 tenant isolation).
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddScoped<ERP_RFQ_Automation.MultiTenancy.ITenantContext, ERP_RFQ_Automation.MultiTenancy.HttpTenantContext>();
+
 // Readiness/liveness health checks (DATA-05)
 builder.Services.AddHealthChecks()
     .AddCheck<ERP_RFQ_Automation.HealthChecks.DatabaseHealthCheck>("database");

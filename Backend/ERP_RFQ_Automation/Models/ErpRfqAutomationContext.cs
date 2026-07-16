@@ -15,6 +15,18 @@ public partial class ErpRfqAutomationContext : DbContext
     {
     }
 
+    // Tenant-scoping constructor. ITenantContext is optional so EF design-time
+    // (migrations) and the parameterless path still work; DI injects the real
+    // per-request scope at runtime. Backs the global query filters in
+    // ErpRfqAutomationContext.Tenancy.cs. (ADR-0005)
+    public ErpRfqAutomationContext(
+        DbContextOptions<ErpRfqAutomationContext> options,
+        ERP_RFQ_Automation.MultiTenancy.ITenantContext tenant)
+        : base(options)
+    {
+        _tenant = tenant;
+    }
+
     public virtual DbSet<Attachment> Attachments { get; set; }
 
     public virtual DbSet<BusinessUnit> BusinessUnits { get; set; }
