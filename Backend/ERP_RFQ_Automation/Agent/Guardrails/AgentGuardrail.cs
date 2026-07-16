@@ -64,6 +64,21 @@ public sealed class AgentGuardrail : IAgentGuardrail
                 var orderAmount = await ResolveOrderAmountAsync(input, ct);
                 return EvaluateCap(orderAmount, policy.MaxAutoOrderValue, "order");
 
+            case AgentToolNames.SendRfqToSuppliers:
+                if (policy.RequireApprovalForSupplierEmails)
+                    return GuardrailDecision.RequireApproval("Policy requires approval before emailing suppliers.");
+                return GuardrailDecision.Allow("Act level; supplier solicitations allowed by policy.");
+
+            case AgentToolNames.AwardRfq:
+                if (policy.RequireApprovalForAwards)
+                    return GuardrailDecision.RequireApproval("Policy requires approval before recording awards.");
+                return EvaluateCap(ResolveAwardTotal(input), policy.MaxAutoAwardValue, "award");
+
+            case AgentToolNames.CaptureSupplierQuote:
+                // Data entry: no category flag/value cap. Autonomy gate above already
+                // denies at Observe and requires approval at Suggest; allow at Act.
+                return GuardrailDecision.Allow("Act level; supplier quote capture (data entry) allowed.");
+
             default:
                 // Unknown mutation — fail safe.
                 return GuardrailDecision.RequireApproval("Unrecognized mutation; requires human approval.");
@@ -98,6 +113,25 @@ public sealed class AgentGuardrail : IAgentGuardrail
             .Select(q => q.TotalAmount)
             .FirstOrDefaultAsync(ct);
         return total ?? 0m;
+    }
+
+    /// <summary>Award value = explicit totalValue/amount hint, else sum(unitPrice*quantity) over the awards[].</summary>
+    private static decimal ResolveAwardTotal(JsonElement input)
+    {
+        var explicitVal = input.GetDecimalOrNull("totalValue") ?? input.GetDecimalOrNull("amount");
+        if (explicitVal.HasValue) return explicitVal.Value;
+
+        decimal total = 0m;
+        if (input.ValueKind == JsonValueKind.Object && input.TryGetProperty("awards", out var awards) && awards.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var a in awards.EnumerateArray())
+            {
+                var unitPrice = a.GetDecimalOrNull("unitPrice") ?? 0m;
+                var qty = a.GetDecimalOrNull("quantity") ?? 1m;
+                total += unitPrice * qty;
+            }
+        }
+        return total;
     }
 
     private static GuardrailDecision? ReadOverride(string? perToolOverridesJson, string toolName)
@@ -137,4 +171,11 @@ public static class AgentToolNames
     public const string DispatchRfqToSupplier = "dispatch_rfq_to_supplier";
     public const string RecommendAward = "recommend_award";
     public const string CreateOrderFromQuote = "create_order_from_quote";
+
+    // Sourcing-loop tools.
+    public const string SendRfqToSuppliers = "send_rfq_to_suppliers";
+    public const string ListSolicitations = "list_solicitations";
+    public const string CaptureSupplierQuote = "capture_supplier_quote";
+    public const string CompareSupplierQuotes = "compare_supplier_quotes";
+    public const string AwardRfq = "award_rfq";
 }

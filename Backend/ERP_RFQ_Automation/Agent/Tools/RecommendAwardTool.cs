@@ -1,5 +1,6 @@
 using System.Text.Json;
 using ERP_RFQ_Automation.Agent.Guardrails;
+using ERP_RFQ_Automation.Agent.Sourcing;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 
@@ -61,22 +62,8 @@ public sealed class RecommendAwardTool : IAgentTool
             })
             .ToList();
 
-        // Normalize each criterion to [0,1] (lower price/lead better; higher success better).
-        var minPrice = bySupplier.Min(b => b.TotalPrice);
-        var maxPrice = bySupplier.Max(b => b.TotalPrice);
-        var minLead = bySupplier.Min(b => b.AvgLeadTime);
-        var maxLead = bySupplier.Max(b => b.AvgLeadTime);
-        var maxSuccess = bySupplier.Max(b => b.SuccessRate);
-
-        const double wPrice = 0.5, wLead = 0.25, wSuccess = 0.25;
-
-        foreach (var b in bySupplier)
-        {
-            var priceScore = maxPrice == minPrice ? 1.0 : 1.0 - (double)((b.TotalPrice - minPrice) / (maxPrice - minPrice));
-            var leadScore = maxLead == minLead ? 1.0 : 1.0 - ((b.AvgLeadTime - minLead) / (maxLead - minLead));
-            var successScore = maxSuccess <= 0 ? 0.0 : b.SuccessRate / maxSuccess;
-            b.Score = Math.Round(wPrice * priceScore + wLead * leadScore + wSuccess * successScore, 4);
-        }
+        // Shared multi-criteria scorer (price 50%, lead time 25%, success rate 25%).
+        SupplierScoring.ScoreInPlace(bySupplier);
 
         var ranked = bySupplier.OrderByDescending(b => b.Score).ToList();
         var winner = ranked[0];
@@ -89,7 +76,7 @@ public sealed class RecommendAwardTool : IAgentTool
             rationale =
                 $"Best weighted score {winner.Score:0.###} (price 50%, lead time 25%, success rate 25%). " +
                 $"Total price {winner.TotalPrice:0.##}, avg lead time {winner.AvgLeadTime:0.#} days, success rate {winner.SuccessRate:0.#}.",
-            weights = new { price = wPrice, leadTime = wLead, successRate = wSuccess },
+            weights = SupplierScoring.Weights,
             comparison = ranked.Select(b => new
             {
                 b.SupplierId,
@@ -103,7 +90,7 @@ public sealed class RecommendAwardTool : IAgentTool
         });
     }
 
-    private sealed class SupplierBid
+    private sealed class SupplierBid : IScoreCandidate
     {
         public long SupplierId { get; set; }
         public string SupplierName { get; set; } = string.Empty;
@@ -112,5 +99,9 @@ public sealed class RecommendAwardTool : IAgentTool
         public double SuccessRate { get; set; }
         public int LineCount { get; set; }
         public double Score { get; set; }
+
+        // IScoreCandidate projection onto the shared scorer.
+        decimal IScoreCandidate.Price => TotalPrice;
+        double IScoreCandidate.LeadTime => AvgLeadTime;
     }
 }

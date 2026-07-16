@@ -95,5 +95,32 @@ public partial class ErpRfqAutomationContext
             e.HasIndex(x => x.BusinessUnitId).IsUnique().HasDatabaseName("UX_AgentPolicies_BU");
             e.HasQueryFilter(x => CurrentTenantId == null || x.BusinessUnitId == CurrentTenantId);
         });
+
+        modelBuilder.Entity<SupplierSolicitation>(e =>
+        {
+            e.ToTable("SupplierSolicitations");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Status).HasConversion<string>().HasMaxLength(20).IsRequired();
+            e.Property(x => x.Channel).HasMaxLength(40).IsRequired();
+            e.Property(x => x.Notes).HasMaxLength(1000);
+            e.Property(x => x.CreatedOn).HasDefaultValueSql("now()");
+            e.Property(x => x.UpdatedOn).HasDefaultValueSql("now()");
+            e.HasIndex(x => new { x.BusinessUnitId, x.RfqId }).HasDatabaseName("IX_SupplierSolicitations_BU_Rfq");
+            e.HasIndex(x => new { x.BusinessUnitId, x.RfqId, x.SupplierId }).HasDatabaseName("IX_SupplierSolicitations_BU_Rfq_Supplier");
+            e.HasQueryFilter(x => CurrentTenantId == null || x.BusinessUnitId == CurrentTenantId);
+        });
+
+        modelBuilder.Entity<SourcingAward>(e =>
+        {
+            e.ToTable("SourcingAwards");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.UnitPrice).HasColumnType("numeric(18,2)");
+            e.Property(x => x.Quantity).HasColumnType("numeric(18,2)");
+            e.Property(x => x.TotalValue).HasColumnType("numeric(18,2)");
+            e.Property(x => x.Rationale).HasMaxLength(2000);
+            e.Property(x => x.CreatedOn).HasDefaultValueSql("now()");
+            e.HasIndex(x => new { x.BusinessUnitId, x.RfqId }).HasDatabaseName("IX_SourcingAwards_BU_Rfq");
+            e.HasQueryFilter(x => CurrentTenantId == null || x.BusinessUnitId == CurrentTenantId);
+        });
     }
 }

@@ -35,6 +35,13 @@ public static class AgentServiceCollectionExtensions
         services.AddScoped<IAgentTool, RecommendAwardTool>();
         services.AddScoped<IAgentTool, CreateOrderFromQuoteTool>();
 
+        // ---- Sourcing-loop tools (dispatch → capture → compare → award) ----
+        services.AddScoped<IAgentTool, SendRfqToSuppliersTool>();
+        services.AddScoped<IAgentTool, ListSolicitationsTool>();
+        services.AddScoped<IAgentTool, CaptureSupplierQuoteTool>();
+        services.AddScoped<IAgentTool, CompareSupplierQuotesTool>();
+        services.AddScoped<IAgentTool, AwardRfqTool>();
+
         // ---- Engine services ----
         services.AddScoped<IAgentToolRegistry, AgentToolRegistry>();
         services.AddScoped<IAgentGuardrail, AgentGuardrail>();
