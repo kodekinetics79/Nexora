@@ -18,6 +18,8 @@ using ERP_RFQ_Automation.Platform.Auth;
 using ERP_RFQ_Automation.Platform.Hardening;
 using ERP_RFQ_Automation.Notifications;
 using ERP_RFQ_Automation.Agent;
+using ERP_RFQ_Automation.Intelligence.Conversion;
+using ERP_RFQ_Automation.Intelligence.Pricing;
 using System.Text.Json.Serialization;
 
 // PostgreSQL migration: restore pre-6.0 Npgsql timestamp semantics so the
@@ -260,6 +262,18 @@ builder.Services.AddPlatformRateLimiting(builder.Configuration);
 // guardrail engine + immutable audit. Runs in mock mode until Agent:Anthropic:ApiKey is
 // set, so it is fully demoable with no key. Depends on notifications/order/dashboard above.
 builder.Services.AddAgentEngine(builder.Configuration);
+
+// Lead→RFQ→Quote intelligence (Intelligence/): catalog product resolution on lead
+// conversion, and the multi-signal pricing engine (price list, recent quotes,
+// supplier quotes, purchase history, product master → recommended price + rationale
+// + confidence per line). Both surfaced as HTTP endpoints AND copilot tools; the
+// mutation tools ride the guardrail engine's unknown-mutation fail-safe (approval).
+builder.Services.AddConversionIntelligence();
+builder.Services.AddPricingIntelligence();
+builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Conversion.PreviewLeadConversionTool>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Conversion.ConvertLeadToRfqTool>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Pricing.PriceRfqTool>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Pricing.ApplyRfqPricingTool>();
 
 var app = builder.Build();
 
