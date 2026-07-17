@@ -29,6 +29,18 @@ namespace ERP_RFQ_Automation.Controllers
                 }
 
                 var response = await _authRepository.LoginAsync(request);
+
+                if (response.RequiresBusinessUnitSelection)
+                {
+                    // Same email+password is valid in multiple business units:
+                    // no token yet — the client retries with businessUnitId set.
+                    return Ok(new
+                    {
+                        requiresBusinessUnitSelection = true,
+                        businessUnits = response.BusinessUnits
+                    });
+                }
+
                 return Ok(response);
             }
             catch (UnauthorizedAccessException ex)

@@ -1,4 +1,4 @@
-﻿using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations;
 
 namespace ERP_RFQ_Automation.DTOs.AuthDTOs
 {
@@ -13,7 +13,11 @@ namespace ERP_RFQ_Automation.DTOs.AuthDTOs
         [StringLength(100, MinimumLength = 6)]
         public string Password { get; set; } = null!;
 
-        [Required]
-        public long BusinessUnitId { get; set; }
+        /// <summary>
+        /// Optional. The server derives the tenant from the email; this is only
+        /// needed (and honored for backward compatibility) when the same email
+        /// exists in multiple business units and the client must disambiguate.
+        /// </summary>
+        public long? BusinessUnitId { get; set; }
     }
 }

@@ -337,10 +337,37 @@ const getEdgePoint = (from: { x: number; y: number }, to: { x: number; y: number
   };
 };
 
+// --- Auth service typing ---
+interface LoginBusinessUnitOption {
+  id: number;
+  name: string;
+}
+
+interface LoginRequest {
+  email: string;
+  password: string;
+  /** Only sent when disambiguating an email that exists in multiple organizations. */
+  businessUnitId?: number;
+}
+
+interface LoginResponse {
+  id: number;
+  email: string;
+  userName: string;
+  roleId: number | null;
+  roleName: string;
+  businessUnitId: number | null;
+  businessUnitName: string | null;
+  token: string;
+  /** Set (with businessUnits, and no token) when the client must pick an organization. */
+  requiresBusinessUnitSelection?: boolean;
+  businessUnits?: LoginBusinessUnitOption[];
+}
+
 const LoginPage: React.FC = () => {
   const theme = useTheme();
   const { mode, setMode, primaryColor } = useAppTheme();
-  const { setToken, setUserData, businessUnits, loadingBusinessUnits } = useAuth();
+  const { setToken, setUserData } = useAuth();
   const navigate = useNavigate();
 
   const [loading, setLoading] = useState(false);
@@ -360,27 +387,39 @@ const LoginPage: React.FC = () => {
   
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [businessUnitId, setBusinessUnitId] = useState<number | string>('');
+  // Rare case: the same email is valid in multiple organizations and the
+  // server asks which one to sign in to.
+  const [businessUnitOptions, setBusinessUnitOptions] = useState<LoginBusinessUnitOption[] | null>(null);
+  const [selectedBusinessUnitId, setSelectedBusinessUnitId] = useState<number | ''>('');
 
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const submitLogin = async (businessUnitId?: number) => {
     setLoading(true);
     setError(null);
     try {
-      const response = await axiosInstance.post("/api/Auth/Login", {
-        email,
-        password,
-        businessUnitId,
-      });
+      const payload: LoginRequest = { email, password };
+      if (businessUnitId !== undefined) {
+        payload.businessUnitId = businessUnitId;
+      }
+      const response = await axiosInstance.post<LoginResponse>("/api/Auth/Login", payload);
       const data = response.data;
+
+      if (data.requiresBusinessUnitSelection) {
+        // No token yet — show the organization chooser and retry with the pick.
+        setBusinessUnitOptions(data.businessUnits ?? []);
+        setSelectedBusinessUnitId('');
+        return;
+      }
+
       setToken(data.token);
       
       // Fetch permissions for the logged in role
       let permissions: any[] = [];
-      try {
-        permissions = await rolePermissionService.getPermissionsByRole(data.roleId, data.businessUnitId);
-      } catch (permErr) {
-        console.error("Failed to fetch permissions", permErr);
+      if (data.roleId != null && data.businessUnitId != null) {
+        try {
+          permissions = await rolePermissionService.getPermissionsByRole(data.roleId, data.businessUnitId);
+        } catch (permErr) {
+          console.error("Failed to fetch permissions", permErr);
+        }
       }
 
       setUserData({
@@ -388,8 +427,8 @@ const LoginPage: React.FC = () => {
         email: data.email,
         userName: data.userName,
         roleName: data.roleName,
-        roleId: data.roleId,
-        businessUnitId: data.businessUnitId,
+        roleId: data.roleId ?? undefined,
+        businessUnitId: data.businessUnitId ?? undefined,
         permissions: permissions,
       });
       navigate('/dashboard');
@@ -398,6 +437,22 @@ const LoginPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleLogin = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (businessUnitOptions) {
+      if (selectedBusinessUnitId === '') return;
+      submitLogin(selectedBusinessUnitId);
+    } else {
+      submitLogin();
+    }
+  };
+
+  const resetBusinessUnitSelection = () => {
+    setBusinessUnitOptions(null);
+    setSelectedBusinessUnitId('');
+    setError(null);
   };
 
   const nodeCenters = industrialFlow.map((_, i) => getNodeCenter(i));
@@ -501,73 +556,80 @@ const LoginPage: React.FC = () => {
             {notice && <Alert severity="info" sx={{ mb: 3, borderRadius: 3 }}>{notice}</Alert>}
 
             <form onSubmit={handleLogin}>
-              <FormControl fullWidth sx={{ mb: 3 }}>
-                <InputLabel id="bu-label">Select Business Unit</InputLabel>
-                <StyledSelect
-                  mode={mode}
-                  labelId="bu-label"
-                  label="Select Business Unit"
-                  value={businessUnitId}
-                  onChange={(e) => setBusinessUnitId(e.target.value as number)}
-                  required
-                  disabled={loadingBusinessUnits}
-                >
-                  {businessUnits.map((bu) => (
-                    <MenuItem key={bu.id} value={bu.id}>
-                      {bu.businessUnitName}
-                    </MenuItem>
-                  ))}
-                  {loadingBusinessUnits && <MenuItem disabled><CircularProgress size={20} /></MenuItem>}
-                </StyledSelect>
-              </FormControl>
+              {businessUnitOptions ? (
+                <>
+                  <Alert severity="info" sx={{ mb: 3, borderRadius: 3 }}>
+                    Your account belongs to more than one organization. Pick one to continue.
+                  </Alert>
+                  <FormControl fullWidth sx={{ mb: 4 }}>
+                    <InputLabel id="bu-label">Which organization?</InputLabel>
+                    <StyledSelect
+                      mode={mode}
+                      labelId="bu-label"
+                      label="Which organization?"
+                      value={selectedBusinessUnitId}
+                      onChange={(e) => setSelectedBusinessUnitId(Number(e.target.value))}
+                      required
+                    >
+                      {businessUnitOptions.map((bu) => (
+                        <MenuItem key={bu.id} value={bu.id}>
+                          {bu.name}
+                        </MenuItem>
+                      ))}
+                    </StyledSelect>
+                  </FormControl>
+                </>
+              ) : (
+                <>
+                  <StyledTextField
+                    mode={mode}
+                    fullWidth
+                    label="Email Address"
+                    variant="outlined"
+                    sx={{ mb: 3 }}
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    required
+                    slotProps={{
+                      input: {
+                        startAdornment: (
+                          <InputAdornment position="start">
+                            <MailIcon sx={{ color: 'primary.main', opacity: 0.7 }} />
+                          </InputAdornment>
+                        ),
+                      }
+                    }}
+                  />
 
-              <StyledTextField
-                mode={mode}
-                fullWidth
-                label="Email Address"
-                variant="outlined"
-                sx={{ mb: 3 }}
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                slotProps={{
-                  input: {
-                    startAdornment: (
-                      <InputAdornment position="start">
-                        <MailIcon sx={{ color: 'primary.main', opacity: 0.7 }} />
-                      </InputAdornment>
-                    ),
-                  }
-                }}
-              />
-
-              <StyledTextField
-                mode={mode}
-                fullWidth
-                label="Password"
-                type={showPassword ? 'text' : 'password'}
-                variant="outlined"
-                sx={{ mb: 4 }}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                slotProps={{
-                  input: {
-                    startAdornment: (
-                      <InputAdornment position="start">
-                        <LockIcon sx={{ color: 'primary.main', opacity: 0.7 }} />
-                      </InputAdornment>
-                    ),
-                    endAdornment: (
-                      <InputAdornment position="end">
-                        <IconButton onClick={() => setShowPassword(!showPassword)} edge="end">
-                          {showPassword ? <VisibilityOff /> : <Visibility />}
-                        </IconButton>
-                      </InputAdornment>
-                    ),
-                  }
-                }}
-              />
+                  <StyledTextField
+                    mode={mode}
+                    fullWidth
+                    label="Password"
+                    type={showPassword ? 'text' : 'password'}
+                    variant="outlined"
+                    sx={{ mb: 4 }}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    required
+                    slotProps={{
+                      input: {
+                        startAdornment: (
+                          <InputAdornment position="start">
+                            <LockIcon sx={{ color: 'primary.main', opacity: 0.7 }} />
+                          </InputAdornment>
+                        ),
+                        endAdornment: (
+                          <InputAdornment position="end">
+                            <IconButton onClick={() => setShowPassword(!showPassword)} edge="end">
+                              {showPassword ? <VisibilityOff /> : <Visibility />}
+                            </IconButton>
+                          </InputAdornment>
+                        ),
+                      }
+                    }}
+                  />
+                </>
+              )}
 
               {error && <Alert severity="error" sx={{ mb: 3, borderRadius: 3 }}>{error}</Alert>}
 
@@ -576,7 +638,7 @@ const LoginPage: React.FC = () => {
                 variant="contained"
                 size="large"
                 type="submit"
-                disabled={loading}
+                disabled={loading || (businessUnitOptions !== null && selectedBusinessUnitId === '')}
                 sx={{
                   py: 2,
                   fontSize: 16,
@@ -585,8 +647,22 @@ const LoginPage: React.FC = () => {
                   transition: 'all 0.3s ease',
                 }}
               >
-                {loading ? <CircularProgress size={24} color="inherit" /> : 'LOGIN'}
+                {loading
+                  ? <CircularProgress size={24} color="inherit" />
+                  : businessUnitOptions ? 'CONTINUE' : 'LOGIN'}
               </Button>
+
+              {businessUnitOptions && (
+                <Button
+                  fullWidth
+                  variant="text"
+                  onClick={resetBusinessUnitSelection}
+                  disabled={loading}
+                  sx={{ mt: 2 }}
+                >
+                  Back to sign in
+                </Button>
+              )}
             </form>
           </Box>
         </FormSection>

@@ -32,31 +32,97 @@ namespace ERP_RFQ_Automation.Repositories
                 throw new UnauthorizedAccessException("Email and password are required.");
             }
 
-            var user = await _context.Users
+            // The tenant is derived from the email: fetch every user with this
+            // email (normally exactly one; the same email may exist in multiple
+            // business units in the future).
+            var usersForEmail = await _context.Users
                 .Include(u => u.Role)
                 .Include(u => u.Bu) // Include BusinessUnit for BusinessUnitName
                 .AsNoTracking()
-                .FirstOrDefaultAsync(u => u.Email.ToLower() == request.Email.ToLower());
+                .Where(u => u.Email.ToLower() == request.Email.ToLower())
+                .ToListAsync();
 
-            if (user == null)
+            User user;
+
+            if (request.BusinessUnitId.HasValue)
             {
-                _logger.LogWarning("User not found for email: {Email}", request.Email);
-                throw new UnauthorizedAccessException("Invalid email or password.");
+                // Backward-compatible path (also used when the client retries
+                // after a business-unit selection prompt): behave exactly as the
+                // original email+password+businessUnitId login did.
+                var candidate = usersForEmail.FirstOrDefault(u => u.Buid == request.BusinessUnitId.Value)
+                                ?? usersForEmail.FirstOrDefault();
+
+                if (candidate == null)
+                {
+                    _logger.LogWarning("User not found for email: {Email}", request.Email);
+                    throw new UnauthorizedAccessException("Invalid email or password.");
+                }
+
+                if (!BCrypt.Net.BCrypt.Verify(request.Password, candidate.PasswordHash))
+                {
+                    _logger.LogWarning("Password verification failed for email: {Email}", request.Email);
+                    throw new UnauthorizedAccessException("Invalid email or password.");
+                }
+
+                if (candidate.Buid != request.BusinessUnitId)
+                {
+                    _logger.LogWarning("Business Unit mismatch for email: {Email}. Expected: {Expected}, Received: {Received}",
+                        request.Email, candidate.Buid, request.BusinessUnitId);
+                    throw new UnauthorizedAccessException("Invalid Business Unit selected for this user.");
+                }
+
+                user = candidate;
             }
-
-            bool isPasswordValid = BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash);
-
-            if (!isPasswordValid)
+            else
             {
-                _logger.LogWarning("Password verification failed for email: {Email}", request.Email);
-                throw new UnauthorizedAccessException("Invalid email or password.");
-            }
+                // Email-only login: verify the password against the active
+                // account(s) for this email. All failures (unknown email, wrong
+                // password) surface the same message so nothing is leaked about
+                // which part failed or which business units exist.
+                var verifiedUsers = usersForEmail
+                    .Where(u => u.IsActive == true)
+                    .Where(u => BCrypt.Net.BCrypt.Verify(request.Password, u.PasswordHash))
+                    .ToList();
 
-            if (user.Buid != request.BusinessUnitId)
-            {
-                _logger.LogWarning("Business Unit mismatch for email: {Email}. Expected: {Expected}, Received: {Received}", 
-                    request.Email, user.Buid, request.BusinessUnitId);
-                throw new UnauthorizedAccessException("Invalid Business Unit selected for this user.");
+                if (verifiedUsers.Count == 0)
+                {
+                    // Preserve the distinct "inactive" message when the
+                    // credentials are actually correct for an inactive account.
+                    var inactiveMatch = usersForEmail
+                        .Where(u => u.IsActive != true)
+                        .Any(u => BCrypt.Net.BCrypt.Verify(request.Password, u.PasswordHash));
+
+                    if (inactiveMatch)
+                    {
+                        _logger.LogWarning("Inactive account login attempt for email: {Email}", request.Email);
+                        throw new UnauthorizedAccessException("User account is not active.");
+                    }
+
+                    _logger.LogWarning("Invalid credentials for email: {Email}", request.Email);
+                    throw new UnauthorizedAccessException("Invalid email or password.");
+                }
+
+                if (verifiedUsers.Count > 1)
+                {
+                    // Same email + password valid in multiple business units:
+                    // ask the client to pick one (no token issued).
+                    _logger.LogInformation("Email {Email} matches multiple business units; requesting selection.", request.Email);
+
+                    return new LoginResponseDTO
+                    {
+                        RequiresBusinessUnitSelection = true,
+                        BusinessUnits = verifiedUsers
+                            .Where(u => u.Buid.HasValue)
+                            .Select(u => new LoginBusinessUnitOptionDTO
+                            {
+                                Id = u.Buid!.Value,
+                                Name = u.Bu?.BusinessUnitName ?? $"Business Unit {u.Buid.Value}"
+                            })
+                            .ToList()
+                    };
+                }
+
+                user = verifiedUsers[0];
             }
 
             if (!user.IsActive == true)
