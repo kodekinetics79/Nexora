@@ -228,6 +228,42 @@ public class LeadController : ControllerBase
         }
     }
 
+    // WP-A3: resolve a duplicate flag. "not_duplicate" clears the conversion
+    // block; "confirm" records a human-confirmed duplicate (stays blocked).
+    [HttpPost("{id}/duplicate-resolution")]
+    public async Task<ActionResult<LeadResponseDTO>> ResolveDuplicate(long id, [FromBody] DuplicateResolutionRequestDTO request)
+    {
+        try
+        {
+            if (!ModelState.IsValid) return BadRequest(ModelState);
+
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
+
+            var resolvedBy = User.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value
+                             ?? User.FindFirst("email")?.Value
+                             ?? User.Identity?.Name
+                             ?? "unknown";
+
+            var lead = await _repository.ResolveDuplicateAsync(id, businessUnitId, request.Action, resolvedBy);
+            if (lead == null) return NotFound($"Lead with ID {id} not found.");
+
+            return Ok(lead);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(ex.Message);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Conflict(ex.Message);
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(StatusCodes.Status500InternalServerError, $"Error resolving duplicate flag: {ex.Message}");
+        }
+    }
+
     [HttpGet("{id}")]
     public async Task<ActionResult<LeadResponseDTO>> GetLeadById(long id)
     {

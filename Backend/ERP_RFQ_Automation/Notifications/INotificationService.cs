@@ -26,5 +26,14 @@ namespace ERP_RFQ_Automation.Notifications
 
         /// <summary>Sends an order-confirmation email to a customer.</summary>
         Task<bool> SendOrderConfirmationAsync(OrderConfirmationNotification request, CancellationToken ct = default);
+
+        /// <summary>Internal alert: a lead was assigned (or reassigned) to a user.</summary>
+        Task<bool> NotifyLeadAssignedAsync(LeadAssignedNotification request, CancellationToken ct = default);
+
+        /// <summary>Brief note to the previous assignee when a lead is reassigned away from them.</summary>
+        Task<bool> NotifyLeadReassignedAwayAsync(LeadReassignedAwayNotification request, CancellationToken ct = default);
+
+        /// <summary>Internal alert: a newly received lead looks like a duplicate of an existing one.</summary>
+        Task<bool> NotifyDuplicateLeadAsync(DuplicateLeadNotification request, CancellationToken ct = default);
     }
 }

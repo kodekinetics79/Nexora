@@ -62,6 +62,42 @@ namespace ERP_RFQ_Automation.Notifications
         public string Message { get; set; } = "Please review the attached quotation and let us know if you'd like to proceed.";
     }
 
+    /// <summary>Internal alert: a lead was assigned (or reassigned) to a user.</summary>
+    public sealed class LeadAssignedNotification : NotificationRequestBase
+    {
+        public string AssigneeName { get; set; } = "there";
+        /// <summary>Full name of the user who performed the assignment (optional).</summary>
+        public string? AssignedBy { get; set; }
+        public string RfqNumber { get; set; } = string.Empty;
+        public string BuyerName { get; set; } = string.Empty;
+        /// <summary>Bid-closing deadline, already formatted for display.</summary>
+        public string Deadline { get; set; } = "Not set";
+        /// <summary>Optional comment supplied at assignment time.</summary>
+        public string? Comment { get; set; }
+    }
+
+    /// <summary>Brief note to the previous assignee when a lead moves to someone else.</summary>
+    public sealed class LeadReassignedAwayNotification : NotificationRequestBase
+    {
+        public string PreviousAssigneeName { get; set; } = "there";
+        public string NewAssigneeName { get; set; } = "another team member";
+        public string RfqNumber { get; set; } = string.Empty;
+        public string BuyerName { get; set; } = string.Empty;
+    }
+
+    /// <summary>Internal alert: a newly received lead looks like a duplicate of an existing one.</summary>
+    public sealed class DuplicateLeadNotification : NotificationRequestBase
+    {
+        public string RecipientName { get; set; } = "there";
+        /// <summary>RFQ number (or #id) of the ORIGINAL lead the recipient owns.</summary>
+        public string OriginalRfqNumber { get; set; } = string.Empty;
+        /// <summary>RFQ number (or #id) of the newly flagged duplicate lead.</summary>
+        public string DuplicateRfqNumber { get; set; } = string.Empty;
+        public string BuyerName { get; set; } = string.Empty;
+        /// <summary>Short human-readable reason ("Same RFQ number", "Same customer and items").</summary>
+        public string Reason { get; set; } = string.Empty;
+    }
+
     /// <summary>Confirmation that an order was placed / accepted.</summary>
     public sealed class OrderConfirmationNotification : NotificationRequestBase
     {

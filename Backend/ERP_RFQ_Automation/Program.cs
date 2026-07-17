@@ -20,6 +20,7 @@ using ERP_RFQ_Automation.Notifications;
 using ERP_RFQ_Automation.Agent;
 using ERP_RFQ_Automation.Intelligence.Conversion;
 using ERP_RFQ_Automation.Intelligence.Pricing;
+using ERP_RFQ_Automation.Intelligence.Decision;
 using System.Text.Json.Serialization;
 
 // PostgreSQL migration: restore pre-6.0 Npgsql timestamp semantics so the
@@ -274,6 +275,25 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automati
 builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Conversion.ConvertLeadToRfqTool>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Pricing.PriceRfqTool>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Pricing.ApplyRfqPricingTool>();
+
+// Lead Decision Brief (Intelligence/Decision): value/coverage/history/urgency →
+// Bid/Review/Skip with plain-language reasons; feeds the leads grid + dashboard.
+builder.Services.AddLeadDecisionIntelligence();
+builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Decision.LeadDecisionBriefTool>();
+
+// WP-A3: duplicate-lead detection + quote-block (Deduplication/)
+builder.Services.AddScoped<ERP_RFQ_Automation.Deduplication.ILeadDuplicateDetector,
+                           ERP_RFQ_Automation.Deduplication.LeadDuplicateDetector>();
+
+// WP-A1/A2: tenant-configurable SLA policy reader (SlaPolicy-backed; default 2h).
+builder.Services.AddScoped<ERP_RFQ_Automation.MultiTenancy.ISlaPolicyReader,
+                           ERP_RFQ_Automation.Sla.SlaPolicyReaderAdapter>();
+
+// ==== SLA & deadline engine + quote outcome capture (Sla/) ====
+// After AddNotifications(...) — SlaNotifications depends on IEmailSender.
+builder.Services.AddScoped<ERP_RFQ_Automation.Sla.IQuoteOutcomeService, ERP_RFQ_Automation.Sla.QuoteOutcomeService>();
+builder.Services.AddSingleton<ERP_RFQ_Automation.Sla.ISlaNotifications, ERP_RFQ_Automation.Sla.SlaNotifications>();
+builder.Services.AddHostedService<ERP_RFQ_Automation.Sla.SlaSweepWorker>();
 
 var app = builder.Build();
 

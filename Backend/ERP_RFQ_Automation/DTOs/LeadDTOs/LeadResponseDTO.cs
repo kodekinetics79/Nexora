@@ -30,6 +30,12 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         public bool IsAccepted => LeadStatusId == 24;
         public bool IsRejected => LeadStatusId == 25;
 
+        // WP-A3 duplicate flag: null | "suspected" | "confirmed" | "not_duplicate".
+        // Conversion is blocked while suspected/confirmed.
+        public string? DuplicateStatus { get; set; }
+        public long? DuplicateOfLeadId { get; set; }
+        public string? DuplicateResolvedBy { get; set; }
+
         // Assignment Info
         public long? AssignedToId { get; set; }
         public string? AssignedToFullName { get; set; }

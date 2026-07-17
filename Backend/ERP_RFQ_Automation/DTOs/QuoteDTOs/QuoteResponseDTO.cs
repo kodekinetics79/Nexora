@@ -19,6 +19,8 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public DateTime? ValidUntil { get; set; }
         public long? StatusId { get; set; }
         public string? StatusValue { get; set; }
+        /// <summary>Stable machine code of the status (DRAFT/SENT/ACCEPTED/REJECTED/EXPIRED/ORDERED).</summary>
+        public string? StatusCode { get; set; }
         public long? CurrencyId { get; set; }
         public string? CurrencyCode { get; set; }
         public decimal? TotalAmount { get; set; }
@@ -31,6 +33,18 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public string? DiscountTypeName { get; set; }
         public decimal? DiscountValue { get; set; }
         public int ItemCount { get; set; } // Optimized: Item count for list views
+
+        // ==== Outcome capture + SLA staleness (WP-A4) ====
+        public DateTime? SentOn { get; set; }
+        public DateTime? RespondedOn { get; set; }
+        public DateTime? OutcomeOn { get; set; }
+        public long? OutcomeReasonId { get; set; }
+        public string? OutcomeReasonName { get; set; }
+        public string? OutcomeNote { get; set; }
+        /// <summary>Computed: SENT, no response, and older than the BU's stale threshold.</summary>
+        public bool IsStale { get; set; }
+        /// <summary>Days since the quote was sent (null when never sent).</summary>
+        public int? DaysSinceSent { get; set; }
 
         public List<QuoteItemResponseDTO> QuoteItems { get; set; } = new List<QuoteItemResponseDTO>();
     }

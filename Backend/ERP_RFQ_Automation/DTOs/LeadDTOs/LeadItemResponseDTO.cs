@@ -28,5 +28,12 @@
         public DateTime? ReceivedDate { get; set; }
         public DateTime? BidClosingDateLine { get; set; }
         public decimal? Aiconfidence { get; set; }
+
+        /// <summary>
+        /// Unrecognized customer-document columns captured verbatim at extraction time
+        /// ({"original column header": "cell value"}); null when none. Serialized as
+        /// camelCase "extraFields" with keys preserved as-is.
+        /// </summary>
+        public Dictionary<string, string>? ExtraFields { get; set; }
     }
 }

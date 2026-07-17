@@ -100,6 +100,11 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         if (lead.LeadStatusId != 24)
             throw new InvalidOperationException("Only an accepted lead can be converted to an RFQ.");
 
+        // WP-A3 hard block: an unresolved duplicate flag stops conversion here too.
+        if (lead.DuplicateStatus is "suspected" or "confirmed")
+            throw new InvalidOperationException(
+                $"This lead is flagged as a possible duplicate of lead #{lead.DuplicateOfLeadId} — resolve the duplicate flag first.");
+
         var already = await _db.Rfqs
             .FirstOrDefaultAsync(r => r.LeadId == leadId && r.BusinessUnitId == businessUnitId, ct);
         if (already != null)

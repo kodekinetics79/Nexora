@@ -33,6 +33,17 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<Supplier>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == null || e.Buid == CurrentTenantId);
         modelBuilder.Entity<Product>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == null || e.Buid == CurrentTenantId);
 
+        // LeadItem.ExtraFields (partial property in LeadItem.Extra.cs): verbatim
+        // unrecognized customer-document columns, stored as jsonb.
+        modelBuilder.Entity<LeadItem>().Property(e => e.ExtraFields).HasColumnType("jsonb");
+
+        // WP-A3 duplicate flag (partial properties in Lead.Duplicate.cs). Columns are
+        // added by a lead-generated migration; see Deduplication/DEDUP-WIRING.md.
+        modelBuilder.Entity<Lead>().Property(e => e.DuplicateStatus).HasMaxLength(20);
+        modelBuilder.Entity<Lead>().Property(e => e.DuplicateResolvedBy).HasMaxLength(256);
+        modelBuilder.Entity<Lead>().HasIndex(e => new { e.BusinessUnitId, e.DuplicateStatus })
+            .HasDatabaseName("IX_Lead_BU_DuplicateStatus");
+
         // ==== Async extraction pipeline (ADR-0003) ====
         modelBuilder.Entity<ERP_RFQ_Automation.Extraction.ExtractionJob>(entity =>
         {
@@ -110,5 +121,9 @@ public partial class ErpRfqAutomationContext
         // ErpRfqAutomationContext.Agent.cs; this single delegating call is the only
         // splice point (partial methods allow exactly one call site + implementation).
         ConfigureAgentModel(modelBuilder);
+
+        // ==== SLA / deadline engine + quote outcome capture (Sla/) ====
+        // Same partial-splice pattern; implementation in ErpRfqAutomationContext.Sla.cs.
+        ConfigureSlaModel(modelBuilder);
     }
 }

@@ -3,6 +3,7 @@ using System;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace ERP_RFQ_Automation.Migrations
 {
     [DbContext(typeof(ErpRfqAutomationContext))]
-    partial class ErpRfqAutomationContextModelSnapshot : ModelSnapshot
+    [Migration("20260717114158_AddLeadItemExtraFields")]
+    partial class AddLeadItemExtraFields
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1138,17 +1141,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("timestamp without time zone")
                         .HasDefaultValueSql("now()");
 
-                    b.Property<long?>("DuplicateOfLeadId")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("DuplicateResolvedBy")
-                        .HasMaxLength(256)
-                        .HasColumnType("character varying(256)");
-
-                    b.Property<string>("DuplicateStatus")
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
-
                     b.Property<string>("DurationAgreement")
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
@@ -1208,12 +1200,11 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasIndex("AssignTo");
 
+                    b.HasIndex("BusinessUnitId");
+
                     b.HasIndex("EmailIngestsId");
 
                     b.HasIndex("LeadRejectedReasonId");
-
-                    b.HasIndex("BusinessUnitId", "DuplicateStatus")
-                        .HasDatabaseName("IX_Lead_BU_DuplicateStatus");
 
                     b.HasIndex(new[] { "LeadStatusId" }, "IX_Leads_LeadStatusId");
 
@@ -2027,16 +2018,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<DateTime?>("ModifiedDate")
                         .HasColumnType("timestamp without time zone");
 
-                    b.Property<string>("OutcomeNote")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
-                    b.Property<DateTime?>("OutcomeOn")
-                        .HasColumnType("timestamp without time zone");
-
-                    b.Property<long?>("OutcomeReasonId")
-                        .HasColumnType("bigint");
-
                     b.Property<DateTime?>("QuoteDate")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("timestamp without time zone")
@@ -2047,15 +2028,9 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(50)
                         .HasColumnType("character varying(50)");
 
-                    b.Property<DateTime?>("RespondedOn")
-                        .HasColumnType("timestamp without time zone");
-
                     b.Property<long?>("Rfqid")
                         .HasColumnType("bigint")
                         .HasColumnName("RFQID");
-
-                    b.Property<DateTime?>("SentOn")
-                        .HasColumnType("timestamp without time zone");
 
                     b.Property<long?>("StatusId")
                         .HasColumnType("bigint")
@@ -3947,94 +3922,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsUnique();
 
                     b.ToTable("Tenants", "platform");
-                });
-
-            modelBuilder.Entity("ERP_RFQ_Automation.Sla.SlaEvent", b =>
-                {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
-
-                    b.Property<long>("BusinessUnitId")
-                        .HasColumnType("bigint");
-
-                    b.Property<DateTime>("CreatedOn")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
-                        .HasDefaultValueSql("now()");
-
-                    b.Property<long>("EntityId")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("EntityType")
-                        .IsRequired()
-                        .HasMaxLength(40)
-                        .HasColumnType("character varying(40)");
-
-                    b.Property<string>("Level")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("BusinessUnitId", "EntityType", "EntityId", "Level")
-                        .HasDatabaseName("IX_SlaEvents_BU_Entity_Level");
-
-                    b.ToTable("SlaEvents", (string)null);
-                });
-
-            modelBuilder.Entity("ERP_RFQ_Automation.Sla.SlaPolicy", b =>
-                {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
-
-                    b.Property<int>("ApprovalEscalationHours")
-                        .HasColumnType("integer");
-
-                    b.Property<long>("BusinessUnitId")
-                        .HasColumnType("bigint");
-
-                    b.Property<DateTime>("CreatedOn")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
-                        .HasDefaultValueSql("now()");
-
-                    b.Property<int>("CriticalDaysBeforeClose")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("DeadlineBufferHours")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("QuoteAutoExpireDays")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("StaleQuoteDays")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("UnassignedHours")
-                        .HasColumnType("integer");
-
-                    b.Property<DateTime>("UpdatedOn")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
-                        .HasDefaultValueSql("now()");
-
-                    b.Property<int>("WarnDaysBeforeClose")
-                        .HasColumnType("integer");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("BusinessUnitId")
-                        .IsUnique()
-                        .HasDatabaseName("UX_SlaPolicies_BU");
-
-                    b.ToTable("SlaPolicies", (string)null);
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Models.Contact", b =>

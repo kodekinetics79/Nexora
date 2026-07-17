@@ -338,11 +338,18 @@ public sealed class LeadPersister : ILeadPersister
 {
     private readonly ErpRfqAutomationContext _context;
     private readonly ILogger<LeadPersister> _log;
+    private readonly ERP_RFQ_Automation.Deduplication.ILeadDuplicateDetector? _duplicateDetector;
 
-    public LeadPersister(ErpRfqAutomationContext context, ILogger<LeadPersister> log)
+    // The detector is optional so persistence keeps working before (and without)
+    // the Deduplication DI registration (see Deduplication/DEDUP-WIRING.md).
+    public LeadPersister(
+        ErpRfqAutomationContext context,
+        ILogger<LeadPersister> log,
+        ERP_RFQ_Automation.Deduplication.ILeadDuplicateDetector? duplicateDetector = null)
     {
         _context = context;
         _log = log;
+        _duplicateDetector = duplicateDetector;
     }
 
     public async Task<long> PersistAsync(ExtractionJob job, ChunkedExtractionOutcome outcome, CancellationToken ct = default)
@@ -375,13 +382,17 @@ public sealed class LeadPersister : ILeadPersister
         var items = ai.Items ?? new List<LeadItemData>();
         var lead = new Lead
         {
-            Rfqno = Truncate(ai.Rfqno, 100),
-            BuyersName = Truncate(ai.BuyersName, 510),
-            RecDate = ParseDate(ai.RecDate) ?? now,
-            BidClosingDate = ParseDate(ai.BidClosingDate),
+            // Data hygiene at write time: junk RFQ numbers and placeholder buyer
+            // identities persist as NULL (never "for" / "Unknown Buyer" / internal
+            // pipeline addresses); sentinel dates (< year 2000, e.g. DateTime.MinValue
+            // rendering as "01 Jan 1") are treated as unknown.
+            Rfqno = IsPlausibleRfqNumber(ai.Rfqno) ? Truncate(ai.Rfqno!.Trim(), 100) : null,
+            BuyersName = SanitizeBuyerName(Truncate(ai.BuyersName, 510)),
+            RecDate = SanitizeDate(ParseDate(ai.RecDate)) ?? now,
+            BidClosingDate = SanitizeDate(ParseDate(ai.BidClosingDate)),
             BiddingDecision = Truncate(ai.BiddingDecision, 100),
-            AcknowledgmentDate = ParseDate(ai.AcknowledgmentDate),
-            SubDate = ParseDate(ai.SubDate),
+            AcknowledgmentDate = SanitizeDate(ParseDate(ai.AcknowledgmentDate)),
+            SubDate = SanitizeDate(ParseDate(ai.SubDate)),
             HeaderRemarks = Truncate($"{reviewNote}{ai.HeaderRemarks}".Trim(), 8000),
             OpportunityNo = Truncate(ai.OpportunityNo, 100),
             NoOfLineItems = items.Count, // conservation: equals persisted count
@@ -423,9 +434,12 @@ public sealed class LeadPersister : ILeadPersister
                 ItemText = Truncate(it.ItemText, 2000),
                 MaterialPotext = Truncate(it.MaterialPotext, 2000),
                 LeadTime = int.TryParse(it.LeadTime, NumberStyles.Integer, CultureInfo.InvariantCulture, out var lt) ? lt : null,
-                ReceivedDate = ParseDate(it.ReceivedDate),
-                BidClosingDateLine = ParseDate(it.BidClosingDateLine),
-                Aiconfidence = ClampConfidence(it.ItemConfidence ?? 0)
+                ReceivedDate = SanitizeDate(ParseDate(it.ReceivedDate)),
+                BidClosingDateLine = SanitizeDate(ParseDate(it.BidClosingDateLine)),
+                Aiconfidence = ClampConfidence(it.ItemConfidence ?? 0),
+                // Unrecognized customer-document columns, capped + serialized to jsonb
+                // (null when the model returned none — the common case).
+                ExtraFields = ExtraFieldsJson.Serialize(it.ExtraFields)
             });
         }
 
@@ -442,6 +456,25 @@ public sealed class LeadPersister : ILeadPersister
         }
 
         _log.LogInformation("Persisted lead {LeadId} with {Count} item(s) from job {JobId}.", lead.Id, items.Count, job.Id);
+
+        // WP-A3: duplicate detection AFTER the save. Best-effort by contract —
+        // a detection failure must never fail (or roll back) the persistence.
+        if (_duplicateDetector != null)
+        {
+            try
+            {
+                var check = await _duplicateDetector.CheckAndFlagAsync(lead.Id, job.BusinessUnitId, ct);
+                if (check.Flagged)
+                    _log.LogInformation(
+                        "Lead {LeadId} flagged as suspected duplicate of lead {OriginalId} ({Reason}).",
+                        check.FlaggedLeadId, check.OriginalLeadId, check.Reason);
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "Duplicate detection failed for lead {LeadId}; persistence succeeded.", lead.Id);
+            }
+        }
+
         return lead.Id;
     }
 
@@ -457,6 +490,46 @@ public sealed class LeadPersister : ILeadPersister
 
     private static string? Truncate(string? value, int max)
         => string.IsNullOrEmpty(value) ? null : (value.Length <= max ? value : value[..max]);
+
+    // Sentinel/absurd dates (DateTime.MinValue, OCR noise like year 1) are "unknown",
+    // not real values. Anything before 2000 is treated as missing.
+    private static DateTime? SanitizeDate(DateTime? d)
+        => d is { } v && v.Year >= 2000 ? v : null;
+
+    // Internal placeholders must never surface as a buyer-facing identity; persist
+    // NULL so the UI can style "unknown" explicitly.
+    private static readonly HashSet<string> PlaceholderBuyerNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "unknown", "unknown buyer", "n/a", "na", "none", "null", "tbd",
+        "extraction@pipeline.local", "system@rfq.com"
+    };
+
+    private static string? SanitizeBuyerName(string? name)
+    {
+        var trimmed = name?.Trim();
+        if (string.IsNullOrEmpty(trimmed)) return null;
+        if (PlaceholderBuyerNames.Contains(trimmed)) return null;
+        if (trimmed.EndsWith("@pipeline.local", StringComparison.OrdinalIgnoreCase)) return null;
+        return trimmed;
+    }
+
+    // Conservative junk filter for extracted RFQ numbers: reject only obvious
+    // garbage (tiny fragments like "for", or bare generic words); keep anything
+    // plausibly real — when in doubt, keep the value.
+    private static readonly HashSet<string> GenericRfqWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "test", "rfq", "quote", "quotation", "request", "na", "n/a", "none",
+        "tbd", "null", "unknown", "for", "the"
+    };
+
+    private static bool IsPlausibleRfqNumber(string? rfqno)
+    {
+        var trimmed = rfqno?.Trim();
+        if (string.IsNullOrEmpty(trimmed)) return false;
+        if (trimmed.Length < 3) return false;
+        if (GenericRfqWords.Contains(trimmed)) return false;
+        return true;
+    }
 
     private static decimal? ClampConfidence(double? c)
     {

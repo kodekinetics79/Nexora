@@ -852,7 +852,12 @@ namespace ERP_RFQ_Automation.Services
         {
             if (string.IsNullOrWhiteSpace(s)) return null;
             var formats = new[] { "yyyy-MM-dd", "dd/MM/yyyy", "MM/dd/yyyy", "dd-MM-yyyy", "d/M/yyyy" };
-            return DateTime.TryParseExact(s.Trim(), formats, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var d) ? d : null;
+            if (!DateTime.TryParseExact(s.Trim(), formats, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var d))
+                return null;
+            // Sentinel guard: extracted placeholders like 0001-01-01 parse "successfully"
+            // but are not real dates — treat anything before 2000 as unknown so the UI
+            // never renders "01 Jan 1". (Same rule as the extraction persister.)
+            return d.Year < 2000 ? null : d;
         }
 
         private string SanitizeFileName(string fileName)
@@ -967,7 +972,9 @@ namespace ERP_RFQ_Automation.Services
                 var rfq = new Rfq
                 {
                     Rfqno = $"RFQ_{Path.GetFileNameWithoutExtension(file.FileName)}_{DateTime.UtcNow:yyyyMMddHHmm}",
-                    BuyersName = "Specialized Customer",
+                    // Unknown buyer stays null (never a fabricated placeholder) so the
+                    // UI can style it honestly as "Buyer not identified yet".
+                    BuyersName = null,
                     RecDate = DateTime.UtcNow,
                     BusinessUnitId = businessUnitId,
                     CreatedBy = createdBy,

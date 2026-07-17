@@ -100,6 +100,49 @@ namespace ERP_RFQ_Automation.Notifications
             return DispatchAsync(EmailTemplates.OrderConfirmation, request, model, ct);
         }
 
+        public Task<bool> NotifyLeadAssignedAsync(LeadAssignedNotification request, CancellationToken ct = default)
+        {
+            var model = new Dictionary<string, string?>
+            {
+                ["assigneeName"] = request.AssigneeName,
+                ["assignedBy"] = string.IsNullOrWhiteSpace(request.AssignedBy) ? "A manager" : request.AssignedBy,
+                ["rfqNumber"] = request.RfqNumber,
+                ["buyerName"] = request.BuyerName,
+                ["deadline"] = request.Deadline,
+                ["comment"] = request.Comment ?? string.Empty,
+                ["ctaUrl"] = ResolveCta(request.CtaPath),
+                ["ctaLabel"] = "Open lead"
+            };
+            return DispatchAsync(EmailTemplates.LeadAssigned, request, model, ct);
+        }
+
+        public Task<bool> NotifyLeadReassignedAwayAsync(LeadReassignedAwayNotification request, CancellationToken ct = default)
+        {
+            var model = new Dictionary<string, string?>
+            {
+                ["previousAssigneeName"] = request.PreviousAssigneeName,
+                ["newAssigneeName"] = request.NewAssigneeName,
+                ["rfqNumber"] = request.RfqNumber,
+                ["buyerName"] = request.BuyerName
+            };
+            return DispatchAsync(EmailTemplates.LeadReassignedAway, request, model, ct);
+        }
+
+        public Task<bool> NotifyDuplicateLeadAsync(DuplicateLeadNotification request, CancellationToken ct = default)
+        {
+            var model = new Dictionary<string, string?>
+            {
+                ["recipientName"] = request.RecipientName,
+                ["originalRfqNumber"] = request.OriginalRfqNumber,
+                ["duplicateRfqNumber"] = request.DuplicateRfqNumber,
+                ["buyerName"] = request.BuyerName,
+                ["reason"] = request.Reason,
+                ["ctaUrl"] = ResolveCta(request.CtaPath),
+                ["ctaLabel"] = "Review duplicate"
+            };
+            return DispatchAsync(EmailTemplates.DuplicateLead, request, model, ct);
+        }
+
         /// <summary>
         /// Renders, builds, and sends. Any exception (render or transport) is logged
         /// and swallowed so the calling business transaction is never affected.

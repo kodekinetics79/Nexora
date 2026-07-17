@@ -55,9 +55,36 @@ namespace ERP_RFQ_Automation.Repositories
                 .Select(g => new { QuoteId = g.Key, Count = g.Count() })
                 .ToDictionaryAsync(x => x.QuoteId, x => x.Count);
 
-            var dtos = quotes.Select(q => MapToDTO(q, itemCounts.TryGetValue(q.Id, out var count) ? count : 0)).ToList();
+            // Outcome reason names (loose FK to SetupMaster) + the BU's stale
+            // threshold, batch-loaded once for the page (WP-A4 / WP-A2).
+            var reasonNames = await LoadReasonNamesAsync(quotes);
+            var staleDays = await GetStaleQuoteDaysAsync(businessUnitId);
+
+            var dtos = quotes.Select(q => MapToDTO(q, itemCounts.TryGetValue(q.Id, out var count) ? count : 0, reasonNames, staleDays)).ToList();
 
             return (dtos, totalItems);
+        }
+
+        /// <summary>Batch-resolves OutcomeReasonId -> display name for a set of quotes.</summary>
+        private async Task<Dictionary<long, string>> LoadReasonNamesAsync(IEnumerable<Quote> quotes)
+        {
+            var reasonIds = quotes.Where(q => q.OutcomeReasonId.HasValue)
+                .Select(q => q.OutcomeReasonId!.Value).Distinct().ToList();
+            if (reasonIds.Count == 0) return new Dictionary<long, string>();
+
+            return await _context.SetupMasters.AsNoTracking()
+                .Where(s => reasonIds.Contains(s.SetupId))
+                .ToDictionaryAsync(s => s.SetupId, s => s.Description ?? s.SetupValue);
+        }
+
+        /// <summary>The BU's configured stale threshold, or the SLA default (7 days).</summary>
+        private async Task<int> GetStaleQuoteDaysAsync(long businessUnitId)
+        {
+            return await _context.Set<ERP_RFQ_Automation.Sla.SlaPolicy>().AsNoTracking()
+                .Where(p => p.BusinessUnitId == businessUnitId)
+                .Select(p => (int?)p.StaleQuoteDays)
+                .FirstOrDefaultAsync()
+                ?? ERP_RFQ_Automation.Sla.SlaPolicy.Default(businessUnitId).StaleQuoteDays;
         }
 
         public async Task<QuoteResponseDTO> GetByIdAsync(long id, long businessUnitId)
@@ -76,12 +103,15 @@ namespace ERP_RFQ_Automation.Repositories
             if (quote == null)
                 throw new KeyNotFoundException($"Quote with ID {id} not found.");
 
-            return MapToDTO(quote, -1); // -1 indicates detail view, load all items
+            var reasonNames = await LoadReasonNamesAsync(new[] { quote });
+            var staleDays = await GetStaleQuoteDaysAsync(businessUnitId);
+
+            return MapToDTO(quote, -1, reasonNames, staleDays); // -1 indicates detail view, load all items
         }
 
         // ... methods AddAsync, UpdateAsync, DeleteAsync skipped (unchanged) ...
 
-        private QuoteResponseDTO MapToDTO(Quote q, int itemCount = -1)
+        private QuoteResponseDTO MapToDTO(Quote q, int itemCount = -1, Dictionary<long, string>? reasonNames = null, int staleQuoteDays = 7)
         {
             return new QuoteResponseDTO
             {
@@ -98,6 +128,15 @@ namespace ERP_RFQ_Automation.Repositories
                 ValidUntil = q.ValidUntil,
                 StatusId = q.StatusId,
                 StatusValue = q.Status?.SetupValue,
+                StatusCode = q.Status?.SetupCode,
+                SentOn = q.SentOn,
+                RespondedOn = q.RespondedOn,
+                OutcomeOn = q.OutcomeOn,
+                OutcomeReasonId = q.OutcomeReasonId,
+                OutcomeReasonName = q.OutcomeReasonId.HasValue && reasonNames != null && reasonNames.TryGetValue(q.OutcomeReasonId.Value, out var rn) ? rn : null,
+                OutcomeNote = q.OutcomeNote,
+                IsStale = ERP_RFQ_Automation.Sla.SlaComputed.IsStale(q.Status?.SetupCode, q.SentOn, q.RespondedOn, staleQuoteDays),
+                DaysSinceSent = ERP_RFQ_Automation.Sla.SlaComputed.DaysSinceSent(q.SentOn),
                 CurrencyId = q.CurrencyId,
                 CurrencyCode = q.Currency?.Code,
                 TotalAmount = q.TotalAmount,

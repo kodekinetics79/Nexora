@@ -35,6 +35,41 @@ namespace ERP_RFQ_Automation.Services
             _quoteConfigRepository = quoteConfigRepository;
         }
 
+        // Legacy QuoteStatus id map, used ONLY when no matching SetupMaster row is
+        // configured (older tenants). All status resolution now goes through
+        // ResolveQuoteStatusIdAsync (SetupType "QuoteStatus" + SetupCode) — the
+        // magic numbers below are documented fallbacks, not the primary path.
+        private static readonly Dictionary<string, long> LegacyQuoteStatusIds = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["DRAFT"] = 42,
+            ["SENT"] = 43,
+            ["ACCEPTED"] = 44,
+            ["REJECTED"] = 45
+        };
+
+        /// <summary>
+        /// Resolves a QuoteStatus id by SetupMaster code — BU-scoped row first, then
+        /// any-BU row, then the documented legacy id map. Returns null when the code
+        /// is unknown everywhere (e.g. EXPIRED before it has been seeded).
+        /// </summary>
+        private async Task<long?> ResolveQuoteStatusIdAsync(string statusCode, long? businessUnitId)
+        {
+            var code = statusCode.ToUpperInvariant();
+
+            SetupMaster? row = null;
+            if (businessUnitId.HasValue)
+            {
+                row = await _context.SetupMasters.AsNoTracking()
+                    .FirstOrDefaultAsync(s => s.SetupType == "QuoteStatus"
+                        && s.SetupCode == code && s.BusinessUnitId == businessUnitId.Value);
+            }
+            row ??= await _context.SetupMasters.AsNoTracking()
+                .FirstOrDefaultAsync(s => s.SetupType == "QuoteStatus" && s.SetupCode == code);
+            if (row != null) return row.SetupId;
+
+            return LegacyQuoteStatusIds.TryGetValue(code, out var legacyId) ? legacyId : null;
+        }
+
         public async Task<QuoteResponseDTO> CreateQuoteAsync(QuoteCreateRequestDTO request)
         {
             var quoteNo = request.QuoteNo;
@@ -55,7 +90,9 @@ namespace ERP_RFQ_Automation.Services
                 BusinessUnitId = request.BusinessUnitId,
                 QuoteDate = request.QuoteDate,
                 ValidUntil = request.ValidUntil,
-                StatusId = (request.StatusId > 0) ? request.StatusId : 42, // Default to DRAFT (42)
+                StatusId = (request.StatusId > 0)
+                    ? request.StatusId
+                    : await ResolveQuoteStatusIdAsync("DRAFT", request.BusinessUnitId), // default: DRAFT (resolved via SetupMaster; legacy id 42 fallback)
                 CurrencyId = request.CurrencyId,
                 HeaderRemarks = request.HeaderRemarks,
                 CreatedBy = request.CreatedBy,
@@ -339,6 +376,20 @@ namespace ERP_RFQ_Automation.Services
             
             if (quote == null) return null;
 
+            // Outcome reason display name + BU stale threshold (WP-A4 / WP-A2).
+            string? outcomeReasonName = null;
+            if (quote.OutcomeReasonId.HasValue)
+            {
+                outcomeReasonName = await _context.SetupMasters.AsNoTracking()
+                    .Where(s => s.SetupId == quote.OutcomeReasonId.Value)
+                    .Select(s => s.Description ?? s.SetupValue)
+                    .FirstOrDefaultAsync();
+            }
+            var staleQuoteDays = await _context.Set<ERP_RFQ_Automation.Sla.SlaPolicy>().AsNoTracking()
+                .Where(p => p.BusinessUnitId == quote.BusinessUnitId)
+                .Select(p => (int?)p.StaleQuoteDays)
+                .FirstOrDefaultAsync() ?? ERP_RFQ_Automation.Sla.SlaPolicy.Default(quote.BusinessUnitId).StaleQuoteDays;
+
             // Load Discount Types for items (nested include or separate load)
              var itemDiscountTypeIds = quote.QuoteItems
                 .Where(i => i.DiscountTypeId.HasValue)
@@ -369,6 +420,15 @@ namespace ERP_RFQ_Automation.Services
                 ValidUntil = quote.ValidUntil,
                 StatusId = quote.StatusId,
                 StatusValue = quote.Status?.SetupValue,
+                StatusCode = quote.Status?.SetupCode,
+                SentOn = quote.SentOn,
+                RespondedOn = quote.RespondedOn,
+                OutcomeOn = quote.OutcomeOn,
+                OutcomeReasonId = quote.OutcomeReasonId,
+                OutcomeReasonName = outcomeReasonName,
+                OutcomeNote = quote.OutcomeNote,
+                IsStale = ERP_RFQ_Automation.Sla.SlaComputed.IsStale(quote.Status?.SetupCode, quote.SentOn, quote.RespondedOn, staleQuoteDays),
+                DaysSinceSent = ERP_RFQ_Automation.Sla.SlaComputed.DaysSinceSent(quote.SentOn),
                 CurrencyId = quote.CurrencyId,
                 CurrencyCode = quote.Currency?.Code,
                 TotalAmount = quote.TotalAmount,
@@ -720,8 +780,10 @@ namespace ERP_RFQ_Automation.Services
                 businessUnitId: quote.BusinessUnitId
             );
 
-            // Update Status to SENT (43)
-            quote.StatusId = 43; 
+            // Mark SENT (resolved via SetupMaster; legacy id 43 fallback) and stamp
+            // SentOn so the SLA engine can compute staleness / auto-expiry (WP-A4).
+            quote.StatusId = await ResolveQuoteStatusIdAsync("SENT", quote.BusinessUnitId);
+            quote.SentOn = DateTime.UtcNow;
             quote.ModifiedDate = DateTime.UtcNow;
             await _context.SaveChangesAsync();
         }
@@ -731,30 +793,35 @@ namespace ERP_RFQ_Automation.Services
             var quote = await _context.Quotes.FindAsync(id);
             if (quote == null) throw new KeyNotFoundException($"Quote with ID {id} not found.");
 
-            long? statusId = statusCode.ToUpper() switch
+            // All codes resolve through SetupMaster (SetupType "QuoteStatus" +
+            // SetupCode, BU-scoped first) with the documented legacy id map as the
+            // last-resort fallback — no more hardcoded 42/43/44/45 branches.
+            var code = statusCode.ToUpperInvariant();
+            long? statusId;
+            switch (code)
             {
-                "DRAFT" => 42,
-                "SENT" => 43,
-                "ACCEPTED" => 44,
-                "REJECTED" => 45,
-                "ORDERED" => null, // Handle dynamically below
-                _ => throw new ArgumentException($"Invalid status code: {statusCode}")
-            };
+                case "DRAFT":
+                case "SENT":
+                case "ACCEPTED":
+                case "REJECTED":
+                case "EXPIRED": // seeded create-if-absent by QuoteOutcomeService (WP-A4)
+                    statusId = await ResolveQuoteStatusIdAsync(code, quote.BusinessUnitId);
+                    if (statusId is null)
+                        throw new ArgumentException(
+                            $"No '{code}' QuoteStatus is configured for this business unit.");
+                    break;
 
-            if (statusCode.ToUpper() == "ORDERED")
-            {
-                var orderedStatus = await _context.SetupMasters
-                    .FirstOrDefaultAsync(sm => sm.SetupType == "QuoteStatus" && 
-                        (sm.SetupCode == "ORDERED" || sm.SetupValue == "ORDERED" || sm.SetupValue == "Ordered"));
-                
-                if (orderedStatus != null)
-                {
-                    statusId = orderedStatus.SetupId;
-                }
-                else
-                {
-                    statusId = 44; // Fallback to Accepted
-                }
+                case "ORDERED":
+                    // Preserve the historical lenient match (code OR display value).
+                    var orderedStatus = await _context.SetupMasters
+                        .FirstOrDefaultAsync(sm => sm.SetupType == "QuoteStatus" &&
+                            (sm.SetupCode == "ORDERED" || sm.SetupValue == "ORDERED" || sm.SetupValue == "Ordered"));
+                    statusId = orderedStatus?.SetupId
+                        ?? await ResolveQuoteStatusIdAsync("ACCEPTED", quote.BusinessUnitId); // historical fallback
+                    break;
+
+                default:
+                    throw new ArgumentException($"Invalid status code: {statusCode}");
             }
 
             quote.StatusId = statusId;

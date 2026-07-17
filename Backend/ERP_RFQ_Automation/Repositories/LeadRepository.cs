@@ -1,18 +1,39 @@
+using ERP_RFQ_Automation.Deduplication;
 using ERP_RFQ_Automation.DTOs.AcceptedLeadDTOs;
 using ERP_RFQ_Automation.DTOs.Lead;
 using ERP_RFQ_Automation.DTOs.LeadDTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.MultiTenancy;
+using ERP_RFQ_Automation.Notifications;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace ERP_RFQ_Automation.Repositories
 {
     public class LeadRepository : ILeadRepository
     {
         private readonly ErpRfqAutomationContext _context;
-        public LeadRepository(ErpRfqAutomationContext context)
+        private readonly INotificationService? _notifications;
+        private readonly ISlaPolicyReader _slaPolicy;
+        private readonly ILeadDuplicateDetector? _duplicateDetector;
+        private readonly ILogger<LeadRepository>? _logger;
+
+        // Optional dependencies keep existing constructions (tests, pre-wiring DI)
+        // compiling and running: notifications / duplicate detection degrade to
+        // no-ops, the SLA reader falls back to the flat default threshold.
+        public LeadRepository(
+            ErpRfqAutomationContext context,
+            INotificationService? notifications = null,
+            ISlaPolicyReader? slaPolicy = null,
+            ILeadDuplicateDetector? duplicateDetector = null,
+            ILogger<LeadRepository>? logger = null)
         {
             _context = context;
+            _notifications = notifications;
+            _slaPolicy = slaPolicy ?? new DefaultSlaPolicyReader();
+            _duplicateDetector = duplicateDetector;
+            _logger = logger;
         }
 
         public async Task<(IEnumerable<LeadResponseDTO>, int TotalCount)> GetLeadListAsync(int pageNumber, int pageSize, long? id, string? rfqno, string? buyersName, string? leadSource, long businessUnitId, DateTime? startDate = null, DateTime? endDate = null, string? emailSource = null, string? clientemail = null)
@@ -107,6 +128,8 @@ namespace ERP_RFQ_Automation.Repositories
                 EmailSource = l.EmailSource,
                 Clientemail = l.Clientemail,
                 LeadStatusId = l.LeadStatusId,
+                DuplicateStatus = l.DuplicateStatus,
+                DuplicateOfLeadId = l.DuplicateOfLeadId,
                 ItemCount = itemCounts.TryGetValue(l.Id, out var count) ? count : 0,
                 LeadItems = new List<LeadItemResponseDTO>(), // Empty list for list view
                 Attachments = attachmentsGrouped.TryGetValue(l.Id, out var atts) ? atts : new List<AttachmentResponseDTO>()
@@ -141,6 +164,20 @@ namespace ERP_RFQ_Automation.Repositories
             lead.LeadStatusId = 24;
             lead.ModifiedDate = DateTime.UtcNow;
             await _context.SaveChangesAsync();
+
+            // WP-A3: accepting a lead re-runs duplicate detection. Best-effort —
+            // a detection failure must never fail the accept itself.
+            if (_duplicateDetector != null)
+            {
+                try
+                {
+                    await _duplicateDetector.CheckAndFlagAsync(id, businessUnitId);
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogError(ex, "Duplicate detection failed after accepting lead {LeadId}; accept succeeded.", id);
+                }
+            }
         }
 
         // ARCH-01: convert an accepted lead into a real RFQ (with LeadId set), so the
@@ -156,6 +193,11 @@ namespace ERP_RFQ_Automation.Repositories
                 throw new KeyNotFoundException($"Lead with ID {id} not found in Business Unit {businessUnitId}.");
             if (lead.LeadStatusId != 24)
                 throw new InvalidOperationException("Only an accepted lead can be converted to an RFQ.");
+
+            // WP-A3 hard block: an unresolved duplicate flag stops conversion.
+            if (lead.DuplicateStatus is "suspected" or "confirmed")
+                throw new InvalidOperationException(
+                    $"This lead is flagged as a possible duplicate of lead #{lead.DuplicateOfLeadId} — resolve the duplicate flag first.");
 
             // Idempotency: never create a second RFQ for the same lead.
             var already = await _context.Rfqs
@@ -342,6 +384,11 @@ namespace ERP_RFQ_Automation.Repositories
                 .Select(g => new { LeadId = g.Key, Count = g.Count() })
                 .ToDictionaryAsync(x => x.LeadId, x => x.Count);
 
+            // WP-A1 unassigned-aging: one policy read per request (SLA engine will
+            // supply the real reader; default is a flat 2h).
+            var unassignedThresholdHours = await _slaPolicy.GetUnassignedHoursAsync(businessUnitId);
+            var nowUtc = DateTime.UtcNow;
+
             var dtos = leads.Select(l => new AcceptedLeadResponseDTO
             {
                 Id = l.Id,
@@ -372,6 +419,19 @@ namespace ERP_RFQ_Automation.Repositories
                 AssignedOn = l.AssignOn,
                 AssignComment = l.AssignComment,
 
+                // WP-A1 unassigned-aging (rule: accepted + unassigned + sitting
+                // longer than the tenant's unassigned-hours threshold).
+                UnassignedHours = l.AssignTo == null
+                    ? (int)Math.Max(0, (nowUtc - (l.ModifiedDate ?? l.CreatedDate)).TotalHours)
+                    : null,
+                IsUnassignedOverdue = l.LeadStatusId == 24
+                    && l.AssignTo == null
+                    && (nowUtc - (l.ModifiedDate ?? l.CreatedDate)).TotalHours > unassignedThresholdHours,
+
+                // WP-A3 duplicate flag (list badge support)
+                DuplicateStatus = l.DuplicateStatus,
+                DuplicateOfLeadId = l.DuplicateOfLeadId,
+
                 // Optimized: Use pre-loaded count dictionary for O(1) lookup
                 ItemCount = itemCounts.TryGetValue(l.Id, out var count) ? count : 0,
                 LeadItems = new List<AcceptedLeadItemDTO>(), // Empty list for list view - items loaded in detail view
@@ -382,7 +442,7 @@ namespace ERP_RFQ_Automation.Repositories
             return (dtos, totalCount);
         }
 
-      public async Task AssignLeadAsync(long leadId, long assignedToUserId, long businessUnitId, string? comment = null)
+      public async Task AssignLeadAsync(long leadId, long assignedToUserId, long businessUnitId, string? comment = null, string? assignedByName = null)
         {
             var lead = await _context.Leads
                 .Include(l => l.AssignToNavigation)
@@ -394,19 +454,117 @@ namespace ERP_RFQ_Automation.Repositories
             if (lead.LeadStatusId != 24)
                 throw new Exception("Can only assign accepted leads (status = 24)");
 
-            // Optional: validate user belongs to same business unit
-            var userInSameBU = await _context.Users
-                .AnyAsync(u => u.Id == assignedToUserId && u.Buid == businessUnitId);
+            // Validate user belongs to same business unit (and load it: the
+            // assignee's email/name are needed for the notification below).
+            var assignee = await _context.Users
+                .AsNoTracking()
+                .FirstOrDefaultAsync(u => u.Id == assignedToUserId && u.Buid == businessUnitId);
 
-            if (!userInSameBU)
+            if (assignee == null)
                 throw new Exception("Assigned user must belong to the same business unit");
 
+            // Capture the previous assignee BEFORE overwriting (reassign = same call).
+            var previousAssignee = lead.AssignToNavigation;
+            var previousAssigneeId = lead.AssignTo;
+
             lead.AssignTo = assignedToUserId;
-            lead.AssignOn = DateTime.UtcNow;           
-            lead.AssignComment = comment;              
+            lead.AssignOn = DateTime.UtcNow;
+            lead.AssignComment = comment;
             lead.ModifiedDate = DateTime.UtcNow;
 
             await _context.SaveChangesAsync();
+
+            // WP-A1: typed assignment notifications. The Notifications module already
+            // guarantees a send failure never throws, but the surrounding lookups are
+            // wrapped too — a notification problem must never break the assignment.
+            try
+            {
+                if (_notifications != null)
+                {
+                    var rfqLabel = lead.Rfqno ?? $"#{lead.Id}";
+                    var buyerLabel = lead.BuyersName ?? "Unknown buyer";
+                    var deadlineLabel = lead.BidClosingDate?.ToString("dd MMM yyyy") ?? "Not set";
+                    var ctaPath = $"/procurement/leads/view/{lead.Id}";
+
+                    await _notifications.NotifyLeadAssignedAsync(new LeadAssignedNotification
+                    {
+                        ToEmail = assignee.Email,
+                        ToName = $"{assignee.FirstName} {assignee.LastName}".Trim(),
+                        AssigneeName = assignee.FirstName,
+                        AssignedBy = assignedByName,
+                        RfqNumber = rfqLabel,
+                        BuyerName = buyerLabel,
+                        Deadline = deadlineLabel,
+                        Comment = comment,
+                        BusinessUnitId = businessUnitId.ToString(),
+                        CtaPath = ctaPath
+                    });
+
+                    // Reassignment away from a DIFFERENT previous assignee: brief note.
+                    if (previousAssigneeId.HasValue
+                        && previousAssigneeId.Value != assignedToUserId
+                        && previousAssignee != null
+                        && !string.IsNullOrWhiteSpace(previousAssignee.Email))
+                    {
+                        await _notifications.NotifyLeadReassignedAwayAsync(new LeadReassignedAwayNotification
+                        {
+                            ToEmail = previousAssignee.Email,
+                            ToName = $"{previousAssignee.FirstName} {previousAssignee.LastName}".Trim(),
+                            PreviousAssigneeName = previousAssignee.FirstName,
+                            NewAssigneeName = $"{assignee.FirstName} {assignee.LastName}".Trim(),
+                            RfqNumber = rfqLabel,
+                            BuyerName = buyerLabel,
+                            BusinessUnitId = businessUnitId.ToString()
+                        });
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Assignment notification failed for lead {LeadId}; assignment succeeded.", leadId);
+            }
+        }
+
+        // WP-A1 manager gate: only callers whose role (SetupMaster "role" row,
+        // resolved by the roleId claim — never a hardcoded numeric id) has a
+        // code/name containing "admin" or "manager" may (re)assign leads.
+        public async Task<bool> CanManageLeadAssignmentsAsync(long roleId)
+        {
+            var role = await _context.SetupMasters
+                .AsNoTracking()
+                .FirstOrDefaultAsync(s => s.SetupId == roleId
+                                          && s.SetupType.ToLower() == "role"
+                                          && (s.IsActive == true || s.IsActive == null));
+            if (role == null) return false;
+
+            return ContainsManagerWord(role.SetupCode) || ContainsManagerWord(role.SetupValue);
+
+            static bool ContainsManagerWord(string? s) =>
+                s != null && (s.Contains("admin", StringComparison.OrdinalIgnoreCase)
+                              || s.Contains("manager", StringComparison.OrdinalIgnoreCase));
+        }
+
+        // WP-A3: resolve a duplicate flag. "not_duplicate" clears the block (the
+        // pair link is kept for audit); "confirm" keeps the lead blocked.
+        public async Task<LeadResponseDTO?> ResolveDuplicateAsync(long id, long businessUnitId, string action, string resolvedBy)
+        {
+            var normalized = action?.Trim().ToLowerInvariant();
+            if (normalized != "not_duplicate" && normalized != "confirm")
+                throw new ArgumentException("Action must be \"not_duplicate\" or \"confirm\".");
+
+            var lead = await _context.Leads
+                .FirstOrDefaultAsync(l => l.Id == id && l.BusinessUnitId == businessUnitId);
+            if (lead == null) return null;
+
+            if (lead.DuplicateStatus == null)
+                throw new InvalidOperationException("This lead is not flagged as a duplicate.");
+
+            lead.DuplicateStatus = normalized == "confirm" ? "confirmed" : "not_duplicate";
+            lead.DuplicateResolvedBy = resolvedBy;
+            lead.ModifiedDate = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+
+            return await GetLeadByIdAsync(id, businessUnitId);
         }
 
         public async Task<IEnumerable<UserDropdownDTO>> GetUsersForAssignmentAsync(long businessUnitId)
@@ -470,6 +628,8 @@ namespace ERP_RFQ_Automation.Repositories
                 CreatedDate = lead.CreatedDate,
                 ModifiedDate = lead.ModifiedDate,
                 LeadStatusId = lead.LeadStatusId,
+                DuplicateStatus = lead.DuplicateStatus,
+                DuplicateOfLeadId = lead.DuplicateOfLeadId,
                 AssignedToId = lead.AssignTo,
                 AssignedToFullName = lead.AssignToNavigation != null
                     ? $"{lead.AssignToNavigation.FirstName} {lead.AssignToNavigation.LastName}".Trim()
@@ -561,7 +721,12 @@ namespace ERP_RFQ_Automation.Repositories
                 EmailSource = lead.EmailSource,
                 Clientemail = lead.Clientemail,
                 LeadStatusId = lead.LeadStatusId,
-                
+
+                // WP-A3 duplicate flag
+                DuplicateStatus = lead.DuplicateStatus,
+                DuplicateOfLeadId = lead.DuplicateOfLeadId,
+                DuplicateResolvedBy = lead.DuplicateResolvedBy,
+
                 // Assignment Info
                 AssignedToId = lead.AssignTo,
                 AssignedToFullName = lead.AssignToNavigation != null
@@ -598,7 +763,10 @@ namespace ERP_RFQ_Automation.Repositories
                     LeadTime = li.LeadTime,
                     ReceivedDate = li.ReceivedDate,
                     BidClosingDateLine = li.BidClosingDateLine,
-                    Aiconfidence = li.Aiconfidence
+                    Aiconfidence = li.Aiconfidence,
+                    // Verbatim unrecognized customer-document columns (jsonb -> dict);
+                    // tolerant parse returns null for absent/malformed payloads.
+                    ExtraFields = ExtraFieldsJson.Deserialize(li.ExtraFields)
                 }).ToList(),
                 Attachments = attachments
             };
@@ -776,6 +944,10 @@ namespace ERP_RFQ_Automation.Repositories
             item.AlternatePartNumber = dto.AlternatePartNumber;
             item.ItemText = dto.ItemText;
             item.LeadTime = dto.LeadTime;
+            // ExtraFields are captured at extraction time and must survive review round
+            // trips: only overwrite when the reviewer explicitly supplies a value.
+            if (dto.ExtraFields != null)
+                item.ExtraFields = ExtraFieldsJson.Serialize(dto.ExtraFields);
         }
 
         // Returns the review reason parsed from HeaderRemarks, or null when the lead is not

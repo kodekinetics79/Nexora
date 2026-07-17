@@ -30,8 +30,17 @@ public class AcceptedLeadResponseDTO
     // Assignment Info - Enhanced
     public long? AssignedToId { get; set; }
     public string? AssignedToFullName { get; set; }
-    public DateTime? AssignedOn { get; set; }          
-    public string? AssignComment { get; set; }         
+    public DateTime? AssignedOn { get; set; }
+    public string? AssignComment { get; set; }
+
+    // WP-A1 unassigned-aging: whole hours the lead has sat unassigned (null when
+    // assigned) and whether that exceeds the tenant's SLA threshold.
+    public int? UnassignedHours { get; set; }
+    public bool IsUnassignedOverdue { get; set; }
+
+    // WP-A3 duplicate flag: null | "suspected" | "confirmed" | "not_duplicate".
+    public string? DuplicateStatus { get; set; }
+    public long? DuplicateOfLeadId { get; set; }
 
     // Item Count - Optimized for list views
     public int ItemCount { get; set; }

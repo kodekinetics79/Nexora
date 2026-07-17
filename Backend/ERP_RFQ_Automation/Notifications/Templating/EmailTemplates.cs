@@ -25,6 +25,9 @@ namespace ERP_RFQ_Automation.Notifications.Templating
         public const string RfqToSupplier = "rfq-to-supplier";
         public const string QuoteToBuyer = "quote-to-buyer";
         public const string OrderConfirmation = "order-confirmation";
+        public const string LeadAssigned = "lead-assigned";
+        public const string LeadReassignedAway = "lead-reassigned-away";
+        public const string DuplicateLead = "lead-duplicate-flagged";
 
         /// <summary>
         /// Shared responsive shell. Table-based layout with inline CSS for maximum
@@ -203,6 +206,101 @@ Valid until:   {{validUntil}}
 {{message}}
 
 View the full quotation here: {{ctaUrl}}
+
+— Nexora (automated notification)
+"""
+                },
+
+                [LeadAssigned] = new EmailTemplateDefinition
+                {
+                    Subject = "Lead assigned to you: {{rfqNumber}}",
+                    Html = Wrap(
+                        "Lead assigned to you",
+                        "A lead was just assigned to you in Nexora.",
+                        """
+<h1 style="margin:0 0 16px 0; font-size:20px; color:#0f172a;">A lead was assigned to you</h1>
+<p style="margin:0 0 16px 0;">Hi {{assigneeName}},</p>
+<p style="margin:0 0 16px 0;">{{assignedBy}} assigned the following lead to you. Please pick it up before the deadline.</p>
+<table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin:8px 0; border-collapse:collapse;">
+  <tr><td style="padding:8px 0; color:#64748b; font-size:14px; width:40%;">RFQ number</td><td style="padding:8px 0; color:#0f172a; font-size:14px; font-weight:600;">{{rfqNumber}}</td></tr>
+  <tr><td style="padding:8px 0; color:#64748b; font-size:14px;">Buyer</td><td style="padding:8px 0; color:#0f172a; font-size:14px;">{{buyerName}}</td></tr>
+  <tr><td style="padding:8px 0; color:#64748b; font-size:14px;">Deadline</td><td style="padding:8px 0; color:#0f172a; font-size:14px; font-weight:600;">{{deadline}}</td></tr>
+</table>
+<p style="margin:0 0 8px 0;">{{comment}}</p>
+""" + CtaButton),
+                    Text = """
+A lead was assigned to you
+
+Hi {{assigneeName}},
+
+{{assignedBy}} assigned the following lead to you. Please pick it up before the deadline.
+
+RFQ number: {{rfqNumber}}
+Buyer:      {{buyerName}}
+Deadline:   {{deadline}}
+
+{{comment}}
+
+Open the lead here: {{ctaUrl}}
+
+— Nexora (automated notification)
+"""
+                },
+
+                [LeadReassignedAway] = new EmailTemplateDefinition
+                {
+                    Subject = "Lead {{rfqNumber}} was reassigned to {{newAssigneeName}}",
+                    Html = Wrap(
+                        "Lead reassigned",
+                        "A lead you were working on has been moved to another team member.",
+                        """
+<h1 style="margin:0 0 16px 0; font-size:20px; color:#0f172a;">A lead was reassigned</h1>
+<p style="margin:0 0 16px 0;">Hi {{previousAssigneeName}},</p>
+<p style="margin:0 0 16px 0;">Lead <strong>{{rfqNumber}}</strong> ({{buyerName}}) is now assigned to <strong>{{newAssigneeName}}</strong>. You no longer need to work on it — no action is required from you.</p>
+"""),
+                    Text = """
+A lead was reassigned
+
+Hi {{previousAssigneeName}},
+
+Lead {{rfqNumber}} ({{buyerName}}) is now assigned to {{newAssigneeName}}.
+You no longer need to work on it — no action is required from you.
+
+— Nexora (automated notification)
+"""
+                },
+
+                [DuplicateLead] = new EmailTemplateDefinition
+                {
+                    Subject = "Possible duplicate lead flagged against {{originalRfqNumber}}",
+                    Html = Wrap(
+                        "Possible duplicate lead",
+                        "A new lead looks like a duplicate of one you own.",
+                        """
+<h1 style="margin:0 0 16px 0; font-size:20px; color:#0f172a;">Possible duplicate lead</h1>
+<p style="margin:0 0 16px 0;">Hi {{recipientName}},</p>
+<p style="margin:0 0 16px 0;">A new lead looks like a duplicate of a lead you are responsible for. It is blocked from being converted until someone reviews it and either confirms it is a duplicate or marks it as not a duplicate.</p>
+<table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin:8px 0; border-collapse:collapse;">
+  <tr><td style="padding:8px 0; color:#64748b; font-size:14px; width:40%;">Your lead</td><td style="padding:8px 0; color:#0f172a; font-size:14px; font-weight:600;">{{originalRfqNumber}}</td></tr>
+  <tr><td style="padding:8px 0; color:#64748b; font-size:14px;">New (flagged) lead</td><td style="padding:8px 0; color:#0f172a; font-size:14px; font-weight:600;">{{duplicateRfqNumber}}</td></tr>
+  <tr><td style="padding:8px 0; color:#64748b; font-size:14px;">Buyer</td><td style="padding:8px 0; color:#0f172a; font-size:14px;">{{buyerName}}</td></tr>
+  <tr><td style="padding:8px 0; color:#64748b; font-size:14px;">Why it was flagged</td><td style="padding:8px 0; color:#0f172a; font-size:14px;">{{reason}}</td></tr>
+</table>
+""" + CtaButton),
+                    Text = """
+Possible duplicate lead
+
+Hi {{recipientName}},
+
+A new lead looks like a duplicate of a lead you are responsible for. It is
+blocked from being converted until someone reviews it.
+
+Your lead:          {{originalRfqNumber}}
+New (flagged) lead: {{duplicateRfqNumber}}
+Buyer:              {{buyerName}}
+Why flagged:        {{reason}}
+
+Review it here: {{ctaUrl}}
 
 — Nexora (automated notification)
 """

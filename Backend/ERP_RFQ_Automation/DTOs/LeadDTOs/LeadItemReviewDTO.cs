@@ -21,5 +21,11 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         public string? AlternatePartNumber { get; set; }
         public string? ItemText { get; set; }
         public int? LeadTime { get; set; }
+
+        /// <summary>
+        /// Optional. When omitted (null) the item's stored ExtraFields are preserved
+        /// untouched; when provided the sanitized value replaces them.
+        /// </summary>
+        public Dictionary<string, string>? ExtraFields { get; set; }
     }
 }

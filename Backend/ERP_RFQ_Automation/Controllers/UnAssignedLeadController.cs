@@ -110,11 +110,27 @@ namespace ERP_RFQ_Automation.Controllers
             try
             {
                 var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+
+                // WP-A1 manager gate: only admin/manager roles may (re)assign leads.
+                // The caller's roleId claim is resolved against the SetupMaster
+                // "role" row (matched by code/name text, never a hardcoded id).
+                if (!long.TryParse(User.FindFirst("roleId")?.Value, out var roleId)
+                    || !await _repository.CanManageLeadAssignmentsAsync(roleId))
+                {
+                    return StatusCode(StatusCodes.Status403Forbidden,
+                        new { error = "Only managers and admins can assign leads." });
+                }
+
+                var callerName = User.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value
+                                 ?? User.FindFirst("email")?.Value
+                                 ?? User.Identity?.Name;
+
                 await _repository.AssignLeadAsync(
                     request.LeadId,
                     request.AssignedToUserId,
                     businessUnitId,
-                    request.Comment             
+                    request.Comment,
+                    callerName
                 );
 
                 return Ok(new { message = "Lead assigned successfully" });

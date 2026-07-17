@@ -2,6 +2,8 @@ using ERP_RFQ_Automation.DTOs.QuoteDTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Services;
+using ERP_RFQ_Automation.Sla;
+using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using System;
@@ -18,11 +20,13 @@ namespace ERP_RFQ_Automation.Controllers
     {
         private readonly IQuoteRepository _repository;
         private readonly IQuoteService _quoteService;
+        private readonly IQuoteOutcomeService _outcomeService;
 
-        public QuoteController(IQuoteRepository repository, IQuoteService quoteService)
+        public QuoteController(IQuoteRepository repository, IQuoteService quoteService, IQuoteOutcomeService outcomeService)
         {
             _repository = repository;
             _quoteService = quoteService;
+            _outcomeService = outcomeService;
         }
 
         [HttpGet]
@@ -186,6 +190,79 @@ namespace ERP_RFQ_Automation.Controllers
                 return BadRequest(ex.Message);
             }
         }
+
+        public sealed class QuoteOutcomeRequestDto
+        {
+            /// <summary>"won" | "lost" | "expired".</summary>
+            public string Outcome { get; set; } = string.Empty;
+            /// <summary>SetupMaster "QuoteOutcomeReason" code (required for lost/expired).</summary>
+            public string? ReasonCode { get; set; }
+            /// <summary>Optional free-text note (max 500 chars).</summary>
+            public string? Note { get; set; }
+        }
+
+        // -------- POST /api/Quote/{id}/outcome (WP-A4) --------
+        [HttpPost("{id}/outcome")]
+        public async Task<ActionResult<QuoteResponseDTO>> SetOutcome(long id, [FromBody] QuoteOutcomeRequestDto request)
+        {
+            try
+            {
+                var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+                if (businessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+
+                var result = await _outcomeService.SetOutcomeAsync(
+                    id, businessUnitId, ActorEmail(), request.Outcome, request.ReasonCode, request.Note);
+                return Ok(result);
+            }
+            catch (KeyNotFoundException)
+            {
+                return NotFound();
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(ex.Message);
+            }
+            catch (InvalidOperationException ex)
+            {
+                // Terminal-state immutability (non-manager correction attempt).
+                return Conflict(ex.Message);
+            }
+        }
+
+        // -------- POST /api/Quote/{id}/mark-responded (WP-A4) --------
+        [HttpPost("{id}/mark-responded")]
+        public async Task<IActionResult> MarkResponded(long id)
+        {
+            try
+            {
+                var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+                if (businessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+
+                await _outcomeService.MarkRespondedAsync(id, businessUnitId, ActorEmail());
+                return Ok(new { id, responded = true });
+            }
+            catch (KeyNotFoundException)
+            {
+                return NotFound();
+            }
+        }
+
+        // -------- GET /api/Quote/outcome-reasons (WP-A4 governed picklist) --------
+        [HttpGet("outcome-reasons")]
+        public async Task<IActionResult> GetOutcomeReasons()
+        {
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+
+            var reasons = await _outcomeService.GetOutcomeReasonsAsync(businessUnitId);
+            return Ok(reasons);
+        }
+
+        private string ActorEmail() =>
+            User.FindFirst(ClaimTypes.Email)?.Value
+            ?? User.FindFirst("email")?.Value
+            ?? User.Identity?.Name
+            ?? "unknown";
 
         [HttpGet("stats")]
         public async Task<ActionResult<QuoteStatsDTO>> GetQuoteStats()

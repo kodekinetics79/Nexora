@@ -309,6 +309,7 @@ namespace ERP_RFQ_Automation.Services
 4. Dates must be in YYYY-MM-DD format or null
 5. Quantities must be positive integers
 6. Assign confidence based on evidence in the text - aim for accuracy over conservatism where evidence is strong
+7. CUSTOM COLUMNS: if the document contains column headers or labeled per-item values that do NOT map to any field in the schema below (e.g. ""Plant Code"", ""Incoterms"", ""Project"", ""Cost Center""), preserve them per item in ""ExtraFields"" as an object whose keys are the ORIGINAL header text exactly as written and whose values are the cell values as strings. Do NOT invent columns, do NOT duplicate values already mapped to schema fields, and use null (or omit ""ExtraFields"") when there are no unmapped columns. Limit to at most 20 entries per item.
 
 **CONFIDENCE GUIDELINES (OPTIMIZED FOR HIGHER PRECISION):**
 - 0.95-1.0: Explicitly stated in text with exact match and clear labeling
@@ -395,7 +396,8 @@ namespace ERP_RFQ_Automation.Services
       ""ReceivedDateConfidence"": number,
       ""BidClosingDateLine"": ""YYYY-MM-DD"" | null,
       ""BidClosingDateLineConfidence"": number,
-      ""ItemConfidence"": number
+      ""ItemConfidence"": number,
+      ""ExtraFields"": {{ ""<original column header>"": ""<cell value as string>"" }} | null
     }}
   ]
 }}
