@@ -15,6 +15,7 @@ import {
   CheckCircle as AcceptIcon,
   Cancel as RejectIcon,
   NavigateNext as NextIcon,
+  AutoAwesome as SparkleIcon,
 } from '@mui/icons-material';
 import leadService from '../../api/services/leadService';
 
@@ -128,8 +129,18 @@ const LeadDetailPage: React.FC = () => {
             {t('lead_detail_analysis') || 'Lead Details Analysis Engine'}
           </Typography>
         </Box>
+        <Stack direction="row" spacing={1.5}>
+          <Button
+            variant="contained"
+            startIcon={<SparkleIcon />}
+            size="small"
+            onClick={() => navigate(`/procurement/leads/${lead.id}/convert`)}
+            sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
+          >
+            Convert with AI
+          </Button>
         {(!lead.isAccepted && !lead.isRejected && lead.status?.toLowerCase() !== 'accepted' && lead.status?.toLowerCase() !== 'rejected') && (
-          <Stack direction="row" spacing={1.5}>
+          <>
             <Button
               variant="outlined"
               color="error"
@@ -152,8 +163,9 @@ const LeadDetailPage: React.FC = () => {
             >
               {t('accept') || 'Accept'}
             </Button>
-          </Stack>
+          </>
         )}
+        </Stack>
       </Box>
 
       <Grid container spacing={3}>

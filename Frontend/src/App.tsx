@@ -54,6 +54,10 @@ const ShipmentViewPage = lazy(() => import('./pages/Sales/Shipments/ShipmentView
 const ShipmentInvoicePage = lazy(() => import('./pages/Sales/Shipments/ShipmentInvoicePage'));
 const PriceStructurePage = lazy(() => import('./pages/Setup/PriceStructure/PriceStructurePage'));
 
+// Intelligence surfaces — AI-assisted Lead→RFQ conversion and RFQ smart pricing.
+const LeadConvertPage = lazy(() => import('./pages/Intelligence/LeadConvertPage'));
+const RfqPricingPage = lazy(() => import('./pages/Intelligence/RfqPricingPage'));
+
 // Sourcing Copilot — conversational autonomous-agent console (flagship surface).
 const CopilotPage = lazy(() => import('./pages/Copilot/CopilotPage'));
 const CopilotApprovalsPage = lazy(() => import('./pages/Copilot/ApprovalsPage'));
@@ -112,6 +116,7 @@ function App() {
       <Route path="/procurement/rfqs/outstanding" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><OutstandingRFQsPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/rfqs/process/:id" element={<MainLayout><PermissionGuard moduleName="RFQ Management" action="edit" redirect><ProcessRFQPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/rfqs/view/:id" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><ViewRFQPage /></PermissionGuard></MainLayout>} />
+      <Route path="/procurement/rfqs/:id/pricing" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><RfqPricingPage /></PermissionGuard></MainLayout>} />
       <Route path="/rfqs/view/:id" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><ViewRFQPage /></PermissionGuard></MainLayout>} />
       <Route path="/rfqs" element={<Navigate to="/procurement/rfqs/all" replace />} />
       
@@ -156,6 +161,7 @@ function App() {
       <Route path="/procurement/leads/manual-upload" element={<MainLayout><PermissionGuard moduleName="Leads" action="create" redirect><ManualUploadLeadsPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/leads/folder-upload" element={<MainLayout><PermissionGuard moduleName="Leads" action="create" redirect><FolderUploadLeadsPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/leads/view/:id" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><LeadDetailPage /></PermissionGuard></MainLayout>} />
+      <Route path="/procurement/leads/:id/convert" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><LeadConvertPage /></PermissionGuard></MainLayout>} />
       
       {/* Short Lead Routes */}
       <Route path="/leads/all" element={<Navigate to="/procurement/leads/all" replace />} />

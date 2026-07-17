@@ -17,6 +17,7 @@ import {
   Refresh as RefreshIcon,
   Layers as ItemsIcon,
   Email as EmailIcon,
+  AutoAwesome as SparkleIcon,
 } from '@mui/icons-material';
 import leadService from '../../api/services/leadService';
 import SearchField from '../../components/common/SearchField';
@@ -216,9 +217,9 @@ const LeadsPage: React.FC = () => {
     {
       field: 'details',
       headerName: 'Details',
-      width: 80,
+      width: 110,
       renderCell: (p) => (
-        <Box sx={{ display: 'flex', alignItems: 'center', height: '100%' }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', height: '100%', gap: 0.5 }}>
           <Tooltip title="View Details">
             <IconButton
               size="small"
@@ -226,6 +227,16 @@ const LeadsPage: React.FC = () => {
               onClick={() => navigate(`/leads/view/${p.row.id}`)}
             >
               <ViewIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="Convert with AI">
+            <IconButton
+              size="small"
+              aria-label="Convert with AI"
+              sx={{ color: 'secondary.main', '&:hover': { bgcolor: 'action.hover' } }}
+              onClick={() => navigate(`/procurement/leads/${p.row.id}/convert`)}
+            >
+              <SparkleIcon fontSize="small" />
             </IconButton>
           </Tooltip>
         </Box>

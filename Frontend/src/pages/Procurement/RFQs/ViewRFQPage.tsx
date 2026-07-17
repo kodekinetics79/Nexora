@@ -14,6 +14,7 @@ import {
   Download as ExportIcon,
   NavigateNext as NextIcon,
   Schedule as HistoryIcon,
+  AutoAwesome as SparkleIcon,
 } from '@mui/icons-material';
 import rfqService from '../../../api/services/rfqService';
 import { useAuth } from '../../../context/AuthContext';
@@ -102,6 +103,14 @@ const ViewRFQPage: React.FC = () => {
               sx={{ fontWeight: 800, borderRadius: 2, px: 3, borderColor: 'divider', color: 'text.secondary' }}
             >
               Back
+            </Button>
+            <Button
+              variant="contained"
+              startIcon={<SparkleIcon />}
+              onClick={() => navigate(`/procurement/rfqs/${rfq.id}/pricing`)}
+              sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
+            >
+              Smart Pricing
             </Button>
             {isDraft && (
               <>

@@ -1,0 +1,156 @@
+import axiosInstance from '../axiosInstance';
+
+// ─── Lead → RFQ conversion preview ───────────────────────────────────────────
+
+export interface ProductMatchSuggestion {
+  productId: number;
+  productName: string | null;
+  materialCode: string | null;
+  manufacturerPartNumber: string | null;
+  /** 0..1 — never shown raw in the UI; mapped to High / Medium / Low. */
+  score: number | null;
+  /** Plain-language explanation of why this product was suggested. */
+  reason: string | null;
+}
+
+export interface ConversionPreviewHeader {
+  rfqno: string | null;
+  buyersName: string | null;
+  recDate: string | null;
+  bidClosingDate: string | null;
+}
+
+export interface ConversionPreviewItem {
+  leadItemId: number;
+  /** The raw text this line was extracted from. */
+  sourceText: string | null;
+  quantity: number | null;
+  unitOfMeasure: string | null;
+  normalizedQuantity: number | null;
+  normalizedUom: string | null;
+  matches: ProductMatchSuggestion[];
+  bestMatchProductId: number | null;
+  /** 0..1 — never shown raw in the UI. */
+  confidence: number | null;
+  needsAttention: boolean;
+  attentionReason: string | null;
+}
+
+export interface ConversionPreview {
+  leadId: number;
+  header: ConversionPreviewHeader;
+  items: ConversionPreviewItem[];
+  /** 0..1 — never shown raw in the UI. */
+  overallConfidence: number | null;
+}
+
+export interface ConvertLeadItemRequest {
+  leadItemId: number;
+  include: boolean;
+  productId?: number;
+  quantity?: number;
+  unitOfMeasure?: string;
+}
+
+export interface ConvertLeadRequest {
+  items: ConvertLeadItemRequest[];
+  notes?: string;
+}
+
+export interface ConvertLeadResponse {
+  rfqId: number;
+}
+
+// ─── RFQ smart-pricing preview ───────────────────────────────────────────────
+
+export type PriceSignalSource =
+  | 'priceList'
+  | 'recentQuote'
+  | 'supplierQuote'
+  | 'purchaseHistory'
+  | 'productMaster';
+
+export interface PriceSignal {
+  source: PriceSignalSource;
+  label: string | null;
+  value: number | null;
+  detail: string | null;
+}
+
+export interface PricePreviewLine {
+  rfqItemId: number;
+  description: string | null;
+  quantity: number | null;
+  recommendedUnitPrice: number | null;
+  floorUnitPrice: number | null;
+  marginPct: number | null;
+  /** 0..1 — never shown raw in the UI. */
+  confidence: number | null;
+  /** Plain-language sentence explaining the recommendation. */
+  rationale: string | null;
+  signals: PriceSignal[];
+  needsAttention: boolean;
+}
+
+export interface PricePreviewTotals {
+  recommendedTotal: number | null;
+}
+
+export interface PricePreview {
+  rfqId: number;
+  currency: string | null;
+  lines: PricePreviewLine[];
+  totals: PricePreviewTotals;
+  /** 0..1 — never shown raw in the UI. */
+  overallConfidence: number | null;
+}
+
+export interface ApplyPricingLineRequest {
+  rfqItemId: number;
+  unitPrice: number;
+}
+
+export interface ApplyPricingRequest {
+  lines: ApplyPricingLineRequest[];
+}
+
+export interface ApplyPricingResponse {
+  applied: number;
+  total: number | null;
+}
+
+// ─── Service ─────────────────────────────────────────────────────────────────
+
+const intelligenceService = {
+  getConversionPreview: async (leadId: number): Promise<ConversionPreview> => {
+    const r = await axiosInstance.get<ConversionPreview>(
+      `/api/intelligence/leads/${leadId}/conversion-preview`
+    );
+    return r.data;
+  },
+
+  convertLead: async (leadId: number, body: ConvertLeadRequest): Promise<ConvertLeadResponse> => {
+    const r = await axiosInstance.post<ConvertLeadResponse>(
+      `/api/intelligence/leads/${leadId}/convert`,
+      body
+    );
+    return r.data;
+  },
+
+  getPricePreview: async (rfqId: number): Promise<PricePreview> => {
+    const r = await axiosInstance.get<PricePreview>(
+      `/api/intelligence/rfqs/${rfqId}/price-preview`
+    );
+    return r.data;
+  },
+
+  applyPricing: async (rfqId: number, body: ApplyPricingRequest): Promise<ApplyPricingResponse> => {
+    const r = await axiosInstance.post<ApplyPricingResponse>(
+      `/api/intelligence/rfqs/${rfqId}/apply-pricing`,
+      body
+    );
+    return r.data;
+  },
+};
+
+export default intelligenceService;

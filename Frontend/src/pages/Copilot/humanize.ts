@@ -36,6 +36,10 @@ const TOOLS: Record<string, HumanTool> = {
   capture_supplier_quote: { icon: '💬', label: 'Recorded a supplier quote', action: "record this supplier's quote" },
   award_rfq: { icon: '🏆', label: 'Awarded the RFQ', action: 'award this RFQ to the chosen supplier' },
   create_order_from_quote: { icon: '🧾', label: 'Created an order', action: 'create an order from this quote' },
+  preview_lead_conversion: { icon: '🔍', label: 'Reviewed how a lead would convert', action: 'preview how this lead converts to an RFQ' },
+  convert_lead_to_rfq: { icon: '📄', label: 'Converted a lead to an RFQ', action: 'convert this lead into an RFQ' },
+  price_rfq: { icon: '💡', label: 'Suggested pricing', action: 'suggest pricing for this RFQ' },
+  apply_rfq_pricing: { icon: '💰', label: 'Applied pricing', action: 'apply the suggested pricing to this RFQ' },
 };
 
 /** snake_case / kebab-case → "Title Case". */
