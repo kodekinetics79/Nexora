@@ -6,7 +6,7 @@ import {
   Box, Typography, Paper, Button, IconButton,
   Stack, Dialog, DialogTitle, DialogContent,
   DialogActions, TextField, MenuItem, Chip,
-  Menu,
+  Menu, FormControlLabel, Switch,
 } from '@mui/material';
 import {
   DataGrid, type GridColDef, type GridPaginationModel
@@ -34,6 +34,11 @@ const OutstandingLeadsPage: React.FC = () => {
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
   const [search, setSearch] = useState('');
   const [menuAnchor, setMenuAnchor] = useState<{ el: HTMLElement, row: any } | null>(null);
+  // Filter toggle wired to the existing excludeAssigned param: on = only leads
+  // still waiting for an owner; off = every accepted lead not yet converted.
+  const [unassignedOnly, setUnassignedOnly] = useState(true);
+  // Inline 2-click assign: click "Assign to..." on a row, then pick a name.
+  const [quickAssign, setQuickAssign] = useState<{ el: HTMLElement, leadId: number } | null>(null);
 
   const formatDate = (dateStr: string | null) => {
     if (!dateStr) return '—';
@@ -60,13 +65,13 @@ const OutstandingLeadsPage: React.FC = () => {
   const isAdminOrManager = userData?.roleName?.toLowerCase().includes('admin') || userData?.roleName?.toLowerCase().includes('manager');
 
   const { data, isLoading, refetch } = useQuery({
-    queryKey: ['leads-outstanding', paginationModel, search],
+    queryKey: ['leads-outstanding', paginationModel, search, unassignedOnly],
     queryFn: () => leadService.getOutstandingLeads({
       pageNumber: paginationModel.page + 1,
       pageSize: paginationModel.pageSize,
       search: search || undefined,
       assignedToId: isAdminOrManager ? undefined : userData?.id,
-      excludeAssigned: true, // Backend logic now handles this correctly with assignedToId
+      excludeAssigned: unassignedOnly, // Backend logic now handles this correctly with assignedToId
     }),
   });
 
@@ -81,9 +86,11 @@ const OutstandingLeadsPage: React.FC = () => {
     onSuccess: () => {
       enqueueSnackbar('Lead assigned successfully!', { variant: 'success' });
       setAssignDialogOpen(false);
+      setQuickAssign(null);
       setAssignToUserId('');
       setAssignComment('');
       queryClient.invalidateQueries({ queryKey: ['leads-outstanding'] });
+      queryClient.invalidateQueries({ queryKey: ['leads-assigned'] });
     },
     onError: (err: any) => enqueueSnackbar(err.response?.data?.error || 'Failed to assign lead', { variant: 'error' }),
   });
@@ -150,20 +157,47 @@ const OutstandingLeadsPage: React.FC = () => {
     {
       field: 'assignee',
       headerName: 'Assigned Specialist',
-      width: 180,
-      renderCell: (p) => (
-        <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
-          <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-            <UserIcon sx={{ fontSize: 14, color: p.row.assignedToFullName ? 'primary.main' : 'error.main' }} />
-            <Typography sx={{ fontWeight: 800, fontSize: '0.85rem', color: p.row.assignedToFullName ? 'text.primary' : 'error.main' }}>
-              {p.row.assignedToFullName || 'Unassigned'}
-            </Typography>
-          </Stack>
-          <Typography variant="caption" sx={{ fontSize: '0.65rem', fontWeight: 700, color: 'text.disabled', textTransform: 'uppercase' }}>
-            Since: {formatDate(p.row.assignedOn)}
-          </Typography>
-        </Box>
-      )
+      width: 200,
+      renderCell: (p) => {
+        const isUnassigned = !p.row.assignedToId;
+        return (
+          <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
+            {isUnassigned && p.row.isUnassignedOverdue && (
+              <Chip
+                label={`Unassigned ${p.row.unassignedHours ?? 0}h`}
+                size="small"
+                sx={{ height: 18, fontSize: '0.6rem', fontWeight: 900, bgcolor: 'error.main', color: 'white', mb: 0.5, borderRadius: 1, width: 'fit-content' }}
+              />
+            )}
+            {isUnassigned && isAdminOrManager ? (
+              // Click 1 of the 2-click assign: opens the name list right here.
+              <Button
+                size="small"
+                variant="outlined"
+                startIcon={<AssignIcon sx={{ fontSize: 14 }} />}
+                onClick={(e) => setQuickAssign({ el: e.currentTarget, leadId: p.row.id })}
+                sx={{ fontWeight: 800, fontSize: '0.7rem', py: 0.25, px: 1, borderRadius: 1.5, width: 'fit-content', textTransform: 'none' }}
+              >
+                Assign to...
+              </Button>
+            ) : (
+              <>
+                <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+                  <UserIcon sx={{ fontSize: 14, color: p.row.assignedToFullName && !isUnassigned ? 'primary.main' : 'error.main' }} />
+                  <Typography sx={{ fontWeight: 800, fontSize: '0.85rem', color: !isUnassigned ? 'text.primary' : 'error.main' }}>
+                    {!isUnassigned ? p.row.assignedToFullName : 'Unassigned'}
+                  </Typography>
+                </Stack>
+                {!isUnassigned && (
+                  <Typography variant="caption" sx={{ fontSize: '0.65rem', fontWeight: 700, color: 'text.disabled', textTransform: 'uppercase' }}>
+                    Since: {formatDate(p.row.assignedOn)}
+                  </Typography>
+                )}
+              </>
+            )}
+          </Box>
+        );
+      }
     },
     {
       field: 'recDate',
@@ -262,9 +296,13 @@ const OutstandingLeadsPage: React.FC = () => {
         <Button variant="outlined" startIcon={<RefreshIcon />} onClick={() => refetch()} size="small" sx={{ fontWeight: 800 }}>Refresh Dashboard</Button>
       </Box>
 
-      {/* Search */}
-      <Paper sx={{ p: 2, mb: 2, borderRadius: 3, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
+      {/* Search + filters */}
+      <Paper sx={{ p: 2, mb: 2, borderRadius: 3, border: '1px solid', borderColor: 'divider', boxShadow: 'none', display: 'flex', alignItems: 'center', gap: 3, flexWrap: 'wrap' }}>
         <SearchField width="400px" value={search} onChange={setSearch} placeholder="Filter outstanding leads..." />
+        <FormControlLabel
+          control={<Switch checked={unassignedOnly} onChange={(e) => setUnassignedOnly(e.target.checked)} size="small" />}
+          label={<Typography sx={{ fontWeight: 700, fontSize: '0.8rem' }}>Waiting for an owner only</Typography>}
+        />
       </Paper>
 
       {/* Grid */}
@@ -338,6 +376,37 @@ const OutstandingLeadsPage: React.FC = () => {
         </DialogActions>
       </Dialog>
 
+      {/* Inline quick-assign: click 2 of 2 — pick a name and it's assigned */}
+      <Menu
+        anchorEl={quickAssign?.el}
+        open={Boolean(quickAssign)}
+        onClose={() => setQuickAssign(null)}
+        slotProps={{
+          paper: {
+            sx: { borderRadius: 2, boxShadow: '0 8px 32px rgba(0,0,0,0.1)', border: '1px solid', borderColor: 'divider', minWidth: 200, maxHeight: 320 }
+          }
+        }}
+      >
+        <Typography sx={{ px: 2, py: 0.75, fontSize: '0.65rem', fontWeight: 900, color: 'text.disabled', textTransform: 'uppercase' }}>
+          Pick a person
+        </Typography>
+        {users.length === 0 && (
+          <MenuItem disabled sx={{ fontSize: '0.8rem' }}>No team members found</MenuItem>
+        )}
+        {users.map((u: any) => (
+          <MenuItem
+            key={u.id}
+            disabled={assignMutation.isPending}
+            onClick={() => {
+              if (quickAssign) assignMutation.mutate({ leadId: quickAssign.leadId, assignedToUserId: Number(u.id) });
+            }}
+            sx={{ fontSize: '0.8rem', fontWeight: 600, py: 1 }}
+          >
+            <UserIcon sx={{ fontSize: 16, mr: 1, color: 'primary.main' }} /> {u.fullName || u.userName}
+          </MenuItem>
+        ))}
+      </Menu>
+
       {/* Actions Menu */}
       <Menu
         anchorEl={menuAnchor?.el}
@@ -362,16 +431,18 @@ const OutstandingLeadsPage: React.FC = () => {
         >
           <ViewIcon sx={{ fontSize: 16, mr: 1, color: 'primary.main' }} /> View
         </MenuItem>
-        <MenuItem
-          onClick={() => {
-            const id = menuAnchor!.row.id;
-            setMenuAnchor(null);
-            handleAssignClick(id);
-          }}
-          sx={{ fontSize: '0.8rem', fontWeight: 600, py: 1 }}
-        >
-          <AssignIcon sx={{ fontSize: 16, mr: 1, color: 'warning.main' }} /> Assign
-        </MenuItem>
+        {isAdminOrManager && (
+          <MenuItem
+            onClick={() => {
+              const id = menuAnchor!.row.id;
+              setMenuAnchor(null);
+              handleAssignClick(id);
+            }}
+            sx={{ fontSize: '0.8rem', fontWeight: 600, py: 1 }}
+          >
+            <AssignIcon sx={{ fontSize: 16, mr: 1, color: 'warning.main' }} /> Assign with a note
+          </MenuItem>
+        )}
       </Menu>
     </Box >
   );

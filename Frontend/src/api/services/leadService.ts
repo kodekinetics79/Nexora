@@ -40,6 +40,11 @@ export interface LeadResponseDTO {
   businessUnitId: number;
   businessUnitName?: string;
   assignedToFullName?: string;
+  // WP-A3 duplicate flag: null | 'suspected' | 'confirmed' | 'not_duplicate'.
+  // Conversion is blocked while suspected/confirmed.
+  duplicateStatus?: string | null;
+  duplicateOfLeadId?: number | null;
+  duplicateResolvedBy?: string | null;
   leadItems?: LeadItemResponseDTO[];
   attachments?: AttachmentResponseDTO[];
 }
@@ -66,6 +71,9 @@ export interface LeadItemResponseDTO {
   alternatePartNumber?: string;
   itemText?: string;
   leadTime?: string;
+  // Unrecognized customer-document columns preserved verbatim at extraction time
+  // ({"original column header": "cell value"}); absent/null when none.
+  extraFields?: Record<string, string> | null;
 }
 
 export interface AttachmentResponseDTO {
@@ -85,6 +93,13 @@ export interface AcceptedLeadResponseDTO {
   assignedToId?: number;
   assignedOn?: string;
   comment?: string;
+  // WP-A1 unassigned-aging: whole hours the lead has sat unassigned (null when
+  // assigned) and whether that exceeds the tenant's SLA threshold (default 2h).
+  unassignedHours?: number | null;
+  isUnassignedOverdue?: boolean;
+  // WP-A3 duplicate flag
+  duplicateStatus?: string | null;
+  duplicateOfLeadId?: number | null;
   // Add other fields as needed
 }
 
@@ -203,6 +218,13 @@ const leadService = {
 
   assignLead: async (data: { leadId: number; assignedToUserId: number; comment?: string }) => {
     return axiosInstance.post('/api/UnAssignedLead/assign', data);
+  },
+
+  // WP-A3: resolve a duplicate flag. 'not_duplicate' clears the conversion
+  // block; 'confirm' records a confirmed duplicate (conversion stays blocked).
+  resolveDuplicate: async (id: number, action: 'not_duplicate' | 'confirm'): Promise<LeadResponseDTO> => {
+    const r = await axiosInstance.post(`/api/Lead/${id}/duplicate-resolution`, { action });
+    return r.data;
   },
 
   // Uploads

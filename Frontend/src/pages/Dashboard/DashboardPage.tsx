@@ -1,594 +1,265 @@
-import { useEffect, useState } from 'react';
-import { Box, Typography, Paper, Card, CircularProgress, IconButton, Tooltip, useTheme, Avatar, Grid, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Chip, Alert, Button } from '@mui/material';
-import { useAuth } from '../../context/AuthContext';
-
-import { 
-  TrendingUp, 
-  TrendingDown, 
-  LocalAtm, 
-  Assignment, 
-  People,
-  Assessment,
-  Refresh,
-  Speed,
-  HealthAndSafety,
-  ScatterPlot,
-  ListAlt
-} from '@mui/icons-material';
-import { useAppTheme } from '../../context/ThemeContext';
-import axiosInstance from '../../api/axiosInstance';
-import { 
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, 
-  PieChart, Pie, Cell,
-  Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
-  BarChart, Bar,
-  ScatterChart, Scatter, ZAxis
-} from 'recharts';
+import { useMemo } from 'react';
+import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Box } from '@mui/material';
 import dayjs from 'dayjs';
+import { useAuth } from '../../context/AuthContext';
+import { useAppTheme } from '../../context/ThemeContext';
+import dashboardService from '../../api/services/dashboardService';
+import leadService from '../../api/services/leadService';
+import extractionReviewService from '../../api/services/extractionReviewService';
+import copilotService from '../../api/services/copilotService';
+import { composeClauses, composeOvernightClause, greetingForHour, type BriefingInput } from './briefing';
+import BriefingHero from './components/BriefingHero';
+import ActionQueue, { type DeadlineRow } from './components/ActionQueue';
+import PipelineSnapshot from './components/PipelineSnapshot';
+import TrendTiles from './components/TrendTiles';
+import AiPulseStrip from './components/AiPulseStrip';
+import { asRealDate } from './components/dashboardTheme';
 
-export interface StatTrendDTO {
-  value: string;
-  isUp: boolean;
-}
+const LIVE = {
+  refetchInterval: 60_000,
+  placeholderData: keepPreviousData,
+} as const;
 
-export interface DashboardStatsDTO {
-  totalLeads: number;
-  activeLeads: number;
-  totalRfqs: number;
-  rfqsQuoted: number;
-  bidRatio: number;
-  totalLineItems: number;
-  l1Quoted: number;
-  totalOrderValue: number;
-  winVolumeRatio: number;
-  avgQuoteValue: number;
-  avgOrderValue: number;
-  customerCount: number;
-  conversionRates: {
-    leadToRfq: number;
-    rfqToQuote: number;
-    quoteToOrder: number;
-  };
-  leadsTrend?: StatTrendDTO;
-  rfqsTrend?: StatTrendDTO;
-  ordersTrend?: StatTrendDTO;
-}
-
-export interface MonthlyTrendDTO {
-  month: string;
-  count: number;
-  value: number;
-}
-
-export interface CategoryDistributionDTO {
-  categoryName: string;
-  count: number;
-  percentage: number;
-}
-
-export interface RadarDataDTO {
-  subject: string;
-  a: number;
-  b: number;
-}
-
-export interface ScatterDataDTO {
-  x: number;
-  y: number;
-  z: number;
-  name: string;
-}
-
-export interface RecentItemDTO {
-  id: string;
-  type: string;
-  description: string;
-  status: string;
-  date: string;
-}
-
-export interface DashboardDataDTO {
-  stats: DashboardStatsDTO;
-  volumeTrend: MonthlyTrendDTO[];
-  statusDistribution: CategoryDistributionDTO[];
-  efficiencyVelocity: CategoryDistributionDTO[];
-  operationalHealth: RadarDataDTO[];
-  responseIntegrity: ScatterDataDTO[];
-  recentItems: RecentItemDTO[];
-  sourceDistribution: CategoryDistributionDTO[];
-}
-
-const StatCard = ({ title, value, icon, trend, trendValue, color, delay }: any) => {
-  const { mode } = useAppTheme();
-  return (
-    <Card sx={{ 
-      borderRadius: 4, 
-      p: 3, 
-      backgroundColor: mode === 'dark' ? 'rgba(30, 41, 59, 0.7)' : 'rgba(255, 255, 255, 0.8)',
-      backdropFilter: 'blur(12px)',
-      border: '1px solid',
-      borderColor: mode === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)',
-      boxShadow: mode === 'dark' ? `0 8px 32px ${color}1A` : `0 8px 32px ${color}15`,
-      transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-      animation: `slideUp 0.5s ease-out ${delay}s both`,
-      '@keyframes slideUp': {
-        from: { opacity: 0, transform: 'translateY(20px)' },
-        to: { opacity: 1, transform: 'translateY(0)' }
-      },
-      '&:hover': {
-        transform: 'translateY(-4px)',
-        boxShadow: mode === 'dark' ? `0 12px 40px ${color}33` : `0 12px 40px ${color}25`,
-        borderColor: `${color}40`,
-      }
-    }}>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 3 }}>
-        <Box>
-          <Typography variant="overline" sx={{ color: 'text.secondary', fontWeight: 700, letterSpacing: 1 }}>{title}</Typography>
-          <Typography variant="h4" sx={{ fontWeight: 800, mt: 0.5, color: 'text.primary' }}>{value}</Typography>
-        </Box>
-        <Avatar sx={{ bgcolor: `${color}15`, color: color, width: 48, height: 48, borderRadius: 3 }}>
-          {icon}
-        </Avatar>
-      </Box>
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', bgcolor: trend === 'up' ? 'success.main' : 'error.main', color: '#fff', px: 0.8, py: 0.2, borderRadius: 1 }}>
-          {trend === 'up' ? <TrendingUp sx={{ fontSize: 14, mr: 0.5 }} /> : <TrendingDown sx={{ fontSize: 14, mr: 0.5 }} />}
-          <Typography variant="caption" sx={{ fontWeight: 700 }}>
-            {trendValue}
-          </Typography>
-        </Box>
-        <Typography variant="caption" sx={{ color: 'text.secondary', fontWeight: 500 }}>vs last month</Typography>
-      </Box>
-    </Card>
-  );
-};
-
+/**
+ * Nexora command center. Three questions, in visual priority:
+ *   1. What needs me NOW?         → Action Queue (left, dominant)
+ *   2. How is the money flowing?  → Pipeline + 6-month trend (right column)
+ *   3. Is the AI working?         → plain-language strip (full width, below)
+ * Every section degrades to a quiet skeleton/empty state on failure.
+ */
 export default function DashboardPage() {
-  const { mode, primaryColor } = useAppTheme();
   const { userData } = useAuth();
-  const theme = useTheme();
+  const { mode, primaryColor } = useAppTheme();
+  const queryClient = useQueryClient();
   const businessUnitId = userData?.businessUnitId || 1;
-  const [loading, setLoading] = useState(true);
-  const [data, setData] = useState<DashboardDataDTO | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
-  const fetchDashboardData = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const response = await axiosInstance.get(`/api/Dashboard/${businessUnitId}`);
-      setData(response.data);
-    } catch (err) {
-      console.error("Failed to fetch dashboard data", err);
-      setError('We could not load your dashboard analytics. Please check your connection and try again.');
-    } finally {
-      setLoading(false);
-    }
-  };
+  // ── Live data (60s auto-refresh; refetches never flash skeletons) ──
+  const core = useQuery({
+    queryKey: ['dashboard', 'core', businessUnitId],
+    queryFn: () => dashboardService.getDashboard(businessUnitId),
+    ...LIVE,
+  });
+  const leadStats = useQuery({
+    queryKey: ['dashboard', 'lead-stats'],
+    queryFn: dashboardService.getLeadStats,
+    ...LIVE,
+  });
+  const rfqStats = useQuery({
+    queryKey: ['dashboard', 'rfq-stats'],
+    queryFn: dashboardService.getRfqStats,
+    ...LIVE,
+  });
+  const quoteStats = useQuery({
+    queryKey: ['dashboard', 'quote-stats'],
+    queryFn: dashboardService.getQuoteStats,
+    ...LIVE,
+  });
+  const orderStats = useQuery({
+    queryKey: ['dashboard', 'order-stats'],
+    queryFn: dashboardService.getOrderStats,
+    ...LIVE,
+  });
+  const needsReview = useQuery({
+    queryKey: ['dashboard', 'needs-review'],
+    queryFn: () => extractionReviewService.getNeedsReview({ pageNumber: 1, pageSize: 5 }),
+    ...LIVE,
+  });
+  const recentLeads = useQuery({
+    queryKey: ['dashboard', 'recent-leads'],
+    queryFn: () => leadService.getAll({ pageNumber: 1, pageSize: 50 }),
+    ...LIVE,
+  });
+  const approvals = useQuery({
+    queryKey: ['dashboard', 'approvals'],
+    queryFn: () => copilotService.getApprovals('pending'),
+    ...LIVE,
+  });
+  const audit = useQuery({
+    queryKey: ['dashboard', 'audit'],
+    queryFn: () => copilotService.getAudit(100),
+    ...LIVE,
+  });
+  const unassigned = useQuery({
+    queryKey: ['dashboard', 'unassigned'],
+    queryFn: () =>
+      leadService.getOutstandingLeads({ pageNumber: 1, pageSize: 5, excludeAssigned: true, businessUnitId }),
+    ...LIVE,
+  });
 
-  useEffect(() => {
-    fetchDashboardData();
-  }, [businessUnitId]);
+  // ── Bid deadlines: next 72h + freshly overdue (last 7 days), real dates only ──
+  const deadlineRows = useMemo<DeadlineRow[]>(() => {
+    const items = recentLeads.data?.items ?? [];
+    const now = dayjs();
+    const horizon = now.add(72, 'hour');
+    const overdueFloor = now.subtract(7, 'day');
+    return items
+      .filter((lead) => !lead.isRejected)
+      .flatMap((lead) => {
+        const closing = asRealDate(lead.bidClosingDate);
+        if (!closing || closing.isBefore(overdueFloor) || closing.isAfter(horizon)) return [];
+        return [
+          {
+            leadId: lead.id,
+            rfqno: lead.rfqno || null,
+            buyersName: lead.buyersName || null,
+            closing,
+            overdue: closing.isBefore(now),
+          },
+        ];
+      })
+      .sort((a, b) => a.closing.valueOf() - b.closing.valueOf())
+      .slice(0, 8);
+  }, [recentLeads.data]);
 
-  if (loading) {
-    return (
-      <Box sx={{ display: 'flex', height: '80vh', alignItems: 'center', justifyContent: 'center' }}>
-        <CircularProgress size={60} thickness={4} sx={{ color: primaryColor }} />
-      </Box>
-    );
-  }
+  // ── Bid/Review/Skip decorations (in-flight API — silently absent on 404) ──
+  const decisionLeadIds = useMemo(() => {
+    const ids = new Set<number>();
+    deadlineRows.forEach((row) => ids.add(row.leadId));
+    (needsReview.data?.items ?? []).forEach((item) => ids.add(item.id));
+    return Array.from(ids).slice(0, 100);
+  }, [deadlineRows, needsReview.data]);
 
-  if (error) {
-    return (
-      <Box sx={{ display: 'flex', flexDirection: 'column', height: '80vh', alignItems: 'center', justifyContent: 'center', gap: 2, p: 3, textAlign: 'center' }}>
-        <Alert severity="error" sx={{ borderRadius: 2, maxWidth: 520 }}>{error}</Alert>
-        <Button variant="contained" startIcon={<Refresh />} onClick={fetchDashboardData} sx={{ borderRadius: 2, fontWeight: 700 }}>
-          Retry
-        </Button>
-      </Box>
-    );
-  }
+  const decisions = useQuery({
+    queryKey: ['dashboard', 'decisions', decisionLeadIds],
+    queryFn: () => dashboardService.getDecisionSummaries(decisionLeadIds),
+    enabled: decisionLeadIds.length > 0,
+    retry: false,
+    refetchInterval: 60_000,
+    placeholderData: keepPreviousData,
+  });
 
-  const formatCurrency = (val: number) => {
-    if (!val) return '$0';
-    if (val >= 1000000) return `$${(val / 1000000).toFixed(2)}M`;
-    if (val >= 1000) return `$${(val / 1000).toFixed(1)}k`;
-    return `$${val}`;
-  };
+  // ── Derived view state ──
+  const stats = core.data?.stats;
+  const avgConfidencePct = core.data?.operationalHealth.find((r) => r.subject === 'AI Accuracy')?.a;
+  const actionsTakenRecently = audit.data?.filter((a) => a.decision?.toLowerCase() === 'executed').length;
+  const isBrandNew = core.isSuccess && stats !== undefined && stats.totalLeads === 0;
+  const isRefreshing =
+    core.isFetching || needsReview.isFetching || approvals.isFetching || recentLeads.isFetching;
 
-  // Extract variables
-  const pieColors = ['#f59e0b', '#3b82f6', '#10b981', '#ef4444', '#8b5cf6', '#ec4899'];
-  const chartData = data?.volumeTrend || [];
-  
-  const mappedPieData = (data?.statusDistribution || []).map((item, index) => ({
-    name: item.categoryName,
-    value: item.count,
-    color: pieColors[index % pieColors.length]
-  }));
+  // ── Narrative briefing: clauses only from queries that succeeded, counts > 0 ──
+  const briefingInput = useMemo<BriefingInput>(() => {
+    const leads = recentLeads.data?.items;
+    const dayAgo = dayjs().subtract(24, 'hour');
+    return {
+      deadlineCount: recentLeads.isSuccess ? deadlineRows.filter((r) => !r.overdue).length : null,
+      needsReviewCount: needsReview.isSuccess && needsReview.data ? needsReview.data.totalCount : null,
+      pendingQuoteCount: quoteStats.isSuccess && quoteStats.data ? quoteStats.data.pendingQuotes : null,
+      totalQuotedAmount: quoteStats.isSuccess && quoteStats.data ? quoteStats.data.totalQuotedAmount : null,
+      pendingApprovalCount: approvals.isSuccess && approvals.data ? approvals.data.length : null,
+      overnightDocCount:
+        recentLeads.isSuccess && leads
+          ? leads.filter((l) => {
+              const created = asRealDate(l.createdDate ?? l.recDate);
+              return created !== null && created.isAfter(dayAgo);
+            }).length
+          : null,
+    };
+  }, [
+    recentLeads.isSuccess,
+    recentLeads.data,
+    deadlineRows,
+    needsReview.isSuccess,
+    needsReview.data,
+    quoteStats.isSuccess,
+    quoteStats.data,
+    approvals.isSuccess,
+    approvals.data,
+  ]);
 
-  const radarData = data?.operationalHealth || [];
-  const scatterData = data?.responseIntegrity || [];
-  const barData = data?.efficiencyVelocity || [];
-  const recentItems = data?.recentItems || [];
-  
-  const sourcePieData = (data?.sourceDistribution || []).map((item, index) => ({
-    name: item.categoryName,
-    value: item.count,
-    color: ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6'][index % 4]
-  }));
+  const briefingClauses = useMemo(() => composeClauses(briefingInput), [briefingInput]);
+  const overnightClause = useMemo(() => composeOvernightClause(briefingInput), [briefingInput]);
+  const briefingLoading =
+    recentLeads.isLoading || needsReview.isLoading || quoteStats.isLoading || approvals.isLoading;
+  const briefingAllFailed =
+    recentLeads.isError && needsReview.isError && quoteStats.isError && approvals.isError;
+  const greeting = greetingForHour(dayjs().hour(), userData?.userName);
+
+  const refreshAll = () => queryClient.invalidateQueries({ queryKey: ['dashboard'] });
 
   return (
-    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1600, margin: '0 auto' }}>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', mb: 4 }}>
-        <Box>
-          <Typography variant="h4" sx={{ fontWeight: 800, color: 'text.primary', mb: 1, letterSpacing: '-0.5px' }}>
-            NEXORA Intelligence
-          </Typography>
-          <Typography variant="body1" sx={{ color: 'text.secondary', fontWeight: 500 }}>
-            Real-time procurement & sales analytics overview.
-          </Typography>
+    <Box sx={{ position: 'relative', maxWidth: 1440, mx: 'auto', p: { xs: 1, md: 2 } }}>
+      {/* Ambient wash behind the glass — subtle in both themes. */}
+      <Box
+        aria-hidden
+        sx={{
+          position: 'absolute',
+          inset: -24,
+          zIndex: 0,
+          pointerEvents: 'none',
+          background:
+            mode === 'dark'
+              ? `radial-gradient(640px 320px at 12% -4%, ${primaryColor}2e, transparent 70%),
+                 radial-gradient(560px 300px at 96% 12%, #0ea5e926, transparent 70%)`
+              : `radial-gradient(640px 320px at 12% -4%, ${primaryColor}1f, transparent 70%),
+                 radial-gradient(560px 300px at 96% 12%, #0ea5e91a, transparent 70%)`,
+        }}
+      />
+
+      <Box sx={{ position: 'relative', zIndex: 1, display: 'flex', flexDirection: 'column', gap: 2 }}>
+        {/* Narrative briefing hero — greeting, situation sentence, Ask Nexora */}
+        <BriefingHero
+          greeting={greeting}
+          clauses={briefingClauses}
+          overnight={overnightClause}
+          loading={briefingLoading}
+          allFailed={briefingAllFailed}
+          updatedAt={core.dataUpdatedAt}
+          refreshing={isRefreshing}
+          onRefresh={refreshAll}
+        />
+
+        {/* Bento grid */}
+        <Box
+          sx={{
+            display: 'grid',
+            gap: 2,
+            gridTemplateColumns: { xs: '1fr', lg: 'repeat(12, 1fr)' },
+            alignItems: 'stretch',
+          }}
+        >
+          <Box sx={{ gridColumn: { xs: 'auto', lg: 'span 7' }, minWidth: 0 }}>
+            <ActionQueue
+              deadlines={deadlineRows}
+              deadlinesReady={recentLeads.isSuccess}
+              review={needsReview.data ? { items: needsReview.data.items, totalCount: needsReview.data.totalCount } : undefined}
+              approvals={approvals.data}
+              unassigned={unassigned.data ? { items: unassigned.data.items, totalCount: unassigned.data.totalCount } : undefined}
+              decisions={decisions.data?.summaries}
+              isLoading={needsReview.isLoading || recentLeads.isLoading}
+              isBrandNew={isBrandNew}
+            />
+          </Box>
+
+          <Box sx={{ gridColumn: { xs: 'auto', lg: 'span 5' }, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <PipelineSnapshot
+              leadStats={leadStats.data}
+              rfqStats={rfqStats.data}
+              quoteStats={quoteStats.data}
+              orderStats={orderStats.data}
+              isLoading={leadStats.isLoading || rfqStats.isLoading || quoteStats.isLoading || orderStats.isLoading}
+            />
+            <TrendTiles
+              volumeTrend={core.data?.volumeTrend}
+              rfqsTrend={stats?.rfqsTrend}
+              ordersTrend={stats?.ordersTrend}
+              isLoading={core.isLoading}
+            />
+          </Box>
+
+          <Box sx={{ gridColumn: { xs: 'auto', lg: '1 / -1' }, minWidth: 0 }}>
+            <AiPulseStrip
+              documentsRead={stats?.totalLeads}
+              avgConfidencePct={avgConfidencePct}
+              reviewQueueDepth={needsReview.data?.totalCount}
+              recentActionsTaken={actionsTakenRecently}
+              auditAvailable={audit.isSuccess}
+              actionsHeld={approvals.data?.length}
+              isLoading={core.isLoading && needsReview.isLoading}
+            />
+          </Box>
         </Box>
-        <Tooltip title="Refresh Data">
-          <IconButton onClick={fetchDashboardData} sx={{ bgcolor: mode === 'dark' ? 'rgba(255,255,255,0.05)' : '#fff', boxShadow: '0 2px 12px rgba(0,0,0,0.08)', borderRadius: 3, width: 44, height: 44 }}>
-            <Refresh />
-          </IconButton>
-        </Tooltip>
       </Box>
-
-      {/* Row 1: Key Stats */}
-      <Grid container spacing={3} sx={{ mb: 4 }}>
-        <Grid size={{ xs: 12, sm: 6, md: 3 }}>
-          <StatCard 
-            title="TOTAL REVENUE" 
-            value={formatCurrency(data?.stats?.totalOrderValue || 0)}
-            icon={<LocalAtm />}
-            trend={data?.stats?.ordersTrend?.isUp ? "up" : "down"}
-            trendValue={data?.stats?.ordersTrend?.value || "0%"}
-            color="#10b981"
-            delay={0.1}
-          />
-        </Grid>
-        <Grid size={{ xs: 12, sm: 6, md: 3 }}>
-          <StatCard 
-            title="ACTIVE RFQs" 
-            value={data?.stats?.totalRfqs || 0}
-            icon={<Assignment />}
-            trend={data?.stats?.rfqsTrend?.isUp ? "up" : "down"}
-            trendValue={data?.stats?.rfqsTrend?.value || "0%"}
-            color={primaryColor}
-            delay={0.2}
-          />
-        </Grid>
-        <Grid size={{ xs: 12, sm: 6, md: 3 }}>
-          <StatCard 
-            title="WIN RATIO" 
-            value={`${(data?.stats?.winVolumeRatio || 0).toFixed(2)}%`}
-            icon={<Speed />}
-            trend="up"
-            trendValue="Auto"
-            color="#3b82f6"
-            delay={0.3}
-          />
-        </Grid>
-        <Grid size={{ xs: 12, sm: 6, md: 3 }}>
-          <StatCard 
-            title="TOTAL LEADS" 
-            value={data?.stats?.totalLeads || 0}
-            icon={<People />}
-            trend={data?.stats?.leadsTrend?.isUp ? "up" : "down"}
-            trendValue={data?.stats?.leadsTrend?.value || "0%"}
-            color="#f59e0b"
-            delay={0.4}
-          />
-        </Grid>
-      </Grid>
-
-      {/* Row 2: Charts Area & Pie */}
-      <Grid container spacing={3} sx={{ mb: 4 }}>
-        <Grid size={{ xs: 12, lg: 8 }}>
-          <Paper sx={{ 
-            p: 3, 
-            borderRadius: 4, 
-            bgcolor: mode === 'dark' ? 'rgba(30, 41, 59, 0.4)' : '#ffffff',
-            boxShadow: mode === 'dark' ? '0 4px 20px rgba(0,0,0,0.2)' : '0 10px 40px rgba(0,0,0,0.03)',
-            border: '1px solid',
-            borderColor: mode === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)',
-            height: 420
-          }}>
-            <Typography variant="h6" sx={{ fontWeight: 800, mb: 3, display: 'flex', alignItems: 'center', gap: 1.5, fontSize: '1.1rem' }}>
-              <Assessment sx={{ color: primaryColor }} /> Volume & Revenue Velocity
-            </Typography>
-            <ResponsiveContainer width="100%" height="85%">
-              <AreaChart data={chartData} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="colorValue" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor={primaryColor} stopOpacity={0.4}/>
-                    <stop offset="95%" stopColor={primaryColor} stopOpacity={0}/>
-                  </linearGradient>
-                  <linearGradient id="colorLeads" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#10b981" stopOpacity={0.4}/>
-                    <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
-                  </linearGradient>
-                </defs>
-                <XAxis dataKey="month" stroke={theme.palette.text.secondary} fontSize={12} tickLine={false} axisLine={false} dy={10} />
-                <YAxis stroke={theme.palette.text.secondary} fontSize={12} tickLine={false} axisLine={false} tickFormatter={(val) => val >= 1000 ? `$${val/1000}k` : `$${val}`} dx={-10} />
-                <CartesianGrid strokeDasharray="3 3" stroke={mode === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'} vertical={false} />
-                <RechartsTooltip 
-                  contentStyle={{ backgroundColor: mode === 'dark' ? '#0f172a' : '#fff', borderRadius: 12, border: '1px solid', borderColor: mode === 'dark' ? '#334155' : '#e2e8f0', boxShadow: '0 10px 25px rgba(0,0,0,0.1)' }}
-                  itemStyle={{ fontWeight: 600 }}
-                />
-                <Area type="monotone" dataKey="value" stroke={primaryColor} strokeWidth={3} fillOpacity={1} fill="url(#colorValue)" />
-                <Area type="monotone" dataKey="count" stroke="#10b981" strokeWidth={3} fillOpacity={1} fill="url(#colorLeads)" />
-              </AreaChart>
-            </ResponsiveContainer>
-          </Paper>
-        </Grid>
-
-        <Grid size={{ xs: 12, lg: 4 }}>
-          <Paper sx={{ 
-            p: 3, 
-            borderRadius: 4, 
-            bgcolor: mode === 'dark' ? 'rgba(30, 41, 59, 0.4)' : '#ffffff',
-            boxShadow: mode === 'dark' ? '0 4px 20px rgba(0,0,0,0.2)' : '0 10px 40px rgba(0,0,0,0.03)',
-            border: '1px solid',
-            borderColor: mode === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)',
-            height: 420,
-            display: 'flex',
-            flexDirection: 'column'
-          }}>
-            <Typography variant="h6" sx={{ fontWeight: 800, mb: 1, fontSize: '1.1rem' }}>
-              RFQ Status Distribution
-            </Typography>
-            <Typography variant="body2" sx={{ color: 'text.secondary', mb: 3 }}>
-              Distribution of current RFQs by stage.
-            </Typography>
-            <Box sx={{ flex: 1, position: 'relative' }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    data={mappedPieData}
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={75}
-                    outerRadius={105}
-                    paddingAngle={5}
-                    dataKey="value"
-                    stroke="none"
-                  >
-                    {mappedPieData.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={entry.color} />
-                    ))}
-                  </Pie>
-                  <RechartsTooltip 
-                    contentStyle={{ backgroundColor: mode === 'dark' ? '#0f172a' : '#fff', borderRadius: 12, border: '1px solid', borderColor: mode === 'dark' ? '#334155' : '#e2e8f0', boxShadow: '0 10px 25px rgba(0,0,0,0.1)' }}
-                  />
-                </PieChart>
-              </ResponsiveContainer>
-              <Box sx={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', textAlign: 'center' }}>
-                <Typography variant="h4" sx={{ fontWeight: 800 }}>{data?.stats?.totalRfqs || 0}</Typography>
-                <Typography variant="caption" sx={{ color: 'text.secondary', fontWeight: 600 }}>Total RFQs</Typography>
-              </Box>
-            </Box>
-            <Box sx={{ display: 'flex', justifyContent: 'center', gap: 3, flexWrap: 'wrap', mt: 3 }}>
-              {mappedPieData.map((item) => (
-                <Box key={item.name} sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  <Box sx={{ width: 10, height: 10, borderRadius: '50%', bgcolor: item.color }} />
-                  <Typography variant="caption" sx={{ fontWeight: 600, color: 'text.primary' }}>{item.name}</Typography>
-                </Box>
-              ))}
-            </Box>
-          </Paper>
-        </Grid>
-      </Grid>
-
-      {/* Row 2.5: Lead Source Analysis */}
-      <Grid container spacing={3} sx={{ mb: 4 }}>
-        <Grid size={{ xs: 12 }}>
-          <Paper sx={{ 
-            p: 3, 
-            borderRadius: 4, 
-            bgcolor: mode === 'dark' ? 'rgba(30, 41, 59, 0.4)' : '#ffffff',
-            boxShadow: mode === 'dark' ? '0 4px 20px rgba(0,0,0,0.2)' : '0 10px 40px rgba(0,0,0,0.03)',
-            border: '1px solid',
-            borderColor: mode === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)',
-          }}>
-            <Typography variant="h6" sx={{ fontWeight: 800, mb: 3, display: 'flex', alignItems: 'center', gap: 1.5, fontSize: '1.1rem' }}>
-              <Speed sx={{ color: '#3b82f6' }} /> Lead Source Completeness (Email vs Manual vs Folder)
-            </Typography>
-            <Grid container spacing={3} sx={{ alignItems: 'center' }}>
-              <Grid size={{ xs: 12, md: 5 }}>
-                <Box sx={{ height: 200 }}>
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie
-                        data={sourcePieData}
-                        cx="50%"
-                        cy="50%"
-                        innerRadius={60}
-                        outerRadius={80}
-                        paddingAngle={5}
-                        dataKey="value"
-                        stroke="none"
-                      >
-                        {sourcePieData.map((entry, index) => (
-                          <Cell key={`cell-${index}`} fill={entry.color} />
-                        ))}
-                      </Pie>
-                      <RechartsTooltip 
-                        contentStyle={{ backgroundColor: mode === 'dark' ? '#0f172a' : '#fff', borderRadius: 12, border: 'none' }}
-                      />
-                    </PieChart>
-                  </ResponsiveContainer>
-                </Box>
-              </Grid>
-              <Grid size={{ xs: 12, md: 7 }}>
-                <Grid container spacing={2}>
-                  {sourcePieData.map((item) => (
-                    <Grid size={{ xs: 12, sm: 4 }} key={item.name}>
-                      <Box sx={{ p: 2, borderRadius: 3, bgcolor: mode === 'dark' ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.01)', border: '1px solid', borderColor: 'divider' }}>
-                        <Typography variant="caption" sx={{ fontWeight: 700, color: 'text.secondary', textTransform: 'uppercase' }}>{item.name}</Typography>
-                        <Typography variant="h5" sx={{ fontWeight: 800, color: item.color, mt: 0.5 }}>{item.value}</Typography>
-                        <Box sx={{ width: '100%', height: 4, bgcolor: mode === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)', borderRadius: 2, mt: 1, overflow: 'hidden' }}>
-                          <Box sx={{ width: `${(item.value / (data?.stats?.totalLeads || 1)) * 100}%`, height: '100%', bgcolor: item.color }} />
-                        </Box>
-                      </Box>
-                    </Grid>
-                  ))}
-                </Grid>
-              </Grid>
-            </Grid>
-          </Paper>
-        </Grid>
-      </Grid>
-
-      {/* Row 3: Pipeline & Efficiency */}
-      <Grid container spacing={3} sx={{ mb: 4 }}>
-        <Grid size={{ xs: 12, md: 6 }}>
-          <Paper sx={{ p: 4, borderRadius: 4, bgcolor: mode === 'dark' ? 'rgba(30, 41, 59, 0.4)' : '#ffffff', border: '1px solid', borderColor: 'divider', height: '100%' }}>
-            <Typography variant="h6" sx={{ fontWeight: 800, mb: 1, fontSize: '1.1rem' }}>
-              Sales Pipeline Efficiency
-            </Typography>
-            <Typography variant="body2" sx={{ color: 'text.secondary', mb: 4 }}>
-              Conversion rates across the primary sales funnel.
-            </Typography>
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-              {[
-                { label: 'Lead to RFQ', val: data?.stats?.conversionRates?.leadToRfq || 0, color: '#f59e0b' },
-                { label: 'RFQ to Quote', val: data?.stats?.conversionRates?.rfqToQuote || 0, color: primaryColor },
-                { label: 'Quote to Order', val: data?.stats?.conversionRates?.quoteToOrder || 0, color: '#10b981' },
-              ].map((step, idx) => (
-                <Box key={idx} sx={{ p: 2, borderRadius: 3, bgcolor: mode === 'dark' ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.01)', border: '1px solid', borderColor: 'divider' }}>
-                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
-                    <Typography variant="subtitle2" sx={{ fontWeight: 700, color: 'text.primary' }}>{step.label}</Typography>
-                    <Typography variant="subtitle1" sx={{ fontWeight: 800, color: step.color }}>{Number(step.val).toFixed(2)}%</Typography>
-                  </Box>
-                  <Box sx={{ width: '100%', height: 8, bgcolor: mode === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)', borderRadius: 4, overflow: 'hidden' }}>
-                    <Box sx={{ width: `${Math.min(step.val, 100)}%`, height: '100%', bgcolor: step.color, borderRadius: 4, transition: 'width 1s ease-in-out' }} />
-                  </Box>
-                </Box>
-              ))}
-            </Box>
-          </Paper>
-        </Grid>
-        
-        <Grid size={{ xs: 12, md: 6 }}>
-           <Paper sx={{ p: 3, borderRadius: 4, bgcolor: mode === 'dark' ? 'rgba(30, 41, 59, 0.4)' : '#ffffff', border: '1px solid', borderColor: 'divider', height: '100%' }}>
-            <Typography variant="h6" sx={{ fontWeight: 800, mb: 1, fontSize: '1.1rem' }}>
-              Category Efficiency
-            </Typography>
-            <Typography variant="body2" sx={{ color: 'text.secondary', mb: 3 }}>
-              Volume breakdown by product category.
-            </Typography>
-            <Box sx={{ height: 280 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={barData} layout="vertical" margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" horizontal={true} vertical={false} stroke={mode === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'} />
-                  <XAxis type="number" stroke={theme.palette.text.secondary} />
-                  <YAxis dataKey="categoryName" type="category" width={80} stroke={theme.palette.text.secondary} fontSize={12} tickLine={false} axisLine={false} />
-                  <RechartsTooltip 
-                    cursor={{ fill: mode === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.02)' }}
-                    contentStyle={{ backgroundColor: mode === 'dark' ? '#0f172a' : '#fff', borderRadius: 8, border: '1px solid', borderColor: mode === 'dark' ? '#334155' : '#e2e8f0' }}
-                  />
-                  <Bar dataKey="count" fill={primaryColor} radius={[0, 4, 4, 0]} barSize={20} />
-                </BarChart>
-              </ResponsiveContainer>
-            </Box>
-          </Paper>
-        </Grid>
-      </Grid>
-
-      {/* Row 4: Radar & Scatter */}
-      <Grid container spacing={3} sx={{ mb: 4 }}>
-        <Grid size={{ xs: 12, md: 5 }}>
-          <Paper sx={{ p: 3, borderRadius: 4, bgcolor: mode === 'dark' ? 'rgba(30, 41, 59, 0.4)' : '#ffffff', border: '1px solid', borderColor: 'divider', height: 400 }}>
-            <Typography variant="h6" sx={{ fontWeight: 800, mb: 1, fontSize: '1.1rem', display: 'flex', alignItems: 'center', gap: 1 }}>
-              <HealthAndSafety sx={{ color: '#8b5cf6' }} /> Operational Health
-            </Typography>
-            <ResponsiveContainer width="100%" height="90%">
-              <RadarChart cx="50%" cy="50%" outerRadius="70%" data={radarData}>
-                <PolarGrid stroke={mode === 'dark' ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)'} />
-                <PolarAngleAxis dataKey="subject" tick={{ fill: theme.palette.text.secondary, fontSize: 11 }} />
-                <PolarRadiusAxis angle={30} domain={[0, 100]} tick={false} axisLine={false} />
-                <Radar name="Current" dataKey="a" stroke={primaryColor} fill={primaryColor} fillOpacity={0.5} />
-                <Radar name="Target" dataKey="b" stroke="#8b5cf6" fill="#8b5cf6" fillOpacity={0.3} />
-                <RechartsTooltip contentStyle={{ backgroundColor: mode === 'dark' ? '#0f172a' : '#fff', borderRadius: 8, border: 'none' }} />
-              </RadarChart>
-            </ResponsiveContainer>
-          </Paper>
-        </Grid>
-
-        <Grid size={{ xs: 12, md: 7 }}>
-          <Paper sx={{ p: 3, borderRadius: 4, bgcolor: mode === 'dark' ? 'rgba(30, 41, 59, 0.4)' : '#ffffff', border: '1px solid', borderColor: 'divider', height: 400 }}>
-            <Typography variant="h6" sx={{ fontWeight: 800, mb: 1, fontSize: '1.1rem', display: 'flex', alignItems: 'center', gap: 1 }}>
-              <ScatterPlot sx={{ color: '#ec4899' }} /> Response Integrity (Time vs Value)
-            </Typography>
-            <ResponsiveContainer width="100%" height="90%">
-              <ScatterChart margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke={mode === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'} />
-                <XAxis type="number" dataKey="x" name="Days Active" unit="d" stroke={theme.palette.text.secondary} />
-                <YAxis type="number" dataKey="y" name="Value" unit="$" stroke={theme.palette.text.secondary} tickFormatter={(val) => `$${val/1000}k`} />
-                <ZAxis type="number" dataKey="z" range={[50, 400]} name="Score" />
-                <RechartsTooltip cursor={{ strokeDasharray: '3 3' }} contentStyle={{ backgroundColor: mode === 'dark' ? '#0f172a' : '#fff', borderRadius: 8 }} />
-                <Scatter name="Items" data={scatterData} fill="#ec4899" fillOpacity={0.7} />
-              </ScatterChart>
-            </ResponsiveContainer>
-          </Paper>
-        </Grid>
-      </Grid>
-
-      {/* Row 5: Recent Items List */}
-      <Grid container spacing={3}>
-        <Grid size={{ xs: 12 }}>
-          <Paper sx={{ p: 3, borderRadius: 4, bgcolor: mode === 'dark' ? 'rgba(30, 41, 59, 0.4)' : '#ffffff', border: '1px solid', borderColor: 'divider' }}>
-            <Typography variant="h6" sx={{ fontWeight: 800, mb: 3, fontSize: '1.1rem', display: 'flex', alignItems: 'center', gap: 1 }}>
-              <ListAlt sx={{ color: primaryColor }} /> Recent Activity
-            </Typography>
-            <TableContainer>
-              <Table size="small">
-                <TableHead>
-                  <TableRow>
-                    <TableCell sx={{ fontWeight: 700, color: 'text.secondary' }}>ID</TableCell>
-                    <TableCell sx={{ fontWeight: 700, color: 'text.secondary' }}>Type</TableCell>
-                    <TableCell sx={{ fontWeight: 700, color: 'text.secondary' }}>Description</TableCell>
-                    <TableCell sx={{ fontWeight: 700, color: 'text.secondary' }}>Status</TableCell>
-                    <TableCell sx={{ fontWeight: 700, color: 'text.secondary', textAlign: 'right' }}>Date</TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {recentItems.slice(0, 10).map((item, index) => (
-                    <TableRow key={index} hover>
-                      <TableCell sx={{ fontWeight: 600 }}>{item.id}</TableCell>
-                      <TableCell>
-                        <Chip label={item.type} size="small" color={item.type === 'RFQ' ? 'primary' : 'warning'} variant="outlined" />
-                      </TableCell>
-                      <TableCell>{item.description}</TableCell>
-                      <TableCell>
-                        <Chip label={item.status} size="small" sx={{ 
-                          bgcolor: item.status === 'Draft' ? 'action.hover' : 
-                                  item.status === 'Submitted' ? `${primaryColor}22` : 
-                                  item.status === 'Accepted' ? '#10b98122' : '#f59e0b22',
-                          color: item.status === 'Draft' ? 'text.secondary' : 
-                                 item.status === 'Submitted' ? primaryColor : 
-                                 item.status === 'Accepted' ? '#10b981' : '#f59e0b',
-                          fontWeight: 600
-                        }} />
-                      </TableCell>
-                      <TableCell align="right" sx={{ color: 'text.secondary' }}>
-                        {dayjs(item.date).format('DD MMM YYYY, HH:mm')}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                  {recentItems.length === 0 && (
-                    <TableRow>
-                      <TableCell colSpan={5} align="center" sx={{ py: 3, color: 'text.secondary' }}>No recent activity found.</TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </TableContainer>
-          </Paper>
-        </Grid>
-      </Grid>
     </Box>
   );
 }

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -6,22 +6,208 @@ import {
   Box, Typography, Paper, Button, Chip, IconButton,
   Tooltip, Stack, TextField, MenuItem, CircularProgress,
   Dialog, DialogTitle, DialogContent, DialogActions, Alert,
+  Link, Menu, ListItemIcon, ListItemText, Popover, FormGroup,
+  FormControlLabel, Checkbox, Divider, ToggleButton, ToggleButtonGroup,
+  Skeleton,
 } from '@mui/material';
 import {
-  DataGrid, type GridColDef, type GridPaginationModel
+  DataGrid, type GridColDef, type GridPaginationModel, type GridColumnVisibilityModel,
 } from '@mui/x-data-grid';
 import {
   CheckCircle as AcceptIcon,
   Cancel as RejectIcon,
   Visibility as ViewIcon,
   Refresh as RefreshIcon,
-  Layers as ItemsIcon,
   Email as EmailIcon,
   AutoAwesome as SparkleIcon,
+  MoreVert as MoreIcon,
+  ViewColumn as ColumnsIcon,
 } from '@mui/icons-material';
-import leadService from '../../api/services/leadService';
+import leadService, { type LeadResponseDTO } from '../../api/services/leadService';
+import decisionService, { type LeadDecisionSummary } from '../../api/services/decisionService';
 import SearchField from '../../components/common/SearchField';
 import { useSnackbar } from 'notistack';
+import { formatDateSafe, parseDateSafe } from '../../utils/dates';
+import { confidenceLevel } from '../Intelligence/common';
+
+// ---------------------------------------------------------------------------
+// Per-user view preferences (column visibility + density), persisted locally.
+// Key shape: `<base>:user-<id>` when a user id can be read from the stored
+// userData blob, otherwise `<base>:global`.
+// ---------------------------------------------------------------------------
+
+const COLUMNS_KEY_BASE = 'nexora.leadsPage.columnVisibility';
+const DENSITY_KEY_BASE = 'nexora.leadsPage.density';
+
+const userScopedKey = (base: string): string => {
+  try {
+    const raw = localStorage.getItem('userData');
+    if (raw) {
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && 'id' in parsed) {
+        const id = (parsed as { id?: unknown }).id;
+        if (typeof id === 'number' || typeof id === 'string') return `${base}:user-${id}`;
+      }
+    }
+  } catch {
+    // Corrupted userData — fall back to a global preference key.
+  }
+  return `${base}:global`;
+};
+
+// Curated default column set. "actions" is always on and cannot be hidden.
+const DEFAULT_COLUMN_VISIBILITY: GridColumnVisibilityModel = {
+  rfqno: true,
+  buyer: true,
+  recDate: true,
+  bidClosingDate: true,
+  itemCount: true,
+  leadSource: true,
+  aiconfidence: true,
+  status: true,
+  decision: true,
+  estimatedValue: false,
+  actions: true,
+};
+
+const HIDEABLE_COLUMNS: ReadonlyArray<{ field: string; label: string }> = [
+  { field: 'rfqno', label: 'RFQ #' },
+  { field: 'buyer', label: 'Buyer' },
+  { field: 'recDate', label: 'Received' },
+  { field: 'bidClosingDate', label: 'Deadline' },
+  { field: 'itemCount', label: 'Items' },
+  { field: 'leadSource', label: 'Source' },
+  { field: 'aiconfidence', label: 'Confidence' },
+  { field: 'status', label: 'Status' },
+  { field: 'decision', label: 'Decision' },
+  { field: 'estimatedValue', label: 'Estimated value' },
+];
+
+const loadColumnVisibility = (): GridColumnVisibilityModel => {
+  try {
+    const raw = localStorage.getItem(userScopedKey(COLUMNS_KEY_BASE));
+    if (raw) {
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return { ...DEFAULT_COLUMN_VISIBILITY, ...(parsed as GridColumnVisibilityModel), actions: true };
+      }
+    }
+  } catch {
+    // Unreadable preference — use the curated defaults.
+  }
+  return { ...DEFAULT_COLUMN_VISIBILITY };
+};
+
+type DensityChoice = 'comfortable' | 'compact';
+
+const loadDensity = (): DensityChoice => {
+  try {
+    return localStorage.getItem(userScopedKey(DENSITY_KEY_BASE)) === 'compact' ? 'compact' : 'comfortable';
+  } catch {
+    return 'comfortable';
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Presentation helpers
+// ---------------------------------------------------------------------------
+
+const INTERNAL_EMAIL_SUFFIX = '@pipeline.local';
+
+/** Internal pipeline addresses and blanks must never be shown to users. */
+const buyerContact = (row: LeadResponseDTO): { text: string; internal: boolean } => {
+  const email = (row.clientemail ?? '').trim();
+  if (!email || email.toLowerCase().endsWith(INTERNAL_EMAIL_SUFFIX)) {
+    const source = (row.leadSource ?? '').toLowerCase();
+    if (source === 'bulk') return { text: 'Bulk upload', internal: true };
+    if (source === 'email') return { text: 'No contact email', internal: true };
+    return { text: 'Manual upload', internal: true };
+  }
+  return { text: email, internal: false };
+};
+
+/** Deadline urgency applies only to real (non-sentinel) dates. */
+const deadlineSx = (dateStr: string | null | undefined): { color: string; fontWeight: number } => {
+  const d = parseDateSafe(dateStr);
+  if (!d) return { color: 'text.disabled', fontWeight: 400 };
+  const hoursLeft = (d.getTime() - Date.now()) / (1000 * 60 * 60);
+  if (hoursLeft < 0) return { color: 'error.main', fontWeight: 700 };
+  if (hoursLeft < 72) return { color: 'warning.main', fontWeight: 700 };
+  return { color: 'text.primary', fontWeight: 500 };
+};
+
+interface StatusMeta {
+  label: string;
+  color: 'success' | 'error' | 'warning' | 'primary';
+  variant: 'filled' | 'outlined';
+}
+
+const leadStatus = (row: LeadResponseDTO): StatusMeta => {
+  if (row.isAccepted) return { label: 'Accepted', color: 'success', variant: 'filled' };
+  if (row.isRejected) return { label: 'Rejected', color: 'error', variant: 'outlined' };
+  if (row.headerRemarks?.startsWith('[NEEDS REVIEW]')) return { label: 'Needs review', color: 'warning', variant: 'filled' };
+  return { label: 'New', color: 'primary', variant: 'outlined' };
+};
+
+// High/Medium/Low levels reuse the app-wide thresholds from Intelligence/common.
+const CONFIDENCE_META: Record<'high' | 'medium' | 'low', { label: string; color: 'success' | 'warning' | 'error' }> = {
+  high: { label: 'High', color: 'success' },
+  medium: { label: 'Medium', color: 'warning' },
+  low: { label: 'Low', color: 'error' },
+};
+
+// Plain-language rendering of the Decision Brief recommendation — raw enum
+// values ("bid"/"review"/"skip") are never shown to users.
+interface DecisionMeta {
+  label: string;
+  color: 'success' | 'warning' | 'default';
+}
+
+const DECISION_META: Record<string, DecisionMeta | undefined> = {
+  bid: { label: 'Worth bidding', color: 'success' },
+  review: { label: 'Needs a look', color: 'warning' },
+  skip: { label: 'Likely skip', color: 'default' },
+};
+
+/** Plain-language facts for the Decision chip tooltip. */
+const decisionFacts = (s: LeadDecisionSummary): string[] => {
+  const facts: string[] = [];
+  if (s.estimatedValue != null) {
+    facts.push(`Est. value: ${s.estimatedValue.toLocaleString('en-US', { maximumFractionDigits: 0 })}`);
+  }
+  if (s.coveragePct != null) {
+    facts.push(`We stock ~${Math.round(s.coveragePct)}%`);
+  }
+  if (s.daysLeft != null) {
+    if (s.daysLeft < 0) {
+      const overdueDays = Math.abs(s.daysLeft);
+      facts.push(`${overdueDays} ${overdueDays === 1 ? 'day' : 'days'} past deadline`);
+    } else if (s.daysLeft === 0) {
+      facts.push('Due today');
+    } else {
+      facts.push(`${s.daysLeft} ${s.daysLeft === 1 ? 'day' : 'days'} left`);
+    }
+  }
+  return facts;
+};
+
+const ConfidenceCell: React.FC<{ score: number | null | undefined }> = ({ score }) => {
+  const level = confidenceLevel(score);
+  if (level === 'unknown') {
+    return <Typography variant="body2" sx={{ color: 'text.disabled' }}>—</Typography>;
+  }
+  const meta = CONFIDENCE_META[level];
+  return (
+    <Chip
+      label={meta.label}
+      color={meta.color}
+      size="small"
+      variant="outlined"
+      sx={{ fontWeight: 700, fontSize: '0.7rem' }}
+      aria-label={`AI confidence ${meta.label.toLowerCase()}`}
+    />
+  );
+};
 
 const LeadsPage: React.FC = () => {
   const { t } = useTranslation();
@@ -36,6 +222,42 @@ const LeadsPage: React.FC = () => {
   const [rejectionDialogOpen, setRejectionDialogOpen] = useState(false);
   const [selectedLeadId, setSelectedLeadId] = useState<number | null>(null);
   const [rejectionReasonId, setRejectionReasonId] = useState<string>('');
+
+  // Accept confirmation
+  const [acceptConfirmId, setAcceptConfirmId] = useState<number | null>(null);
+
+  // Row overflow menu
+  const [rowMenuAnchor, setRowMenuAnchor] = useState<HTMLElement | null>(null);
+  const [rowMenuLeadId, setRowMenuLeadId] = useState<number | null>(null);
+
+  // View preferences (persisted per user)
+  const [columnVisibility, setColumnVisibility] = useState<GridColumnVisibilityModel>(loadColumnVisibility);
+  const [density, setDensity] = useState<DensityChoice>(loadDensity);
+  const [columnsAnchor, setColumnsAnchor] = useState<HTMLElement | null>(null);
+
+  const applyColumnVisibility = (model: GridColumnVisibilityModel) => {
+    const next: GridColumnVisibilityModel = { ...model, actions: true };
+    setColumnVisibility(next);
+    try {
+      localStorage.setItem(userScopedKey(COLUMNS_KEY_BASE), JSON.stringify(next));
+    } catch {
+      // Storage unavailable — preference just won't persist.
+    }
+  };
+
+  const applyDensity = (value: DensityChoice) => {
+    setDensity(value);
+    try {
+      localStorage.setItem(userScopedKey(DENSITY_KEY_BASE), value);
+    } catch {
+      // Storage unavailable — preference just won't persist.
+    }
+  };
+
+  const closeRowMenu = () => {
+    setRowMenuAnchor(null);
+    setRowMenuLeadId(null);
+  };
 
   const syncEmailsMutation = useMutation({
     mutationFn: () => leadService.fetchEmails(),
@@ -61,10 +283,26 @@ const LeadsPage: React.FC = () => {
     queryFn: () => leadService.getRejectionReasons(),
   });
 
+  // Decision Brief summaries: one batched call for the current page's ids,
+  // fired only after the leads query resolves. This never blocks the grid —
+  // it is a separate query, and on error (e.g. the engine isn't deployed yet)
+  // the Decision / Estimated value cells simply render nothing.
+  const visibleLeadIds = useMemo(() => (data?.items ?? []).map((l) => l.id), [data]);
+  const decisionQuery = useQuery({
+    queryKey: ['lead-decision-summaries', visibleLeadIds],
+    queryFn: () => decisionService.getDecisionSummaries(visibleLeadIds),
+    enabled: visibleLeadIds.length > 0,
+    retry: false,
+    staleTime: 60_000,
+  });
+  const decisionSummaries = decisionQuery.data?.summaries;
+  const decisionsLoading = visibleLeadIds.length > 0 && decisionQuery.isPending;
+
   const acceptMutation = useMutation({
     mutationFn: (id: number) => leadService.acceptLead(id),
     onSuccess: () => {
       enqueueSnackbar('Lead accepted successfully!', { variant: 'success' });
+      setAcceptConfirmId(null);
       queryClient.invalidateQueries({ queryKey: ['leads'] });
     },
     onError: (err: any) => enqueueSnackbar(err.response?.data || 'Failed to accept lead', { variant: 'error' }),
@@ -92,220 +330,298 @@ const LeadsPage: React.FC = () => {
     }
   };
 
-  const formatDate = (dateStr: string | null) => {
-    if (!dateStr) return '—';
-    const d = new Date(dateStr);
-    return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-  };
-
-  const getUrgencyColor = (dateStr: string | null) => {
-    if (!dateStr) return 'text.secondary';
-    const d = new Date(dateStr);
-    const now = new Date();
-    const diff = (d.getTime() - now.getTime()) / (1000 * 60 * 60 * 24);
-    if (diff < 0) return 'error.dark';
-    if (diff < 3) return 'error.main';
-    if (diff < 7) return 'warning.main';
-    return 'success.main';
-  };
-
-  const columns: GridColDef[] = [
+  const columns: GridColDef<LeadResponseDTO>[] = [
     {
       field: 'rfqno',
-      headerName: t('rfq_management'),
-      width: 200,
-      renderCell: (p) => (
-        <Box sx={{ py: 1.5 }}>
-          <Typography sx={{ fontWeight: 900, fontSize: '0.85rem', color: 'primary.main', fontFamily: 'monospace', letterSpacing: '-0.02em' }}>
-            {p.row.rfqno || 'NO RFQ #'}
-          </Typography>
-          {p.row.rfqtype && (
-            <Chip
-              label={p.row.rfqtype}
-              size="small"
-              sx={{ height: 16, fontSize: '0.6rem', fontWeight: 900, bgcolor: 'primary.lighter', color: 'primary.dark', mt: 0.5 }}
-            />
-          )}
-        </Box>
-      )
+      headerName: 'RFQ #',
+      width: 180,
+      renderCell: (p) => {
+        const raw = (p.row.rfqno ?? '').trim();
+        const isMissing = !raw || raw.toUpperCase() === 'NO RFQ #';
+        if (isMissing) {
+          return (
+            <Typography variant="body2" sx={{ color: 'text.disabled', fontStyle: 'italic' }}>
+              No RFQ # yet
+            </Typography>
+          );
+        }
+        return (
+          <Link
+            component="button"
+            type="button"
+            underline="hover"
+            onClick={() => navigate(`/leads/view/${p.row.id}`)}
+            sx={{ fontWeight: 500, fontSize: '0.85rem', color: 'primary.main', textAlign: 'left' }}
+          >
+            {raw}
+          </Link>
+        );
+      },
     },
     {
       field: 'buyer',
-      headerName: 'Buyer And Contact',
+      headerName: 'Buyer',
       flex: 1,
       minWidth: 200,
-      renderCell: (p) => (
-        <Box sx={{ py: 1.5 }}>
-          <Typography sx={{ fontWeight: 700, fontSize: '0.85rem', color: 'text.primary', mb: 0.2 }}>
-            {p.row.buyersName || 'Unknown Buyer'}
-          </Typography>
-          <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: '0.7rem', display: 'flex', alignItems: 'center', gap: 0.5 }}>
-            <EmailIcon sx={{ fontSize: 12 }} /> {p.row.clientemail}
-          </Typography>
-          {(p.row.buyersName?.toLowerCase().includes('aramco') || p.row.buyersName?.toLowerCase().includes('sec')) && (
-            <Chip
-              label="KEY ACCOUNT"
-              size="small"
-              sx={{ height: 14, fontSize: '0.55rem', fontWeight: 900, bgcolor: 'error.main', color: 'white', mt: 0.5, borderRadius: 1 }}
-            />
-          )}
-        </Box>
-      )
-    },
-    {
-      field: 'timelines',
-      headerName: 'Dates & Deadlines',
-      width: 140,
-      renderCell: (p) => (
-        <Box sx={{ py: 1.5 }}>
-          <Box sx={{ mb: 1 }}>
-            <Typography sx={{ fontSize: '0.6rem', fontWeight: 900, color: 'text.disabled', textTransform: 'uppercase' }}>Received</Typography>
-            <Typography sx={{ fontSize: '0.75rem', fontWeight: 700 }}>{formatDate(p.row.recDate)}</Typography>
-          </Box>
-          <Box>
-            <Typography sx={{ fontSize: '0.6rem', fontWeight: 900, color: 'text.disabled', textTransform: 'uppercase' }}>Deadline</Typography>
-            <Typography sx={{ fontSize: '0.8rem', fontWeight: 900, color: getUrgencyColor(p.row.bidClosingDate) }}>
-              {formatDate(p.row.bidClosingDate)}
+      sortable: false,
+      renderCell: (p) => {
+        const name = (p.row.buyersName ?? '').trim();
+        const unknownBuyer = !name || name.toLowerCase() === 'unknown buyer';
+        const contact = buyerContact(p.row);
+        return (
+          <Box sx={{ lineHeight: 1.3, py: 0.25 }}>
+            {unknownBuyer ? (
+              <Typography sx={{ fontSize: '0.85rem', color: 'text.disabled' }}>
+                Buyer not identified yet
+              </Typography>
+            ) : (
+              <Typography sx={{ fontWeight: 600, fontSize: '0.85rem', color: 'text.primary' }}>
+                {name}
+              </Typography>
+            )}
+            <Typography
+              variant="caption"
+              sx={{
+                color: contact.internal ? 'text.disabled' : 'text.secondary',
+                fontSize: '0.7rem',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 0.5,
+              }}
+            >
+              {!contact.internal && <EmailIcon sx={{ fontSize: 12 }} />}
+              {contact.text}
             </Typography>
           </Box>
-        </Box>
-      )
+        );
+      },
+    },
+    {
+      field: 'recDate',
+      headerName: 'Received',
+      width: 110,
+      renderCell: (p) => {
+        const label = formatDateSafe(p.row.recDate);
+        return (
+          <Typography variant="body2" sx={{ fontSize: '0.8rem', color: label === '—' ? 'text.disabled' : 'text.primary' }}>
+            {label}
+          </Typography>
+        );
+      },
+    },
+    {
+      field: 'bidClosingDate',
+      headerName: 'Deadline',
+      width: 120,
+      renderCell: (p) => {
+        const sx = deadlineSx(p.row.bidClosingDate);
+        return (
+          <Typography variant="body2" sx={{ fontSize: '0.8rem', ...sx }}>
+            {formatDateSafe(p.row.bidClosingDate)}
+          </Typography>
+        );
+      },
     },
     {
       field: 'itemCount',
-      headerName: t('invoice_items'),
+      headerName: 'Items',
       width: 80,
+      type: 'number',
+      align: 'right',
+      headerAlign: 'right',
       renderCell: (p) => (
-        <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', height: '100%' }}>
-          <ItemsIcon sx={{ fontSize: 14, color: 'text.secondary' }} />
-          <Typography sx={{ fontSize: '0.85rem', fontWeight: 800 }}>{p.value || 0}</Typography>
-        </Stack>
-      )
+        <Typography variant="body2" sx={{ fontSize: '0.85rem', fontWeight: 500 }}>
+          {p.row.itemCount ?? 0}
+        </Typography>
+      ),
     },
     {
-      field: 'source_confidence',
-      headerName: 'Source And Confidence',
-      width: 180,
-      renderCell: (p) => {
-        const val = (p.row.aiconfidence || 0) * 100;
-        const color = val > 80 ? 'success' : val > 50 ? 'warning' : 'error';
-        return (
-          <Box sx={{ py: 1.5, width: '100%' }}>
-            <Chip
-              label={p.row.leadSource}
-              size="small"
-              sx={{
-                fontWeight: 900,
-                fontSize: '0.65rem',
-                height: 18,
-                mb: 0.5,
-                borderRadius: 1,
-                color: 'white !important', // Force white text
-                bgcolor: p.row.leadSource === 'Email' ? 'primary.main' : 'secondary.main'
-              }}
-            />
-            <Typography sx={{ fontSize: '0.7rem', fontWeight: 900, color: `${color}.main`, display: 'block' }}>
-              AI: {Math.round(val)}% Match
-            </Typography>
-            <Box sx={{ height: 3, width: '100%', bgcolor: 'action.hover', borderRadius: 1, overflow: 'hidden', mt: 0.3 }}>
-              <Box sx={{ height: '100%', width: `${val}%`, bgcolor: `${color}.main` }} />
-            </Box>
-          </Box>
-        );
-      }
-    },
-    {
-      field: 'details',
-      headerName: 'Details',
+      field: 'leadSource',
+      headerName: 'Source',
       width: 110,
       renderCell: (p) => (
-        <Box sx={{ display: 'flex', alignItems: 'center', height: '100%', gap: 0.5 }}>
-          <Tooltip title="View Details">
-            <IconButton
-              size="small"
-              sx={{ color: 'primary.main', bgcolor: 'primary.lighter', '&:hover': { bgcolor: 'primary.light', color: 'white' } }}
-              onClick={() => navigate(`/leads/view/${p.row.id}`)}
-            >
-              <ViewIcon fontSize="small" />
-            </IconButton>
+        <Chip
+          label={p.row.leadSource || '—'}
+          size="small"
+          variant="outlined"
+          sx={{ fontWeight: 600, fontSize: '0.7rem' }}
+        />
+      ),
+    },
+    {
+      field: 'aiconfidence',
+      headerName: 'Confidence',
+      width: 120,
+      renderCell: (p) => <ConfidenceCell score={p.row.aiconfidence} />,
+    },
+    {
+      field: 'status',
+      headerName: 'Status',
+      width: 130,
+      sortable: false,
+      renderCell: (p) => {
+        const meta = leadStatus(p.row);
+        return (
+          <Chip
+            label={meta.label}
+            color={meta.color}
+            variant={meta.variant}
+            size="small"
+            sx={{ fontWeight: 600, fontSize: '0.7rem' }}
+          />
+        );
+      },
+    },
+    {
+      field: 'decision',
+      headerName: 'Decision',
+      width: 140,
+      sortable: false,
+      filterable: false,
+      renderCell: (p) => {
+        if (decisionQuery.isError) return null;
+        if (decisionsLoading) {
+          return <Skeleton variant="rounded" width={96} height={22} sx={{ borderRadius: 3 }} />;
+        }
+        const summary = decisionSummaries?.[String(p.row.id)];
+        if (!summary) return null;
+        const meta = DECISION_META[summary.recommendation];
+        if (!meta) return null;
+        const facts = decisionFacts(summary);
+        const chip = (
+          <Chip
+            label={meta.label}
+            color={meta.color}
+            size="small"
+            sx={{ fontWeight: 600, fontSize: '0.7rem' }}
+          />
+        );
+        if (facts.length === 0) return chip;
+        return (
+          <Tooltip
+            title={
+              <Box>
+                {facts.map((fact) => (
+                  <Typography key={fact} variant="caption" sx={{ display: 'block' }}>
+                    {fact}
+                  </Typography>
+                ))}
+              </Box>
+            }
+          >
+            {chip}
           </Tooltip>
-          <Tooltip title="Convert with AI">
-            <IconButton
-              size="small"
-              aria-label="Convert with AI"
-              sx={{ color: 'secondary.main', '&:hover': { bgcolor: 'action.hover' } }}
-              onClick={() => navigate(`/procurement/leads/${p.row.id}/convert`)}
-            >
-              <SparkleIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
-        </Box>
-      )
+        );
+      },
+    },
+    {
+      field: 'estimatedValue',
+      headerName: 'Estimated value',
+      width: 130,
+      align: 'right',
+      headerAlign: 'right',
+      sortable: false,
+      filterable: false,
+      renderCell: (p) => {
+        if (decisionQuery.isError) return null;
+        if (decisionsLoading) {
+          return <Skeleton width={56} height={18} />;
+        }
+        const summary = decisionSummaries?.[String(p.row.id)];
+        if (!summary) return null;
+        if (summary.estimatedValue == null) {
+          return <Typography variant="body2" sx={{ fontSize: '0.8rem', color: 'text.disabled' }}>—</Typography>;
+        }
+        return (
+          <Typography variant="body2" sx={{ fontSize: '0.8rem', fontWeight: 500 }}>
+            {summary.estimatedValue.toLocaleString('en-US', { maximumFractionDigits: 0 })}
+          </Typography>
+        );
+      },
     },
     {
       field: 'actions',
       headerName: t('actions'),
-      width: 100,
+      width: 130,
       sortable: false,
-      renderCell: (p) => (
-        <Stack direction="row" spacing={0.5} sx={{ height: '100%', alignItems: 'center' }}>
-          {!p.row.isAccepted && !p.row.isRejected ? (
-            <>
-              <Tooltip title="Approve">
-                <IconButton size="small" sx={{ color: 'success.main', bgcolor: 'success.lighter' }} onClick={() => acceptMutation.mutate(p.row.id)}>
-                  <AcceptIcon fontSize="small" />
+      filterable: false,
+      hideable: false,
+      renderCell: (p) => {
+        const decided = p.row.isAccepted || p.row.isRejected;
+        return (
+          <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center' }}>
+            <Tooltip title="View">
+              <IconButton
+                size="small"
+                aria-label="View"
+                sx={{ color: 'primary.main' }}
+                onClick={() => navigate(`/leads/view/${p.row.id}`)}
+              >
+                <ViewIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="Convert with AI">
+              <IconButton
+                size="small"
+                aria-label="Convert with AI"
+                sx={{ color: 'secondary.main' }}
+                onClick={() => navigate(`/procurement/leads/${p.row.id}/convert`)}
+              >
+                <SparkleIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+            {!decided && (
+              <Tooltip title="More actions">
+                <IconButton
+                  size="small"
+                  aria-label="More actions"
+                  onClick={(e) => {
+                    setRowMenuAnchor(e.currentTarget);
+                    setRowMenuLeadId(p.row.id);
+                  }}
+                >
+                  <MoreIcon fontSize="small" />
                 </IconButton>
               </Tooltip>
-              <Tooltip title="Discard">
-                <IconButton size="small" sx={{ color: 'error.main', bgcolor: 'error.lighter' }} onClick={() => handleRejectClick(p.row.id)}>
-                  <RejectIcon fontSize="small" />
-                </IconButton>
-              </Tooltip>
-            </>
-          ) : (
-            <Chip
-              label={p.row.isAccepted ? 'OK' : 'X'}
-              size="small"
-              color={p.row.isAccepted ? 'success' : 'error'}
-              sx={{ fontWeight: 900, height: 20, fontSize: '0.65rem' }}
-            />
-          )}
-        </Stack>
-      ),
+            )}
+          </Stack>
+        );
+      },
     },
   ];
+
+  const totalCount = data?.totalCount ?? 0;
 
   return (
     <Box sx={{ p: 3, bgcolor: 'background.default', minHeight: '100vh' }}>
       {/* Header Section */}
-      <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-        <Box>
-          <Typography variant="h4" sx={{ fontWeight: 900, letterSpacing: '-0.02em', mb: 0.5 }}>
-            {t('leads')}
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Master Lead Dashboard
-          </Typography>
-        </Box>
-        <Stack direction="row" spacing={2}>
-          <Button
-            variant="outlined"
-            startIcon={syncEmailsMutation.isPending ? <CircularProgress size={20} color="inherit" /> : <EmailIcon />}
-            onClick={() => syncEmailsMutation.mutate()}
-            disabled={syncEmailsMutation.isPending}
-            sx={{ fontWeight: 800, borderRadius: 2, border: '2px solid' }}
-          >
-            {syncEmailsMutation.isPending ? 'Getting Leads...' : 'Get New Leads'}
-          </Button>
-          <Tooltip title="Refresh Data">
-            <IconButton onClick={() => refetch()} sx={{ bgcolor: 'white', boxShadow: 1 }}>
+      <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+        <Typography variant="h5" sx={{ fontWeight: 700 }}>
+          {t('leads')}
+        </Typography>
+        <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center' }}>
+          <Tooltip title="Fetches new emails from your connected inboxes now">
+            <span>
+              <Button
+                variant="outlined"
+                startIcon={syncEmailsMutation.isPending ? <CircularProgress size={18} color="inherit" /> : <EmailIcon />}
+                onClick={() => syncEmailsMutation.mutate()}
+                disabled={syncEmailsMutation.isPending}
+                sx={{ fontWeight: 600, borderRadius: 2 }}
+              >
+                {syncEmailsMutation.isPending ? 'Checking…' : 'Check for new leads'}
+              </Button>
+            </span>
+          </Tooltip>
+          <Tooltip title="Refresh">
+            <IconButton aria-label="Refresh" onClick={() => refetch()} sx={{ bgcolor: 'background.paper', boxShadow: 1 }}>
               <RefreshIcon />
             </IconButton>
           </Tooltip>
         </Stack>
       </Stack>
 
-      {/* Filters */}
+      {/* Filters + view controls */}
       <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
         <SearchField width="360px" value={search} onChange={setSearch} placeholder="Search by RFQ No, Buyer Name..." />
         <TextField select size="small" value={leadSource} onChange={(e) => setLeadSource(e.target.value)} sx={{ minWidth: 160 }} label="Lead Source">
@@ -314,6 +630,20 @@ const LeadsPage: React.FC = () => {
           <MenuItem value="Manual">Manual</MenuItem>
           <MenuItem value="Bulk">Bulk Upload</MenuItem>
         </TextField>
+        <Box sx={{ flexGrow: 1 }} />
+        {!isLoading && !isError && (
+          <Typography variant="body2" sx={{ color: 'text.secondary', whiteSpace: 'nowrap' }}>
+            {totalCount} {totalCount === 1 ? 'lead' : 'leads'}
+          </Typography>
+        )}
+        <Button
+          size="small"
+          startIcon={<ColumnsIcon />}
+          onClick={(e) => setColumnsAnchor(e.currentTarget)}
+          sx={{ fontWeight: 600, color: 'text.secondary', whiteSpace: 'nowrap' }}
+        >
+          Columns
+        </Button>
       </Paper>
 
       {/* Grid */}
@@ -331,7 +661,7 @@ const LeadsPage: React.FC = () => {
           <DataGrid
             rows={data?.items ?? []}
             columns={columns}
-            rowCount={data?.totalCount ?? 0}
+            rowCount={totalCount}
             loading={isLoading}
             pageSizeOptions={[10, 25, 50]}
             paginationModel={paginationModel}
@@ -339,10 +669,111 @@ const LeadsPage: React.FC = () => {
             onPaginationModelChange={setPaginationModel}
             disableRowSelectionOnClick
             getRowId={(r) => r.id}
-            rowHeight={100}
+            density={density}
+            columnVisibilityModel={columnVisibility}
+            onColumnVisibilityModelChange={applyColumnVisibility}
           />
         )}
       </Paper>
+
+      {/* Row overflow menu (Accept / Reject) */}
+      <Menu anchorEl={rowMenuAnchor} open={Boolean(rowMenuAnchor)} onClose={closeRowMenu}>
+        <MenuItem
+          onClick={() => {
+            if (rowMenuLeadId != null) setAcceptConfirmId(rowMenuLeadId);
+            closeRowMenu();
+          }}
+        >
+          <ListItemIcon>
+            <AcceptIcon fontSize="small" color="success" />
+          </ListItemIcon>
+          <ListItemText>Accept lead</ListItemText>
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            if (rowMenuLeadId != null) handleRejectClick(rowMenuLeadId);
+            closeRowMenu();
+          }}
+        >
+          <ListItemIcon>
+            <RejectIcon fontSize="small" color="error" />
+          </ListItemIcon>
+          <ListItemText>Reject lead…</ListItemText>
+        </MenuItem>
+      </Menu>
+
+      {/* Columns & density popover */}
+      <Popover
+        open={Boolean(columnsAnchor)}
+        anchorEl={columnsAnchor}
+        onClose={() => setColumnsAnchor(null)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+        transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+      >
+        <Box sx={{ p: 2, width: 240 }}>
+          <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
+            Show columns
+          </Typography>
+          <FormGroup>
+            {HIDEABLE_COLUMNS.map((c) => (
+              <FormControlLabel
+                key={c.field}
+                control={
+                  <Checkbox
+                    size="small"
+                    checked={columnVisibility[c.field] !== false}
+                    onChange={(e) => applyColumnVisibility({ ...columnVisibility, [c.field]: e.target.checked })}
+                  />
+                }
+                label={<Typography variant="body2">{c.label}</Typography>}
+              />
+            ))}
+            <FormControlLabel
+              control={<Checkbox size="small" checked disabled />}
+              label={<Typography variant="body2" sx={{ color: 'text.disabled' }}>Actions (always shown)</Typography>}
+            />
+          </FormGroup>
+          <Divider sx={{ my: 1.5 }} />
+          <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
+            Density
+          </Typography>
+          <ToggleButtonGroup
+            size="small"
+            exclusive
+            fullWidth
+            value={density}
+            onChange={(_e, value: DensityChoice | null) => {
+              if (value) applyDensity(value);
+            }}
+          >
+            <ToggleButton value="comfortable">Comfortable</ToggleButton>
+            <ToggleButton value="compact">Compact</ToggleButton>
+          </ToggleButtonGroup>
+        </Box>
+      </Popover>
+
+      {/* Accept confirmation */}
+      <Dialog open={acceptConfirmId != null} onClose={() => setAcceptConfirmId(null)}>
+        <DialogTitle sx={{ fontWeight: 800 }}>Accept this lead?</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            The lead moves to your accepted leads and can be assigned for quoting.
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button onClick={() => setAcceptConfirmId(null)} color="inherit">Cancel</Button>
+          <Button
+            variant="contained"
+            color="success"
+            disabled={acceptMutation.isPending}
+            onClick={() => {
+              if (acceptConfirmId != null) acceptMutation.mutate(acceptConfirmId);
+            }}
+          >
+            Accept lead
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       {/* Rejection Dialog */}
       <Dialog open={rejectionDialogOpen} onClose={() => setRejectionDialogOpen(false)}>

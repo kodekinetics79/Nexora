@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, IconButton,
-  Tooltip, Chip, Stack,
+  Tooltip, Chip, Stack, Menu, MenuItem,
+  FormControlLabel, Switch,
 } from '@mui/material';
 import {
   DataGrid, type GridColDef, type GridPaginationModel
@@ -15,15 +16,27 @@ import {
   Email as EmailIcon,
   Layers as ItemsIcon,
   Person as UserIcon,
+  ExpandMore as ChangeIcon,
 } from '@mui/icons-material';
+import { useSnackbar } from 'notistack';
 import leadService from '../../api/services/leadService';
 import SearchField from '../../components/common/SearchField';
+import { useAuth } from '../../context/AuthContext';
 
 const AssignedLeadsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const { userData } = useAuth();
+  const queryClient = useQueryClient();
+  const { enqueueSnackbar } = useSnackbar();
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
   const [search, setSearch] = useState('');
+  // Filter toggle wired to the existing assignedToId param.
+  const [myLeadsOnly, setMyLeadsOnly] = useState(false);
+  // Inline 2-click reassign: click the assignee name, then pick the new name.
+  const [quickAssign, setQuickAssign] = useState<{ el: HTMLElement, leadId: number } | null>(null);
+
+  const isAdminOrManager = userData?.roleName?.toLowerCase().includes('admin') || userData?.roleName?.toLowerCase().includes('manager');
 
   const formatDate = (dateStr: string | null) => {
     if (!dateStr) return '—';
@@ -42,12 +55,30 @@ const AssignedLeadsPage: React.FC = () => {
   };
 
   const { data, isLoading, refetch } = useQuery({
-    queryKey: ['leads-assigned', paginationModel, search],
+    queryKey: ['leads-assigned', paginationModel, search, myLeadsOnly],
     queryFn: () => leadService.getAssignedLeads({
       pageNumber: paginationModel.page + 1,
       pageSize: paginationModel.pageSize,
       search: search || undefined,
+      assignedToId: myLeadsOnly ? userData?.id : undefined,
     }),
+  });
+
+  const { data: users = [] } = useQuery({
+    queryKey: ['assignment-users'],
+    queryFn: () => leadService.getUsersForAssignment(userData?.businessUnitId || 0),
+    enabled: !!userData?.businessUnitId && !!isAdminOrManager,
+  });
+
+  const reassignMutation = useMutation({
+    mutationFn: (payload: { leadId: number; assignedToUserId: number }) => leadService.assignLead(payload),
+    onSuccess: () => {
+      enqueueSnackbar('Lead reassigned successfully!', { variant: 'success' });
+      setQuickAssign(null);
+      queryClient.invalidateQueries({ queryKey: ['leads-assigned'] });
+      queryClient.invalidateQueries({ queryKey: ['leads-outstanding'] });
+    },
+    onError: (err: any) => enqueueSnackbar(err.response?.data?.error || 'Failed to reassign lead', { variant: 'error' }),
   });
 
   const columns: GridColDef[] = [
@@ -96,15 +127,38 @@ const AssignedLeadsPage: React.FC = () => {
     {
       field: 'assignee',
       headerName: 'Assigned Specialist',
-      width: 180,
+      width: 200,
       renderCell: (p) => (
         <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
-          <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-            <UserIcon sx={{ fontSize: 14, color: p.row.assignedToFullName ? 'primary.main' : 'error.main' }} />
-            <Typography sx={{ fontWeight: 800, fontSize: '0.85rem', color: p.row.assignedToFullName ? 'text.primary' : 'error.main' }}>
-              {p.row.assignedToFullName || 'Unassigned'}
-            </Typography>
-          </Stack>
+          {!p.row.assignedToId && p.row.isUnassignedOverdue && (
+            <Chip
+              label={`Unassigned ${p.row.unassignedHours ?? 0}h`}
+              size="small"
+              sx={{ height: 18, fontSize: '0.6rem', fontWeight: 900, bgcolor: 'error.main', color: 'white', mb: 0.5, borderRadius: 1, width: 'fit-content' }}
+            />
+          )}
+          {isAdminOrManager ? (
+            // Click 1 of the 2-click reassign: opens the name list right here.
+            <Tooltip title="Click to hand this lead to someone else">
+              <Button
+                size="small"
+                color="inherit"
+                endIcon={<ChangeIcon sx={{ fontSize: 14 }} />}
+                onClick={(e) => setQuickAssign({ el: e.currentTarget, leadId: p.row.id })}
+                sx={{ fontWeight: 800, fontSize: '0.8rem', py: 0.25, px: 0.75, justifyContent: 'flex-start', width: 'fit-content', textTransform: 'none' }}
+              >
+                <UserIcon sx={{ fontSize: 14, mr: 0.5, color: 'primary.main' }} />
+                {p.row.assignedToFullName || 'Unassigned'}
+              </Button>
+            </Tooltip>
+          ) : (
+            <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+              <UserIcon sx={{ fontSize: 14, color: p.row.assignedToFullName ? 'primary.main' : 'error.main' }} />
+              <Typography sx={{ fontWeight: 800, fontSize: '0.85rem', color: p.row.assignedToFullName ? 'text.primary' : 'error.main' }}>
+                {p.row.assignedToFullName || 'Unassigned'}
+              </Typography>
+            </Stack>
+          )}
           <Typography variant="caption" sx={{ fontSize: '0.65rem', fontWeight: 700, color: 'text.disabled', textTransform: 'uppercase' }}>
             Since: {formatDate(p.row.assignedOn)}
           </Typography>
@@ -197,9 +251,13 @@ const AssignedLeadsPage: React.FC = () => {
         <Button variant="outlined" startIcon={<RefreshIcon />} onClick={() => refetch()} size="small" sx={{ fontWeight: 800 }}>Refresh Dashboard</Button>
       </Box>
 
-      {/* Search */}
-      <Paper sx={{ p: 2, mb: 2, borderRadius: 3, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
+      {/* Search + filters */}
+      <Paper sx={{ p: 2, mb: 2, borderRadius: 3, border: '1px solid', borderColor: 'divider', boxShadow: 'none', display: 'flex', alignItems: 'center', gap: 3, flexWrap: 'wrap' }}>
         <SearchField width="400px" value={search} onChange={setSearch} placeholder="Filter assigned leads..." />
+        <FormControlLabel
+          control={<Switch checked={myLeadsOnly} onChange={(e) => setMyLeadsOnly(e.target.checked)} size="small" />}
+          label={<Typography sx={{ fontWeight: 700, fontSize: '0.8rem' }}>My leads only</Typography>}
+        />
       </Paper>
 
       {/* Grid */}
@@ -230,6 +288,37 @@ const AssignedLeadsPage: React.FC = () => {
           }}
         />
       </Paper>
+
+      {/* Inline quick-reassign: click 2 of 2 — pick the new owner */}
+      <Menu
+        anchorEl={quickAssign?.el}
+        open={Boolean(quickAssign)}
+        onClose={() => setQuickAssign(null)}
+        slotProps={{
+          paper: {
+            sx: { borderRadius: 2, boxShadow: '0 8px 32px rgba(0,0,0,0.1)', border: '1px solid', borderColor: 'divider', minWidth: 200, maxHeight: 320 }
+          }
+        }}
+      >
+        <Typography sx={{ px: 2, py: 0.75, fontSize: '0.65rem', fontWeight: 900, color: 'text.disabled', textTransform: 'uppercase' }}>
+          Hand this lead to
+        </Typography>
+        {users.length === 0 && (
+          <MenuItem disabled sx={{ fontSize: '0.8rem' }}>No team members found</MenuItem>
+        )}
+        {users.map((u: any) => (
+          <MenuItem
+            key={u.id}
+            disabled={reassignMutation.isPending}
+            onClick={() => {
+              if (quickAssign) reassignMutation.mutate({ leadId: quickAssign.leadId, assignedToUserId: Number(u.id) });
+            }}
+            sx={{ fontSize: '0.8rem', fontWeight: 600, py: 1 }}
+          >
+            <UserIcon sx={{ fontSize: 16, mr: 1, color: 'primary.main' }} /> {u.fullName || u.userName}
+          </MenuItem>
+        ))}
+      </Menu>
     </Box>
   );
 };

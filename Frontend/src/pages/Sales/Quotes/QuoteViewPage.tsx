@@ -4,19 +4,20 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Box, Typography, Paper, Grid, Stack, Button, Chip,
   Table, TableHead, TableRow, TableCell, TableBody,
-  Divider, CircularProgress, IconButton, Card, CardContent
+  Divider, CircularProgress, IconButton, Card, CardContent, Tooltip
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
   Edit as EditIcon,
   PictureAsPdf as PdfIcon,
   Email as EmailIcon,
-  CheckCircle as AcceptIcon,
-  Cancel as RejectIcon,
   Send as SendIcon,
-  ShoppingCart as OrderIcon
+  ShoppingCart as OrderIcon,
+  EmojiEvents as OutcomeIcon,
+  MarkEmailRead as RespondedIcon
 } from '@mui/icons-material';
 import quoteService from '../../../api/services/quoteService';
+import QuoteOutcomeDialog from './QuoteOutcomeDialog';
 import orderService from '../../../api/services/orderService';
 import { useAuth } from '../../../context/AuthContext';
 import dayjs from 'dayjs';
@@ -41,6 +42,17 @@ const QuoteViewPage: React.FC = () => {
       toast.success('Status updated successfully');
       queryClient.invalidateQueries({ queryKey: ['quote-detail', id] });
     }
+  });
+
+  // WP-A4: outcome capture + "customer responded" stamp.
+  const [outcomeOpen, setOutcomeOpen] = React.useState(false);
+  const respondedMutation = useMutation({
+    mutationFn: () => quoteService.markResponded(Number(id)),
+    onSuccess: () => {
+      toast.success('Marked as responded');
+      queryClient.invalidateQueries({ queryKey: ['quote-detail', id] });
+    },
+    onError: () => toast.error('Failed to mark as responded')
   });
 
   const orderMutation = useMutation({
@@ -75,6 +87,25 @@ const QuoteViewPage: React.FC = () => {
             <IconButton onClick={() => navigate('/sales/quotes')} size="small"><BackIcon /></IconButton>
             <Typography variant="h4" sx={{ fontWeight: 900, letterSpacing: '-0.02em' }}>Quote: {quote.quoteNo}</Typography>
             <Chip label={quote.statusValue} color={quote.statusValue === 'Sent' ? 'success' : quote.statusValue === 'Accepted' ? 'primary' : 'default'} sx={{ fontWeight: 900, height: 28, borderRadius: 1.5 }} />
+            {quote.outcomeOn && (
+              <Tooltip title={[quote.outcomeReasonName, quote.outcomeNote].filter(Boolean).join(' — ') || 'No reason recorded'}>
+                <Chip
+                  label={(quote.statusCode || '').toUpperCase() === 'ACCEPTED' || (quote.statusCode || '').toUpperCase() === 'ORDERED'
+                    ? 'Won' : (quote.statusCode || '').toUpperCase() === 'REJECTED' ? 'Lost' : 'Expired'}
+                  color={(quote.statusCode || '').toUpperCase() === 'ACCEPTED' || (quote.statusCode || '').toUpperCase() === 'ORDERED'
+                    ? 'success' : (quote.statusCode || '').toUpperCase() === 'REJECTED' ? 'error' : 'default'}
+                  sx={{ fontWeight: 900, height: 28, borderRadius: 1.5 }}
+                />
+              </Tooltip>
+            )}
+            {quote.isStale && !quote.respondedOn && (
+              <Chip
+                label={`Stale · no reply for ${quote.daysSinceSent ?? '?'} days`}
+                color="warning"
+                variant="outlined"
+                sx={{ fontWeight: 900, height: 28, borderRadius: 1.5 }}
+              />
+            )}
           </Stack>
           <Typography variant="body2" color="text.secondary">Created on {dayjs(quote.createdDate).format('DD MMM YYYY')} by {quote.createdBy}</Typography>
         </Box>
@@ -105,11 +136,29 @@ const QuoteViewPage: React.FC = () => {
           </Button>
           
           {quote.statusValue === 'Draft' && <Button variant="contained" startIcon={<SendIcon />} onClick={() => statusMutation.mutate('Sent')} sx={{ borderRadius: 2 }}>Finalize</Button>}
-          
+
           {quote.statusValue === 'Sent' && (
             <>
-              <Button variant="contained" color="success" startIcon={<AcceptIcon />} onClick={() => statusMutation.mutate('Accepted')} sx={{ borderRadius: 2 }}>Accept</Button>
-              <Button variant="contained" color="error" startIcon={<RejectIcon />} onClick={() => statusMutation.mutate('Rejected')} sx={{ borderRadius: 2 }}>Reject</Button>
+              {!quote.respondedOn && (
+                <Button
+                  variant="outlined"
+                  startIcon={respondedMutation.isPending ? <CircularProgress size={18} /> : <RespondedIcon />}
+                  onClick={() => respondedMutation.mutate()}
+                  disabled={respondedMutation.isPending}
+                  sx={{ borderRadius: 2 }}
+                >
+                  Customer responded
+                </Button>
+              )}
+              <Button
+                variant="contained"
+                color="warning"
+                startIcon={<OutcomeIcon />}
+                onClick={() => setOutcomeOpen(true)}
+                sx={{ borderRadius: 2, fontWeight: 800 }}
+              >
+                Record outcome
+              </Button>
             </>
           )}
 
@@ -192,6 +241,14 @@ const QuoteViewPage: React.FC = () => {
           </Card>
         </Grid>
       </Grid>
+
+      <QuoteOutcomeDialog
+        open={outcomeOpen}
+        onClose={() => setOutcomeOpen(false)}
+        quoteId={Number(id)}
+        quoteNo={quote.quoteNo}
+        invalidateKeys={[['quote-detail', id], ['quotes']]}
+      />
     </Box>
   );
 };

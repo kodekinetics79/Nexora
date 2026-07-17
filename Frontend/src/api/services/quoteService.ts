@@ -27,7 +27,25 @@ export interface QuoteDTO {
   discountValue?: number;
   itemCount: number;
   quoteItems: any[];
+  // Outcome capture + SLA staleness (WP-A4)
+  statusCode?: string;
+  sentOn?: string | null;
+  respondedOn?: string | null;
+  outcomeOn?: string | null;
+  outcomeReasonId?: number | null;
+  outcomeReasonName?: string | null;
+  outcomeNote?: string | null;
+  isStale?: boolean;
+  daysSinceSent?: number | null;
 }
+
+export interface OutcomeReasonDTO {
+  id: number;
+  code: string;
+  label: string;
+}
+
+export type QuoteOutcome = 'won' | 'lost' | 'expired';
 
 export interface PaginatedQuotes {
   items: QuoteDTO[];
@@ -78,11 +96,36 @@ const quoteService = {
   },
 
   transitionStatus: async (id: number, status: string, modifiedBy: string): Promise<QuoteDTO> => {
-    const { data } = await axiosInstance.post(`/api/Quote/${id}/status`, null, { 
-      params: { status, modifiedBy } 
+    const { data } = await axiosInstance.post(`/api/Quote/${id}/status`, null, {
+      params: { status, modifiedBy }
     });
     return data;
-  }
+  },
+
+  // ==== Outcome capture (WP-A4) ====
+
+  getOutcomeReasons: async (): Promise<OutcomeReasonDTO[]> => {
+    const { data } = await axiosInstance.get('/api/Quote/outcome-reasons');
+    return data;
+  },
+
+  setOutcome: async (
+    id: number,
+    outcome: QuoteOutcome,
+    reasonCode?: string,
+    note?: string,
+  ): Promise<QuoteDTO> => {
+    const { data } = await axiosInstance.post(`/api/Quote/${id}/outcome`, {
+      outcome,
+      reasonCode: reasonCode || undefined,
+      note: note || undefined,
+    });
+    return data;
+  },
+
+  markResponded: async (id: number): Promise<void> => {
+    await axiosInstance.post(`/api/Quote/${id}/mark-responded`);
+  },
 };
 
 export default quoteService;

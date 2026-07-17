@@ -1,13 +1,13 @@
 import React from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Chip, Grid,
   CircularProgress, Stack, Table, TableHead,
   TableRow, TableCell, TableBody, IconButton,
   Breadcrumbs, Link, Dialog, DialogTitle, DialogContent,
-  DialogActions, TextField, MenuItem,
+  DialogActions, TextField, MenuItem, Alert, AlertTitle,
 } from '@mui/material';
 import {
   Description as FileIcon,
@@ -18,8 +18,44 @@ import {
   AutoAwesome as SparkleIcon,
 } from '@mui/icons-material';
 import leadService from '../../api/services/leadService';
+import { parseDateSafe, formatDateSafe } from '../../utils/dates';
 
 import { toast } from 'react-hot-toast';
+
+/**
+ * SLA deadline chip (WP-A2): urgency at a glance for the bid closing date.
+ * Overdue = red, closing within 3 days = amber, otherwise neutral. Sentinel
+ * dates (< 2000, e.g. DateTime.MinValue) are treated as "no deadline" and
+ * render nothing — parseDateSafe handles that.
+ */
+const DeadlineChip: React.FC<{ bidClosingDate?: string | null }> = ({ bidClosingDate }) => {
+  const close = parseDateSafe(bidClosingDate);
+  if (!close) return null;
+
+  const msPerDay = 24 * 60 * 60 * 1000;
+  const daysLeft = Math.ceil((close.getTime() - Date.now()) / msPerDay);
+
+  const label = daysLeft < 0
+    ? `Overdue by ${Math.abs(daysLeft)} day${Math.abs(daysLeft) === 1 ? '' : 's'}`
+    : daysLeft === 0
+      ? 'Closes today'
+      : `${daysLeft} day${daysLeft === 1 ? '' : 's'} left`;
+
+  const palette = daysLeft < 0
+    ? { bgcolor: 'error.lighter', color: 'error.main', borderColor: 'error.light' }
+    : daysLeft <= 3
+      ? { bgcolor: 'warning.lighter', color: 'warning.main', borderColor: 'warning.light' }
+      : { bgcolor: 'action.hover', color: 'text.secondary', borderColor: 'divider' };
+
+  return (
+    <Chip
+      size="small"
+      label={label}
+      title={`Bid closes ${formatDateSafe(bidClosingDate)}`}
+      sx={{ fontWeight: 900, height: 24, fontSize: '0.7rem', border: '1px solid', ...palette }}
+    />
+  );
+};
 
 const SectionTitle: React.FC<{ title: string; count?: number }> = ({ title, count }) => (
   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
@@ -47,11 +83,29 @@ const LeadDetailPage: React.FC = () => {
   const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
   const { data: lead, isLoading } = useQuery({
     queryKey: ['lead-detail', Number(id)],
     queryFn: () => leadService.getById(Number(id)),
     enabled: !!id,
+  });
+
+  // WP-A3: duplicate-flag resolution ("Not a duplicate" unblocks conversion;
+  // "Confirm duplicate" keeps it blocked).
+  const [duplicateAction, setDuplicateAction] = React.useState<'not_duplicate' | 'confirm' | null>(null);
+  const resolveDuplicateMutation = useMutation({
+    mutationFn: (action: 'not_duplicate' | 'confirm') => leadService.resolveDuplicate(Number(id), action),
+    onSuccess: (_data, action) => {
+      toast.success(action === 'not_duplicate'
+        ? 'Marked as not a duplicate. This lead can be converted again.'
+        : 'Confirmed as a duplicate. This lead stays blocked from conversion.');
+      setDuplicateAction(null);
+      queryClient.invalidateQueries({ queryKey: ['lead-detail', Number(id)] });
+    },
+    onError: (error: any) => {
+      toast.error(error.response?.data?.message || error.response?.data || 'Could not update the duplicate flag');
+    },
   });
 
   // FE-14: fetch the real rejection reasons instead of hardcoding reason id 1.
@@ -60,11 +114,8 @@ const LeadDetailPage: React.FC = () => {
     queryFn: () => leadService.getRejectionReasons(),
   });
 
-  const formatDate = (dateStr: string | null) => {
-    if (!dateStr) return '—';
-    const d = new Date(dateStr);
-    return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-  };
+  // Sentinel-safe formatting (dates before 2000 render as "—", never "01 Jan 1").
+  const formatDate = (dateStr: string | null) => formatDateSafe(dateStr);
 
   const [isProcessing, setIsProcessing] = React.useState(false);
   const [rejectDialogOpen, setRejectDialogOpen] = React.useState(false);
@@ -122,9 +173,12 @@ const LeadDetailPage: React.FC = () => {
 
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 3 }}>
         <Box>
-          <Typography variant="h5" sx={{ fontWeight: 950, color: 'text.primary', letterSpacing: '-0.02em', mb: 0.5 }}>
-            {lead.rfqno}
-          </Typography>
+          <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', mb: 0.5 }}>
+            <Typography variant="h5" sx={{ fontWeight: 950, color: 'text.primary', letterSpacing: '-0.02em' }}>
+              {lead.rfqno}
+            </Typography>
+            <DeadlineChip bidClosingDate={lead.bidClosingDate} />
+          </Stack>
           <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>
             {t('lead_detail_analysis') || 'Lead Details Analysis Engine'}
           </Typography>
@@ -167,6 +221,58 @@ const LeadDetailPage: React.FC = () => {
         )}
         </Stack>
       </Box>
+
+      {/* WP-A3: duplicate warning banner */}
+      {(lead.duplicateStatus === 'suspected' || lead.duplicateStatus === 'confirmed') && (
+        <Alert
+          severity={lead.duplicateStatus === 'confirmed' ? 'error' : 'warning'}
+          sx={{ mb: 3, borderRadius: 2, '& .MuiAlert-message': { width: '100%' } }}
+        >
+          <AlertTitle sx={{ fontWeight: 800 }}>
+            {lead.duplicateStatus === 'confirmed'
+              ? `Confirmed duplicate of Lead #${lead.duplicateOfLeadId}`
+              : `This looks like a duplicate of Lead #${lead.duplicateOfLeadId}`}
+          </AlertTitle>
+          <Typography variant="body2" sx={{ mb: 1.5 }}>
+            {lead.duplicateStatus === 'confirmed'
+              ? 'Someone confirmed this lead is a duplicate, so it stays blocked from being converted to an RFQ. If that was a mistake, choose "Not a duplicate" below.'
+              : 'It cannot be converted to an RFQ until someone decides. Compare it with the original lead, then choose one of the options below.'}
+          </Typography>
+          <Stack direction="row" spacing={1.5} sx={{ flexWrap: 'wrap' }}>
+            <Button
+              size="small"
+              variant="outlined"
+              color="inherit"
+              onClick={() => navigate(`/procurement/leads/view/${lead.duplicateOfLeadId}`)}
+              sx={{ fontWeight: 800, borderRadius: 2 }}
+            >
+              View original
+            </Button>
+            <Button
+              size="small"
+              variant="contained"
+              color="success"
+              onClick={() => setDuplicateAction('not_duplicate')}
+              disabled={resolveDuplicateMutation.isPending}
+              sx={{ fontWeight: 800, borderRadius: 2 }}
+            >
+              Not a duplicate
+            </Button>
+            {lead.duplicateStatus === 'suspected' && (
+              <Button
+                size="small"
+                variant="contained"
+                color="error"
+                onClick={() => setDuplicateAction('confirm')}
+                disabled={resolveDuplicateMutation.isPending}
+                sx={{ fontWeight: 800, borderRadius: 2 }}
+              >
+                Confirm duplicate
+              </Button>
+            )}
+          </Stack>
+        </Alert>
+      )}
 
       <Grid container spacing={3}>
         {/* Left Column: General Information */}
@@ -256,7 +362,8 @@ const LeadDetailPage: React.FC = () => {
                 </TableHead>
                 <TableBody>
                   {lead.leadItems?.map((item: any) => (
-                    <TableRow key={item.id} sx={{ '&:hover': { bgcolor: 'action.selected' } }}>
+                    <React.Fragment key={item.id}>
+                    <TableRow sx={{ '&:hover': { bgcolor: 'action.selected' } }}>
                       <TableCell sx={{ width: '35%', py: 2 }}>
                         <Typography sx={{ fontWeight: 800, fontSize: '0.85rem', color: 'primary.main', mb: 0.5 }}>{item.productShortName}</Typography>
                         <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', lineHeight: 1.4, fontSize: '0.75rem' }}>{item.productShortDescription}</Typography>
@@ -289,6 +396,27 @@ const LeadDetailPage: React.FC = () => {
                         </Stack>
                       </TableCell>
                     </TableRow>
+                    {item.extraFields && Object.keys(item.extraFields).length > 0 && (
+                      <TableRow>
+                        <TableCell colSpan={5} sx={{ py: 1.25, bgcolor: 'action.hover', borderTop: 'none' }}>
+                          <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase', display: 'block', mb: 0.5, fontSize: '0.6rem' }}>
+                            Additional columns from customer document
+                          </Typography>
+                          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75 }}>
+                            {Object.entries(item.extraFields as Record<string, string>).map(([key, value]) => (
+                              <Chip
+                                key={key}
+                                size="small"
+                                variant="outlined"
+                                label={`${key}: ${value}`}
+                                sx={{ height: 20, fontSize: '0.65rem', fontWeight: 600, color: 'text.secondary', maxWidth: 320 }}
+                              />
+                            ))}
+                          </Box>
+                        </TableCell>
+                      </TableRow>
+                    )}
+                    </React.Fragment>
                   ))}
                 </TableBody>
               </Table>
@@ -296,6 +424,31 @@ const LeadDetailPage: React.FC = () => {
           </Box>
         </Grid>
       </Grid>
+
+      {/* WP-A3: confirm dialog for duplicate resolution */}
+      <Dialog open={duplicateAction !== null} onClose={() => setDuplicateAction(null)} fullWidth maxWidth="xs">
+        <DialogTitle sx={{ fontWeight: 800 }}>
+          {duplicateAction === 'not_duplicate' ? 'Not a duplicate?' : 'Confirm duplicate?'}
+        </DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="body2">
+            {duplicateAction === 'not_duplicate'
+              ? `This tells the system the lead is NOT a copy of Lead #${lead.duplicateOfLeadId}. The warning goes away and the lead can be converted to an RFQ again.`
+              : `This marks the lead as a real duplicate of Lead #${lead.duplicateOfLeadId}. It stays blocked from being converted. You can still change this later.`}
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button onClick={() => setDuplicateAction(null)} color="inherit">{t('cancel') || 'Cancel'}</Button>
+          <Button
+            variant="contained"
+            color={duplicateAction === 'not_duplicate' ? 'success' : 'error'}
+            onClick={() => duplicateAction && resolveDuplicateMutation.mutate(duplicateAction)}
+            disabled={resolveDuplicateMutation.isPending}
+          >
+            {duplicateAction === 'not_duplicate' ? 'Yes, not a duplicate' : 'Yes, it is a duplicate'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       {/* FE-14: real rejection-reason selector (no more hardcoded reason id 1) */}
       <Dialog open={rejectDialogOpen} onClose={() => setRejectDialogOpen(false)} fullWidth maxWidth="xs">

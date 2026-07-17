@@ -68,14 +68,18 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
       { key: 'dashboard', label: t('dashboard'), icon: <DashboardIcon />, path: '/dashboard', moduleName: 'Dashboard' },
       {
         key: 'copilot',
-        label: t('copilot') || 'Copilot',
+        // NOTE: these keys are missing from i18n resources, so t('copilot')
+        // resolves to the raw key ("copilot") — a truthy string — and the
+        // `|| 'Fallback'` pattern never fires. Passing the fallback as
+        // i18next's defaultValue renders proper Title Case labels instead.
+        label: t('copilot', 'Copilot'),
         icon: <CopilotIcon />,
         moduleName: 'Dashboard',
         activePrefixes: ['/copilot'],
         children: [
-          { key: 'copilot-chat', label: t('copilot') || 'Copilot', path: '/copilot', moduleName: 'Dashboard' },
-          { key: 'copilot-approvals', label: t('approvals') || 'Approvals', path: '/copilot/approvals', moduleName: 'Dashboard' },
-          { key: 'copilot-activity', label: t('activity') || 'Activity', path: '/copilot/activity', moduleName: 'Dashboard' },
+          { key: 'copilot-chat', label: t('copilot', 'Copilot'), path: '/copilot', moduleName: 'Dashboard' },
+          { key: 'copilot-approvals', label: t('approvals', 'Approvals'), path: '/copilot/approvals', moduleName: 'Dashboard' },
+          { key: 'copilot-activity', label: t('activity', 'Activity'), path: '/copilot/activity', moduleName: 'Dashboard' },
         ],
       },
       {
@@ -85,7 +89,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
         moduleName: 'Leads',
         children: [
           { key: 'leads-all', label: t('leads'), path: '/procurement/leads/all', moduleName: 'Leads', activePrefixes: ['/procurement/leads/view', '/leads/view'] },
-          { key: 'leads-review', label: t('review_queue') || 'Review Queue', path: '/procurement/extraction/review', moduleName: 'Leads', activePrefixes: ['/procurement/extraction/review'] },
+          { key: 'leads-review', label: t('review_queue', 'Review Queue'), path: '/procurement/extraction/review', moduleName: 'Leads', activePrefixes: ['/procurement/extraction/review'] },
           { key: 'leads-outstanding', label: t('outstanding_leads'), path: '/procurement/leads/outstanding', moduleName: 'Leads' },
           { key: 'leads-assigned', label: t('assigned_leads'), path: '/procurement/leads/assigned', moduleName: 'Leads' },
           { key: 'leads-manual', label: t('manual_upload'), path: '/procurement/leads/manual-upload', moduleName: 'Leads' },
@@ -152,6 +156,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
           { key: 'locations', label: t('locations'), path: '/setup/locations', moduleName: 'Locations' },
           { key: 'quote-format', label: t('quote_format'), path: '/setup/quote-format', moduleName: 'Quote Configuration' },
           { key: 'price-structure', label: 'Price Structure', path: '/setup/price-structure', moduleName: 'UOM' },
+          { key: 'sla', label: 'Deadlines & Alerts', path: '/setup/sla', moduleName: 'UOM' },
           { key: 'business-unit', label: t('business_unit'), path: '/setup/business-unit', moduleName: 'Business Units' },
         ]
       },

@@ -47,11 +47,12 @@ export interface OrderItemDTO {
   warehouseId?: number;
 }
 
+// Mirrors Backend DTOs/OrderDTOs/OrderStatsDTO.cs (GET /api/Order/stats).
 export interface OrderStatsDTO {
   totalOrders: number;
   pendingOrders: number;
   completedOrders: number;
-  cancelledOrders: number;
+  totalRevenue: number;
 }
 
 const orderService = {

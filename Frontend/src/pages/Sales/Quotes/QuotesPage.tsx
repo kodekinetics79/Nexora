@@ -16,11 +16,65 @@ import {
   Email as EmailIcon,
   Delete as DeleteIcon,
   Add as AddIcon,
+  EmojiEvents as OutcomeIcon,
 } from '@mui/icons-material';
-import quoteService from '../../../api/services/quoteService';
+import quoteService, { type QuoteDTO } from '../../../api/services/quoteService';
+import QuoteOutcomeDialog from './QuoteOutcomeDialog';
 import SearchField from '../../../components/common/SearchField';
 import { useAuth } from '../../../context/AuthContext';
 import dayjs from 'dayjs';
+
+/**
+ * Plain-language status cell (WP-A4): outcome chips (Won green / Lost red /
+ * Expired grey, reason on hover), "Stale · no reply for N days" for quiet SENT
+ * quotes, "Sent · x days ago", and "Responded" once the customer replied.
+ */
+const QuoteStatusCell: React.FC<{ quote: QuoteDTO }> = ({ quote }) => {
+  const code = (quote.statusCode || quote.statusValue || '').toUpperCase();
+
+  const chip = (label: string, colors: { bg: string; fg: string; border: string }, tooltip?: string) => (
+    <Tooltip title={tooltip || ''} disableHoverListener={!tooltip}>
+      <Chip
+        label={label}
+        size="small"
+        sx={{
+          fontWeight: 900, height: 24, fontSize: '0.7rem',
+          bgcolor: colors.bg, color: colors.fg,
+          border: '1px solid', borderColor: colors.border,
+        }}
+      />
+    </Tooltip>
+  );
+
+  const reasonTip = [quote.outcomeReasonName, quote.outcomeNote].filter(Boolean).join(' — ');
+
+  if (code === 'ACCEPTED' || code === 'ORDERED') {
+    return chip('Won', { bg: 'success.lighter', fg: 'success.main', border: 'success.light' }, reasonTip);
+  }
+  if (code === 'REJECTED') {
+    return chip('Lost', { bg: 'error.lighter', fg: 'error.main', border: 'error.light' }, reasonTip);
+  }
+  if (code === 'EXPIRED') {
+    return chip('Expired', { bg: 'action.hover', fg: 'text.secondary', border: 'divider' }, reasonTip);
+  }
+  if (code === 'SENT') {
+    if (quote.respondedOn) {
+      return chip('Responded', { bg: 'info.lighter', fg: 'info.main', border: 'info.light' });
+    }
+    if (quote.isStale) {
+      return chip(
+        `Stale · no reply for ${quote.daysSinceSent ?? '?'} days`,
+        { bg: 'warning.lighter', fg: 'warning.main', border: 'warning.light' },
+        'The customer has not responded. Consider following up or recording the outcome.',
+      );
+    }
+    const ago = quote.daysSinceSent != null
+      ? quote.daysSinceSent === 0 ? 'today' : `${quote.daysSinceSent} day${quote.daysSinceSent === 1 ? '' : 's'} ago`
+      : null;
+    return chip(ago ? `Sent · ${ago}` : 'Sent', { bg: 'success.lighter', fg: 'success.main', border: 'success.light' });
+  }
+  return chip(quote.statusValue || '—', { bg: 'action.hover', fg: 'text.secondary', border: 'divider' });
+};
 
 const QuotesPage: React.FC = () => {
   const { t: _t } = useTranslation();
@@ -34,6 +88,7 @@ const QuotesPage: React.FC = () => {
     message: '',
     severity: 'success'
   });
+  const [outcomeTarget, setOutcomeTarget] = useState<{ id: number; quoteNo: string } | null>(null);
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['quotes', paginationModel, search],
@@ -124,27 +179,17 @@ const QuotesPage: React.FC = () => {
     {
       field: 'statusValue',
       headerName: 'Status',
-      width: 120,
+      width: 190,
       renderCell: (p) => (
-        <Chip
-          label={p.value}
-          size="small"
-          sx={{ 
-            fontWeight: 900, 
-            height: 24, 
-            fontSize: '0.7rem',
-            bgcolor: p.value === 'Sent' ? 'success.lighter' : 'action.hover',
-            color: p.value === 'Sent' ? 'success.main' : 'text.secondary',
-            border: '1px solid',
-            borderColor: p.value === 'Sent' ? 'success.light' : 'divider'
-          }}
-        />
+        <Box sx={{ display: 'flex', alignItems: 'center', height: '100%' }}>
+          <QuoteStatusCell quote={p.row as QuoteDTO} />
+        </Box>
       )
     },
     {
       field: 'actions',
       headerName: 'Actions',
-      width: 180,
+      width: 210,
       sortable: false,
       renderCell: (p) => (
         <Stack direction="row" spacing={1} sx={{ alignItems: 'center', height: '100%' }}>
@@ -153,6 +198,13 @@ const QuotesPage: React.FC = () => {
               <ViewIcon fontSize="small" />
             </IconButton>
           </Tooltip>
+          {(p.row.statusCode || p.row.statusValue)?.toUpperCase() === 'SENT' && (
+            <Tooltip title="Record outcome (won / lost / expired)">
+              <IconButton size="small" color="warning" onClick={() => setOutcomeTarget({ id: p.row.id, quoteNo: p.row.quoteNo })}>
+                <OutcomeIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          )}
           <Tooltip title="Download PDF">
             <IconButton size="small" onClick={() => handleDownloadPdf(p.row.id, p.row.quoteNo)}>
               <PdfIcon fontSize="small" color="error" />
@@ -225,8 +277,16 @@ const QuotesPage: React.FC = () => {
         />
       </Paper>
 
-      <Snackbar 
-        open={snackbar.open} 
+      <QuoteOutcomeDialog
+        open={!!outcomeTarget}
+        onClose={() => setOutcomeTarget(null)}
+        quoteId={outcomeTarget?.id ?? null}
+        quoteNo={outcomeTarget?.quoteNo}
+        invalidateKeys={[['quotes']]}
+      />
+
+      <Snackbar
+        open={snackbar.open}
         autoHideDuration={6000} 
         onClose={() => setSnackbar({ ...snackbar, open: false })}
       >

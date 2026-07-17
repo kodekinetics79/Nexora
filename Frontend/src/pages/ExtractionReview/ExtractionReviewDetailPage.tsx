@@ -49,6 +49,10 @@ interface ReviewLineItem {
   itemText?: string;
   leadTime?: string;
   aiconfidence?: number | null;
+  // Unrecognized customer-document columns captured at extraction time. Read-only
+  // in the workbench and deliberately excluded from the submit payload so the
+  // backend preserves the stored values untouched.
+  extraFields?: Record<string, string> | null;
 }
 
 interface ReviewHeaderState {
@@ -86,6 +90,7 @@ const mapItems = (items: LeadItemResponseDTO[] | undefined): ReviewLineItem[] =>
     itemText: it.itemText ?? '',
     leadTime: it.leadTime ?? '',
     aiconfidence: it.aiconfidence ?? null,
+    extraFields: it.extraFields ?? null,
   }));
 
 const ExtractionReviewDetailPage: React.FC = () => {
@@ -473,6 +478,33 @@ const ExtractionReviewDetailPage: React.FC = () => {
                 }}
               />
             </Paper>
+            {items.some((it) => it.extraFields && Object.keys(it.extraFields).length > 0) && (
+              <Paper elevation={0} sx={{ mt: 2, p: 2, borderRadius: 3, border: '1px dashed', borderColor: 'divider' }}>
+                <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase', display: 'block', mb: 1, fontSize: '0.65rem' }}>
+                  Additional columns from customer document (read-only)
+                </Typography>
+                <Stack spacing={1}>
+                  {items
+                    .filter((it) => it.extraFields && Object.keys(it.extraFields).length > 0)
+                    .map((it) => (
+                      <Box key={it.id} sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75, alignItems: 'center' }}>
+                        <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.secondary', minWidth: 80, fontSize: '0.7rem' }}>
+                          Line {it.lineItemNo || it.id}
+                        </Typography>
+                        {Object.entries(it.extraFields as Record<string, string>).map(([key, value]) => (
+                          <Chip
+                            key={key}
+                            size="small"
+                            variant="outlined"
+                            label={`${key}: ${value}`}
+                            sx={{ height: 20, fontSize: '0.65rem', fontWeight: 600, color: 'text.secondary', maxWidth: 320 }}
+                          />
+                        ))}
+                      </Box>
+                    ))}
+                </Stack>
+              </Paper>
+            )}
           </Box>
         </Grid>
       </Grid>

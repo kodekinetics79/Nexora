@@ -53,6 +53,7 @@ const CreateShipmentPage = lazy(() => import('./pages/Sales/Shipments/CreateShip
 const ShipmentViewPage = lazy(() => import('./pages/Sales/Shipments/ShipmentViewPage'));
 const ShipmentInvoicePage = lazy(() => import('./pages/Sales/Shipments/ShipmentInvoicePage'));
 const PriceStructurePage = lazy(() => import('./pages/Setup/PriceStructure/PriceStructurePage'));
+const SlaSettingsPage = lazy(() => import('./pages/Setup/Sla/SlaSettingsPage'));
 
 // Intelligence surfaces — AI-assisted Lead→RFQ conversion and RFQ smart pricing.
 const LeadConvertPage = lazy(() => import('./pages/Intelligence/LeadConvertPage'));
@@ -129,6 +130,9 @@ function App() {
       <Route path="/setup/quote-format" element={<MainLayout><PermissionGuard moduleName="Quote Configuration" redirect><QuoteFormatPage /></PermissionGuard></MainLayout>} />
       <Route path="/setup/business-unit" element={<MainLayout><PermissionGuard moduleName="Business Units" redirect><BusinessUnitPage /></PermissionGuard></MainLayout>} />
       <Route path="/setup/price-structure" element={<MainLayout><PermissionGuard moduleName="UOM" redirect><PriceStructurePage /></PermissionGuard></MainLayout>} />
+      {/* SLA & alert policy (WP-A2). Guarded by the generic setup module ("UOM"),
+          matching /setup/master and /setup/price-structure. */}
+      <Route path="/setup/sla" element={<MainLayout><PermissionGuard moduleName="UOM" redirect><SlaSettingsPage /></PermissionGuard></MainLayout>} />
 
       {/* Security Routes */}
       <Route path="/security/users" element={<MainLayout><PermissionGuard moduleName="Users" redirect><UsersPage /></PermissionGuard></MainLayout>} />

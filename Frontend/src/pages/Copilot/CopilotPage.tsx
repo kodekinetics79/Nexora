@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useSnackbar } from 'notistack';
 import dayjs from 'dayjs';
 import {
@@ -238,12 +238,18 @@ const MessageBubble: React.FC<{ message: ChatMessage }> = ({ message }) => {
 
 const CopilotPage: React.FC = () => {
   const navigate = useNavigate();
+  const location = useLocation();
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
 
   const [sessionId, setSessionId] = useState<string | undefined>(undefined);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput] = useState('');
+  // A question handed over from the dashboard (BriefingHero) PREFILLS the
+  // composer — it is never auto-sent; the user stays in control.
+  const [input, setInput] = useState(() => {
+    const state = location.state as { initialQuestion?: unknown } | null;
+    return typeof state?.initialQuestion === 'string' ? state.initialQuestion : '';
+  });
   const [streaming, setStreaming] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
