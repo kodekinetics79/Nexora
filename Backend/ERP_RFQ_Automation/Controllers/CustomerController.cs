@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DTOs.BusinessUnit;
 using ERP_RFQ_Automation.DTOs.CurrencyDTOs;
 using ERP_RFQ_Automation.DTOs.CustomerDTOs;
@@ -28,6 +29,7 @@ namespace ERP_RFQ_Automation.Controllers
         // GET: api/Customer?pageNumber=1&pageSize=10&id=1&name=abc&contactEmail=abc@example.com&taxId=123&currencyId=1&isActive=true&businessUnitId=1
 
         [HttpGet]
+        [RequireModulePermission("Customers", PermissionAction.View)]
         public async Task<ActionResult<DTOs.CustomerDTOs.PaginatedResponseDTO<CustomerResponseDTO>>> GetAll(
             [FromQuery] long? businessUnitId = null,
             [FromQuery] int pageNumber = 1,
@@ -74,6 +76,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // GET: api/Customer/5
         [HttpGet("{id}")]
+        [RequireModulePermission("Customers", PermissionAction.View)]
         public async Task<ActionResult<CustomerResponseDTO>> GetById(long id, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -114,6 +117,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // POST: api/Customer
         [HttpPost]
+        [RequireModulePermission("Customers", PermissionAction.Create)]
         public async Task<ActionResult<CustomerResponseDTO>> Create([FromForm] CustomerCreateRequestDTO request)
         {
             try
@@ -182,6 +186,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // PUT: api/Customer/5
         [HttpPut("{id}")]
+        [RequireModulePermission("Customers", PermissionAction.Edit)]
         public async Task<ActionResult> Update(long id, [FromForm] CustomerUpdateRequestDTO request, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -255,6 +260,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // DELETE: api/Customer/5
         [HttpDelete("{id}")]
+        [RequireModulePermission("Customers", PermissionAction.Delete)]
         public async Task<ActionResult> Delete(long id, [FromQuery] long? businessUnitId = null)
         {
             try

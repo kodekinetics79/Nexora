@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DTOs;
 using ERP_RFQ_Automation.DTOs.OrderDTOs;
 using ERP_RFQ_Automation.Interfaces;
@@ -24,6 +25,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // GET: api/Order
         [HttpGet]
+        [RequireModulePermission("Orders", PermissionAction.View)]
         public async Task<IActionResult> GetOrders([FromQuery] long? businessUnitId = null)
         {
             try
@@ -45,6 +47,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // GET: api/Order/5
         [HttpGet("{id}")]
+        [RequireModulePermission("Orders", PermissionAction.View)]
         public async Task<IActionResult> GetOrder(long id, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -70,6 +73,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // POST: api/Order
         [HttpPost]
+        [RequireModulePermission("Orders", PermissionAction.Create)]
         public async Task<IActionResult> CreateManualOrder([FromBody] CreateOrderDto createOrderDto)
         {
             try
@@ -91,6 +95,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // POST: api/Order/from-rfq/{rfqId}
         [HttpPost("from-rfq/{rfqId}")]
+        [RequireModulePermission("Orders", PermissionAction.Create)]
         public async Task<IActionResult> CreateOrderFromRfq(long rfqId, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -113,6 +118,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // POST: api/Order/from-quote/{quoteId}
         [HttpPost("from-quote/{quoteId}")]
+        [RequireModulePermission("Orders", PermissionAction.Create)]
         public async Task<IActionResult> CreateOrderFromQuote(long quoteId, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -134,6 +140,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // PUT: api/Order/5
         [HttpPut("{id}")]
+        [RequireModulePermission("Orders", PermissionAction.Edit)]
         public async Task<IActionResult> UpdateOrder(long id, [FromBody] UpdateOrderDto updateOrderDto)
         {
             try
@@ -151,6 +158,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // DELETE: api/Order/5
         [HttpDelete("{id}")]
+        [RequireModulePermission("Orders", PermissionAction.Delete)]
         public async Task<IActionResult> DeleteOrder(long id, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -172,6 +180,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // GET: api/Order/customer/5
         [HttpGet("customer/{customerId}")]
+        [RequireModulePermission("Orders", PermissionAction.View)]
         public async Task<IActionResult> GetOrdersByCustomer(long customerId, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -192,6 +201,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet("{id}/invoice")]
+        [RequireModulePermission("Orders", PermissionAction.View)]
         public async Task<IActionResult> GetInvoice(long id, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -213,6 +223,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet("stats")]
+        [RequireModulePermission("Orders", PermissionAction.View)]
         public async Task<ActionResult<OrderStatsDTO>> GetOrderStats()
         {
             try

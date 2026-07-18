@@ -4,6 +4,7 @@ using System.Text.Json;
 using ERP_RFQ_Automation.Agent;
 using ERP_RFQ_Automation.Agent.Guardrails;
 using ERP_RFQ_Automation.Agent.Models;
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http.Features;
@@ -156,7 +157,9 @@ public sealed class AgentController : ControllerBase
     }
 
     // -------- POST /api/agent/approvals/{id}/approve --------
+    // Deciding a guarded mutation is a supervisory action: manager/admin only.
     [HttpPost("approvals/{id:guid}/approve")]
+    [RequireManagerRole]
     public async Task<IActionResult> Approve(Guid id, CancellationToken ct)
     {
         var ctx = BuildContext();
@@ -192,7 +195,9 @@ public sealed class AgentController : ControllerBase
     }
 
     // -------- POST /api/agent/approvals/{id}/reject --------
+    // Same supervisory boundary as approve.
     [HttpPost("approvals/{id:guid}/reject")]
+    [RequireManagerRole]
     public async Task<IActionResult> Reject(Guid id, CancellationToken ct)
     {
         var ctx = BuildContext();
@@ -269,7 +274,9 @@ public sealed class AgentController : ControllerBase
     }
 
     // -------- PUT /api/agent/policy --------
+    // Changing autonomy levels / approval thresholds is manager/admin only (GET stays open).
     [HttpPut("policy")]
+    [RequireManagerRole]
     public async Task<IActionResult> PutPolicy([FromBody] PolicyUpdateDto dto, CancellationToken ct)
     {
         var ctx = BuildContext();

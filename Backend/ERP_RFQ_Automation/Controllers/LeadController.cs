@@ -1,6 +1,7 @@
 ﻿using ERP_RFQ_Automation.DTOs.Lead;
 using ERP_RFQ_Automation.DTOs.LeadDTOs;
 using ERP_RFQ_Automation.DTOs.AcceptedLeadDTOs;
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -17,6 +18,7 @@ public class LeadController : ControllerBase
     }
 
     [HttpGet]
+    [RequireModulePermission("Leads", PermissionAction.View)]
     public async Task<ActionResult<PaginatedResponseDTO<LeadResponseDTO>>> GetLeadList(
         [FromQuery] long? businessUnitId = null,
         [FromQuery] int pageNumber = 1,
@@ -85,6 +87,7 @@ public class LeadController : ControllerBase
 
     // New endpoint for Accept
     [HttpPost("accept/{id}")]
+    [RequireModulePermission("Leads", PermissionAction.Edit)]
     public async Task<ActionResult> AcceptLead(long id)
     {
         try
@@ -101,6 +104,7 @@ public class LeadController : ControllerBase
 
     // ARCH-01: convert an accepted lead into a real RFQ (closes the Lead -> RFQ gap).
     [HttpPost("{id}/convert-to-rfq")]
+    [RequireModulePermission("Leads", PermissionAction.Create)]
     public async Task<ActionResult> ConvertLeadToRfq(long id)
     {
         try
@@ -142,6 +146,7 @@ public class LeadController : ControllerBase
 
     // New endpoint for Reject
     [HttpPost("reject/{id}")]
+    [RequireModulePermission("Leads", PermissionAction.Edit)]
     public async Task<ActionResult> RejectLead(long id, [FromQuery] long reasonId)
     {
         try
@@ -157,6 +162,7 @@ public class LeadController : ControllerBase
     }
 
     [HttpGet("stats")]
+    [RequireModulePermission("Leads", PermissionAction.View)]
     public async Task<ActionResult<LeadStatsDTO>> GetLeadStats()
     {
         try
@@ -175,6 +181,7 @@ public class LeadController : ControllerBase
 
     // Extraction review workbench: list low-confidence leads awaiting human review.
     [HttpGet("needs-review")]
+    [RequireModulePermission("Leads", PermissionAction.View)]
     public async Task<ActionResult<PaginatedResponseDTO<LeadNeedsReviewItemDTO>>> GetNeedsReviewLeads(
         [FromQuery] int pageNumber = 1,
         [FromQuery] int pageSize = 25,
@@ -208,6 +215,7 @@ public class LeadController : ControllerBase
 
     // Extraction review workbench: submit reviewer corrections and clear the review flag.
     [HttpPut("{id}/review")]
+    [RequireModulePermission("Leads", PermissionAction.Edit)]
     public async Task<ActionResult<LeadResponseDTO>> SubmitLeadReview(long id, [FromBody] LeadReviewSubmitDTO review)
     {
         try
@@ -231,6 +239,7 @@ public class LeadController : ControllerBase
     // WP-A3: resolve a duplicate flag. "not_duplicate" clears the conversion
     // block; "confirm" records a human-confirmed duplicate (stays blocked).
     [HttpPost("{id}/duplicate-resolution")]
+    [RequireModulePermission("Leads", PermissionAction.Edit)]
     public async Task<ActionResult<LeadResponseDTO>> ResolveDuplicate(long id, [FromBody] DuplicateResolutionRequestDTO request)
     {
         try
@@ -265,6 +274,7 @@ public class LeadController : ControllerBase
     }
 
     [HttpGet("{id}")]
+    [RequireModulePermission("Leads", PermissionAction.View)]
     public async Task<ActionResult<LeadResponseDTO>> GetLeadById(long id)
     {
         try

@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Intelligence.Decision;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -26,6 +27,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         /// <summary>GET /api/intelligence/leads/{id}/decision-brief — full Bid/Review/Skip brief.</summary>
         [HttpGet("{id}/decision-brief")]
+        [RequireModulePermission("Leads", PermissionAction.View)]
         public async Task<ActionResult<LeadDecisionBrief>> GetDecisionBrief(long id, CancellationToken ct)
         {
             var businessUnitId = GetBusinessUnitId();
@@ -48,6 +50,7 @@ namespace ERP_RFQ_Automation.Controllers
         /// foreign-tenant ids are omitted from the response, never errors.
         /// </summary>
         [HttpPost("decision-summaries")]
+        [RequireModulePermission("Leads", PermissionAction.View)]
         public async Task<ActionResult<DecisionSummariesResponse>> GetDecisionSummaries(
             [FromBody] DecisionSummariesRequest request, CancellationToken ct)
         {

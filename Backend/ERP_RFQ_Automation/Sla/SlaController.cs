@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -48,7 +49,9 @@ public sealed class SlaController : ControllerBase
     }
 
     // -------- PUT /api/sla/policy --------
+    // Tenant-wide SLA thresholds are manager/admin only (GET stays open to any user).
     [HttpPut("policy")]
+    [RequireManagerRole]
     public async Task<IActionResult> PutPolicy([FromBody] SlaPolicyUpdateDto dto, CancellationToken ct)
     {
         var bu = ResolveBusinessUnit();

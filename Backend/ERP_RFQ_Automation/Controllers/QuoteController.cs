@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DTOs.QuoteDTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
@@ -30,6 +31,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet]
+        [RequireModulePermission("Quotations", PermissionAction.View)]
         public async Task<ActionResult<IEnumerable<QuoteResponseDTO>>> GetAll(
             [FromQuery] long? businessUnitId = null,
             [FromQuery] int pageNumber = 1,
@@ -62,6 +64,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet("{id}")]
+        [RequireModulePermission("Quotations", PermissionAction.View)]
         public async Task<ActionResult<QuoteResponseDTO>> GetById(long id, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -86,6 +89,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPost]
+        [RequireModulePermission("Quotations", PermissionAction.Create)]
         public async Task<ActionResult<QuoteResponseDTO>> Create([FromBody] QuoteCreateRequestDTO request)
         {
             try
@@ -105,6 +109,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPut("{id}")]
+        [RequireModulePermission("Quotations", PermissionAction.Edit)]
         public async Task<IActionResult> Update(long id, [FromBody] QuoteUpdateRequestDTO request)
         {
             if (id != request.Id) return BadRequest("ID mismatch");
@@ -125,6 +130,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpDelete("{id}")]
+        [RequireModulePermission("Quotations", PermissionAction.Delete)]
         public async Task<IActionResult> Delete(long id, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -145,6 +151,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet("{id}/pdf")]
+        [RequireModulePermission("Quotations", PermissionAction.View)]
         public async Task<IActionResult> DownloadPdf(long id)
         {
             try
@@ -159,6 +166,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPost("{id}/email")]
+        [RequireModulePermission("Quotations", PermissionAction.Edit)]
         public async Task<IActionResult> SendEmail(long id, [FromQuery] string recipientEmail)
         {
             if (string.IsNullOrEmpty(recipientEmail)) return BadRequest("Recipient email is required.");
@@ -174,6 +182,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPost("{id}/status")]
+        [RequireModulePermission("Quotations", PermissionAction.Edit)]
         public async Task<ActionResult<QuoteResponseDTO>> TransitionStatus(long id, [FromQuery] string status, [FromQuery] string modifiedBy)
         {
             try
@@ -203,6 +212,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // -------- POST /api/Quote/{id}/outcome (WP-A4) --------
         [HttpPost("{id}/outcome")]
+        [RequireModulePermission("Quotations", PermissionAction.Edit)]
         public async Task<ActionResult<QuoteResponseDTO>> SetOutcome(long id, [FromBody] QuoteOutcomeRequestDto request)
         {
             try
@@ -231,6 +241,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // -------- POST /api/Quote/{id}/mark-responded (WP-A4) --------
         [HttpPost("{id}/mark-responded")]
+        [RequireModulePermission("Quotations", PermissionAction.Edit)]
         public async Task<IActionResult> MarkResponded(long id)
         {
             try
@@ -265,6 +276,7 @@ namespace ERP_RFQ_Automation.Controllers
             ?? "unknown";
 
         [HttpGet("stats")]
+        [RequireModulePermission("Quotations", PermissionAction.View)]
         public async Task<ActionResult<QuoteStatsDTO>> GetQuoteStats()
         {
             try

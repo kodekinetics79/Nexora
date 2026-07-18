@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Mvc;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.DTOs.SupplierQuotedItem;
+using ERP_RFQ_Automation.Authorization;
 using Microsoft.AspNetCore.Authorization;
 
 namespace ERP_RFQ_Automation.Controllers
@@ -23,6 +24,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet]
+        [RequireModulePermission("Supplier History", PermissionAction.View)]
         public async Task<ActionResult<IEnumerable<SupplierQuotedItemResponseDTO>>> GetAll([FromQuery] long? businessUnitId = null)
         {
             try
@@ -42,6 +44,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet("{id}")]
+        [RequireModulePermission("Supplier History", PermissionAction.View)]
         public async Task<ActionResult<SupplierQuotedItemResponseDTO>> GetById(long id, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -65,6 +68,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet("GetBySupplier/{supplierId}")]
+        [RequireModulePermission("Supplier History", PermissionAction.View)]
         public async Task<ActionResult<IEnumerable<SupplierQuotedItemResponseDTO>>> GetBySupplier(long supplierId, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -84,6 +88,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPost]
+        [RequireModulePermission("Supplier History", PermissionAction.Create)]
         public async Task<ActionResult<SupplierQuotedItemResponseDTO>> Create(SupplierQuotedItemCreateDTO dto, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -138,6 +143,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPut("{id}")]
+        [RequireModulePermission("Supplier History", PermissionAction.Edit)]
         public async Task<IActionResult> Update(long id, SupplierQuotedItemUpdateDTO dto, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -187,6 +193,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpDelete("{id}")]
+        [RequireModulePermission("Supplier History", PermissionAction.Delete)]
         public async Task<IActionResult> Delete(long id, [FromQuery] long? businessUnitId = null)
         {
             try

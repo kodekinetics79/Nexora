@@ -1,4 +1,5 @@
-﻿using DocumentFormat.OpenXml.InkML;
+using DocumentFormat.OpenXml.InkML;
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DTOs.LookupDTOs;
 using ERP_RFQ_Automation.DTOs.ProductDTOs;
 using ERP_RFQ_Automation.Interfaces;
@@ -27,6 +28,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet]
+        [RequireModulePermission("Products", PermissionAction.View)]
         public async Task<ActionResult<PaginatedProductResponseDTO>> GetAll(
             [FromQuery] long? businessUnitId = null,
             [FromQuery] int pageNumber = 1,
@@ -62,6 +64,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet("{id}")]
+        [RequireModulePermission("Products", PermissionAction.View)]
         public async Task<ActionResult<ProductResponseDTO>> GetById(long id, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -159,6 +162,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPost]
+        [RequireModulePermission("Products", PermissionAction.Create)]
         public async Task<ActionResult<ProductResponseDTO>> Create([FromForm] ProductCreateRequestDTO request)
         {
             if (!ModelState.IsValid) return BadRequest(ModelState);
@@ -281,6 +285,7 @@ namespace ERP_RFQ_Automation.Controllers
 
 
         [HttpPut("{id}")]
+        [RequireModulePermission("Products", PermissionAction.Edit)]
         public async Task<ActionResult<ProductResponseDTO>> Update(long id, [FromForm] ProductUpdateRequestDTO request)
         {
             if (!ModelState.IsValid) return BadRequest(ModelState);
@@ -400,6 +405,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpDelete("{id}")]
+        [RequireModulePermission("Products", PermissionAction.Delete)]
         public async Task<IActionResult> Delete(long id, [FromQuery] long? businessUnitId = null)
         {
             var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
@@ -498,6 +504,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet("{id}/stock-details")]
+        [RequireModulePermission("Products", PermissionAction.View)]
         public async Task<ActionResult<StockDetailsDTO>> GetStockDetails(long id, [FromQuery] long? businessUnitId = null)
         {
             var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
@@ -521,6 +528,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet("{id}/purchase-history")]
+        [RequireModulePermission("Products", PermissionAction.View)]
         public async Task<ActionResult<PurchaseHistoryDTO>> GetPurchaseHistory(long id, [FromQuery] long? businessUnitId = null)
         {
             var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");

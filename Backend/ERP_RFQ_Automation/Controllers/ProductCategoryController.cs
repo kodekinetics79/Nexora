@@ -1,4 +1,5 @@
-﻿// Controllers/ProductCategoryController.cs
+// Controllers/ProductCategoryController.cs
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DTOs.ProductCategory;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
@@ -24,6 +25,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // GET: api/ProductCategory?pageNumber=1&pageSize=20&search=electronics&isActive=true&businessUnitId=1
         [HttpGet]
+        [RequireModulePermission("Product Categories", PermissionAction.View)]
         public async Task<ActionResult<PaginatedProductCategoryResponseDTO>> GetAll(
             [FromQuery] long? businessUnitId = null,
             [FromQuery] int pageNumber = 1,
@@ -100,6 +102,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // GET: api/ProductCategory/5?businessUnitId=1
         [HttpGet("{id}")]
+        [RequireModulePermission("Product Categories", PermissionAction.View)]
         public async Task<ActionResult<ProductCategoryResponseDTO>> GetById(long id, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -137,6 +140,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // POST: api/ProductCategory
         [HttpPost]
+        [RequireModulePermission("Product Categories", PermissionAction.Create)]
         public async Task<ActionResult<ProductCategoryResponseDTO>> Create([FromBody] ProductCategoryCreateRequestDTO request)
         {
             try
@@ -183,6 +187,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // PUT: api/ProductCategory/5
         [HttpPut("{id}")]
+        [RequireModulePermission("Product Categories", PermissionAction.Edit)]
         public async Task<IActionResult> Update(long id, [FromBody] ProductCategoryUpdateRequestDTO request)
         {
             try
@@ -215,6 +220,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // DELETE: api/ProductCategory/5?businessUnitId=1
         [HttpDelete("{id}")]
+        [RequireModulePermission("Product Categories", PermissionAction.Delete)]
         public async Task<IActionResult> Delete(long id, [FromQuery] long? businessUnitId = null)
         {
             try

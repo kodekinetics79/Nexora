@@ -135,6 +135,10 @@ namespace ERP_RFQ_Automation.Repositories
 
             switch (action.ToLower())
             {
+                case "canview":
+                    // Mirrors the frontend PermissionGuard: there is no CanView column —
+                    // having ANY RolePermission row for the module grants view.
+                    return await query.AnyAsync();
                 case "cancreate":
                     return await query.AnyAsync(rp => rp.CanCreate == true);
                 case "canedit":

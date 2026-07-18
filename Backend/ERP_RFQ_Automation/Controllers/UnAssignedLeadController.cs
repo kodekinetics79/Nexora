@@ -1,4 +1,5 @@
-﻿using ERP_RFQ_Automation.DTOs.AcceptedLeadDTOs;
+﻿using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.DTOs.AcceptedLeadDTOs;
 using ERP_RFQ_Automation.DTOs.Lead;
 using ERP_RFQ_Automation.Interfaces;
 using Microsoft.AspNetCore.Authorization;
@@ -19,6 +20,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet]
+        [RequireModulePermission("Leads", PermissionAction.View)]
         public async Task<ActionResult<PaginatedResponseDTO<AcceptedLeadResponseDTO>>> GetAcceptedLeads(
             [FromQuery] long? businessUnitId = null,
             [FromQuery] int pageNumber = 1,
@@ -56,6 +58,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet("assigned")]
+        [RequireModulePermission("Leads", PermissionAction.View)]
         public async Task<ActionResult<PaginatedResponseDTO<AcceptedLeadResponseDTO>>> GetAssignedLeads(
             [FromQuery] long? businessUnitId = null,
             [FromQuery] int pageNumber = 1,
@@ -141,6 +144,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
         }
         [HttpGet("{id}")]
+        [RequireModulePermission("Leads", PermissionAction.View)]
         public async Task<ActionResult<AcceptedLeadResponseDTO>> GetAcceptedLeadById(long id)
         {
             var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");

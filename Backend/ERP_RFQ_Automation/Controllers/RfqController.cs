@@ -1,4 +1,5 @@
-﻿using ERP_RFQ_Automation.DTOs.LookupDTOs;
+﻿using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.DTOs.LookupDTOs;
 using ERP_RFQ_Automation.DTOs.RfqDTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
@@ -28,6 +29,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet]
+        [RequireModulePermission("RFQ Management", PermissionAction.View)]
         public async Task<ActionResult<PaginatedRfqResponseDTO>> GetAll(
             [FromQuery] long? businessUnitId = null,
             [FromQuery] int pageNumber = 1,
@@ -71,6 +73,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet("{id}")]
+        [RequireModulePermission("RFQ Management", PermissionAction.View)]
         public async Task<ActionResult<RfqResponseDTO>> GetById(long id, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -91,6 +94,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPost]
+        [RequireModulePermission("RFQ Management", PermissionAction.Create)]
         public async Task<ActionResult<RfqResponseDTO>> Create([FromBody] RfqCreateRequestDTO request)
         {
             try
@@ -174,6 +178,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPut("{id}")]
+        [RequireModulePermission("RFQ Management", PermissionAction.Edit)]
         public async Task<ActionResult> Update(long id, [FromBody] RfqUpdateRequestDTO request)
         {
             try
@@ -257,6 +262,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPost("{id}/approve")]
+        [RequireModulePermission("RFQ Management", PermissionAction.Edit)]
         public async Task<ActionResult> Approve(
             long id,
             [FromQuery] string? recipientEmail = null,
@@ -320,6 +326,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet("stats")]
+        [RequireModulePermission("RFQ Management", PermissionAction.View)]
         public async Task<ActionResult<RfqStatsDTO>> GetRfqStats()
         {
             try
@@ -337,7 +344,9 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpDelete("{id}")]
-        [Authorize(Policy = "CanDeleteRFQ")]
+        // Was [Authorize(Policy = "CanDeleteRFQ")] — that legacy policy checks module
+        // "RFQ", which does not match the Modules row / frontend name "RFQ Management".
+        [RequireModulePermission("RFQ Management", PermissionAction.Delete)]
         public async Task<ActionResult> Delete(long id, [FromQuery] long? businessUnitId = null)
         {
             try

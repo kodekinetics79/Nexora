@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Intelligence.Conversion;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -23,6 +24,7 @@ public class ConversionIntelligenceController : ControllerBase
 
     /// <summary>Dry-run conversion: catalog matches, normalization and confidence per line.</summary>
     [HttpGet("{id}/conversion-preview")]
+    [RequireModulePermission("Leads", PermissionAction.View)]
     public async Task<ActionResult<ConversionPreview>> GetConversionPreview(long id, CancellationToken ct)
     {
         try
@@ -45,6 +47,7 @@ public class ConversionIntelligenceController : ControllerBase
 
     /// <summary>Convert the lead into an RFQ applying the request's per-line choices.</summary>
     [HttpPost("{id}/convert")]
+    [RequireModulePermission("Leads", PermissionAction.Create)]
     public async Task<ActionResult> Convert(long id, [FromBody] ConvertRequest request, CancellationToken ct)
     {
         try

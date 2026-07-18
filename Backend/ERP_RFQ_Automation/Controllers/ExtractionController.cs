@@ -5,6 +5,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Extraction;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Hosting;
@@ -51,6 +52,8 @@ namespace ERP_RFQ_Automation.Controllers
         /// </summary>
         [HttpPost("upload")]
         [RequestSizeLimit(200L * 1024 * 1024)]
+        // Uploading documents creates leads — same gate as the manual-upload lead pages.
+        [RequireModulePermission("Leads", PermissionAction.Create)]
         public async Task<IActionResult> Upload([FromForm] List<IFormFile> files, CancellationToken ct = default)
         {
             var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");

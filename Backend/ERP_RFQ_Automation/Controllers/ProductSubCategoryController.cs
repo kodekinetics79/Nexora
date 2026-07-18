@@ -1,4 +1,5 @@
-﻿using ERP_RFQ_Automation.DTOs.ProductSubCategory;
+using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.DTOs.ProductSubCategory;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
 using Microsoft.AspNetCore.Authorization;
@@ -23,6 +24,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // GET: api/ProductSubCategory?pageNumber=1&pageSize=20&search=electronics&businessUnitId=1&isActive=true
         [HttpGet]
+        [RequireModulePermission("Product Categories", PermissionAction.View)]
         public async Task<ActionResult<PaginatedProductSubCategoryResponseDTO>> GetAll(
             [FromQuery] long? businessUnitId = null,
             [FromQuery] int pageNumber = 1,
@@ -96,6 +98,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // GET: api/ProductSubCategory/5?businessUnitId=1
         [HttpGet("{id}")]
+        [RequireModulePermission("Product Categories", PermissionAction.View)]
         public async Task<ActionResult<ProductSubCategoryResponseDTO>> GetById(int id, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -129,6 +132,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // POST: api/ProductSubCategory
         [HttpPost]
+        [RequireModulePermission("Product Categories", PermissionAction.Create)]
         public async Task<ActionResult<ProductSubCategoryResponseDTO>> Create([FromBody] ProductSubCategoryCreateRequestDTO request)
         {
             try
@@ -173,6 +177,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // PUT: api/ProductSubCategory/5
         [HttpPut("{id}")]
+        [RequireModulePermission("Product Categories", PermissionAction.Edit)]
         public async Task<IActionResult> Update(int id, [FromBody] ProductSubCategoryUpdateRequestDTO request)
         {
             try
@@ -204,6 +209,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // DELETE: api/ProductSubCategory/5?businessUnitId=1
         [HttpDelete("{id}")]
+        [RequireModulePermission("Product Categories", PermissionAction.Delete)]
         public async Task<IActionResult> Delete(int id, [FromQuery] long? businessUnitId = null)
         {
             try

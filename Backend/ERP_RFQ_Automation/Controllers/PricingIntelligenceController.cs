@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Intelligence.Pricing;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -22,6 +23,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         /// <summary>GET /api/intelligence/rfqs/{id}/price-preview</summary>
         [HttpGet("{id}/price-preview")]
+        [RequireModulePermission("Quotations", PermissionAction.View)]
         public async Task<ActionResult<PricePreview>> GetPricePreview(long id, CancellationToken ct)
         {
             var businessUnitId = GetBusinessUnitId();
@@ -40,6 +42,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         /// <summary>POST /api/intelligence/rfqs/{id}/apply-pricing</summary>
         [HttpPost("{id}/apply-pricing")]
+        [RequireModulePermission("Quotations", PermissionAction.Edit)]
         public async Task<ActionResult<ApplyPricingResult>> ApplyPricing(
             long id, [FromBody] ApplyPricingRequest request, CancellationToken ct)
         {

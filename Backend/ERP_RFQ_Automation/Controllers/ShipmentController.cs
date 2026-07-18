@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
@@ -26,6 +27,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet]
+        [RequireModulePermission("Shipments", PermissionAction.View)]
         public async Task<IActionResult> GetShipments([FromQuery] long? businessUnitId = null)
         {
             try
@@ -47,6 +49,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet("{id}")]
+        [RequireModulePermission("Shipments", PermissionAction.View)]
         public async Task<IActionResult> GetShipment(long id, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -66,6 +69,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPost]
+        [RequireModulePermission("Shipments", PermissionAction.Create)]
         public async Task<IActionResult> CreateShipment([FromBody] CreateShipmentDto dto)
         {
             try
@@ -140,6 +144,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPut("{id}")]
+        [RequireModulePermission("Shipments", PermissionAction.Edit)]
         public async Task<IActionResult> UpdateShipment(long id, [FromBody] UpdateShipmentDto dto)
         {
             try
@@ -178,6 +183,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpDelete("{id}")]
+        [RequireModulePermission("Shipments", PermissionAction.Delete)]
         public async Task<IActionResult> DeleteShipment(long id, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -195,6 +201,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet("order/{orderId}")]
+        [RequireModulePermission("Shipments", PermissionAction.View)]
         public async Task<IActionResult> GetShipmentsByOrder(long orderId, [FromQuery] long? businessUnitId = null)
         {
             try
