@@ -1,341 +1,50 @@
 import React, { useEffect, useState } from 'react';
 import {
+  Alert,
   Box,
-  Typography,
-  TextField,
   Button,
+  CircularProgress,
+  FormControl,
+  GlobalStyles,
   IconButton,
   InputAdornment,
-  Alert,
-  Select,
-  MenuItem,
-  FormControl,
   InputLabel,
-  useTheme,
-  CircularProgress,
+  MenuItem,
+  Select,
+  TextField,
+  Typography,
 } from '@mui/material';
 import {
   MailOutlined as MailIcon,
   LockOutlined as LockIcon,
-  RocketLaunch as RocketIcon,
-  Description as FileIcon,
-  MonetizationOn as DollarIcon,
-  Storage as DatabaseIcon,
-  LocalShipping as TruckIcon,
-  LightMode as SunIcon,
-  DarkMode as MoonIcon,
   Visibility,
   VisibilityOff,
 } from '@mui/icons-material';
-import { keyframes, css } from '@emotion/react';
-import styled from '@emotion/styled';
-import { useAuth } from '../../context/AuthContext';
-import { useAppTheme } from '../../context/ThemeContext';
-import Branding from '../../components/common/Branding';
-import axiosInstance from '../../api/axiosInstance';
 import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../../context/AuthContext';
+import axiosInstance from '../../api/axiosInstance';
 import rolePermissionService from '../../api/services/rolePermissionService';
-
-// --- Animations ---
-const gridFloat = keyframes`
-  0% { transform: translateY(0); }
-  100% { transform: translateY(-50px); }
-`;
-
-const scan = keyframes`
-  0% { top: -10%; opacity: 0; }
-  10%, 90% { opacity: 0.5; }
-  100% { top: 110%; opacity: 0; }
-`;
-
-const spin = keyframes`
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-`;
-
-const nodeLoop = (index: number) => keyframes`
-  0%, ${index * 15}% { opacity: 0; transform: scale(0.8); }
-  ${index * 15 + 5}%, 90% { opacity: 1; transform: scale(1); }
-  95%, 100% { opacity: 0; transform: scale(0.8); }
-`;
-
-const pathLoop = (index: number) => keyframes`
-  0%, ${index * 15 + 7}% { opacity: 0; stroke-dashoffset: 200; }
-  ${index * 15 + 12}%, 90% { opacity: 0.7; stroke-dashoffset: 0; }
-  95%, 100% { opacity: 0; stroke-dashoffset: 200; }
-`;
-
-// --- Styled Components ---
-const Container = styled.div`
-  height: 100vh;
-  width: 100vw;
-  overflow: hidden;
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: ${(props: any) => props.theme.palette.background.default};
-  font-family: 'Poppins', sans-serif;
-  transition: background 0.5s ease;
-`;
-
-const ScannerLine = styled.div<{ primary: string }>`
-  position: absolute;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: linear-gradient(90deg, transparent, ${props => props.primary}, transparent);
-  box-shadow: 0 0 15px ${props => props.primary};
-  z-index: 10;
-  animation: ${scan} 4s linear infinite;
-`;
-
-const DigitalGrid = styled.div<{ primary: string }>`
-  position: absolute;
-  inset: -100px;
-  background-image: 
-    linear-gradient(${props => props.primary}1a 1px, transparent 1px),
-    linear-gradient(90deg, ${props => props.primary}1a 1px, transparent 1px);
-  background-size: 60px 60px;
-  transform: perspective(1000px) rotateX(60deg);
-  mask-image: radial-gradient(circle at center, black, transparent 80%);
-  animation: ${gridFloat} 15s linear infinite;
-  z-index: 0;
-  opacity: 0.5;
-`;
-
-const GlassCard = styled.div<{ mode: string }>`
-  width: 1400px;
-  max-width: 95vw;
-  height: 850px;
-  background: ${props => props.mode === 'dark' ? 'rgba(10, 15, 28, 0.85)' : 'rgba(255, 255, 255, 0.7)'};
-  backdrop-filter: blur(40px);
-  border-radius: 40px;
-  border: 1px solid ${props => props.mode === 'dark' ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.05)'};
-  display: flex;
-  overflow: hidden;
-  position: relative;
-  z-index: 10;
-  box-shadow: ${props => props.mode === 'dark' ? '0 50px 120px -30px rgba(0, 0, 0, 0.9)' : '0 50px 120px -30px rgba(13, 71, 161, 0.15)'};
-  transition: all 0.5s ease;
-
-  @media (max-width: 1200px) {
-    height: auto;
-    min-height: 800px;
-    flex-direction: column;
-  }
-`;
-
-const VisualArea = styled.div<{ mode: string }>`
-  flex: 1.8;
-  background: ${props => props.mode === 'dark'
-    ? 'linear-gradient(135deg, rgba(30, 41, 59, 0.4) 0%, rgba(15, 23, 42, 0.1) 100%)'
-    : 'linear-gradient(135deg, rgba(241, 245, 249, 0.8) 0%, rgba(255, 255, 255, 0.2) 100%)'};
-  border-right: 1px solid ${props => props.mode === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)'};
-  display: flex;
-  flex-direction: column;
-  padding: 48px;
-  position: relative;
-  justify-content: center;
-  align-items: center;
-  overflow: hidden;
-
-  @media (max-width: 1200px) {
-    display: none;
-  }
-`;
-
-const FormSection = styled.div`
-  flex: 1;
-  padding: 64px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  position: relative;
-  background: transparent;
-
-  @media (max-width: 768px) {
-    padding: 24px;
-  }
-`;
-
-const RadialWrapper = styled.div`
-  position: relative;
-  width: 580px;
-  height: 580px;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  z-index: 5;
-`;
-
-const SensorRing = styled.div<{ color: string }>`
-  position: absolute;
-  inset: -12px;
-  border: 1px dashed ${props => props.color};
-  border-radius: 50%;
-  opacity: 0.3;
-  animation: ${spin} 15s linear infinite;
-`;
-
-const NodeBadge = styled.div<{ color: string }>`
-  position: absolute;
-  top: -10px;
-  right: -10px;
-  background: ${props => props.color};
-  color: #fff;
-  font-size: 8px;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-weight: 900;
-  letter-spacing: 1px;
-  box-shadow: 0 4px 10px rgba(0,0,0,0.3);
-`;
-
-const CircularStage = styled.div<{ index: number; x: number; y: number; color: string; mode: string }>`
-  position: absolute;
-  width: 110px;
-  height: 110px;
-  background: ${props => props.mode === 'dark' ? 'rgba(30, 41, 59, 1)' : 'rgba(255, 255, 255, 1)'};
-  border: 2px solid ${props => props.color};
-  border-radius: 50%;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  z-index: 20;
-  left: ${props => props.x}px;
-  top: ${props => props.y}px;
-  margin-top: -55px;
-  margin-left: -55px;
-  opacity: 0;
-  box-shadow: 0 12px 30px -10px rgba(0, 0, 0, 0.3);
-  animation: ${props => css`${nodeLoop(props.index)} 10s infinite ease-in-out`};
-  transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275), box-shadow 0.3s ease;
-
-  &:hover {
-    transform: scale(1.1);
-    box-shadow: 0 20px 40px -15px ${props => props.color}66;
-  }
-`;
-
-const ConnectionLine = styled.line<{ index: number; color: string }>`
-  stroke: ${props => props.color};
-  stroke-width: 2;
-  stroke-dasharray: 6 4;
-  opacity: 0;
-  stroke-linecap: round;
-  animation: ${props => css`${pathLoop(props.index)} 10s infinite ease-in-out`};
-`;
-
-const SVGOverlay = styled.svg`
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-  z-index: 5;
-`;
-
-const OrbitRing = styled.circle<{ primary: string }>`
-  fill: none;
-  stroke: ${props => props.primary}14;
-  stroke-width: 1;
-  stroke-dasharray: 4 4;
-`;
-
-// --- Custom Form Inputs ---
-const StyledTextField = styled(TextField)<{ mode?: string }>(({ theme, mode }: any) => ({
-  '& .MuiOutlinedInput-root': {
-    backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 0.6)' : 'rgba(255, 255, 255, 0.8)',
-    borderRadius: '16px',
-    transition: 'all 0.3s ease-in-out',
-    boxShadow: mode === 'dark' ? '0 4px 20px rgba(0,0,0,0.2)' : '0 4px 20px rgba(13, 71, 161, 0.05)',
-    border: '1px solid transparent',
-    '& fieldset': { border: 'none' },
-    '&:hover': {
-      backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 0.9)' : '#ffffff',
-      boxShadow: mode === 'dark' ? '0 6px 24px rgba(0,0,0,0.4)' : '0 8px 24px rgba(13, 71, 161, 0.12)',
-      transform: 'translateY(-2px)',
-    },
-    '&.Mui-focused': {
-      backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 1)' : '#ffffff',
-      border: `1px solid ${theme.palette.primary.main}80`,
-      boxShadow: `0 8px 32px ${theme.palette.primary.main}33`,
-      transform: 'translateY(-2px)',
-    }
-  },
-  '& input': {
-    '&:-webkit-autofill, &:-webkit-autofill:hover, &:-webkit-autofill:focus, &:-webkit-autofill:active': {
-      WebkitBoxShadow: mode === 'dark' ? '0 0 0 30px #131c33 inset !important' : '0 0 0 30px #ffffff inset !important',
-      WebkitTextFillColor: mode === 'dark' ? '#ffffff !important' : '#000000 !important',
-      transition: 'background-color 5000s ease-in-out 0s',
-      borderRadius: '0px',
-    }
-  },
-  '& .MuiInputLabel-root': {
-    fontWeight: 500,
-    '&.Mui-focused, &.MuiFormLabel-filled': {
-      transform: 'translate(14px, -11px) scale(0.75)',
-      backgroundColor: mode === 'dark' ? '#0a0f1c' : '#ffffff',
-      padding: '0 6px',
-      borderRadius: '4px',
-    }
-  }
-}));
-
-const StyledSelect = styled(Select)<{ mode?: string }>(({ theme, mode }: any) => ({
-  backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 0.6)' : 'rgba(255, 255, 255, 0.8)',
-  borderRadius: '16px',
-  transition: 'all 0.3s ease-in-out',
-  boxShadow: mode === 'dark' ? '0 4px 20px rgba(0,0,0,0.2)' : '0 4px 20px rgba(13, 71, 161, 0.05)',
-  border: '1px solid transparent',
-  '& fieldset': { border: 'none' },
-  '&:hover': {
-    backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 0.9)' : '#ffffff',
-    boxShadow: mode === 'dark' ? '0 6px 24px rgba(0,0,0,0.4)' : '0 8px 24px rgba(13, 71, 161, 0.12)',
-    transform: 'translateY(-2px)',
-  },
-  '&.Mui-focused': {
-    backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 1)' : '#ffffff',
-    border: `1px solid ${theme.palette.primary.main}80`,
-    boxShadow: `0 8px 32px ${theme.palette.primary.main}33`,
-    transform: 'translateY(-2px)',
-  }
-}));
-
-// --- Data ---
-const industrialFlow = [
-  { key: "DEMAND", title: "Smart Sourcing", icon: <RocketIcon />, color: "#6366f1" },
-  { key: "ANALYZE", title: "AI Validation", icon: <FileIcon />, color: "#0ea5e9" },
-  { key: "OPTIMIZE", title: "Dynamic Costing", icon: <DollarIcon />, color: "#10b981" },
-  { key: "EXECUTE", title: "Global Fulfillment", icon: <DatabaseIcon />, color: "#f59e0b" },
-  { key: "TRACK", title: "Real-time Logistics", icon: <TruckIcon />, color: "#8b5cf6" }
-];
-
-const SVG_SIZE = 580;
-const CENTER = SVG_SIZE / 2;
-const ORBIT_R = 215;
-const NODE_R = 55;
-
-const getNodeCenter = (index: number) => {
-  const angleDeg = index * 72 - 90;
-  const angleRad = angleDeg * (Math.PI / 180);
-  return {
-    x: CENTER + ORBIT_R * Math.cos(angleRad),
-    y: CENTER + ORBIT_R * Math.sin(angleRad),
-  };
-};
-
-const getEdgePoint = (from: { x: number; y: number }, to: { x: number; y: number }, radius: number) => {
-  const dx = to.x - from.x;
-  const dy = to.y - from.y;
-  const dist = Math.sqrt(dx * dx + dy * dy);
-  return {
-    x: from.x + (dx / dist) * radius,
-    y: from.y + (dy / dist) * radius,
-  };
-};
+import logo from '../../assets/img/logo.svg';
+import AuroraBackdrop from './components/AuroraBackdrop';
+import BentoTiles from './components/BentoTiles';
+import Spotlight from './components/Spotlight';
+import {
+  ACCENT,
+  ACCENT_DEEP,
+  ACCENT_SOFT,
+  ACCENT_TINT,
+  HAIRLINE,
+  PAGE_BG,
+  TEXT_HI,
+  TEXT_LOW,
+  TEXT_MID,
+  errorAlertSx,
+  focusRingSx,
+  glassFieldSx,
+  glassSelectSx,
+  glassSx,
+  infoAlertSx,
+} from './components/tokens';
 
 // --- Auth service typing ---
 interface LoginBusinessUnitOption {
@@ -365,8 +74,6 @@ interface LoginResponse {
 }
 
 const LoginPage: React.FC = () => {
-  const theme = useTheme();
-  const { mode, setMode, primaryColor } = useAppTheme();
   const { setToken, setUserData } = useAuth();
   const navigate = useNavigate();
 
@@ -384,7 +91,7 @@ const LoginPage: React.FC = () => {
       sessionStorage.removeItem('authNotice');
     }
   }, []);
-  
+
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   // Rare case: the same email is valid in multiple organizations and the
@@ -411,7 +118,7 @@ const LoginPage: React.FC = () => {
       }
 
       setToken(data.token);
-      
+
       // Fetch permissions for the logged in role
       let permissions: any[] = [];
       if (data.roleId != null && data.businessUnitId != null) {
@@ -455,138 +162,230 @@ const LoginPage: React.FC = () => {
     setError(null);
   };
 
-  const nodeCenters = industrialFlow.map((_, i) => getNodeCenter(i));
-
   return (
-    <Container theme={theme}>
-      <DigitalGrid primary={primaryColor} />
-      <ScannerLine primary={primaryColor} />
+    <Box
+      component="main"
+      sx={{
+        // 100vh first for browsers without dvh (Safari < 15.4), then the
+        // iOS-correct dynamic viewport unit where supported.
+        minHeight: '100vh',
+        '@supports (min-height: 100dvh)': { minHeight: '100dvh' },
+        position: 'relative',
+        backgroundColor: PAGE_BG,
+        color: TEXT_HI,
+        fontFamily: '"Outfit", "Inter", sans-serif',
+        '& *::selection': {
+          backgroundColor: 'rgba(70, 130, 180, 0.55)',
+          color: '#FFFFFF',
+          WebkitTextFillColor: '#FFFFFF',
+        },
+      }}
+    >
+      {/* While this pre-auth stage is mounted, force dark UA chrome (document
+          scrollbar, native control tints) regardless of the in-app theme mode.
+          Unmounts (and reverts) on navigation. */}
+      <GlobalStyles
+        styles={{
+          ':root': { colorScheme: 'dark' },
+          body: { scrollbarColor: '#2E4260 #0A101C' },
+          'body::-webkit-scrollbar-track, body *::-webkit-scrollbar-track': {
+            backgroundColor: '#0A101C',
+          },
+          'body::-webkit-scrollbar-thumb, body *::-webkit-scrollbar-thumb': {
+            backgroundColor: '#2E4260',
+            borderColor: '#0A101C',
+          },
+          'body::-webkit-scrollbar-thumb:hover, body *::-webkit-scrollbar-thumb:hover': {
+            backgroundColor: '#3D5678',
+          },
+        }}
+      />
+      <AuroraBackdrop />
+      <Spotlight />
 
-      <GlassCard mode={mode}>
-        <VisualArea mode={mode}>
-          <RadialWrapper>
-            <SVGOverlay viewBox={`0 0 ${SVG_SIZE} ${SVG_SIZE}`}>
-              <defs>
-                {industrialFlow.map((node, i) => (
-                  <marker
-                    key={`marker-${i}`}
-                    id={`arrow-${i}`}
-                    markerWidth="8"
-                    markerHeight="8"
-                    refX="4"
-                    refY="3"
-                    orient="auto"
-                  >
-                    <path fill={node.color} d="M0,0 L0,6 L7,3 z" style={{ opacity: 0.8 }} />
-                  </marker>
-                ))}
-              </defs>
-
-              <OrbitRing cx={CENTER} cy={CENTER} r={ORBIT_R} primary={primaryColor} />
-
-              {industrialFlow.map((node, i) => {
-                const nextIndex = (i + 1) % industrialFlow.length;
-                const from = nodeCenters[i];
-                const to = nodeCenters[nextIndex];
-                const fromEdge = getEdgePoint(from, to, NODE_R + 4);
-                const toEdge = getEdgePoint(to, from, NODE_R + 14);
-
-                return (
-                  <ConnectionLine
-                    key={`conn-${i}`}
-                    index={i}
-                    x1={fromEdge.x}
-                    y1={fromEdge.y}
-                    x2={toEdge.x}
-                    y2={toEdge.y}
-                    color={node.color}
-                    markerEnd={`url(#arrow-${i})`}
-                  />
-                );
-              })}
-            </SVGOverlay>
-
-            {industrialFlow.map((node, i) => {
-              const pos = nodeCenters[i];
-              return (
-                <CircularStage
-                  key={node.key}
-                  index={i}
-                  x={pos.x}
-                  y={pos.y}
-                  color={node.color}
-                  mode={mode}
-                >
-                  <SensorRing color={node.color} />
-                  <NodeBadge color={node.color}>0{i + 1}</NodeBadge>
-                  <Box sx={{ color: node.color, fontSize: 32, mb: 0.5, display: 'flex' }}>
-                    {node.icon}
-                  </Box>
-                  <Typography variant="caption" sx={{ fontWeight: 800, color: node.color, textTransform: 'uppercase', letterSpacing: 1, fontSize: 10 }}>
-                    {node.key}
-                  </Typography>
-                  <Typography variant="caption" sx={{ fontWeight: 700, color: 'text.primary', opacity: 0.8, fontSize: 9 }}>
-                    {node.title}
-                  </Typography>
-                </CircularStage>
-              );
-            })}
-          </RadialWrapper>
-
-          <Box sx={{ position: 'absolute', top: 50, left: 50, zIndex: 30 }}>
-            <Branding fontSize={28} />
+      <Box
+        sx={{
+          position: 'relative',
+          zIndex: 1,
+          minHeight: '100vh',
+          '@supports (min-height: 100dvh)': { minHeight: '100dvh' },
+          display: 'flex',
+          flexDirection: 'column',
+          maxWidth: 1280,
+          mx: 'auto',
+          px: { xs: 2.5, sm: 4, md: 6 },
+          py: { xs: 4, md: 5 },
+        }}
+      >
+        <Box
+          sx={{
+            flex: 1,
+            display: 'grid',
+            alignContent: 'center',
+            columnGap: { lg: 8 },
+            rowGap: { xs: 4, lg: 4.5 },
+            gridTemplateColumns: { xs: '1fr', lg: 'minmax(0, 1fr) minmax(380px, 440px)' },
+            gridTemplateAreas: {
+              xs: '"intro" "card" "tiles"',
+              lg: '"intro card" "tiles card"',
+            },
+          }}
+        >
+          {/* --- Landing pitch: one confident headline --- */}
+          <Box sx={{ gridArea: 'intro' }}>
+            <Typography
+              component="h1"
+              sx={{
+                fontWeight: 800,
+                letterSpacing: '-0.03em',
+                lineHeight: 1.05,
+                color: TEXT_HI,
+                fontSize: { xs: '2.25rem', sm: '2.9rem', lg: '3.4rem' },
+                mb: 2,
+              }}
+            >
+              Sourcing, run by{' '}
+              <Box
+                component="span"
+                sx={{
+                  background: `linear-gradient(100deg, ${ACCENT_SOFT} 0%, ${ACCENT_TINT} 100%)`,
+                  WebkitBackgroundClip: 'text',
+                  backgroundClip: 'text',
+                  color: 'transparent',
+                  '@supports not (-webkit-background-clip: text)': {
+                    background: 'none',
+                    color: ACCENT_SOFT,
+                  },
+                }}
+              >
+                intelligence.
+              </Box>
+            </Typography>
+            <Typography sx={{ color: TEXT_MID, fontSize: { xs: 15, sm: 16.5 }, lineHeight: 1.6, maxWidth: 560 }}>
+              Nexora reads your RFQs, sources suppliers, and builds quotes — then routes every
+              decision through your team before anything moves.
+            </Typography>
           </Box>
-        </VisualArea>
 
-        <FormSection>
-          <Box sx={{ position: 'absolute', top: 40, right: 40, display: 'flex', gap: 2 }}>
-            <IconButton onClick={() => setMode(mode === 'dark' ? 'light' : 'dark')}>
-              {mode === 'dark' ? <SunIcon /> : <MoonIcon />}
-            </IconButton>
-          </Box>
+          {/* --- The glass login card --- */}
+          <Box
+            component="section"
+            aria-label="Sign in to Nexora"
+            sx={{
+              gridArea: 'card',
+              alignSelf: 'center',
+              justifySelf: { xs: 'center', lg: 'end' },
+              width: '100%',
+              maxWidth: 440,
+              ...glassSx,
+              borderRadius: '28px',
+              p: { xs: 3, sm: 4 },
+              boxShadow: '0 30px 90px -30px rgba(0, 0, 0, 0.8), 0 0 70px -25px rgba(70, 130, 180, 0.35)',
+            }}
+          >
+            {/* Wordmark */}
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 4 }}>
+              <Box
+                sx={{
+                  width: 44,
+                  height: 44,
+                  borderRadius: '12px',
+                  flexShrink: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  background: `linear-gradient(135deg, ${ACCENT} 0%, ${ACCENT_DEEP} 100%)`,
+                  boxShadow: '0 10px 26px -10px rgba(70, 130, 180, 0.6)',
+                }}
+              >
+                <img src={logo} alt="" height={24} style={{ filter: 'brightness(0) invert(1)' }} />
+              </Box>
+              <Box>
+                <Typography sx={{ fontSize: 22, fontWeight: 900, letterSpacing: '-0.5px', lineHeight: 1.15, color: TEXT_HI }}>
+                  NEXORA
+                </Typography>
+                <Typography sx={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.14em', textTransform: 'uppercase', color: ACCENT_SOFT }}>
+                  The Intelligence Platform
+                </Typography>
+              </Box>
+            </Box>
 
-          <Box sx={{ maxWidth: 400, width: '100%', mx: 'auto' }}>
-            <Typography variant="h3" sx={{ fontWeight: 900, mb: 1, letterSpacing: '-0.03em' }}>
+            <Typography component="h2" sx={{ fontSize: 24, fontWeight: 800, letterSpacing: '-0.02em', color: TEXT_HI, mb: 0.5 }}>
               Welcome back
             </Typography>
-            <Typography variant="body1" sx={{ color: 'text.secondary', mb: 6 }}>
-              Enter your operational credentials to continue.
+            <Typography sx={{ color: TEXT_MID, fontSize: 14.5, mb: 3.5 }}>
+              Sign in to your workspace to continue.
             </Typography>
 
-            {notice && <Alert severity="info" sx={{ mb: 3, borderRadius: 3 }}>{notice}</Alert>}
+            {notice && <Alert severity="info" sx={infoAlertSx}>{notice}</Alert>}
 
             <form onSubmit={handleLogin}>
               {businessUnitOptions ? (
                 <>
-                  <Alert severity="info" sx={{ mb: 3, borderRadius: 3 }}>
+                  <Alert severity="info" sx={infoAlertSx}>
                     Your account belongs to more than one organization. Pick one to continue.
                   </Alert>
                   <FormControl fullWidth sx={{ mb: 4 }}>
-                    <InputLabel id="bu-label">Which organization?</InputLabel>
-                    <StyledSelect
-                      mode={mode}
+                    <InputLabel
+                      id="bu-label"
+                      sx={{ color: 'rgba(255, 255, 255, 0.70)', '&.Mui-focused': { color: ACCENT_SOFT } }}
+                    >
+                      Which organization?
+                    </InputLabel>
+                    <Select
                       labelId="bu-label"
                       label="Which organization?"
+                      autoFocus
                       value={selectedBusinessUnitId}
                       onChange={(e) => setSelectedBusinessUnitId(Number(e.target.value))}
                       required
+                      sx={glassSelectSx}
+                      MenuProps={{
+                        slotProps: {
+                          paper: {
+                            sx: {
+                              mt: 1,
+                              borderRadius: '14px',
+                              backgroundColor: '#101B30',
+                              backgroundImage: 'none',
+                              border: `1px solid ${HAIRLINE}`,
+                              color: TEXT_HI,
+                              boxShadow: '0 20px 50px -12px rgba(0, 0, 0, 0.7)',
+                            },
+                          },
+                        },
+                      }}
                     >
                       {businessUnitOptions.map((bu) => (
-                        <MenuItem key={bu.id} value={bu.id}>
+                        <MenuItem
+                          key={bu.id}
+                          value={bu.id}
+                          sx={{
+                            '&:hover': { backgroundColor: 'rgba(255, 255, 255, 0.06)' },
+                            // MUI's default focusVisible tint is invisible on this
+                            // dark paper — make keyboard focus clearly readable.
+                            '&.Mui-focusVisible': { backgroundColor: 'rgba(255, 255, 255, 0.12)' },
+                            '&.Mui-selected': { backgroundColor: 'rgba(70, 130, 180, 0.24)' },
+                            '&.Mui-selected:hover': { backgroundColor: 'rgba(70, 130, 180, 0.32)' },
+                            '&.Mui-selected.Mui-focusVisible': { backgroundColor: 'rgba(70, 130, 180, 0.36)' },
+                          }}
+                        >
                           {bu.name}
                         </MenuItem>
                       ))}
-                    </StyledSelect>
+                    </Select>
                   </FormControl>
                 </>
               ) : (
                 <>
-                  <StyledTextField
-                    mode={mode}
+                  <TextField
                     fullWidth
                     label="Email Address"
+                    type="email"
+                    autoComplete="email"
+                    autoFocus
                     variant="outlined"
-                    sx={{ mb: 3 }}
+                    sx={{ ...glassFieldSx, mb: 3 }}
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     required
@@ -594,20 +393,20 @@ const LoginPage: React.FC = () => {
                       input: {
                         startAdornment: (
                           <InputAdornment position="start">
-                            <MailIcon sx={{ color: 'primary.main', opacity: 0.7 }} />
+                            <MailIcon sx={{ color: ACCENT_SOFT, opacity: 0.85 }} />
                           </InputAdornment>
                         ),
-                      }
+                      },
                     }}
                   />
 
-                  <StyledTextField
-                    mode={mode}
+                  <TextField
                     fullWidth
                     label="Password"
                     type={showPassword ? 'text' : 'password'}
+                    autoComplete="current-password"
                     variant="outlined"
-                    sx={{ mb: 4 }}
+                    sx={{ ...glassFieldSx, mb: 4 }}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     required
@@ -615,23 +414,31 @@ const LoginPage: React.FC = () => {
                       input: {
                         startAdornment: (
                           <InputAdornment position="start">
-                            <LockIcon sx={{ color: 'primary.main', opacity: 0.7 }} />
+                            <LockIcon sx={{ color: ACCENT_SOFT, opacity: 0.85 }} />
                           </InputAdornment>
                         ),
                         endAdornment: (
                           <InputAdornment position="end">
-                            <IconButton onClick={() => setShowPassword(!showPassword)} edge="end">
+                            <IconButton
+                              onClick={() => setShowPassword(!showPassword)}
+                              edge="end"
+                              aria-label={showPassword ? 'Hide password' : 'Show password'}
+                              sx={{ color: 'rgba(255, 255, 255, 0.70)', ...focusRingSx }}
+                            >
                               {showPassword ? <VisibilityOff /> : <Visibility />}
                             </IconButton>
                           </InputAdornment>
                         ),
-                      }
+                      },
                     }}
                   />
                 </>
               )}
 
-              {error && <Alert severity="error" sx={{ mb: 3, borderRadius: 3 }}>{error}</Alert>}
+              {/* Announce sign-in errors to assistive tech as they appear */}
+              <Box aria-live="polite">
+                {error && <Alert severity="error" sx={errorAlertSx}>{error}</Alert>}
+              </Box>
 
               <Button
                 fullWidth
@@ -640,16 +447,33 @@ const LoginPage: React.FC = () => {
                 type="submit"
                 disabled={loading || (businessUnitOptions !== null && selectedBusinessUnitId === '')}
                 sx={{
-                  py: 2,
-                  fontSize: 16,
-                  boxShadow: `0 12px 30px -10px ${primaryColor}66`,
-                  '&:hover': { transform: 'translateY(-2px)' },
-                  transition: 'all 0.3s ease',
+                  py: 1.6,
+                  fontSize: 15.5,
+                  fontWeight: 700,
+                  borderRadius: '14px',
+                  color: '#ffffff',
+                  background: `linear-gradient(135deg, #3D74A6 0%, ${ACCENT_DEEP} 100%)`,
+                  boxShadow: '0 14px 34px -12px rgba(70, 130, 180, 0.55)',
+                  transition: 'transform 0.2s ease, box-shadow 0.2s ease',
+                  '&:hover': {
+                    background: `linear-gradient(135deg, #427CAC 0%, ${ACCENT_DEEP} 100%)`,
+                    transform: 'translateY(-1px)',
+                    boxShadow: '0 18px 40px -12px rgba(70, 130, 180, 0.65)',
+                  },
+                  '&.Mui-disabled': {
+                    background: 'rgba(255, 255, 255, 0.12)',
+                    color: 'rgba(255, 255, 255, 0.45)',
+                  },
+                  ...focusRingSx,
+                  '@media (prefers-reduced-motion: reduce)': {
+                    transition: 'none',
+                    '&:hover': { transform: 'none' },
+                  },
                 }}
               >
                 {loading
                   ? <CircularProgress size={24} color="inherit" />
-                  : businessUnitOptions ? 'CONTINUE' : 'LOGIN'}
+                  : businessUnitOptions ? 'Continue' : 'Sign in'}
               </Button>
 
               {businessUnitOptions && (
@@ -658,16 +482,38 @@ const LoginPage: React.FC = () => {
                   variant="text"
                   onClick={resetBusinessUnitSelection}
                   disabled={loading}
-                  sx={{ mt: 2 }}
+                  sx={{
+                    mt: 2,
+                    color: ACCENT_SOFT,
+                    fontWeight: 600,
+                    borderRadius: '12px',
+                    '&:hover': { backgroundColor: 'rgba(255, 255, 255, 0.06)' },
+                    ...focusRingSx,
+                  }}
                 >
                   Back to sign in
                 </Button>
               )}
             </form>
           </Box>
-        </FormSection>
-      </GlassCard>
-    </Container>
+
+          {/* --- Bento feature tiles ---
+              After the card in DOM so mobile reading/announcement order matches
+              the stacked visual order (intro → card → tiles); grid areas keep
+              the desktop placement unchanged. No focusables inside. */}
+          <Box sx={{ gridArea: 'tiles' }}>
+            <BentoTiles />
+          </Box>
+        </Box>
+
+        {/* --- Thin footer line --- */}
+        <Box component="footer" sx={{ mt: { xs: 5, lg: 6 }, pt: 2.5, borderTop: '1px solid rgba(255, 255, 255, 0.08)' }}>
+          <Typography sx={{ fontSize: 12.5, color: TEXT_LOW, letterSpacing: '0.02em' }}>
+            © Nexora
+          </Typography>
+        </Box>
+      </Box>
+    </Box>
   );
 };
 
