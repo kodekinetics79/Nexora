@@ -1,73 +1,341 @@
-import React, { useEffect, useRef, useState } from 'react';
-import type { AnimationEvent } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
-  Alert,
   Box,
+  Typography,
+  TextField,
   Button,
-  CircularProgress,
-  FormControl,
-  GlobalStyles,
   IconButton,
   InputAdornment,
-  InputLabel,
-  MenuItem,
+  Alert,
   Select,
-  TextField,
-  Typography,
+  MenuItem,
+  FormControl,
+  InputLabel,
+  useTheme,
+  CircularProgress,
 } from '@mui/material';
 import {
   MailOutlined as MailIcon,
   LockOutlined as LockIcon,
+  RocketLaunch as RocketIcon,
+  Description as FileIcon,
+  MonetizationOn as DollarIcon,
+  Storage as DatabaseIcon,
+  LocalShipping as TruckIcon,
+  LightMode as SunIcon,
+  DarkMode as MoonIcon,
   Visibility,
   VisibilityOff,
-  AutoAwesomeOutlined as SparkIcon,
-  VerifiedUserOutlined as ShieldIcon,
 } from '@mui/icons-material';
-import { useNavigate } from 'react-router-dom';
+import { keyframes, css } from '@emotion/react';
+import styled from '@emotion/styled';
 import { useAuth } from '../../context/AuthContext';
+import { useAppTheme } from '../../context/ThemeContext';
+import Branding from '../../components/common/Branding';
 import axiosInstance from '../../api/axiosInstance';
+import { useNavigate } from 'react-router-dom';
 import rolePermissionService from '../../api/services/rolePermissionService';
-import logo from '../../assets/img/logo.svg';
-import AuroraBackdrop from './components/AuroraBackdrop';
-import BentoTiles from './components/BentoTiles';
-import ParticleField from './components/ParticleField';
-import Spotlight from './components/Spotlight';
-import useDepthStage from './components/useDepthStage';
-import {
-  ACCENT,
-  ACCENT_SOFT,
-  HAIRLINE,
-  NO_BACKDROP_FILTER,
-  PAGE_BG,
-  SOLID_CARD_BG,
-  TEXT_HI,
-  TEXT_LOW,
-  TEXT_MID,
-  errorAlertSx,
-  focusRingSx,
-  glassFieldSx,
-  glassSelectSx,
-  infoAlertSx,
-} from './components/tokens';
-import {
-  EASE_OUT,
-  EASE_SPRING,
-  REDUCED_MOTION,
-  alertIn,
-  borderTrace,
-  cardMove,
-  cardShake,
-  fadeIn,
-  glowPulse,
-  iconFlip,
-  riseIn,
-  rowsIn,
-  sheenSweep,
-  stageSweep,
-  swapFade,
-  swapIn,
-  swapOut,
-} from './components/motion';
+
+// --- Animations ---
+const gridFloat = keyframes`
+  0% { transform: translateY(0); }
+  100% { transform: translateY(-50px); }
+`;
+
+const scan = keyframes`
+  0% { top: -10%; opacity: 0; }
+  10%, 90% { opacity: 0.5; }
+  100% { top: 110%; opacity: 0; }
+`;
+
+const spin = keyframes`
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+`;
+
+const nodeLoop = (index: number) => keyframes`
+  0%, ${index * 15}% { opacity: 0; transform: scale(0.8); }
+  ${index * 15 + 5}%, 90% { opacity: 1; transform: scale(1); }
+  95%, 100% { opacity: 0; transform: scale(0.8); }
+`;
+
+const pathLoop = (index: number) => keyframes`
+  0%, ${index * 15 + 7}% { opacity: 0; stroke-dashoffset: 200; }
+  ${index * 15 + 12}%, 90% { opacity: 0.7; stroke-dashoffset: 0; }
+  95%, 100% { opacity: 0; stroke-dashoffset: 200; }
+`;
+
+// --- Styled Components ---
+const Container = styled.div`
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: ${(props: any) => props.theme.palette.background.default};
+  font-family: 'Poppins', sans-serif;
+  transition: background 0.5s ease;
+`;
+
+const ScannerLine = styled.div<{ primary: string }>`
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, ${props => props.primary}, transparent);
+  box-shadow: 0 0 15px ${props => props.primary};
+  z-index: 10;
+  animation: ${scan} 4s linear infinite;
+`;
+
+const DigitalGrid = styled.div<{ primary: string }>`
+  position: absolute;
+  inset: -100px;
+  background-image: 
+    linear-gradient(${props => props.primary}1a 1px, transparent 1px),
+    linear-gradient(90deg, ${props => props.primary}1a 1px, transparent 1px);
+  background-size: 60px 60px;
+  transform: perspective(1000px) rotateX(60deg);
+  mask-image: radial-gradient(circle at center, black, transparent 80%);
+  animation: ${gridFloat} 15s linear infinite;
+  z-index: 0;
+  opacity: 0.5;
+`;
+
+const GlassCard = styled.div<{ mode: string }>`
+  width: 1400px;
+  max-width: 95vw;
+  height: 850px;
+  background: ${props => props.mode === 'dark' ? 'rgba(10, 15, 28, 0.85)' : 'rgba(255, 255, 255, 0.7)'};
+  backdrop-filter: blur(40px);
+  border-radius: 40px;
+  border: 1px solid ${props => props.mode === 'dark' ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.05)'};
+  display: flex;
+  overflow: hidden;
+  position: relative;
+  z-index: 10;
+  box-shadow: ${props => props.mode === 'dark' ? '0 50px 120px -30px rgba(0, 0, 0, 0.9)' : '0 50px 120px -30px rgba(13, 71, 161, 0.15)'};
+  transition: all 0.5s ease;
+
+  @media (max-width: 1200px) {
+    height: auto;
+    min-height: 800px;
+    flex-direction: column;
+  }
+`;
+
+const VisualArea = styled.div<{ mode: string }>`
+  flex: 1.8;
+  background: ${props => props.mode === 'dark'
+    ? 'linear-gradient(135deg, rgba(30, 41, 59, 0.4) 0%, rgba(15, 23, 42, 0.1) 100%)'
+    : 'linear-gradient(135deg, rgba(241, 245, 249, 0.8) 0%, rgba(255, 255, 255, 0.2) 100%)'};
+  border-right: 1px solid ${props => props.mode === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)'};
+  display: flex;
+  flex-direction: column;
+  padding: 48px;
+  position: relative;
+  justify-content: center;
+  align-items: center;
+  overflow: hidden;
+
+  @media (max-width: 1200px) {
+    display: none;
+  }
+`;
+
+const FormSection = styled.div`
+  flex: 1;
+  padding: 64px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  position: relative;
+  background: transparent;
+
+  @media (max-width: 768px) {
+    padding: 24px;
+  }
+`;
+
+const RadialWrapper = styled.div`
+  position: relative;
+  width: 580px;
+  height: 580px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 5;
+`;
+
+const SensorRing = styled.div<{ color: string }>`
+  position: absolute;
+  inset: -12px;
+  border: 1px dashed ${props => props.color};
+  border-radius: 50%;
+  opacity: 0.3;
+  animation: ${spin} 15s linear infinite;
+`;
+
+const NodeBadge = styled.div<{ color: string }>`
+  position: absolute;
+  top: -10px;
+  right: -10px;
+  background: ${props => props.color};
+  color: #fff;
+  font-size: 8px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+`;
+
+const CircularStage = styled.div<{ index: number; x: number; y: number; color: string; mode: string }>`
+  position: absolute;
+  width: 110px;
+  height: 110px;
+  background: ${props => props.mode === 'dark' ? 'rgba(30, 41, 59, 1)' : 'rgba(255, 255, 255, 1)'};
+  border: 2px solid ${props => props.color};
+  border-radius: 50%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  z-index: 20;
+  left: ${props => props.x}px;
+  top: ${props => props.y}px;
+  margin-top: -55px;
+  margin-left: -55px;
+  opacity: 0;
+  box-shadow: 0 12px 30px -10px rgba(0, 0, 0, 0.3);
+  animation: ${props => css`${nodeLoop(props.index)} 10s infinite ease-in-out`};
+  transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275), box-shadow 0.3s ease;
+
+  &:hover {
+    transform: scale(1.1);
+    box-shadow: 0 20px 40px -15px ${props => props.color}66;
+  }
+`;
+
+const ConnectionLine = styled.line<{ index: number; color: string }>`
+  stroke: ${props => props.color};
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
+  opacity: 0;
+  stroke-linecap: round;
+  animation: ${props => css`${pathLoop(props.index)} 10s infinite ease-in-out`};
+`;
+
+const SVGOverlay = styled.svg`
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 5;
+`;
+
+const OrbitRing = styled.circle<{ primary: string }>`
+  fill: none;
+  stroke: ${props => props.primary}14;
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+`;
+
+// --- Custom Form Inputs ---
+const StyledTextField = styled(TextField)<{ mode?: string }>(({ theme, mode }: any) => ({
+  '& .MuiOutlinedInput-root': {
+    backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 0.6)' : 'rgba(255, 255, 255, 0.8)',
+    borderRadius: '16px',
+    transition: 'all 0.3s ease-in-out',
+    boxShadow: mode === 'dark' ? '0 4px 20px rgba(0,0,0,0.2)' : '0 4px 20px rgba(13, 71, 161, 0.05)',
+    border: '1px solid transparent',
+    '& fieldset': { border: 'none' },
+    '&:hover': {
+      backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 0.9)' : '#ffffff',
+      boxShadow: mode === 'dark' ? '0 6px 24px rgba(0,0,0,0.4)' : '0 8px 24px rgba(13, 71, 161, 0.12)',
+      transform: 'translateY(-2px)',
+    },
+    '&.Mui-focused': {
+      backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 1)' : '#ffffff',
+      border: `1px solid ${theme.palette.primary.main}80`,
+      boxShadow: `0 8px 32px ${theme.palette.primary.main}33`,
+      transform: 'translateY(-2px)',
+    }
+  },
+  '& input': {
+    '&:-webkit-autofill, &:-webkit-autofill:hover, &:-webkit-autofill:focus, &:-webkit-autofill:active': {
+      WebkitBoxShadow: mode === 'dark' ? '0 0 0 30px #131c33 inset !important' : '0 0 0 30px #ffffff inset !important',
+      WebkitTextFillColor: mode === 'dark' ? '#ffffff !important' : '#000000 !important',
+      transition: 'background-color 5000s ease-in-out 0s',
+      borderRadius: '0px',
+    }
+  },
+  '& .MuiInputLabel-root': {
+    fontWeight: 500,
+    '&.Mui-focused, &.MuiFormLabel-filled': {
+      transform: 'translate(14px, -11px) scale(0.75)',
+      backgroundColor: mode === 'dark' ? '#0a0f1c' : '#ffffff',
+      padding: '0 6px',
+      borderRadius: '4px',
+    }
+  }
+}));
+
+const StyledSelect = styled(Select)<{ mode?: string }>(({ theme, mode }: any) => ({
+  backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 0.6)' : 'rgba(255, 255, 255, 0.8)',
+  borderRadius: '16px',
+  transition: 'all 0.3s ease-in-out',
+  boxShadow: mode === 'dark' ? '0 4px 20px rgba(0,0,0,0.2)' : '0 4px 20px rgba(13, 71, 161, 0.05)',
+  border: '1px solid transparent',
+  '& fieldset': { border: 'none' },
+  '&:hover': {
+    backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 0.9)' : '#ffffff',
+    boxShadow: mode === 'dark' ? '0 6px 24px rgba(0,0,0,0.4)' : '0 8px 24px rgba(13, 71, 161, 0.12)',
+    transform: 'translateY(-2px)',
+  },
+  '&.Mui-focused': {
+    backgroundColor: mode === 'dark' ? 'rgba(15, 23, 42, 1)' : '#ffffff',
+    border: `1px solid ${theme.palette.primary.main}80`,
+    boxShadow: `0 8px 32px ${theme.palette.primary.main}33`,
+    transform: 'translateY(-2px)',
+  }
+}));
+
+// --- Data ---
+const industrialFlow = [
+  { key: "DEMAND", title: "Smart Sourcing", icon: <RocketIcon />, color: "#6366f1" },
+  { key: "ANALYZE", title: "AI Validation", icon: <FileIcon />, color: "#0ea5e9" },
+  { key: "OPTIMIZE", title: "Dynamic Costing", icon: <DollarIcon />, color: "#10b981" },
+  { key: "EXECUTE", title: "Global Fulfillment", icon: <DatabaseIcon />, color: "#f59e0b" },
+  { key: "TRACK", title: "Real-time Logistics", icon: <TruckIcon />, color: "#8b5cf6" }
+];
+
+const SVG_SIZE = 580;
+const CENTER = SVG_SIZE / 2;
+const ORBIT_R = 215;
+const NODE_R = 55;
+
+const getNodeCenter = (index: number) => {
+  const angleDeg = index * 72 - 90;
+  const angleRad = angleDeg * (Math.PI / 180);
+  return {
+    x: CENTER + ORBIT_R * Math.cos(angleRad),
+    y: CENTER + ORBIT_R * Math.sin(angleRad),
+  };
+};
+
+const getEdgePoint = (from: { x: number; y: number }, to: { x: number; y: number }, radius: number) => {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  return {
+    x: from.x + (dx / dist) * radius,
+    y: from.y + (dy / dist) * radius,
+  };
+};
 
 // --- Auth service typing ---
 interface LoginBusinessUnitOption {
@@ -97,6 +365,8 @@ interface LoginResponse {
 }
 
 const LoginPage: React.FC = () => {
+  const theme = useTheme();
+  const { mode, setMode, primaryColor } = useAppTheme();
   const { setToken, setUserData } = useAuth();
   const navigate = useNavigate();
 
@@ -114,7 +384,7 @@ const LoginPage: React.FC = () => {
       sessionStorage.removeItem('authNotice');
     }
   }, []);
-
+  
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   // Rare case: the same email is valid in multiple organizations and the
@@ -141,7 +411,7 @@ const LoginPage: React.FC = () => {
       }
 
       setToken(data.token);
-
+      
       // Fetch permissions for the logged in role
       let permissions: any[] = [];
       if (data.roleId != null && data.businessUnitId != null) {
@@ -185,733 +455,219 @@ const LoginPage: React.FC = () => {
     setError(null);
   };
 
-  // ------------------------------------------------------------------
-  // "First Light / Depth Stack" choreography (presentation only — every
-  // auth decision above still keys off businessUnitOptions / loading).
-  // ------------------------------------------------------------------
-
-  const stageRef = useRef<HTMLElement | null>(null);
-  const tiltRef = useRef<HTMLDivElement | null>(null);
-  const emailInputRef = useRef<HTMLInputElement | null>(null);
-  const orgSelectRef = useRef<HTMLInputElement | null>(null);
-
-  // Single pointer system: parallax + card tilt + specular + spotlight vars.
-  useDepthStage(stageRef, tiltRef);
-
-  // One-shot stage light sweep; unmounted from the DOM after its 900ms run.
-  const [sweep, setSweep] = useState(
-    () => !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
-  );
-
-  // Autofocus the email field at 650ms (immediately under reduced motion).
-  useEffect(() => {
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      emailInputRef.current?.focus();
-      return;
-    }
-    const id = window.setTimeout(() => emailInputRef.current?.focus(), 650);
-    return () => window.clearTimeout(id);
-  }, []);
-
-  // On error: move focus to the first invalid field (spec §4).
-  useEffect(() => {
-    if (!error) return;
-    if (businessUnitOptions) orgSelectRef.current?.focus();
-    else emailInputRef.current?.focus();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [error]);
-
-  // Shared-axis chooser swap: displayChooser mirrors businessUnitOptions with
-  // a 100ms out phase (160ms out animation, 60ms overlap with the 200ms in).
-  const chooserActive = businessUnitOptions !== null;
-  const [displayChooser, setDisplayChooser] = useState(false);
-  const [swapPhase, setSwapPhase] = useState<'idle' | 'out' | 'in'>('idle');
-  const lastBusinessUnitsRef = useRef<LoginBusinessUnitOption[]>([]);
-  useEffect(() => {
-    if (businessUnitOptions) lastBusinessUnitsRef.current = businessUnitOptions;
-  }, [businessUnitOptions]);
-  useEffect(() => {
-    if (chooserActive === displayChooser) return;
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      // Reduced motion: 150ms opacity-only crossfade, no height/translate.
-      setDisplayChooser(chooserActive);
-      setSwapPhase('in');
-      const t = window.setTimeout(() => setSwapPhase('idle'), 160);
-      return () => window.clearTimeout(t);
-    }
-    setSwapPhase('out');
-    const t1 = window.setTimeout(() => {
-      setDisplayChooser(chooserActive);
-      setSwapPhase('in');
-    }, 100);
-    const t2 = window.setTimeout(() => setSwapPhase('idle'), 380);
-    return () => {
-      window.clearTimeout(t1);
-      window.clearTimeout(t2);
-    };
-  }, [chooserActive, displayChooser]);
-
-  const chooserOptions = businessUnitOptions ?? lastBusinessUnitsRef.current;
+  const nodeCenters = industrialFlow.map((_, i) => getNodeCenter(i));
 
   return (
-    <Box
-      component="main"
-      ref={stageRef}
-      sx={{
-        // 100vh first for browsers without dvh (Safari < 15.4), then the
-        // iOS-correct dynamic viewport unit where supported.
-        minHeight: '100vh',
-        '@supports (min-height: 100dvh)': { minHeight: '100dvh' },
-        position: 'relative',
-        backgroundColor: PAGE_BG,
-        color: TEXT_HI,
-        fontFamily: '"Outfit", "Inter", sans-serif',
-        '& *::selection': {
-          backgroundColor: 'rgba(37, 99, 235, 0.65)',
-          color: '#FFFFFF',
-          WebkitTextFillColor: '#FFFFFF',
-        },
-        // Reduced-motion entrance: the whole stage does one 250ms fade and
-        // every per-element entrance below turns itself off.
-        [REDUCED_MOTION]: {
-          animation: `${fadeIn} 250ms ease-out both`,
-        },
-      }}
-    >
-      {/* While this pre-auth stage is mounted, force dark UA chrome (document
-          scrollbar, native control tints) regardless of the in-app theme mode.
-          Unmounts (and reverts) on navigation. */}
-      <GlobalStyles
-        styles={{
-          ':root': { colorScheme: 'dark' },
-          body: { scrollbarColor: '#2E4260 #0A101C' },
-          'body::-webkit-scrollbar-track, body *::-webkit-scrollbar-track': {
-            backgroundColor: '#0A101C',
-          },
-          'body::-webkit-scrollbar-thumb, body *::-webkit-scrollbar-thumb': {
-            backgroundColor: '#2E4260',
-            borderColor: '#0A101C',
-          },
-          'body::-webkit-scrollbar-thumb:hover, body *::-webkit-scrollbar-thumb:hover': {
-            backgroundColor: '#3D5678',
-          },
-        }}
-      />
-      <AuroraBackdrop />
-      <ParticleField />
-      <Spotlight />
+    <Container theme={theme}>
+      <DigitalGrid primary={primaryColor} />
+      <ScannerLine primary={primaryColor} />
 
-      {/* One light sweep, 0–900ms, then removed from the DOM. */}
-      {sweep && (
-        <Box
-          aria-hidden="true"
-          onAnimationEnd={() => setSweep(false)}
-          sx={{
-            position: 'fixed',
-            inset: '-10%',
-            zIndex: 2,
-            pointerEvents: 'none',
-            background:
-              'linear-gradient(120deg, transparent 38%, rgba(255, 255, 255, 0.08) 47%, rgba(220, 238, 255, 0.10) 50%, rgba(255, 255, 255, 0.08) 53%, transparent 62%)',
-            animation: `${stageSweep} 900ms ${EASE_OUT} both`,
-          }}
-        />
-      )}
-
-      <Box
-        sx={{
-          position: 'relative',
-          zIndex: 1,
-          minHeight: '100vh',
-          '@supports (min-height: 100dvh)': { minHeight: '100dvh' },
-          display: 'flex',
-          flexDirection: 'column',
-          maxWidth: 1320,
-          mx: 'auto',
-          px: { xs: 2.5, sm: 4, md: 6 },
-          pt: { xs: 3, md: 3.5 },
-          pb: { xs: 2.5, md: 3 },
-        }}
-      >
-        {/* --- Top bar: wordmark left, trust pill right --- */}
-        <Box
-          component="header"
-          sx={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            mb: { xs: 4, lg: 2 },
-            animation: `${fadeIn} 480ms ${EASE_OUT} both`,
-            [REDUCED_MOTION]: { animation: 'none' },
-          }}
-        >
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
-            <Box
-              sx={{
-                width: 38,
-                height: 38,
-                borderRadius: '11px',
-                flexShrink: 0,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                background: 'linear-gradient(135deg, #38BDF8 0%, #2563EB 60%, #7C3AED 120%)',
-                boxShadow: '0 8px 24px -8px rgba(56, 189, 248, 0.65)',
-              }}
-            >
-              <img src={logo} alt="" height={20} style={{ filter: 'brightness(0) invert(1)' }} />
-            </Box>
-            <Box>
-              <Typography sx={{ fontSize: 18, fontWeight: 900, letterSpacing: '-0.02em', lineHeight: 1.1, color: TEXT_HI }}>
-                NEXORA
-              </Typography>
-              <Typography sx={{ fontSize: 9.5, fontWeight: 700, letterSpacing: '0.16em', textTransform: 'uppercase', color: ACCENT_SOFT }}>
-                Intelligence Platform
-              </Typography>
-            </Box>
-          </Box>
-
-          <Box
-            sx={{
-              display: { xs: 'none', sm: 'inline-flex' },
-              alignItems: 'center',
-              gap: 0.75,
-              px: 1.75,
-              py: 0.75,
-              borderRadius: '999px',
-              border: '1px solid rgba(110, 231, 183, 0.30)',
-              backgroundColor: 'rgba(52, 211, 153, 0.10)',
-            }}
-          >
-            <ShieldIcon sx={{ fontSize: 15, color: '#6EE7B7' }} />
-            <Typography sx={{ fontSize: 12, fontWeight: 600, letterSpacing: '0.02em', color: '#A7F3D0' }}>
-              Human-approved AI
-            </Typography>
-          </Box>
-        </Box>
-
-        {/* --- Main stage --- */}
-        <Box
-          sx={{
-            flex: 1,
-            display: 'grid',
-            alignContent: 'center',
-            columnGap: { lg: 9 },
-            rowGap: { xs: 4, lg: 3.5 },
-            gridTemplateColumns: { xs: '1fr', lg: 'minmax(0, 1fr) minmax(390px, 442px)' },
-            gridTemplateAreas: {
-              xs: '"intro" "card" "tiles"',
-              lg: '"intro card" "tiles card"',
-            },
-          }}
-        >
-          {/* --- Landing pitch: eyebrow, display headline, subline --- */}
-          <Box sx={{ gridArea: 'intro', alignSelf: 'end' }}>
-            <Box
-              sx={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 0.75,
-                px: 1.75,
-                py: 0.75,
-                mb: 2.5,
-                borderRadius: '999px',
-                border: '1px solid rgba(56, 189, 248, 0.35)',
-                backgroundColor: 'rgba(56, 189, 248, 0.10)',
-                boxShadow: '0 0 24px -6px rgba(56, 189, 248, 0.35)',
-                animation: `${riseIn} 480ms ${EASE_OUT} both`,
-                animationDelay: { xs: '56ms', md: '80ms' },
-                [REDUCED_MOTION]: { animation: 'none' },
-              }}
-            >
-              <SparkIcon sx={{ fontSize: 15, color: ACCENT }} />
-              <Typography sx={{ fontSize: 12, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: ACCENT_SOFT }}>
-                AI-powered sourcing
-              </Typography>
-            </Box>
-
-            <Typography
-              component="h1"
-              sx={{
-                fontWeight: 800,
-                letterSpacing: '-0.035em',
-                lineHeight: 1.04,
-                color: TEXT_HI,
-                fontSize: { xs: '2.4rem', sm: '3.1rem', lg: '3.75rem' },
-                mb: 2,
-                textShadow: '0 2px 40px rgba(37, 99, 235, 0.35)',
-                animation: `${riseIn} 480ms ${EASE_OUT} both`,
-                animationDelay: { xs: '112ms', md: '160ms' },
-                [REDUCED_MOTION]: { animation: 'none' },
-              }}
-            >
-              Sourcing, run by{' '}
-              <Box
-                component="span"
-                sx={{
-                  display: 'block',
-                  background: 'linear-gradient(95deg, #7DD3FC 0%, #38BDF8 40%, #A78BFA 90%)',
-                  WebkitBackgroundClip: 'text',
-                  backgroundClip: 'text',
-                  color: 'transparent',
-                  '@supports not (-webkit-background-clip: text)': {
-                    background: 'none',
-                    color: ACCENT_SOFT,
-                  },
-                }}
-              >
-                intelligence.
-              </Box>
-            </Typography>
-            <Typography
-              sx={{
-                color: TEXT_MID,
-                fontSize: { xs: 15.5, sm: 17 },
-                lineHeight: 1.6,
-                maxWidth: 540,
-                animation: `${riseIn} 480ms ${EASE_OUT} both`,
-                animationDelay: { xs: '168ms', md: '240ms' },
-                [REDUCED_MOTION]: { animation: 'none' },
-              }}
-            >
-              Nexora reads your RFQs, sources suppliers, and builds quotes — then routes
-              every decision through your team before anything moves.
-            </Typography>
-          </Box>
-
-          {/* --- The glass login card ---
-              Wrapper: perspective + parallax. Tilt frame: 1px gradient ring +
-              rotateX/Y vars + Z-settle entrance. Inside: border-trace overlay,
-              specular highlight, and the glass section itself. */}
-          <Box
-            sx={{
-              gridArea: 'card',
-              alignSelf: 'center',
-              justifySelf: { xs: 'center', lg: 'end' },
-              width: '100%',
-              maxWidth: 442,
-              perspective: '1200px',
-              transform: 'translate3d(calc(var(--px, 0) * 5px), calc(var(--py, 0) * 3px), 0)',
-            }}
-          >
-            <Box
-              ref={tiltRef}
-              style={{ willChange: 'transform' }}
-              onAnimationEnd={(e: AnimationEvent<HTMLDivElement>) => {
-                // Release the entrance layer promotion (spec §6); the pointer
-                // system re-promotes only while the tilt is actively tracking.
-                if (e.target === e.currentTarget) {
-                  e.currentTarget.style.willChange = 'auto';
-                }
-              }}
-              sx={{
-                position: 'relative',
-                borderRadius: '26px',
-                p: '1px',
-                background:
-                  'linear-gradient(165deg, rgba(186, 230, 253, 0.75) 0%, rgba(255, 255, 255, 0.14) 30%, rgba(139, 92, 246, 0.32) 65%, rgba(56, 189, 248, 0.55) 100%)',
-                boxShadow:
-                  '0 40px 110px -30px rgba(2, 6, 20, 0.9), 0 0 100px -18px rgba(56, 189, 248, 0.45)',
-                transform: 'rotateX(var(--tiltX, 0deg)) rotateY(var(--tiltY, 0deg))',
-                animation: `${fadeIn} 300ms ${EASE_OUT} backwards, ${cardMove} 440ms ${EASE_SPRING} backwards`,
-                animationDelay: { xs: '140ms, 140ms', md: '200ms, 200ms' },
-                [REDUCED_MOTION]: { animation: 'none' },
-              }}
-            >
-              {/* Border light: one ACCENT→CYAN trace, 700–1100ms, then gone. */}
-              <Box
-                aria-hidden="true"
-                sx={{
-                  position: 'absolute',
-                  inset: 0,
-                  borderRadius: '26px',
-                  p: '1px',
-                  pointerEvents: 'none',
-                  background: `linear-gradient(90deg, transparent 20%, ${ACCENT} 45%, #22D3EE 55%, transparent 80%)`,
-                  backgroundSize: '250% 100%',
-                  WebkitMask: 'linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)',
-                  WebkitMaskComposite: 'xor',
-                  mask: 'linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)',
-                  maskComposite: 'exclude',
-                  opacity: 0,
-                  animation: `${borderTrace} 400ms linear both`,
-                  animationDelay: { xs: '490ms', md: '700ms' },
-                  [REDUCED_MOTION]: { animation: 'none' },
-                }}
-              />
-              <Box
-                component="section"
-                aria-label="Sign in to Nexora"
-                sx={{
-                  position: 'relative',
-                  borderRadius: '25px',
-                  p: { xs: 3, sm: 4.5 },
-                  backgroundColor: 'rgba(9, 15, 34, 0.45)',
-                  backgroundImage: `
-                    linear-gradient(115deg, rgba(255, 255, 255, 0.07) 0%, transparent 42%),
-                    radial-gradient(130% 70% at 50% 0%, rgba(56, 189, 248, 0.16) 0%, transparent 55%)
-                  `,
-                  backdropFilter: 'blur(28px) saturate(170%)',
-                  WebkitBackdropFilter: 'blur(28px) saturate(170%)',
-                  [NO_BACKDROP_FILTER]: { backgroundColor: SOLID_CARD_BG },
-                  // Error shake lives here (not on the entrance-animated frame)
-                  // so replays never re-run the entrance.
-                  animation: error ? `${cardShake} 240ms ease` : 'none',
-                  [REDUCED_MOTION]: { animation: 'none' },
-                }}
-              >
-                {/* Specular highlight, positioned by --mx/--my from the tilt. */}
-                <Box
-                  aria-hidden="true"
-                  sx={{
-                    position: 'absolute',
-                    inset: 0,
-                    borderRadius: '25px',
-                    pointerEvents: 'none',
-                    mixBlendMode: 'overlay',
-                    opacity: 0.13,
-                    background:
-                      'radial-gradient(300px circle at var(--mx, 50%) var(--my, 20%), rgba(255, 255, 255, 0.95) 0%, rgba(255, 255, 255, 0) 70%)',
-                    display: { xs: 'none', lg: 'block' },
-                    '.nx-degrade &': { display: 'none' },
-                    [REDUCED_MOTION]: { display: 'none' },
-                  }}
-                />
-                <Typography component="h2" sx={{ fontSize: 27, fontWeight: 800, letterSpacing: '-0.02em', color: TEXT_HI, mb: 0.5 }}>
-                  Welcome back
-                </Typography>
-                <Typography sx={{ color: TEXT_MID, fontSize: 14.5, mb: 3.5 }}>
-                  Sign in to your workspace to continue.
-                </Typography>
-
-                {notice && <Alert severity="info" sx={infoAlertSx}>{notice}</Alert>}
-
-                <form onSubmit={handleLogin}>
-                  {/* Shared-axis swap region: height animates via
-                      grid-template-rows, content via translateY/opacity. */}
-                  <Box
-                    sx={{
-                      display: 'grid',
-                      gridTemplateRows: '1fr',
-                      ...(swapPhase === 'in' && {
-                        animation: `${rowsIn} 250ms ${EASE_OUT}`,
-                        [REDUCED_MOTION]: { animation: 'none' },
-                      }),
-                    }}
+      <GlassCard mode={mode}>
+        <VisualArea mode={mode}>
+          <RadialWrapper>
+            <SVGOverlay viewBox={`0 0 ${SVG_SIZE} ${SVG_SIZE}`}>
+              <defs>
+                {industrialFlow.map((node, i) => (
+                  <marker
+                    key={`marker-${i}`}
+                    id={`arrow-${i}`}
+                    markerWidth="8"
+                    markerHeight="8"
+                    refX="4"
+                    refY="3"
+                    orient="auto"
                   >
-                    <Box
-                      sx={{
-                        minWidth: 0,
-                        minHeight: 0,
-                        overflow: swapPhase === 'idle' ? 'visible' : 'hidden',
-                        ...(swapPhase === 'out' && {
-                          animation: `${swapOut} 160ms ease forwards`,
-                          [REDUCED_MOTION]: { animation: 'none', opacity: 0 },
-                        }),
-                        ...(swapPhase === 'in' && {
-                          animation: `${swapIn} 200ms ${EASE_OUT} both`,
-                          [REDUCED_MOTION]: { animation: `${swapFade} 150ms ease both` },
-                        }),
-                      }}
-                    >
-                      {displayChooser ? (
-                        <>
-                          <Alert severity="info" sx={infoAlertSx}>
-                            Your account belongs to more than one organization. Pick one to continue.
-                          </Alert>
-                          <FormControl fullWidth sx={{ mb: 4 }}>
-                            <InputLabel
-                              id="bu-label"
-                              sx={{ color: 'rgba(226, 236, 255, 0.72)', '&.Mui-focused': { color: ACCENT_SOFT } }}
-                            >
-                              Which organization?
-                            </InputLabel>
-                            <Select
-                              labelId="bu-label"
-                              label="Which organization?"
-                              autoFocus
-                              inputRef={orgSelectRef}
-                              value={selectedBusinessUnitId}
-                              onChange={(e) => setSelectedBusinessUnitId(Number(e.target.value))}
-                              required
-                              sx={glassSelectSx}
-                              MenuProps={{
-                                slotProps: {
-                                  paper: {
-                                    sx: {
-                                      mt: 1,
-                                      borderRadius: '14px',
-                                      backgroundColor: '#101B36',
-                                      backgroundImage: 'none',
-                                      border: `1px solid ${HAIRLINE}`,
-                                      color: TEXT_HI,
-                                      boxShadow: '0 20px 50px -12px rgba(0, 0, 0, 0.7)',
-                                    },
-                                  },
-                                },
-                              }}
-                            >
-                              {chooserOptions.map((bu) => (
-                                <MenuItem
-                                  key={bu.id}
-                                  value={bu.id}
-                                  sx={{
-                                    '&:hover': { backgroundColor: 'rgba(255, 255, 255, 0.06)' },
-                                    // MUI's default focusVisible tint is invisible on this
-                                    // dark paper — make keyboard focus clearly readable.
-                                    '&.Mui-focusVisible': { backgroundColor: 'rgba(255, 255, 255, 0.12)' },
-                                    '&.Mui-selected': { backgroundColor: 'rgba(56, 189, 248, 0.22)' },
-                                    '&.Mui-selected:hover': { backgroundColor: 'rgba(56, 189, 248, 0.30)' },
-                                    '&.Mui-selected.Mui-focusVisible': { backgroundColor: 'rgba(56, 189, 248, 0.34)' },
-                                  }}
-                                >
-                                  {bu.name}
-                                </MenuItem>
-                              ))}
-                            </Select>
-                          </FormControl>
-                        </>
-                      ) : (
-                        <>
-                          <TextField
-                            fullWidth
-                            label="Email Address"
-                            type="email"
-                            autoComplete="email"
-                            variant="outlined"
-                            inputRef={emailInputRef}
-                            sx={{ ...glassFieldSx, mb: 3 }}
-                            value={email}
-                            onChange={(e) => setEmail(e.target.value)}
-                            required
-                            slotProps={{
-                              input: {
-                                startAdornment: (
-                                  <InputAdornment position="start">
-                                    <MailIcon sx={{ color: ACCENT_SOFT, opacity: 0.9 }} />
-                                  </InputAdornment>
-                                ),
-                              },
-                            }}
-                          />
+                    <path fill={node.color} d="M0,0 L0,6 L7,3 z" style={{ opacity: 0.8 }} />
+                  </marker>
+                ))}
+              </defs>
 
-                          <TextField
-                            fullWidth
-                            label="Password"
-                            type={showPassword ? 'text' : 'password'}
-                            autoComplete="current-password"
-                            variant="outlined"
-                            sx={{ ...glassFieldSx, mb: 4 }}
-                            value={password}
-                            onChange={(e) => setPassword(e.target.value)}
-                            required
-                            slotProps={{
-                              input: {
-                                startAdornment: (
-                                  <InputAdornment position="start">
-                                    <LockIcon sx={{ color: ACCENT_SOFT, opacity: 0.9 }} />
-                                  </InputAdornment>
-                                ),
-                                endAdornment: (
-                                  <InputAdornment position="end">
-                                    <IconButton
-                                      onClick={() => setShowPassword(!showPassword)}
-                                      edge="end"
-                                      aria-label={showPassword ? 'Hide password' : 'Show password'}
-                                      sx={{ color: 'rgba(226, 236, 255, 0.72)', ...focusRingSx }}
-                                    >
-                                      {/* Keyed remount drives the 160ms rotateY
-                                          + 120ms cross-fade on the icon only. */}
-                                      <Box
-                                        key={showPassword ? 'hide' : 'show'}
-                                        component="span"
-                                        sx={{
-                                          display: 'inline-flex',
-                                          animation: `${iconFlip} 160ms ease-out`,
-                                          [REDUCED_MOTION]: { animation: 'none' },
-                                        }}
-                                      >
-                                        {showPassword ? <VisibilityOff /> : <Visibility />}
-                                      </Box>
-                                    </IconButton>
-                                  </InputAdornment>
-                                ),
-                              },
-                            }}
-                          />
-                        </>
-                      )}
-                    </Box>
-                  </Box>
+              <OrbitRing cx={CENTER} cy={CENTER} r={ORBIT_R} primary={primaryColor} />
 
-                  {/* Announce sign-in errors to assistive tech as they appear */}
-                  <Box aria-live="assertive">
-                    {error && (
-                      <Alert
-                        severity="error"
-                        sx={{
-                          ...errorAlertSx,
-                          animation: `${alertIn} 200ms ${EASE_OUT} both`,
-                          [REDUCED_MOTION]: { animation: 'none' },
-                        }}
-                      >
-                        {error}
-                      </Alert>
-                    )}
-                  </Box>
+              {industrialFlow.map((node, i) => {
+                const nextIndex = (i + 1) % industrialFlow.length;
+                const from = nodeCenters[i];
+                const to = nodeCenters[nextIndex];
+                const fromEdge = getEdgePoint(from, to, NODE_R + 4);
+                const toEdge = getEdgePoint(to, from, NODE_R + 14);
 
-                  <Button
-                    fullWidth
-                    variant="contained"
-                    size="large"
-                    type="submit"
-                    disabled={loading || (businessUnitOptions !== null && selectedBusinessUnitId === '')}
-                    sx={{
-                      position: 'relative',
-                      py: 1.6,
-                      fontSize: 15.5,
-                      fontWeight: 700,
-                      letterSpacing: '0.01em',
-                      borderRadius: '14px',
-                      color: '#ffffff',
-                      // Every gradient stop keeps white text ≥ 5:1 (AA).
-                      background: 'linear-gradient(135deg, #2563EB 0%, #4F46E5 55%, #7C3AED 100%)',
-                      boxShadow: 'inset 0 1px 0 rgba(255, 255, 255, 0.25)',
-                      // Release is the 250ms spring; hover/press override below.
-                      transition: `transform 250ms ${EASE_SPRING}, filter 180ms ease`,
-                      // Ambient glow layer: pulses 0.55↔0.75 on a 5s cycle.
-                      '&::after': {
-                        content: '""',
-                        position: 'absolute',
-                        inset: 0,
-                        borderRadius: 'inherit',
-                        boxShadow: '0 16px 40px -12px rgba(56, 189, 248, 0.65)',
-                        opacity: 0.65,
-                        animation: `${glowPulse} 5s ease-in-out infinite`,
-                        zIndex: -1,
-                        pointerEvents: 'none',
-                      },
-                      '&:hover': {
-                        background: 'linear-gradient(135deg, #2563EB 0%, #4F46E5 55%, #7C3AED 100%)',
-                        filter: 'brightness(1.1) saturate(1.05)',
-                        transform: 'translateY(-1px) scale(1.01)',
-                        transition: `transform 180ms ${EASE_OUT}, filter 180ms ease`,
-                        '&::after': { animation: 'none', opacity: 0.95 },
-                      },
-                      '&:active': {
-                        transform: 'scale(0.985)',
-                        transition: 'transform 90ms ease-out',
-                      },
-                      '&.Mui-disabled': loading
-                        ? {
-                            // Loading: keep the gradient, run a sheen sweep via
-                            // background-position (size constant).
-                            color: 'rgba(255, 255, 255, 0.9)',
-                            backgroundImage:
-                              'linear-gradient(100deg, transparent 35%, rgba(255, 255, 255, 0.22) 50%, transparent 65%), linear-gradient(135deg, #2563EB 0%, #4F46E5 55%, #7C3AED 100%)',
-                            backgroundSize: '250% 100%, 100% 100%',
-                            animation: `${sheenSweep} 1.2s linear infinite`,
-                          }
-                        : {
-                            background: 'rgba(255, 255, 255, 0.12)',
-                            color: 'rgba(255, 255, 255, 0.45)',
-                            '&::after': { display: 'none' },
-                          },
-                      ...focusRingSx,
-                      [REDUCED_MOTION]: {
-                        transition: 'none',
-                        '&:hover, &:active': { transform: 'none' },
-                        '&::after': { animation: 'none' },
-                        '&.Mui-disabled': { animation: 'none' },
-                      },
-                    }}
-                  >
-                    {loading
-                      ? <CircularProgress size={24} color="inherit" />
-                      : businessUnitOptions ? 'Continue' : 'Sign in'}
-                  </Button>
+                return (
+                  <ConnectionLine
+                    key={`conn-${i}`}
+                    index={i}
+                    x1={fromEdge.x}
+                    y1={fromEdge.y}
+                    x2={toEdge.x}
+                    y2={toEdge.y}
+                    color={node.color}
+                    markerEnd={`url(#arrow-${i})`}
+                  />
+                );
+              })}
+            </SVGOverlay>
 
-                  {businessUnitOptions && (
-                    <Button
-                      fullWidth
-                      variant="text"
-                      onClick={resetBusinessUnitSelection}
-                      disabled={loading}
-                      sx={{
-                        mt: 2,
-                        color: ACCENT_SOFT,
-                        fontWeight: 600,
-                        borderRadius: '12px',
-                        '&:hover': { backgroundColor: 'rgba(255, 255, 255, 0.06)' },
-                        ...focusRingSx,
-                      }}
-                    >
-                      Back to sign in
-                    </Button>
-                  )}
-                </form>
-
-                {/* Trust microcopy anchoring the card's bottom edge */}
-                <Box
-                  sx={{
-                    mt: 3.5,
-                    pt: 2.5,
-                    borderTop: `1px solid ${HAIRLINE}`,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: 0.75,
-                  }}
+            {industrialFlow.map((node, i) => {
+              const pos = nodeCenters[i];
+              return (
+                <CircularStage
+                  key={node.key}
+                  index={i}
+                  x={pos.x}
+                  y={pos.y}
+                  color={node.color}
+                  mode={mode}
                 >
-                  <ShieldIcon sx={{ fontSize: 15, color: ACCENT_SOFT, opacity: 0.9 }} />
-                  <Typography sx={{ fontSize: 12.5, color: TEXT_LOW, letterSpacing: '0.02em' }}>
-                    Role-based access · Every session is audited
+                  <SensorRing color={node.color} />
+                  <NodeBadge color={node.color}>0{i + 1}</NodeBadge>
+                  <Box sx={{ color: node.color, fontSize: 32, mb: 0.5, display: 'flex' }}>
+                    {node.icon}
+                  </Box>
+                  <Typography variant="caption" sx={{ fontWeight: 800, color: node.color, textTransform: 'uppercase', letterSpacing: 1, fontSize: 10 }}>
+                    {node.key}
                   </Typography>
-                </Box>
-              </Box>
-            </Box>
+                  <Typography variant="caption" sx={{ fontWeight: 700, color: 'text.primary', opacity: 0.8, fontSize: 9 }}>
+                    {node.title}
+                  </Typography>
+                </CircularStage>
+              );
+            })}
+          </RadialWrapper>
+
+          <Box sx={{ position: 'absolute', top: 50, left: 50, zIndex: 30 }}>
+            <Branding fontSize={28} />
+          </Box>
+        </VisualArea>
+
+        <FormSection>
+          <Box sx={{ position: 'absolute', top: 40, right: 40, display: 'flex', gap: 2 }}>
+            <IconButton onClick={() => setMode(mode === 'dark' ? 'light' : 'dark')}>
+              {mode === 'dark' ? <SunIcon /> : <MoonIcon />}
+            </IconButton>
           </Box>
 
-          {/* --- Bento feature tiles ---
-              After the card in DOM so mobile reading/announcement order matches
-              the stacked visual order (intro → card → tiles); grid areas keep
-              the desktop placement unchanged. No focusables inside. */}
-          <Box
-            sx={{
-              gridArea: 'tiles',
-              alignSelf: 'start',
-              transform: 'translate3d(calc(var(--px, 0) * 3px), calc(var(--py, 0) * 1.8px), 0)',
-            }}
-          >
-            <BentoTiles />
-          </Box>
-        </Box>
+          <Box sx={{ maxWidth: 400, width: '100%', mx: 'auto' }}>
+            <Typography variant="h3" sx={{ fontWeight: 900, mb: 1, letterSpacing: '-0.03em' }}>
+              Welcome back
+            </Typography>
+            <Typography variant="body1" sx={{ color: 'text.secondary', mb: 6 }}>
+              Enter your operational credentials to continue.
+            </Typography>
 
-        {/* --- Anchored footer line --- */}
-        <Box
-          component="footer"
-          sx={{
-            mt: { xs: 4, lg: 3.5 },
-            pt: 2,
-            borderTop: `1px solid ${HAIRLINE}`,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: 2,
-            flexWrap: 'wrap',
-            animation: `${fadeIn} 480ms ${EASE_OUT} both`,
-            [REDUCED_MOTION]: { animation: 'none' },
-          }}
-        >
-          <Typography sx={{ fontSize: 12.5, color: TEXT_LOW, letterSpacing: '0.02em' }}>
-            © Nexora — procurement intelligence platform
-          </Typography>
-          <Typography sx={{ fontSize: 12.5, color: TEXT_LOW, letterSpacing: '0.02em' }}>
-            Multi-tenant isolation · Role-based access · Full audit trail
-          </Typography>
-        </Box>
-      </Box>
-    </Box>
+            {notice && <Alert severity="info" sx={{ mb: 3, borderRadius: 3 }}>{notice}</Alert>}
+
+            <form onSubmit={handleLogin}>
+              {businessUnitOptions ? (
+                <>
+                  <Alert severity="info" sx={{ mb: 3, borderRadius: 3 }}>
+                    Your account belongs to more than one organization. Pick one to continue.
+                  </Alert>
+                  <FormControl fullWidth sx={{ mb: 4 }}>
+                    <InputLabel id="bu-label">Which organization?</InputLabel>
+                    <StyledSelect
+                      mode={mode}
+                      labelId="bu-label"
+                      label="Which organization?"
+                      value={selectedBusinessUnitId}
+                      onChange={(e) => setSelectedBusinessUnitId(Number(e.target.value))}
+                      required
+                    >
+                      {businessUnitOptions.map((bu) => (
+                        <MenuItem key={bu.id} value={bu.id}>
+                          {bu.name}
+                        </MenuItem>
+                      ))}
+                    </StyledSelect>
+                  </FormControl>
+                </>
+              ) : (
+                <>
+                  <StyledTextField
+                    mode={mode}
+                    fullWidth
+                    label="Email Address"
+                    variant="outlined"
+                    sx={{ mb: 3 }}
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    required
+                    slotProps={{
+                      input: {
+                        startAdornment: (
+                          <InputAdornment position="start">
+                            <MailIcon sx={{ color: 'primary.main', opacity: 0.7 }} />
+                          </InputAdornment>
+                        ),
+                      }
+                    }}
+                  />
+
+                  <StyledTextField
+                    mode={mode}
+                    fullWidth
+                    label="Password"
+                    type={showPassword ? 'text' : 'password'}
+                    variant="outlined"
+                    sx={{ mb: 4 }}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    required
+                    slotProps={{
+                      input: {
+                        startAdornment: (
+                          <InputAdornment position="start">
+                            <LockIcon sx={{ color: 'primary.main', opacity: 0.7 }} />
+                          </InputAdornment>
+                        ),
+                        endAdornment: (
+                          <InputAdornment position="end">
+                            <IconButton onClick={() => setShowPassword(!showPassword)} edge="end">
+                              {showPassword ? <VisibilityOff /> : <Visibility />}
+                            </IconButton>
+                          </InputAdornment>
+                        ),
+                      }
+                    }}
+                  />
+                </>
+              )}
+
+              {error && <Alert severity="error" sx={{ mb: 3, borderRadius: 3 }}>{error}</Alert>}
+
+              <Button
+                fullWidth
+                variant="contained"
+                size="large"
+                type="submit"
+                disabled={loading || (businessUnitOptions !== null && selectedBusinessUnitId === '')}
+                sx={{
+                  py: 2,
+                  fontSize: 16,
+                  boxShadow: `0 12px 30px -10px ${primaryColor}66`,
+                  '&:hover': { transform: 'translateY(-2px)' },
+                  transition: 'all 0.3s ease',
+                }}
+              >
+                {loading
+                  ? <CircularProgress size={24} color="inherit" />
+                  : businessUnitOptions ? 'CONTINUE' : 'LOGIN'}
+              </Button>
+
+              {businessUnitOptions && (
+                <Button
+                  fullWidth
+                  variant="text"
+                  onClick={resetBusinessUnitSelection}
+                  disabled={loading}
+                  sx={{ mt: 2 }}
+                >
+                  Back to sign in
+                </Button>
+              )}
+            </form>
+          </Box>
+        </FormSection>
+      </GlassCard>
+    </Container>
   );
 };
 
