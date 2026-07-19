@@ -125,5 +125,9 @@ public partial class ErpRfqAutomationContext
         // ==== SLA / deadline engine + quote outcome capture (Sla/) ====
         // Same partial-splice pattern; implementation in ErpRfqAutomationContext.Sla.cs.
         ConfigureSlaModel(modelBuilder);
+
+        // ==== Passive AI metrics + quote revisions (WP-B4, Metrics/) ====
+        // Same partial-splice pattern; implementation in ErpRfqAutomationContext.Metrics.cs.
+        ConfigureMetricsModel(modelBuilder);
     }
 }

@@ -62,15 +62,24 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
     private readonly ErpRfqAutomationContext _context;
     private readonly IQuoteService _quoteService;
     private readonly ILogger<QuoteOutcomeService> _logger;
+    private readonly ERP_RFQ_Automation.Metrics.IMetricRecorder? _metrics;
+    private readonly ERP_RFQ_Automation.Intelligence.Decision.ILeadDecisionService? _decisions;
 
+    // WP-B4: metrics + decision-brief lookup are OPTIONAL passive add-ons
+    // (default null) — existing constructions keep compiling, and outcome capture
+    // works unchanged when the recorder is not yet registered (WAVEB-WIRING.md).
     public QuoteOutcomeService(
         ErpRfqAutomationContext context,
         IQuoteService quoteService,
-        ILogger<QuoteOutcomeService> logger)
+        ILogger<QuoteOutcomeService> logger,
+        ERP_RFQ_Automation.Metrics.IMetricRecorder? metrics = null,
+        ERP_RFQ_Automation.Intelligence.Decision.ILeadDecisionService? decisions = null)
     {
         _context = context;
         _quoteService = quoteService;
         _logger = logger;
+        _metrics = metrics;
+        _decisions = decisions;
     }
 
     // Default governed picklist, seeded per-BU on demand (SetupMaster.BusinessUnitId
@@ -109,6 +118,18 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
         var quote = await _context.Quotes
             .FirstOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId, ct)
             ?? throw new KeyNotFoundException($"Quote with ID {quoteId} not found.");
+
+        // Revisions-lite chain lock (WP-B4): a quote that has been superseded by a
+        // newer revision can no longer take an outcome — the outcome belongs on the
+        // latest revision (and, once recorded there, locks the whole chain).
+        var supersededBy = await _context.Quotes.AsNoTracking()
+            .Where(q => q.RevisionOfQuoteId == quote.Id)
+            .Select(q => new { q.QuoteNo, q.RevisionNo })
+            .FirstOrDefaultAsync(ct);
+        if (supersededBy != null)
+            throw new InvalidOperationException(
+                $"Quote '{quote.QuoteNo}' has been superseded by revision '{supersededBy.QuoteNo}' " +
+                $"(Rev {supersededBy.RevisionNo}). Record the outcome on the latest revision instead.");
 
         // Terminal-state immutability: once an outcome is recorded the quote is
         // frozen; only a manager/admin may correct it.
@@ -150,6 +171,10 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
 
         _logger.LogInformation("Quote {QuoteId} outcome '{Outcome}' recorded by {Actor} (reason {Reason}).",
             quoteId, outcome, actorEmail, reasonCode ?? "-");
+
+        // WP-B4 passive metric (never throws, never blocks the outcome).
+        await RecordOutcomeMetricAsync(quote, outcome!.Trim().ToLowerInvariant(), reasonCode, ct);
+
         return dto;
     }
 
@@ -162,6 +187,12 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
         // already resolved by a human between sweep and execution.
         var sentId = await ResolveStatusIdAsync(quote.BusinessUnitId, "SENT", ct) ?? LegacySentStatusId;
         if (quote.StatusId != sentId || quote.OutcomeOn.HasValue) return false;
+
+        // Revisions-lite chain lock (WP-B4): a superseded quote's fate is carried
+        // by its newer revision — the system must not stamp an outcome on it.
+        var superseded = await _context.Quotes.AsNoTracking().IgnoreQueryFilters()
+            .AnyAsync(q => q.RevisionOfQuoteId == quote.Id, ct);
+        if (superseded) return false;
 
         await EnsureExpiredStatusSeededAsync(quote.BusinessUnitId, ct);
         await EnsureReasonsSeededAsync(quote.BusinessUnitId, ct);
@@ -177,7 +208,81 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
         await _context.SaveChangesAsync(ct);
 
         _logger.LogInformation("Quote {QuoteId} auto-expired (reason {Reason}).", quoteId, reasonCode);
+
+        // WP-B4 passive metric for the system path too.
+        await RecordOutcomeMetricAsync(quote, "expired", reasonCode, ct);
+
         return true;
+    }
+
+    /// <summary>
+    /// WP-B4 hook (c): appends an "outcome_recorded" MetricEvent with the outcome,
+    /// reason and the RecDate→SentOn→OutcomeOn cycle deltas (whole days). The
+    /// lead-decision-brief recommendation is included only when it is cheaply
+    /// resolvable via ILeadDecisionService.GetSummariesAsync (its batch/cheap
+    /// path); anything else — including any lookup failure — just omits it.
+    /// Never throws.
+    /// </summary>
+    private async Task RecordOutcomeMetricAsync(Quote quote, string outcome, string? reasonCode, CancellationToken ct)
+    {
+        if (_metrics is null) return;
+
+        try
+        {
+            // RFQ receive date + lead linkage in one projection. Rfq.RecDate is
+            // non-nullable but may be a sentinel (< year 2000) — treat as unknown.
+            var rfqFacts = quote.Rfqid.HasValue
+                ? await _context.Rfqs.AsNoTracking().IgnoreQueryFilters()
+                    .Where(r => r.Id == quote.Rfqid.Value)
+                    .Select(r => new { r.RecDate, r.LeadId })
+                    .FirstOrDefaultAsync(ct)
+                : null;
+
+            DateTime? recDate = rfqFacts != null && rfqFacts.RecDate.Year >= 2000 ? rfqFacts.RecDate : null;
+
+            static double? Days(DateTime? from, DateTime? to) =>
+                from.HasValue && to.HasValue ? Math.Round((to.Value - from.Value).TotalDays, 1) : null;
+
+            string? recommendation = null;
+            if (_decisions is not null && rfqFacts?.LeadId is long leadId)
+            {
+                try
+                {
+                    var summaries = await _decisions.GetSummariesAsync(new[] { leadId }, quote.BusinessUnitId, ct);
+                    if (summaries.TryGetValue(leadId, out var summary)) recommendation = summary.Recommendation;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Not cheaply resolvable right now — omit, per spec.
+                    _logger.LogDebug(ex, "Outcome metric: decision-brief recommendation lookup skipped for quote {QuoteId}.", quote.Id);
+                }
+            }
+
+            await _metrics.RecordAsync(quote.BusinessUnitId, ERP_RFQ_Automation.Metrics.MetricEventTypes.OutcomeRecorded, quote.Id, new
+            {
+                quoteId = quote.Id,
+                quoteNo = quote.QuoteNo,
+                revisionNo = quote.RevisionNo,
+                outcome,
+                reasonCode,
+                cycle = new
+                {
+                    recDate,
+                    sentOn = quote.SentOn,
+                    outcomeOn = quote.OutcomeOn,
+                    recToSentDays = Days(recDate, quote.SentOn),
+                    sentToOutcomeDays = Days(quote.SentOn, quote.OutcomeOn),
+                    recToOutcomeDays = Days(recDate, quote.OutcomeOn)
+                },
+                decisionBriefRecommendation = recommendation
+            }, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // The recorder itself never throws; this belt-and-braces guard covers the
+            // facts-gathering above. A metric must never break an outcome.
+            _logger.LogWarning(ex, "Outcome metric for quote {QuoteId} was dropped.", quote.Id);
+        }
     }
 
     public async Task MarkRespondedAsync(long quoteId, long businessUnitId, string actorEmail, CancellationToken ct = default)

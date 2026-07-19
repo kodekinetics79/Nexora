@@ -103,4 +103,13 @@ internal static class JsonInputExtensions
         if (v.ValueKind == JsonValueKind.String && decimal.TryParse(v.GetString(), out var s)) return s;
         return null;
     }
+
+    public static bool GetBool(this JsonElement e, string prop, bool fallback = false)
+    {
+        if (e.ValueKind != JsonValueKind.Object || !e.TryGetProperty(prop, out var v)) return fallback;
+        if (v.ValueKind == JsonValueKind.True) return true;
+        if (v.ValueKind == JsonValueKind.False) return false;
+        if (v.ValueKind == JsonValueKind.String && bool.TryParse(v.GetString(), out var s)) return s;
+        return fallback;
+    }
 }

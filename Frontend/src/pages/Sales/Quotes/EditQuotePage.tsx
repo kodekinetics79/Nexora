@@ -19,6 +19,7 @@ import customerService from '../../../api/services/customerService';
 import quoteService from '../../../api/services/quoteService';
 import setupService from '../../../api/services/setupService';
 import productService from '../../../api/services/productService';
+import CustomerContextPanel from './CustomerContextPanel';
 import { toast } from 'react-hot-toast';
 
 interface QuoteItem {
@@ -390,6 +391,9 @@ const EditQuotePage: React.FC = () => {
               </Stack>
             </CardContent>
           </Card>
+
+          {/* WP-B2: "This customer" history — win rate + last-sold prices. */}
+          <CustomerContextPanel customerId={customerId} />
         </Grid>
       </Grid>
     </Box>

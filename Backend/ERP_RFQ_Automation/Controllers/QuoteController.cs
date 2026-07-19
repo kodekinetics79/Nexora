@@ -172,8 +172,71 @@ namespace ERP_RFQ_Automation.Controllers
             if (string.IsNullOrEmpty(recipientEmail)) return BadRequest("Recipient email is required.");
             try
             {
-                await _quoteService.SendQuoteEmailAsync(id, recipientEmail);
+                // WP-B3: the send may be parked as a below-floor approval instead of
+                // being performed; 409 tells the caller it is queued, not failed.
+                var result = await _quoteService.SendQuoteEmailAsync(id, recipientEmail, options: new QuoteSendOptions
+                {
+                    RequestedByUserId = ActorUserId(),
+                    RequestedBy = ActorEmail()
+                });
+
+                if (result.Held)
+                {
+                    return Conflict(new
+                    {
+                        queuedForApproval = true,
+                        approvalId = result.ApprovalId,
+                        summary = result.HoldSummary,
+                        message = "Sent for approval — pricing is below your floor. Track it in Approvals."
+                    });
+                }
+
                 return Ok("Email sent successfully.");
+            }
+            catch (KeyNotFoundException)
+            {
+                return NotFound();
+            }
+        }
+
+        // -------- POST /api/Quote/{id}/revise (revisions-lite, WP-B4) --------
+        // Clones a non-DRAFT quote (+items) as a new DRAFT revision (RevisionNo+1,
+        // linked back). Draft / superseded / outcome-locked chains → 409.
+        [HttpPost("{id}/revise")]
+        [RequireModulePermission("Quotations", PermissionAction.Create)]
+        public async Task<ActionResult<QuoteResponseDTO>> Revise(long id)
+        {
+            try
+            {
+                var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+                if (businessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+
+                var revision = await _quoteService.ReviseQuoteAsync(id, businessUnitId, ActorEmail());
+                return CreatedAtAction(nameof(GetById),
+                    new { id = revision.Id, businessUnitId = revision.BusinessUnitId }, revision);
+            }
+            catch (KeyNotFoundException)
+            {
+                return NotFound();
+            }
+            catch (InvalidOperationException ex)
+            {
+                // Draft, already revised, or chain locked by a recorded outcome.
+                return Conflict(new { message = ex.Message });
+            }
+        }
+
+        // -------- GET /api/Quote/{id}/revisions (revision-chain facts) --------
+        [HttpGet("{id}/revisions")]
+        [RequireModulePermission("Quotations", PermissionAction.View)]
+        public async Task<ActionResult<QuoteRevisionInfoDTO>> GetRevisionInfo(long id)
+        {
+            try
+            {
+                var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+                if (businessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+
+                return Ok(await _quoteService.GetRevisionInfoAsync(id, businessUnitId));
             }
             catch (KeyNotFoundException)
             {
@@ -274,6 +337,11 @@ namespace ERP_RFQ_Automation.Controllers
             ?? User.FindFirst("email")?.Value
             ?? User.Identity?.Name
             ?? "unknown";
+
+        private long? ActorUserId() =>
+            long.TryParse(
+                User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("sub")?.Value,
+                out var uid) ? uid : null;
 
         [HttpGet("stats")]
         [RequireModulePermission("Quotations", PermissionAction.View)]

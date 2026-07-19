@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System;
 using System.Linq;
+using System.Security.Claims;
 using System.Threading.Tasks;
 
 namespace ERP_RFQ_Automation.Controllers
@@ -298,7 +299,23 @@ namespace ERP_RFQ_Automation.Controllers
                 {
                     try
                     {
-                        await _quoteService.SendQuoteEmailAsync(quoteId, selectedEmail, emailSubject, emailBody);
+                        // WP-B3: the send can come back "held" (below-floor pricing) —
+                        // the quote exists but the email is parked in the Approvals inbox.
+                        var sendResult = await _quoteService.SendQuoteEmailAsync(
+                            quoteId, selectedEmail, emailSubject, emailBody,
+                            new ERP_RFQ_Automation.DTOs.QuoteDTOs.QuoteSendOptions
+                            {
+                                RequestedByUserId = long.TryParse(
+                                    User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("sub")?.Value,
+                                    out var approverId) ? approverId : null,
+                                RequestedBy = User.FindFirst(ClaimTypes.Email)?.Value ?? approvedBy
+                            });
+
+                        if (sendResult.Held)
+                        {
+                            emailWarning = "Quote generated, but sending is held for approval — pricing is below " +
+                                           $"your floor ({sendResult.HoldSummary}). Track it in the Approvals inbox.";
+                        }
                     }
                     catch (Exception emailEx)
                     {

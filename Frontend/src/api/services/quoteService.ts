@@ -45,6 +45,28 @@ export interface OutcomeReasonDTO {
   label: string;
 }
 
+// ==== Below-floor holds (WP-B3) + revisions-lite (WP-B4) ====
+
+/** Result of a send attempt: either it went out, or it was parked in Approvals. */
+export interface QuoteSendOutcome {
+  held: boolean;
+  /** Plain-language hold info when held ("Quote #…: N line(s) below floor by up to X%"). */
+  message?: string;
+  approvalId?: string;
+}
+
+export interface QuoteRevisionInfoDTO {
+  quoteId: number;
+  quoteNo: string;
+  revisionNo: number;
+  revisionOfQuoteId?: number | null;
+  revisionOfQuoteNo?: string | null;
+  supersededByQuoteId?: number | null;
+  supersededByQuoteNo?: string | null;
+  chainLocked: boolean;
+  canRevise: boolean;
+}
+
 export type QuoteOutcome = 'won' | 'lost' | 'expired';
 
 export interface PaginatedQuotes {
@@ -91,8 +113,35 @@ const quoteService = {
     return data;
   },
 
-  sendEmail: async (id: number, recipientEmail: string): Promise<void> => {
-    await axiosInstance.post(`/api/Quote/${id}/email`, null, { params: { recipientEmail } });
+  /**
+   * Sends the quote email. WP-B3: a 409 with queuedForApproval means nothing was
+   * sent — the send is parked in the Approvals inbox (below-floor pricing) — and
+   * is surfaced as `{ held: true }` rather than an error.
+   */
+  sendEmail: async (id: number, recipientEmail: string): Promise<QuoteSendOutcome> => {
+    try {
+      await axiosInstance.post(`/api/Quote/${id}/email`, null, { params: { recipientEmail } });
+      return { held: false };
+    } catch (error: any) {
+      const data = error?.response?.data;
+      if (error?.response?.status === 409 && data?.queuedForApproval) {
+        return { held: true, message: data.summary || data.message, approvalId: data.approvalId };
+      }
+      throw error;
+    }
+  },
+
+  // ==== Revisions-lite (WP-B4) ====
+
+  /** Clones a non-draft quote as a new DRAFT revision; 409 when draft/superseded/locked. */
+  revise: async (id: number): Promise<QuoteDTO> => {
+    const { data } = await axiosInstance.post(`/api/Quote/${id}/revise`);
+    return data;
+  },
+
+  getRevisionInfo: async (id: number): Promise<QuoteRevisionInfoDTO> => {
+    const { data } = await axiosInstance.get(`/api/Quote/${id}/revisions`);
+    return data;
   },
 
   transitionStatus: async (id: number, status: string, modifiedBy: string): Promise<QuoteDTO> => {

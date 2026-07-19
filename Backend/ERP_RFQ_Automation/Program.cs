@@ -287,6 +287,12 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automati
 builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Conversion.ConvertLeadToRfqTool>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Pricing.PriceRfqTool>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Pricing.ApplyRfqPricingTool>();
+// WP-B3: executor for below-floor holds — the approvals inbox approve endpoint
+// re-invokes it via the tool registry (creation happens in BelowFloorGuard,
+// already registered inside AddPricingIntelligence()).
+builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Pricing.ApproveBelowFloorQuoteTool>();
+// WP-B4: append-only passive AI-metrics writer (never throws; own DI scope).
+builder.Services.AddSingleton<ERP_RFQ_Automation.Metrics.IMetricRecorder, ERP_RFQ_Automation.Metrics.MetricRecorder>();
 
 // Lead Decision Brief (Intelligence/Decision): value/coverage/history/urgency →
 // Bid/Review/Skip with plain-language reasons; feeds the leads grid + dashboard.

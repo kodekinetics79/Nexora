@@ -119,6 +119,54 @@ export interface ApplyPricingResponse {
   total: number | null;
 }
 
+// ─── GET /api/intelligence/customers/{id}/context (WP-B2) ────────────────────
+// Mirrors Backend Controllers/CustomerContextController.cs wire contracts.
+
+export interface CustomerKeyLineDTO {
+  description: string | null;
+  quantity: number;
+  unitPrice: number;
+}
+
+export interface CustomerQuoteSummaryDTO {
+  quoteId: number;
+  quoteNo: string;
+  quoteDate: string | null;
+  totalAmount: number | null;
+  statusValue: string | null;
+  /** "won" | "lost" | "open" */
+  outcome: 'won' | 'lost' | 'open';
+  outcomeReasonName: string | null;
+  keyLines: CustomerKeyLineDTO[];
+}
+
+export interface CustomerItemPriceDTO {
+  productId: number | null;
+  description: string | null;
+  unitPrice: number;
+  quoteDate: string | null;
+  monthsAgo: number | null;
+}
+
+export interface CustomerContextDTO {
+  customerId: number;
+  customerName: string | null;
+  totalQuotes: number;
+  wonQuotes: number;
+  lostQuotes: number;
+  /** 0–100; null while nothing has been decided yet. */
+  winRatePct: number | null;
+  ordersLast24Months: number;
+  orderValueLast24Months: number;
+  avgQuoteTotal: number | null;
+  /** Average margin era (0–100); null when no cost floor data exists. */
+  avgMarginPct: number | null;
+  lastQuoteDate: string | null;
+  recentQuotes: CustomerQuoteSummaryDTO[];
+  recentItemPrices: CustomerItemPriceDTO[];
+  generatedAt: string;
+}
+
 // ─── Service ─────────────────────────────────────────────────────────────────
 
 const intelligenceService = {
@@ -148,6 +196,14 @@ const intelligenceService = {
     const r = await axiosInstance.post<ApplyPricingResponse>(
       `/api/intelligence/rfqs/${rfqId}/apply-pricing`,
       body
+    );
+    return r.data;
+  },
+
+  /** WP-B2: "This customer" history + last-sold prices, shown while quoting. */
+  getCustomerContext: async (customerId: number): Promise<CustomerContextDTO> => {
+    const r = await axiosInstance.get<CustomerContextDTO>(
+      `/api/intelligence/customers/${customerId}/context`
     );
     return r.data;
   },

@@ -87,7 +87,17 @@ const RfqPricingPage: React.FC = () => {
       enqueueSnackbar('Pricing applied — ready to quote', { variant: 'success' });
       navigate(`/procurement/rfqs/view/${rfqId}`);
     },
-    onError: () => {
+    onError: (error: any) => {
+      // WP-B3: a 409 with queuedForApproval means nothing was applied — the
+      // below-floor prices are parked in the Approvals inbox for a manager.
+      const data = error?.response?.data;
+      if (error?.response?.status === 409 && data?.queuedForApproval) {
+        enqueueSnackbar(
+          data.message || 'Sent for approval — pricing is below your floor. Track it in Approvals.',
+          { variant: 'info', autoHideDuration: 8000 },
+        );
+        return;
+      }
       enqueueSnackbar("Couldn't apply the pricing. Your edits are still here — please try again.", { variant: 'error' });
     },
   });

@@ -17,6 +17,7 @@ import {
   Delete as DeleteIcon,
   Add as AddIcon,
   EmojiEvents as OutcomeIcon,
+  ContentCopy as ReviseIcon,
 } from '@mui/icons-material';
 import quoteService, { type QuoteDTO } from '../../../api/services/quoteService';
 import QuoteOutcomeDialog from './QuoteOutcomeDialog';
@@ -98,6 +99,20 @@ const QuotesPage: React.FC = () => {
       search: search || undefined,
       businessUnitId: userData?.businessUnitId || undefined,
     }),
+  });
+
+  // WP-B4 revisions-lite: clone a non-draft quote as a new DRAFT revision and
+  // jump straight into editing it. 409 = draft / superseded / outcome-locked chain.
+  const reviseMutation = useMutation({
+    mutationFn: (id: number) => quoteService.revise(id),
+    onSuccess: (draft) => {
+      queryClient.invalidateQueries({ queryKey: ['quotes'] });
+      navigate(`/sales/quotes/edit/${draft.id}`);
+    },
+    onError: (error: any) => {
+      const message = error?.response?.data?.message || 'This quote cannot be revised.';
+      setSnackbar({ open: true, message, severity: 'error' });
+    }
   });
 
   const deleteMutation = useMutation({
@@ -202,6 +217,18 @@ const QuotesPage: React.FC = () => {
             <Tooltip title="Record outcome (won / lost / expired)">
               <IconButton size="small" color="warning" onClick={() => setOutcomeTarget({ id: p.row.id, quoteNo: p.row.quoteNo })}>
                 <OutcomeIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          )}
+          {!['DRAFT', 'ORDERED'].includes(((p.row.statusCode || p.row.statusValue) || '').toUpperCase()) && (
+            <Tooltip title="Revise — create a new draft revision of this quote">
+              <IconButton
+                size="small"
+                color="info"
+                disabled={reviseMutation.isPending}
+                onClick={() => reviseMutation.mutate(p.row.id)}
+              >
+                <ReviseIcon fontSize="small" />
               </IconButton>
             </Tooltip>
           )}

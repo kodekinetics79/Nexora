@@ -18,22 +18,25 @@ namespace ERP_RFQ_Automation.Repositories
         private readonly ISlaPolicyReader _slaPolicy;
         private readonly ILeadDuplicateDetector? _duplicateDetector;
         private readonly ILogger<LeadRepository>? _logger;
+        private readonly ERP_RFQ_Automation.Metrics.IMetricRecorder? _metrics;
 
         // Optional dependencies keep existing constructions (tests, pre-wiring DI)
-        // compiling and running: notifications / duplicate detection degrade to
-        // no-ops, the SLA reader falls back to the flat default threshold.
+        // compiling and running: notifications / duplicate detection / metrics
+        // degrade to no-ops, the SLA reader falls back to the flat default threshold.
         public LeadRepository(
             ErpRfqAutomationContext context,
             INotificationService? notifications = null,
             ISlaPolicyReader? slaPolicy = null,
             ILeadDuplicateDetector? duplicateDetector = null,
-            ILogger<LeadRepository>? logger = null)
+            ILogger<LeadRepository>? logger = null,
+            ERP_RFQ_Automation.Metrics.IMetricRecorder? metrics = null)
         {
             _context = context;
             _notifications = notifications;
             _slaPolicy = slaPolicy ?? new DefaultSlaPolicyReader();
             _duplicateDetector = duplicateDetector;
             _logger = logger;
+            _metrics = metrics;
         }
 
         public async Task<(IEnumerable<LeadResponseDTO>, int TotalCount)> GetLeadListAsync(int pageNumber, int pageSize, long? id, string? rfqno, string? buyersName, string? leadSource, long businessUnitId, DateTime? startDate = null, DateTime? endDate = null, string? emailSource = null, string? clientemail = null)
@@ -870,6 +873,18 @@ namespace ERP_RFQ_Automation.Repositories
 
             var header = review.Header ?? new LeadReviewHeaderDTO();
 
+            // WP-B4 passive metric (hook b): capture which fields the reviewer
+            // actually changed vs. the stored values, BEFORE the edits are applied.
+            var headerChanged = new List<string>();
+            if (header.Rfqno != null && header.Rfqno != lead.Rfqno) headerChanged.Add("rfqno");
+            if (header.BuyersName != null && header.BuyersName != lead.BuyersName) headerChanged.Add("buyersName");
+            if (header.BidClosingDate != null && header.BidClosingDate != lead.BidClosingDate) headerChanged.Add("bidClosingDate");
+            if (header.OpportunityNo != null && header.OpportunityNo != lead.OpportunityNo) headerChanged.Add("opportunityNo");
+            if (header.HeaderRemarks != null && header.HeaderRemarks != lead.HeaderRemarks) headerChanged.Add("headerRemarks");
+            var itemFieldChanges = new Dictionary<string, int>();
+            var itemsChanged = 0;
+            var itemsAdded = 0;
+
             // Header edits: only apply provided (non-null) fields.
             if (header.Rfqno != null) lead.Rfqno = header.Rfqno;
             if (header.BuyersName != null) lead.BuyersName = header.BuyersName;
@@ -896,6 +911,16 @@ namespace ERP_RFQ_Automation.Repositories
                 {
                     var existing = lead.LeadItems.FirstOrDefault(li => li.Id == dto.Id.Value);
                     if (existing == null) continue; // stale/foreign id; ignore rather than trust it
+
+                    // WP-B4 metric: diff BEFORE the upsert overwrites the stored values.
+                    var changed = DiffItemFields(existing, dto);
+                    if (changed.Count > 0)
+                    {
+                        itemsChanged++;
+                        foreach (var field in changed)
+                            itemFieldChanges[field] = itemFieldChanges.TryGetValue(field, out var n) ? n + 1 : 1;
+                    }
+
                     ApplyItemFields(existing, dto);
                 }
                 else
@@ -903,6 +928,7 @@ namespace ERP_RFQ_Automation.Repositories
                     var created = new LeadItem { LeadId = lead.Id };
                     ApplyItemFields(created, dto);
                     lead.LeadItems.Add(created);
+                    itemsAdded++;
                 }
             }
 
@@ -921,8 +947,56 @@ namespace ERP_RFQ_Automation.Repositories
 
             await _context.SaveChangesAsync();
 
+            // WP-B4 passive metric (hook b): what the reviewer corrected. Additive,
+            // null-safe, and the recorder never throws — review flow is unaffected.
+            if (_metrics != null && (headerChanged.Count > 0 || itemsChanged > 0 || itemsAdded > 0 || toRemove.Count > 0))
+            {
+                await _metrics.RecordAsync(businessUnitId,
+                    ERP_RFQ_Automation.Metrics.MetricEventTypes.ExtractionCorrected, lead.Id, new
+                    {
+                        leadId = lead.Id,
+                        action = review.Action,
+                        headerChanged,
+                        itemsAdded,
+                        itemsRemoved = toRemove.Count,
+                        itemsChanged,
+                        itemFieldChanges
+                    });
+            }
+
             // Reuse the canonical mapping for the response.
             return await GetLeadByIdAsync(id, businessUnitId);
+        }
+
+        // WP-B4: field-level diff between a stored lead item and the reviewer's
+        // submission — the exact field set ApplyItemFields writes. Camel-cased
+        // names are the metric payload contract (Sla/WAVEB-WIRING.md).
+        private static List<string> DiffItemFields(LeadItem item, LeadItemReviewDTO dto)
+        {
+            var changed = new List<string>();
+            void Check<T>(string name, T stored, T submitted)
+            {
+                if (!EqualityComparer<T>.Default.Equals(stored, submitted)) changed.Add(name);
+            }
+
+            Check("lineItemNo", item.LineItemNo, dto.LineItemNo);
+            Check("productShortName", item.ProductShortName, dto.ProductShortName);
+            Check("productShortDescription", item.ProductShortDescription, dto.ProductShortDescription);
+            Check("commodityProduct", item.CommodityProduct, dto.CommodityProduct);
+            Check("itemMaterialCode", item.ItemMaterialCode, dto.ItemMaterialCode);
+            Check("currency", item.Currency, dto.Currency);
+            Check("unitOfMeasure", item.UnitOfMeasure, dto.UnitOfMeasure);
+            Check("unitPrice", item.UnitPrice, dto.UnitPrice);
+            if (dto.Quantity.HasValue) Check("quantity", item.Quantity, dto.Quantity.Value);
+            Check("manufacturerName", item.ManufacturerName, dto.ManufacturerName);
+            Check("manufacturerPartNumber", item.ManufacturerPartNumber, dto.ManufacturerPartNumber);
+            Check("alternateProductName", item.AlternateProductName, dto.AlternateProductName);
+            Check("alternatePartNumber", item.AlternatePartNumber, dto.AlternatePartNumber);
+            Check("itemText", item.ItemText, dto.ItemText);
+            Check("leadTime", item.LeadTime, dto.LeadTime);
+            if (dto.ExtraFields != null)
+                Check("extraFields", item.ExtraFields, ExtraFieldsJson.Serialize(dto.ExtraFields));
+            return changed;
         }
 
         // Only quantity is non-nullable on the model; a null quantity keeps the existing

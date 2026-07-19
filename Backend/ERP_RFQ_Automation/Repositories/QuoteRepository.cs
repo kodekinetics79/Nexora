@@ -252,14 +252,37 @@ namespace ERP_RFQ_Automation.Repositories
 
             var now = DateTime.UtcNow;
 
+            // WP-B2 fix: these counts previously used bare magic ids 31/32, which do
+            // NOT match the seeded QuoteStatus rows (DRAFT=42, SENT=43, ACCEPTED=44,
+            // REJECTED=45 — see QuoteService.LegacyQuoteStatusIds), so both stats were
+            // silently 0. Statuses are now resolved by SetupType "QuoteStatus" +
+            // SetupCode, with the documented legacy ids as fallback — never magic ids.
+            var acceptedStatusIds = await GetQuoteStatusIdsAsync("ACCEPTED", legacyId: 44);
+            var pendingStatusIds = await GetQuoteStatusIdsAsync("SENT", legacyId: 43); // pending = sent, awaiting the customer
+
             return new QuoteStatsDTO
             {
                 TotalQuotes = quotes.Count,
-                AcceptedQuotes = quotes.Count(q => q.StatusId == 32), // Assuming 32 is Accepted
-                PendingQuotes = quotes.Count(q => q.StatusId == 31),  // Assuming 31 is Pending
+                AcceptedQuotes = quotes.Count(q => q.StatusId.HasValue && acceptedStatusIds.Contains(q.StatusId.Value)),
+                PendingQuotes = quotes.Count(q => q.StatusId.HasValue && pendingStatusIds.Contains(q.StatusId.Value)),
                 ExpiredQuotes = quotes.Count(q => q.ValidUntil.HasValue && q.ValidUntil.Value < now),
                 TotalQuotedAmount = quotes.Sum(q => q.TotalAmount ?? 0)
             };
+        }
+
+        /// <summary>
+        /// All SetupMaster ids carrying this QuoteStatus code (any BU) + the documented
+        /// legacy fallback id, so pre-SetupMaster tenants are still counted correctly —
+        /// the same pattern as SlaSweepWorker.GetStatusIdsAsync.
+        /// </summary>
+        private async Task<List<long>> GetQuoteStatusIdsAsync(string code, long legacyId)
+        {
+            var ids = await _context.SetupMasters.AsNoTracking()
+                .Where(s => s.SetupType == "QuoteStatus" && s.SetupCode == code)
+                .Select(s => s.SetupId)
+                .ToListAsync();
+            if (!ids.Contains(legacyId)) ids.Add(legacyId);
+            return ids;
         }
     }
 }

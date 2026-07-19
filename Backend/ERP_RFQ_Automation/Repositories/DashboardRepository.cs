@@ -170,5 +170,278 @@ namespace ERP_RFQ_Automation.Repositories
                 IsUp = diff >= 0
             };
         }
+
+        // ════════════════════════════════════════════════════════════════════
+        // WP-B1: manager team-workload view
+        // ════════════════════════════════════════════════════════════════════
+
+        /// <summary>Extraction sentinel floor — dates before this year are "unknown", never overdue.</summary>
+        private const int SentinelYearFloor = 2000;
+
+        public async Task<TeamWorkloadDTO> GetTeamWorkloadAsync(long businessUnitId)
+        {
+            var now = DateTime.UtcNow;
+            var acceptedLeadStatusIds = await ResolveStatusIdsAsync("LeadStatus", "ACCEPTED", "Accepted", legacyId: 24);
+            var sentQuoteStatusIds = await ResolveStatusIdsAsync("QuoteStatus", "SENT", "Sent", legacyId: 43);
+            var staleDays = await GetStaleQuoteDaysAsync(businessUnitId);
+
+            // Active reps of this BU — one query; rows are built for every rep so
+            // managers also see who has capacity (zeros are informative).
+            var users = await _context.Users.AsNoTracking()
+                .Where(u => u.Buid == businessUnitId && u.IsActive != false)
+                .Select(u => new { u.Id, u.FirstName, u.LastName, u.Email })
+                .ToListAsync();
+
+            // Open leads = accepted, never rejected. Same definition the SLA sweep
+            // uses; overdue requires a REAL closing date (sentinels < 2000 ignored).
+            var leadRows = await _context.Leads.AsNoTracking()
+                .Where(l => l.BusinessUnitId == businessUnitId
+                            && l.LeadStatusId != null && acceptedLeadStatusIds.Contains(l.LeadStatusId.Value)
+                            && l.LeadRejectedReasonId == null)
+                .Select(l => new { l.AssignTo, l.BidClosingDate })
+                .ToListAsync();
+
+            // SENT quotes; ownership is resolved from Quote.CreatedBy (free-text
+            // identity) by email or "First Last" — the same rule as the SLA
+            // stale-quote digest, so both features agree on who owns a quote.
+            var quoteRows = await _context.Quotes.AsNoTracking()
+                .Where(q => q.BusinessUnitId == businessUnitId
+                            && q.StatusId != null && sentQuoteStatusIds.Contains(q.StatusId.Value))
+                .Select(q => new { q.CreatedBy, q.SentOn, q.RespondedOn })
+                .ToListAsync();
+
+            var rows = new List<TeamWorkloadRowDTO>();
+            var matchedQuoteOwners = new HashSet<int>(); // indices into quoteRows already attributed
+
+            foreach (var u in users)
+            {
+                var fullName = $"{u.FirstName} {u.LastName}".Trim();
+                var myLeads = leadRows.Where(l => l.AssignTo == u.Id).ToList();
+
+                var myQuotes = new List<(DateTime? SentOn, DateTime? RespondedOn)>();
+                for (var i = 0; i < quoteRows.Count; i++)
+                {
+                    var q = quoteRows[i];
+                    if (string.Equals(u.Email, q.CreatedBy, StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(fullName, q.CreatedBy, StringComparison.OrdinalIgnoreCase))
+                    {
+                        myQuotes.Add((q.SentOn, q.RespondedOn));
+                        matchedQuoteOwners.Add(i);
+                    }
+                }
+
+                rows.Add(new TeamWorkloadRowDTO
+                {
+                    UserId = u.Id,
+                    Name = fullName.Length > 0 ? fullName : u.Email,
+                    Email = u.Email,
+                    OpenLeads = myLeads.Count,
+                    OverdueLeads = myLeads.Count(l => IsOverdue(l.BidClosingDate, now)),
+                    SentQuotes = myQuotes.Count,
+                    StaleQuotes = myQuotes.Count(q => IsStaleSentQuote(q.SentOn, q.RespondedOn, staleDays, now))
+                });
+            }
+
+            // Unassigned bucket: leads nobody owns + quotes whose CreatedBy matched
+            // no active BU user (owner unknown ⇒ effectively unowned work).
+            var unassignedLeads = leadRows.Where(l => l.AssignTo == null || !users.Any(u => u.Id == l.AssignTo)).ToList();
+            var orphanQuotes = quoteRows.Where((q, i) => !matchedQuoteOwners.Contains(i)).ToList();
+
+            rows = rows
+                .OrderByDescending(r => r.OpenLeads)
+                .ThenByDescending(r => r.SentQuotes)
+                .ThenBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            rows.Add(new TeamWorkloadRowDTO
+            {
+                UserId = null,
+                Name = "Unassigned",
+                Email = null,
+                OpenLeads = unassignedLeads.Count,
+                OverdueLeads = unassignedLeads.Count(l => IsOverdue(l.BidClosingDate, now)),
+                SentQuotes = orphanQuotes.Count,
+                StaleQuotes = orphanQuotes.Count(q => IsStaleSentQuote(q.SentOn, q.RespondedOn, staleDays, now)),
+                IsUnassignedBucket = true
+            });
+
+            return new TeamWorkloadDTO { Rows = rows, StaleQuoteDays = staleDays, GeneratedAt = now };
+        }
+
+        private static bool IsOverdue(DateTime? bidClosingDate, DateTime now) =>
+            bidClosingDate.HasValue && bidClosingDate.Value.Year >= SentinelYearFloor && bidClosingDate.Value < now;
+
+        /// <summary>Row is already filtered to SENT status; mirrors SlaComputed.IsStale.</summary>
+        private static bool IsStaleSentQuote(DateTime? sentOn, DateTime? respondedOn, int staleDays, DateTime now) =>
+            ERP_RFQ_Automation.Sla.SlaComputed.IsStale("SENT", sentOn, respondedOn, staleDays, now);
+
+        // ════════════════════════════════════════════════════════════════════
+        // WP-B2: pipeline / margin analytics
+        // ════════════════════════════════════════════════════════════════════
+
+        public async Task<PipelineAnalyticsDTO> GetPipelineAnalyticsAsync(long businessUnitId)
+        {
+            var now = DateTime.UtcNow;
+            var acceptedLeadStatusIds = await ResolveStatusIdsAsync("LeadStatus", "ACCEPTED", "Accepted", legacyId: 24);
+            var sentQuoteStatusIds = await ResolveStatusIdsAsync("QuoteStatus", "SENT", "Sent", legacyId: 43);
+            var wonQuoteStatusIds = (await ResolveStatusIdsAsync("QuoteStatus", "ACCEPTED", "Accepted", legacyId: 44))
+                .Concat(await ResolveStatusIdsAsync("QuoteStatus", "ORDERED", "Ordered", legacyId: null))
+                .Distinct().ToList();
+            var lostQuoteStatusIds = (await ResolveStatusIdsAsync("QuoteStatus", "REJECTED", "Rejected", legacyId: 45))
+                .Concat(await ResolveStatusIdsAsync("QuoteStatus", "EXPIRED", "Expired", legacyId: null))
+                .Distinct().ToList();
+
+            // ── Stage 1+2: leads received / leads accepted (counts + priced-line value) ──
+            var totalLeads = await _context.Leads.CountAsync(l => l.BusinessUnitId == businessUnitId);
+            var acceptedLeads = await _context.Leads.CountAsync(l =>
+                l.BusinessUnitId == businessUnitId
+                && l.LeadStatusId != null && acceptedLeadStatusIds.Contains(l.LeadStatusId.Value)
+                && l.LeadRejectedReasonId == null);
+
+            // Value estimates from the leads' own priced lines (UnitPrice × Quantity);
+            // nullable SUM so an empty set materializes as null, not a throw.
+            var totalLeadValue = await _context.LeadItems
+                .Where(li => li.Lead.BusinessUnitId == businessUnitId && li.UnitPrice > 0 && li.Quantity > 0)
+                .SumAsync(li => (decimal?)(li.UnitPrice!.Value * li.Quantity)) ?? 0m;
+            var acceptedLeadValue = await _context.LeadItems
+                .Where(li => li.Lead.BusinessUnitId == businessUnitId
+                             && li.Lead.LeadStatusId != null && acceptedLeadStatusIds.Contains(li.Lead.LeadStatusId.Value)
+                             && li.Lead.LeadRejectedReasonId == null
+                             && li.UnitPrice > 0 && li.Quantity > 0)
+                .SumAsync(li => (decimal?)(li.UnitPrice!.Value * li.Quantity)) ?? 0m;
+
+            // ── Stage 3+4: quoted / won (quote totals) ──
+            var quotedCount = await _context.Quotes.CountAsync(q => q.BusinessUnitId == businessUnitId);
+            var quotedValue = await _context.Quotes
+                .Where(q => q.BusinessUnitId == businessUnitId)
+                .SumAsync(q => q.TotalAmount) ?? 0m;
+
+            var wonCount = await _context.Quotes.CountAsync(q =>
+                q.BusinessUnitId == businessUnitId
+                && q.StatusId != null && wonQuoteStatusIds.Contains(q.StatusId.Value));
+            var wonValue = await _context.Quotes
+                .Where(q => q.BusinessUnitId == businessUnitId
+                            && q.StatusId != null && wonQuoteStatusIds.Contains(q.StatusId.Value))
+                .SumAsync(q => q.TotalAmount) ?? 0m;
+
+            // ── Losses grouped by outcome reason (name resolved via SetupMaster) ──
+            var lostGroups = await _context.Quotes.AsNoTracking()
+                .Where(q => q.BusinessUnitId == businessUnitId
+                            && q.StatusId != null && lostQuoteStatusIds.Contains(q.StatusId.Value))
+                .GroupBy(q => q.OutcomeReasonId)
+                .Select(g => new { ReasonId = g.Key, Count = g.Count(), Value = g.Sum(q => q.TotalAmount) ?? 0m })
+                .ToListAsync();
+
+            var reasonIds = lostGroups.Where(g => g.ReasonId.HasValue).Select(g => g.ReasonId!.Value).Distinct().ToList();
+            var reasonNames = reasonIds.Count == 0
+                ? new Dictionary<long, string>()
+                : await _context.SetupMasters.AsNoTracking()
+                    .Where(s => reasonIds.Contains(s.SetupId))
+                    .ToDictionaryAsync(s => s.SetupId, s => s.Description ?? s.SetupValue);
+
+            var lossReasons = lostGroups
+                .Select(g => new PipelineLossReasonDTO
+                {
+                    Reason = g.ReasonId.HasValue && reasonNames.TryGetValue(g.ReasonId.Value, out var name)
+                        ? name
+                        : "No reason recorded",
+                    Count = g.Count,
+                    Value = g.Value
+                })
+                .OrderByDescending(r => r.Count)
+                .ToList();
+
+            // ── Weighted forecast over the open SENT pipeline:
+            //    still waiting × 0.3 + responded-but-undecided × 0.5 ──
+            var sentQuotes = await _context.Quotes.AsNoTracking()
+                .Where(q => q.BusinessUnitId == businessUnitId
+                            && q.StatusId != null && sentQuoteStatusIds.Contains(q.StatusId.Value))
+                .Select(q => new { q.TotalAmount, q.RespondedOn })
+                .ToListAsync();
+
+            var awaiting = sentQuotes.Where(q => q.RespondedOn == null).ToList();
+            var responded = sentQuotes.Where(q => q.RespondedOn != null).ToList();
+            var awaitingValue = awaiting.Sum(q => q.TotalAmount ?? 0m);
+            var respondedValue = responded.Sum(q => q.TotalAmount ?? 0m);
+
+            // ── Quoted-vs-floor margin proxy. Floor = the pricing engine's cost
+            //    basis (FinalLandedCost ?? UnitCost); only lines where that floor
+            //    actually exists are sampled — never guessed. ──
+            var marginRows = await _context.QuoteItems.AsNoTracking()
+                .Where(qi => qi.Quote.BusinessUnitId == businessUnitId && qi.UnitPrice > 0)
+                .Select(qi => new
+                {
+                    qi.UnitPrice,
+                    Cost = qi.Product != null ? (qi.Product.FinalLandedCost ?? qi.Product.UnitCost) : null
+                })
+                .ToListAsync();
+
+            var marginSamples = marginRows
+                .Where(r => r.Cost.HasValue && r.Cost.Value > 0)
+                .Select(r => (r.UnitPrice - r.Cost!.Value) / r.UnitPrice)
+                .ToList();
+
+            return new PipelineAnalyticsDTO
+            {
+                Funnel = new List<PipelineStageDTO>
+                {
+                    new() { Key = "leads", Label = "Requests received", Count = totalLeads, Value = Round2(totalLeadValue) },
+                    new() { Key = "accepted", Label = "Accepted to work on", Count = acceptedLeads, Value = Round2(acceptedLeadValue) },
+                    new() { Key = "quoted", Label = "Quotes created", Count = quotedCount, Value = Round2(quotedValue) },
+                    new() { Key = "won", Label = "Won", Count = wonCount, Value = Round2(wonValue) }
+                },
+                LossReasons = lossReasons,
+                WeightedForecast = Round2(awaitingValue * 0.3m + respondedValue * 0.5m),
+                AwaitingResponseQuotes = awaiting.Count,
+                AwaitingResponseValue = Round2(awaitingValue),
+                RespondedQuotes = responded.Count,
+                RespondedValue = Round2(respondedValue),
+                AvgMarginPct = marginSamples.Count > 0
+                    ? Math.Round(marginSamples.Average() * 100m, 1, MidpointRounding.AwayFromZero)
+                    : null,
+                MarginSampleLines = marginSamples.Count,
+                TotalQuoteLines = marginRows.Count,
+                GeneratedAt = now
+            };
+        }
+
+        // ════════════════════════════════════════════════════════════════════
+        // Shared status/SLA resolution helpers (Wave B)
+        // ════════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Resolves every SetupMaster id carrying a status, by SetupType + SetupCode
+        /// (falling back to a case-insensitive SetupValue match for tenants whose
+        /// rows have no code), then appends the documented legacy id so
+        /// pre-SetupMaster tenants keep working — the exact pattern of
+        /// SlaSweepWorker.GetStatusIdsAsync / QuoteService.LegacyQuoteStatusIds.
+        /// Never queries by magic id alone.
+        /// </summary>
+        private async Task<List<long>> ResolveStatusIdsAsync(string setupType, string setupCode, string displayValue, long? legacyId)
+        {
+            var typeLower = setupType.ToLowerInvariant();
+            var valueLower = displayValue.ToLowerInvariant();
+
+            var ids = await _context.SetupMasters.AsNoTracking()
+                .Where(s => s.SetupType.ToLower() == typeLower
+                            && (s.SetupCode == setupCode || s.SetupValue.ToLower() == valueLower))
+                .Select(s => s.SetupId)
+                .ToListAsync();
+
+            if (legacyId.HasValue && !ids.Contains(legacyId.Value)) ids.Add(legacyId.Value);
+            return ids;
+        }
+
+        /// <summary>The BU's configured stale threshold, or the SLA default (7 days).</summary>
+        private async Task<int> GetStaleQuoteDaysAsync(long businessUnitId)
+        {
+            return await _context.Set<ERP_RFQ_Automation.Sla.SlaPolicy>().AsNoTracking()
+                .Where(p => p.BusinessUnitId == businessUnitId)
+                .Select(p => (int?)p.StaleQuoteDays)
+                .FirstOrDefaultAsync()
+                ?? ERP_RFQ_Automation.Sla.SlaPolicy.Default(businessUnitId).StaleQuoteDays;
+        }
+
+        private static decimal Round2(decimal v) => Math.Round(v, 2, MidpointRounding.AwayFromZero);
     }
 }

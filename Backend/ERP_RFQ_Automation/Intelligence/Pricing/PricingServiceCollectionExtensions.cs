@@ -14,6 +14,14 @@ public static class PricingServiceCollectionExtensions
     public static IServiceCollection AddPricingIntelligence(this IServiceCollection services)
     {
         services.AddScoped<IPricingEngine, PricingEngine>();
+
+        // WP-B3 below-floor control: detection + hold creation reused by the
+        // pricing controller and QuoteService's send path. Registered here (this
+        // extension is already spliced into Program.cs) so no new splice is needed.
+        // The ApproveBelowFloorQuoteTool executor is NOT registered here — same
+        // convention as the other pricing tools; line lives in Sla/WAVEB-WIRING.md.
+        services.AddScoped<IBelowFloorGuard, BelowFloorGuard>();
+
         return services;
     }
 }

@@ -47,9 +47,15 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useTranslation();
-  const { hasPermission } = useAuth();
-  
+  const { hasPermission, userData } = useAuth();
+
+  // Mirrors the backend RoleGate rule (role name contains admin/manager). The
+  // server still enforces this on the workload endpoint; hiding the entry just
+  // avoids showing reps a manager-only page.
+  const isManager = /admin|manager/i.test(userData?.roleName ?? '');
+
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
+    'dashboard': location.pathname.startsWith('/dashboard'),
     'rfq_mgmt': location.pathname.includes('/rfqs'),
     'setup': location.pathname.includes('/setup'),
     'security': location.pathname.includes('/security'),
@@ -65,7 +71,20 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
 
   const menuItems: MenuItem[] = useMemo(() => {
     const rawItems: MenuItem[] = [
-      { key: 'dashboard', label: t('dashboard'), icon: <DashboardIcon />, path: '/dashboard', moduleName: 'Dashboard' },
+      // Managers get a Dashboard group with the WP-B1 Team Workload view;
+      // everyone else keeps the familiar one-click Dashboard item.
+      isManager
+        ? {
+            key: 'dashboard',
+            label: t('dashboard'),
+            icon: <DashboardIcon />,
+            moduleName: 'Dashboard',
+            children: [
+              { key: 'dashboard-overview', label: t('dashboard'), path: '/dashboard', moduleName: 'Dashboard' },
+              { key: 'dashboard-team', label: t('team_workload', 'Team Workload'), path: '/dashboard/team', moduleName: 'Dashboard' },
+            ],
+          }
+        : { key: 'dashboard', label: t('dashboard'), icon: <DashboardIcon />, path: '/dashboard', moduleName: 'Dashboard' },
       {
         key: 'copilot',
         // NOTE: these keys are missing from i18n resources, so t('copilot')
@@ -172,7 +191,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
       }
       return !item.moduleName || hasPermission(item.moduleName);
     });
-  }, [t, hasPermission]);
+  }, [t, hasPermission, isManager]);
 
   const renderMenuItem = (item: MenuItem) => {
     const hasChildren = !!item.children;

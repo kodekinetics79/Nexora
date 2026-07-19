@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Box, Typography, Paper, Grid, Stack, Button, Chip,
   Table, TableHead, TableRow, TableCell, TableBody,
-  Divider, CircularProgress, IconButton, Card, CardContent, Tooltip
+  Divider, CircularProgress, IconButton, Card, CardContent, Tooltip, Alert
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
@@ -14,10 +14,12 @@ import {
   Send as SendIcon,
   ShoppingCart as OrderIcon,
   EmojiEvents as OutcomeIcon,
-  MarkEmailRead as RespondedIcon
+  MarkEmailRead as RespondedIcon,
+  ContentCopy as ReviseIcon
 } from '@mui/icons-material';
 import quoteService from '../../../api/services/quoteService';
 import QuoteOutcomeDialog from './QuoteOutcomeDialog';
+import EmailPromptDialog from '../../../components/common/EmailPromptDialog';
 import orderService from '../../../api/services/orderService';
 import { useAuth } from '../../../context/AuthContext';
 import dayjs from 'dayjs';
@@ -42,6 +44,45 @@ const QuoteViewPage: React.FC = () => {
       toast.success('Status updated successfully');
       queryClient.invalidateQueries({ queryKey: ['quote-detail', id] });
     }
+  });
+
+  // WP-B4 revisions-lite: chain facts drive the "Rev n" chip + Revise button.
+  const { data: revisionInfo } = useQuery({
+    queryKey: ['quote-revisions', id],
+    queryFn: () => quoteService.getRevisionInfo(Number(id)),
+    enabled: !!id
+  });
+
+  const reviseMutation = useMutation({
+    mutationFn: () => quoteService.revise(Number(id)),
+    onSuccess: (draft) => {
+      toast.success(`Revision ${draft.quoteNo} created — you are now editing the new draft`);
+      queryClient.invalidateQueries({ queryKey: ['quote-revisions', id] });
+      queryClient.invalidateQueries({ queryKey: ['quotes'] });
+      navigate(`/sales/quotes/edit/${draft.id}`);
+    },
+    onError: (error: any) => {
+      const message = error?.response?.data?.message || 'This quote cannot be revised.';
+      toast.error(message, { duration: 6000 });
+    }
+  });
+
+  // WP-B3: quote-send with below-floor hold awareness.
+  const [emailOpen, setEmailOpen] = React.useState(false);
+  const [holdInfo, setHoldInfo] = React.useState<string | null>(null);
+  const sendMutation = useMutation({
+    mutationFn: (recipientEmail: string) => quoteService.sendEmail(Number(id), recipientEmail),
+    onSuccess: (result) => {
+      setEmailOpen(false);
+      if (result.held) {
+        setHoldInfo(result.message || null);
+        toast('Sent for approval — pricing is below your floor. Track it in Approvals.', { icon: '⏳', duration: 6000 });
+      } else {
+        toast.success('Quote emailed to the customer');
+        queryClient.invalidateQueries({ queryKey: ['quote-detail', id] });
+      }
+    },
+    onError: () => toast.error('Failed to send the quote email')
   });
 
   // WP-A4: outcome capture + "customer responded" stamp.
@@ -87,6 +128,30 @@ const QuoteViewPage: React.FC = () => {
             <IconButton onClick={() => navigate('/sales/quotes')} size="small"><BackIcon /></IconButton>
             <Typography variant="h4" sx={{ fontWeight: 900, letterSpacing: '-0.02em' }}>Quote: {quote.quoteNo}</Typography>
             <Chip label={quote.statusValue} color={quote.statusValue === 'Sent' ? 'success' : quote.statusValue === 'Accepted' ? 'primary' : 'default'} sx={{ fontWeight: 900, height: 28, borderRadius: 1.5 }} />
+            {revisionInfo && revisionInfo.revisionNo > 1 && revisionInfo.revisionOfQuoteNo && (
+              <Tooltip title={`This quote is revision ${revisionInfo.revisionNo} and replaces ${revisionInfo.revisionOfQuoteNo}`}>
+                <Chip
+                  label={`Rev ${revisionInfo.revisionNo} · replaces ${revisionInfo.revisionOfQuoteNo}`}
+                  color="info"
+                  variant="outlined"
+                  size="small"
+                  onClick={revisionInfo.revisionOfQuoteId ? () => navigate(`/sales/quotes/view/${revisionInfo.revisionOfQuoteId}`) : undefined}
+                  sx={{ fontWeight: 900, height: 28, borderRadius: 1.5 }}
+                />
+              </Tooltip>
+            )}
+            {revisionInfo?.supersededByQuoteNo && (
+              <Tooltip title="A newer revision replaces this quote — open it">
+                <Chip
+                  label={`Superseded by ${revisionInfo.supersededByQuoteNo}`}
+                  color="warning"
+                  variant="outlined"
+                  size="small"
+                  onClick={() => navigate(`/sales/quotes/view/${revisionInfo.supersededByQuoteId}`)}
+                  sx={{ fontWeight: 900, height: 28, borderRadius: 1.5 }}
+                />
+              </Tooltip>
+            )}
             {quote.outcomeOn && (
               <Tooltip title={[quote.outcomeReasonName, quote.outcomeNote].filter(Boolean).join(' — ') || 'No reason recorded'}>
                 <Chip
@@ -126,15 +191,31 @@ const QuoteViewPage: React.FC = () => {
           >
             Export PDF
           </Button>
-          <Button 
-            variant="outlined" 
-            startIcon={<EmailIcon />} 
+          <Button
+            variant="outlined"
+            startIcon={<EmailIcon />}
             disabled={quote.statusValue?.toUpperCase() === 'ORDERED'}
+            onClick={() => setEmailOpen(true)}
             sx={{ borderRadius: 2 }}
           >
             Email
           </Button>
-          
+
+          {revisionInfo?.canRevise && (
+            <Tooltip title="Create a new draft revision of this quote (the original stays untouched)">
+              <Button
+                variant="outlined"
+                color="info"
+                startIcon={reviseMutation.isPending ? <CircularProgress size={18} /> : <ReviseIcon />}
+                onClick={() => reviseMutation.mutate()}
+                disabled={reviseMutation.isPending}
+                sx={{ borderRadius: 2, fontWeight: 800 }}
+              >
+                Revise
+              </Button>
+            </Tooltip>
+          )}
+
           {quote.statusValue === 'Draft' && <Button variant="contained" startIcon={<SendIcon />} onClick={() => statusMutation.mutate('Sent')} sx={{ borderRadius: 2 }}>Finalize</Button>}
 
           {quote.statusValue === 'Sent' && (
@@ -176,6 +257,22 @@ const QuoteViewPage: React.FC = () => {
           )}
         </Stack>
       </Stack>
+
+      {holdInfo !== null && (
+        <Alert
+          severity="info"
+          onClose={() => setHoldInfo(null)}
+          action={
+            <Button color="inherit" size="small" sx={{ fontWeight: 800 }} onClick={() => navigate('/copilot/approvals')}>
+              Open Approvals
+            </Button>
+          }
+          sx={{ mb: 3, borderRadius: 2, fontWeight: 600 }}
+        >
+          Sent for approval — pricing is below your floor. Track it in Approvals.
+          {holdInfo ? ` (${holdInfo})` : ''}
+        </Alert>
+      )}
 
       <Grid container spacing={3}>
         <Grid size={{ xs: 12, md: 8 }}>
@@ -248,6 +345,17 @@ const QuoteViewPage: React.FC = () => {
         quoteId={Number(id)}
         quoteNo={quote.quoteNo}
         invalidateKeys={[['quote-detail', id], ['quotes']]}
+      />
+
+      <EmailPromptDialog
+        open={emailOpen}
+        title={`Email quote ${quote.quoteNo}`}
+        initialEmail={quote.customerEmail || ''}
+        loading={sendMutation.isPending}
+        businessUnitId={businessUnitId}
+        customerId={quote.customerId ?? null}
+        onCancel={() => setEmailOpen(false)}
+        onConfirm={(email) => sendMutation.mutate(email)}
       />
     </Box>
   );

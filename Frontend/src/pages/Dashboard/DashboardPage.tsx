@@ -12,6 +12,7 @@ import { composeClauses, composeOvernightClause, greetingForHour, type BriefingI
 import BriefingHero from './components/BriefingHero';
 import ActionQueue, { type DeadlineRow } from './components/ActionQueue';
 import PipelineSnapshot from './components/PipelineSnapshot';
+import PipelinePanel from './components/PipelinePanel';
 import TrendTiles from './components/TrendTiles';
 import AiPulseStrip from './components/AiPulseStrip';
 import { asRealDate } from './components/dashboardTheme';
@@ -257,6 +258,11 @@ export default function DashboardPage() {
               actionsHeld={approvals.data?.length}
               isLoading={core.isLoading && needsReview.isLoading}
             />
+          </Box>
+
+          {/* WP-B2: pipeline analytics — additive card below the existing bento. */}
+          <Box sx={{ gridColumn: { xs: 'auto', lg: '1 / -1' }, minWidth: 0 }}>
+            <PipelinePanel />
           </Box>
         </Box>
       </Box>

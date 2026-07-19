@@ -40,6 +40,8 @@ const TOOLS: Record<string, HumanTool> = {
   convert_lead_to_rfq: { icon: '📄', label: 'Converted a lead to an RFQ', action: 'convert this lead into an RFQ' },
   price_rfq: { icon: '💡', label: 'Suggested pricing', action: 'suggest pricing for this RFQ' },
   apply_rfq_pricing: { icon: '💰', label: 'Applied pricing', action: 'apply the suggested pricing to this RFQ' },
+  // WP-B3: below-floor holds (created by the pricing/send guards, executed on approve)
+  approve_below_floor_quote: { icon: '💰', label: 'Approve below-floor pricing', action: 'approve this below-floor quote' },
 };
 
 /** snake_case / kebab-case → "Title Case". */

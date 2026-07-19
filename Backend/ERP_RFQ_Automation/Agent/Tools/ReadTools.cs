@@ -27,6 +27,64 @@ internal static class ToolSchemas
         var size = Math.Clamp(input.GetInt32("pageSize", 10), 1, 50);
         return (page, size);
     }
+
+    /// <summary>Extraction sentinel floor — dates before this year are "unknown", never overdue.</summary>
+    public const int SentinelYearFloor = 2000;
+
+    private static string EscapeLike(string s) =>
+        s.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
+
+    /// <summary>
+    /// WP-B1: resolves an "assignedTo" name-or-email substring against the
+    /// tenant's active users. Returns matched user ids plus the identity strings
+    /// (email and "First Last") a Quote.CreatedBy may carry — the same owner
+    /// convention as the SLA stale-quote digest.
+    /// </summary>
+    public static async Task<(List<long> UserIds, List<string> Identities)> ResolveAssigneesAsync(
+        ErpRfqAutomationContext db, long businessUnitId, string term, CancellationToken ct)
+    {
+        var pattern = $"%{EscapeLike(term.Trim())}%";
+        var users = await db.Users.AsNoTracking()
+            .Where(u => u.Buid == businessUnitId && u.IsActive != false)
+            .Where(u => EF.Functions.ILike(u.FirstName + " " + u.LastName, pattern, "\\")
+                        || EF.Functions.ILike(u.Email, pattern, "\\"))
+            .Select(u => new { u.Id, u.Email, u.FirstName, u.LastName })
+            .ToListAsync(ct);
+
+        var identities = new List<string>();
+        foreach (var u in users)
+        {
+            if (!string.IsNullOrWhiteSpace(u.Email)) identities.Add(u.Email);
+            identities.Add($"{u.FirstName} {u.LastName}".Trim());
+        }
+        return (users.Select(u => u.Id).ToList(), identities);
+    }
+
+    /// <summary>The BU's configured stale-quote threshold, or the SLA default.</summary>
+    public static async Task<int> GetStaleQuoteDaysAsync(ErpRfqAutomationContext db, long businessUnitId, CancellationToken ct)
+    {
+        return await db.Set<ERP_RFQ_Automation.Sla.SlaPolicy>().AsNoTracking()
+            .Where(p => p.BusinessUnitId == businessUnitId)
+            .Select(p => (int?)p.StaleQuoteDays)
+            .FirstOrDefaultAsync(ct)
+            ?? ERP_RFQ_Automation.Sla.SlaPolicy.Default(businessUnitId).StaleQuoteDays;
+    }
+
+    /// <summary>
+    /// SetupMaster ids for a status code (SetupType + SetupCode — never magic ids
+    /// alone) + the documented legacy fallback id, mirroring
+    /// SlaSweepWorker.GetStatusIdsAsync so pre-SetupMaster tenants still resolve.
+    /// </summary>
+    public static async Task<List<long>> GetStatusIdsAsync(
+        ErpRfqAutomationContext db, string setupType, string code, long? legacyId, CancellationToken ct)
+    {
+        var ids = await db.SetupMasters.AsNoTracking()
+            .Where(s => s.SetupType == setupType && s.SetupCode == code)
+            .Select(s => s.SetupId)
+            .ToListAsync(ct);
+        if (legacyId.HasValue && !ids.Contains(legacyId.Value)) ids.Add(legacyId.Value);
+        return ids;
+    }
 }
 
 public sealed class SearchRfqsTool : IAgentTool
@@ -158,19 +216,68 @@ public sealed class SearchLeadsTool : IAgentTool
     public SearchLeadsTool(ErpRfqAutomationContext db) => _db = db;
 
     public string Name => AgentToolNames.SearchLeads;
-    public string Description => "Search inbound leads by RFQ number or buyer name.";
-    public string InputJsonSchema => ToolSchemas.Search;
+    public string Description =>
+        "Search inbound leads by RFQ number or buyer name. Optional filters: assignedTo " +
+        "(a rep's name or email substring, e.g. \"Tomas\" — resolves who the lead is assigned to), " +
+        "overdueOnly (bid closing date already passed), staleOnly (accepted leads that have produced " +
+        "no RFQ for longer than the tenant's stale threshold).";
+    public string InputJsonSchema =>
+        "{\"type\":\"object\",\"properties\":{" +
+        "\"query\":{\"type\":\"string\",\"description\":\"Free-text filter on RFQ number or buyer name\"}," +
+        "\"assignedTo\":{\"type\":\"string\",\"description\":\"Rep name or email substring; only leads assigned to matching users\"}," +
+        "\"overdueOnly\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Only leads whose bid closing date is already in the past (real dates only)\"}," +
+        "\"staleOnly\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Only accepted leads with no RFQ created yet, older than the tenant's stale threshold\"}," +
+        "\"page\":{\"type\":\"integer\",\"minimum\":1,\"default\":1}," +
+        "\"pageSize\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":50,\"default\":10}}}";
     public bool IsMutation => false;
 
     public async Task<AgentToolResult> ExecuteAsync(JsonElement input, AgentToolContext ctx, CancellationToken ct)
     {
         var q = input.GetStringOrNull("query");
+        var assignedTo = input.GetStringOrNull("assignedTo");
+        var overdueOnly = input.GetBool("overdueOnly");
+        var staleOnly = input.GetBool("staleOnly");
         var (page, size) = ToolSchemas.Paging(input);
+        var now = DateTime.UtcNow;
 
+        // The tenant-scoped context's global query filter constrains rows to the
+        // caller's BU; the extra filters below only narrow further.
         var query = _db.Set<Lead>().AsNoTracking();
         if (!string.IsNullOrWhiteSpace(q))
             query = query.Where(l => (l.Rfqno != null && EF.Functions.ILike(l.Rfqno, $"%{q}%"))
                                      || (l.BuyersName != null && EF.Functions.ILike(l.BuyersName, $"%{q}%")));
+
+        if (!string.IsNullOrWhiteSpace(assignedTo))
+        {
+            var (userIds, _) = await ToolSchemas.ResolveAssigneesAsync(_db, ctx.BusinessUnitId, assignedTo, ct);
+            if (userIds.Count == 0)
+                return AgentToolResult.Ok(new
+                {
+                    total = 0, page, pageSize = size, items = Array.Empty<object>(),
+                    note = $"No user in this tenant matched '{assignedTo}'."
+                });
+            query = query.Where(l => l.AssignTo != null && userIds.Contains(l.AssignTo.Value));
+        }
+
+        if (overdueOnly)
+            query = query.Where(l => l.BidClosingDate != null
+                                     && l.BidClosingDate.Value.Year >= ToolSchemas.SentinelYearFloor
+                                     && l.BidClosingDate < now
+                                     && l.LeadRejectedReasonId == null);
+
+        if (staleOnly)
+        {
+            // Stale lead = accepted, never rejected, no RFQ produced yet, and
+            // older than the tenant's stale threshold (age from assignment when
+            // known, else last touch, else creation).
+            var acceptedIds = await ToolSchemas.GetStatusIdsAsync(_db, "LeadStatus", "ACCEPTED", legacyId: 24, ct);
+            var staleDays = await ToolSchemas.GetStaleQuoteDaysAsync(_db, ctx.BusinessUnitId, ct);
+            var cutoff = now.AddDays(-staleDays);
+            query = query.Where(l => l.LeadStatusId != null && acceptedIds.Contains(l.LeadStatusId.Value)
+                                     && l.LeadRejectedReasonId == null
+                                     && !l.Rfqs.Any()
+                                     && (l.AssignOn ?? l.ModifiedDate ?? l.CreatedDate) < cutoff);
+        }
 
         var total = await query.CountAsync(ct);
         var rows = await query
@@ -183,8 +290,12 @@ public sealed class SearchLeadsTool : IAgentTool
                 buyer = l.BuyersName,
                 source = l.LeadSource,
                 recDate = l.RecDate,
+                bidClosingDate = l.BidClosingDate,
                 confidence = l.Aiconfidence,
-                status = l.LeadStatus != null ? l.LeadStatus.SetupValue : null
+                status = l.LeadStatus != null ? l.LeadStatus.SetupValue : null,
+                assignedTo = l.AssignToNavigation != null
+                    ? (l.AssignToNavigation.FirstName + " " + l.AssignToNavigation.LastName)
+                    : null
             })
             .ToListAsync(ct);
 
@@ -198,34 +309,95 @@ public sealed class SearchQuotesTool : IAgentTool
     public SearchQuotesTool(ErpRfqAutomationContext db) => _db = db;
 
     public string Name => AgentToolNames.SearchQuotes;
-    public string Description => "Search quotations by quote number. Returns totals and validity.";
-    public string InputJsonSchema => ToolSchemas.Search;
+    public string Description =>
+        "Search quotations by quote number. Returns totals, validity and staleness. Optional filters: " +
+        "assignedTo (a rep's name or email substring, e.g. \"Tomas\" — resolves the quote's owner), " +
+        "overdueOnly (validity date passed with no outcome recorded), staleOnly (sent quotes the " +
+        "customer has not answered for longer than the tenant's stale threshold).";
+    public string InputJsonSchema =>
+        "{\"type\":\"object\",\"properties\":{" +
+        "\"query\":{\"type\":\"string\",\"description\":\"Free-text filter on quote number\"}," +
+        "\"assignedTo\":{\"type\":\"string\",\"description\":\"Rep name or email substring; only quotes owned by matching users\"}," +
+        "\"overdueOnly\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Only quotes whose validity date has passed with no outcome recorded\"}," +
+        "\"staleOnly\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Only SENT quotes with no customer response past the tenant's stale threshold\"}," +
+        "\"page\":{\"type\":\"integer\",\"minimum\":1,\"default\":1}," +
+        "\"pageSize\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":50,\"default\":10}}}";
     public bool IsMutation => false;
 
     public async Task<AgentToolResult> ExecuteAsync(JsonElement input, AgentToolContext ctx, CancellationToken ct)
     {
         var q = input.GetStringOrNull("query");
+        var assignedTo = input.GetStringOrNull("assignedTo");
+        var overdueOnly = input.GetBool("overdueOnly");
+        var staleOnly = input.GetBool("staleOnly");
         var (page, size) = ToolSchemas.Paging(input);
+        var now = DateTime.UtcNow;
 
+        var staleDays = await ToolSchemas.GetStaleQuoteDaysAsync(_db, ctx.BusinessUnitId, ct);
+
+        // The tenant-scoped context's global query filter constrains rows to the
+        // caller's BU; the extra filters below only narrow further.
         var query = _db.Set<Quote>().AsNoTracking();
         if (!string.IsNullOrWhiteSpace(q))
             query = query.Where(x => EF.Functions.ILike(x.QuoteNo, $"%{q}%"));
 
+        if (!string.IsNullOrWhiteSpace(assignedTo))
+        {
+            // Quote ownership is Quote.CreatedBy free text (email or "First Last"
+            // — the SLA digest convention). Match resolved user identities exactly
+            // plus the raw substring, so partially-typed names still resolve.
+            var (_, identities) = await ToolSchemas.ResolveAssigneesAsync(_db, ctx.BusinessUnitId, assignedTo, ct);
+            var pattern = $"%{assignedTo.Trim()}%";
+            query = query.Where(x => identities.Contains(x.CreatedBy)
+                                     || EF.Functions.ILike(x.CreatedBy, pattern));
+        }
+
+        if (overdueOnly)
+            query = query.Where(x => x.ValidUntil != null && x.ValidUntil < now && x.OutcomeOn == null);
+
+        if (staleOnly)
+        {
+            var sentIds = await ToolSchemas.GetStatusIdsAsync(_db, "QuoteStatus", "SENT", legacyId: 43, ct);
+            var cutoff = now.AddDays(-staleDays);
+            query = query.Where(x => x.StatusId != null && sentIds.Contains(x.StatusId.Value)
+                                     && x.SentOn != null && x.RespondedOn == null
+                                     && x.SentOn < cutoff);
+        }
+
         var total = await query.CountAsync(ct);
-        var rows = await query
+        var fetched = await query
             .OrderByDescending(x => x.QuoteDate)
             .Skip((page - 1) * size).Take(size)
             .Select(x => new
             {
                 x.Id,
-                quoteNo = x.QuoteNo,
-                rfqId = x.Rfqid,
-                totalAmount = x.TotalAmount,
-                quoteDate = x.QuoteDate,
-                validUntil = x.ValidUntil,
-                status = x.Status != null ? x.Status.SetupValue : null
+                x.QuoteNo,
+                x.Rfqid,
+                x.TotalAmount,
+                x.QuoteDate,
+                x.ValidUntil,
+                x.SentOn,
+                x.RespondedOn,
+                x.CreatedBy,
+                StatusValue = x.Status != null ? x.Status.SetupValue : null,
+                StatusCode = x.Status != null ? x.Status.SetupCode : null
             })
             .ToListAsync(ct);
+
+        var rows = fetched.Select(x => new
+        {
+            id = x.Id,
+            quoteNo = x.QuoteNo,
+            rfqId = x.Rfqid,
+            totalAmount = x.TotalAmount,
+            quoteDate = x.QuoteDate,
+            validUntil = x.ValidUntil,
+            sentOn = x.SentOn,
+            owner = x.CreatedBy,
+            status = x.StatusValue,
+            isStale = ERP_RFQ_Automation.Sla.SlaComputed.IsStale(x.StatusCode, x.SentOn, x.RespondedOn, staleDays, now),
+            daysSinceSent = ERP_RFQ_Automation.Sla.SlaComputed.DaysSinceSent(x.SentOn, now)
+        }).ToList();
 
         return AgentToolResult.Ok(new { total, page, pageSize = size, items = rows });
     }

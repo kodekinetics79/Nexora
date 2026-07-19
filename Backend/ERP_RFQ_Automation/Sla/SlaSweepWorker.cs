@@ -328,43 +328,146 @@ public sealed class SlaSweepWorker : BackgroundService
             _log.LogWarning("BU {Bu}: {Count} stale quote(s) whose CreatedBy did not match a user; digest skipped for those.", bu, unresolved);
     }
 
-    // ---------------- 5. pending approval escalation ----------------
+    // ---------------- 5. pending approval escalation (WP-B3 escalation clock) ----------------
 
+    /// <summary>
+    /// Escalates approvals still pending at
+    ///   min(CreatedOn + ApprovalEscalationHours, BidClosingDate − DeadlineBufferHours)
+    /// — the deadline term applies to holds that resolve to an RFQ with a real
+    /// bid-closing date (below-floor quote holds); approvals with no resolvable
+    /// deadline use the plain age rule, exactly as before. The requester's own
+    /// manager (Users.ManagerId) is notified first; when no manager can be
+    /// resolved the tenant's managers/admins are the fallback audience. Send-once
+    /// via the (BU, "approval", guid-key, "escalated") SlaEvent — the below-floor
+    /// guard stamps the same event when it escalates at creation time (deadline
+    /// already inside the buffer), so the two paths never double-notify.
+    /// </summary>
     private async Task SweepPendingApprovalsAsync(
         ErpRfqAutomationContext db, ISlaNotifications notifications, long bu, SlaPolicy policy, CancellationToken ct)
     {
-        var cutoff = DateTime.UtcNow.AddHours(-policy.ApprovalEscalationHours);
+        var now = DateTime.UtcNow;
 
         var pending = await db.Set<AgentApproval>().AsNoTracking().IgnoreQueryFilters()
-            .Where(a => a.BusinessUnitId == bu
-                        && a.Status == AgentApprovalStatus.Pending
-                        && a.CreatedOn < cutoff)
-            .Select(a => new { a.Id, a.ToolName, a.Summary, a.CreatedOn })
+            .Where(a => a.BusinessUnitId == bu && a.Status == AgentApprovalStatus.Pending)
+            .Select(a => new { a.Id, a.ToolName, a.Summary, a.CreatedOn, a.RequestedByUserId, a.RequestedBy, a.InputJson })
             .ToListAsync(ct);
         if (pending.Count == 0) return;
 
-        var recipients = await GetManagersAndAdminsAsync(db, bu, ct);
-        if (recipients.Count == 0) return;
+        List<Recipient>? fallbackRecipients = null; // lazy — only fetched when needed
 
         foreach (var approval in pending)
         {
+            // Escalation moment: age rule, pulled earlier by the RFQ deadline buffer
+            // when the hold carries one.
+            var escalateAt = approval.CreatedOn.AddHours(policy.ApprovalEscalationHours);
+            var deadline = await ResolveApprovalDeadlineAsync(db, bu, approval.ToolName, approval.InputJson, ct);
+            if (deadline.HasValue)
+            {
+                var bufferEdge = deadline.Value.AddHours(-policy.DeadlineBufferHours);
+                if (bufferEdge < escalateAt) escalateAt = bufferEdge;
+            }
+            if (now < escalateAt) continue;
+
             // SlaEvent.EntityId is a bigint; approval ids are Guids, so a stable
             // 64-bit key is derived from the Guid's first 8 bytes (dedup only —
             // never used to look the approval back up).
             var entityKey = BitConverter.ToInt64(approval.Id.ToByteArray(), 0);
             if (await EventExistsAsync(db, bu, "approval", entityKey, "escalated", ct)) continue;
 
+            // Requester's manager first (Users.ManagerId); managers/admins as fallback.
+            var recipients = await ResolveRequesterManagerAsync(db, bu, approval.RequestedByUserId, approval.RequestedBy, ct);
+            if (recipients.Count == 0)
+            {
+                fallbackRecipients ??= await GetManagersAndAdminsAsync(db, bu, ct);
+                recipients = fallbackRecipients;
+            }
+            if (recipients.Count == 0) continue; // nobody to tell — retry next sweep
+
             var label = $"Copilot approval: {approval.ToolName}";
+            var deadlineNote = deadline.HasValue
+                ? $" The linked RFQ's bid closes on {deadline.Value:dd MMM yyyy HH:mm} UTC, inside the {policy.DeadlineBufferHours}-hour safety buffer."
+                : $" It has been pending for more than {policy.ApprovalEscalationHours} hour(s).";
+
             foreach (var r in recipients)
             {
                 await notifications.SendDeadlineAlertAsync(r.Email, r.FirstName, "escalated", label,
                     "A copilot action has been waiting for approval",
-                    $"\"{approval.Summary ?? approval.ToolName}\" has been pending since {approval.CreatedOn:dd MMM yyyy HH:mm} UTC (more than {policy.ApprovalEscalationHours} hour(s)). Please approve or reject it.",
+                    $"\"{approval.Summary ?? approval.ToolName}\" (requested by {approval.RequestedBy ?? "unknown"}) has been pending since " +
+                    $"{approval.CreatedOn:dd MMM yyyy HH:mm} UTC.{deadlineNote} Please approve or reject it.",
                     bu, ct);
             }
 
             await RecordEventAsync(db, bu, "approval", entityKey, "escalated", ct);
         }
+    }
+
+    /// <summary>
+    /// The external deadline behind an approval, when one exists: below-floor
+    /// holds (WP-B3) carry rfqId/quoteId in their InputJson → RFQ.BidClosingDate
+    /// (real dates only, year ≥ 2000 — sentinel convention). Any parse/lookup
+    /// problem simply means "no deadline".
+    /// </summary>
+    private async Task<DateTime?> ResolveApprovalDeadlineAsync(
+        ErpRfqAutomationContext db, long bu, string toolName, string? inputJson, CancellationToken ct)
+    {
+        if (toolName != "approve_below_floor_quote" || string.IsNullOrWhiteSpace(inputJson)) return null;
+
+        try
+        {
+            long? rfqId = null;
+            using (var doc = System.Text.Json.JsonDocument.Parse(inputJson))
+            {
+                var root = doc.RootElement;
+                if (root.ValueKind != System.Text.Json.JsonValueKind.Object) return null;
+
+                if (root.TryGetProperty("rfqId", out var rfqEl) && rfqEl.TryGetInt64(out var rid))
+                    rfqId = rid;
+                else if (root.TryGetProperty("quoteId", out var quoteEl) && quoteEl.TryGetInt64(out var qid))
+                {
+                    rfqId = await db.Quotes.AsNoTracking().IgnoreQueryFilters()
+                        .Where(q => q.Id == qid && q.BusinessUnitId == bu)
+                        .Select(q => q.Rfqid)
+                        .FirstOrDefaultAsync(ct);
+                }
+            }
+            if (rfqId is null) return null;
+
+            var bidClosing = await db.Rfqs.AsNoTracking().IgnoreQueryFilters()
+                .Where(r => r.Id == rfqId.Value && r.BusinessUnitId == bu)
+                .Select(r => r.BidClosingDate)
+                .FirstOrDefaultAsync(ct);
+
+            return bidClosing.HasValue && bidClosing.Value.Year >= 2000 ? bidClosing : null;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            _log.LogDebug(ex, "BU {Bu}: could not resolve a deadline for a pending approval; using the age rule.", bu);
+            return null;
+        }
+    }
+
+    /// <summary>The requester's manager (via Users.ManagerId), as a 0/1-element recipient list.</summary>
+    private static async Task<List<Recipient>> ResolveRequesterManagerAsync(
+        ErpRfqAutomationContext db, long bu, long? requestedByUserId, string? requestedBy, CancellationToken ct)
+    {
+        // Requester by id first, then by email (AgentToolContext.UserName is the email claim).
+        var requester = await db.Users.AsNoTracking()
+            .Where(u => (requestedByUserId != null && u.Id == requestedByUserId)
+                        || (requestedBy != null && u.Email == requestedBy))
+            .Where(u => u.Buid == null || u.Buid == bu)
+            .Select(u => new { u.ManagerId })
+            .FirstOrDefaultAsync(ct);
+        if (requester?.ManagerId is null) return new List<Recipient>();
+
+        var manager = await db.Users.AsNoTracking()
+            .Where(u => u.Id == requester.ManagerId.Value && u.IsActive != false)
+            .Select(u => new { u.Id, u.Email, u.FirstName })
+            .FirstOrDefaultAsync(ct);
+
+        return manager is null || string.IsNullOrWhiteSpace(manager.Email)
+            ? new List<Recipient>()
+            : new List<Recipient> { new(manager.Id, manager.Email, manager.FirstName) };
     }
 
     // ---------------- shared helpers ----------------

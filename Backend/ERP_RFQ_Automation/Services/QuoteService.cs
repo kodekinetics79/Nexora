@@ -16,10 +16,29 @@ namespace ERP_RFQ_Automation.Services
     public interface IQuoteService
     {
         Task<byte[]> GenerateQuotePdfAsync(long quoteId);
-        Task SendQuoteEmailAsync(long quoteId, string recipientEmail, string? customSubject = null, string? customBody = null);
+
+        /// <summary>
+        /// Emails the quote PDF and stamps SENT/SentOn — unless a line is priced
+        /// below its pricing-engine floor (WP-B3), in which case NOTHING is sent:
+        /// the send is parked as a pending approve_below_floor_quote approval and
+        /// the result says so. options.BypassFloorHold (approved-hold execution
+        /// only) skips the check.
+        /// </summary>
+        Task<QuoteSendResult> SendQuoteEmailAsync(long quoteId, string recipientEmail, string? customSubject = null, string? customBody = null, QuoteSendOptions? options = null);
         Task<QuoteResponseDTO> CreateQuoteAsync(QuoteCreateRequestDTO request);
         Task<QuoteResponseDTO> UpdateQuoteAsync(long id, QuoteUpdateRequestDTO request);
         Task<QuoteResponseDTO> TransitionStatusAsync(long id, string statusCode, string modifiedBy);
+
+        /// <summary>
+        /// Revisions-lite (WP-B4): clones a non-DRAFT quote (+items) as a new DRAFT
+        /// revision (RevisionNo+1, linked back via RevisionOfQuoteId). Throws
+        /// InvalidOperationException (→ 409) when the quote is a draft, already
+        /// superseded, or its chain is locked by a recorded outcome.
+        /// </summary>
+        Task<QuoteResponseDTO> ReviseQuoteAsync(long quoteId, long businessUnitId, string actor);
+
+        /// <summary>Revision-chain facts for one quote (chip + Revise button state).</summary>
+        Task<QuoteRevisionInfoDTO> GetRevisionInfoAsync(long quoteId, long businessUnitId);
     }
 
     public class QuoteService : IQuoteService
@@ -27,12 +46,21 @@ namespace ERP_RFQ_Automation.Services
         private readonly ErpRfqAutomationContext _context;
         private readonly IEmailService _emailService;
         private readonly IQuoteConfigurationRepository _quoteConfigRepository;
+        private readonly ERP_RFQ_Automation.Intelligence.Pricing.IBelowFloorGuard? _belowFloorGuard;
 
-        public QuoteService(ErpRfqAutomationContext context, IEmailService emailService, IQuoteConfigurationRepository quoteConfigRepository)
+        // The below-floor guard is optional (defaults to null) so existing direct
+        // constructions (tests, pre-wiring DI) keep working; without it the send
+        // path simply performs no floor check (pre-WP-B3 behaviour).
+        public QuoteService(
+            ErpRfqAutomationContext context,
+            IEmailService emailService,
+            IQuoteConfigurationRepository quoteConfigRepository,
+            ERP_RFQ_Automation.Intelligence.Pricing.IBelowFloorGuard? belowFloorGuard = null)
         {
             _context = context;
             _emailService = emailService;
             _quoteConfigRepository = quoteConfigRepository;
+            _belowFloorGuard = belowFloorGuard;
         }
 
         // Legacy QuoteStatus id map, used ONLY when no matching SetupMaster row is
@@ -742,8 +770,26 @@ namespace ERP_RFQ_Automation.Services
             return document.GeneratePdf();
         }
 
-        public async Task SendQuoteEmailAsync(long quoteId, string recipientEmail, string? customSubject = null, string? customBody = null)
+        public async Task<QuoteSendResult> SendQuoteEmailAsync(long quoteId, string recipientEmail, string? customSubject = null, string? customBody = null, QuoteSendOptions? options = null)
         {
+            options ??= new QuoteSendOptions();
+
+            // WP-B3 below-floor gate: recompute floors for the quote's RFQ and hold
+            // the ENTIRE send when any current line price is under its floor. The
+            // approve_below_floor_quote tool re-enters here with BypassFloorHold=true
+            // once a manager approves, so the held send cannot re-hold itself.
+            if (!options.BypassFloorHold && _belowFloorGuard is not null)
+            {
+                var check = await _belowFloorGuard.CheckQuoteSendAsync(quoteId, CancellationToken.None);
+                if (check.IsBelowFloor)
+                {
+                    var approval = await _belowFloorGuard.CreateSendHoldAsync(
+                        quoteId, recipientEmail, customSubject, customBody, check,
+                        options.RequestedByUserId, options.RequestedBy, CancellationToken.None);
+                    return QuoteSendResult.HeldForApproval(approval.Id, approval.Summary);
+                }
+            }
+
             var pdfBytes = await GenerateQuotePdfAsync(quoteId);
             var quote = await _context.Quotes
                 .Include(q => q.BusinessUnit)
@@ -786,6 +832,178 @@ namespace ERP_RFQ_Automation.Services
             quote.SentOn = DateTime.UtcNow;
             quote.ModifiedDate = DateTime.UtcNow;
             await _context.SaveChangesAsync();
+
+            return QuoteSendResult.Sent();
+        }
+
+        // ==================================================================
+        // Revisions-lite (WP-B4)
+        // ==================================================================
+
+        public async Task<QuoteResponseDTO> ReviseQuoteAsync(long quoteId, long businessUnitId, string actor)
+        {
+            var source = await _context.Quotes
+                .Include(q => q.QuoteItems)
+                .FirstOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId);
+            if (source == null) throw new KeyNotFoundException($"Quote with ID {quoteId} not found.");
+
+            if (await IsQuoteInDraftAsync(source))
+                throw new InvalidOperationException(
+                    $"Quote '{source.QuoteNo}' is still a draft — edit it directly instead of creating a revision.");
+
+            var successor = await _context.Quotes.AsNoTracking()
+                .Where(q => q.RevisionOfQuoteId == quoteId)
+                .Select(q => new { q.QuoteNo, q.RevisionNo })
+                .FirstOrDefaultAsync();
+            if (successor != null)
+                throw new InvalidOperationException(
+                    $"Quote '{source.QuoteNo}' has already been revised as '{successor.QuoteNo}' (Rev {successor.RevisionNo}). " +
+                    "Revise the latest revision instead.");
+
+            // Chain lock: award/outcome on ANY revision closes the whole chain.
+            var chain = await LoadRevisionChainAsync(source.Id, source.RevisionOfQuoteId);
+            var closed = chain.FirstOrDefault(c => c.OutcomeOn.HasValue);
+            if (closed != null)
+                throw new InvalidOperationException(
+                    $"This quote chain is closed — an outcome was already recorded on '{closed.QuoteNo}'. " +
+                    "No further revisions can be created.");
+
+            var now = DateTime.UtcNow;
+            var revision = new Quote
+            {
+                QuoteNo = NextRevisionQuoteNo(source.QuoteNo, source.RevisionNo + 1),
+                Rfqid = source.Rfqid,
+                CustomerId = source.CustomerId,
+                BusinessUnitId = source.BusinessUnitId,
+                QuoteDate = now,
+                ValidUntil = source.ValidUntil,
+                StatusId = await ResolveQuoteStatusIdAsync("DRAFT", source.BusinessUnitId),
+                CurrencyId = source.CurrencyId,
+                HeaderRemarks = source.HeaderRemarks,
+                DiscountTypeId = source.DiscountTypeId,
+                DiscountValue = source.DiscountValue,
+                CreatedBy = actor,
+                CreatedDate = now,
+                RevisionOfQuoteId = source.Id,
+                RevisionNo = source.RevisionNo + 1,
+                QuoteItems = source.QuoteItems.Select(i => new QuoteItem
+                {
+                    RfqitemId = i.RfqitemId,
+                    ProductId = i.ProductId,
+                    ItemDescription = i.ItemDescription,
+                    Quantity = i.Quantity,
+                    UnitPrice = i.UnitPrice,
+                    DiscountTypeId = i.DiscountTypeId,
+                    DiscountValue = i.DiscountValue,
+                    TaxAmount = i.TaxAmount,
+                    DeliveryLeadTime = i.DeliveryLeadTime,
+                    CreatedBy = actor,
+                    CreatedDate = now
+                }).ToList()
+            };
+
+            await CalculateQuoteTotals(revision);
+
+            _context.Quotes.Add(revision);
+            await _context.SaveChangesAsync();
+
+            return await GetQuoteByIdAsync(revision.Id);
+        }
+
+        public async Task<QuoteRevisionInfoDTO> GetRevisionInfoAsync(long quoteId, long businessUnitId)
+        {
+            var quote = await _context.Quotes
+                .FirstOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId);
+            if (quote == null) throw new KeyNotFoundException($"Quote with ID {quoteId} not found.");
+
+            string? predecessorNo = null;
+            if (quote.RevisionOfQuoteId.HasValue)
+            {
+                predecessorNo = await _context.Quotes.AsNoTracking()
+                    .Where(q => q.Id == quote.RevisionOfQuoteId.Value)
+                    .Select(q => q.QuoteNo)
+                    .FirstOrDefaultAsync();
+            }
+
+            var successor = await _context.Quotes.AsNoTracking()
+                .Where(q => q.RevisionOfQuoteId == quoteId)
+                .Select(q => new { q.Id, q.QuoteNo })
+                .FirstOrDefaultAsync();
+
+            var chain = await LoadRevisionChainAsync(quote.Id, quote.RevisionOfQuoteId);
+            var chainLocked = quote.OutcomeOn.HasValue || chain.Any(c => c.OutcomeOn.HasValue);
+            var isDraft = await IsQuoteInDraftAsync(quote);
+
+            return new QuoteRevisionInfoDTO
+            {
+                QuoteId = quote.Id,
+                QuoteNo = quote.QuoteNo,
+                RevisionNo = quote.RevisionNo,
+                RevisionOfQuoteId = quote.RevisionOfQuoteId,
+                RevisionOfQuoteNo = predecessorNo,
+                SupersededByQuoteId = successor?.Id,
+                SupersededByQuoteNo = successor?.QuoteNo,
+                ChainLocked = chainLocked,
+                CanRevise = !isDraft && successor == null && !chainLocked
+            };
+        }
+
+        private sealed record RevisionChainMember(long Id, string QuoteNo, DateTime? OutcomeOn, long? RevisionOfQuoteId);
+
+        /// <summary>
+        /// All members of a quote's revision chain (the quote itself included):
+        /// walks predecessor links up to the root, then successor links down.
+        /// Chains are short (revisions-lite); a visited-set + hop cap guards
+        /// against pathological/cyclic data.
+        /// </summary>
+        private async Task<List<RevisionChainMember>> LoadRevisionChainAsync(long quoteId, long? revisionOfQuoteId)
+        {
+            const int maxHops = 50;
+            var members = new List<RevisionChainMember>();
+            var visited = new HashSet<long> { quoteId };
+
+            // The quote itself.
+            var self = await _context.Quotes.AsNoTracking()
+                .Where(q => q.Id == quoteId)
+                .Select(q => new RevisionChainMember(q.Id, q.QuoteNo, q.OutcomeOn, q.RevisionOfQuoteId))
+                .FirstOrDefaultAsync();
+            if (self != null) members.Add(self);
+
+            // Walk up to the root.
+            var upId = revisionOfQuoteId;
+            for (var hop = 0; upId.HasValue && hop < maxHops; hop++)
+            {
+                if (!visited.Add(upId.Value)) break;
+                var member = await _context.Quotes.AsNoTracking()
+                    .Where(q => q.Id == upId.Value)
+                    .Select(q => new RevisionChainMember(q.Id, q.QuoteNo, q.OutcomeOn, q.RevisionOfQuoteId))
+                    .FirstOrDefaultAsync();
+                if (member == null) break;
+                members.Add(member);
+                upId = member.RevisionOfQuoteId;
+            }
+
+            // Walk down through successors (linked list: one successor per member).
+            long? downId = quoteId;
+            for (var hop = 0; downId.HasValue && hop < maxHops; hop++)
+            {
+                var member = await _context.Quotes.AsNoTracking()
+                    .Where(q => q.RevisionOfQuoteId == downId.Value)
+                    .Select(q => new RevisionChainMember(q.Id, q.QuoteNo, q.OutcomeOn, q.RevisionOfQuoteId))
+                    .FirstOrDefaultAsync();
+                if (member == null || !visited.Add(member.Id)) break;
+                members.Add(member);
+                downId = member.Id;
+            }
+
+            return members;
+        }
+
+        /// <summary>"QT-0725-0003" → "QT-0725-0003-R2"; "QT-0725-0003-R2" → "QT-0725-0003-R3".</summary>
+        private static string NextRevisionQuoteNo(string quoteNo, int revisionNo)
+        {
+            var baseNo = System.Text.RegularExpressions.Regex.Replace(quoteNo ?? "", @"-R\d+$", "");
+            return $"{baseNo}-R{revisionNo}";
         }
 
         public async Task<QuoteResponseDTO> TransitionStatusAsync(long id, string statusCode, string modifiedBy)

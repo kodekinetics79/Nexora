@@ -127,6 +127,58 @@ export interface DecisionSummariesResponse {
   summaries: Record<string, LeadDecisionSummary>;
 }
 
+// ─── GET /api/dashboard/workload (WP-B1, managers only) ─────────────────────
+// Mirrors Backend DTOs/Dashboard/WaveBAnalyticsDTOs.cs.
+
+export interface TeamWorkloadRowDTO {
+  /** Null for the unassigned bucket row. */
+  userId: number | null;
+  name: string;
+  email: string | null;
+  openLeads: number;
+  overdueLeads: number;
+  sentQuotes: number;
+  staleQuotes: number;
+  isUnassignedBucket: boolean;
+}
+
+export interface TeamWorkloadDTO {
+  rows: TeamWorkloadRowDTO[];
+  /** The BU's stale threshold in days (used for the column hint). */
+  staleQuoteDays: number;
+  generatedAt: string;
+}
+
+// ─── GET /api/dashboard/pipeline-analytics (WP-B2) ──────────────────────────
+
+export interface PipelineStageDTO {
+  key: 'leads' | 'accepted' | 'quoted' | 'won';
+  label: string;
+  count: number;
+  value: number;
+}
+
+export interface PipelineLossReasonDTO {
+  reason: string;
+  count: number;
+  value: number;
+}
+
+export interface PipelineAnalyticsDTO {
+  funnel: PipelineStageDTO[];
+  lossReasons: PipelineLossReasonDTO[];
+  weightedForecast: number;
+  awaitingResponseQuotes: number;
+  awaitingResponseValue: number;
+  respondedQuotes: number;
+  respondedValue: number;
+  /** Null when no quote line has floor (cost) data. */
+  avgMarginPct: number | null;
+  marginSampleLines: number;
+  totalQuoteLines: number;
+  generatedAt: string;
+}
+
 // ─── Service ────────────────────────────────────────────────────────────────
 
 const dashboardService = {
@@ -161,6 +213,18 @@ const dashboardService = {
       '/api/intelligence/leads/decision-summaries',
       { leadIds }
     );
+    return r.data;
+  },
+
+  /** WP-B1: per-rep workload for the caller's BU. Managers/admins only (403 otherwise). */
+  getTeamWorkload: async (): Promise<TeamWorkloadDTO> => {
+    const r = await axiosInstance.get<TeamWorkloadDTO>('/api/dashboard/workload');
+    return r.data;
+  },
+
+  /** WP-B2: stage funnel, loss reasons, weighted forecast and margin proxy. */
+  getPipelineAnalytics: async (): Promise<PipelineAnalyticsDTO> => {
+    const r = await axiosInstance.get<PipelineAnalyticsDTO>('/api/dashboard/pipeline-analytics');
     return r.data;
   },
 };
