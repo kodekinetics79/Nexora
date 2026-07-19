@@ -1,33 +1,26 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Box } from '@mui/material';
 import { keyframes } from '@emotion/react';
 
 /**
- * Pointer-following spotlight, grafted from the cinematic-split concept and
- * recolored/retuned for the aurora stage.
+ * Pointer-following spotlight, retuned for the aurora stage.
  *
- * Two light layers (a steel-blue key light and a larger, fainter cool sheen)
- * gently follow the pointer. Because this layers ON TOP of the aurora field,
- * the disc opacities are deliberately lower than the original concept
- * (key 0.08 vs 0.13, sheen 0.03 vs 0.045) so the two systems never read as
- * busy together. Implementation notes:
+ * Two light layers (an electric-sky key light and a larger, fainter cool
+ * sheen) gently follow the pointer. Since the "Depth Stack" refactor this
+ * component owns NO event listeners: the page's single pointer system
+ * (useDepthStage) writes `--spot-x` / `--spot-y` (raw px) onto the stage
+ * element and the discs simply read the inherited vars. The CSS `transition`
+ * on `transform` interpolates on the compositor and gives the light its
+ * gentle lag (the sheen trails on a longer duration for depth). The container
+ * also carries the +4px parallax translate (y at 0.6×) from `--px`/`--py`.
  *
- * - The layers are fixed-size radial-gradient discs moved with
- *   `transform: translate3d(var(--spot-x), var(--spot-y), 0)` only — no
- *   layout, no repaint of the gradient itself; the CSS `transition` on
- *   `transform` interpolates on the compositor and gives the light its
- *   gentle lag (the sheen trails on a longer duration for depth).
- * - `mousemove` writes are rAF-throttled: at most one CSS custom-property
- *   write per frame, straight onto the DOM node — the React tree never
- *   re-renders while the pointer moves. The stage rect is cached and
- *   refreshed on resize/scroll.
- * - Touch-first devices (`hover: none` / `pointer: coarse`) get no pointer
- *   tracking — instead a very slow autonomous drift. Under
- *   `prefers-reduced-motion` the drift is disabled entirely (matching the
- *   aurora's motion policy) and the light parks at a static position.
- * - The whole layer is `aria-hidden` and `pointer-events: none`; it is
- *   lighting, not UI. Hidden below the `lg` two-column layout, where the
- *   aurora alone carries the stage.
+ * Touch-first devices (`hover: none` / `pointer: coarse`) get no pointer
+ * tracking — instead a very slow autonomous drift. Under
+ * `prefers-reduced-motion` the drift is disabled entirely (matching the
+ * aurora's motion policy) and the light parks at a static position.
+ * The whole layer is `aria-hidden` and `pointer-events: none`; it is
+ * lighting, not UI. Hidden below the `lg` two-column layout, where the
+ * aurora alone carries the stage.
  */
 
 const KEY_DRIFT = keyframes`
@@ -45,68 +38,22 @@ const SHEEN_DRIFT = keyframes`
 `;
 
 const Spotlight: React.FC = () => {
-  const layerRef = useRef<HTMLDivElement | null>(null);
   const [mode, setMode] = useState<'interactive' | 'drift'>('interactive');
 
   useEffect(() => {
-    const layer = layerRef.current;
-    const stage = layer ? layer.parentElement : null;
-    if (!layer || !stage) return;
-
     // Touch-first and reduced-motion users get the autonomous mode
     // (drift for touch, fully static under reduced motion — see sx below).
     const wantsDrift =
       window.matchMedia('(prefers-reduced-motion: reduce)').matches ||
       window.matchMedia('(hover: none)').matches ||
       window.matchMedia('(pointer: coarse)').matches;
-    if (wantsDrift) {
-      setMode('drift');
-      return;
-    }
-
-    let rect = stage.getBoundingClientRect();
-
-    // Park the light near the headline until the first pointer move.
-    layer.style.setProperty('--spot-x', `${rect.width * 0.42}px`);
-    layer.style.setProperty('--spot-y', `${rect.height * 0.36}px`);
-
-    let frame: number | null = null;
-    let pointerX = 0;
-    let pointerY = 0;
-
-    const onMove = (event: MouseEvent) => {
-      pointerX = event.clientX;
-      pointerY = event.clientY;
-      if (frame !== null) return; // rAF throttle: one style write per frame
-      frame = requestAnimationFrame(() => {
-        frame = null;
-        layer.style.setProperty('--spot-x', `${pointerX - rect.left}px`);
-        layer.style.setProperty('--spot-y', `${pointerY - rect.top}px`);
-      });
-    };
-
-    // The rect is viewport-relative, so refresh the cache when either the
-    // viewport size or the scroll position changes (short viewports scroll).
-    const onInvalidate = () => {
-      rect = stage.getBoundingClientRect();
-    };
-
-    stage.addEventListener('mousemove', onMove);
-    window.addEventListener('resize', onInvalidate);
-    window.addEventListener('scroll', onInvalidate, { passive: true });
-    return () => {
-      stage.removeEventListener('mousemove', onMove);
-      window.removeEventListener('resize', onInvalidate);
-      window.removeEventListener('scroll', onInvalidate);
-      if (frame !== null) cancelAnimationFrame(frame);
-    };
+    if (wantsDrift) setMode('drift');
   }, []);
 
   const isDrift = mode === 'drift';
 
   return (
     <Box
-      ref={layerRef}
       aria-hidden="true"
       sx={{
         position: 'absolute',
@@ -115,11 +62,14 @@ const Spotlight: React.FC = () => {
         pointerEvents: 'none',
         // Below lg the layout stacks and the aurora alone carries the stage.
         display: { xs: 'none', lg: 'block' },
+        // Near parallax layer: +4px × the lerped pointer offset (y at 0.6×).
+        transform: 'translate3d(calc(var(--px, 0) * 4px), calc(var(--py, 0) * 2.4px), 0)',
+        // Park position until the pointer system's first write.
         '--spot-x': '38vw',
         '--spot-y': '34vh',
       }}
     >
-      {/* Steel-blue key light (ACCENT_SOFT hue #8FBEDF, kept faint over the aurora) */}
+      {/* Electric-sky key light (ACCENT hue #38BDF8) */}
       <Box
         sx={{
           position: 'absolute',
@@ -132,7 +82,7 @@ const Spotlight: React.FC = () => {
           borderRadius: '50%',
           willChange: 'transform',
           background:
-            'radial-gradient(circle closest-side, rgba(143, 190, 223, 0.08) 0%, rgba(143, 190, 223, 0.03) 45%, rgba(143, 190, 223, 0) 72%)',
+            'radial-gradient(circle closest-side, rgba(125, 211, 252, 0.16) 0%, rgba(56, 189, 248, 0.06) 45%, rgba(56, 189, 248, 0) 72%)',
           ...(isDrift
             ? {
                 transform: 'translate3d(26vw, 40vh, 0)',
@@ -147,7 +97,7 @@ const Spotlight: React.FC = () => {
               }),
         }}
       />
-      {/* Trailing cool sheen (ACCENT_TINT hue #C9DFF0) */}
+      {/* Trailing cool sheen (ACCENT_TINT hue #BAE6FD) */}
       <Box
         sx={{
           position: 'absolute',
@@ -160,7 +110,7 @@ const Spotlight: React.FC = () => {
           borderRadius: '50%',
           willChange: 'transform',
           background:
-            'radial-gradient(circle closest-side, rgba(201, 223, 240, 0.03) 0%, rgba(201, 223, 240, 0) 70%)',
+            'radial-gradient(circle closest-side, rgba(186, 230, 253, 0.06) 0%, rgba(186, 230, 253, 0) 70%)',
           ...(isDrift
             ? {
                 transform: 'translate3d(14vw, 52vh, 0)',
