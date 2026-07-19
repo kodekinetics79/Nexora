@@ -40,6 +40,7 @@ const OutstandingRFQsPage = lazy(() => import('./pages/Procurement/RFQs/Outstand
 const ProcessRFQPage = lazy(() => import('./pages/Procurement/RFQs/ProcessRFQPage'));
 const ViewRFQPage = lazy(() => import('./pages/Procurement/RFQs/ViewRFQPage'));
 const DashboardPage = lazy(() => import('./pages/Dashboard/DashboardPage'));
+const TeamWorkloadPage = lazy(() => import('./pages/Dashboard/TeamWorkloadPage'));
 const QuotesPage = lazy(() => import('./pages/Sales/Quotes/QuotesPage'));
 const CreateQuotePage = lazy(() => import('./pages/Sales/Quotes/CreateQuotePage'));
 const QuoteViewPage = lazy(() => import('./pages/Sales/Quotes/QuoteViewPage'));
@@ -80,6 +81,7 @@ function App() {
     <Routes>
       <Route path="/" element={<Navigate to="/login" replace />} />
       <Route path="/dashboard" element={<MainLayout><PermissionGuard moduleName="Dashboard" redirect><DashboardPage /></PermissionGuard></MainLayout>} />
+      <Route path="/dashboard/team" element={<MainLayout><PermissionGuard moduleName="Dashboard" redirect><TeamWorkloadPage /></PermissionGuard></MainLayout>} />
 
       {/* Sourcing Copilot Routes */}
       <Route path="/copilot" element={<MainLayout><PermissionGuard moduleName="Dashboard" redirect><CopilotPage /></PermissionGuard></MainLayout>} />
