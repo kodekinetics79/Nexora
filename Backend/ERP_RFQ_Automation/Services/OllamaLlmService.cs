@@ -6,7 +6,9 @@ using System.Text.Json.Serialization;
 
 namespace ERP_RFQ_Automation.Services
 {
-    public class OllamaLlmService : ILLMService
+    // Partial: the WP-BOQ DraftServiceBoqAsync implementation lives in
+    // OllamaLlmService.Boq.cs so this file's extraction path stays untouched.
+    public partial class OllamaLlmService : ILLMService
     {
         private readonly HttpClient _http;
         private readonly ILogger<OllamaLlmService> _log;
@@ -310,6 +312,8 @@ namespace ERP_RFQ_Automation.Services
 5. Quantities must be positive integers
 6. Assign confidence based on evidence in the text - aim for accuracy over conservatism where evidence is strong
 7. CUSTOM COLUMNS: if the document contains column headers or labeled per-item values that do NOT map to any field in the schema below (e.g. ""Plant Code"", ""Incoterms"", ""Project"", ""Cost Center""), preserve them per item in ""ExtraFields"" as an object whose keys are the ORIGINAL header text exactly as written and whose values are the cell values as strings. Do NOT invent columns, do NOT duplicate values already mapped to schema fields, and use null (or omit ""ExtraFields"") when there are no unmapped columns. Limit to at most 20 entries per item.
+8. MULTI-INQUIRY DOCUMENTS: if (and ONLY if) the document clearly contains MULTIPLE distinct inquiries/RFQs (e.g. different RFQ numbers, clearly separated sections for different requests), set every item's ""InquiryGroup"" to that item's inquiry identifier (prefer the inquiry's own RFQ number; otherwise a short section label), using the IDENTICAL string for all items of the same inquiry, with an ""InquiryGroupConfidence"" reflecting how certain the separation is. If the document is one single inquiry — the common case — use null (or omit) ""InquiryGroup"" for every item. NEVER invent groups when the separation is not explicit.
+9. INQUIRY TYPE: classify the OVERALL document as ""product"" (physical goods/materials/spare parts), ""service"" (labor, installation, maintenance, consulting, scope-of-work) or ""mixed"" (clearly both) in ""InquiryType"" with ""InquiryTypeConfidence"". Use null if genuinely unclear.
 
 **CONFIDENCE GUIDELINES (OPTIMIZED FOR HIGHER PRECISION):**
 - 0.95-1.0: Explicitly stated in text with exact match and clear labeling
@@ -346,6 +350,8 @@ namespace ERP_RFQ_Automation.Services
   ""DurationAgreement"": string | null,
   ""DurationAgreementConfidence"": number,
   ""OverallConfidence"": number,
+  ""InquiryType"": ""product"" | ""service"" | ""mixed"" | null,
+  ""InquiryTypeConfidence"": number,
   ""Items"": [
     {{
       ""CompanyRef"": string | null,
@@ -397,7 +403,9 @@ namespace ERP_RFQ_Automation.Services
       ""BidClosingDateLine"": ""YYYY-MM-DD"" | null,
       ""BidClosingDateLineConfidence"": number,
       ""ItemConfidence"": number,
-      ""ExtraFields"": {{ ""<original column header>"": ""<cell value as string>"" }} | null
+      ""ExtraFields"": {{ ""<original column header>"": ""<cell value as string>"" }} | null,
+      ""InquiryGroup"": string | null,
+      ""InquiryGroupConfidence"": number
     }}
   ]
 }}

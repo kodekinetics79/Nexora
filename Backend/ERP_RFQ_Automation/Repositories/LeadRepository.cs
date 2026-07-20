@@ -131,6 +131,7 @@ namespace ERP_RFQ_Automation.Repositories
                 EmailSource = l.EmailSource,
                 Clientemail = l.Clientemail,
                 LeadStatusId = l.LeadStatusId,
+                InquiryType = l.InquiryType, // WP-BOQ: service/mixed list badge
                 DuplicateStatus = l.DuplicateStatus,
                 DuplicateOfLeadId = l.DuplicateOfLeadId,
                 ItemCount = itemCounts.TryGetValue(l.Id, out var count) ? count : 0,
@@ -431,6 +432,9 @@ namespace ERP_RFQ_Automation.Repositories
                     && l.AssignTo == null
                     && (nowUtc - (l.ModifiedDate ?? l.CreatedDate)).TotalHours > unassignedThresholdHours,
 
+                // WP-BOQ: service/mixed list badge
+                InquiryType = l.InquiryType,
+
                 // WP-A3 duplicate flag (list badge support)
                 DuplicateStatus = l.DuplicateStatus,
                 DuplicateOfLeadId = l.DuplicateOfLeadId,
@@ -631,6 +635,7 @@ namespace ERP_RFQ_Automation.Repositories
                 CreatedDate = lead.CreatedDate,
                 ModifiedDate = lead.ModifiedDate,
                 LeadStatusId = lead.LeadStatusId,
+                InquiryType = lead.InquiryType, // WP-BOQ: service/mixed badge
                 DuplicateStatus = lead.DuplicateStatus,
                 DuplicateOfLeadId = lead.DuplicateOfLeadId,
                 AssignedToId = lead.AssignTo,
@@ -724,6 +729,9 @@ namespace ERP_RFQ_Automation.Repositories
                 EmailSource = lead.EmailSource,
                 Clientemail = lead.Clientemail,
                 LeadStatusId = lead.LeadStatusId,
+
+                // WP-BOQ: service/mixed badge
+                InquiryType = lead.InquiryType,
 
                 // WP-A3 duplicate flag
                 DuplicateStatus = lead.DuplicateStatus,

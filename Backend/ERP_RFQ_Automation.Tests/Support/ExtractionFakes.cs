@@ -34,6 +34,11 @@ public sealed class StubLlm : ILLMService
         var result = _responses.Count > 0 ? _responses.Dequeue() : null;
         return Task.FromResult(result);
     }
+
+    // WP-BOQ member of ILLMService — not exercised by the extraction tests; returns
+    // null ("model produced nothing usable") so any accidental call degrades safely.
+    public Task<BoqDraftResult?> DraftServiceBoqAsync(string scopeText)
+        => Task.FromResult<BoqDraftResult?>(null);
 }
 
 /// <summary>Builders for the verbose positional records used by the extraction pipeline.</summary>

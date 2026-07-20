@@ -7,6 +7,17 @@ namespace ERP_RFQ_Automation.Services.Interfaces
     public interface ILLMService
     {
         Task<LeadExtractionResult?> ExtractLeadDataAsync(string fullText);
+
+        /// <summary>
+        /// WP-BOQ (additive): reads a service request / scope-of-work text and drafts a
+        /// structured bill of quantities (sections + items + explicit TBD lines +
+        /// assumptions). Returns null when the model output cannot be trusted — callers
+        /// must fall back to an honest TBD-heavy skeleton, never fabricate quantities.
+        /// Contracts + lenient converters live in BoqDraftContracts.cs; the Ollama
+        /// implementation (same retry/strict-parse shape as ExtractLeadDataAsync) is in
+        /// Services/OllamaLlmService.Boq.cs.
+        /// </summary>
+        Task<BoqDraftResult?> DraftServiceBoqAsync(string scopeText);
     }
     public record LeadExtractionResult(
         string? Rfqno, double? RfqnoConfidence,
@@ -21,7 +32,12 @@ namespace ERP_RFQ_Automation.Services.Interfaces
         string? Rfqtype, double? RfqtypeConfidence,
         string? DurationAgreement, double? DurationAgreementConfidence,
         double? OverallConfidence,
-        List<LeadItemData> Items);
+        List<LeadItemData> Items,
+        // Document-level classification: "product" | "service" | "mixed" (foundation for
+        // the BOQ engine). Optional + defaulted so every existing positional construction
+        // site and model outputs that omit it keep working unchanged.
+        string? InquiryType = null,
+        double? InquiryTypeConfidence = null);
     public record LeadItemData(
         string? CompanyRef, double? CompanyRefConfidence,
         string? CustomerAccountPortalId, double? CustomerAccountPortalIdConfidence,
@@ -52,7 +68,14 @@ namespace ERP_RFQ_Automation.Services.Interfaces
         // Optional + defaulted so existing positional construction sites and model
         // outputs that omit it keep working unchanged.
         [property: JsonConverter(typeof(LenientStringDictionaryConverter))]
-        Dictionary<string, string>? ExtraFields = null);
+        Dictionary<string, string>? ExtraFields = null,
+        // Multi-inquiry detection: when one document contains several distinct
+        // inquiries/RFQs, the model labels each item with its inquiry's RFQ number /
+        // section label (identical label for items of the same inquiry). Null when the
+        // document is a single inquiry. Optional + defaulted for the same reason as
+        // ExtraFields.
+        string? InquiryGroup = null,
+        double? InquiryGroupConfidence = null);
 
     /// <summary>
     /// Tolerant reader for the LLM's ExtraFields object: accepts string/number/bool

@@ -55,6 +55,16 @@ public sealed class ChunkedExtractionOutcome
     public int ExtractedItemCount { get; init; }
     public string? ReviewReason { get; init; }
     public List<string> Diagnostics { get; init; } = new();
+
+    /// <summary>
+    /// Multi-inquiry auto-split (see <see cref="MultiInquirySplitter"/>): when the
+    /// document verifiably contains N distinct inquiries, one result per inquiry group
+    /// (2..MaxGroups entries, a strict partition of <see cref="Result"/>'s items). Null
+    /// when the document is a single inquiry or the grouping was ambiguous/low-confidence
+    /// (fall back to single-lead behavior). <see cref="Result"/> always stays populated
+    /// with the merged view for consumers that don't split.
+    /// </summary>
+    public List<LeadExtractionResult>? SplitResults { get; init; }
 }
 
 public interface IChunkedExtractionService
@@ -129,6 +139,17 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             var status0 = single.OverallConfidence is < MinAcceptableConfidence
                 ? ExtractionOutcomeStatus.NeedsReview
                 : ExtractionOutcomeStatus.Ok;
+
+            // Multi-inquiry auto-split — only from a clean (Ok) extraction; an uncertain
+            // document is never guess-split (it stays a single NeedsReview lead).
+            List<LeadExtractionResult>? split0 = null;
+            if (status0 == ExtractionOutcomeStatus.Ok)
+            {
+                split0 = MultiInquirySplitter.TrySplitByItemGroups(single);
+                if (split0 != null)
+                    diagnostics.Add($"Multi-inquiry document: split into {split0.Count} inquiry group(s).");
+            }
+
             return new ChunkedExtractionOutcome
             {
                 Status = status0,
@@ -136,7 +157,8 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                 ExpectedItemCount = items0.Count,
                 ExtractedItemCount = items0.Count,
                 ReviewReason = status0 == ExtractionOutcomeStatus.NeedsReview ? "Overall confidence below threshold." : null,
-                Diagnostics = diagnostics
+                Diagnostics = diagnostics,
+                SplitResults = split0
             };
         }
 
@@ -196,6 +218,17 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         var status = reviewReason is null ? ExtractionOutcomeStatus.Ok : ExtractionOutcomeStatus.NeedsReview;
         if (reviewReason is not null) diagnostics.Add(reviewReason);
 
+        // Multi-inquiry auto-split — only when the extraction is fully clean (all chunks
+        // succeeded, counts conserved, confidence acceptable). A NeedsReview document is
+        // never guess-split; it keeps today's single flagged lead.
+        List<LeadExtractionResult>? splitResults = null;
+        if (status == ExtractionOutcomeStatus.Ok)
+        {
+            splitResults = MultiInquirySplitter.TrySplitByItemGroups(merged);
+            if (splitResults != null)
+                diagnostics.Add($"Multi-inquiry document: split into {splitResults.Count} inquiry group(s).");
+        }
+
         return new ChunkedExtractionOutcome
         {
             Status = status,
@@ -203,7 +236,8 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             ExpectedItemCount = expected,
             ExtractedItemCount = extracted,
             ReviewReason = reviewReason,
-            Diagnostics = diagnostics
+            Diagnostics = diagnostics,
+            SplitResults = splitResults
         };
     }
 
@@ -228,11 +262,35 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         var overall = ComputeOverallConfidence(items, header: primary);
         var result = BuildStructuredResult(primary, items, overall);
 
+        var anyNeedsReview = import.Documents.Any(d => d.ValidationStatus != ValidationStatus.Valid)
+                             || allItems.Any(i => i.ValidationStatus != ValidationStatus.Valid);
+
         string? reviewReason = null;
+        List<LeadExtractionResult>? splitResults = null;
         if (import.Documents.Count > 1)
-            reviewReason = $"File contains {import.Documents.Count} distinct RFQ groups; review before splitting.";
-        else if (import.Documents.Any(d => d.ValidationStatus != ValidationStatus.Valid)
-                 || allItems.Any(i => i.ValidationStatus != ValidationStatus.Valid))
+        {
+            // Multi-inquiry auto-split: only clean (fully valid, confident), fully
+            // identified groups are split into per-inquiry results. Anything ambiguous
+            // keeps the previous single-lead + NeedsReview behavior — never guess-split.
+            if (!anyNeedsReview
+                && overall >= MinAcceptableConfidence
+                && MultiInquirySplitter.ShouldSplitStructured(import.Documents))
+            {
+                splitResults = import.Documents
+                    .Select(d =>
+                    {
+                        var groupItems = d.LineItems.Select(MapCanonicalItem).ToList();
+                        return BuildStructuredResult(d, groupItems, ComputeOverallConfidence(groupItems, d));
+                    })
+                    .ToList();
+                diagnostics.Add($"Multi-inquiry document: split into {splitResults.Count} RFQ group(s).");
+            }
+            else
+            {
+                reviewReason = $"File contains {import.Documents.Count} distinct RFQ groups; review before splitting.";
+            }
+        }
+        else if (anyNeedsReview)
             reviewReason = "One or more fields need review (see canonical validation issues).";
         else if (overall < MinAcceptableConfidence)
             reviewReason = $"Overall confidence {overall:F2} below threshold.";
@@ -247,7 +305,8 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             ExpectedItemCount = expected,
             ExtractedItemCount = items.Count,
             ReviewReason = reviewReason,
-            Diagnostics = diagnostics
+            Diagnostics = diagnostics,
+            SplitResults = splitResults
         });
     }
 

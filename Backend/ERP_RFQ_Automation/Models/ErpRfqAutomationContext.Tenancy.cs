@@ -44,6 +44,11 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<Lead>().HasIndex(e => new { e.BusinessUnitId, e.DuplicateStatus })
             .HasDatabaseName("IX_Lead_BU_DuplicateStatus");
 
+        // WP-BOQ foundation: inquiry classification (partial property in
+        // Lead.Inquiry.cs). Column ("InquiryType" varchar(16) NULL) is added by a
+        // lead-generated migration, same pattern as the duplicate-flag columns above.
+        modelBuilder.Entity<Lead>().Property(e => e.InquiryType).HasMaxLength(16);
+
         // ==== Async extraction pipeline (ADR-0003) ====
         modelBuilder.Entity<ERP_RFQ_Automation.Extraction.ExtractionJob>(entity =>
         {
@@ -129,5 +134,9 @@ public partial class ErpRfqAutomationContext
         // ==== Passive AI metrics + quote revisions (WP-B4, Metrics/) ====
         // Same partial-splice pattern; implementation in ErpRfqAutomationContext.Metrics.cs.
         ConfigureMetricsModel(modelBuilder);
+
+        // ==== Service RFQ → BOQ engine (Boq/) ====
+        // Same partial-splice pattern; implementation in ErpRfqAutomationContext.Boq.cs.
+        ConfigureBoqModel(modelBuilder);
     }
 }

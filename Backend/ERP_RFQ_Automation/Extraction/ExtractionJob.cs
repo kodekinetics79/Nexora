@@ -10,7 +10,9 @@ public enum ExtractionSourceType
 {
     Email,
     ManualUpload,
-    ExcelTemplate
+    ExcelTemplate,
+    /// <summary>Watched-folder ingestion (SEC / Aramco / shared lead folders).</summary>
+    Folder
 }
 
 /// <summary>

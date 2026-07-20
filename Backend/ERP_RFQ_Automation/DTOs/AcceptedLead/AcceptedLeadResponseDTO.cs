@@ -38,6 +38,11 @@ public class AcceptedLeadResponseDTO
     public int? UnassignedHours { get; set; }
     public bool IsUnassignedOverdue { get; set; }
 
+    // WP-BOQ foundation: "product" | "service" | "mixed" | null (unclassified).
+    public string? InquiryType { get; set; }
+    // Distinct list badge for service-scope leads (service or mixed inquiries).
+    public bool IsServiceInquiry => InquiryType is "service" or "mixed";
+
     // WP-A3 duplicate flag: null | "suspected" | "confirmed" | "not_duplicate".
     public string? DuplicateStatus { get; set; }
     public long? DuplicateOfLeadId { get; set; }

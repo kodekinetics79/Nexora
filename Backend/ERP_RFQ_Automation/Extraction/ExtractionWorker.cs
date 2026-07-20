@@ -354,7 +354,117 @@ public sealed class LeadPersister : ILeadPersister
 
     public async Task<long> PersistAsync(ExtractionJob job, ChunkedExtractionOutcome outcome, CancellationToken ct = default)
     {
-        var ai = outcome.Result ?? throw new InvalidOperationException("Cannot persist a null extraction result.");
+        if (outcome.Result is null)
+            throw new InvalidOperationException("Cannot persist a null extraction result.");
+
+        // Multi-inquiry auto-split: N per-group results (a strict partition of the merged
+        // items) persist as N Leads sharing ONE EmailIngest + the same source document.
+        var results = outcome.SplitResults is { Count: > 1 }
+            ? outcome.SplitResults
+            : new List<LeadExtractionResult> { outcome.Result };
+
+        // Ingest provenance sidecar (email door): real from/subject + a PRE-CREATED
+        // EmailIngest id. Best-effort — a missing/corrupt sidecar falls back to the
+        // synthetic-ingest behavior below.
+        var metadata = ExtractionJobMetadata.TryLoad(job);
+
+        var now = DateTime.UtcNow;
+        var parseStatus = outcome.Status == ExtractionOutcomeStatus.NeedsReview ? "NeedsReview" : "Success";
+        var ingest = await ResolveIngestAsync(job, metadata, parseStatus, now, ct);
+
+        var reviewNote = outcome.Status == ExtractionOutcomeStatus.NeedsReview
+            ? $"[NEEDS REVIEW] {outcome.ReviewReason} "
+            : string.Empty;
+        // Email parity: legacy leads carried "Email: From X, Subject: Y" in the remarks.
+        var sourceNote = metadata?.FromEmail != null || metadata?.Subject != null
+            ? $"Email: From {metadata?.FromEmail}, Subject: {metadata?.Subject}. "
+            : string.Empty;
+
+        var leads = new List<Lead>(results.Count);
+        for (var g = 0; g < results.Count; g++)
+        {
+            var splitNote = results.Count > 1
+                ? $"Split from a multi-inquiry document (group {g + 1} of {results.Count}). "
+                : string.Empty;
+            leads.Add(BuildLead(job, metadata, results[g], ingest, now,
+                $"{reviewNote}{splitNote}{sourceNote}"));
+        }
+
+        var autoDetect = _context.ChangeTracker.AutoDetectChangesEnabled;
+        _context.ChangeTracker.AutoDetectChangesEnabled = false;
+        try
+        {
+            // Add traverses each graph (ingest + lead + items). An ALREADY-TRACKED ingest
+            // (pre-created by the email door) is skipped by graph-add and simply linked.
+            foreach (var lead in leads)
+                _context.Add(lead);
+            await _context.SaveChangesAsync(ct); // one per-document transaction
+        }
+        finally
+        {
+            _context.ChangeTracker.AutoDetectChangesEnabled = autoDetect;
+        }
+
+        _log.LogInformation(
+            "Persisted {LeadCount} lead(s) ({LeadIds}) with {Count} item(s) total from job {JobId}.",
+            leads.Count, string.Join(",", leads.Select(l => l.Id)),
+            leads.Sum(l => l.LeadItems.Count), job.Id);
+
+        // Evidence linkage: every produced lead gets an Attachment row pointing at the
+        // immutable source document (shared across split leads). Best-effort — an
+        // attachment failure must never fail the persistence.
+        await TryAttachSourceDocumentAsync(job, leads, now, ct);
+
+        // WP-A3: duplicate detection AFTER the save, PER produced lead. Best-effort by
+        // contract — a detection failure must never fail (or roll back) the persistence.
+        if (_duplicateDetector != null)
+        {
+            foreach (var lead in leads)
+            {
+                try
+                {
+                    var check = await _duplicateDetector.CheckAndFlagAsync(lead.Id, job.BusinessUnitId, ct);
+                    if (check.Flagged)
+                        _log.LogInformation(
+                            "Lead {LeadId} flagged as suspected duplicate of lead {OriginalId} ({Reason}).",
+                            check.FlaggedLeadId, check.OriginalLeadId, check.Reason);
+                }
+                catch (Exception ex)
+                {
+                    _log.LogError(ex, "Duplicate detection failed for lead {LeadId}; persistence succeeded.", lead.Id);
+                }
+            }
+        }
+
+        return leads[0].Id;
+    }
+
+    /// <summary>
+    /// Resolves the EmailIngest all leads of this job link to: the PRE-CREATED row named
+    /// by the sidecar (email door — its ParseStatus/ParsedAt are updated to the outcome),
+    /// or a synthetic per-job row (manual/folder/queue uploads), exactly as before.
+    /// </summary>
+    private async Task<EmailIngest> ResolveIngestAsync(
+        ExtractionJob job, ExtractionJobMetadata? metadata, string parseStatus, DateTime now, CancellationToken ct)
+    {
+        if (metadata?.EmailIngestId is > 0)
+        {
+            // Tracked lookup so graph-add links (not re-inserts) it.
+            var existing = await _context.EmailIngests
+                .FirstOrDefaultAsync(e => e.Id == metadata.EmailIngestId.Value, ct);
+            if (existing != null)
+            {
+                existing.ParseStatus = parseStatus;
+                existing.ParsedAt = now;
+                // AutoDetectChanges is disabled around SaveChanges — mark explicitly.
+                _context.Entry(existing).Property(e => e.ParseStatus).IsModified = true;
+                _context.Entry(existing).Property(e => e.ParsedAt).IsModified = true;
+                return existing;
+            }
+            _log.LogWarning(
+                "Job {JobId} referenced EmailIngest {IngestId} which no longer exists; falling back to a synthetic ingest.",
+                job.Id, metadata.EmailIngestId);
+        }
 
         var config = await _context.EmailConfigurations.AsNoTracking()
                          .FirstOrDefaultAsync(e => e.IsActive && e.BusinessUnitId == job.BusinessUnitId, ct)
@@ -362,23 +472,30 @@ public sealed class LeadPersister : ILeadPersister
                          .FirstOrDefaultAsync(e => e.IsActive, ct)
                      ?? throw new InvalidOperationException("No active EmailConfiguration available for lead persistence.");
 
-        var now = DateTime.UtcNow;
-        var reviewNote = outcome.Status == ExtractionOutcomeStatus.NeedsReview
-            ? $"[NEEDS REVIEW] {outcome.ReviewReason} "
-            : string.Empty;
-
-        var ingest = new EmailIngest
+        return new EmailIngest
         {
-            MessageId = $"Extraction_{job.SourceType}_{job.ContentHash[..Math.Min(24, job.ContentHash.Length)]}",
-            EmailSubject = job.FileName ?? "Extraction job",
-            FromEmail = "extraction@pipeline.local",
+            // BU-scoped so identical content ingested by two tenants (allowed by the
+            // per-BU idempotency index) can never collide on the unique MessageId.
+            MessageId = $"Extraction_{job.SourceType}_{job.BusinessUnitId}_{job.ContentHash[..Math.Min(24, job.ContentHash.Length)]}",
+            EmailSubject = metadata?.Subject ?? job.FileName ?? "Extraction job",
+            FromEmail = metadata?.FromEmail ?? "extraction@pipeline.local",
             ToEmail = "system@rfq.com",
             EmailConfigurationId = config.Id,
             CreatedOn = now,
-            ParseStatus = outcome.Status == ExtractionOutcomeStatus.NeedsReview ? "NeedsReview" : "Success",
+            ParseStatus = parseStatus,
             ParsedAt = now
         };
+    }
 
+    /// <summary>Builds one Lead (+ its LeadItems) for one extraction result/group.</summary>
+    private static Lead BuildLead(
+        ExtractionJob job,
+        ExtractionJobMetadata? metadata,
+        LeadExtractionResult ai,
+        EmailIngest ingest,
+        DateTime now,
+        string remarksPrefix)
+    {
         var items = ai.Items ?? new List<LeadItemData>();
         var lead = new Lead
         {
@@ -393,19 +510,22 @@ public sealed class LeadPersister : ILeadPersister
             BiddingDecision = Truncate(ai.BiddingDecision, 100),
             AcknowledgmentDate = SanitizeDate(ParseDate(ai.AcknowledgmentDate)),
             SubDate = SanitizeDate(ParseDate(ai.SubDate)),
-            HeaderRemarks = Truncate($"{reviewNote}{ai.HeaderRemarks}".Trim(), 8000),
+            HeaderRemarks = Truncate($"{remarksPrefix}{ai.HeaderRemarks}".Trim(), 8000),
             OpportunityNo = Truncate(ai.OpportunityNo, 100),
-            NoOfLineItems = items.Count, // conservation: equals persisted count
+            NoOfLineItems = items.Count, // conservation: equals persisted count PER LEAD
             Rfqtype = Truncate(ai.Rfqtype, 50),
             DurationAgreement = Truncate(ai.DurationAgreement, 100),
-            LeadSource = job.SourceType.ToString(),
-            EmailSource = Truncate(job.FileType, 255),
-            Clientemail = "extraction@pipeline.local",
+            LeadSource = metadata?.LeadSource ?? job.SourceType.ToString(),
+            EmailSource = Truncate(metadata?.EmailSource ?? job.FileType, 255),
+            Clientemail = metadata?.ClientEmail ?? "extraction@pipeline.local",
             Aiconfidence = ClampConfidence(ai.OverallConfidence),
+            // WP-BOQ foundation: document-level "product" | "service" | "mixed"
+            // classification (partial property; column added by a lead migration).
+            InquiryType = NormalizeInquiryType(ai.InquiryType),
             CreatedBy = "System",
             CreatedDate = now,
             BusinessUnitId = job.BusinessUnitId,
-            EmailIngests = ingest // navigation -> EF inserts ingest first, fills EmailIngestsId
+            EmailIngests = ingest // navigation -> EF inserts/links ingest, fills EmailIngestsId
         };
 
         foreach (var it in items)
@@ -443,39 +563,77 @@ public sealed class LeadPersister : ILeadPersister
             });
         }
 
-        var autoDetect = _context.ChangeTracker.AutoDetectChangesEnabled;
-        _context.ChangeTracker.AutoDetectChangesEnabled = false;
+        return lead;
+    }
+
+    /// <summary>
+    /// Best-effort evidence linkage: one Attachment row per produced lead pointing at the
+    /// immutable stored source document, mirroring what the legacy email/manual doors did.
+    /// Never throws — persistence has already succeeded.
+    /// </summary>
+    private async Task TryAttachSourceDocumentAsync(ExtractionJob job, List<Lead> leads, DateTime now, CancellationToken ct)
+    {
         try
         {
-            _context.Add(lead); // traverses the graph: ingest + lead + all items marked Added
+            long? size = null;
+            try { size = new FileInfo(job.StoragePath).Length; } catch { /* stored file may be remote/purged */ }
+
+            var fileName = job.FileName ?? Path.GetFileName(job.StoragePath);
+            var filePath = ToPortablePath(job.StoragePath);
+            var ext = (job.FileType ?? Path.GetExtension(job.StoragePath).TrimStart('.')).ToLowerInvariant();
+
+            foreach (var lead in leads)
+            {
+                _context.Attachments.Add(new Attachment
+                {
+                    ParentType = "Lead",
+                    ParentId = lead.Id,
+                    FileName = fileName,
+                    FilePath = filePath,
+                    MimeType = MimeTypeFor(ext),
+                    FileSize = size,
+                    ContentType = MimeTypeFor(ext)?.Split('/')[0],
+                    CreatedOn = now,
+                    UploadedDate = now
+                });
+            }
             await _context.SaveChangesAsync(ct);
         }
-        finally
+        catch (Exception ex)
         {
-            _context.ChangeTracker.AutoDetectChangesEnabled = autoDetect;
+            _log.LogWarning(ex, "Failed to record source-document attachment(s) for job {JobId}; leads persisted.", job.Id);
         }
+    }
 
-        _log.LogInformation("Persisted lead {LeadId} with {Count} item(s) from job {JobId}.", lead.Id, items.Count, job.Id);
+    /// <summary>Stores the app-relative "Uploads/..." path when derivable (matches the
+    /// legacy attachment convention); falls back to the absolute storage path.</summary>
+    private static string ToPortablePath(string storagePath)
+    {
+        var idx = storagePath.LastIndexOf("Uploads", StringComparison.OrdinalIgnoreCase);
+        return idx >= 0 ? storagePath[idx..] : storagePath;
+    }
 
-        // WP-A3: duplicate detection AFTER the save. Best-effort by contract —
-        // a detection failure must never fail (or roll back) the persistence.
-        if (_duplicateDetector != null)
-        {
-            try
-            {
-                var check = await _duplicateDetector.CheckAndFlagAsync(lead.Id, job.BusinessUnitId, ct);
-                if (check.Flagged)
-                    _log.LogInformation(
-                        "Lead {LeadId} flagged as suspected duplicate of lead {OriginalId} ({Reason}).",
-                        check.FlaggedLeadId, check.OriginalLeadId, check.Reason);
-            }
-            catch (Exception ex)
-            {
-                _log.LogError(ex, "Duplicate detection failed for lead {LeadId}; persistence succeeded.", lead.Id);
-            }
-        }
+    private static string? MimeTypeFor(string ext) => ext switch
+    {
+        "pdf" => "application/pdf",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx" or "xlsm" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "csv" => "text/csv",
+        "txt" => "text/plain",
+        "html" or "htm" => "text/html",
+        "jpg" or "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "bmp" => "image/bmp",
+        "tiff" or "tif" => "image/tiff",
+        _ => "application/octet-stream"
+    };
 
-        return lead.Id;
+    /// <summary>Persist only the three known classifications; anything else is "unknown" (null).</summary>
+    private static string? NormalizeInquiryType(string? value)
+    {
+        var t = value?.Trim().ToLowerInvariant();
+        return t is "product" or "service" or "mixed" ? t : null;
     }
 
     private static readonly string[] DateFormats =

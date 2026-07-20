@@ -96,7 +96,10 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         var text = ext switch
         {
             "pdf" => ExtractTextFromPdf(bytes),
-            "doc" or "docx" => ExtractTextFromDocx(bytes),
+            // Legacy Word 97-2003 binary (SEC folder door): shared OLE/piece-table
+            // parser; falls back to the OpenXML reader for mislabeled .docx files.
+            "doc" => ExtractTextFromLegacyDoc(bytes),
+            "docx" => ExtractTextFromDocx(bytes),
             "jpg" or "jpeg" or "png" or "bmp" or "tiff" or "tif" or "gif" => ExtractTextFromImage(bytes),
             _ => DecodeText(bytes)
         };
@@ -146,6 +149,13 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
 
     private static string DecodeText(byte[] bytes)
         => bytes.Length == 0 ? string.Empty : Encoding.UTF8.GetString(bytes);
+
+    private string ExtractTextFromLegacyDoc(byte[] bytes)
+    {
+        var text = WordBinaryTextExtractor.Extract(bytes, _log);
+        // A file named .doc that is actually OOXML has no OLE signature — try OpenXML.
+        return string.IsNullOrWhiteSpace(text) ? ExtractTextFromDocx(bytes) : text;
+    }
 
     private string ExtractTextFromDocx(byte[] bytes)
     {

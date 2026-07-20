@@ -48,6 +48,9 @@ namespace ERP_RFQ_Automation.Services
         private const string STATUS_PENDING = "Pending";
         private const string STATUS_SUCCESS = "Success";
         private const string STATUS_FAILED = "Failed";
+        // ING-05 (unified queue): body + attachments handed to the durable extraction
+        // queue; the LeadPersister flips this to Success/NeedsReview when the job lands.
+        private const string STATUS_QUEUED = "Queued";
         private const string STATUS_REJECTED = "Rejected - Low Signal";        // <= 50 chars
         private const string STATUS_SCANNED_PDF = "NeedsReview - Scanned PDF";  // <= 50 chars
         // ING-04: internal marker returned by PDF extraction when a page image-only/scanned PDF
@@ -56,14 +59,21 @@ namespace ERP_RFQ_Automation.Services
         // pdfium (Docnet) and the Tesseract native engine are not thread-safe; serialize OCR so
         // parallel attachment extraction cannot crash the native libraries.
         private static readonly object _ocrLock = new object();
+        // ING-05: when true (default) the email door no longer runs its own LLM
+        // extraction — the body and every attachment are enqueued as durable extraction
+        // jobs instead. Config: Ingestion:UseUnifiedQueue (set false to restore the
+        // legacy direct-extraction path unchanged).
+        private readonly bool _useUnifiedQueue;
         public EmailService(ErpRfqAutomationContext context, IWebHostEnvironment env,
-            ILogger<EmailService> logger, ILLMService llmService, IServiceScopeFactory scopeFactory)
+            ILogger<EmailService> logger, ILLMService llmService, IServiceScopeFactory scopeFactory,
+            IConfiguration configuration)
         {
             _context = context;
             _env = env;
             _logger = logger;
             _llmService = llmService;
             _scopeFactory = scopeFactory;
+            _useUnifiedQueue = configuration.GetValue("Ingestion:UseUnifiedQueue", true);
             _attachmentPath = Path.Combine(_env.ContentRootPath, "Uploads", "RFQ_Attachments");
             _rawEmailPath = Path.Combine(_env.ContentRootPath, "Uploads", "Raw_Emails");
             _tessDataPath = Path.Combine(_env.ContentRootPath, "tessdata");
@@ -104,6 +114,9 @@ namespace ERP_RFQ_Automation.Services
             using var scope = _scopeFactory.CreateScope();
             var localContext = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
             var localLlm = scope.ServiceProvider.GetRequiredService<ILLMService>();
+            // ING-05: unified-queue gateway from the SAME scope as localContext (null when
+            // not registered -> the legacy direct path below still works).
+            var ingestion = scope.ServiceProvider.GetService<ERP_RFQ_Automation.Extraction.IDocumentIngestion>();
             using var client = new ImapClient();
             try
             {
@@ -125,7 +138,7 @@ namespace ERP_RFQ_Automation.Services
                         // ING-01: only mark \Seen once a durable record (EmailIngest + raw .eml)
                         // exists, so a message we fail to persist is retried on the next cycle
                         // instead of vanishing.
-                        bool durablyPersisted = await ProcessSingleEmailAsync(message, config, localContext, localLlm);
+                        bool durablyPersisted = await ProcessSingleEmailAsync(message, config, localContext, localLlm, ingestion);
 
                         // Check if connection is still alive before marking as seen
                         if (!client.IsConnected)
@@ -182,7 +195,8 @@ namespace ERP_RFQ_Automation.Services
         /// mark it \Seen; returns false only when nothing could be persisted (retry next cycle).
         /// </summary>
         private async Task<bool> ProcessSingleEmailAsync(MimeMessage message, EmailConfiguration config,
-            ErpRfqAutomationContext context, ILLMService llmService)
+            ErpRfqAutomationContext context, ILLMService llmService,
+            ERP_RFQ_Automation.Extraction.IDocumentIngestion? ingestion = null)
         {
             var messageId = message.MessageId ?? Guid.NewGuid().ToString();
             var from = message.From.ToString();
@@ -256,7 +270,31 @@ namespace ERP_RFQ_Automation.Services
                 return true;
             }
 
-            // Process email with AI
+            // ING-05: unified queue — the RFQ email's body and each attachment become
+            // durable, content-addressed extraction jobs (one batch), replacing the
+            // direct LLM extraction below. The pre-created EmailIngest is referenced via
+            // the job's provenance sidecar so the produced lead(s) link to the REAL
+            // ingest (from/subject) instead of a synthetic one.
+            if (_useUnifiedQueue && ingestion != null)
+            {
+                var queued = await EnqueueEmailForExtractionAsync(message, ingest, config, ingestion);
+                if (queued > 0)
+                {
+                    ingest.ParseStatus = STATUS_QUEUED; // persister flips to Success/NeedsReview
+                }
+                else
+                {
+                    // Nothing enqueuable (empty body, no supported attachments) — same
+                    // terminal state the legacy path produced for unextractable mail.
+                    if (ingest.ParseStatus == STATUS_PENDING)
+                        ingest.ParseStatus = STATUS_FAILED;
+                    ingest.ParsedAt = DateTime.UtcNow;
+                }
+                await context.SaveChangesAsync();
+                return true;
+            }
+
+            // Legacy direct-extraction path (Ingestion:UseUnifiedQueue=false).
             var (leadId, extractedText) = await SaveLeadFromEmailAndAttachments(
                 message, ingest, config, context, llmService);
             ingest.ParsedAt = DateTime.UtcNow;
@@ -271,6 +309,100 @@ namespace ERP_RFQ_Automation.Services
             }
             await context.SaveChangesAsync();
             return true;
+        }
+
+        /// <summary>
+        /// ING-05: fans one RFQ email out to the durable extraction queue — the body text
+        /// as its own content-addressed .txt document plus one job per supported
+        /// attachment, all sharing one batch id and one provenance sidecar (real
+        /// EmailIngest id + from/subject). Per-document failures are isolated: one bad
+        /// attachment never blocks the body or the other attachments. Re-delivered
+        /// content dedups naturally on the queue's (BusinessUnitId, ContentHash) index.
+        /// Returns the number of jobs enqueued (duplicates count — they are handled work).
+        /// </summary>
+        private async Task<int> EnqueueEmailForExtractionAsync(
+            MimeMessage message, EmailIngest ingest, EmailConfiguration config,
+            ERP_RFQ_Automation.Extraction.IDocumentIngestion ingestion)
+        {
+            var batchId = Guid.NewGuid();
+            var queued = 0;
+            var metadata = new ERP_RFQ_Automation.Extraction.ExtractionJobMetadata
+            {
+                EmailIngestId = ingest.Id,
+                FromEmail = message.From.ToString(),
+                Subject = message.Subject ?? "",
+                ClientEmail = config.EmailAddress,
+                LeadSource = "Email",
+                EmailSource = "Text Only" // per-attachment jobs override with their own label
+            };
+
+            // 1) Email body as its own document (Subject/From header lines give the
+            //    extractor the same context the legacy prompt had).
+            try
+            {
+                var body = GetEmailBody(message);
+                if (!string.IsNullOrWhiteSpace(body))
+                {
+                    var bodyDoc = $"Subject: {message.Subject}\nFrom: {message.From}\nDate: {message.Date:yyyy-MM-dd}\n\n{body}";
+                    var bodyName = $"{SanitizeFileName(message.Subject ?? "email")}_body.txt";
+                    var result = await ingestion.IngestAsync(
+                        Encoding.UTF8.GetBytes(bodyDoc), bodyName, config.BusinessUnitId,
+                        ERP_RFQ_Automation.Extraction.ExtractionSourceType.Email,
+                        batchId, priority: 0, metadata);
+                    queued++;
+                    _logger.LogInformation("Enqueued email body as job {JobId} ({Outcome}) for ingest {IngestId}.",
+                        result.JobId, result.Outcome, ingest.Id);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to enqueue email body for ingest {IngestId}.", ingest.Id);
+            }
+
+            // 2) Each supported attachment is its own job (same batch, same provenance).
+            foreach (var att in message.Attachments)
+            {
+                if (att is not MimePart part || part.FileName == null) continue;
+                var ext = Path.GetExtension(part.FileName).ToLowerInvariant();
+                if (!IsSupportedExtension(ext)) continue;
+
+                try
+                {
+                    using var ms = new MemoryStream();
+                    await part.Content.DecodeToAsync(ms);
+                    if (ms.Length == 0) continue;
+                    if (ms.Length > MAX_ATTACHMENT_SIZE)
+                    {
+                        _logger.LogWarning("Skipping large attachment {FileName} ({Size} bytes).", part.FileName, ms.Length);
+                        continue;
+                    }
+
+                    var attMetadata = new ERP_RFQ_Automation.Extraction.ExtractionJobMetadata
+                    {
+                        EmailIngestId = ingest.Id,
+                        FromEmail = metadata.FromEmail,
+                        Subject = metadata.Subject,
+                        ClientEmail = metadata.ClientEmail,
+                        LeadSource = "Email",
+                        EmailSource = GetFileTypeLabel(ext)
+                    };
+                    var result = await ingestion.IngestAsync(
+                        ms.ToArray(), part.FileName, config.BusinessUnitId,
+                        ERP_RFQ_Automation.Extraction.ExtractionSourceType.Email,
+                        batchId, priority: 0, attMetadata);
+                    queued++;
+                    _logger.LogInformation("Enqueued attachment {FileName} as job {JobId} ({Outcome}) for ingest {IngestId}.",
+                        part.FileName, result.JobId, result.Outcome, ingest.Id);
+                }
+                catch (Exception ex)
+                {
+                    // Poison-attachment isolation: continue with the remaining documents.
+                    _logger.LogError(ex, "Failed to enqueue attachment {FileName} for ingest {IngestId}.",
+                        part.FileName, ingest.Id);
+                }
+            }
+
+            return queued;
         }
         private async Task<bool> IsLikelyRFQEmailAsync(MimeMessage message)
         {

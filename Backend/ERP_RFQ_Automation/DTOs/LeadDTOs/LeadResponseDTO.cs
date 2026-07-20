@@ -30,6 +30,11 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         public bool IsAccepted => LeadStatusId == 24;
         public bool IsRejected => LeadStatusId == 25;
 
+        // WP-BOQ foundation: "product" | "service" | "mixed" | null (unclassified).
+        public string? InquiryType { get; set; }
+        // Distinct list badge for service-scope leads (service or mixed inquiries).
+        public bool IsServiceInquiry => InquiryType is "service" or "mixed";
+
         // WP-A3 duplicate flag: null | "suspected" | "confirmed" | "not_duplicate".
         // Conversion is blocked while suspected/confirmed.
         public string? DuplicateStatus { get; set; }

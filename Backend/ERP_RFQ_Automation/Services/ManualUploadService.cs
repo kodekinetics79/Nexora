@@ -43,16 +43,27 @@ namespace ERP_RFQ_Automation.Services
         // pdfium (Docnet) and the Tesseract native engine are not thread-safe; serialize OCR.
         private static readonly object _ocrLock = new object();
 
+        // ING-05: when true (default) the document-extraction path enqueues each file as
+        // its own durable extraction job instead of the synchronous direct-LLM flow below.
+        // The Excel-template path (ProcessCustomerRfqExcelAsync) is deterministic and is
+        // NOT affected. Config: Ingestion:UseUnifiedQueue.
+        private readonly bool _useUnifiedQueue;
+        private readonly ERP_RFQ_Automation.Extraction.IDocumentIngestion? _ingestion;
+
         public ManualUploadService(
             ErpRfqAutomationContext context,
             IWebHostEnvironment env,
             ILogger<ManualUploadService> logger,
-            ILLMService llmService)
+            ILLMService llmService,
+            IConfiguration configuration,
+            ERP_RFQ_Automation.Extraction.IDocumentIngestion? ingestion = null)
         {
             _context = context;
             _env = env;
             _logger = logger;
             _llmService = llmService;
+            _useUnifiedQueue = configuration.GetValue("Ingestion:UseUnifiedQueue", true);
+            _ingestion = ingestion;
             _attachmentPath = Path.Combine(_env.ContentRootPath, "Uploads", "Manual_Attachments");
             _tessDataPath = Path.Combine(_env.ContentRootPath, "tessdata");
             Directory.CreateDirectory(_attachmentPath);
@@ -71,6 +82,13 @@ namespace ERP_RFQ_Automation.Services
                 _logger.LogWarning("No files provided for manual upload.");
                 return ServiceResult<long>.CreateFailure("No files were uploaded.");
             }
+
+            // ING-05: unified queue — each document becomes its own durable extraction
+            // job (one lead per document; files are never merged into one lead). The
+            // synchronous direct-LLM path below remains available via
+            // Ingestion:UseUnifiedQueue=false.
+            if (_useUnifiedQueue && _ingestion != null)
+                return await EnqueueUploadedFilesAsync(files, businessUnitId);
 
             const double minConfidence = 0.60;
             string combinedExtractedText = "";
@@ -377,6 +395,64 @@ namespace ERP_RFQ_Automation.Services
                 _logger.LogError(ex, "Failed to save lead from manual upload.");
                 return ServiceResult<long>.CreateFailure("An unexpected error occurred during processing. Please contact support.");
             }
+        }
+
+        /// <summary>
+        /// ING-05: fans a manual upload out to the durable queue — one content-addressed
+        /// job per supported file, shared batch id, interactive priority. Per-file
+        /// failures are isolated. Returns success when at least one file was enqueued
+        /// (Data carries 0: leads are produced asynchronously by the extraction worker,
+        /// not inline — the message states this explicitly).
+        /// </summary>
+        private async Task<ServiceResult<long>> EnqueueUploadedFilesAsync(
+            List<Microsoft.AspNetCore.Http.IFormFile> files, long businessUnitId)
+        {
+            const long maxBytes = 25 * 1024 * 1024; // 25 MB, mirrors the legacy path
+            var batchId = Guid.NewGuid();
+            int queued = 0, duplicates = 0, skipped = 0;
+
+            foreach (var file in files)
+            {
+                if (file.Length == 0) { skipped++; continue; }
+                var ext = Path.GetExtension(file.FileName).ToLowerInvariant();
+                if (!IsSupportedExtension(ext)) { skipped++; continue; }
+                if (file.Length > maxBytes)
+                {
+                    _logger.LogWarning("Skipping large file: {File} ({Size} bytes)", file.FileName, file.Length);
+                    skipped++;
+                    continue;
+                }
+
+                try
+                {
+                    using var ms = new MemoryStream();
+                    await file.CopyToAsync(ms);
+                    var result = await _ingestion!.IngestAsync(
+                        ms.ToArray(), file.FileName, businessUnitId,
+                        ERP_RFQ_Automation.Extraction.ExtractionSourceType.ManualUpload,
+                        batchId, priority: 10 /* interactive */);
+                    if (result.Outcome == ERP_RFQ_Automation.Extraction.EnqueueOutcome.Duplicate)
+                        duplicates++;
+                    else
+                        queued++;
+                }
+                catch (Exception ex)
+                {
+                    // Poison-file isolation: one bad file never fails the batch.
+                    _logger.LogError(ex, "Failed to enqueue manual upload {FileName}.", file.FileName);
+                    skipped++;
+                }
+            }
+
+            if (queued == 0 && duplicates == 0)
+                return ServiceResult<long>.CreateFailure(
+                    "No supported documents could be queued for extraction. Please check the file types and try again.");
+
+            var parts = new List<string> { $"{queued} document(s) queued for extraction" };
+            if (duplicates > 0) parts.Add($"{duplicates} already processed (duplicate content)");
+            if (skipped > 0) parts.Add($"{skipped} skipped");
+            return ServiceResult<long>.CreateSuccess(0,
+                $"{string.Join(", ", parts)}. Leads will appear in the list once extraction completes (batch {batchId:N}).");
         }
 
         // SEC-11: image content types accepted by the manual-upload attachment path. These mirror
