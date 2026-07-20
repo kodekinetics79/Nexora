@@ -1,14 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
-using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Extraction;
 using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
@@ -18,32 +15,28 @@ namespace ERP_RFQ_Automation.Controllers
     /// <summary>
     /// Additive async ingest surface for the durable extraction pipeline (ADR-0003).
     /// Each uploaded file is persisted to an immutable, content-addressed path and fanned
-    /// out to its OWN queue job — files are NEVER merged. This endpoint does not touch the
-    /// existing synchronous ManualUpload path, so the working demo is unaffected.
+    /// out to its OWN queue job — files are NEVER merged. Storage + enqueue now live in
+    /// the shared <see cref="IDocumentIngestion"/> gateway so all four ingestion doors
+    /// (this endpoint, email poller, folder watcher, manual upload) use one code path.
     /// </summary>
     [ApiController]
     [Route("api/[controller]")]
     [Authorize]
     public class ExtractionController : ControllerBase
     {
-        private readonly IExtractionQueue _queue;
-        private readonly IWebHostEnvironment _env;
+        private readonly IDocumentIngestion _ingestion;
         private readonly ILogger<ExtractionController> _logger;
-        private readonly string _storageRoot;
 
         // Interactive uploads outrank bulk backfills in the weighted-fair claim ordering.
         private const int InteractivePriority = 10;
         private const long MaxBytesPerFile = 25L * 1024 * 1024; // 25 MB, mirrors ManualUpload
 
         public ExtractionController(
-            IExtractionQueue queue,
-            IWebHostEnvironment env,
+            IDocumentIngestion ingestion,
             ILogger<ExtractionController> logger)
         {
-            _queue = queue;
-            _env = env;
+            _ingestion = ingestion;
             _logger = logger;
-            _storageRoot = Path.Combine(_env.ContentRootPath, "Uploads", "Extraction");
         }
 
         /// <summary>
@@ -88,28 +81,16 @@ namespace ERP_RFQ_Automation.Controllers
                         bytes = ms.ToArray();
                     }
 
-                    var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
-                    var storagePath = await PersistImmutableAsync(bytes, hash, file.FileName, ct);
-                    var fileType = Path.GetExtension(file.FileName).TrimStart('.').ToLowerInvariant();
-
-                    var enqueue = await _queue.EnqueueAsync(new EnqueueExtractionRequest
-                    {
-                        BusinessUnitId = businessUnitId,
-                        SourceType = ExtractionSourceType.ManualUpload,
-                        StoragePath = storagePath,
-                        FileName = file.FileName,
-                        FileType = string.IsNullOrEmpty(fileType) ? null : fileType,
-                        Content = bytes,          // bytes hashed in one place by the queue
-                        ContentHash = hash,       // precomputed for the content-addressed path
-                        BatchId = batchId,
-                        Priority = InteractivePriority
-                    }, ct);
+                    var ingested = await _ingestion.IngestAsync(
+                        bytes, file.FileName, businessUnitId,
+                        ExtractionSourceType.ManualUpload,
+                        batchId, InteractivePriority, metadata: null, ct);
 
                     results.Add(new
                     {
-                        jobId = enqueue.JobId,
+                        jobId = ingested.JobId,
                         fileName = file.FileName,
-                        outcome = enqueue.Outcome.ToString()
+                        outcome = ingested.Outcome.ToString()
                     });
                 }
                 catch (Exception ex)
@@ -121,37 +102,6 @@ namespace ERP_RFQ_Automation.Controllers
             }
 
             return StatusCode(StatusCodes.Status202Accepted, new { batchId, jobs = results });
-        }
-
-        /// <summary>
-        /// Writes the raw bytes to an immutable, content-addressed path
-        /// (Uploads/Extraction/&lt;aa&gt;/&lt;sha256&gt;&lt;ext&gt;). Identical bytes reuse the same
-        /// file — a re-upload never rewrites or mutates existing content.
-        /// </summary>
-        private async Task<string> PersistImmutableAsync(byte[] bytes, string hash, string originalName, CancellationToken ct)
-        {
-            var ext = Path.GetExtension(originalName);
-            var shard = hash[..2];
-            var dir = Path.Combine(_storageRoot, shard);
-            Directory.CreateDirectory(dir);
-
-            var path = Path.Combine(dir, hash + ext);
-            if (!System.IO.File.Exists(path))
-            {
-                // Write to a temp file then atomically move so a concurrent reader never sees a partial file.
-                var tmp = path + "." + Guid.NewGuid().ToString("N")[..8] + ".tmp";
-                await System.IO.File.WriteAllBytesAsync(tmp, bytes, ct);
-                try
-                {
-                    System.IO.File.Move(tmp, path, overwrite: false);
-                }
-                catch (IOException)
-                {
-                    // Another request materialized the same content first; the existing file is authoritative.
-                    try { System.IO.File.Delete(tmp); } catch { /* best-effort cleanup */ }
-                }
-            }
-            return path;
         }
     }
 }

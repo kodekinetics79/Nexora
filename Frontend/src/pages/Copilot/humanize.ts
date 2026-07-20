@@ -42,6 +42,9 @@ const TOOLS: Record<string, HumanTool> = {
   apply_rfq_pricing: { icon: '💰', label: 'Applied pricing', action: 'apply the suggested pricing to this RFQ' },
   // WP-B3: below-floor holds (created by the pricing/send guards, executed on approve)
   approve_below_floor_quote: { icon: '💰', label: 'Approve below-floor pricing', action: 'approve this below-floor quote' },
+  // WP-BOQ: Service RFQ → Bill of Quantities engine (Boq/BoqTools.cs)
+  draft_boq: { icon: '📋', label: 'Drafted a bill of quantities', action: 'draft a bill of quantities from this request' },
+  get_boq: { icon: '📋', label: 'Opened a bill of quantities', action: 'open this bill of quantities' },
 };
 
 /** snake_case / kebab-case → "Title Case". */

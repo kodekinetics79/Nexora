@@ -26,6 +26,7 @@ import {
   FiberManualRecord as BulletIcon,
   TrendingUp as LeadIcon,
   AutoAwesome as CopilotIcon,
+  FactCheck as BoqIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../../context/AuthContext';
 
@@ -127,6 +128,9 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
         ]
       },
       { key: 'quotes', label: t('quotations'), icon: <QuotationIcon />, path: '/sales/quotes', moduleName: 'Quotations', activePrefixes: ['/sales/quotes'] },
+      // Service BOQs live next to Quotations — a BOQ is priced quote material for
+      // service work, so it shares the Quotations module permission.
+      { key: 'service-boqs', label: t('service_boqs', 'Service BOQs'), icon: <BoqIcon />, path: '/services/boq', moduleName: 'Quotations', activePrefixes: ['/services/boq'] },
       { key: 'orders', label: t('orders'), icon: <OrderIcon />, path: '/sales/orders', moduleName: 'Orders', activePrefixes: ['/sales/orders'] },
       { key: 'shipments', label: t('shipments'), icon: <ShipmentIcon />, path: '/sales/shipments', moduleName: 'Shipments', activePrefixes: ['/sales/shipments'] },
       {

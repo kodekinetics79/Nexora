@@ -60,6 +60,10 @@ const SlaSettingsPage = lazy(() => import('./pages/Setup/Sla/SlaSettingsPage'));
 const LeadConvertPage = lazy(() => import('./pages/Intelligence/LeadConvertPage'));
 const RfqPricingPage = lazy(() => import('./pages/Intelligence/RfqPricingPage'));
 
+// Service RFQ → BOQ engine — drafted bills of quantities for service work.
+const BoqListPage = lazy(() => import('./pages/Boq/BoqListPage'));
+const BoqEditorPage = lazy(() => import('./pages/Boq/BoqEditorPage'));
+
 // Sourcing Copilot — conversational autonomous-agent console (flagship surface).
 const CopilotPage = lazy(() => import('./pages/Copilot/CopilotPage'));
 const CopilotApprovalsPage = lazy(() => import('./pages/Copilot/ApprovalsPage'));
@@ -87,6 +91,10 @@ function App() {
       <Route path="/copilot" element={<MainLayout><PermissionGuard moduleName="Dashboard" redirect><CopilotPage /></PermissionGuard></MainLayout>} />
       <Route path="/copilot/approvals" element={<MainLayout><PermissionGuard moduleName="Dashboard" redirect><CopilotApprovalsPage /></PermissionGuard></MainLayout>} />
       <Route path="/copilot/activity" element={<MainLayout><PermissionGuard moduleName="Dashboard" redirect><CopilotActivityPage /></PermissionGuard></MainLayout>} />
+
+      {/* Service BOQ Routes — gated by Quotations (BOQs are priced quote material) */}
+      <Route path="/services/boq" element={<MainLayout><PermissionGuard moduleName="Quotations" redirect><BoqListPage /></PermissionGuard></MainLayout>} />
+      <Route path="/services/boq/:id" element={<MainLayout><PermissionGuard moduleName="Quotations" redirect><BoqEditorPage /></PermissionGuard></MainLayout>} />
 
       {/* Sales Routes */}
       <Route path="/sales/quotes" element={<MainLayout><PermissionGuard moduleName="Quotations" redirect><QuotesPage /></PermissionGuard></MainLayout>} />

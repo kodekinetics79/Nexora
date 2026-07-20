@@ -25,7 +25,7 @@ const ManualUploadLeadsPage: React.FC = () => {
   const uploadMutation = useMutation({
     mutationFn: (fd: FormData) => leadService.uploadManual(fd),
     onSuccess: () => {
-      enqueueSnackbar('Lead documents processed successfully by AI engine!', { variant: 'success' });
+      enqueueSnackbar('Documents queued — Nexora is reading them now. New leads will appear shortly.', { variant: 'success' });
       setFiles([]);
     },
     onError: (err: any) => {

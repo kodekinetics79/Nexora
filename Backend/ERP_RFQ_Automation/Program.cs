@@ -21,6 +21,7 @@ using ERP_RFQ_Automation.Agent;
 using ERP_RFQ_Automation.Intelligence.Conversion;
 using ERP_RFQ_Automation.Intelligence.Pricing;
 using ERP_RFQ_Automation.Intelligence.Decision;
+using ERP_RFQ_Automation.Boq;
 using System.Text.Json.Serialization;
 
 // PostgreSQL migration: restore pre-6.0 Npgsql timestamp semantics so the
@@ -259,6 +260,10 @@ builder.Services.AddScoped<IChunkedExtractionService, ChunkedExtractionService>(
 builder.Services.AddScoped<ILeadPersister, LeadPersister>();
 builder.Services.AddScoped<IExtractionDocumentReader, ProductionDocumentReader>();
 builder.Services.AddHostedService<ExtractionWorker>();
+// ING-05: unified ingestion gateway — the ONE door to the durable queue used by the
+// modern upload endpoint, the email poller, the folder watcher and manual upload
+// (each door still honours Ingestion:UseUnifiedQueue, default true).
+builder.Services.AddScoped<IDocumentIngestion, DocumentIngestionService>();
 
 // Transactional email / notifications (Notifications/): provider-agnostic sender
 // (defaults to the safe console provider until an SMTP/SendGrid provider is
@@ -293,6 +298,12 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automati
 builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Pricing.ApproveBelowFloorQuoteTool>();
 // WP-B4: append-only passive AI-metrics writer (never throws; own DI scope).
 builder.Services.AddSingleton<ERP_RFQ_Automation.Metrics.IMetricRecorder, ERP_RFQ_Automation.Metrics.MetricRecorder>();
+
+// Service RFQ → BOQ engine (Boq/): LLM drafting with honest TBDs, tenant assembly
+// library, editor endpoints; vision seam ready for a drawing-capable model.
+builder.Services.AddBoqEngine();
+builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Boq.DraftBoqTool>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Boq.GetBoqTool>();
 
 // Lead Decision Brief (Intelligence/Decision): value/coverage/history/urgency →
 // Bid/Review/Skip with plain-language reasons; feeds the leads grid + dashboard.
