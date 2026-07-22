@@ -173,27 +173,27 @@ builder.Services.AddHttpClient<OllamaLlmService>(client =>
 });
 
 // CORS restricted to configured frontend origins (SEC-13). AllowAnyOrigin is
-// unsafe for a system with authenticated, tenant-scoped data. Set
-// "Cors:AllowedOrigins" in configuration for the pilot; falls back to local dev.
-var corsOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>();
+// unsafe for a system with authenticated, tenant-scoped data. Always include
+// the known deployment origins, then merge env-configured origins for previews
+// and future custom domains. Normalize trailing slashes because CORS origin
+// matching is exact.
+var configuredCorsOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
+var corsOrigins = configuredCorsOrigins
+    .Concat([
+        "http://localhost:5173",
+        "http://localhost:4173",
+        "http://localhost:3000",
+        "https://nexora1-ai.vercel.app"
+    ])
+    .Where(origin => !string.IsNullOrWhiteSpace(origin))
+    .Select(origin => origin.Trim().TrimEnd('/'))
+    .Distinct(StringComparer.OrdinalIgnoreCase)
+    .ToArray();
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("DefaultCors", policy =>
     {
-        if (corsOrigins is { Length: > 0 })
-        {
-            policy.WithOrigins(corsOrigins).AllowAnyMethod().AllowAnyHeader().AllowCredentials();
-        }
-        else
-        {
-            // Fallback origins: local dev + the deployed Vercel frontend. In production,
-            // set Cors:AllowedOrigins (env: Cors__AllowedOrigins__0, __1, ...) to the exact
-            // frontend URL(s) instead of relying on this list.
-            policy.WithOrigins(
-                    "http://localhost:5173", "http://localhost:4173", "http://localhost:3000",
-                    "https://nexora1-ai.vercel.app")
-                  .AllowAnyMethod().AllowAnyHeader();
-        }
+        policy.WithOrigins(corsOrigins).AllowAnyMethod().AllowAnyHeader();
     });
 });
 // Configure JWT Authentication
