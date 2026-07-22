@@ -57,7 +57,7 @@ const SupplierDetailPage: React.FC = () => {
   if (isLoading) return <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '60vh' }}><CircularProgress /></Box>;
   if (!supplier) return <Box sx={{ p: 4 }}><Typography>Supplier not found.</Typography></Box>;
 
-  const apiBase = import.meta.env.VITE_API_URL ?? '';
+  const apiBase = import.meta.env.VITE_API_BASE_URL ?? import.meta.env.VITE_API_URL ?? '';
 
   return (
     <Box sx={{ p: 3, width: '100%' }}>
