@@ -136,6 +136,6 @@ export const userFromLogin = (
     id: pick(body.id, bodyUser.id, claims.sub),
     email: pick(body.email, bodyUser.email, claims.email, fallbackEmail) ?? fallbackEmail,
     name: pick(body.name, body.userName, bodyUser.name, claims.name),
-    role: pick(body.role, bodyUser.role, claims.role, claims.scope) ?? 'Platform Owner',
+    role: pick(body.platformRole, body.role, bodyUser.role, claims.platformRole, claims.role) ?? 'Platform Owner',
   };
 };
