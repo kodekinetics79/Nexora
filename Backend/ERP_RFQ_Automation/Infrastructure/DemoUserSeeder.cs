@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Platform.Models;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Infrastructure;
@@ -15,6 +16,8 @@ public static class DemoUserSeeder
         var businessUnitName = configuration["DemoUser:BusinessUnitName"] ?? "Customer POC";
         var businessUnitCode = configuration["DemoUser:BusinessUnitCode"] ?? "CUSTOMER-POC";
         var roleName = configuration["DemoUser:RoleName"] ?? "Super Admin";
+        var platformEmail = configuration["PlatformOwner:Email"] ?? "owner@nexora.app";
+        var platformPassword = configuration["PlatformOwner:Password"] ?? "Nexora#Pilot-a9bc9e";
 
         using var scope = services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
@@ -113,5 +116,35 @@ public static class DemoUserSeeder
 
         await db.SaveChangesAsync();
         logger.LogInformation("Ensured demo login user {Email} for business unit {BusinessUnit}.", email, businessUnit.BusinessUnitName);
+
+        var platformOwner = await db.Set<PlatformUser>().FirstOrDefaultAsync(u => u.Email == platformEmail);
+        var platformPasswordHash = BCrypt.Net.BCrypt.HashPassword(platformPassword);
+
+        if (platformOwner == null)
+        {
+            platformOwner = new PlatformUser
+            {
+                Email = platformEmail,
+                PasswordHash = platformPasswordHash,
+                PlatformRole = PlatformRole.Owner,
+                IsActive = true,
+                DisplayName = "Platform Owner",
+                CreatedBy = "system:demo-seed",
+                CreatedOn = now
+            };
+            db.Set<PlatformUser>().Add(platformOwner);
+        }
+        else
+        {
+            platformOwner.PasswordHash = platformPasswordHash;
+            platformOwner.PlatformRole = PlatformRole.Owner;
+            platformOwner.IsActive = true;
+            platformOwner.DisplayName = string.IsNullOrWhiteSpace(platformOwner.DisplayName)
+                ? "Platform Owner"
+                : platformOwner.DisplayName;
+        }
+
+        await db.SaveChangesAsync();
+        logger.LogInformation("Ensured platform owner login user {Email}.", platformEmail);
     }
 }

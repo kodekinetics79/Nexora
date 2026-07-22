@@ -45,10 +45,18 @@ Vercel project settings:
 
 ## 3. Demo login (Neon is seeded)
 
+Tenant app:
+
 - URL: https://nexora1-ai.vercel.app
 - **Email:** `robert@example.com`
 - **Password:** `Nexora#Pilot-a9bc9e`
 - **Business Unit:** `Customer POC`
+
+Platform console:
+
+- URL: https://nexora1-ai.vercel.app/platform
+- **Email:** `owner@nexora.app`
+- **Password:** `Nexora#Pilot-a9bc9e`
 
 The backend verifies this demo account on startup so a fresh Render/Neon deploy
 can log in immediately. To disable that repair in a production tenant, set:
