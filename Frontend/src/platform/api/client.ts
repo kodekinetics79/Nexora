@@ -93,6 +93,60 @@ const flagOverrides: Record<string, Record<string, boolean>> = {};
 const planFor = (tier: PlanTier): Plan =>
   PLANS.find((p) => p.tier === tier) ?? PLANS[0];
 
+type BackendTenant = {
+  id: string | number;
+  name: string;
+  slug: string;
+  status?: string | null;
+  planCode?: string | null;
+  createdOn?: string | null;
+  primaryBusinessUnitId?: string | number | null;
+  primaryContactEmail?: string | null;
+  region?: string | null;
+  usage?: Partial<Tenant['usage']> | null;
+  extractionSuccessRate?: number | null;
+  pipelineHealth?: string | null;
+};
+
+const normalizePlanTier = (planCode?: string | null): PlanTier => {
+  const tier = (planCode ?? '').toLowerCase();
+  return tier === 'free' || tier === 'enterprise' ? tier : 'pro';
+};
+
+const normalizeTenantStatus = (status?: string | null): Tenant['status'] => {
+  const normalized = (status ?? 'active').toLowerCase();
+  if (normalized === 'trial' || normalized === 'suspended' || normalized === 'provisioning') return normalized;
+  return 'active';
+};
+
+const normalizeTenant = (tenant: BackendTenant): Tenant => {
+  const plan = planFor(normalizePlanTier(tenant.planCode));
+  const usage = tenant.usage ?? {};
+  return {
+    id: String(tenant.id),
+    name: tenant.name,
+    slug: tenant.slug,
+    planTier: plan.tier,
+    status: normalizeTenantStatus(tenant.status),
+    region: tenant.region ?? 'us-east-1',
+    primaryContactEmail: tenant.primaryContactEmail ?? 'owner@nexora.app',
+    createdAt: tenant.createdOn ?? new Date().toISOString(),
+    usage: {
+      docsProcessedMtd: usage.docsProcessedMtd ?? 0,
+      docQuota: usage.docQuota ?? plan.monthlyDocQuota,
+      seatsUsed: usage.seatsUsed ?? 0,
+      seatQuota: usage.seatQuota ?? plan.seatQuota,
+      llmCostMtdUsd: usage.llmCostMtdUsd ?? 0,
+      storageUsedGb: usage.storageUsedGb ?? 0,
+    },
+    extractionSuccessRate: tenant.extractionSuccessRate ?? 1,
+    pipelineHealth:
+      tenant.pipelineHealth === 'degraded' || tenant.pipelineHealth === 'down'
+        ? tenant.pipelineHealth
+        : 'healthy',
+  };
+};
+
 const effectiveFlags = (tenant: Tenant): Record<string, boolean> => {
   const entitlements = new Set(planFor(tenant.planTier).entitlements);
   const base: Record<string, boolean> = {};
@@ -340,15 +394,41 @@ const httpPlatformApi: PlatformApi = {
   getOverview: async () => (await platformHttp.get<OverviewMetrics>('/api/platform/overview')).data,
 
   // GET /api/platform/tenants
-  listTenants: async () => (await platformHttp.get<Tenant[]>('/api/platform/tenants')).data,
+  listTenants: async () =>
+    (await platformHttp.get<BackendTenant[]>('/api/platform/tenants')).data.map(normalizeTenant),
   // GET /api/platform/tenants/:id
-  getTenant: async (id) => (await platformHttp.get<TenantDetail>(`/api/platform/tenants/${id}`)).data,
+  getTenant: async (id) => {
+    const tenant = normalizeTenant((await platformHttp.get<BackendTenant>(`/api/platform/tenants/${id}`)).data);
+    return {
+      ...tenant,
+      users: [],
+      flags: {},
+      usageMeters: [],
+      recentAudit: [],
+      queue: {
+        queueDepth: 0,
+        inFlight: 0,
+        deadLetter: 0,
+        processedLast24h: 0,
+        avgLatencyMs: 0,
+        successRate: tenant.extractionSuccessRate,
+      },
+    };
+  },
   // POST /api/platform/tenants
-  provisionTenant: async (input) => (await platformHttp.post<Tenant>('/api/platform/tenants', input)).data,
+  provisionTenant: async (input) => {
+    const created = (await platformHttp.post<BackendTenant>('/api/platform/tenants', input)).data;
+    return {
+      ...normalizeTenant(created),
+      planTier: input.planTier,
+      region: input.region,
+      primaryContactEmail: input.primaryContactEmail,
+    };
+  },
   // POST /api/platform/tenants/:id/suspend
-  suspendTenant: async (id) => (await platformHttp.post<Tenant>(`/api/platform/tenants/${id}/suspend`)).data,
+  suspendTenant: async (id) => normalizeTenant((await platformHttp.post<BackendTenant>(`/api/platform/tenants/${id}/suspend`, { reason: 'Platform action' })).data),
   // POST /api/platform/tenants/:id/resume
-  resumeTenant: async (id) => (await platformHttp.post<Tenant>(`/api/platform/tenants/${id}/resume`)).data,
+  resumeTenant: async (id) => normalizeTenant((await platformHttp.post<BackendTenant>(`/api/platform/tenants/${id}/resume`, { reason: 'Platform action' })).data),
   // POST /api/platform/tenants/:id/impersonate
   impersonateTenant: async (id) => (await platformHttp.post<ImpersonationTicket>(`/api/platform/tenants/${id}/impersonate`)).data,
   // PUT /api/platform/tenants/:id/flags/:flagKey
