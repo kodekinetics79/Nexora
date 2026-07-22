@@ -73,6 +73,16 @@ Job-completion non-idempotency (duplicate lead on crash between persist+complete
 4. AI privacy posture: self-host Ollama vs. build IAiGateway seam (raw doc text currently leaves to Ollama Cloud by default).
 5. Migration execution mechanism (release_command vs. guarded startup Migrate).
 
+## Commercial Case connectivity map (verified in code, 2026-07-22)
+- **CommercialCase ↔ Lead**: durable 1:1, required, immutable reference (`Lead.CommercialCase.cs`: `CommercialCaseId`/`CommercialCaseReference` private-set). Reference DB-trigger enforced (migration 20260722033825).
+- **Chain (all FK, but nullable)**: Lead ←`LeadId?`← Rfq ←`Rfqid?`← Quote ←`QuoteId?`← Order ←`OrderId`← Shipment. QuoteItem→Rfqitem via `RfqitemId?`.
+- **Read spine EXISTS**: `CommercialCaseQueryService` already traverses Case→Lead→Rfqs→Quotes→Orders→Shipments for search + detail by permanent reference (`Controllers/CommercialCasesController.cs`: GET /api/commercial-cases/search, /{id}). **Do not rebuild.**
+- **Real gaps vs. the end-to-end prompt**:
+  - No direct denormalized `CommercialCaseId` on Rfq/Quote/Order/Shipment → search needs full-chain join; links are nullable so downstream docs can orphan from a case (no enforcement).
+  - **No first-class Invoice / Payment / AR / Credit-Debit-Note entities** — invoice is an Order-derived print view; payment is status fields on Order (MODULE 14/15 largely unbuilt).
+  - Supplier sourcing / cost-comparison depth unverified (MODULE 6/7) — needs inspection.
+  - Commercial Case reference has thin/no frontend surface (per FE review).
+
 ## Next smallest executable task
 Implement `IFileStorage` abstraction over object storage behind DocumentIngestionService (P0 #1) once provider is chosen; interim: attach a Fly volume via `[mounts]` (single-machine only).
 
