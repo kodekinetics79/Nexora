@@ -114,10 +114,10 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   const hasPermission = (moduleName: string, action: 'view' | 'create' | 'edit' | 'delete' = 'view') => {
+    const normalizedRoleName = (userData.roleName ?? '').replace(/[_-]/g, ' ').toLowerCase();
+    if (normalizedRoleName.includes('admin')) return true;
+
     if (!userData.permissions) return false;
-    
-    // Super Admin or similar role logic could go here
-    if (userData.roleName === 'Super Admin') return true;
 
     const permission = userData.permissions.find(
       p => p.moduleName.toLowerCase() === moduleName.toLowerCase()
