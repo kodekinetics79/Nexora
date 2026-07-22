@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
 using Microsoft.EntityFrameworkCore;
+using ERP_RFQ_Automation.Services;
+using ERP_RFQ_Automation.CustomFields;
 
 namespace ERP_RFQ_Automation.Models;
 
@@ -31,6 +33,8 @@ public partial class ErpRfqAutomationContext : DbContext
 
     public virtual DbSet<BusinessUnit> BusinessUnits { get; set; }
 
+    public virtual DbSet<CommercialCase> CommercialCases { get; set; }
+
     public virtual DbSet<Contact> Contacts { get; set; }
 
     public virtual DbSet<Currency> Currencies { get; set; }
@@ -46,6 +50,10 @@ public partial class ErpRfqAutomationContext : DbContext
     public virtual DbSet<Lead> Leads { get; set; }
 
     public virtual DbSet<LeadItem> LeadItems { get; set; }
+
+    public virtual DbSet<LeadReferenceConfiguration> LeadReferenceConfigurations { get; set; }
+
+    public virtual DbSet<LeadStatusHistory> LeadStatusHistories { get; set; }
 
     public virtual DbSet<Module> Modules { get; set; }
 
@@ -108,6 +116,21 @@ public partial class ErpRfqAutomationContext : DbContext
     public virtual DbSet<Taxis> Taxes { get; set; }
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder) { }
+
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        LeadPersistenceRules.Prepare(this);
+        CustomFieldGovernanceInterceptor.Validate(ChangeTracker);
+        return base.SaveChanges(acceptAllChangesOnSuccess);
+    }
+
+    public override Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
+    {
+        LeadPersistenceRules.Prepare(this);
+        CustomFieldGovernanceInterceptor.Validate(ChangeTracker);
+        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+    }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         // SQL Server is case-INSENSITIVE. Postgres is case-sensitive, so email

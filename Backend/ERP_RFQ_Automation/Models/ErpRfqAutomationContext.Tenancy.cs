@@ -1,4 +1,7 @@
 using ERP_RFQ_Automation.MultiTenancy;
+using ERP_RFQ_Automation.CommercialRouting;
+using ERP_RFQ_Automation.CustomFields;
+using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Models;
@@ -20,12 +23,18 @@ public partial class ErpRfqAutomationContext
 
     partial void OnModelCreatingPartial(ModelBuilder modelBuilder)
     {
+        if (Database.IsNpgsql())
+            modelBuilder.HasSequence<long>("CommercialCaseReferenceSequence");
+
         // Commercial documents (non-nullable BusinessUnitId).
         modelBuilder.Entity<Lead>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<Rfq>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<Quote>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<Order>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<Shipment>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<CommercialCase>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<LeadReferenceConfiguration>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<LeadStatusHistory>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
 
         // Master data (nullable Buid). Rows with a null Buid are treated as shared
         // reference data (visible to all tenants); tenant-owned rows are scoped.
@@ -48,6 +57,121 @@ public partial class ErpRfqAutomationContext
         // Lead.Inquiry.cs). Column ("InquiryType" varchar(16) NULL) is added by a
         // lead-generated migration, same pattern as the duplicate-flag columns above.
         modelBuilder.Entity<Lead>().Property(e => e.InquiryType).HasMaxLength(16);
+
+        // PostgreSQL-backed enterprise foundations. These modules intentionally use
+        // jsonb, filtered indexes, and PostgreSQL check expressions; their focused
+        // tests use isolated models while the legacy SQLite suite remains portable.
+        if (Database.IsNpgsql())
+        {
+            modelBuilder.AddEvidenceLedger();
+            modelBuilder.ApplyCommercialRoutingModel();
+            modelBuilder.ConfigureGovernedCustomFields();
+
+            modelBuilder.Entity<DocumentCorpus>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+            modelBuilder.Entity<SourceDocument>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+            modelBuilder.Entity<DocumentPage>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+            modelBuilder.Entity<DocumentRegion>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+            modelBuilder.Entity<CanonicalInquiry>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+            modelBuilder.Entity<CanonicalLineItem>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+            modelBuilder.Entity<FieldEvidence>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+
+            modelBuilder.Entity<CustomerIdentifier>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+            modelBuilder.Entity<CustomerOwnership>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+            modelBuilder.Entity<LeadRoutingDecision>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+            modelBuilder.Entity<LeadAssignment>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+            modelBuilder.Entity<UnassignedWorkItem>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+
+            modelBuilder.Entity<CustomFieldDefinition>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+            modelBuilder.Entity<CustomFieldVersion>().HasQueryFilter(e => CurrentTenantId == null || e.Definition.BusinessUnitId == CurrentTenantId);
+            modelBuilder.Entity<CustomFieldOption>().HasQueryFilter(e => CurrentTenantId == null || e.Version.Definition.BusinessUnitId == CurrentTenantId);
+            modelBuilder.Entity<CustomFieldRule>().HasQueryFilter(e => CurrentTenantId == null || e.Version.Definition.BusinessUnitId == CurrentTenantId);
+            modelBuilder.Entity<CustomFieldDependency>().HasQueryFilter(e => CurrentTenantId == null || e.Version.Definition.BusinessUnitId == CurrentTenantId);
+            modelBuilder.Entity<CustomFieldRecord>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+            modelBuilder.Entity<CustomFieldValue>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+            modelBuilder.Entity<CustomFieldValueHistory>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        }
+
+        // Permanent tenant-scoped commercial-case identity. PostgreSQL assigns the
+        // value through the migration trigger; ValueGeneratedOnAdd makes EF read the
+        // generated value back with the INSERT result.
+        modelBuilder.Entity<Lead>().Property(e => e.CommercialCaseReference)
+            .HasMaxLength(100)
+            .IsRequired()
+            .ValueGeneratedOnAdd();
+        var commercialCaseId = modelBuilder.Entity<Lead>().Property(e => e.CommercialCaseId);
+        if (Database.IsNpgsql())
+            commercialCaseId.ValueGeneratedOnAdd();
+        modelBuilder.Entity<Lead>().HasIndex(e => new { e.BusinessUnitId, e.CommercialCaseReference })
+            .IsUnique()
+            .HasDatabaseName("UX_Leads_BU_CommercialCaseReference");
+        modelBuilder.Entity<Lead>().HasIndex(e => e.CommercialCaseId).IsUnique()
+            .HasDatabaseName("UX_Leads_CommercialCaseID");
+
+        modelBuilder.Entity<CommercialCase>(entity =>
+        {
+            entity.ToTable("CommercialCases");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.BusinessUnitId).HasColumnName("BusinessUnitID");
+            var allocationNumber = entity.Property(e => e.AllocationNumber).ValueGeneratedOnAdd();
+            if (Database.IsNpgsql())
+                allocationNumber.HasDefaultValueSql("nextval('\"CommercialCaseReferenceSequence\"')");
+            entity.Property(e => e.MasterReference).HasMaxLength(100).IsRequired().ValueGeneratedOnAdd();
+            entity.Property(e => e.CreatedOn).HasDefaultValueSql("now()");
+            entity.Property(e => e.CreatedBy).HasMaxLength(255).IsRequired();
+            entity.HasIndex(e => e.AllocationNumber).IsUnique()
+                .HasDatabaseName("UX_CommercialCases_AllocationNumber");
+            entity.HasIndex(e => new { e.BusinessUnitId, e.MasterReference }).IsUnique()
+                .HasDatabaseName("UX_CommercialCases_BU_MasterReference");
+            entity.HasOne(e => e.BusinessUnit).WithMany(e => e.CommercialCases)
+                .HasForeignKey(e => e.BusinessUnitId)
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(e => e.Lead).WithOne(e => e.CommercialCase)
+                .HasForeignKey<Lead>(e => e.CommercialCaseId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<LeadReferenceConfiguration>(entity =>
+        {
+            entity.ToTable("LeadReferenceConfigurations");
+            entity.HasKey(e => e.BusinessUnitId);
+            entity.Property(e => e.BusinessUnitId).ValueGeneratedNever().HasColumnName("BusinessUnitID");
+            entity.Property(e => e.Prefix).HasMaxLength(20).IsRequired();
+            entity.Property(e => e.Format).HasMaxLength(100).IsRequired();
+            entity.Property(e => e.SequencePadding).HasDefaultValue(6);
+            entity.Property(e => e.FinancialYearStartMonth).HasDefaultValue(1);
+            entity.Property(e => e.CreatedOn).HasDefaultValueSql("now()");
+            entity.HasOne(e => e.BusinessUnit).WithOne(e => e.LeadReferenceConfiguration)
+                .HasForeignKey<LeadReferenceConfiguration>(e => e.BusinessUnitId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<LeadStatusHistory>(entity =>
+        {
+            entity.ToTable("LeadStatusHistories");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.BusinessUnitId).HasColumnName("BusinessUnitID");
+            entity.Property(e => e.LeadId).HasColumnName("LeadID");
+            entity.Property(e => e.CommercialCaseId).HasColumnName("CommercialCaseID");
+            entity.Property(e => e.PreviousStatusId).HasColumnName("PreviousStatusID");
+            entity.Property(e => e.NewStatusId).HasColumnName("NewStatusID");
+            entity.Property(e => e.EventType).HasMaxLength(30).IsRequired();
+            entity.Property(e => e.ChangedBy).HasMaxLength(255);
+            entity.Property(e => e.ActorSource).HasMaxLength(50).IsRequired();
+            entity.Property(e => e.ChangedOn).HasDefaultValueSql("now()");
+            entity.Property(e => e.Reason).HasMaxLength(1000);
+            entity.Property(e => e.CommercialCaseReference).HasMaxLength(100).IsRequired();
+            entity.HasIndex(e => new { e.BusinessUnitId, e.LeadId, e.ChangedOn })
+                .HasDatabaseName("IX_LeadStatusHistory_BU_Lead_ChangedOn");
+            entity.HasOne(e => e.Lead).WithMany(e => e.StatusHistory)
+                .HasForeignKey(e => e.LeadId)
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(e => e.CommercialCase).WithMany(e => e.LeadStatusHistory)
+                .HasForeignKey(e => e.CommercialCaseId)
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(e => e.BusinessUnit).WithMany(e => e.LeadStatusHistories)
+                .HasForeignKey(e => e.BusinessUnitId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
 
         // ==== Async extraction pipeline (ADR-0003) ====
         modelBuilder.Entity<ERP_RFQ_Automation.Extraction.ExtractionJob>(entity =>
