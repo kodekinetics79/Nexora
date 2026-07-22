@@ -73,6 +73,14 @@ Job-completion non-idempotency (duplicate lead on crash between persist+complete
 4. AI privacy posture: self-host Ollama vs. build IAiGateway seam (raw doc text currently leaves to Ollama Cloud by default).
 5. Migration execution mechanism (release_command vs. guarded startup Migrate).
 
+## Money-path implementation (priority per user, 2026-07-22)
+Priority spine: Lead -> RFQ -> Quote -> PO/Order -> Delivery(Shipment) -> Inventory.
+- Lead/Rfq/Quote/Order/Shipment: entities exist, FK-connected (nullable links).
+- **KEY FINDING**: the `Inventory` POCO was **never mapped to the DB** (no DbSet, only reference was an absent query filter) — so there was **no persisted stock** at all. Confirms inventory was the biggest real hole.
+- **SHIPPED — Inventory reservation engine** (commit pending): mapped the `Inventory` table (scalar cols, navs ignored to avoid cascading into other unmapped aggregates), added append-only `StockReservation` ledger, `IInventoryAvailabilityService` (OnHand/Reserved/Available; Reserve idempotent + over-reserve rejected; ReleaseForOrder; Consume decrements on-hand once). Fixed Inventory tenant query-filter gap. Migration `20260722235620_AddInventoryStockReservations`. Tests: `InventoryReservationTests` (6) — availability math, two-orders-cant-double-promise, idempotent reserve, release restores, consume-decrements-once, tenant isolation. **218/218 green.**
+- NEXT (increment 2): wire Order confirmation -> ReserveAsync per line; delivery/shipment -> ConsumeAsync. Requires resolving RFQ/Order line -> InventoryId (product/part match).
+- Slice A storage SME board (wf_a8c1da57-0f1) finished: 3/4 SME specs were placeholder stubs; the reconciliation consultant was strong and flagged Slice-B invoice intel (Postgres nextval is NOT gap-free for legal invoice numbers -> use a counter table; `Taxis` already mapped; BusinessUnit lacks TRN/functional-currency). Bank for the invoice slice.
+
 ## Commercial Case connectivity map (verified in code, 2026-07-22)
 - **CommercialCase ↔ Lead**: durable 1:1, required, immutable reference (`Lead.CommercialCase.cs`: `CommercialCaseId`/`CommercialCaseReference` private-set). Reference DB-trigger enforced (migration 20260722033825).
 - **Chain (all FK, but nullable)**: Lead ←`LeadId?`← Rfq ←`Rfqid?`← Quote ←`QuoteId?`← Order ←`OrderId`← Shipment. QuoteItem→Rfqitem via `RfqitemId?`.

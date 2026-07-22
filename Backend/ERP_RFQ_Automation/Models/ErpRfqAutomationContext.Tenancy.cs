@@ -1,5 +1,6 @@
 using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.CommercialRouting;
+using ERP_RFQ_Automation.Inventory;
 using ERP_RFQ_Automation.CustomFields;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
@@ -47,6 +48,7 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<Customer>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == null || e.Buid == CurrentTenantId);
         modelBuilder.Entity<Supplier>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == null || e.Buid == CurrentTenantId);
         modelBuilder.Entity<Product>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == null || e.Buid == CurrentTenantId);
+        modelBuilder.Entity<Inventory>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == null || e.Buid == CurrentTenantId);
 
         // LeadItem.ExtraFields (partial property in LeadItem.Extra.cs): verbatim
         // unrecognized customer-document columns, stored as jsonb.
@@ -69,6 +71,11 @@ public partial class ErpRfqAutomationContext
         // PostgreSQL-only model because their constraints use jsonb and PostgreSQL
         // expressions.
         modelBuilder.ApplyCommercialRoutingModel();
+
+        // Stock reservation ledger (portable relational model; enabled for the SQLite suite).
+        modelBuilder.ApplyInventoryReservationModel();
+        modelBuilder.Entity<ERP_RFQ_Automation.Inventory.StockReservation>()
+            .HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CustomerIdentifier>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CustomerOwnership>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<LeadRoutingDecision>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);

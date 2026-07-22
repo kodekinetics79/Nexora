@@ -118,6 +118,8 @@ public partial class ErpRfqAutomationContext : DbContext
 
     public virtual DbSet<Warehouse> Warehouses { get; set; }
 
+    public virtual DbSet<ERP_RFQ_Automation.Inventory.StockReservation> StockReservations { get; set; }
+
     public virtual DbSet<Taxis> Taxes { get; set; }
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder) { }

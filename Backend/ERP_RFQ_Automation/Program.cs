@@ -123,6 +123,7 @@ builder.Services.AddScoped<IShipmentRepository, ShipmentRepository>();
 builder.Services.AddScoped<IQuoteConfigurationRepository, QuoteConfigurationRepository>();
 builder.Services.AddScoped<IDashboardRepository, DashboardRepository>();
 builder.Services.AddScoped<ICommercialCaseQueryService, CommercialCaseQueryService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.IInventoryAvailabilityService, ERP_RFQ_Automation.Inventory.InventoryAvailabilityService>();
 builder.Services.AddScoped<ILifecycleApplicationService, LifecycleApplicationService>();
 builder.Services.AddScoped<ILifecycleOutboxStore, LifecycleOutboxStore>();
 builder.Services.AddScoped<ICommercialRoutingApplicationService, CommercialRoutingApplicationService>();
