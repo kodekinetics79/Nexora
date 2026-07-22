@@ -84,6 +84,15 @@ Security/red-team review:
 - Malware scanning, quarantine, archive limits, and dangerous document handling are missing from RFQ ingestion.
 - SMTP testing accepts caller-supplied host/port and disables certificate validation; this must be controlled before enterprise release.
 
+Data architecture and PostgreSQL review:
+
+- The existing PostgreSQL queue is a sound pilot foundation: it has tenant/content-hash uniqueness, claim/lease behavior, and `FOR UPDATE SKIP LOCKED` concurrency.
+- The missing durable evidence graph is also the primary database blocker. Source evidence currently exists only in DTOs, while final `Lead` and `LeadItem` records have no document/page/region evidence foreign keys.
+- `Attachment` is not yet a sovereign object-storage boundary. It needs tenant ownership, content hash, bucket/key/version, encryption, quarantine, retention, and recovery metadata instead of relying on a polymorphic local file path.
+- EF graph insertion in `ExtractionWorker` will bottleneck at 100,000 line items. Evidence ingestion needs bounded batches, PostgreSQL `COPY`, or staging-table merge while retaining idempotency.
+- Partitioning should be introduced selectively after measurement: keep the core transactional model simple, but make page, region, field-evidence, and extraction-run tables partition-ready by tenant and time.
+- Database and immutable evidence objects must be restored as one recoverable system using PostgreSQL point-in-time recovery, object versioning, and post-restore hash verification.
+
 Product/Sales and RFQ SME review:
 
 - Commercially strong areas: RFQ/quote/order/shipment spine, tenant/platform admin, pricing foundations, review queue, sourcing/BOQ groundwork.
@@ -148,6 +157,7 @@ These must be closed before Nexora is positioned as delivery-ready for enterpris
 | Review workbench | Exception-first review with source evidence, edit/reject/split/merge, audit trail, and concurrency control. |
 | Recovery proof | Worker crash/restart resumes without duplicate RFQs or lost page/inquiry progress. |
 | Scale evidence | Representative benchmark for large digital/scanned documents, dense tables, and concurrent tenants. |
+| Storage recovery | Database and immutable evidence objects restore to a mutually consistent point with hash verification. |
 
 ## P0 Findings Ledger
 
@@ -157,6 +167,9 @@ These must be closed before Nexora is positioned as delivery-ready for enterpris
 | DOC-02 | Scanned PDF OCR only processes first 10 pages | `Extraction/ProductionDocumentReader.cs` | Replace document-level OCR cap with page/region jobs and completeness ledger. |
 | DOC-03 | Document reader loads full files into memory | `Extraction/ProductionDocumentReader.cs` | Stream and partition files into bounded page/sheet/attachment jobs. |
 | DOC-04 | Structure is flattened before extraction | `ProductionDocumentReader` PDF/DOCX paths | Preserve layout, table, page, row, column, and coordinate metadata. |
+| DATA-01 | Attachments rely on local paths and lack immutable object identity/recovery metadata | `Models/Attachment.cs`; `Extraction/DocumentIngestionService.cs` | Store tenant, content hash, bucket/key/version, encryption, quarantine, retention, and restore metadata. |
+| DATA-02 | High-volume extraction persists large EF object graphs | `Extraction/ExtractionWorker.cs` | Add bounded batch writes using `COPY` or staging/merge, with idempotency and transaction tests. |
+| DATA-03 | Page/region/evidence growth has no partition and retention design | Extraction and document-intelligence persistence | Make high-growth tables partition-ready and establish measured partition/retention thresholds. |
 | SEC-ING-01 | RFQ ingestion trusts extension and lacks enterprise quarantine controls | `DocumentIngestionService.cs`; `Controllers/ExtractionController.cs`; `Security/FileContentValidator.cs` | Add file signature detection, malware scan interface, limits, quarantine, and rejection audit. |
 | SEC-RLS-01 | Tenant isolation is EF-filter based and fail-open for null tenant context, not DB RLS | `Models/ErpRfqAutomationContext.Tenancy.cs`; `MultiTenancy/ITenantContext.cs` | Add Postgres RLS policies, app tenant setting, DB role without bypass, and negative SQL tests. |
 | SEC-FILE-01 | File download is path-based, not tenant object-authorized | `Controllers/FileController.cs` | Download by attachment/evidence id, verify tenant ownership, reject direct paths/symlinks/traversal. |
@@ -197,6 +210,24 @@ Build this first, end to end, before expanding formats and scale:
 
 This slice avoids premature OCR complexity while proving the evidence ledger, validation, review, tenant safety, idempotency, and audit foundations.
 
+## First Schema Slice
+
+The first migration should establish these tenant-owned records and constraints:
+
+| Table | Core Purpose and Constraints |
+|---|---|
+| `document_corpora` | Batch/corpus lifecycle; index tenant plus creation time and unique batch identifier. |
+| `source_documents` | Immutable source identity, detected type, content hash, object bucket/key/version, byte/page counts, and security state; unique tenant plus content hash. |
+| `document_pages` | Ordered page/sheet ledger with dimensions, rotation, text hash, OCR state, and confidence; unique document plus page number. |
+| `document_regions` | Typed bounding regions with source text and confidence, linked to a page. |
+| `canonical_inquiries` | Independent customer inquiry records linked to corpus and eventual lead/RFQ output. |
+| `canonical_line_items` | Normalized commercial fields plus retained raw payload, indexed for inquiry and manufacturer-part lookup. |
+| `field_evidence` | Field-level raw/normalized values, extractor/run identity, confidence, and source-region link. |
+
+Every table must carry `business_unit_id`; application requests must set the PostgreSQL tenant session value, and RLS policies must fail closed when it is absent. Platform and background processing require separate, audited database roles rather than a nullable tenant bypass.
+
+High-growth tables should include creation/run timestamps from the first migration so monthly range partitioning can be introduced without redesign. Tenant-list partitioning is deferred unless production measurements show a small number of exceptionally large tenants.
+
 ## First Sprint Backlog
 
 1. Add `DocumentIntelligence` persistence entities and migration for documents, sheets/pages, inquiries, line items, fields, evidence anchors, extraction runs, and validation findings.
@@ -207,6 +238,8 @@ This slice avoids premature OCR complexity while proving the evidence ledger, va
 6. Inject `NexoraMetrics` into ingestion and worker paths for enqueued/succeeded/failed/duration metrics.
 7. Add a secure ingestion facade with document magic-type detection and quarantine states.
 8. Resolve or formally risk-accept dependency warnings for `MailKit`, `MimeKit`, `OpenXmlPowerTools`, and `System.Management.Automation.dll`.
+9. Replace local-path attachment identity with versioned object metadata and add a database-plus-object-store restore test.
+10. Prototype batched field-evidence and line-item ingestion, then benchmark it against the EF graph path at 100,000 rows.
 
 ## Implementation Increments
 
