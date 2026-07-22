@@ -50,6 +50,13 @@ Vercel project settings:
 - **Password:** `Demo@2026!`
 - **Business Unit:** `Customer POC`
 
+The backend verifies this demo account on startup so a fresh Render/Neon deploy
+can log in immediately. To disable that repair in a production tenant, set:
+
+```text
+DemoUser__Enabled=false
+```
+
 ## Required backend env vars (reference)
 
 | Key (env form) | Purpose |

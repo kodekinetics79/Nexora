@@ -22,6 +22,7 @@ using ERP_RFQ_Automation.Intelligence.Conversion;
 using ERP_RFQ_Automation.Intelligence.Pricing;
 using ERP_RFQ_Automation.Intelligence.Decision;
 using ERP_RFQ_Automation.Boq;
+using ERP_RFQ_Automation.Infrastructure;
 using System.Text.Json.Serialization;
 
 // PostgreSQL migration: restore pre-6.0 Npgsql timestamp semantics so the
@@ -325,6 +326,8 @@ builder.Services.AddSingleton<ERP_RFQ_Automation.Sla.ISlaNotifications, ERP_RFQ_
 builder.Services.AddHostedService<ERP_RFQ_Automation.Sla.SlaSweepWorker>();
 
 var app = builder.Build();
+
+await DemoUserSeeder.EnsureAsync(app.Services, app.Configuration);
 
 // Global exception handler — return a generic message to clients and log the
 // detail server-side, instead of leaking exception internals. (DATA-12, SEC-16)
