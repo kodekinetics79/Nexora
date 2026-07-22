@@ -1,9 +1,6 @@
 {
-  "env": {
-    "VITE_API_BASE_URL": "https://nexora-api.fly.dev"
-  },
   "installCommand": "cd Frontend && npm ci",
-  "buildCommand": "cd Frontend && npm run build",
+  "buildCommand": "cd Frontend && VITE_API_BASE_URL=https://nexora-api.fly.dev npm run build",
   "outputDirectory": "Frontend/dist",
   "rewrites": [
     { "source": "/(.*)", "destination": "/index.html" }
