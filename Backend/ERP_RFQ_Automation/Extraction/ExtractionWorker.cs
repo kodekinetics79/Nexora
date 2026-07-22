@@ -339,17 +339,20 @@ public sealed class LeadPersister : ILeadPersister
     private readonly ErpRfqAutomationContext _context;
     private readonly ILogger<LeadPersister> _log;
     private readonly ERP_RFQ_Automation.Deduplication.ILeadDuplicateDetector? _duplicateDetector;
+    private readonly ERP_RFQ_Automation.CommercialRouting.ICommercialRoutingApplicationService? _routing;
 
     // The detector is optional so persistence keeps working before (and without)
     // the Deduplication DI registration (see Deduplication/DEDUP-WIRING.md).
     public LeadPersister(
         ErpRfqAutomationContext context,
         ILogger<LeadPersister> log,
-        ERP_RFQ_Automation.Deduplication.ILeadDuplicateDetector? duplicateDetector = null)
+        ERP_RFQ_Automation.Deduplication.ILeadDuplicateDetector? duplicateDetector = null,
+        ERP_RFQ_Automation.CommercialRouting.ICommercialRoutingApplicationService? routing = null)
     {
         _context = context;
         _log = log;
         _duplicateDetector = duplicateDetector;
+        _routing = routing;
     }
 
     public async Task<long> PersistAsync(ExtractionJob job, ChunkedExtractionOutcome outcome, CancellationToken ct = default)
@@ -432,6 +435,32 @@ public sealed class LeadPersister : ILeadPersister
                 catch (Exception ex)
                 {
                     _log.LogError(ex, "Duplicate detection failed for lead {LeadId}; persistence succeeded.", lead.Id);
+                }
+            }
+        }
+
+        // Every extracted lead enters the governed routing flow. Matching may assign
+        // an effective owner or create one durable unassigned work item. Routing is
+        // idempotent per job/lead; a transient routing failure cannot duplicate the
+        // commercial record and can be replayed through the routing API/reconciler.
+        if (_routing != null)
+        {
+            foreach (var lead in leads)
+            {
+                try
+                {
+                    await _routing.RouteLeadAsync(job.BusinessUnitId,
+                        new ERP_RFQ_Automation.CommercialRouting.RouteLeadCommand(
+                            lead.Id,
+                            $"extraction:{job.Id}:lead:{lead.Id}:route:v1",
+                            $"extraction-job:{job.Id}"),
+                        ct);
+                }
+                catch (Exception ex)
+                {
+                    _log.LogError(ex,
+                        "Commercial routing failed for extracted lead {LeadId}; the lead remains available for reconciliation.",
+                        lead.Id);
                 }
             }
         }

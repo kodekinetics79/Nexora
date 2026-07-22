@@ -24,6 +24,7 @@ using ERP_RFQ_Automation.Intelligence.Decision;
 using ERP_RFQ_Automation.Boq;
 using ERP_RFQ_Automation.Infrastructure;
 using ERP_RFQ_Automation.CommercialCases;
+using ERP_RFQ_Automation.CommercialRouting;
 using System.Text.Json.Serialization;
 
 // PostgreSQL migration: restore pre-6.0 Npgsql timestamp semantics so the
@@ -120,6 +121,10 @@ builder.Services.AddScoped<IShipmentRepository, ShipmentRepository>();
 builder.Services.AddScoped<IQuoteConfigurationRepository, QuoteConfigurationRepository>();
 builder.Services.AddScoped<IDashboardRepository, DashboardRepository>();
 builder.Services.AddScoped<ICommercialCaseQueryService, CommercialCaseQueryService>();
+builder.Services.AddScoped<ICommercialRoutingApplicationService, CommercialRoutingApplicationService>();
+builder.Services.AddSingleton<DeterministicRoutingEngine>();
+builder.Services.AddSingleton(new RoutingPolicy());
+builder.Services.AddHostedService<RoutingReconciliationWorker>();
 // RBAC Authorization
 builder.Services.AddScoped<IAuthorizationHandler, PermissionHandler>();
 // Server-side module RBAC (mirrors the frontend PermissionGuard):

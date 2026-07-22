@@ -58,13 +58,21 @@ public partial class ErpRfqAutomationContext
         // lead-generated migration, same pattern as the duplicate-flag columns above.
         modelBuilder.Entity<Lead>().Property(e => e.InquiryType).HasMaxLength(16);
 
-        // PostgreSQL-backed enterprise foundations. These modules intentionally use
-        // jsonb, filtered indexes, and PostgreSQL check expressions; their focused
-        // tests use isolated models while the legacy SQLite suite remains portable.
+        // Routing uses portable relational constructs and is also enabled for the
+        // SQLite integration suite. The evidence/custom-field modules retain their
+        // PostgreSQL-only model because their constraints use jsonb and PostgreSQL
+        // expressions.
+        modelBuilder.ApplyCommercialRoutingModel();
+        modelBuilder.Entity<CustomerIdentifier>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<CustomerOwnership>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<LeadRoutingDecision>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<LeadAssignment>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<UnassignedWorkItem>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+
+        // PostgreSQL-backed enterprise foundations.
         if (Database.IsNpgsql())
         {
             modelBuilder.AddEvidenceLedger();
-            modelBuilder.ApplyCommercialRoutingModel();
             modelBuilder.ConfigureGovernedCustomFields();
 
             modelBuilder.Entity<DocumentCorpus>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
@@ -74,12 +82,6 @@ public partial class ErpRfqAutomationContext
             modelBuilder.Entity<CanonicalInquiry>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
             modelBuilder.Entity<CanonicalLineItem>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
             modelBuilder.Entity<FieldEvidence>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
-
-            modelBuilder.Entity<CustomerIdentifier>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
-            modelBuilder.Entity<CustomerOwnership>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
-            modelBuilder.Entity<LeadRoutingDecision>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
-            modelBuilder.Entity<LeadAssignment>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
-            modelBuilder.Entity<UnassignedWorkItem>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
 
             modelBuilder.Entity<CustomFieldDefinition>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
             modelBuilder.Entity<CustomFieldVersion>().HasQueryFilter(e => CurrentTenantId == null || e.Definition.BusinessUnitId == CurrentTenantId);

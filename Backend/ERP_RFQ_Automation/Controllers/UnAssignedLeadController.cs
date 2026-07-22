@@ -2,6 +2,7 @@
 using ERP_RFQ_Automation.DTOs.AcceptedLeadDTOs;
 using ERP_RFQ_Automation.DTOs.Lead;
 using ERP_RFQ_Automation.Interfaces;
+using ERP_RFQ_Automation.CommercialRouting;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -13,10 +14,14 @@ namespace ERP_RFQ_Automation.Controllers
     public class UnAssignedLeadController : ControllerBase
     {
         private readonly ILeadRepository _repository;
+        private readonly ICommercialRoutingApplicationService _routing;
 
-        public UnAssignedLeadController(ILeadRepository repository)
+        public UnAssignedLeadController(
+            ILeadRepository repository,
+            ICommercialRoutingApplicationService routing)
         {
             _repository = repository;
+            _routing = routing;
         }
 
         [HttpGet]
@@ -108,35 +113,42 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPost("assign")]
+        [RequireManagerRole]
+        [RequireModulePermission("Leads", PermissionAction.Edit)]
         public async Task<ActionResult> AssignLead([FromBody] AssignLeadRequestDTO request)
         {
             try
             {
                 var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
 
-                // WP-A1 manager gate: only admin/manager roles may (re)assign leads.
-                // The caller's roleId claim is resolved against the SetupMaster
-                // "role" row (matched by code/name text, never a hardcoded id).
-                if (!long.TryParse(User.FindFirst("roleId")?.Value, out var roleId)
-                    || !await _repository.CanManageLeadAssignmentsAsync(roleId))
-                {
-                    return StatusCode(StatusCodes.Status403Forbidden,
-                        new { error = "Only managers and admins can assign leads." });
-                }
-
-                var callerName = User.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value
-                                 ?? User.FindFirst("email")?.Value
-                                 ?? User.Identity?.Name;
-
-                await _repository.AssignLeadAsync(
+                var userClaim = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+                                ?? User.FindFirst("sub")?.Value;
+                long? assignedByUserId = long.TryParse(userClaim, out var parsedUserId) ? parsedUserId : null;
+                await _routing.AssignLeadAsync(businessUnitId, new ManualAssignLeadCommand(
                     request.LeadId,
                     request.AssignedToUserId,
-                    businessUnitId,
+                    assignedByUserId,
+                    request.IdempotencyKey,
+                    request.CorrelationId,
+                    AssignmentScope.LeadOnly,
                     request.Comment,
-                    callerName
-                );
+                    EnforceExpectedAssignee: true,
+                    request.ExpectedAssigneeId),
+                    HttpContext.RequestAborted);
 
                 return Ok(new { message = "Lead assigned successfully" });
+            }
+            catch (RoutingNotFoundException ex)
+            {
+                return NotFound(new { error = ex.Message });
+            }
+            catch (RoutingConflictException ex)
+            {
+                return Conflict(new { error = ex.Message });
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(new { error = ex.Message });
             }
             catch (Exception ex)
             {

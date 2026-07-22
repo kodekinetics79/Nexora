@@ -34,7 +34,7 @@ const AssignedLeadsPage: React.FC = () => {
   // Filter toggle wired to the existing assignedToId param.
   const [myLeadsOnly, setMyLeadsOnly] = useState(false);
   // Inline 2-click reassign: click the assignee name, then pick the new name.
-  const [quickAssign, setQuickAssign] = useState<{ el: HTMLElement, leadId: number } | null>(null);
+  const [quickAssign, setQuickAssign] = useState<{ el: HTMLElement, leadId: number, expectedAssigneeId: number } | null>(null);
 
   const isAdminOrManager = userData?.roleName?.toLowerCase().includes('admin') || userData?.roleName?.toLowerCase().includes('manager');
 
@@ -71,7 +71,7 @@ const AssignedLeadsPage: React.FC = () => {
   });
 
   const reassignMutation = useMutation({
-    mutationFn: (payload: { leadId: number; assignedToUserId: number }) => leadService.assignLead(payload),
+    mutationFn: (payload: { leadId: number; assignedToUserId: number; expectedAssigneeId: number }) => leadService.assignLead(payload),
     onSuccess: () => {
       enqueueSnackbar('Lead reassigned successfully!', { variant: 'success' });
       setQuickAssign(null);
@@ -144,7 +144,11 @@ const AssignedLeadsPage: React.FC = () => {
                 size="small"
                 color="inherit"
                 endIcon={<ChangeIcon sx={{ fontSize: 14 }} />}
-                onClick={(e) => setQuickAssign({ el: e.currentTarget, leadId: p.row.id })}
+                onClick={(e) => setQuickAssign({
+                  el: e.currentTarget,
+                  leadId: p.row.id,
+                  expectedAssigneeId: Number(p.row.assignedToId),
+                })}
                 sx={{ fontWeight: 800, fontSize: '0.8rem', py: 0.25, px: 0.75, justifyContent: 'flex-start', width: 'fit-content', textTransform: 'none' }}
               >
                 <UserIcon sx={{ fontSize: 14, mr: 0.5, color: 'primary.main' }} />
@@ -311,7 +315,11 @@ const AssignedLeadsPage: React.FC = () => {
             key={u.id}
             disabled={reassignMutation.isPending}
             onClick={() => {
-              if (quickAssign) reassignMutation.mutate({ leadId: quickAssign.leadId, assignedToUserId: Number(u.id) });
+              if (quickAssign) reassignMutation.mutate({
+                leadId: quickAssign.leadId,
+                assignedToUserId: Number(u.id),
+                expectedAssigneeId: quickAssign.expectedAssigneeId,
+              });
             }}
             sx={{ fontSize: '0.8rem', fontWeight: 600, py: 1 }}
           >

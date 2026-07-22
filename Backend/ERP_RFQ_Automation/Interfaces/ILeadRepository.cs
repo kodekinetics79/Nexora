@@ -31,13 +31,6 @@ namespace ERP_RFQ_Automation.Interfaces
         Task<IEnumerable<UserDropdownDTO>> GetUsersForAssignmentAsync(long businessUnitId);
         Task<AcceptedLeadResponseDTO?> GetAcceptedLeadByIdAsync(long id, long businessUnitId);
 
-        // Updated method signature (assignedByName feeds the assignment notification)
-        Task AssignLeadAsync(long leadId, long assignedToUserId, long businessUnitId, string? comment = null, string? assignedByName = null);
-
-        // WP-A1 manager gate: true when the role (SetupMaster "role" row) resolves
-        // to an admin/manager role by code/name (never by hardcoded numeric id).
-        Task<bool> CanManageLeadAssignmentsAsync(long roleId);
-
         // WP-A3: resolve a duplicate flag ("not_duplicate" | "confirm"); returns the
         // refreshed lead detail, or null when the lead does not exist in the BU.
         Task<LeadResponseDTO?> ResolveDuplicateAsync(long id, long businessUnitId, string action, string resolvedBy);

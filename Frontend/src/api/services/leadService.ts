@@ -216,8 +216,14 @@ const leadService = {
     return r.data;
   },
 
-  assignLead: async (data: { leadId: number; assignedToUserId: number; comment?: string }) => {
-    return axiosInstance.post('/api/UnAssignedLead/assign', data);
+  assignLead: async (data: { leadId: number; assignedToUserId: number; expectedAssigneeId?: number | null; comment?: string }) => {
+    const operationId = crypto.randomUUID();
+    return axiosInstance.post('/api/UnAssignedLead/assign', {
+      ...data,
+      expectedAssigneeId: data.expectedAssigneeId ?? null,
+      idempotencyKey: `manual-assignment:${operationId}`,
+      correlationId: operationId,
+    });
   },
 
   // WP-A3: resolve a duplicate flag. 'not_duplicate' clears the conversion

@@ -18,9 +18,13 @@ public static class CommercialRoutingModelBuilderExtensions
             entity.Property(x => x.DisplayValue).HasMaxLength(320).IsRequired();
             entity.Property(x => x.Confidence).HasPrecision(5, 4);
             entity.Property(x => x.Source).HasMaxLength(80).IsRequired();
-            entity.HasIndex(x => new { x.BusinessUnitId, x.IdentifierType, x.NormalizedValue })
+            entity.HasIndex(x => new { x.BusinessUnitId, x.IdentifierType, x.NormalizedValue, x.CustomerId })
                 .IsUnique()
                 .HasFilter("\"EffectiveTo\" IS NULL");
+            entity.HasIndex(x => new { x.BusinessUnitId, x.IdentifierType, x.NormalizedValue })
+                .IsUnique()
+                .HasFilter("\"EffectiveTo\" IS NULL AND \"IdentifierType\" IN ('ErpAccount', 'TaxRegistration', 'Email', 'Phone')")
+                .HasDatabaseName("UX_customer_identifiers_authoritative");
             entity.HasIndex(x => new { x.BusinessUnitId, x.CustomerId });
             entity.HasOne<Customer>().WithMany().HasForeignKey(x => x.CustomerId).OnDelete(DeleteBehavior.Restrict);
         });

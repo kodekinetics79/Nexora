@@ -95,5 +95,8 @@ public class AssignLeadRequestDTO
 {
     public long LeadId { get; set; }
     public long AssignedToUserId { get; set; }
-    public string? Comment { get; set; }   
+    public long? ExpectedAssigneeId { get; set; }
+    public string IdempotencyKey { get; set; } = string.Empty;
+    public string CorrelationId { get; set; } = string.Empty;
+    public string? Comment { get; set; }
 }

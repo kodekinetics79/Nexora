@@ -176,7 +176,7 @@ Each event carries tenant, branch, commercial case, entity, actor/service, event
 |---|---|---|
 | Permanent reference foundation | Implemented | Immutable aggregate, global non-reuse sequence, tenant formatting, backfill, database triggers, status history, search/detail API, and tenant-isolation tests pass. Clean PostgreSQL 17 migration verified. The 1,000-worker concurrency certification remains a release gate. |
 | Evidence-ledger domain | Foundation implemented | Corpus, source document, page, region, canonical inquiry/line, and field-evidence model, constraints, indexes, migration, and focused tests pass. Object storage, malware quarantine, and ingestion dual-write remain pending. |
-| Customer routing domain | Foundation implemented | Identifier, ownership, routing-decision, append-only assignment, durable unassigned-item model, deterministic policy, migration, and focused tests pass. Application repository/API integration and notification consumers remain pending. |
+| Customer routing domain | Operational increment implemented | Normalized identifier administration, customer ownership, deterministic matching, assignment ledger, durable queue, claim/release, single and bulk assignment, idempotency, optimistic versions, notifications, extraction integration, reconciliation worker, tenant-authorized APIs, and historical backfills pass. Capacity calendars, ownership-transfer preview, and full routing administration UI remain pending. |
 | Governed custom fields | Foundation implemented | Immutable definitions/versions, typed values, options, rules, dependency validation, retirement, history, migration, and focused tests pass. Administration/value APIs, field capabilities, and UI remain pending. |
 | Lifecycle command service | Pending | Commercial-case aggregate prerequisite is available; transition policy, optimistic concurrency, audit, and outbox implementation is next. |
 | Workspace and global search | Started | Tenant-authorized commercial-case search and lifecycle detail read model implemented; RFQ workspace summary, authorization shaping, UI, and line-item search remain pending. |
@@ -187,9 +187,9 @@ Each event carries tenant, branch, commercial case, entity, actor/service, event
 
 Evidence captured for the current foundation increment on 2026-07-21:
 
-- Backend regression: 170 tests passing, including reference immutability, status history, routing, queue, evidence, custom-field governance, search, and cross-tenant detail denial.
+- Backend regression: 182 tests passing, including reference immutability, status history, routing, queue persistence/leases/bulk results, ambiguous matching, evidence, custom-field governance, search, and cross-tenant denial.
 - Frontend production build: TypeScript and Vite build pass; the existing large-chunk advisory remains non-blocking technical debt.
-- Database integration: all 10 migrations apply successfully to a blank PostgreSQL 17 database, producing the expected 80-table schema.
+- Database integration: all 13 migrations apply successfully on PostgreSQL 17. A seeded upgrade rehearsal proved historical assignment-ledger creation, durable queue creation for accepted unowned leads, normalized customer/contact identifier backfill, and duplicate soft-name matching.
 - Migration semantics: reference allocation rollback/non-reuse and post-rollback monotonic allocation verified against PostgreSQL.
 - Source hygiene: `git diff --check` passes.
 
