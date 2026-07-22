@@ -15,6 +15,7 @@ public sealed class CustomFieldDefinition
         CreatedBy = Require(createdBy, nameof(createdBy), 200);
         CreatedOn = RequireUtc(createdOn, nameof(createdOn));
         Status = CustomFieldDefinitionStatus.Draft;
+        Version = 0;
     }
 
     public long Id { get; private set; }
@@ -28,6 +29,7 @@ public sealed class CustomFieldDefinition
     public DateTime? RetiredOn { get; private set; }
     public string? RetiredBy { get; private set; }
     public string? RetirementReason { get; private set; }
+    public long Version { get; private set; }
     public IReadOnlyCollection<CustomFieldVersion> Versions => _versions.AsReadOnly();
 
     public static CustomFieldDefinition Create(
@@ -40,6 +42,7 @@ public sealed class CustomFieldDefinition
         var nextVersion = _versions.Count == 0 ? 1 : _versions.Max(x => x.VersionNumber) + 1;
         var version = CustomFieldVersion.Create(this, nextVersion, draft, createdBy, createdOn);
         _versions.Add(version);
+        Version++;
         return version;
     }
 
@@ -50,6 +53,7 @@ public sealed class CustomFieldDefinition
             throw new CustomFieldDomainException($"Version {versionNumber} does not belong to this definition.");
         ActiveVersionNumber = versionNumber;
         Status = CustomFieldDefinitionStatus.Active;
+        Version++;
     }
 
     public void Retire(string retiredBy, string reason, DateTime retiredOn)
@@ -60,6 +64,7 @@ public sealed class CustomFieldDefinition
         RetirementReason = Require(reason, nameof(reason), 1000);
         RetiredOn = RequireUtc(retiredOn, nameof(retiredOn));
         Status = CustomFieldDefinitionStatus.Retired;
+        Version++;
     }
 
     private void EnsureNotRetired()
@@ -95,7 +100,9 @@ public sealed record CustomFieldVersionDraft(
     string? HelpText = null,
     string? DefaultValueJson = null,
     bool IsSensitive = false,
-    bool IsSearchable = false);
+    bool IsSearchable = false,
+    CustomFieldAccessLevel ViewAccess = CustomFieldAccessLevel.TenantUser,
+    CustomFieldAccessLevel EditAccess = CustomFieldAccessLevel.TenantUser);
 
 public sealed class CustomFieldVersion
 {
@@ -120,6 +127,8 @@ public sealed class CustomFieldVersion
     public string? DefaultValueJson { get; private set; }
     public bool IsSensitive { get; private set; }
     public bool IsSearchable { get; private set; }
+    public CustomFieldAccessLevel ViewAccess { get; private set; }
+    public CustomFieldAccessLevel EditAccess { get; private set; }
     public DateTime CreatedOn { get; private set; }
     public string CreatedBy { get; private set; } = null!;
     public IReadOnlyCollection<CustomFieldOption> Options => _options.AsReadOnly();
@@ -145,6 +154,8 @@ public sealed class CustomFieldVersion
             DefaultValueJson = NormalizeOptional(draft.DefaultValueJson, 8000),
             IsSensitive = draft.IsSensitive,
             IsSearchable = draft.IsSearchable,
+            ViewAccess = draft.ViewAccess,
+            EditAccess = draft.EditAccess,
             CreatedBy = CustomFieldDefinition.Require(createdBy, nameof(createdBy), 200),
             CreatedOn = CustomFieldDefinition.RequireUtc(createdOn, nameof(createdOn))
         };
@@ -184,6 +195,9 @@ public sealed class CustomFieldVersion
 
     private static void ValidateDraft(CustomFieldVersionDraft draft)
     {
+        if (draft.IsSensitive && (draft.ViewAccess != CustomFieldAccessLevel.ManagerOrAdmin ||
+                                  draft.EditAccess != CustomFieldAccessLevel.ManagerOrAdmin))
+            throw new CustomFieldDomainException("Sensitive fields must require manager/admin access for viewing and editing.");
         if (draft.MinimumLength is < 0 || draft.MaximumLength is < 0)
             throw new CustomFieldDomainException("Length limits cannot be negative.");
         if (draft.MinimumLength > draft.MaximumLength)

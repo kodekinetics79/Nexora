@@ -4,6 +4,10 @@ namespace ERP_RFQ_Automation.CustomFields;
 
 public static class CustomFieldValueValidator
 {
+    private const int MaximumTextLength = 100_000;
+    private const int MaximumJsonLength = 1_000_000;
+    private const int MaximumMultiOptions = 500;
+
     public static void Validate(CustomFieldVersion version, CustomFieldValueInput input)
     {
         ArgumentNullException.ThrowIfNull(version);
@@ -87,6 +91,8 @@ public static class CustomFieldValueValidator
 
     private static void ValidateText(CustomFieldVersion version, string value)
     {
+        if (value.Length > MaximumTextLength)
+            throw new CustomFieldDomainException($"'{version.Label}' cannot exceed {MaximumTextLength} characters.");
         if (version.IsRequired && string.IsNullOrWhiteSpace(value))
             throw new CustomFieldDomainException($"'{version.Label}' is required.");
         if (version.MinimumLength.HasValue && value.Length < version.MinimumLength.Value)
@@ -111,12 +117,17 @@ public static class CustomFieldValueValidator
 
     private static void ValidateMultiOption(CustomFieldVersion version, string json)
     {
+        if (json.Length > MaximumJsonLength)
+            throw new CustomFieldDomainException($"Multi-option JSON cannot exceed {MaximumJsonLength} characters.");
         try
         {
             var options = JsonSerializer.Deserialize<string[]>(json)
                 ?? throw new CustomFieldDomainException("Multi-option values must be a JSON string array.");
             if (options.Length == 0 && version.IsRequired)
                 throw new CustomFieldDomainException($"'{version.Label}' is required.");
+            if (options.Length > MaximumMultiOptions)
+                throw new CustomFieldDomainException(
+                    $"Multi-option values cannot contain more than {MaximumMultiOptions} selections.");
             if (options.Distinct(StringComparer.OrdinalIgnoreCase).Count() != options.Length)
                 throw new CustomFieldDomainException("Multi-option values cannot contain duplicates.");
             foreach (var option in options) ValidateOption(version, option);
@@ -129,6 +140,8 @@ public static class CustomFieldValueValidator
 
     private static void ValidateJson(string json)
     {
+        if (json.Length > MaximumJsonLength)
+            throw new CustomFieldDomainException($"JSON values cannot exceed {MaximumJsonLength} characters.");
         try { using var _ = JsonDocument.Parse(json); }
         catch (JsonException exception)
         {

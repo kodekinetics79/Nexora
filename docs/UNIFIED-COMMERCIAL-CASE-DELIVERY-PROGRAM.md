@@ -177,7 +177,7 @@ Each event carries tenant, branch, commercial case, entity, actor/service, event
 | Permanent reference foundation | Implemented | Immutable aggregate, global non-reuse sequence, tenant formatting, backfill, database triggers, status history, search/detail API, and tenant-isolation tests pass. Clean PostgreSQL 17 migration verified. The 1,000-worker concurrency certification remains a release gate. |
 | Evidence-ledger domain | Foundation implemented | Corpus, source document, page, region, canonical inquiry/line, and field-evidence model, constraints, indexes, migration, and focused tests pass. Object storage, malware quarantine, and ingestion dual-write remain pending. |
 | Customer routing domain | Operational increment implemented | Normalized identifier administration, customer ownership, deterministic matching, assignment ledger, durable queue, claim/release, single and bulk assignment, idempotency, optimistic versions, notifications, extraction integration, reconciliation worker, tenant-authorized APIs, and historical backfills pass. Capacity calendars, ownership-transfer preview, and full routing administration UI remain pending. |
-| Governed custom fields | Foundation implemented | Immutable definitions/versions, typed values, options, rules, dependency validation, retirement, history, migration, and focused tests pass. Administration/value APIs, field capabilities, and UI remain pending. |
+| Governed custom fields | Operational increment implemented | Manager-governed definition/version activation and retirement, typed entity values, enforced conditional rules, options/dependencies and cycle validation, field-level view/edit capabilities, sensitive-field filtering, request-bound idempotency, optimistic concurrency, append-only history, tenant-aware database constraints, module-authorized APIs, limits, and migration backfills pass. Administration and entity-form UI, applicability scopes, localization, import/export, reporting, and aggregate-specific object authorization remain pending. |
 | Lifecycle command service | Pending | Commercial-case aggregate prerequisite is available; transition policy, optimistic concurrency, audit, and outbox implementation is next. |
 | Workspace and global search | Started | Tenant-authorized commercial-case search and lifecycle detail read model implemented; RFQ workspace summary, authorization shaping, UI, and line-item search remain pending. |
 | Full traceability and award-to-cash | Pending | Requires staged migration and reconciliation plan. |
@@ -185,11 +185,11 @@ Each event carries tenant, branch, commercial case, entity, actor/service, event
 
 ## Verification Record
 
-Evidence captured for the current foundation increment on 2026-07-21:
+Evidence captured for the current operational increment on 2026-07-21:
 
-- Backend regression: 182 tests passing, including reference immutability, status history, routing, queue persistence/leases/bulk results, ambiguous matching, evidence, custom-field governance, search, and cross-tenant denial.
+- Backend regression: 192 tests passing, including reference immutability, status history, routing, queue persistence/leases/bulk results, ambiguous matching, evidence, custom-field lifecycle/value governance, enforced conditional rules, incompatible-version rejection, sensitive-field capabilities, request-bound idempotency/concurrency, dependency cycles, search, and cross-tenant denial.
 - Frontend production build: TypeScript and Vite build pass; the existing large-chunk advisory remains non-blocking technical debt.
-- Database integration: all 13 migrations apply successfully on PostgreSQL 17. A seeded upgrade rehearsal proved historical assignment-ledger creation, durable queue creation for accepted unowned leads, normalized customer/contact identifier backfill, and duplicate soft-name matching.
+- Database integration: all 15 migrations apply successfully from zero on PostgreSQL 17. A seeded upgrade rehearsal proved historical assignment-ledger creation, durable queue creation for accepted unowned leads, normalized customer/contact identifier backfill, duplicate soft-name matching, custom-field access/value-version backfills, and collision-free legacy history idempotency keys. The custom-field schema also certifies its retry-safe concurrent unique index, tenant-aware composite foreign keys, typed-value constraints, and eight append-only/no-delete governance triggers.
 - Migration semantics: reference allocation rollback/non-reuse and post-rollback monotonic allocation verified against PostgreSQL.
 - Source hygiene: `git diff --check` passes.
 

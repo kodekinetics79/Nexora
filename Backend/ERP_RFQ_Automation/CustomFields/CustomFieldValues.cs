@@ -57,6 +57,7 @@ public sealed class CustomFieldValue
     public long? ReferenceId { get; private set; }
     public DateTime UpdatedOn { get; private set; }
     public string UpdatedBy { get; private set; } = null!;
+    public long Version { get; private set; }
 
     public static CustomFieldValue Create(
         long businessUnitId,
@@ -86,8 +87,34 @@ public sealed class CustomFieldValue
             ReferenceType = input.ReferenceType,
             ReferenceId = input.ReferenceId,
             UpdatedBy = CustomFieldDefinition.Require(updatedBy, nameof(updatedBy), 200),
-            UpdatedOn = CustomFieldDefinition.RequireUtc(updatedOn, nameof(updatedOn))
+            UpdatedOn = CustomFieldDefinition.RequireUtc(updatedOn, nameof(updatedOn)),
+            Version = 1
         };
+    }
+
+    public void Update(
+        CustomFieldVersion version,
+        CustomFieldValueInput input,
+        string updatedBy,
+        DateTime updatedOn,
+        long expectedVersion)
+    {
+        if (Version != expectedVersion)
+            throw new CustomFieldDomainException("Custom-field value changed since it was loaded. Refresh and retry.");
+        CustomFieldValueValidator.Validate(version, input);
+        DefinitionVersion = version.VersionNumber;
+        TextValue = input.Text;
+        IntegerValue = input.Integer;
+        DecimalValue = input.Decimal;
+        BooleanValue = input.Boolean;
+        DateValue = input.Date;
+        TimestampValue = input.Timestamp;
+        JsonValue = input.Json;
+        ReferenceType = input.ReferenceType;
+        ReferenceId = input.ReferenceId;
+        UpdatedBy = CustomFieldDefinition.Require(updatedBy, nameof(updatedBy), 200);
+        UpdatedOn = CustomFieldDefinition.RequireUtc(updatedOn, nameof(updatedOn));
+        Version++;
     }
 }
 
@@ -104,10 +131,13 @@ public sealed class CustomFieldValueHistory
     public DateTime ChangedOn { get; private set; }
     public string? Reason { get; private set; }
     public string CorrelationId { get; private set; } = null!;
+    public string IdempotencyKey { get; private set; } = null!;
+    public string RequestHash { get; private set; } = null!;
 
     public static CustomFieldValueHistory Create(
         long businessUnitId, long valueId, string changeType, string? beforeJson, string? afterJson,
-        string changedBy, DateTime changedOn, string correlationId, string? reason = null) =>
+        string changedBy, DateTime changedOn, string correlationId, string idempotencyKey,
+        string requestHash, string? reason = null) =>
         new()
         {
             BusinessUnitId = businessUnitId > 0 ? businessUnitId : throw new CustomFieldDomainException("A business unit is required."),
@@ -118,6 +148,8 @@ public sealed class CustomFieldValueHistory
             ChangedBy = CustomFieldDefinition.Require(changedBy, nameof(changedBy), 200),
             ChangedOn = CustomFieldDefinition.RequireUtc(changedOn, nameof(changedOn)),
             CorrelationId = CustomFieldDefinition.Require(correlationId, nameof(correlationId), 100),
+            IdempotencyKey = CustomFieldDefinition.Require(idempotencyKey, nameof(idempotencyKey), 160),
+            RequestHash = CustomFieldDefinition.Require(requestHash, nameof(requestHash), 64),
             Reason = reason
         };
 }

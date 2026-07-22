@@ -21,6 +21,12 @@ public enum CustomFieldDefinitionStatus
     Retired
 }
 
+public enum CustomFieldAccessLevel
+{
+    TenantUser,
+    ManagerOrAdmin
+}
+
 public enum CustomFieldRuleEffect
 {
     Visible,

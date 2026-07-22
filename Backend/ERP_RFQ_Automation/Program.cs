@@ -25,6 +25,7 @@ using ERP_RFQ_Automation.Boq;
 using ERP_RFQ_Automation.Infrastructure;
 using ERP_RFQ_Automation.CommercialCases;
 using ERP_RFQ_Automation.CommercialRouting;
+using ERP_RFQ_Automation.CustomFields;
 using System.Text.Json.Serialization;
 
 // PostgreSQL migration: restore pre-6.0 Npgsql timestamp semantics so the
@@ -122,6 +123,7 @@ builder.Services.AddScoped<IQuoteConfigurationRepository, QuoteConfigurationRepo
 builder.Services.AddScoped<IDashboardRepository, DashboardRepository>();
 builder.Services.AddScoped<ICommercialCaseQueryService, CommercialCaseQueryService>();
 builder.Services.AddScoped<ICommercialRoutingApplicationService, CommercialRoutingApplicationService>();
+builder.Services.AddScoped<ICustomFieldApplicationService, CustomFieldApplicationService>();
 builder.Services.AddSingleton<DeterministicRoutingEngine>();
 builder.Services.AddSingleton(new RoutingPolicy());
 builder.Services.AddHostedService<RoutingReconciliationWorker>();
