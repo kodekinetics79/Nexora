@@ -9,43 +9,35 @@ the backend URL below to function.
 
 ---
 
-## 1. Backend → Fly.io (recommended)
+## 1. Backend → Render
 
-From the `Backend/` directory (contains `Dockerfile` + `fly.toml`):
+The current backend is deployed at **https://nexora-fyjw.onrender.com**.
 
-```bash
-cd Backend
-fly launch --no-deploy            # first time: creates the app "nexora-api"
-```
-
-Set configuration as **secrets/env** (nothing sensitive is baked into the image —
+Set configuration as **Render environment variables** (nothing sensitive is baked into the image —
 `appsettings.json` ships only placeholders and the app FAILS FAST without these):
 
-```bash
-fly secrets set \
-  ConnectionStrings__DefaultConnection="Host=<neon-DIRECT-endpoint>;Database=neondb;Username=neondb_owner;Password=<neon-pw>;SSL Mode=Require;Trust Server Certificate=True" \
-  Jwt__Key="<a NEW 32+ byte random key>" \
-  Ollama__BaseUrl="https://ollama.com/" \
-  Ollama__ApiKey="<ollama key>" \
-  Cors__AllowedOrigins__0="https://nexora1-ai.vercel.app"
-
-fly deploy
+```text
+ConnectionStrings__DefaultConnection=Host=<neon-DIRECT-endpoint>;Database=neondb;Username=neondb_owner;Password=<neon-pw>;SSL Mode=Require;Trust Server Certificate=True
+Jwt__Key=<a NEW 32+ byte random key>
+Ollama__BaseUrl=https://ollama.com/
+Ollama__ApiKey=<ollama key>
+Cors__AllowedOrigins__0=https://nexora1-ai.vercel.app
 ```
 
-- Health check: `GET /health` → `Healthy` (already wired in `fly.toml`).
-- The app URL will be `https://nexora-api.fly.dev` (or your chosen app name).
+- Health check: `GET /health` → `Healthy`.
+- The app URL is `https://nexora-fyjw.onrender.com`.
 - **Neon endpoint:** use the **direct** endpoint (no `-pooler`) for now. The
   pooled endpoint needs `Max Auto Prepare=0` + RLS-via-`SET LOCAL` (ADR-0005 Ph2).
 
-> Any container host works (Render, Railway, Azure Container Apps) — they all build
-> the same `Dockerfile`. Fly is the simplest for a .NET server + workers.
+> Any container host works (Render, Fly.io, Railway, Azure Container Apps) — they all build
+> the same `Dockerfile`.
 
 ## 2. Frontend → Vercel (already deployed)
 
 The SPA reads the API base URL from `VITE_API_BASE_URL` **at build time**. In the
 Vercel project settings:
 
-1. **Environment Variables** → add `VITE_API_BASE_URL = https://nexora-api.fly.dev`
+1. **Environment Variables** → add `VITE_API_BASE_URL = https://nexora-fyjw.onrender.com`
    (your backend URL).
 2. **Redeploy** the frontend so the value is baked in.
 
