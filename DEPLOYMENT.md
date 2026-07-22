@@ -46,8 +46,8 @@ Vercel project settings:
 ## 3. Demo login (Neon is seeded)
 
 - URL: https://nexora1-ai.vercel.app
-- **Email:** `john@example.com`
-- **Password:** `Demo@2026!`
+- **Email:** `robert@example.com`
+- **Password:** `Nexora#Pilot-a9bc9e`
 - **Business Unit:** `Customer POC`
 
 The backend verifies this demo account on startup so a fresh Render/Neon deploy
@@ -70,4 +70,4 @@ DemoUser__Enabled=false
 ## Security reminders before a real pilot
 - **Rotate** the 3 original secrets (old SQL `sa` / JWT / Ollama) — `SECURITY.md`.
 - Consider rotating the Neon credentials (they passed through chat).
-- Change the demo user's password from `Demo@2026!`.
+- Change the demo user's password before a real pilot.

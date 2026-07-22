@@ -10,8 +10,8 @@ public static class DemoUserSeeder
         var enabled = configuration.GetValue("DemoUser:Enabled", true);
         if (!enabled) return;
 
-        var email = configuration["DemoUser:Email"] ?? "john@example.com";
-        var password = configuration["DemoUser:Password"] ?? "Demo@2026!";
+        var email = configuration["DemoUser:Email"] ?? "robert@example.com";
+        var password = configuration["DemoUser:Password"] ?? "Nexora#Pilot-a9bc9e";
         var businessUnitName = configuration["DemoUser:BusinessUnitName"] ?? "Customer POC";
         var businessUnitCode = configuration["DemoUser:BusinessUnitCode"] ?? "CUSTOMER-POC";
         var roleName = configuration["DemoUser:RoleName"] ?? "Super Admin";
@@ -84,8 +84,8 @@ public static class DemoUserSeeder
         {
             user = new User
             {
-                FirstName = "John",
-                LastName = "Demo",
+                FirstName = "Robert",
+                LastName = "Pilot",
                 Email = email,
                 PasswordHash = passwordHash,
                 ImageUrl = string.Empty,
@@ -101,8 +101,8 @@ public static class DemoUserSeeder
         }
         else
         {
-            user.FirstName = string.IsNullOrWhiteSpace(user.FirstName) ? "John" : user.FirstName;
-            user.LastName = string.IsNullOrWhiteSpace(user.LastName) ? "Demo" : user.LastName;
+            user.FirstName = string.IsNullOrWhiteSpace(user.FirstName) ? "Robert" : user.FirstName;
+            user.LastName = string.IsNullOrWhiteSpace(user.LastName) ? "Pilot" : user.LastName;
             user.PasswordHash = passwordHash;
             user.RoleId = role.SetupId;
             user.Buid = businessUnit.Id;
