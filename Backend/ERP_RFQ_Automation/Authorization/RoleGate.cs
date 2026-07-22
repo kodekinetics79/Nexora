@@ -13,10 +13,10 @@ namespace ERP_RFQ_Automation.Authorization
     public interface IRoleGate
     {
         /// <summary>Role name contains both "super" and "admin" (e.g. "Super Admin", "Super_Administrator").</summary>
-        Task<bool> IsSuperAdminAsync(long roleId);
+        Task<bool> IsSuperAdminAsync(long roleId, long businessUnitId);
 
         /// <summary>Role name contains "admin" or "manager" (same rule as lead-assignment management).</summary>
-        Task<bool> IsManagerOrAdminAsync(long roleId);
+        Task<bool> IsManagerOrAdminAsync(long roleId, long businessUnitId);
     }
 
     public sealed class RoleGate : IRoleGate
@@ -32,15 +32,15 @@ namespace ERP_RFQ_Automation.Authorization
             _cache = cache;
         }
 
-        public async Task<bool> IsSuperAdminAsync(long roleId)
+        public async Task<bool> IsSuperAdminAsync(long roleId, long businessUnitId)
         {
-            var role = await ResolveRoleAsync(roleId);
+            var role = await ResolveRoleAsync(roleId, businessUnitId);
             return role is not null && (IsSuperAdminName(role.Value.Code) || IsSuperAdminName(role.Value.Value));
         }
 
-        public async Task<bool> IsManagerOrAdminAsync(long roleId)
+        public async Task<bool> IsManagerOrAdminAsync(long roleId, long businessUnitId)
         {
-            var role = await ResolveRoleAsync(roleId);
+            var role = await ResolveRoleAsync(roleId, businessUnitId);
             return role is not null && (IsManagerName(role.Value.Code) || IsManagerName(role.Value.Value));
         }
 
@@ -54,17 +54,17 @@ namespace ERP_RFQ_Automation.Authorization
                           || s.Contains("manager", StringComparison.OrdinalIgnoreCase));
 
         /// <summary>Role names change rarely; cache the resolved (code, value) 60s per roleId.</summary>
-        private async Task<(string? Code, string? Value)?> ResolveRoleAsync(long roleId)
+        private async Task<(string? Code, string? Value)?> ResolveRoleAsync(long roleId, long businessUnitId)
         {
             return await _cache.GetOrCreateAsync<(string? Code, string? Value)?>(
-                $"rbac:role:{roleId}",
+                $"rbac:role:{businessUnitId}:{roleId}",
                 async entry =>
                 {
                     entry.AbsoluteExpirationRelativeToNow = CacheTtl;
 
                     var role = await _context.SetupMasters
                         .AsNoTracking()
-                        .Where(s => s.SetupId == roleId
+                        .Where(s => s.SetupId == roleId && s.BusinessUnitId == businessUnitId
                                     && s.SetupType.ToLower() == "role"
                                     && (s.IsActive == true || s.IsActive == null))
                         .Select(s => new { s.SetupCode, s.SetupValue })

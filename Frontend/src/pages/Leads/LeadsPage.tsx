@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Chip, IconButton,
   Tooltip, Stack, TextField, MenuItem, CircularProgress,
-  Dialog, DialogTitle, DialogContent, DialogActions, Alert,
+  Alert,
   Link, Menu, ListItemIcon, ListItemText, Popover, FormGroup,
   FormControlLabel, Checkbox, Divider, ToggleButton, ToggleButtonGroup,
   Skeleton,
@@ -14,8 +14,6 @@ import {
   DataGrid, type GridColDef, type GridPaginationModel, type GridColumnVisibilityModel,
 } from '@mui/x-data-grid';
 import {
-  CheckCircle as AcceptIcon,
-  Cancel as RejectIcon,
   Visibility as ViewIcon,
   Refresh as RefreshIcon,
   Email as EmailIcon,
@@ -218,14 +216,6 @@ const LeadsPage: React.FC = () => {
   const [search, setSearch] = useState('');
   const [leadSource, setLeadSource] = useState('all');
 
-  // Rejection Dialog State
-  const [rejectionDialogOpen, setRejectionDialogOpen] = useState(false);
-  const [selectedLeadId, setSelectedLeadId] = useState<number | null>(null);
-  const [rejectionReasonId, setRejectionReasonId] = useState<string>('');
-
-  // Accept confirmation
-  const [acceptConfirmId, setAcceptConfirmId] = useState<number | null>(null);
-
   // Row overflow menu
   const [rowMenuAnchor, setRowMenuAnchor] = useState<HTMLElement | null>(null);
   const [rowMenuLeadId, setRowMenuLeadId] = useState<number | null>(null);
@@ -278,11 +268,6 @@ const LeadsPage: React.FC = () => {
     }),
   });
 
-  const { data: reasons = [] } = useQuery({
-    queryKey: ['rejection-reasons'],
-    queryFn: () => leadService.getRejectionReasons(),
-  });
-
   // Decision Brief summaries: one batched call for the current page's ids,
   // fired only after the leads query resolves. This never blocks the grid —
   // it is a separate query, and on error (e.g. the engine isn't deployed yet)
@@ -297,38 +282,6 @@ const LeadsPage: React.FC = () => {
   });
   const decisionSummaries = decisionQuery.data?.summaries;
   const decisionsLoading = visibleLeadIds.length > 0 && decisionQuery.isPending;
-
-  const acceptMutation = useMutation({
-    mutationFn: (id: number) => leadService.acceptLead(id),
-    onSuccess: () => {
-      enqueueSnackbar('Lead accepted successfully!', { variant: 'success' });
-      setAcceptConfirmId(null);
-      queryClient.invalidateQueries({ queryKey: ['leads'] });
-    },
-    onError: (err: any) => enqueueSnackbar(err.response?.data || 'Failed to accept lead', { variant: 'error' }),
-  });
-
-  const rejectMutation = useMutation({
-    mutationFn: ({ id, reasonId }: { id: number; reasonId: number }) => leadService.rejectLead(id, reasonId),
-    onSuccess: () => {
-      enqueueSnackbar('Lead rejected successfully', { variant: 'info' });
-      setRejectionDialogOpen(false);
-      setRejectionReasonId('');
-      queryClient.invalidateQueries({ queryKey: ['leads'] });
-    },
-    onError: (err: any) => enqueueSnackbar(err.response?.data || 'Failed to reject lead', { variant: 'error' }),
-  });
-
-  const handleRejectClick = (id: number) => {
-    setSelectedLeadId(id);
-    setRejectionDialogOpen(true);
-  };
-
-  const handleConfirmReject = () => {
-    if (selectedLeadId && rejectionReasonId) {
-      rejectMutation.mutate({ id: selectedLeadId, reasonId: Number(rejectionReasonId) });
-    }
-  };
 
   const columns: GridColDef<LeadResponseDTO>[] = [
     {
@@ -676,29 +629,18 @@ const LeadsPage: React.FC = () => {
         )}
       </Paper>
 
-      {/* Row overflow menu (Accept / Reject) */}
+      {/* Row overflow menu */}
       <Menu anchorEl={rowMenuAnchor} open={Boolean(rowMenuAnchor)} onClose={closeRowMenu}>
         <MenuItem
           onClick={() => {
-            if (rowMenuLeadId != null) setAcceptConfirmId(rowMenuLeadId);
+            if (rowMenuLeadId != null) navigate(`/leads/view/${rowMenuLeadId}`);
             closeRowMenu();
           }}
         >
           <ListItemIcon>
-            <AcceptIcon fontSize="small" color="success" />
+            <ViewIcon fontSize="small" color="primary" />
           </ListItemIcon>
-          <ListItemText>Accept lead</ListItemText>
-        </MenuItem>
-        <MenuItem
-          onClick={() => {
-            if (rowMenuLeadId != null) handleRejectClick(rowMenuLeadId);
-            closeRowMenu();
-          }}
-        >
-          <ListItemIcon>
-            <RejectIcon fontSize="small" color="error" />
-          </ListItemIcon>
-          <ListItemText>Reject lead…</ListItemText>
+          <ListItemText>Open lifecycle</ListItemText>
         </MenuItem>
       </Menu>
 
@@ -752,58 +694,6 @@ const LeadsPage: React.FC = () => {
         </Box>
       </Popover>
 
-      {/* Accept confirmation */}
-      <Dialog open={acceptConfirmId != null} onClose={() => setAcceptConfirmId(null)}>
-        <DialogTitle sx={{ fontWeight: 800 }}>Accept this lead?</DialogTitle>
-        <DialogContent>
-          <Typography variant="body2">
-            The lead moves to your accepted leads and can be assigned for quoting.
-          </Typography>
-        </DialogContent>
-        <DialogActions sx={{ p: 2 }}>
-          <Button onClick={() => setAcceptConfirmId(null)} color="inherit">Cancel</Button>
-          <Button
-            variant="contained"
-            color="success"
-            disabled={acceptMutation.isPending}
-            onClick={() => {
-              if (acceptConfirmId != null) acceptMutation.mutate(acceptConfirmId);
-            }}
-          >
-            Accept lead
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* Rejection Dialog */}
-      <Dialog open={rejectionDialogOpen} onClose={() => setRejectionDialogOpen(false)}>
-        <DialogTitle sx={{ fontWeight: 800 }}>Reject Lead</DialogTitle>
-        <DialogContent dividers>
-          <Typography variant="body2" sx={{ mb: 2 }}>Please select a reason for rejecting this lead.</Typography>
-          <TextField
-            select
-            fullWidth
-            label="Rejection Reason"
-            value={rejectionReasonId}
-            onChange={(e) => setRejectionReasonId(e.target.value)}
-          >
-            {reasons.map((r: any) => (
-              <MenuItem key={r.id} value={r.id}>{r.reasonName}</MenuItem>
-            ))}
-          </TextField>
-        </DialogContent>
-        <DialogActions sx={{ p: 2 }}>
-          <Button onClick={() => setRejectionDialogOpen(false)} color="inherit">Cancel</Button>
-          <Button
-            variant="contained"
-            color="error"
-            onClick={handleConfirmReject}
-            disabled={!rejectionReasonId || rejectMutation.isPending}
-          >
-            Confirm Rejection
-          </Button>
-        </DialogActions>
-      </Dialog>
     </Box>
   );
 };

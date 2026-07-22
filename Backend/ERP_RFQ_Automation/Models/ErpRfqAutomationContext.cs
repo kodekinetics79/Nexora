@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using Microsoft.EntityFrameworkCore;
 using ERP_RFQ_Automation.Services;
 using ERP_RFQ_Automation.CustomFields;
+using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 
 namespace ERP_RFQ_Automation.Models;
 
@@ -34,6 +35,10 @@ public partial class ErpRfqAutomationContext : DbContext
     public virtual DbSet<BusinessUnit> BusinessUnits { get; set; }
 
     public virtual DbSet<CommercialCase> CommercialCases { get; set; }
+
+    public virtual DbSet<CommercialLifecycleEvent> CommercialLifecycleEvents { get; set; }
+
+    public virtual DbSet<LifecycleOutboxMessage> LifecycleOutboxMessages { get; set; }
 
     public virtual DbSet<Contact> Contacts { get; set; }
 
@@ -121,6 +126,7 @@ public partial class ErpRfqAutomationContext : DbContext
     {
         LeadPersistenceRules.Prepare(this);
         CustomFieldGovernanceInterceptor.Validate(ChangeTracker);
+        LifecycleGovernanceInterceptor.Validate(ChangeTracker);
         return base.SaveChanges(acceptAllChangesOnSuccess);
     }
 
@@ -128,6 +134,7 @@ public partial class ErpRfqAutomationContext : DbContext
     {
         LeadPersistenceRules.Prepare(this);
         CustomFieldGovernanceInterceptor.Validate(ChangeTracker);
+        LifecycleGovernanceInterceptor.Validate(ChangeTracker);
         return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
     }
 
@@ -1035,7 +1042,8 @@ public partial class ErpRfqAutomationContext : DbContext
                 .HasConstraintName("FK__RolePermi__Modul__04E4BC85");
 
             entity.HasOne(d => d.Role).WithMany(p => p.RolePermissions)
-                .HasForeignKey(d => d.RoleId)
+                .HasForeignKey(d => new { d.BusinessUnitId, d.RoleId })
+                .HasPrincipalKey(p => new { p.BusinessUnitId, p.SetupId })
                 .HasConstraintName("FK__RolePermi__RoleI__03F0984C");
         });
 
@@ -1454,7 +1462,8 @@ public partial class ErpRfqAutomationContext : DbContext
                 .HasConstraintName("FK_Users_Manager");
 
             entity.HasOne(d => d.Role).WithMany(p => p.Users)
-                .HasForeignKey(d => d.RoleId)
+                .HasForeignKey(d => new { d.Buid, d.RoleId })
+                .HasPrincipalKey(p => new { p.BusinessUnitId, p.SetupId })
                 .HasConstraintName("FK__Users__RoleID__7B5B524B");
 
             entity.HasOne(d => d.Team).WithMany(p => p.Users)

@@ -29,7 +29,12 @@ public sealed record CommercialCaseStatusEvent(
     string? ChangedBy,
     string ActorSource,
     DateTime ChangedOn,
-    string? Reason);
+    string? Reason,
+    string? AggregateType = null,
+    string? CorrelationId = null,
+    string? RequestReference = null,
+    string? PolicyVersion = null,
+    string? ReasonCode = null);
 
 public sealed record CommercialCaseDetail(
     long Id,

@@ -1056,7 +1056,8 @@ namespace ERP_RFQ_Automation.Services
                     CreatedBy = createdBy,
                     CreatedDate = DateTime.UtcNow,
                     NoOfLineItems = rfqItems.Count,
-                    RfqstatusId = 34,
+                    RfqstatusId = await ERP_RFQ_Automation.CommercialCases.Lifecycle.LifecycleStatusCatalog.ResolveIdAsync(
+                        _context, businessUnitId, "Rfq", "DRAFT"),
                     Rfqitems = rfqItems
                 };
 

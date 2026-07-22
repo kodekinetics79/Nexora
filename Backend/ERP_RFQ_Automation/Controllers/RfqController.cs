@@ -10,6 +10,7 @@ using System;
 using System.Linq;
 using System.Security.Claims;
 using System.Threading.Tasks;
+using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 
 namespace ERP_RFQ_Automation.Controllers
 {
@@ -21,12 +22,14 @@ namespace ERP_RFQ_Automation.Controllers
         private readonly IRfqRepository _repository;
         private readonly Services.IQuoteService _quoteService;
         private readonly ErpRfqAutomationContext _context;
+        private readonly ILifecycleApplicationService _lifecycle;
 
-        public RfqController(IRfqRepository repository, Services.IQuoteService quoteService, ErpRfqAutomationContext context)
+        public RfqController(IRfqRepository repository, Services.IQuoteService quoteService, ErpRfqAutomationContext context, ILifecycleApplicationService lifecycle)
         {
             _repository = repository;
             _quoteService = quoteService;
             _context = context;
+            _lifecycle = lifecycle;
         }
 
         [HttpGet]
@@ -39,7 +42,8 @@ namespace ERP_RFQ_Automation.Controllers
             [FromQuery] bool? isActive = null,
             [FromQuery] long? assignedToId = null,
             [FromQuery] string? createdBy = null,
-            [FromQuery] long? rfqStatusId = null)
+            [FromQuery] long? rfqStatusId = null,
+            [FromQuery] string? rfqStatusCode = null)
         {
             try
             {
@@ -56,7 +60,7 @@ namespace ERP_RFQ_Automation.Controllers
                 if (pageSize < 1 || pageSize > 1000)
                     return BadRequest("Page size must be between 1 and 1000.");
 
-                var (items, totalItems) = await _repository.GetAllAsync(targetBUId, pageNumber, pageSize, search, isActive, assignedToId, createdBy, rfqStatusId);
+                var (items, totalItems) = await _repository.GetAllAsync(targetBUId, pageNumber, pageSize, search, isActive, assignedToId, createdBy, rfqStatusId, rfqStatusCode);
                 
                 return Ok(new PaginatedRfqResponseDTO
                 {
@@ -106,6 +110,7 @@ namespace ERP_RFQ_Automation.Controllers
                 if (claimBUId > 0) request.BusinessUnitId = claimBUId;
 
                 if (request.BusinessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+                if (!request.LeadId.HasValue) return BadRequest("A tenant-owned lead is required so the RFQ belongs to a commercial case.");
 
             var rfq = new Rfq
             {
@@ -123,7 +128,7 @@ namespace ERP_RFQ_Automation.Controllers
                 DurationAgreement = request.DurationAgreement,
                 LeadId = request.LeadId,
                 CustomerId = request.CustomerId,
-                CreatedBy = request.CreatedBy,
+                CreatedBy = User.FindFirst(ClaimTypes.Email)?.Value ?? User.Identity?.Name ?? "System",
                 CreatedDate = DateTime.UtcNow,
                 BusinessUnitId = request.BusinessUnitId,
                 RfqstatusId = request.RfqstatusId,
@@ -171,6 +176,10 @@ namespace ERP_RFQ_Automation.Controllers
             var response = await _repository.GetByIdAsync(rfq.Id, rfq.BusinessUnitId);
 
             return CreatedAtAction(nameof(GetById), new { id = rfq.Id, businessUnitId = rfq.BusinessUnitId }, response);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Conflict(new { error = ex.Message });
             }
             catch (Exception ex)
             {
@@ -256,6 +265,10 @@ namespace ERP_RFQ_Automation.Controllers
 
             return NoContent();
             }
+            catch (InvalidOperationException ex)
+            {
+                return Conflict(new { error = ex.Message });
+            }
             catch (Exception ex)
             {
                 return StatusCode(StatusCodes.Status500InternalServerError, $"Error: {ex.Message}");
@@ -278,6 +291,7 @@ namespace ERP_RFQ_Automation.Controllers
             var approvedBy = User.Identity?.Name ?? "System";
 
             using var transaction = await _context.Database.BeginTransactionAsync();
+            var quoteDelivered = false;
             try
             {
                 var quoteId = await _repository.ApproveAsync(id, approvedBy, businessUnitId, customerId);
@@ -316,6 +330,10 @@ namespace ERP_RFQ_Automation.Controllers
                             emailWarning = "Quote generated, but sending is held for approval — pricing is below " +
                                            $"your floor ({sendResult.HoldSummary}). Track it in the Approvals inbox.";
                         }
+                        else
+                        {
+                            quoteDelivered = true;
+                        }
                     }
                     catch (Exception emailEx)
                     {
@@ -328,12 +346,27 @@ namespace ERP_RFQ_Automation.Controllers
                 }
 
                 await transaction.CommitAsync();
+                await transaction.DisposeAsync();
+                if (quoteDelivered)
+                {
+                    var state = await _lifecycle.GetRfqStateAsync(businessUnitId, id, default);
+                    await _lifecycle.TransitionRfqAsync(businessUnitId, id,
+                        new LifecycleActor(approvedBy, "QuoteDelivery"),
+                        new LifecycleTransitionCommand("QUOTE_SENT", state.Version, null, null, "Api",
+                            HttpContext.TraceIdentifier, $"quote-{quoteId}", $"quote-delivery:{businessUnitId}:{quoteId}"),
+                        false, default);
+                }
                 return Ok(new { message = "RFQ approved and Quote generated successfully", quoteId, emailWarning });
             }
             catch (KeyNotFoundException ex)
             {
                 try { await transaction.RollbackAsync(); } catch { /* already rolled back */ }
                 return NotFound(ex.Message);
+            }
+            catch (InvalidOperationException ex)
+            {
+                try { await transaction.RollbackAsync(); } catch { /* already rolled back */ }
+                return Conflict(new { error = ex.Message });
             }
             catch (Exception ex)
             {

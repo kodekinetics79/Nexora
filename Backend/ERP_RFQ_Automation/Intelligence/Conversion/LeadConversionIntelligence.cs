@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Intelligence.Conversion;
@@ -91,14 +92,15 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
     {
         var lead = await _db.Leads
             .Include(l => l.LeadItems)
+            .Include(l => l.LeadStatus)
             .FirstOrDefaultAsync(l => l.Id == leadId && l.BusinessUnitId == businessUnitId, ct);
         if (lead == null)
             throw new KeyNotFoundException($"Lead with ID {leadId} not found in Business Unit {businessUnitId}.");
 
         // Legacy gates, replicated verbatim: only accepted leads convert, and a
         // lead is only ever converted once.
-        if (lead.LeadStatusId != 24)
-            throw new InvalidOperationException("Only an accepted lead can be converted to an RFQ.");
+        if (LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue) != "QUALIFIED")
+            throw new InvalidOperationException("Only a qualified lead can be converted to an RFQ.");
 
         // WP-A3 hard block: an unresolved duplicate flag stops conversion here too.
         if (lead.DuplicateStatus is "suspected" or "confirmed")
@@ -108,7 +110,10 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         var already = await _db.Rfqs
             .FirstOrDefaultAsync(r => r.LeadId == leadId && r.BusinessUnitId == businessUnitId, ct);
         if (already != null)
-            throw new InvalidOperationException($"This lead has already been converted to RFQ {already.Rfqno}.");
+        {
+            await CompleteConversionLifecycleAsync(lead, already.Id, request.ActingUser, ct);
+            return already.Id;
+        }
 
         // Per-line choices. Reject ids that don't belong to this lead (never trust
         // caller-supplied identifiers across the tenant boundary).
@@ -181,7 +186,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             DurationAgreement = lead.DurationAgreement,
             LeadId = lead.Id,
             BusinessUnitId = businessUnitId,
-            RfqstatusId = 34, // Draft — same status literal as the legacy path.
+            RfqstatusId = await LifecycleStatusCatalog.ResolveIdAsync(_db, businessUnitId, "Rfq", "DRAFT", ct),
             CreatedBy = createdBy,
             CreatedDate = now,
             Rfqitems = included.Select(li =>
@@ -264,7 +269,20 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         _db.Rfqs.Add(rfq);
         await _db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
+        await tx.DisposeAsync();
+        await CompleteConversionLifecycleAsync(lead, rfq.Id, createdBy, ct);
         return rfq.Id;
+    }
+
+    private async Task CompleteConversionLifecycleAsync(Lead lead, long rfqId, string? createdBy, CancellationToken ct)
+    {
+        if (LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue) != "QUALIFIED") return;
+        var actor = string.IsNullOrWhiteSpace(createdBy) ? "System" : createdBy.Trim();
+        await new LifecycleApplicationService(_db).TransitionLeadAsync(
+            lead.BusinessUnitId, lead.Id, new LifecycleActor(actor, "LeadConversion"),
+            new LifecycleTransitionCommand("CONVERTED_TO_RFQ", lead.LifecycleVersion, null, null,
+                "Api", $"conversion-{lead.Id}", $"rfq-{rfqId}", $"lead-conversion:{lead.BusinessUnitId}:{lead.Id}"),
+            false, ct);
     }
 
     // ====================================================== Resolution engine

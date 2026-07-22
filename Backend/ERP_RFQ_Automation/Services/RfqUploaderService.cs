@@ -133,7 +133,8 @@ namespace ERP_RFQ_Automation.Services
                         BuyersName = document.BuyerName.Value,
                         RecDate = document.ReceivedDate.Value == default ? DateTime.UtcNow : document.ReceivedDate.Value,
                         BidClosingDate = document.BidClosingDate.Value == default ? null : document.BidClosingDate.Value,
-                        RfqstatusId = 34,
+                        RfqstatusId = await ERP_RFQ_Automation.CommercialCases.Lifecycle.LifecycleStatusCatalog.ResolveIdAsync(
+                            _context, businessUnitId, "Rfq", "DRAFT"),
                         HeaderRemarks = BuildCanonicalRemarks(document),
                         CreatedBy = createdBy,
                         CreatedDate = DateTime.UtcNow,

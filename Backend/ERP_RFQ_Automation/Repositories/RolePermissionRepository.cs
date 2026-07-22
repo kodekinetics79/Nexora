@@ -21,6 +21,7 @@ namespace ERP_RFQ_Automation.Repositories
                 .AsNoTracking()
                 .Include(rp => rp.Role)
                 .Include(rp => rp.Module)
+                .Where(rp => rp.BusinessUnitId == businessUnitId)
                 .AsQueryable();
 
             // Apply filters
@@ -49,7 +50,7 @@ namespace ERP_RFQ_Automation.Repositories
                 .AsNoTracking()
                 .Include(rp => rp.Role)
                 .Include(rp => rp.Module)
-                .FirstOrDefaultAsync(rp => rp.Id == id);
+                .FirstOrDefaultAsync(rp => rp.Id == id && rp.BusinessUnitId == businessUnitId);
 
             return rolePermission ?? throw new KeyNotFoundException($"RolePermission with ID {id} not found.");
         }
@@ -59,7 +60,9 @@ namespace ERP_RFQ_Automation.Repositories
             // Validate RoleId exists (if provided)
             if (rolePermission.RoleId.HasValue)
             {
-                var roleExists = await _context.SetupMasters.AnyAsync(sm => sm.SetupId == rolePermission.RoleId.Value && sm.SetupType == "role");
+                var roleExists = await _context.SetupMasters.AnyAsync(sm => sm.SetupId == rolePermission.RoleId.Value
+                    && sm.BusinessUnitId == rolePermission.BusinessUnitId && sm.SetupType.ToLower() == "role"
+                    && sm.IsActive != false);
                 if (!roleExists)
                     throw new ArgumentException($"Role with ID {rolePermission.RoleId} does not exist.");
             }
@@ -76,7 +79,8 @@ namespace ERP_RFQ_Automation.Repositories
 
             // Validate unique RoleId-ModuleId-BusinessUnitId combination
             var permissionExists = await _context.RolePermissions.AnyAsync(rp =>
-                rp.RoleId == rolePermission.RoleId && rp.ModuleId == rolePermission.ModuleId);
+                rp.RoleId == rolePermission.RoleId && rp.ModuleId == rolePermission.ModuleId
+                    && rp.BusinessUnitId == rolePermission.BusinessUnitId);
             if (permissionExists)
                 throw new ArgumentException($"Permission for RoleId {rolePermission.RoleId}, ModuleId {rolePermission.ModuleId}, and BusinessUnitId {rolePermission.BusinessUnitId} already exists.");
 
@@ -86,7 +90,8 @@ namespace ERP_RFQ_Automation.Repositories
 
         public async Task UpdateAsync(RolePermission rolePermission)
         {
-            var existing = await _context.RolePermissions.AsNoTracking().FirstOrDefaultAsync(rp => rp.Id == rolePermission.Id);
+            var existing = await _context.RolePermissions.AsNoTracking().FirstOrDefaultAsync(rp =>
+                rp.Id == rolePermission.Id && rp.BusinessUnitId == rolePermission.BusinessUnitId);
             if (existing == null)
                 throw new KeyNotFoundException($"RolePermission with ID {rolePermission.Id} not found.");
 
@@ -95,7 +100,9 @@ namespace ERP_RFQ_Automation.Repositories
             // Validate RoleId exists (if provided)
             if (rolePermission.RoleId.HasValue)
             {
-                var roleExists = await _context.SetupMasters.AnyAsync(sm => sm.SetupId == rolePermission.RoleId.Value && sm.SetupType == "role");
+                var roleExists = await _context.SetupMasters.AnyAsync(sm => sm.SetupId == rolePermission.RoleId.Value
+                    && sm.BusinessUnitId == rolePermission.BusinessUnitId && sm.SetupType.ToLower() == "role"
+                    && sm.IsActive != false);
                 if (!roleExists)
                     throw new ArgumentException($"Role with ID {rolePermission.RoleId} does not exist in Business Unit {rolePermission.BusinessUnitId}.");
             }
@@ -112,7 +119,8 @@ namespace ERP_RFQ_Automation.Repositories
 
             // Validate unique RoleId-ModuleId-BusinessUnitId combination (excluding current permission)
             var permissionExists = await _context.RolePermissions.AnyAsync(rp =>
-                rp.RoleId == rolePermission.RoleId && rp.ModuleId == rolePermission.ModuleId && rp.Id != rolePermission.Id);
+                rp.RoleId == rolePermission.RoleId && rp.ModuleId == rolePermission.ModuleId
+                    && rp.BusinessUnitId == rolePermission.BusinessUnitId && rp.Id != rolePermission.Id);
             if (permissionExists)
                 throw new ArgumentException($"Permission for RoleId {rolePermission.RoleId}, ModuleId {rolePermission.ModuleId}, and BusinessUnitId {rolePermission.BusinessUnitId} already exists.");
 
@@ -131,7 +139,8 @@ namespace ERP_RFQ_Automation.Repositories
         {
             var query = _context.RolePermissions
                 .AsNoTracking()
-                .Where(rp => rp.RoleId == roleId && rp.Module != null && rp.Module.ModuleName == moduleName);
+                .Where(rp => rp.RoleId == roleId && rp.BusinessUnitId == businessUnitId
+                    && rp.Module != null && rp.Module.ModuleName == moduleName);
 
             switch (action.ToLower())
             {

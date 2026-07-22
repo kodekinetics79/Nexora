@@ -1,6 +1,7 @@
 ﻿using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
+using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 
 namespace ERP_RFQ_Automation.Repositories
 {
@@ -52,6 +53,8 @@ namespace ERP_RFQ_Automation.Repositories
                 throw new ArgumentException($"Business unit name {businessUnit.BusinessUnitName} already exists.");
 
             _context.BusinessUnits.Add(businessUnit);
+            _context.SetupMasters.AddRange(LifecycleStatusCatalog.CreateFor(
+                businessUnit, string.IsNullOrWhiteSpace(businessUnit.CreatedBy) ? "System" : businessUnit.CreatedBy));
             await _context.SaveChangesAsync();
         }
 

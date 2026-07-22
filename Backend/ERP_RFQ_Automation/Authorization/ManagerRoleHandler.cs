@@ -23,17 +23,19 @@ namespace ERP_RFQ_Automation.Authorization
         protected override async Task HandleRequirementAsync(AuthorizationHandlerContext context, ManagerRoleRequirement requirement)
         {
             var roleIdClaim = context.User.FindFirst("roleId")?.Value;
-            if (!long.TryParse(roleIdClaim, out var roleId))
+            var businessUnitIdClaim = context.User.FindFirst("businessUnitId")?.Value;
+            if (!long.TryParse(roleIdClaim, out var roleId) ||
+                !long.TryParse(businessUnitIdClaim, out var businessUnitId) || businessUnitId <= 0)
                 return;
 
-            if (await _roleGate.IsSuperAdminAsync(roleId))
+            if (await _roleGate.IsSuperAdminAsync(roleId, businessUnitId))
             {
                 _logger.LogDebug("Manager gate bypassed for super-admin role {RoleId}.", roleId);
                 context.Succeed(requirement);
                 return;
             }
 
-            if (await _roleGate.IsManagerOrAdminAsync(roleId))
+            if (await _roleGate.IsManagerOrAdminAsync(roleId, businessUnitId))
                 context.Succeed(requirement);
         }
     }

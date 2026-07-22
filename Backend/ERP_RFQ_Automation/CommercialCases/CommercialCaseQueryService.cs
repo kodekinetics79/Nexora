@@ -117,7 +117,25 @@ public sealed class CommercialCaseQueryService : ICommercialCaseQueryService
                 "Shipment", s.Id, s.ShipmentNo, s.Status.SetupValue, s.ShipmentDate))
             .ToListAsync(cancellationToken);
 
-        var history = await _db.LeadStatusHistories.AsNoTracking()
+        var lifecycleHistory = await _db.CommercialLifecycleEvents.AsNoTracking()
+            .Where(h => h.BusinessUnitId == businessUnitId && h.CommercialCaseId == header.Id)
+            .Select(h => new CommercialCaseStatusEvent(
+                h.Id,
+                h.EventType,
+                h.PreviousStatusCode,
+                h.NewStatusCode,
+                h.ActorId,
+                h.ActorSource,
+                h.OccurredOn,
+                h.ReasonNotes,
+                h.AggregateType,
+                h.CorrelationId,
+                h.RequestReference,
+                h.PolicyVersion,
+                h.ReasonCode))
+            .ToListAsync(cancellationToken);
+
+        var legacyHistory = await _db.LeadStatusHistories.AsNoTracking()
             .Where(h => h.BusinessUnitId == businessUnitId && h.CommercialCaseId == header.Id)
             .OrderBy(h => h.ChangedOn)
             .Select(h => new CommercialCaseStatusEvent(
@@ -130,8 +148,22 @@ public sealed class CommercialCaseQueryService : ICommercialCaseQueryService
                 h.ChangedBy,
                 h.ActorSource,
                 h.ChangedOn,
-                h.Reason))
+                h.Reason,
+                null,
+                null,
+                null,
+                null,
+                null))
             .ToListAsync(cancellationToken);
+        var duplicateWindow = TimeSpan.FromSeconds(2);
+        var nonDuplicatedLegacy = legacyHistory.Where(legacy =>
+            legacy.EventType != "StatusChanged" || !lifecycleHistory.Any(governed =>
+                governed.AggregateType == "Lead" &&
+                (governed.ChangedOn - legacy.ChangedOn).Duration() <= duplicateWindow));
+        var history = nonDuplicatedLegacy.Concat(lifecycleHistory)
+            .OrderBy(h => h.ChangedOn)
+            .ThenBy(h => h.Id)
+            .ToArray();
 
         var documents = new List<CommercialCaseDocument>
         {

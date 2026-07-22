@@ -93,6 +93,7 @@ export interface RfqFilterParams {
     assignedToId?: number;
     createdBy?: string;
     rfqStatusId?: number;
+    rfqStatusCode?: string;
 }
 
 const rfqService = {

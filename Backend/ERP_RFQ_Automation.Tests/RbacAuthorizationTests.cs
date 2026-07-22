@@ -37,16 +37,16 @@ public class RbacAuthorizationTests
             CreatedOn = DateTime.UtcNow
         });
 
-    private static void SeedRole(ErpRfqAutomationContext ctx, long roleId, string roleName)
+    private static void SeedRole(ErpRfqAutomationContext ctx, long roleId, string roleName, long businessUnitId = Bu)
     {
-        Seed.EnsureBusinessUnit(ctx, Bu);
+        Seed.EnsureBusinessUnit(ctx, businessUnitId);
         ctx.SetupMasters.Add(new SetupMaster
         {
             SetupId = roleId,
             SetupType = "role",
             SetupCode = roleName,
             SetupValue = roleName,
-            BusinessUnitId = Bu,
+            BusinessUnitId = businessUnitId,
             IsActive = true,
             CreatedBy = "seed",
             CreatedOn = DateTime.UtcNow
@@ -55,13 +55,14 @@ public class RbacAuthorizationTests
 
     private static void SeedPermission(
         ErpRfqAutomationContext ctx, long id, long roleId, long moduleId,
-        bool canCreate = false, bool canEdit = false, bool canDelete = false)
+        bool canCreate = false, bool canEdit = false, bool canDelete = false,
+        long businessUnitId = Bu)
         => ctx.RolePermissions.Add(new RolePermission
         {
             Id = id,
             RoleId = roleId,
             ModuleId = moduleId,
-            BusinessUnitId = Bu,
+            BusinessUnitId = businessUnitId,
             CanCreate = canCreate,
             CanEdit = canEdit,
             CanDelete = canDelete,
@@ -192,6 +193,33 @@ public class RbacAuthorizationTests
 
         using var cache = new MemoryCache(new MemoryCacheOptions());
         Assert.True(await RunPermissionCheck(ctx, cache, UserWith(99, Bu), ModuleLeads, "CanDelete"));
+    }
+
+    [Fact]
+    public async Task ForeignTenantSuperAdminRole_DoesNotBypassModuleChecks()
+    {
+        using var db = new TestDb();
+        using var ctx = db.ContextFor(Bu);
+        SeedRole(ctx, 99, "Super Admin", businessUnitId: 2);
+        SeedModule(ctx, ModuleLeadsId, ModuleLeads);
+        ctx.SaveChanges();
+
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        Assert.False(await RunPermissionCheck(ctx, cache, UserWith(99, Bu), ModuleLeads, "CanDelete"));
+    }
+
+    [Fact]
+    public async Task ForeignTenantPermissionRow_DoesNotGrantAccess()
+    {
+        using var db = new TestDb();
+        using var ctx = db.ContextFor(Bu);
+        SeedRole(ctx, 10, "Sales Executive", businessUnitId: 2);
+        SeedModule(ctx, ModuleLeadsId, ModuleLeads);
+        SeedPermission(ctx, 9001, 10, ModuleLeadsId, canEdit: true, businessUnitId: 2);
+        ctx.SaveChanges();
+
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        Assert.False(await RunPermissionCheck(ctx, cache, UserWith(10, Bu), ModuleLeads, "CanEdit"));
     }
 
     [Fact]

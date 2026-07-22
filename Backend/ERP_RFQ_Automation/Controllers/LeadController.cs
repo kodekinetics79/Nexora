@@ -96,6 +96,8 @@ public class LeadController : ControllerBase
             await _repository.AcceptLeadAsync(id, businessUnitId);
             return Ok("Lead accepted successfully.");
         }
+        catch (KeyNotFoundException ex) { return NotFound(ex.Message); }
+        catch (InvalidOperationException ex) { return Conflict(new { error = ex.Message }); }
         catch (Exception ex)
         {
             return StatusCode(StatusCodes.Status500InternalServerError, $"Error accepting lead: {ex.Message}");
@@ -155,6 +157,8 @@ public class LeadController : ControllerBase
             await _repository.RejectLeadAsync(id, reasonId, businessUnitId);
             return Ok("Lead rejected successfully.");
         }
+        catch (KeyNotFoundException ex) { return NotFound(ex.Message); }
+        catch (InvalidOperationException ex) { return Conflict(new { error = ex.Message }); }
         catch (Exception ex)
         {
             return StatusCode(StatusCodes.Status500InternalServerError, $"Error rejecting lead: {ex.Message}");

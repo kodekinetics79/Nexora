@@ -162,12 +162,11 @@ public class LeadReviewUpsertTests
     }
 
     [Fact]
-    public async Task Approve_SetsLeadStatusTo24()
+    public async Task Approve_ClearsReviewWithoutBypassingLifecycle()
     {
         using var db = new TestDb();
         using (var seed = db.ContextFor(null))
         {
-            Seed.LeadStatus(seed, 24, Bu, "Lead Accepted"); // FK target for LeadStatusId = 24
             Seed.Lead(seed, 100, Bu, parseStatus: "NeedsReview", items: new[] { Seed.LeadItem(1, "L1", 1) });
             seed.SaveChanges();
         }
@@ -181,7 +180,9 @@ public class LeadReviewUpsertTests
         });
 
         using var verify = db.ContextFor(Bu);
-        Assert.Equal(24, verify.Leads.Single(l => l.Id == 100).LeadStatusId);
+        var reviewed = verify.Leads.Include(l => l.EmailIngests).Single(l => l.Id == 100);
+        Assert.Null(reviewed.LeadStatusId);
+        Assert.Equal("Success", reviewed.EmailIngests.ParseStatus);
     }
 
     [Fact]

@@ -4,7 +4,8 @@ namespace ERP_RFQ_Automation.DTOs.Lead
 {
     // Payload for the review workbench PUT api/Lead/{id}/review.
     // "save"    -> persist corrections and clear the NeedsReview flag, leaving the lead new.
-    // "approve" -> same, and additionally mark the lead Accepted (LeadStatusId = 24).
+    // "approve" -> persist corrections and clear the extraction-review flag. Lifecycle
+    // qualification remains a separate, governed command.
     public class LeadReviewSubmitDTO
     {
         [Required]

@@ -6,6 +6,7 @@ using ERP_RFQ_Automation.Platform.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 
 namespace ERP_RFQ_Automation.Platform.Controllers;
 
@@ -115,6 +116,7 @@ public class TenantsController : ControllerBase
                     CreatedOn = DateTime.UtcNow
                 };
                 _context.Set<BusinessUnit>().Add(bu);
+                _context.SetupMasters.AddRange(LifecycleStatusCatalog.CreateFor(bu, actor));
                 await _context.SaveChangesAsync(ct);
 
                 tenant.PrimaryBusinessUnitId = bu.Id;

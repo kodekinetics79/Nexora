@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Services;
 using ERP_RFQ_Automation.Tests.Support;
@@ -73,17 +74,19 @@ public sealed class LeadReferenceTests
     }
 
     [Fact]
-    public void Reference_is_immutable_and_status_changes_are_historicized()
+    public async Task Reference_is_immutable_and_status_changes_are_historicized()
     {
         using var db = new TestDb();
         using var context = db.ContextFor(null);
         var lead = Seed.Lead(context, 301, 3);
-        Seed.LeadStatus(context, 24, 3, "Accepted");
+        Seed.LeadStatus(context, 24, 3, "Pending Identification");
         context.SaveChanges();
         var originalReference = lead.CommercialCaseReference;
 
-        lead.LeadStatusId = 24;
-        context.SaveChanges();
+        await new LifecycleApplicationService(context).TransitionLeadAsync(3, lead.Id,
+            new LifecycleActor("reviewer-3", "AuthenticatedUser"),
+            new LifecycleTransitionCommand("PENDING_IDENTIFICATION", 1, null, null,
+                "Api", "corr-301", "req-301", "lead-reference-301"), false, default);
 
         var statusChange = Assert.Single(context.LeadStatusHistories.Where(h =>
             h.LeadId == lead.Id && h.EventType == "StatusChanged"));
@@ -93,16 +96,19 @@ public sealed class LeadReferenceTests
         Assert.Equal(lead.CommercialCaseId, statusChange.CommercialCaseId);
         Assert.Null(statusChange.ChangedBy);
         Assert.Equal("PersistenceFallback", statusChange.ActorSource);
+        Assert.Single(context.CommercialLifecycleEvents.Where(e => e.AggregateId == lead.Id));
 
+        context.ChangeTracker.Clear();
+        lead = context.Leads.Include(item => item.CommercialCase).Single(item => item.Id == 301);
         context.Entry(lead).Property(e => e.CommercialCaseReference).CurrentValue = "MANUAL-CHANGE";
         var error = Assert.Throws<InvalidOperationException>(() => context.SaveChanges());
         Assert.Contains("cannot be changed", error.Message, StringComparison.OrdinalIgnoreCase);
 
         context.Entry(lead).Property(e => e.CommercialCaseReference).CurrentValue = originalReference;
         context.Entry(lead).State = EntityState.Unchanged;
-        context.Entry(lead.CommercialCase).Property(e => e.MasterReference).CurrentValue = "CASE-CHANGE";
-        var aggregateError = Assert.Throws<InvalidOperationException>(() => context.SaveChanges());
-        Assert.Contains("identity cannot be changed", aggregateError.Message, StringComparison.OrdinalIgnoreCase);
+        var aggregateError = Assert.Throws<InvalidOperationException>(() =>
+            context.Entry(lead.CommercialCase).Property(e => e.MasterReference).CurrentValue = "CASE-CHANGE");
+        Assert.Contains("part of a key", aggregateError.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

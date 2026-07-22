@@ -121,7 +121,8 @@ public sealed class SlaSweepWorker : BackgroundService
             .Where(l => l.BusinessUnitId == bu
                         && l.BidClosingDate != null
                         && l.BidClosingDate.Value.Year >= 2000
-                        && (l.LeadStatusId == null || l.LeadStatusId == 24)
+                        && (l.LeadStatusId == null || l.LeadStatus != null &&
+                            (l.LeadStatus.SetupCode == "QUALIFIED" || l.LeadStatus.SetupValue == "Accepted" || l.LeadStatus.SetupValue == "Qualified"))
                         && l.LeadRejectedReasonId == null
                         && l.BidClosingDate <= horizon)
             .Select(l => new { l.Id, l.Rfqno, l.BidClosingDate, l.AssignTo })
@@ -196,7 +197,8 @@ public sealed class SlaSweepWorker : BackgroundService
         // measured from acceptance when known (ModifiedDate) else creation.
         var leads = await db.Leads.AsNoTracking().IgnoreQueryFilters()
             .Where(l => l.BusinessUnitId == bu
-                        && l.LeadStatusId == 24
+                        && l.LeadStatus != null
+                        && (l.LeadStatus.SetupCode == "QUALIFIED" || l.LeadStatus.SetupValue == "Accepted" || l.LeadStatus.SetupValue == "Qualified")
                         && l.AssignTo == null
                         && (l.ModifiedDate ?? l.CreatedDate) < cutoff)
             .Select(l => new { l.Id, l.Rfqno })

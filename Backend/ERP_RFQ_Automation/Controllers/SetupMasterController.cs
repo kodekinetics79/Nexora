@@ -2,6 +2,7 @@ using ERP_RFQ_Automation.DTOs;
 using ERP_RFQ_Automation.DTOs.SetupDTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Authorization;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -100,6 +101,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPost]
+        [RequireManagerRole]
         public async Task<ActionResult<SetupMasterResponseDTO>> Create([FromBody] SetupMasterCreateRequestDTO request)
         {
             try
@@ -148,6 +150,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPut("{id}")]
+        [RequireManagerRole]
         public async Task<ActionResult> Update(long id, [FromBody] SetupMasterUpdateRequestDTO request)
         {
             try
@@ -195,6 +198,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpDelete("{id}")]
+        [RequireManagerRole]
         public async Task<ActionResult> Delete(long id)
         {
             try

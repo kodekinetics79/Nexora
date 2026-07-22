@@ -47,7 +47,7 @@ namespace ERP_RFQ_Automation.Authorization
             // Super-admin bypass: defense against missing/partial RolePermissions rows.
             // Even if the seed grants a super admin everything, an absent row must never
             // lock the platform owner-role out of its own tenant.
-            if (await _roleGate.IsSuperAdminAsync(roleId))
+            if (await _roleGate.IsSuperAdminAsync(roleId, businessUnitId))
             {
                 _logger.LogDebug("Module permission check bypassed for super-admin role {RoleId}.", roleId);
                 context.Succeed(requirement);

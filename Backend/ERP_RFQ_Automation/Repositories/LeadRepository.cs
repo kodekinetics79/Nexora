@@ -5,6 +5,7 @@ using ERP_RFQ_Automation.DTOs.LeadDTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.MultiTenancy;
+using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -155,29 +156,10 @@ namespace ERP_RFQ_Automation.Repositories
         // New implementation for Accept
         public async Task AcceptLeadAsync(long id, long businessUnitId)
         {
-            var lead = await _context.Leads.FirstOrDefaultAsync(l => l.Id == id && l.BusinessUnitId == businessUnitId);
-            if (lead == null)
-            {
-                throw new Exception($"Lead with ID {id} not found in Business Unit {businessUnitId}.");
-            }
-
-            lead.LeadStatusId = 24;
-            lead.ModifiedDate = DateTime.UtcNow;
-            await _context.SaveChangesAsync();
-
-            // WP-A3: accepting a lead re-runs duplicate detection. Best-effort —
-            // a detection failure must never fail the accept itself.
-            if (_duplicateDetector != null)
-            {
-                try
-                {
-                    await _duplicateDetector.CheckAndFlagAsync(id, businessUnitId);
-                }
-                catch (Exception ex)
-                {
-                    _logger?.LogError(ex, "Duplicate detection failed after accepting lead {LeadId}; accept succeeded.", id);
-                }
-            }
+            var exists = await _context.Leads.AnyAsync(l => l.Id == id && l.BusinessUnitId == businessUnitId);
+            if (!exists) throw new KeyNotFoundException($"Lead with ID {id} not found in Business Unit {businessUnitId}.");
+            throw new InvalidOperationException(
+                "Lead acceptance has moved to the governed lifecycle. Advance the lead to UNDER_REVIEW, then transition it to QUALIFIED.");
         }
 
         // ARCH-01: convert an accepted lead into a real RFQ (with LeadId set), so the
@@ -188,11 +170,12 @@ namespace ERP_RFQ_Automation.Repositories
         {
             var lead = await _context.Leads
                 .Include(l => l.LeadItems)
+                .Include(l => l.LeadStatus)
                 .FirstOrDefaultAsync(l => l.Id == id && l.BusinessUnitId == businessUnitId);
             if (lead == null)
                 throw new KeyNotFoundException($"Lead with ID {id} not found in Business Unit {businessUnitId}.");
-            if (lead.LeadStatusId != 24)
-                throw new InvalidOperationException("Only an accepted lead can be converted to an RFQ.");
+            if (LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue) != "QUALIFIED")
+                throw new InvalidOperationException("Only a qualified lead can be converted to an RFQ.");
 
             // WP-A3 hard block: an unresolved duplicate flag stops conversion.
             if (lead.DuplicateStatus is "suspected" or "confirmed")
@@ -203,7 +186,10 @@ namespace ERP_RFQ_Automation.Repositories
             var already = await _context.Rfqs
                 .FirstOrDefaultAsync(r => r.LeadId == id && r.BusinessUnitId == businessUnitId);
             if (already != null)
-                throw new InvalidOperationException($"This lead has already been converted to RFQ {already.Rfqno}.");
+            {
+                await CompleteConversionLifecycleAsync(lead, already.Id, createdBy);
+                return (already.Id, already.Rfqno);
+            }
 
             // Reuse the lead's RFQ number when present and unique; otherwise derive one.
             var rfqno = !string.IsNullOrWhiteSpace(lead.Rfqno)
@@ -227,7 +213,7 @@ namespace ERP_RFQ_Automation.Repositories
                 DurationAgreement = lead.DurationAgreement,
                 LeadId = lead.Id,
                 BusinessUnitId = businessUnitId,
-                RfqstatusId = 34, // Draft
+                RfqstatusId = await LifecycleStatusCatalog.ResolveIdAsync(_context, businessUnitId, "Rfq", "DRAFT"),
                 CreatedBy = createdBy,
                 CreatedDate = DateTime.UtcNow,
                 Rfqitems = lead.LeadItems.Select(li => new Rfqitem
@@ -266,7 +252,19 @@ namespace ERP_RFQ_Automation.Repositories
             _context.Rfqs.Add(rfq);
             await _context.SaveChangesAsync();
             await tx.CommitAsync();
+            await tx.DisposeAsync();
+            await CompleteConversionLifecycleAsync(lead, rfq.Id, createdBy);
             return (rfq.Id, rfq.Rfqno);
+        }
+
+        private async Task CompleteConversionLifecycleAsync(Lead lead, long rfqId, string actor)
+        {
+            if (LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue) != "QUALIFIED") return;
+            await new LifecycleApplicationService(_context).TransitionLeadAsync(
+                lead.BusinessUnitId, lead.Id, new LifecycleActor(actor, "LeadConversion"),
+                new LifecycleTransitionCommand("CONVERTED_TO_RFQ", lead.LifecycleVersion, null, null,
+                    "Api", $"conversion-{lead.Id}", $"rfq-{rfqId}", $"lead-conversion:{lead.BusinessUnitId}:{lead.Id}"),
+                false, default);
         }
 
         public async Task<IEnumerable<RejectionReasonDTO>> GetLeadRejectionReasonsAsync()
@@ -286,16 +284,10 @@ namespace ERP_RFQ_Automation.Repositories
         // New implementation for Reject
         public async Task RejectLeadAsync(long id, long reasonId, long businessUnitId)
         {
-            var lead = await _context.Leads.FirstOrDefaultAsync(l => l.Id == id && l.BusinessUnitId == businessUnitId);
-            if (lead == null)
-            {
-                throw new Exception($"Lead with ID {id} not found in Business Unit {businessUnitId}.");
-            }
-
-            lead.LeadStatusId = 25;
-            lead.LeadRejectedReasonId = reasonId;
-            lead.ModifiedDate = DateTime.UtcNow;
-            await _context.SaveChangesAsync();
+            var exists = await _context.Leads.AnyAsync(l => l.Id == id && l.BusinessUnitId == businessUnitId);
+            if (!exists) throw new KeyNotFoundException($"Lead with ID {id} not found in Business Unit {businessUnitId}.");
+            throw new InvalidOperationException(
+                "Lead rejection has moved to the governed lifecycle. Use a DISQUALIFIED or CANCELLED transition with a reason code.");
         }
 
 
@@ -316,7 +308,8 @@ namespace ERP_RFQ_Automation.Repositories
                 .AsNoTracking()
                 .Include(l => l.AssignToNavigation)
                 .Where(l => l.BusinessUnitId == businessUnitId)
-                .Where(l => l.LeadStatusId == 24) // Only Accepted
+                .Where(l => l.LeadStatus != null &&
+                    (l.LeadStatus.SetupCode == "QUALIFIED" || l.LeadStatus.SetupValue == "Accepted" || l.LeadStatus.SetupValue == "Qualified"))
                 .Where(l => !l.Rfqs.Any());  // Only show leads that have NOT yet been converted to an RFQ
 
             // Exclude assigned leads if requested (but only if we're not looking for a specific assignee)
@@ -424,7 +417,8 @@ namespace ERP_RFQ_Automation.Repositories
                 UnassignedHours = l.AssignTo == null
                     ? (int)Math.Max(0, (nowUtc - (l.ModifiedDate ?? l.CreatedDate)).TotalHours)
                     : null,
-                IsUnassignedOverdue = l.LeadStatusId == 24
+                IsUnassignedOverdue = l.LeadStatus != null &&
+                    (l.LeadStatus.SetupCode == "QUALIFIED" || l.LeadStatus.SetupValue == "Accepted" || l.LeadStatus.SetupValue == "Qualified")
                     && l.AssignTo == null
                     && (nowUtc - (l.ModifiedDate ?? l.CreatedDate)).TotalHours > unassignedThresholdHours,
 
@@ -487,7 +481,9 @@ namespace ERP_RFQ_Automation.Repositories
                 .AsNoTracking()
                 .Include(l => l.LeadItems)
                 .Include(l => l.AssignToNavigation)
-                .FirstOrDefaultAsync(l => l.Id == id && l.BusinessUnitId == businessUnitId && l.LeadStatusId == 24);
+                .Include(l => l.LeadStatus)
+                .FirstOrDefaultAsync(l => l.Id == id && l.BusinessUnitId == businessUnitId && l.LeadStatus != null &&
+                    (l.LeadStatus.SetupCode == "QUALIFIED" || l.LeadStatus.SetupValue == "Accepted" || l.LeadStatus.SetupValue == "Qualified"));
 
             if (lead == null) return null;
 
@@ -841,9 +837,6 @@ namespace ERP_RFQ_Automation.Repositories
             // Clear the canonical NeedsReview flag regardless of action.
             if (lead.EmailIngests != null)
                 lead.EmailIngests.ParseStatus = "Success";
-
-            if (review.Action == "approve")
-                lead.LeadStatusId = 24;
 
             lead.ModifiedDate = DateTime.UtcNow;
 

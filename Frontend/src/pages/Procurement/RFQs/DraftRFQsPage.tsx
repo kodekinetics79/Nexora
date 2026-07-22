@@ -11,7 +11,6 @@ import {
 } from '@mui/x-data-grid';
 import {
   Visibility as ViewIcon,
-  CheckCircle as ApproveIcon,
   Delete as DeleteIcon,
   ElectricBolt as ProcessIcon,
   Layers as ItemsIcon,
@@ -41,7 +40,7 @@ const DraftRFQsPage: React.FC = () => {
       pageNumber: paginationModel.page + 1,
       pageSize: paginationModel.pageSize,
       search: search || undefined,
-      rfqStatusId: 34, // Draft
+      rfqStatusCode: 'DRAFT',
       businessUnitId: userData?.businessUnitId || undefined,
     }),
   });
@@ -66,11 +65,6 @@ const DraftRFQsPage: React.FC = () => {
     },
     onError: () => enqueueSnackbar('Failed to delete RFQ', { variant: 'error' }),
   });
-
-  const handleApproveClick = (rfq: any) => {
-    setSelectedRfq(rfq);
-    setApprovalDialogOpen(true);
-  };
 
   const formatDate = (dateStr: string | null) => {
     if (!dateStr) return '—';
@@ -147,8 +141,8 @@ const DraftRFQsPage: React.FC = () => {
           <Tooltip title="View">
             <IconButton size="small" onClick={() => navigate(`/procurement/rfqs/view/${p.row.id}`)}><ViewIcon fontSize="small" /></IconButton>
           </Tooltip>
-          <Tooltip title="Approve & Send">
-            <IconButton size="small" sx={{ color: 'success.main', bgcolor: 'success.lighter' }} onClick={() => handleApproveClick(p.row)}><ApproveIcon fontSize="small" /></IconButton>
+          <Tooltip title="Open lifecycle">
+            <IconButton size="small" sx={{ color: 'success.main', bgcolor: 'success.lighter' }} onClick={() => navigate(`/procurement/rfqs/view/${p.row.id}`)}><ProcessIcon fontSize="small" /></IconButton>
           </Tooltip>
           {!p.row.leadId && (
             <Tooltip title="Delete">

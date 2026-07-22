@@ -135,7 +135,9 @@ namespace ERP_RFQ_Automation.Repositories
             // Validate foreign keys
             if (user.RoleId.HasValue)
             {
-                var roleExists = await _context.SetupMasters.AnyAsync(sm => sm.SetupId == user.RoleId.Value && sm.SetupType == "role");
+                var roleExists = await _context.SetupMasters.AnyAsync(sm => sm.SetupId == user.RoleId.Value
+                    && sm.BusinessUnitId == user.Buid && sm.SetupType.ToLower() == "role"
+                    && sm.IsActive != false);
                 if (!roleExists)
                     throw new ArgumentException($"Role with ID {user.RoleId.Value} does not exist.");
             }
@@ -191,7 +193,9 @@ namespace ERP_RFQ_Automation.Repositories
             // Validate foreign keys
             if (user.RoleId.HasValue)
             {
-                var roleExists = await _context.SetupMasters.AnyAsync(sm => sm.SetupId == user.RoleId.Value && sm.SetupType == "role");
+                var roleExists = await _context.SetupMasters.AnyAsync(sm => sm.SetupId == user.RoleId.Value
+                    && sm.BusinessUnitId == user.Buid && sm.SetupType.ToLower() == "role"
+                    && sm.IsActive != false);
                 if (!roleExists)
                     throw new ArgumentException($"Role with ID {user.RoleId.Value} does not exist.");
             }

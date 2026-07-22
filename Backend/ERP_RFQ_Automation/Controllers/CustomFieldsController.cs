@@ -130,7 +130,7 @@ public sealed class CustomFieldsController : ControllerBase
     private async Task<bool> IsManagerOrAdminAsync()
     {
         if (!long.TryParse(User.FindFirst("roleId")?.Value, out var roleId)) return false;
-        return await _roleGate.IsManagerOrAdminAsync(roleId);
+        return await _roleGate.IsManagerOrAdminAsync(roleId, TenantId());
     }
 
     private static string ModuleFor(string entityType) => entityType switch

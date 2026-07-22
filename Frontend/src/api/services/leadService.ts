@@ -193,14 +193,6 @@ const leadService = {
     return r.data;
   },
 
-  acceptLead: async (id: number) => {
-    return axiosInstance.post(`/api/Lead/accept/${id}`);
-  },
-
-  rejectLead: async (id: number, reasonId: number) => {
-    return axiosInstance.post(`/api/Lead/reject/${id}`, null, { params: { reasonId } });
-  },
-
   getRejectionReasons: async () => {
     const r = await axiosInstance.get('/api/Lead/rejection-reasons');
     return r.data;

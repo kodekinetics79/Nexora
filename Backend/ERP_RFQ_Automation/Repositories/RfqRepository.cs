@@ -1,4 +1,5 @@
 ﻿using ERP_RFQ_Automation.DTOs.LookupDTOs;
+using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.DTOs.RfqDTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
@@ -19,7 +20,7 @@ namespace ERP_RFQ_Automation.Repositories
             _context = context;
         }
 
-        public async Task<(IEnumerable<RfqResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null, long? assignedToId = null, string? createdBy = null, long? rfqStatusId = null)
+        public async Task<(IEnumerable<RfqResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null, long? assignedToId = null, string? createdBy = null, long? rfqStatusId = null, string? rfqStatusCode = null)
         {
             IQueryable<Rfq> query = _context.Rfqs
                 .AsNoTracking()
@@ -33,6 +34,13 @@ namespace ERP_RFQ_Automation.Repositories
             if (rfqStatusId.HasValue)
             {
                 query = query.Where(r => r.RfqstatusId == rfqStatusId.Value);
+            }
+            if (!string.IsNullOrWhiteSpace(rfqStatusCode))
+            {
+                var code = rfqStatusCode.Trim().ToUpper();
+                query = query.Where(r => r.Rfqstatus != null &&
+                    (r.Rfqstatus.SetupCode != null && r.Rfqstatus.SetupCode.ToUpper() == code ||
+                     r.Rfqstatus.SetupValue.ToUpper() == code));
             }
 
             if (assignedToId.HasValue || !string.IsNullOrWhiteSpace(createdBy))
@@ -213,19 +221,14 @@ namespace ERP_RFQ_Automation.Repositories
                     throw new ArgumentException($"RFQ Type ID {rfq.RfqtypeId} does not exist.");
             }
 
-            if (rfq.RfqstatusId.HasValue)
-            {
-                var statusExists = await _context.SetupMasters.AnyAsync(sm => sm.SetupId == rfq.RfqstatusId);
-                if (!statusExists)
-                    throw new ArgumentException($"RFQ Status ID {rfq.RfqstatusId} does not exist.");
-            }
-
-            if (rfq.LeadId.HasValue)
-            {
-                var leadExists = await _context.Leads.AnyAsync(l => l.Id == rfq.LeadId);
-                if (!leadExists)
-                    throw new ArgumentException($"Lead ID {rfq.LeadId} does not exist.");
-            }
+            if (!rfq.LeadId.HasValue)
+                throw new ArgumentException("A tenant-owned lead is required so the RFQ belongs to a commercial case.");
+            var leadExists = await _context.Leads.AnyAsync(l =>
+                l.Id == rfq.LeadId.Value && l.BusinessUnitId == rfq.BusinessUnitId);
+            if (!leadExists)
+                throw new ArgumentException($"Lead ID {rfq.LeadId} does not exist in this business unit.");
+            rfq.RfqstatusId = await LifecycleStatusCatalog.ResolveIdAsync(
+                _context, rfq.BusinessUnitId, "Rfq", "DRAFT");
 
             rfq.CreatedDate = DateTime.UtcNow;
 
@@ -267,7 +270,8 @@ namespace ERP_RFQ_Automation.Repositories
             existing.ModifiedBy = rfq.ModifiedBy;
             existing.ModifiedDate = DateTime.UtcNow;
             existing.BusinessUnitId = rfq.BusinessUnitId;
-            existing.RfqstatusId = rfq.RfqstatusId;
+            if (rfq.RfqstatusId != existing.RfqstatusId)
+                throw new InvalidOperationException("RFQ status must be changed through the governed lifecycle command.");
 
             await _context.SaveChangesAsync();
         }
@@ -277,14 +281,24 @@ namespace ERP_RFQ_Automation.Repositories
             var rfq = await _context.Rfqs
                 .Include(r => r.Rfqitems)
                 .Include(r => r.Lead)
+                .Include(r => r.Rfqstatus)
                 // SEC-07: scope to the caller's business unit so one tenant cannot
                 // approve (and generate/email a quote for) another tenant's RFQ.
                 .FirstOrDefaultAsync(r => r.Id == id && r.BusinessUnitId == businessUnitId);
 
             if (rfq == null) throw new KeyNotFoundException($"RFQ with ID {id} not found.");
 
-            // Update status to 35 (Submitted/Approved)
-            rfq.RfqstatusId = 35;
+            var existingQuoteId = await _context.Quotes
+                .Where(q => q.Rfqid == id && q.BusinessUnitId == businessUnitId)
+                .Select(q => (long?)q.Id).FirstOrDefaultAsync();
+            if (existingQuoteId.HasValue) return existingQuoteId.Value;
+
+            var lifecycleStatus = LifecyclePolicy.Canonicalize(
+                "Rfq", rfq.Rfqstatus?.SetupCode, rfq.Rfqstatus?.SetupValue);
+            if (lifecycleStatus != "QUOTE_PREPARATION")
+                throw new InvalidOperationException(
+                    "A quote can only be generated when the RFQ lifecycle is in QUOTE_PREPARATION.");
+
             rfq.ModifiedBy = approvedBy;
             rfq.ModifiedDate = DateTime.UtcNow;
 

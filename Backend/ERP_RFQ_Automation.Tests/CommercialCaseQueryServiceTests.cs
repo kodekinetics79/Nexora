@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.CommercialCases;
+using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.Tests.Support;
 
 namespace ERP_RFQ_Automation.Tests;
@@ -36,11 +37,13 @@ public sealed class CommercialCaseQueryServiceTests
         long caseId;
         await using (var seed = db.ContextFor(null))
         {
-            Seed.LeadStatus(seed, 991, 93, "Accepted");
+            Seed.LeadStatus(seed, 991, 93, "Pending Identification");
             var lead = Seed.Lead(seed, 903, 93);
             await seed.SaveChangesAsync();
-            lead.LeadStatusId = 991;
-            await seed.SaveChangesAsync();
+            await new LifecycleApplicationService(seed).TransitionLeadAsync(93, lead.Id,
+                new LifecycleActor("reviewer-93", "AuthenticatedUser"),
+                new LifecycleTransitionCommand("PENDING_IDENTIFICATION", 1, null, null,
+                    "Api", "corr-903", "req-903", "case-detail-903"), false, default);
             caseId = lead.CommercialCaseId;
         }
 
@@ -51,10 +54,11 @@ public sealed class CommercialCaseQueryServiceTests
 
         Assert.NotNull(result);
         Assert.Equal("NXR-2026-000001", result.MasterReference);
-        Assert.Equal("Accepted", result.CurrentStatus);
+        Assert.Equal("Pending Identification", result.CurrentStatus);
         Assert.Contains(result.Documents, d => d.DocumentType == "Lead" && d.DocumentId == 903);
         Assert.Contains(result.StatusHistory, h => h.EventType == "Created");
-        Assert.Contains(result.StatusHistory, h => h.EventType == "StatusChanged" && h.NewStatus == "Accepted");
+        Assert.Contains(result.StatusHistory, h => h.EventType == "StatusTransitioned" && h.NewStatus == "PENDING_IDENTIFICATION");
+        Assert.DoesNotContain(result.StatusHistory, h => h.EventType == "StatusChanged");
     }
 
     [Fact]

@@ -20,6 +20,8 @@ import rfqService from '../../../api/services/rfqService';
 import { useAuth } from '../../../context/AuthContext';
 import EmailPromptDialog from '../../../components/common/EmailPromptDialog';
 import { useSnackbar } from 'notistack';
+import LifecycleActions from '../../../components/common/LifecycleActions';
+import lifecycleService from '../../../api/services/commercialLifecycleService';
 
 const DataField: React.FC<{ label: string; value: string | number | null; bold?: boolean; color?: string }> = ({ label, value, bold = true, color = 'text.primary' }) => (
   <Box sx={{ mb: 1.5 }}>
@@ -47,6 +49,11 @@ const ViewRFQPage: React.FC = () => {
     queryFn: () => rfqService.getById(Number(id), userData?.businessUnitId || 0),
     enabled: !!id && !!userData?.businessUnitId,
   });
+  const { data: lifecycle } = useQuery({
+    queryKey: ['lifecycle', 'rfqs', Number(id)],
+    queryFn: () => lifecycleService.getState('rfqs', Number(id)),
+    enabled: !!id,
+  });
 
   const approveMutation = useMutation({
     mutationFn: (payload: { id: number; approvedBy: string; email?: string; subject?: string; body?: string; customerId?: number }) =>
@@ -68,7 +75,8 @@ const ViewRFQPage: React.FC = () => {
   if (isLoading) return <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '60vh' }}><CircularProgress /></Box>;
   if (!rfq) return <Box sx={{ p: 4 }}><Typography>RFQ not found.</Typography></Box>;
 
-  const isDraft = rfq.rfqstatusId === 34;
+  const isDraft = lifecycle?.currentStatusCode === 'DRAFT';
+  const canSendQuote = lifecycle?.currentStatusCode === 'QUOTE_PREPARATION';
 
   return (
     <Box sx={{ p: 3, maxWidth: 1800, mx: 'auto' }}>
@@ -96,6 +104,7 @@ const ViewRFQPage: React.FC = () => {
             />
           </Box>
           <Stack direction="row" spacing={1.5}>
+            <LifecycleActions aggregate="rfqs" id={rfq.id} onChanged={() => queryClient.invalidateQueries({ queryKey: ['rfq-detail', Number(id)] })} />
             <Button
               variant="outlined"
               startIcon={<BackIcon />}
@@ -122,17 +131,12 @@ const ViewRFQPage: React.FC = () => {
                 >
                   Edit Draft
                 </Button>
-                <Button
-                  variant="contained"
-                  color="success"
-                  startIcon={<ApproveIcon />}
-                  onClick={() => setApprovalDialogOpen(true)}
-                  sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
-                >
-                  Approve & Send
-                </Button>
               </>
             )}
+            {canSendQuote && <Button variant="contained" color="success" startIcon={<ApproveIcon />}
+              onClick={() => setApprovalDialogOpen(true)} sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}>
+              Generate & Send Quote
+            </Button>}
             <Button
               variant="outlined"
               startIcon={<ExportIcon />}

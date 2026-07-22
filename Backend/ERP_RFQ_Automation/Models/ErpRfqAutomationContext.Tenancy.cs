@@ -2,6 +2,7 @@ using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.CommercialRouting;
 using ERP_RFQ_Automation.CustomFields;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
+using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Models;
@@ -35,6 +36,11 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<CommercialCase>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<LeadReferenceConfiguration>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<LeadStatusHistory>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<SetupMaster>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<RolePermission>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<User>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == null || e.Buid == CurrentTenantId);
+        modelBuilder.Entity<CommercialLifecycleEvent>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<LifecycleOutboxMessage>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
 
         // Master data (nullable Buid). Rows with a null Buid are treated as shared
         // reference data (visible to all tenants); tenant-owned rows are scoped.
@@ -70,6 +76,7 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<UnassignedWorkItem>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
 
         modelBuilder.ConfigureGovernedCustomFields();
+        modelBuilder.ConfigureCommercialLifecycle();
         modelBuilder.Entity<CustomFieldDefinition>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CustomFieldVersion>().HasQueryFilter(e => CurrentTenantId == null || e.Definition.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CustomFieldOption>().HasQueryFilter(e => CurrentTenantId == null || e.Version.Definition.BusinessUnitId == CurrentTenantId);
