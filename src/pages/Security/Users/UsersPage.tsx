@@ -151,7 +151,8 @@ const UsersPage: React.FC = () => {
   const handleEdit = (record: UserDTO) => {
     setSelectedRecord(record);
     setFormData(record);
-    setImagePreview(record.imageUrl ? `${import.meta.env.VITE_API_URL}${record.imageUrl}` : null);
+    const apiBase = import.meta.env.VITE_API_BASE_URL ?? import.meta.env.VITE_API_URL ?? '';
+    setImagePreview(record.imageUrl ? `${apiBase}${record.imageUrl}` : null);
     setIsModalOpen(true);
   };
 
@@ -194,7 +195,7 @@ const UsersPage: React.FC = () => {
       sortable: false,
       renderCell: (params) => (
         <Avatar
-          src={params.value ? `${import.meta.env.VITE_API_URL}${params.value}` : undefined}
+          src={params.value ? `${import.meta.env.VITE_API_BASE_URL ?? import.meta.env.VITE_API_URL ?? ''}${params.value}` : undefined}
           sx={{ width: 32, height: 32, my: 1 }}
         >
           {!params.value && <PersonIcon fontSize="small" />}

@@ -76,7 +76,7 @@ const ProductDetailPage: React.FC = () => {
     return <Box sx={{ p: 4 }}><Typography>Product not found.</Typography></Box>;
   }
 
-  const apiBase = import.meta.env.VITE_API_URL ?? '';
+  const apiBase = import.meta.env.VITE_API_BASE_URL ?? import.meta.env.VITE_API_URL ?? '';
 
   const stockChip = () => {
     if (product.qtyOnHand === 0) return <Chip label="Out of Stock" color="error" size="small" />;
