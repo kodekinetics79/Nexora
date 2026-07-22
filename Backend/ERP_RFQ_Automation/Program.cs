@@ -190,7 +190,7 @@ builder.Services.AddCors(options =>
             // frontend URL(s) instead of relying on this list.
             policy.WithOrigins(
                     "http://localhost:5173", "http://localhost:4173", "http://localhost:3000",
-                    "https://nexora-ai-beryl.vercel.app")
+                    "https://nexora1-ai.vercel.app")
                   .AllowAnyMethod().AllowAnyHeader();
         }
     });

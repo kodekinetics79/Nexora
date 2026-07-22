@@ -4,7 +4,7 @@ Topology: **Frontend on Vercel** + **Backend on a container host** + **Neon (Pos
 (Vercel cannot host the .NET backend — it's a persistent server with background
 workers, not serverless.)
 
-Current: frontend is deployed at **https://nexora-ai-beryl.vercel.app**; it needs
+Current: frontend is deployed at **https://nexora1-ai.vercel.app**; it needs
 the backend URL below to function.
 
 ---
@@ -27,7 +27,7 @@ fly secrets set \
   Jwt__Key="<a NEW 32+ byte random key>" \
   Ollama__BaseUrl="https://ollama.com/" \
   Ollama__ApiKey="<ollama key>" \
-  Cors__AllowedOrigins__0="https://nexora-ai-beryl.vercel.app"
+  Cors__AllowedOrigins__0="https://nexora1-ai.vercel.app"
 
 fly deploy
 ```
@@ -53,7 +53,7 @@ Vercel project settings:
 
 ## 3. Demo login (Neon is seeded)
 
-- URL: https://nexora-ai-beryl.vercel.app
+- URL: https://nexora1-ai.vercel.app
 - **Email:** `john@example.com`
 - **Password:** `Demo@2026!`
 - **Business Unit:** `Customer POC`
