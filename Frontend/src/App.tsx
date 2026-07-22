@@ -30,7 +30,6 @@ const LeadsPage = lazy(() => import('./pages/Leads/LeadsPage'));
 const OutstandingLeadsPage = lazy(() => import('./pages/Leads/OutstandingLeadsPage'));
 const AssignedLeadsPage = lazy(() => import('./pages/Leads/AssignedLeadsPage'));
 const ManualUploadLeadsPage = lazy(() => import('./pages/Leads/ManualUploadLeadsPage'));
-const FolderUploadLeadsPage = lazy(() => import('./pages/Leads/FolderUploadLeadsPage'));
 const LeadDetailPage = lazy(() => import('./pages/Leads/LeadDetailPage'));
 const ExtractionReviewPage = lazy(() => import('./pages/ExtractionReview/ExtractionReviewPage'));
 const ExtractionReviewDetailPage = lazy(() => import('./pages/ExtractionReview/ExtractionReviewDetailPage'));
@@ -173,7 +172,8 @@ function App() {
       <Route path="/procurement/leads/outstanding" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><OutstandingLeadsPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/leads/assigned" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><AssignedLeadsPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/leads/manual-upload" element={<MainLayout><PermissionGuard moduleName="Leads" action="create" redirect><ManualUploadLeadsPage /></PermissionGuard></MainLayout>} />
-      <Route path="/procurement/leads/folder-upload" element={<MainLayout><PermissionGuard moduleName="Leads" action="create" redirect><FolderUploadLeadsPage /></PermissionGuard></MainLayout>} />
+      {/* Customer 1 / Customer 2 folder-upload prototype removed from intake. Redirect legacy links to manual upload. */}
+      <Route path="/procurement/leads/folder-upload" element={<Navigate to="/procurement/leads/manual-upload" replace />} />
       <Route path="/procurement/leads/view/:id" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><LeadDetailPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/leads/:id/convert" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><LeadConvertPage /></PermissionGuard></MainLayout>} />
       
@@ -182,7 +182,7 @@ function App() {
       <Route path="/leads/outstanding" element={<Navigate to="/procurement/leads/outstanding" replace />} />
       <Route path="/leads/assigned" element={<Navigate to="/procurement/leads/assigned" replace />} />
       <Route path="/leads/manual-upload" element={<Navigate to="/procurement/leads/manual-upload" replace />} />
-      <Route path="/leads/folder-upload" element={<Navigate to="/procurement/leads/folder-upload" replace />} />
+      <Route path="/leads/folder-upload" element={<Navigate to="/procurement/leads/manual-upload" replace />} />
       <Route path="/leads/view/:id" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><LeadDetailPage /></PermissionGuard></MainLayout>} />
       <Route path="/leads" element={<Navigate to="/procurement/leads/all" replace />} />
 

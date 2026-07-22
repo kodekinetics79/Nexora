@@ -33,6 +33,13 @@
 	<PackageReference Include="Tesseract" Version="5.2.0" />
   </ItemGroup>
 
+  <!-- Tesseract trained data must ship with the app: OCR of scanned PDFs/images resolves
+       language data from ContentRootPath/tessdata at runtime. Without this the publish
+       output (and therefore the Docker runtime image) has no tessdata and OCR fails silently. -->
+  <ItemGroup>
+    <Content Include="tessdata\**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <!-- Platform Hardening (Platform/Hardening): OpenTelemetry observability.
        All net8.0-compatible. Rate limiting + logging enrichment use the built-in
        Microsoft.AspNetCore.* framework and need no packages. -->

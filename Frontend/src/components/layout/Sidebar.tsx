@@ -113,7 +113,6 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
           { key: 'leads-outstanding', label: t('outstanding_leads'), path: '/procurement/leads/outstanding', moduleName: 'Leads' },
           { key: 'leads-assigned', label: t('assigned_leads'), path: '/procurement/leads/assigned', moduleName: 'Leads' },
           { key: 'leads-manual', label: t('manual_upload'), path: '/procurement/leads/manual-upload', moduleName: 'Leads' },
-          { key: 'leads-folder', label: t('upload_folder_leads'), path: '/procurement/leads/folder-upload', moduleName: 'Leads' },
         ]
       },
       {

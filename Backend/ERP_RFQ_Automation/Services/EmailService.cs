@@ -1307,21 +1307,24 @@ namespace ERP_RFQ_Automation.Services
             }
 
             var config = await query.FirstOrDefaultAsync();
-            
-            // Fallback: If we searched with fromEmail and found nothing, try with just businessUnitId
-            if (config == null && !string.IsNullOrEmpty(fromEmail))
+
+            // Fallback within the SAME business unit only: if a specific fromEmail was requested but
+            // not found, fall back to any active SMTP config belonging to that business unit.
+            // We must never fall back to another tenant's SMTP account — doing so would send this
+            // tenant's quote (customer names, pricing, terms) through a different tenant's mail server.
+            if (config == null && !string.IsNullOrEmpty(fromEmail) && businessUnitId.HasValue)
             {
                 config = await _context.EmailConfigurations
                     .FirstOrDefaultAsync(e => e.IsActive && e.Protocol.ToUpper() == "SMTP" && e.BusinessUnitId == businessUnitId);
             }
 
-            // Fallback: Just take any active SMTP
             if (config == null)
             {
-                config = await _context.EmailConfigurations.FirstOrDefaultAsync(e => e.IsActive && e.Protocol.ToUpper() == "SMTP");
+                throw new InvalidOperationException(
+                    businessUnitId.HasValue
+                        ? $"No active SMTP configuration found for business unit {businessUnitId.Value}. Configure an email account for this business unit before sending."
+                        : "No active SMTP configuration found for sending emails.");
             }
-
-            if (config == null) throw new Exception("No active SMTP configuration found for sending emails.");
 
             var message = new MimeMessage();
             message.From.Add(new MailboxAddress(config.ConfigurationName, config.EmailAddress));

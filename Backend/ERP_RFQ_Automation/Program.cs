@@ -339,7 +339,7 @@ builder.Services.AddHostedService<ERP_RFQ_Automation.Sla.SlaSweepWorker>();
 
 var app = builder.Build();
 
-await DemoUserSeeder.EnsureAsync(app.Services, app.Configuration);
+await DemoUserSeeder.EnsureAsync(app.Services, app.Configuration, app.Environment);
 
 // Global exception handler — return a generic message to clients and log the
 // detail server-side, instead of leaking exception internals. (DATA-12, SEC-16)

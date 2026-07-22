@@ -6,22 +6,39 @@ namespace ERP_RFQ_Automation.Infrastructure;
 
 public static class DemoUserSeeder
 {
-    public static async Task EnsureAsync(IServiceProvider services, IConfiguration configuration)
+    public static async Task EnsureAsync(IServiceProvider services, IConfiguration configuration, IHostEnvironment environment)
     {
-        var enabled = configuration.GetValue("DemoUser:Enabled", true);
+        // Fail-closed: seeding is off unless a deployment explicitly opts in.
+        var enabled = configuration.GetValue("DemoUser:Enabled", false);
         if (!enabled) return;
 
+        using var scope = services.CreateScope();
+        var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("DemoUserSeeder");
+
         var email = configuration["DemoUser:Email"] ?? "robert@example.com";
-        var password = configuration["DemoUser:Password"] ?? "Nexora#Pilot-a9bc9e";
         var businessUnitName = configuration["DemoUser:BusinessUnitName"] ?? "Customer POC";
         var businessUnitCode = configuration["DemoUser:BusinessUnitCode"] ?? "CUSTOMER-POC";
         var roleName = configuration["DemoUser:RoleName"] ?? "Super Admin";
         var platformEmail = configuration["PlatformOwner:Email"] ?? "owner@nexora.app";
-        var platformPassword = configuration["PlatformOwner:Password"] ?? "Nexora#Pilot-a9bc9e";
 
-        using var scope = services.CreateScope();
+        // Passwords must be supplied explicitly. No hardcoded fallback credential is ever seeded,
+        // so a production deployment cannot inherit a repo-published password.
+        var password = configuration["DemoUser:Password"];
+        var platformPassword = configuration["PlatformOwner:Password"];
+        if (string.IsNullOrWhiteSpace(password) || string.IsNullOrWhiteSpace(platformPassword))
+        {
+            logger.LogWarning(
+                "DemoUser:Enabled is true but DemoUser:Password and/or PlatformOwner:Password are not set. Skipping seeding — no default credential will be created.");
+            return;
+        }
+
+        if (environment.IsProduction())
+        {
+            logger.LogWarning(
+                "DemoUserSeeder is running in the Production environment (DemoUser:Enabled=true). Ensure the seeded credentials are intended and rotated after first login.");
+        }
+
         var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
-        var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("DemoUserSeeder");
         var now = DateTime.UtcNow;
 
         var businessUnit = await db.BusinessUnits
@@ -104,9 +121,10 @@ public static class DemoUserSeeder
         }
         else
         {
+            // Never overwrite an existing user's password on restart — that would silently reset a
+            // credential an operator may have already rotated. Only backfill non-credential metadata.
             user.FirstName = string.IsNullOrWhiteSpace(user.FirstName) ? "Robert" : user.FirstName;
             user.LastName = string.IsNullOrWhiteSpace(user.LastName) ? "Pilot" : user.LastName;
-            user.PasswordHash = passwordHash;
             user.RoleId = role.SetupId;
             user.Buid = businessUnit.Id;
             user.IsActive = true;
@@ -136,7 +154,7 @@ public static class DemoUserSeeder
         }
         else
         {
-            platformOwner.PasswordHash = platformPasswordHash;
+            // Do not reset an existing platform owner's password on restart.
             platformOwner.PlatformRole = PlatformRole.Owner;
             platformOwner.IsActive = true;
             platformOwner.DisplayName = string.IsNullOrWhiteSpace(platformOwner.DisplayName)
