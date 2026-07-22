@@ -20,6 +20,9 @@ import { jwtDecode } from 'jwt-decode';
 const TOKEN_KEY = 'nexora_platform_token';
 const USER_KEY = 'nexora_platform_user';
 
+let cachedUserRaw: string | null = null;
+let cachedUser: PlatformSessionUser | null = null;
+
 export interface PlatformSessionUser {
   id?: string;
   email: string;
@@ -70,9 +73,15 @@ export const getPlatformToken = (): string | null => {
 export const getPlatformUser = (): PlatformSessionUser | null => {
   const raw = sessionStorage.getItem(USER_KEY);
   if (!raw) return null;
+  if (raw === cachedUserRaw) return cachedUser;
+
   try {
-    return JSON.parse(raw) as PlatformSessionUser;
+    cachedUser = JSON.parse(raw) as PlatformSessionUser;
+    cachedUserRaw = raw;
+    return cachedUser;
   } catch {
+    cachedUser = null;
+    cachedUserRaw = raw;
     return null;
   }
 };
@@ -83,14 +92,19 @@ export const getPlatformAuthedSnapshot = (): boolean => getPlatformToken() !== n
 // --- writes -----------------------------------------------------------------
 
 export const setPlatformSession = (token: string, user: PlatformSessionUser): void => {
+  const userRaw = JSON.stringify(user);
   sessionStorage.setItem(TOKEN_KEY, token);
-  sessionStorage.setItem(USER_KEY, JSON.stringify(user));
+  sessionStorage.setItem(USER_KEY, userRaw);
+  cachedUserRaw = userRaw;
+  cachedUser = user;
   emit();
 };
 
 export const clearPlatformSession = (): void => {
   sessionStorage.removeItem(TOKEN_KEY);
   sessionStorage.removeItem(USER_KEY);
+  cachedUserRaw = null;
+  cachedUser = null;
   emit();
 };
 
