@@ -259,3 +259,51 @@ Complete the first-class invoice, payment, accounts-receivable, and credit/debit
   idempotency, database uniqueness and PostgreSQL migration tests; EF reports no pending
   model changes. First-class invoice/payment/AR entities and governed tax/margin policy
   remain the next commercial-finance increment.
+
+## Governed accounts receivable and customer payments (2026-07-23)
+- Added tenant-scoped receivable documents and lines, customer payments and allocations,
+  legal document counters, and an append-only commercial-finance audit ledger. Order
+  invoices are snapshotted from authoritative order money, support partial quantities,
+  and receive legal numbers only when issued.
+- Invoice creation and issue use serializable transactions, locked source orders,
+  stable request hashes, bounded PostgreSQL retry, and issue-time quantity revalidation.
+  Competing drafts cannot over-invoice an order; concurrent same-key requests return the
+  original draft. Only confirmed/completed/fulfilled orders or orders backed by an
+  accepted customer quote are eligible.
+- Currency amounts are normalized to two decimals before validation. Line and header
+  footing is revalidated at issue and enforced by PostgreSQL checks. Payment allocation
+  triggers lock the parent receipt and reject aggregate allocation above the receipt;
+  application checks also prevent invoice over-allocation and customer/currency mismatch.
+- Added dedicated `Accounts Receivable` and `Customer Payments` permissions across the
+  API, route guard, sidebar, and order action. The migration grants these permissions only
+  to finance/accounting/admin roles; other roles remain fail closed and super-admin retains
+  the established controlled bypass.
+- Payment commercial-case attribution is derived from allocated invoices. Receipt fields
+  are immutable except for a versioned, reason-required reversal; PostgreSQL rejects
+  simultaneous changes hidden inside a reversal. Historical aging uses payment and
+  reversal effective times, preserving correct prior-period views.
+- The AR workspace separates totals by currency, lists drafts and issued documents,
+  highlights a newly created draft, posts payments with a stable operation key across
+  retries, exposes payment history, and supports governed reversal. Wide tables scroll
+  within their surface on narrow screens.
+- PostgreSQL applies direct RLS to all six finance tables, tenant-composite document,
+  payment, allocation, order, case, and parent-document relationships, plus a trigger
+  that proves every referenced order item belongs to the document's tenant order. Tenant
+  sequences receive `USAGE` only, not direct read/update authority.
+- Verification: **289/289 backend tests pass**, including **10/10 PostgreSQL** production
+  tests; EF reports no pending model changes; the forward upgrade script contains no
+  downgrade/drop statements; the frontend TypeScript/Vite production build passes.
+  PostgreSQL tests cover concurrent legal numbering and idempotent replay, RLS/ownership,
+  issued/audit immutability, allocation ceilings, and forged reversal rejection.
+- An independent finance/security re-review returned **SHIP** after the PostgreSQL lane
+  proved that concurrent reuse of one idempotency key across different orders yields one
+  success and one governed conflict rather than an unhandled unique-key failure. The
+  isolated upgrade test also proves finance/accounting role-permission seeding.
+- Browser visual SIT remains open because the in-app browser runtime could not initialize
+  in this execution environment. The existing MUI vendor chunk warning, missing ESLint
+  configuration, and MailKit/MimeKit dependency advisories remain release-hardening work.
+- This increment deliberately does not claim the complete award-to-cash roadmap. Customer
+  award records, credit/debit notes, write-offs/refunds, statements/dunning, bank
+  reconciliation, GL export, and a transactional finance outbox remain the next governed
+  delivery slices. Draft cancellation/consolidation is also required before exposing
+  arbitrary partial-invoice drafting beyond the current deterministic full-order action.

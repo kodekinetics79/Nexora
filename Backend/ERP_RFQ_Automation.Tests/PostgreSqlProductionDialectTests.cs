@@ -71,6 +71,25 @@ public sealed class PostgreSqlProductionDialectTests
                     .Select(quote => quote.FinancialCalculationVersion)
                     .ToListAsync();
                 Assert.Equal(new[] { 1, 2 }, versions);
+
+                await context.Database.ExecuteSqlRawAsync("""
+                    INSERT INTO "Setup_Master"
+                        ("SetupID", "SetupType", "SetupCode", "SetupValue", "BusinessUnitID", "IsActive", "CreatedBy", "CreatedOn")
+                    VALUES (94010, 'Role', 'FINANCE_MANAGER', 'Finance Manager', 94001, true, 'tests', now());
+                    """);
+                await migrator.MigrateAsync("20260723160000_AddCommercialFinanceLedger");
+
+                var financePermissionCount = await context.Database.SqlQueryRaw<long>("""
+                    SELECT count(*) AS "Value"
+                    FROM "RolePermissions" permission
+                    JOIN "Module" module ON module."ID" = permission."ModuleID"
+                    WHERE permission."RoleID" = 94010
+                      AND permission."BusinessUnitID" = 94001
+                      AND permission."CanCreate" = true
+                      AND permission."CanEdit" = true
+                      AND module."ModuleName" IN ('Accounts Receivable', 'Customer Payments')
+                    """).SingleAsync();
+                Assert.Equal(2, financePermissionCount);
             }
         }
         finally

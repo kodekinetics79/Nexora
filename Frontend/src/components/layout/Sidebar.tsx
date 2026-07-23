@@ -27,6 +27,7 @@ import {
   TrendingUp as LeadIcon,
   AutoAwesome as CopilotIcon,
   FactCheck as BoqIcon,
+  AccountBalance as FinanceIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../../context/AuthContext';
 
@@ -132,6 +133,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
       // service work, so it shares the Quotations module permission.
       { key: 'service-boqs', label: t('service_boqs', 'Service BOQs'), icon: <BoqIcon />, path: '/services/boq', moduleName: 'Quotations', activePrefixes: ['/services/boq'] },
       { key: 'orders', label: t('orders'), icon: <OrderIcon />, path: '/sales/orders', moduleName: 'Orders', activePrefixes: ['/sales/orders'] },
+      { key: 'accounts-receivable', label: 'Accounts Receivable', icon: <FinanceIcon />, path: '/sales/finance', moduleName: 'Accounts Receivable', activePrefixes: ['/sales/finance'] },
       { key: 'shipments', label: t('shipments'), icon: <ShipmentIcon />, path: '/sales/shipments', moduleName: 'Shipments', activePrefixes: ['/sales/shipments'] },
       {
         key: 'supplier_mgmt',

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import {
   Box, Typography, Paper, Table, TableHead, TableRow, TableCell,
   TableBody, IconButton, Button, Stack, Chip, TextField,
@@ -18,6 +18,8 @@ import {
 import { useAuth } from '../../../context/AuthContext';
 import orderService from '../../../api/services/orderService';
 import dayjs from 'dayjs';
+import { useSnackbar } from 'notistack';
+import commercialFinanceService from '../../../api/services/commercialFinanceService';
 
 import PermissionGuard from '../../../components/common/PermissionGuard';
 
@@ -26,6 +28,12 @@ const OrderListPage: React.FC = () => {
   const { userData } = useAuth();
   const businessUnitId = userData?.businessUnitId || 0;
   const [searchTerm, setSearchTerm] = useState('');
+  const { enqueueSnackbar } = useSnackbar();
+  const createInvoice = useMutation({
+    mutationFn: (orderId: number) => commercialFinanceService.createInvoiceFromOrder(orderId),
+    onSuccess: (document) => navigate(`/sales/finance?documentId=${document.id}`),
+    onError: (error: any) => enqueueSnackbar(error.response?.data?.detail ?? 'Invoice draft could not be created', { variant: 'error' }),
+  });
 
   const { data: orders = [], isLoading, isError, refetch } = useQuery({
     queryKey: ['orders-list', businessUnitId, searchTerm],
@@ -135,15 +143,18 @@ const OrderListPage: React.FC = () => {
                       <Tooltip title="View Order">
                         <IconButton size="small" color="primary" onClick={() => navigate(`/sales/orders/${order.id}`)}><ViewIcon fontSize="small" /></IconButton>
                       </Tooltip>
-                      <Tooltip title="Generate Invoice">
-                        <IconButton 
-                          size="small" 
-                          color="info" 
-                          onClick={() => window.open(`/sales/orders/invoice/${order.id}`, '_blank')}
-                        >
-                          <InvoiceIcon fontSize="small" />
-                        </IconButton>
-                      </Tooltip>
+                      <PermissionGuard moduleName="Accounts Receivable" action="create">
+                        <Tooltip title="Create invoice draft">
+                          <IconButton
+                            size="small"
+                            color="info"
+                            disabled={createInvoice.isPending}
+                            onClick={() => createInvoice.mutate(order.id)}
+                          >
+                            <InvoiceIcon fontSize="small" />
+                          </IconButton>
+                        </Tooltip>
+                      </PermissionGuard>
                       <PermissionGuard moduleName="Shipments" action="create">
                         {!order.hasShipments && !['Shipped', 'Delivered', 'Cancelled'].includes(order.status) && (
                           <Tooltip title="Create Shipment">

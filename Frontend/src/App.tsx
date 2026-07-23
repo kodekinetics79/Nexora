@@ -49,6 +49,7 @@ const OrderListPage = lazy(() => import('./pages/Sales/Orders/OrderListPage'));
 const CreateOrderPage = lazy(() => import('./pages/Sales/Orders/CreateOrderPage'));
 const OrderViewPage = lazy(() => import('./pages/Sales/Orders/OrderViewPage'));
 const OrderInvoicePage = lazy(() => import('./pages/Sales/Shipments/OrderInvoicePage'));
+const AccountsReceivablePage = lazy(() => import('./pages/Sales/Finance/AccountsReceivablePage'));
 const ShipmentListPage = lazy(() => import('./pages/Sales/Shipments/ShipmentListPage'));
 const CreateShipmentPage = lazy(() => import('./pages/Sales/Shipments/CreateShipmentPage'));
 const ShipmentViewPage = lazy(() => import('./pages/Sales/Shipments/ShipmentViewPage'));
@@ -106,6 +107,7 @@ function App() {
       <Route path="/sales/orders/create" element={<MainLayout><PermissionGuard moduleName="Orders" action="create" redirect><CreateOrderPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/orders/edit/:id" element={<MainLayout><PermissionGuard moduleName="Orders" action="edit" redirect><CreateOrderPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/orders/:id" element={<MainLayout><PermissionGuard moduleName="Orders" redirect><OrderViewPage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/finance" element={<MainLayout><PermissionGuard moduleName="Accounts Receivable" redirect><AccountsReceivablePage /></PermissionGuard></MainLayout>} />
       
       <Route path="/sales/shipments" element={<MainLayout><PermissionGuard moduleName="Shipments" redirect><ShipmentListPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/shipments/create" element={<MainLayout><PermissionGuard moduleName="Shipments" action="create" redirect><CreateShipmentPage /></PermissionGuard></MainLayout>} />
