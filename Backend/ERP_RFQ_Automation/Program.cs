@@ -124,6 +124,7 @@ builder.Services.AddScoped<IQuoteConfigurationRepository, QuoteConfigurationRepo
 builder.Services.AddScoped<IDashboardRepository, DashboardRepository>();
 builder.Services.AddScoped<ICommercialCaseQueryService, CommercialCaseQueryService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.IInventoryAvailabilityService, ERP_RFQ_Automation.Inventory.InventoryAvailabilityService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.IOrderStockReservationService, ERP_RFQ_Automation.Inventory.OrderStockReservationService>();
 builder.Services.AddScoped<ILifecycleApplicationService, LifecycleApplicationService>();
 builder.Services.AddScoped<ILifecycleOutboxStore, LifecycleOutboxStore>();
 builder.Services.AddScoped<ICommercialRoutingApplicationService, CommercialRoutingApplicationService>();

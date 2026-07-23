@@ -16,11 +16,58 @@ namespace ERP_RFQ_Automation.Controllers
     {
         private readonly IOrderService _orderService;
         private readonly IOrderRepository _repository;
+        private readonly ERP_RFQ_Automation.Inventory.IOrderStockReservationService _stock;
 
-        public OrderController(IOrderService orderService, IOrderRepository repository)
+        public OrderController(
+            IOrderService orderService,
+            IOrderRepository repository,
+            ERP_RFQ_Automation.Inventory.IOrderStockReservationService stock)
         {
             _orderService = orderService;
             _repository = repository;
+            _stock = stock;
+        }
+
+        private long ResolveBusinessUnitId(long? businessUnitId)
+        {
+            var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            return claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
+        }
+
+        // POST: api/Order/5/allocate — reserve available stock for every order line (confirmation).
+        [HttpPost("{id}/allocate")]
+        [RequireModulePermission("Orders", PermissionAction.Edit)]
+        public async Task<IActionResult> AllocateStock(long id, [FromQuery] long? businessUnitId = null)
+        {
+            var buId = ResolveBusinessUnitId(businessUnitId);
+            if (buId <= 0) return BadRequest("Business Unit ID is required.");
+            var actor = User.FindFirst("email")?.Value ?? User.Identity?.Name;
+            var result = await _stock.ReserveOrderAsync(buId, id, actor);
+            return Ok(result);
+        }
+
+        // POST: api/Order/5/release-stock — release all active holds (order cancelled/unallocated).
+        [HttpPost("{id}/release-stock")]
+        [RequireModulePermission("Orders", PermissionAction.Edit)]
+        public async Task<IActionResult> ReleaseStock(long id, [FromQuery] long? businessUnitId = null)
+        {
+            var buId = ResolveBusinessUnitId(businessUnitId);
+            if (buId <= 0) return BadRequest("Business Unit ID is required.");
+            var actor = User.FindFirst("email")?.Value ?? User.Identity?.Name;
+            var released = await _stock.ReleaseOrderAsync(buId, id, actor);
+            return Ok(new { orderId = id, released });
+        }
+
+        // POST: api/Order/5/consume-stock — consume holds and decrement on-hand (goods issue/delivery).
+        [HttpPost("{id}/consume-stock")]
+        [RequireModulePermission("Orders", PermissionAction.Edit)]
+        public async Task<IActionResult> ConsumeStock(long id, [FromQuery] long? businessUnitId = null)
+        {
+            var buId = ResolveBusinessUnitId(businessUnitId);
+            if (buId <= 0) return BadRequest("Business Unit ID is required.");
+            var actor = User.FindFirst("email")?.Value ?? User.Identity?.Name;
+            var consumed = await _stock.ConsumeOrderAsync(buId, id, actor);
+            return Ok(new { orderId = id, consumed });
         }
 
         // GET: api/Order
