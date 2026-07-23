@@ -32,6 +32,7 @@ using ERP_RFQ_Automation.CommercialFinance;
 using ERP_RFQ_Automation.OrderToCash;
 using ERP_RFQ_Automation.CustomFields;
 using ERP_RFQ_Automation.AI;
+using ERP_RFQ_Automation.Security;
 using System.Text.Json.Serialization;
 using Npgsql;
 
@@ -158,6 +159,8 @@ builder.Services.AddScoped<IAuthorizationHandler, PermissionHandler>();
 // body that leaks no module names.
 builder.Services.AddMemoryCache();
 builder.Services.AddScoped<IRoleGate, RoleGate>();
+builder.Services.AddSingleton<TenantSmtpConcurrencyGate>();
+builder.Services.AddSingleton<IOutboundSmtpTransport, MailKitOutboundSmtpTransport>();
 builder.Services.AddScoped<IAuthorizationHandler, ManagerRoleHandler>();
 builder.Services.AddSingleton<IAuthorizationPolicyProvider, ModulePermissionPolicyProvider>();
 builder.Services.AddSingleton<IAuthorizationMiddlewareResultHandler, ForbiddenJsonResultHandler>();
@@ -434,6 +437,7 @@ if (app.Environment.IsDevelopment())
 // Use CORS
 app.UseCors("DefaultCors");
 app.UseAuthentication();
+app.UseReadOnlyImpersonationGuard();
 // Tenant + correlation-id logging scope — AFTER auth so the businessUnitId claim exists.
 app.UsePlatformObservability();
 // Authenticated tenant routes fail closed when a token has no valid tenant claim.

@@ -21,6 +21,7 @@ public static class RateLimitingExtensions
 {
     /// <summary>Name of the stricter upload policy.</summary>
     public const string UploadPolicy = "upload";
+    public const string SmtpPolicy = "smtp";
 
     public static IServiceCollection AddPlatformRateLimiting(
         this IServiceCollection services, IConfiguration configuration)
@@ -34,9 +35,12 @@ public static class RateLimitingExtensions
         var uploadPermitLimit = GetInt(configuration, "RateLimiting:Upload:PermitLimit", 30);
         var uploadWindowSeconds = GetInt(configuration, "RateLimiting:Upload:WindowSeconds", 60);
         var uploadQueueLimit = GetInt(configuration, "RateLimiting:Upload:QueueLimit", 0);
+        var smtpPermitLimit = GetInt(configuration, "RateLimiting:Smtp:PermitLimit", 10);
+        var smtpWindowSeconds = GetInt(configuration, "RateLimiting:Smtp:WindowSeconds", 60);
 
         var window = TimeSpan.FromSeconds(windowSeconds);
         var uploadWindow = TimeSpan.FromSeconds(uploadWindowSeconds);
+        var smtpWindow = TimeSpan.FromSeconds(smtpWindowSeconds);
 
         services.AddRateLimiter(options =>
         {
@@ -63,6 +67,17 @@ public static class RateLimitingExtensions
                         PermitLimit = uploadPermitLimit,
                         Window = uploadWindow,
                         QueueLimit = uploadQueueLimit,
+                        QueueProcessingOrder = QueueProcessingOrder.OldestFirst
+                    }));
+
+            options.AddPolicy(SmtpPolicy, httpContext =>
+                RateLimitPartition.GetFixedWindowLimiter(
+                    partitionKey: "smtp:" + PartitionKey(httpContext),
+                    factory: _ => new FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = smtpPermitLimit,
+                        Window = smtpWindow,
+                        QueueLimit = 0,
                         QueueProcessingOrder = QueueProcessingOrder.OldestFirst
                     }));
 

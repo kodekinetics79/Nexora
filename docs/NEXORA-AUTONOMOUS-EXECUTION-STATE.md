@@ -443,3 +443,31 @@ Complete the first-class invoice, payment, accounts-receivable, and credit/debit
 - Independent finance/security re-review returned **SHIP** with no P0/P1 findings after
   verifying disbursement settlement semantics, destination-token protection, complete
   multi-document allocation rendering, cross-operation races, and tenant isolation.
+
+## Tenant administration and outbound SMTP hardening (2026-07-23)
+- Tenant user creation, update, deletion, role listing, and business-unit reads are scoped
+  to the authenticated business unit. Tenant-plane business-unit create/update/delete is
+  denied because lifecycle ownership remains in the platform control plane.
+- Role assignment and protected-account management now compare the caller's effective
+  module permissions and manager/admin authority. Self-promotion, higher-authority role
+  assignment, and modification or deletion of accounts above the caller's authority fail
+  closed. Read-only support impersonation blocks every unsafe HTTP method in middleware
+  after authentication and before authorization.
+- Outbound email accepts no client SMTP settings or credentials, selects one deterministic
+  active tenant configuration, and only permits an active contact of the selected tenant
+  supplier. CR/LF headers, oversized bodies, excessive multipart requests, private or
+  special-purpose IPv4/IPv6 destinations, mixed DNS answers, and DNS rebinding fail closed.
+- SMTP connections pin the validated address while preserving the configured hostname for
+  certificate validation. Implicit TLS or mandatory STARTTLS is used with a 20-second total
+  deadline, request cancellation, tenant rate limiting, and a two-send tenant concurrency
+  ceiling. Attachments are intentionally rejected until production malware scanning or CDR
+  is available; extension/signature checks alone are not treated as content safety.
+- MailKit and MimeKit resolve to 4.16.0. Patched Microsoft package overrides remove legacy
+  document-library transitive advisories; the NuGet vulnerability audit reports no known
+  vulnerable backend packages.
+- Verification passed **48/48 focused security tests** and **351/351 non-PostgreSQL backend
+  regressions**. The focused lane includes relational permission-hierarchy and SMTP
+  controller tests plus special-address, mixed-DNS, request-limit, rate-policy, concurrency,
+  and impersonation behavior. Independent authorization and SMTP/SSRF reviews both returned
+  **SHIP** with no P0/P1 findings. Existing NU1701 legacy document-package compatibility
+  warnings remain a separate modernization item.

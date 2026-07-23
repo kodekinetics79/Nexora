@@ -5,6 +5,7 @@ using ERP_RFQ_Automation.DTOs.UserGroup;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Security;
+using ERP_RFQ_Automation.Authorization;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Http;
@@ -19,16 +20,19 @@ namespace ERP_RFQ_Automation.Controllers
     {
         private readonly IUserRepository _repository;
         private readonly IWebHostEnvironment _environment;
+        private readonly IRoleGate _roleGate;
         private static readonly int[] AllowedPageSizes = { 5, 10, 25, 50 };
 
-        public UserController(IUserRepository repository, IWebHostEnvironment environment)
+        public UserController(IUserRepository repository, IWebHostEnvironment environment, IRoleGate roleGate)
         {
             _repository = repository;
             _environment = environment;
+            _roleGate = roleGate;
         }
 
         // GET: api/User?pageNumber=1&pageSize=10&id=1&userName=john&email=john@example.com&roleId=1&region=US&isActive=true&businessUnitId=1
         [HttpGet]
+        [RequireModulePermission("Users", PermissionAction.View)]
         public async Task<ActionResult<DTOs.UserDTO.PaginatedResponseDTO<UserResponseDTO>>> GetAll(
             [FromQuery] long? businessUnitId = null,
             [FromQuery] int pageNumber = 1,
@@ -75,6 +79,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // GET: api/User/5
         [HttpGet("{id}")]
+        [RequireModulePermission("Users", PermissionAction.View)]
         public async Task<ActionResult<UserResponseDTO>> GetById(long id, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -100,6 +105,8 @@ namespace ERP_RFQ_Automation.Controllers
 
         // POST: api/User
         [HttpPost]
+        [RequireModulePermission("Users", PermissionAction.Create)]
+        [RequireModulePermission("Roles & Permissions", PermissionAction.Edit)]
         public async Task<ActionResult<UserResponseDTO>> Create([FromForm] UserCreateRequestDTO request)
         {
             try
@@ -131,9 +138,10 @@ namespace ERP_RFQ_Automation.Controllers
                 }
 
                 var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                if (request.Buid <= 0) request.Buid = claimBUId;
-
-                if (request.Buid <= 0) return BadRequest("Business Unit ID is required.");
+                if (claimBUId <= 0) return Forbid();
+                if (request.Buid > 0 && request.Buid != claimBUId) return Forbid();
+                request.Buid = claimBUId;
+                if (!await CanManageRoleAsync(request.RoleId, claimBUId)) return Forbid();
 
                 var user = new User
                 {
@@ -172,6 +180,8 @@ namespace ERP_RFQ_Automation.Controllers
 
         // PUT: api/User/5
         [HttpPut("{id}")]
+        [RequireModulePermission("Users", PermissionAction.Edit)]
+        [RequireModulePermission("Roles & Permissions", PermissionAction.Edit)]
         public async Task<ActionResult> Update(long id, [FromForm] UserUpdateRequestDTO request)
         {
             try
@@ -180,11 +190,17 @@ namespace ERP_RFQ_Automation.Controllers
                     return BadRequest(ModelState);
 
                 var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                if (request.Buid <= 0) request.Buid = claimBUId;
-
-                if (request.Buid <= 0) return BadRequest("Business Unit ID is required.");
+                if (claimBUId <= 0) return Forbid();
+                if (request.Buid > 0 && request.Buid != claimBUId) return Forbid();
+                request.Buid = claimBUId;
 
                 var existing = await _repository.GetByIdAsync(id, request.Buid);
+                var callerId = long.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                    ?? User.FindFirst("sub")?.Value, out var parsedCallerId) ? parsedCallerId : 0;
+                if (!await CanManageRoleAsync(existing.RoleId, claimBUId)) return Forbid();
+                if (request.RoleId != existing.RoleId &&
+                    (callerId == id || !await CanManageRoleAsync(request.RoleId, claimBUId)))
+                    return Forbid();
 
                 string? imagePath = existing.ImageUrl;
                 if (request.ImageFile != null)
@@ -297,6 +313,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // DELETE: api/User/5
         [HttpDelete("{id}")]
+        [RequireModulePermission("Users", PermissionAction.Delete)]
         public async Task<ActionResult> Delete(long id, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -307,6 +324,8 @@ namespace ERP_RFQ_Automation.Controllers
                 if (targetBUId <= 0)
                     return BadRequest("Business Unit ID is required.");
 
+                var existing = await _repository.GetByIdAsync(id, targetBUId);
+                if (!await CanManageRoleAsync(existing.RoleId, targetBUId)) return Forbid();
                 await _repository.DeleteAsync(id, targetBUId);
                 return NoContent();
             }
@@ -326,11 +345,14 @@ namespace ERP_RFQ_Automation.Controllers
 
         // GET: api/User/Roles
         [HttpGet("Roles")]
+        [RequireModulePermission("Users", PermissionAction.View)]
         public async Task<ActionResult<IEnumerable<RoleResponseDTO>>> GetRoles()
         {
             try
             {
-                var roles = await _repository.GetRolesAsync();
+                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+                if (claimBUId <= 0) return Forbid();
+                var roles = await _repository.GetRolesAsync(claimBUId);
                 return Ok(roles);
             }
             catch (Exception ex)
@@ -341,6 +363,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // GET: api/User/Teams
         [HttpGet("Teams")]
+        [RequireModulePermission("Users", PermissionAction.View)]
         public async Task<ActionResult<IEnumerable<TeamResponseDTO>>> GetTeams([FromQuery] long? businessUnitId = null)
         {
             try
@@ -362,12 +385,15 @@ namespace ERP_RFQ_Automation.Controllers
 
         // GET: api/User/BusinessUnits
         [HttpGet("BusinessUnits")]
+        [RequireModulePermission("Users", PermissionAction.View)]
         public async Task<ActionResult<IEnumerable<BusinessUnitResponseDTO>>> GetBusinessUnits()
         {
             try
             {
+                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+                if (claimBUId <= 0) return Forbid();
                 var businessUnits = await _repository.GetBusinessUnitsAsync();
-                return Ok(businessUnits);
+                return Ok(businessUnits.Where(x => x.Id == claimBUId));
             }
             catch (Exception ex)
             {
@@ -378,6 +404,7 @@ namespace ERP_RFQ_Automation.Controllers
     
         // GET: api/User/UserGroups
         [HttpGet("UserGroups")]
+        [RequireModulePermission("Users", PermissionAction.View)]
         public async Task<ActionResult<IEnumerable<UserGroupResponseDTO>>> GetUserGroups([FromQuery] long? businessUnitId = null)
         {
             try
@@ -425,6 +452,16 @@ namespace ERP_RFQ_Automation.Controllers
                 BusinessUnitName = user.Bu != null ? user.Bu.BusinessUnitName : null,
                 UserGroupName = user.UserGroup != null ? user.UserGroup.UserGroupsName : null
             };
+        }
+
+        private async Task<bool> CanManageRoleAsync(long? targetRoleId, long businessUnitId)
+        {
+            if (!targetRoleId.HasValue) return true;
+            var callerRoleId = long.TryParse(User.FindFirst("roleId")?.Value, out var parsedRoleId)
+                ? parsedRoleId
+                : 0;
+            if (callerRoleId <= 0) return false;
+            return await _roleGate.CanManageRoleAsync(callerRoleId, targetRoleId, businessUnitId);
         }
     }
 }

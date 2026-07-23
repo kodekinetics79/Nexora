@@ -1,6 +1,7 @@
 using ERP_RFQ_Automation.DTOs.BusinessUnit;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Authorization;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -21,6 +22,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // GET: api/BusinessUnit?pageNumber=1&pageSize=10&id=1&businessUnitName=corp
         [HttpGet]
+        [RequireModulePermission("Business Units", PermissionAction.View)]
         public async Task<ActionResult<PaginatedResponseDTO<BusinessUnitResponseDTO>>> GetAll(
             [FromQuery] int pageNumber = 1,
             [FromQuery] int pageSize = 10,
@@ -36,7 +38,10 @@ namespace ERP_RFQ_Automation.Controllers
                 if (pageSize < 1 || pageSize > 1000)
                     return BadRequest("Page size must be between 1 and 1000.");
 
-                var (businessUnits, totalCount) = await _repository.GetAllAsync(pageNumber, pageSize, id, businessUnitName);
+                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+                if (claimBUId <= 0) return Forbid();
+                if (id.HasValue && id.Value != claimBUId) return Forbid();
+                var (businessUnits, totalCount) = await _repository.GetAllAsync(pageNumber, pageSize, claimBUId, businessUnitName);
                 var businessUnitDTOs = businessUnits.Select(MapToResponse).ToList();
 
                 var response = new PaginatedResponseDTO<BusinessUnitResponseDTO>
@@ -57,10 +62,13 @@ namespace ERP_RFQ_Automation.Controllers
 
         // GET: api/BusinessUnit/5
         [HttpGet("{id}")]
+        [RequireModulePermission("Business Units", PermissionAction.View)]
         public async Task<ActionResult<BusinessUnitResponseDTO>> GetById(long id)
         {
             try
             {
+                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+                if (claimBUId <= 0 || id != claimBUId) return Forbid();
                 var businessUnit = await _repository.GetByIdAsync(id);
                 return Ok(MapToResponse(businessUnit));
             }
@@ -92,64 +100,27 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPost]
-        public async Task<ActionResult<BusinessUnitResponseDTO>> Create([FromBody] BusinessUnitCreateRequestDTO request)
+        [RequireModulePermission("Business Units", PermissionAction.Create)]
+        public ActionResult<BusinessUnitResponseDTO> Create([FromBody] BusinessUnitCreateRequestDTO request)
         {
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
-
-            var businessUnit = new BusinessUnit
-            {
-                BusinessUnitCode = request.BusinessUnitCode,
-                BusinessUnitName = request.BusinessUnitName,
-                Description = request.Description,
-                IsActive = request.IsActive,
-                CreatedBy = User.Identity?.Name ?? request.CreatedBy ?? "System",
-                CreatedOn = DateTime.UtcNow
-            };
-
-            await _repository.AddAsync(businessUnit);
-            var response = MapToResponse(businessUnit);
-            return CreatedAtAction(nameof(GetById), new { id = businessUnit.Id }, response);
+            // Tenant identities cannot provision tenants/business units. The governed
+            // platform control plane owns that lifecycle.
+            return Forbid();
         }
 
         [HttpPut("{id}")]
+        [RequireModulePermission("Business Units", PermissionAction.Edit)]
         public async Task<ActionResult> Update(long id, [FromBody] BusinessUnitUpdateRequestDTO request)
         {
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
-
-            var existing = await _repository.GetByIdAsync(id);
-            existing.BusinessUnitCode = request.BusinessUnitCode;
-            existing.BusinessUnitName = request.BusinessUnitName;
-            existing.Description = request.Description;
-            existing.IsActive = request.IsActive;
-            existing.ModifiedBy = User.Identity?.Name ?? request.ModifiedBy ?? "System";
-            existing.ModifiedOn = DateTime.UtcNow;
-
-            await _repository.UpdateAsync(existing);
-            return NoContent();
+            await Task.CompletedTask;
+            return Forbid();
         }
         // DELETE: api/BusinessUnit/5
         [HttpDelete("{id}")]
-        public async Task<ActionResult> Delete(long id)
+        [RequireModulePermission("Business Units", PermissionAction.Delete)]
+        public ActionResult Delete(long id)
         {
-            try
-            {
-                await _repository.DeleteAsync(id);
-                return NoContent();
-            }
-            catch (KeyNotFoundException ex)
-            {
-                return NotFound(ex.Message);
-            }
-            catch (InvalidOperationException ex)
-            {
-                return BadRequest(ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error deleting data: {ex.Message}");
-            }
+            return Forbid();
         }
 
         private BusinessUnitResponseDTO MapToResponse(BusinessUnit businessUnit)

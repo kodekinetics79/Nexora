@@ -15,7 +15,7 @@ namespace ERP_RFQ_Automation.Interfaces
         Task AddAsync(User user);
         Task UpdateAsync(User user);
         Task DeleteAsync(long id, long businessUnitId);
-        Task<IEnumerable<RoleResponseDTO>> GetRolesAsync();
+        Task<IEnumerable<RoleResponseDTO>> GetRolesAsync(long businessUnitId);
         Task<IEnumerable<TeamResponseDTO>> GetTeamsAsync(long businessUnitId);
         Task<IEnumerable<BusinessUnitResponseDTO>> GetBusinessUnitsAsync();
         Task<IEnumerable<UserGroupResponseDTO>> GetUserGroupsAsync(long businessUnitId);

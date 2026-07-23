@@ -1,85 +1,138 @@
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DTOs;
-using MailKit.Net.Smtp;
-using MailKit.Security;
+using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Platform.Hardening;
+using ERP_RFQ_Automation.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.EntityFrameworkCore;
 using MimeKit;
-using System;
-using System.IO;
-using System.Threading.Tasks;
+using System.Net;
 
-namespace ERP_RFQ_Automation.Controllers
+namespace ERP_RFQ_Automation.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+[Authorize]
+public sealed class SmtpController(
+    ILogger<SmtpController> logger,
+    ErpRfqAutomationContext context,
+    TenantSmtpConcurrencyGate concurrencyGate,
+    IOutboundSmtpTransport transport) : ControllerBase
 {
-    [ApiController]
-    [Route("api/[controller]")]
-    [Authorize]
-    public class SmtpController : ControllerBase
-    {
-        private readonly ILogger<SmtpController> _logger;
+    private const long MaximumAttachmentBytes = 10 * 1024 * 1024;
+    private const long MaximumRequestBytes = 11 * 1024 * 1024;
+    private const int MaximumAttachmentCount = 10;
+    private readonly ILogger<SmtpController> _logger = logger;
+    private readonly ErpRfqAutomationContext _context = context;
+    private readonly TenantSmtpConcurrencyGate _concurrencyGate = concurrencyGate;
+    private readonly IOutboundSmtpTransport _transport = transport;
 
-        public SmtpController(ILogger<SmtpController> logger)
+    [HttpPost("send")]
+    [RequireModulePermission("Email & SMTP", PermissionAction.Create)]
+    [EnableRateLimiting(RateLimitingExtensions.SmtpPolicy)]
+    [RequestSizeLimit(MaximumRequestBytes)]
+    [RequestFormLimits(MultipartBodyLengthLimit = MaximumRequestBytes)]
+    public async Task<IActionResult> SendEmail([FromForm] SendSupplierEmailRequestDTO request)
+    {
+        var businessUnitClaim = User.FindFirst("businessUnitId")?.Value;
+        if (!long.TryParse(businessUnitClaim, out var businessUnitId) || businessUnitId <= 0)
+            return Forbid();
+        if (request is null || request.SupplierId <= 0 || string.IsNullOrWhiteSpace(request.ToEmail) ||
+            string.IsNullOrWhiteSpace(request.Subject) || string.IsNullOrWhiteSpace(request.Body))
+            return BadRequest("Supplier, recipient, subject, and body are required.");
+        if (ContainsNewline(request.ToEmail) || ContainsNewline(request.Subject))
+            return BadRequest("Email headers contain invalid characters.");
+        if (request.Subject.Length > 300 || request.Body.Length > 500_000)
+            return BadRequest("Email content exceeds the allowed size.");
+        if (request.Attachments is { Count: > MaximumAttachmentCount } ||
+            request.Attachments?.Sum(x => x.Length) > MaximumAttachmentBytes)
+            return BadRequest("Attachments exceed the allowed count or total size.");
+        if (request.Attachments?.Any(x => x.Length > 0) == true)
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                "Attachment delivery is unavailable until malware scanning is configured.");
+
+        await using var sendLease = await _concurrencyGate.TryAcquireAsync(
+            businessUnitId, HttpContext.RequestAborted);
+        if (sendLease is null)
+            return StatusCode(StatusCodes.Status429TooManyRequests,
+                "Too many email deliveries are already in progress for this tenant.");
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
+        deadline.CancelAfter(TimeSpan.FromSeconds(20));
+        var cancellationToken = deadline.Token;
+
+        MailboxAddress recipient;
+        try { recipient = MailboxAddress.Parse(request.ToEmail.Trim()); }
+        catch (ParseException) { return BadRequest("The recipient email address is invalid."); }
+
+        var authorizedRecipient = await _context.Suppliers.AnyAsync(s =>
+            s.Id == request.SupplierId && s.Buid == businessUnitId && s.IsActive != false &&
+            (s.ContactEmail == recipient.Address || s.Contacts.Any(c =>
+                c.IsActive != false && c.Email == recipient.Address)), cancellationToken);
+        if (!authorizedRecipient)
+            return BadRequest("The recipient is not an active contact for this tenant supplier.");
+
+        var configuration = await _context.EmailConfigurations
+            .Where(x => x.BusinessUnitId == businessUnitId && x.IsActive && x.Protocol.ToUpper() == "SMTP")
+            .OrderBy(x => x.Id)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (configuration is null)
+            return Conflict("No active SMTP configuration is available for this tenant.");
+        if (!IsValidConfiguredEndpoint(configuration.Host, configuration.Port))
         {
-            _logger = logger;
+            _logger.LogError("Rejected invalid SMTP endpoint configuration for tenant {BusinessUnitId}.", businessUnitId);
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                "The tenant SMTP configuration is not permitted.");
         }
 
-        [HttpPost("send")]
-        public async Task<IActionResult> SendEmail([FromForm] SendSupplierEmailRequestDTO request)
+        try
         {
-            if (request == null || request.SmtpSettings == null)
-            {
-                return BadRequest("Invalid request data.");
-            }
+            var message = new MimeMessage();
+            message.From.Add(new MailboxAddress(configuration.ConfigurationName, configuration.EmailAddress));
+            message.To.Add(recipient);
+            message.Subject = request.Subject.Trim();
+            var builder = new BodyBuilder { HtmlBody = request.Body };
 
-            try
-            {
-                var message = new MimeMessage();
-                message.From.Add(new MailboxAddress(request.SmtpSettings.Username, request.SmtpSettings.Username));
-                message.To.Add(new MailboxAddress(request.ToEmail, request.ToEmail));
-                message.Subject = request.Subject;
+            message.Body = builder.ToMessageBody();
 
-                var builder = new BodyBuilder { HtmlBody = request.Body };
-
-                if (request.Attachments != null)
-                {
-                    foreach (var file in request.Attachments)
-                    {
-                        if (file.Length > 0)
-                        {
-                            using var ms = new MemoryStream();
-                            await file.CopyToAsync(ms);
-                            builder.Attachments.Add(file.FileName, ms.ToArray(), ContentType.Parse(file.ContentType));
-                        }
-                    }
-                }
-
-                message.Body = builder.ToMessageBody();
-
-                using var client = new SmtpClient();
-                // Bypass certificate validation for maximum compatibility in dev/test environments
-                client.ServerCertificateValidationCallback = (s, c, h, e) => true;
-                client.Timeout = 10000; // 10 second timeout
-
-                _logger.LogInformation("Connecting to SMTP {Host}:{Port} (UseSsl: {UseSsl})", 
-                    request.SmtpSettings.Host, request.SmtpSettings.Port, request.SmtpSettings.UseSsl);
-
-                // Use Auto to let MailKit decide, or be explicit based on common ports
-                var options = request.SmtpSettings.UseSsl 
-                    ? SecureSocketOptions.SslOnConnect 
-                    : SecureSocketOptions.StartTls;
-
-                await client.ConnectAsync(request.SmtpSettings.Host, request.SmtpSettings.Port, options);
-                
-                await client.AuthenticateAsync(request.SmtpSettings.Username, request.SmtpSettings.Password);
-                await client.SendAsync(message);
-                await client.DisconnectAsync(true);
-
-                return Ok(new { message = "Email sent successfully" });
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to send email via SMTP");
-                return StatusCode(500, $"Failed to send email: {ex.Message}");
-            }
+            _logger.LogInformation("Connecting to configured SMTP endpoint for tenant {BusinessUnitId}.", businessUnitId);
+            await _transport.SendAsync(configuration, message, cancellationToken);
+            return Ok(new { message = "Email sent successfully" });
+        }
+        catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("Configured SMTP delivery timed out for tenant {BusinessUnitId}.", businessUnitId);
+            return StatusCode(StatusCodes.Status504GatewayTimeout, "SMTP delivery timed out.");
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(exception, "Configured SMTP delivery failed for tenant {BusinessUnitId}.", businessUnitId);
+            return StatusCode(StatusCodes.Status502BadGateway, "SMTP delivery failed.");
         }
     }
+
+    internal static bool IsValidConfiguredEndpoint(string? host, int port)
+    {
+        if (string.IsNullOrWhiteSpace(host) || host.Length > 253 || port is < 1 or > 65535)
+            return false;
+        var normalized = host.Trim().TrimEnd('.');
+        if (normalized.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
+            normalized.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (IPAddress.TryParse(normalized, out var address))
+            return IsPublicAddress(address);
+        return Uri.CheckHostName(normalized) == UriHostNameType.Dns;
+    }
+
+    internal static bool IsPublicAddress(IPAddress address)
+        => MailKitOutboundSmtpTransport.IsPublicAddress(address);
+
+    private static bool ContainsNewline(string value)
+        => value.Contains('\r') || value.Contains('\n');
+
 }

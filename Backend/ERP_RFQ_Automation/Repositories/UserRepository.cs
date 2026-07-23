@@ -261,11 +261,11 @@ namespace ERP_RFQ_Automation.Repositories
             await _context.SaveChangesAsync();
         }
 
-        public async Task<IEnumerable<RoleResponseDTO>> GetRolesAsync()
+        public async Task<IEnumerable<RoleResponseDTO>> GetRolesAsync(long businessUnitId)
         {
             return await _context.SetupMasters
                 .AsNoTracking()
-                .Where(sm => sm.SetupType == "role")
+                .Where(sm => sm.SetupType == "role" && sm.BusinessUnitId == businessUnitId && sm.IsActive != false)
                 .Select(sm => new RoleResponseDTO
                 {
                     SetupId = sm.SetupId,

@@ -17,6 +17,8 @@ namespace ERP_RFQ_Automation.Authorization
 
         /// <summary>Role name contains "admin" or "manager" (same rule as lead-assignment management).</summary>
         Task<bool> IsManagerOrAdminAsync(long roleId, long businessUnitId);
+
+        Task<bool> CanManageRoleAsync(long callerRoleId, long? targetRoleId, long businessUnitId);
     }
 
     public sealed class RoleGate : IRoleGate
@@ -42,6 +44,44 @@ namespace ERP_RFQ_Automation.Authorization
         {
             var role = await ResolveRoleAsync(roleId, businessUnitId);
             return role is not null && (IsManagerName(role.Value.Code) || IsManagerName(role.Value.Value));
+        }
+
+        public async Task<bool> CanManageRoleAsync(long callerRoleId, long? targetRoleId, long businessUnitId)
+        {
+            if (!targetRoleId.HasValue) return true;
+            if (await IsSuperAdminAsync(callerRoleId, businessUnitId)) return true;
+            if (await IsSuperAdminAsync(targetRoleId.Value, businessUnitId)) return false;
+            if (await IsManagerOrAdminAsync(targetRoleId.Value, businessUnitId) &&
+                !await IsManagerOrAdminAsync(callerRoleId, businessUnitId)) return false;
+
+            var roles = await _context.SetupMasters.AsNoTracking()
+                .Where(x => (x.SetupId == callerRoleId || x.SetupId == targetRoleId.Value) &&
+                            x.BusinessUnitId == businessUnitId && x.SetupType.ToLower() == "role" &&
+                            x.IsActive != false)
+                .Select(x => x.SetupId)
+                .Distinct()
+                .ToListAsync();
+            if (!roles.Contains(callerRoleId) || !roles.Contains(targetRoleId.Value)) return false;
+
+            var permissions = await _context.RolePermissions.AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.RoleId.HasValue &&
+                            (x.RoleId == callerRoleId || x.RoleId == targetRoleId.Value))
+                .Select(x => new { RoleId = x.RoleId!.Value, x.ModuleId, x.CanCreate, x.CanEdit, x.CanDelete })
+                .ToListAsync();
+            var caller = permissions.Where(x => x.RoleId == callerRoleId)
+                .GroupBy(x => x.ModuleId)
+                .ToDictionary(x => x.Key, x => (
+                    CanCreate: x.Any(y => y.CanCreate == true),
+                    CanEdit: x.Any(y => y.CanEdit == true),
+                    CanDelete: x.Any(y => y.CanDelete == true)));
+            foreach (var target in permissions.Where(x => x.RoleId == targetRoleId.Value).GroupBy(x => x.ModuleId))
+            {
+                if (!caller.TryGetValue(target.Key, out var grant)) return false;
+                if (target.Any(x => x.CanCreate == true) && !grant.CanCreate) return false;
+                if (target.Any(x => x.CanEdit == true) && !grant.CanEdit) return false;
+                if (target.Any(x => x.CanDelete == true) && !grant.CanDelete) return false;
+            }
+            return true;
         }
 
         private static bool IsSuperAdminName(string? s) =>
