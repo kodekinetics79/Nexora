@@ -45,7 +45,7 @@ namespace ERP_RFQ_Automation.Repositories
 
             if (assignedToId.HasValue || !string.IsNullOrWhiteSpace(createdBy))
             {
-                query = query.Where(r => 
+                query = query.Where(r =>
                     (assignedToId.HasValue && r.Lead != null && r.Lead.AssignTo == assignedToId.Value) ||
                     (!string.IsNullOrWhiteSpace(createdBy) && r.CreatedBy == createdBy)
                 );
@@ -325,6 +325,7 @@ namespace ERP_RFQ_Automation.Repositories
                 CreatedDate = DateTime.UtcNow,
                 HeaderRemarks = rfq.HeaderRemarks,
                 CurrencyId = rfq.Rfqitems.FirstOrDefault()?.CurrencyId,
+                FinancialCalculationVersion = 2,
                 QuoteItems = rfq.Rfqitems.Select(i => new QuoteItem
                 {
                     RfqitemId = i.Id,

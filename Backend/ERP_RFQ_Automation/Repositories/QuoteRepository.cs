@@ -34,7 +34,7 @@ namespace ERP_RFQ_Automation.Repositories
             if (!string.IsNullOrWhiteSpace(search))
             {
                 search = search.Trim().ToLower();
-                query = query.Where(q => q.QuoteNo.ToLower().Contains(search) || 
+                query = query.Where(q => q.QuoteNo.ToLower().Contains(search) ||
                                          (q.Customer != null && q.Customer.Name.ToLower().Contains(search)));
             }
 
@@ -178,6 +178,7 @@ namespace ERP_RFQ_Automation.Repositories
                 item.TotalAmount = (item.Quantity * item.UnitPrice) - (item.Discount ?? 0) + (item.TaxAmount ?? 0);
             }
             quote.TotalAmount = quote.QuoteItems.Sum(i => i.TotalAmount);
+            quote.FinancialCalculationVersion = 2;
             quote.CreatedDate = DateTime.UtcNow;
 
             _context.Quotes.Add(quote);
@@ -209,26 +210,27 @@ namespace ERP_RFQ_Automation.Repositories
             // Update Items logic handled via Controller or specific Item management methods
             // For simplicity in this base update, strict replacement or specific item management is needed
             // Here assuming Controller manages the list merging, or we implement full merge here
-            
+
             // Full merge logic for items:
             // 1. Remove items not in new list
             // 2. Add new items
             // 3. Update existing items
-            
+
             // NOTE: Implementing naive replacement for now, controller should handle refined logic or passing correct object graph
             _context.QuoteItems.RemoveRange(existing.QuoteItems);
-            foreach(var item in quote.QuoteItems)
+            foreach (var item in quote.QuoteItems)
             {
                 item.QuoteId = existing.Id; // Ensure link
                 _context.QuoteItems.Add(item);
             }
-            
+
             // Recalculate Total
-             foreach (var item in quote.QuoteItems)
+            foreach (var item in quote.QuoteItems)
             {
                 item.TotalAmount = (item.Quantity * item.UnitPrice) - (item.Discount ?? 0) + (item.TaxAmount ?? 0);
             }
             existing.TotalAmount = quote.QuoteItems.Sum(i => i.TotalAmount);
+            existing.FinancialCalculationVersion = 2;
 
             await _context.SaveChangesAsync();
         }

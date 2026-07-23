@@ -163,9 +163,9 @@ namespace ERP_RFQ_Automation.Services
                 if (quote != null)
                 {
                     var orderedStatus = await _context.SetupMasters
-                        .FirstOrDefaultAsync(sm => sm.SetupType == "QuoteStatus" && 
+                        .FirstOrDefaultAsync(sm => sm.SetupType == "QuoteStatus" &&
                             (sm.SetupCode == "ORDERED" || sm.SetupValue == "ORDERED" || sm.SetupValue == "Ordered"));
-                    
+
                     if (orderedStatus != null)
                     {
                         quote.StatusId = orderedStatus.SetupId;
@@ -175,7 +175,7 @@ namespace ERP_RFQ_Automation.Services
                         // Fallback to ACCEPTED (44) if a specific ORDERED status doesn't exist
                         quote.StatusId = 44;
                     }
-                    
+
                     _context.Quotes.Update(quote);
                     await _context.SaveChangesAsync();
                 }
@@ -235,7 +235,7 @@ namespace ERP_RFQ_Automation.Services
             {
                 order.OrderItems.Add(new OrderItem
                 {
-                    ProductId = rfqItem.ProductId ?? 0, 
+                    ProductId = rfqItem.ProductId ?? 0,
                     Description = rfqItem.ItemText,
                     Quantity = rfqItem.Quantity, // Quantity is int, not nullable
                     UnitPrice = rfqItem.UnitPrice ?? 0,
@@ -246,7 +246,7 @@ namespace ERP_RFQ_Automation.Services
                     IsActive = true
                 });
             }
-            
+
             // Re-calc totals
             order.SubTotal = order.OrderItems.Sum(i => i.TotalAmount);
             order.TotalAmount = order.SubTotal ?? 0;
@@ -257,12 +257,19 @@ namespace ERP_RFQ_Automation.Services
 
         public async Task<OrderDto> CreateOrderFromQuoteAsync(long quoteId, long businessUnitId)
         {
+            var existingOrder = await _context.Orders
+                .Include(o => o.OrderItems)
+                .FirstOrDefaultAsync(o => o.QuoteId == quoteId && o.BusinessUnitId == businessUnitId);
+            if (existingOrder is not null)
+                return MapToDto(existingOrder);
+
             var quote = await _context.Quotes
                 .Include(q => q.QuoteItems)
+                .Include(q => q.Rfq)
                 .FirstOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId);
 
             if (quote == null) throw new Exception("Quote not found");
-            
+
             if (quote.CustomerId == null || quote.CustomerId == 0)
                 throw new Exception("Cannot create order: The source Quote does not have a linked Customer.");
 
@@ -284,20 +291,33 @@ namespace ERP_RFQ_Automation.Services
 
             var orderNo = await _orderRepository.GetNextOrderNumberAsync(businessUnitId);
 
-            // Create Order Header
+            var grossSubtotal = RoundCurrency(quote.QuoteItems.Sum(i => RoundCurrency(i.Quantity * i.UnitPrice)));
+            var itemDiscount = RoundCurrency(quote.QuoteItems.Sum(i => RoundCurrency(i.Discount ?? 0m)));
+            var totalTax = RoundCurrency(quote.QuoteItems.Sum(i => RoundCurrency(i.TaxAmount ?? 0m)));
+            var preHeaderTotal = quote.FinancialCalculationVersion >= 2
+                ? RoundCurrency(grossSubtotal - itemDiscount + totalTax)
+                : RoundCurrency(grossSubtotal - itemDiscount);
+            var headerDiscount = RoundCurrency(Math.Max(0m, preHeaderTotal - (quote.TotalAmount ?? preHeaderTotal)));
+            var totalDiscount = RoundCurrency(itemDiscount + headerDiscount);
+            var totalAmount = RoundCurrency(grossSubtotal - totalDiscount + totalTax);
+
             var order = new Order
             {
                 OrderNo = orderNo,
                 QuoteId = quote.Id,
+                LeadId = quote.Rfq?.LeadId,
                 Rfqid = quote.Rfqid,
                 CustomerId = quote.CustomerId.Value,
                 BusinessUnitId = businessUnitId,
                 StatusId = draftStatus.SetupId,
                 PaymentStatusId = unpaidStatus?.SetupId,
                 OrderDate = DateTime.Now,
-                TotalAmount = quote.TotalAmount ?? 0,
-                SubTotal = quote.TotalAmount, // Approximation or fetch items
-                DiscountAmount = quote.DiscountValue, // If global discount
+                CurrencyId = quote.CurrencyId,
+                TotalAmount = totalAmount,
+                SubTotal = grossSubtotal,
+                TaxAmount = totalTax,
+                DiscountAmount = totalDiscount,
+                BalanceAmount = totalAmount,
                 CreatedBy = "System",
                 CreatedOn = DateTime.Now,
                 IsActive = true
@@ -314,28 +334,42 @@ namespace ERP_RFQ_Automation.Services
                     UnitPrice = qItem.UnitPrice,
                     Discount = qItem.Discount ?? 0,
                     TaxAmount = qItem.TaxAmount ?? 0,
-                    TotalAmount = qItem.TotalAmount,
+                    TotalAmount = RoundCurrency(
+                        (qItem.Quantity * qItem.UnitPrice) - (qItem.Discount ?? 0m) + (qItem.TaxAmount ?? 0m)),
                     CreatedBy = "System",
                     CreatedDate = DateTime.Now,
                     IsActive = true
                 });
             }
 
-            var createdOrder = await _orderRepository.CreateOrderAsync(order);
+            _context.Orders.Add(order);
 
             // Update Quote Status to Ordered
             var orderedStatus = await _context.SetupMasters
-                .FirstOrDefaultAsync(sm => sm.SetupType == "QuoteStatus" && 
+                .FirstOrDefaultAsync(sm => sm.SetupType == "QuoteStatus" &&
                     (sm.SetupCode == "ORDERED" || sm.SetupValue == "ORDERED" || sm.SetupValue == "Ordered"));
-            
+
             if (orderedStatus != null)
             {
                 quote.StatusId = orderedStatus.SetupId;
-                _context.Quotes.Update(quote);
-                await _context.SaveChangesAsync();
             }
 
-            return MapToDto(createdOrder);
+            try
+            {
+                await _context.SaveChangesAsync();
+            }
+            catch (DbUpdateException)
+            {
+                _context.ChangeTracker.Clear();
+                var replay = await _context.Orders
+                    .Include(o => o.OrderItems)
+                    .FirstOrDefaultAsync(o => o.QuoteId == quoteId && o.BusinessUnitId == businessUnitId);
+                if (replay is not null)
+                    return MapToDto(replay);
+                throw;
+            }
+
+            return MapToDto(order);
         }
 
         public async Task<OrderDto> UpdateOrderAsync(long id, UpdateOrderDto dto, long businessUnitId)
@@ -374,10 +408,10 @@ namespace ERP_RFQ_Automation.Services
             await _orderRepository.DeleteOrderAsync(id, businessUnitId);
         }
 
-         public async Task<IEnumerable<OrderDto>> GetOrdersByCustomerIdAsync(long customerId, long businessUnitId)
+        public async Task<IEnumerable<OrderDto>> GetOrdersByCustomerIdAsync(long customerId, long businessUnitId)
         {
-             var orders = await _orderRepository.GetOrdersByCustomerIdAsync(customerId, businessUnitId);
-             return orders.Select(MapToDto).ToList();
+            var orders = await _orderRepository.GetOrdersByCustomerIdAsync(customerId, businessUnitId);
+            return orders.Select(MapToDto).ToList();
         }
 
         public async Task<InvoiceDto?> GetInvoiceDataAsync(long orderId, long businessUnitId)
@@ -397,12 +431,12 @@ namespace ERP_RFQ_Automation.Services
                 LeadNo = order.Quote?.Rfq?.Lead?.Rfqno ?? order.Rfq?.Lead?.Rfqno,
                 CustomerName = order.Customer?.Name ?? "Unknown",
                 CustomerEmail = order.Customer?.ContactEmail,
-                CustomerPhone = order.Customer?.Contacts?.FirstOrDefault(c => c.IsPrimary == true)?.PhoneNo 
+                CustomerPhone = order.Customer?.Contacts?.FirstOrDefault(c => c.IsPrimary == true)?.PhoneNo
                                 ?? order.Customer?.Contacts?.FirstOrDefault()?.PhoneNo,
-                CustomerAddress = string.Join(", ", new[] { 
-                    order.Customer?.BillingAddressLine1, 
-                    order.Customer?.BillingCity, 
-                    order.Customer?.BillingCountry 
+                CustomerAddress = string.Join(", ", new[] {
+                    order.Customer?.BillingAddressLine1,
+                    order.Customer?.BillingCity,
+                    order.Customer?.BillingCountry
                 }.Where(s => !string.IsNullOrEmpty(s))),
                 SubTotal = order.SubTotal ?? 0,
                 TaxAmount = order.TaxAmount ?? 0,

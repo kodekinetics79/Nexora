@@ -3,6 +3,8 @@ using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Npgsql;
 
 namespace ERP_RFQ_Automation.Tests;
@@ -14,6 +16,73 @@ public sealed class PostgreSqlProductionDialectTests
 
     public PostgreSqlProductionDialectTests(PostgreSqlTestDatabase database)
         => _database = database;
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task FinancialMigration_ClassifiesHistoricalQuoteArithmetic()
+    {
+        var databaseName = $"finance_{Guid.NewGuid():N}";
+        var adminBuilder = new NpgsqlConnectionStringBuilder(_database.ConnectionString)
+        {
+            Database = "postgres"
+        };
+        var isolatedBuilder = new NpgsqlConnectionStringBuilder(_database.ConnectionString)
+        {
+            Database = databaseName
+        };
+
+        await using (var admin = new NpgsqlConnection(adminBuilder.ConnectionString))
+        {
+            await admin.OpenAsync();
+            await using var create = admin.CreateCommand();
+            create.CommandText = $"CREATE DATABASE \"{databaseName}\"";
+            await create.ExecuteNonQueryAsync();
+        }
+
+        try
+        {
+            await using (var context = _database.ContextForConnectionString(isolatedBuilder.ConnectionString, null))
+            {
+                var migrator = context.GetService<IMigrator>();
+                await migrator.MigrateAsync("20260723140000_AddAiGovernanceLedger");
+                await context.Database.ExecuteSqlRawAsync("""
+                    INSERT INTO "BusinessUnits"
+                        ("ID", "BusinessUnitCode", "BusinessUnitName", "CreatedBy", "CreatedOn")
+                    VALUES (94001, 'FINMIG', 'Finance Migration', 'tests', now());
+
+                    INSERT INTO "Quotes"
+                        ("ID", "QuoteNo", "BusinessUnitID", "CreatedBy", "CreatedDate", "TotalAmount")
+                    VALUES
+                        (94001, 'QT-LEGACY-EXCLUSIVE', 94001, 'tests', now(), 100),
+                        (94002, 'QT-LEGACY-INCLUSIVE', 94001, 'tests', now(), 105);
+
+                    INSERT INTO "QuoteItems"
+                        ("ID", "QuoteID", "ItemDescription", "Quantity", "UnitPrice", "Discount", "TaxAmount", "TotalAmount", "CreatedBy", "CreatedDate")
+                    VALUES
+                        (94001, 94001, 'Exclusive', 1, 100, 0, 5, 100, 'tests', now()),
+                        (94002, 94002, 'Inclusive', 1, 100, 0, 5, 105, 'tests', now());
+                    """);
+
+                await migrator.MigrateAsync("20260723150000_EnforceQuoteOrderFinancialIntegrity");
+
+                var versions = await context.Quotes.IgnoreQueryFilters()
+                    .Where(quote => quote.Id == 94_001 || quote.Id == 94_002)
+                    .OrderBy(quote => quote.Id)
+                    .Select(quote => quote.FinancialCalculationVersion)
+                    .ToListAsync();
+                Assert.Equal(new[] { 1, 2 }, versions);
+            }
+        }
+        finally
+        {
+            NpgsqlConnection.ClearAllPools();
+            await using var admin = new NpgsqlConnection(adminBuilder.ConnectionString);
+            await admin.OpenAsync();
+            await using var drop = admin.CreateCommand();
+            drop.CommandText = $"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)";
+            await drop.ExecuteNonQueryAsync();
+        }
+    }
 
     [Fact]
     [Trait("Category", "PostgreSQL")]

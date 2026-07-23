@@ -52,6 +52,15 @@ public sealed class PostgreSqlTestDatabase : IAsyncLifetime
     public ErpRfqAutomationContext ContextFor(long? businessUnitId)
         => new(_options, new StubTenant(businessUnitId));
 
+    public ErpRfqAutomationContext ContextForConnectionString(string connectionString, long? businessUnitId)
+    {
+        var options = new DbContextOptionsBuilder<ErpRfqAutomationContext>()
+            .UseNpgsql(connectionString)
+            .EnableDetailedErrors()
+            .Options;
+        return new ErpRfqAutomationContext(options, new StubTenant(businessUnitId));
+    }
+
     public ErpRfqAutomationContext TenantContextWithRls(long businessUnitId)
     {
         var tenant = new StubTenant(businessUnitId);

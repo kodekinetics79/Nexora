@@ -154,6 +154,14 @@ public partial class ErpRfqAutomationContext
             .HasDatabaseName("UX_Leads_BU_CommercialCaseReference");
         modelBuilder.Entity<Lead>().HasIndex(e => e.CommercialCaseId).IsUnique()
             .HasDatabaseName("UX_Leads_CommercialCaseID");
+        modelBuilder.Entity<Order>().HasIndex(e => new { e.BusinessUnitId, e.QuoteId })
+            .IsUnique()
+            .HasFilter("\"QuoteID\" IS NOT NULL")
+            .HasDatabaseName("UX_Orders_BU_QuoteID");
+        modelBuilder.Entity<Order>().HasIndex(e => e.BusinessUnitId)
+            .HasDatabaseName("IX_Orders_BusinessUnitID");
+        modelBuilder.Entity<Quote>().Property(e => e.FinancialCalculationVersion)
+            .HasDefaultValue(2);
 
         modelBuilder.Entity<CommercialCase>(entity =>
         {

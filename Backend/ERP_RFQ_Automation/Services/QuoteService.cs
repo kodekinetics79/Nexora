@@ -157,7 +157,7 @@ namespace ERP_RFQ_Automation.Services
             // Format: QT-MMYY-0001
             var now = DateTime.UtcNow;
             var prefix = $"QT-{now:MM}{now:yy}-";
-            
+
             // Get the last quote number with this prefix
             var lastQuote = await _context.Quotes
                 .Where(q => q.QuoteNo.StartsWith(prefix))
@@ -215,7 +215,7 @@ namespace ERP_RFQ_Automation.Services
             // Here we will clear and re-add or try to match. 
             // Matching by ID is best.
 
-             // 1. Update existing and Add new
+            // 1. Update existing and Add new
             foreach (var itemDto in request.QuoteItems)
             {
                 // FIN-12: validate financial inputs for any item that will remain on the quote.
@@ -267,7 +267,7 @@ namespace ERP_RFQ_Automation.Services
             }
 
             await CalculateQuoteTotals(quote);
-            
+
             await _context.SaveChangesAsync();
 
             return await GetQuoteByIdAsync(quote.Id);
@@ -278,14 +278,14 @@ namespace ERP_RFQ_Automation.Services
             // Load setup for discounts if needed
             // We need to know if DiscountType is Percentage or Fixed.
             // Assuming we can load them.
-            
+
             var discountTypeIds = new List<long>();
             if (quote.DiscountTypeId.HasValue) discountTypeIds.Add(quote.DiscountTypeId.Value);
-            foreach(var item in quote.QuoteItems)
+            foreach (var item in quote.QuoteItems)
             {
-                if(item.DiscountTypeId.HasValue) discountTypeIds.Add(item.DiscountTypeId.Value);
+                if (item.DiscountTypeId.HasValue) discountTypeIds.Add(item.DiscountTypeId.Value);
             }
-            
+
             var discountTypes = await _context.SetupMasters
                 .Where(s => discountTypeIds.Contains(s.SetupId))
                 .ToDictionaryAsync(s => s.SetupId, s => s.SetupCode); // Assuming SetupCode is PERCENTAGE or FIXED
@@ -327,13 +327,13 @@ namespace ERP_RFQ_Automation.Services
                 // YES.
                 // FIN-09: round each line net to currency scale before summing so the printed
                 // line totals reconcile with the printed grand total.
-                item.TotalAmount = RoundCurrency(itemTotal - itemDiscountAmount);
+                item.TotalAmount = RoundCurrency(itemTotal - itemDiscountAmount + (item.TaxAmount ?? 0m));
                 quoteSubTotal += item.TotalAmount;
             }
 
             // Quote Header Discount
             decimal quoteDiscountAmount = 0;
-             if (quote.DiscountTypeId.HasValue && quote.DiscountValue.HasValue && discountTypes.ContainsKey(quote.DiscountTypeId.Value))
+            if (quote.DiscountTypeId.HasValue && quote.DiscountValue.HasValue && discountTypes.ContainsKey(quote.DiscountTypeId.Value))
             {
                 string code = discountTypes[quote.DiscountTypeId.Value].ToUpper();
                 if (code == "PERCENTAGE")
@@ -350,6 +350,7 @@ namespace ERP_RFQ_Automation.Services
             if (quoteDiscountAmount > quoteSubTotal) quoteDiscountAmount = quoteSubTotal;
 
             quote.TotalAmount = RoundCurrency(quoteSubTotal - quoteDiscountAmount);
+            quote.FinancialCalculationVersion = 2;
         }
 
         // Rounds a monetary value to the 2-decimal currency scale used on printed documents
@@ -393,15 +394,15 @@ namespace ERP_RFQ_Automation.Services
 
         private async Task<QuoteResponseDTO> GetQuoteByIdAsync(long id)
         {
-             var quote = await _context.Quotes
-                .Include(q => q.QuoteItems)
-                .Include(q => q.Customer)
-                .Include(q => q.BusinessUnit)
-                .Include(q => q.Currency)
-                .Include(q => q.Status)
-                .Include(q => q.DiscountType)
-                .FirstOrDefaultAsync(q => q.Id == id);
-            
+            var quote = await _context.Quotes
+               .Include(q => q.QuoteItems)
+               .Include(q => q.Customer)
+               .Include(q => q.BusinessUnit)
+               .Include(q => q.Currency)
+               .Include(q => q.Status)
+               .Include(q => q.DiscountType)
+               .FirstOrDefaultAsync(q => q.Id == id);
+
             if (quote == null) return null;
 
             // Outcome reason display name + BU stale threshold (WP-A4 / WP-A2).
@@ -419,18 +420,18 @@ namespace ERP_RFQ_Automation.Services
                 .FirstOrDefaultAsync() ?? ERP_RFQ_Automation.Sla.SlaPolicy.Default(quote.BusinessUnitId).StaleQuoteDays;
 
             // Load Discount Types for items (nested include or separate load)
-             var itemDiscountTypeIds = quote.QuoteItems
-                .Where(i => i.DiscountTypeId.HasValue)
-                .Select(i => i.DiscountTypeId.Value)
-                .Distinct()
-                .ToList();
-            
+            var itemDiscountTypeIds = quote.QuoteItems
+               .Where(i => i.DiscountTypeId.HasValue)
+               .Select(i => i.DiscountTypeId.Value)
+               .Distinct()
+               .ToList();
+
             var itemDiscountTypes = new Dictionary<long, string>();
             if (itemDiscountTypeIds.Any())
             {
-                 itemDiscountTypes = await _context.SetupMasters
-                    .Where(s => itemDiscountTypeIds.Contains(s.SetupId))
-                    .ToDictionaryAsync(s => s.SetupId, s => s.Description);
+                itemDiscountTypes = await _context.SetupMasters
+                   .Where(s => itemDiscountTypeIds.Contains(s.SetupId))
+                   .ToDictionaryAsync(s => s.SetupId, s => s.Description);
             }
 
 
@@ -511,7 +512,7 @@ namespace ERP_RFQ_Automation.Services
 
             string logoBase64 = config?.Logo;
             string primaryColor = config?.PrimaryColor ?? "#1e3a8a";
-            string termsContent = config?.TermsAndConditions ?? 
+            string termsContent = config?.TermsAndConditions ??
                                 "1. Prices are valid for 30 days from the date of the quote.\n" +
                                 "2. Payment terms: Net 30 days from invoice date.\n" +
                                 "3. Delivery dates are estimates and subject to confirmation.\n" +
@@ -519,7 +520,7 @@ namespace ERP_RFQ_Automation.Services
                                 "5. Any applicable taxes or duties are not included unless specified.\n" +
                                 "6. Warranty and liability are as per the manufacturer's standard terms.\n" +
                                 "7. This quote is confidential and intended solely for the recipient.";
-            
+
             string companyAddress = config?.CompanyAddress ?? "123 Business Rd, Tech City, 54321";
             string companyPhone = config?.CompanyPhone ?? "+1 800 555 0199";
             string companyEmail = config?.CompanyEmail ?? quote.Rfq?.Lead?.Clientemail ?? "sales@company.com";
@@ -528,12 +529,12 @@ namespace ERP_RFQ_Automation.Services
             byte[] logoBytes = null;
             if (!string.IsNullOrEmpty(logoBase64))
             {
-                try 
-                { 
+                try
+                {
                     // Remove data:image/png;base64, prefix if exists
                     if (logoBase64.Contains(",")) logoBase64 = logoBase64.Split(',')[1];
-                    logoBytes = Convert.FromBase64String(logoBase64); 
-                } 
+                    logoBytes = Convert.FromBase64String(logoBase64);
+                }
                 catch { }
             }
 
@@ -543,7 +544,7 @@ namespace ERP_RFQ_Automation.Services
             decimal subTotal = quote.QuoteItems.Sum(i => RoundCurrency(i.Quantity * i.UnitPrice));
             decimal totalItemDiscounts = quote.QuoteItems.Sum(i => RoundCurrency(i.Discount ?? 0));
             decimal totalTax = quote.QuoteItems.Sum(i => RoundCurrency(i.TaxAmount ?? 0));
-            
+
             decimal headerDiscount = 0;
             if (quote.DiscountTypeId.HasValue && quote.DiscountValue.HasValue)
             {
@@ -564,7 +565,7 @@ namespace ERP_RFQ_Automation.Services
                     page.DefaultTextStyle(x => x.FontFamily(Fonts.Arial).FontSize(10).FontColor(Colors.Grey.Darken4));
 
                     // 0. Accent Bar (Top)
-                    page.Header().Column(col => 
+                    page.Header().Column(col =>
                     {
                         col.Item().Height(3).Background(primaryColor);
                         col.Item().PaddingBottom(20).PaddingTop(20).Row(row =>
@@ -581,11 +582,11 @@ namespace ERP_RFQ_Automation.Services
                                     c.Item().Text(quote.BusinessUnit?.BusinessUnitName ?? "Company Name")
                                         .FontSize(22).Bold().FontColor(primaryColor);
                                 }
-                                
+
                                 c.Item().PaddingTop(8).Text(footerText)
                                     .FontSize(9).Italic().FontColor(Colors.Grey.Darken1);
-                                
-                                c.Item().PaddingTop(10).Column(details => 
+
+                                c.Item().PaddingTop(10).Column(details =>
                                 {
                                     details.Spacing(1);
                                     details.Item().Text(companyAddress).FontSize(8).FontColor(Colors.Grey.Medium);
@@ -599,8 +600,8 @@ namespace ERP_RFQ_Automation.Services
                             {
                                 c.Item().Text("QUOTATION")
                                     .FontSize(22).ExtraBold().FontColor(Colors.Grey.Lighten2);
-                                
-                                c.Item().PaddingTop(15).Column(info => 
+
+                                c.Item().PaddingTop(15).Column(info =>
                                 {
                                     info.Spacing(2);
                                     info.Item().Text(t => { t.Span("Reference No: ").SemiBold(); t.Span(quote.QuoteNo); });
@@ -608,7 +609,7 @@ namespace ERP_RFQ_Automation.Services
                                     info.Item().Text(t => { t.Span("Valid Until: ").SemiBold(); t.Span($"{quote.ValidUntil:MMM dd, yyyy}"); });
                                 });
 
-                                
+
                             });
                         });
                     });
@@ -628,25 +629,25 @@ namespace ERP_RFQ_Automation.Services
                                     c.Item().Text(label).FontSize(8).ExtraBold().FontColor(primaryColor);
                                     c.Item().PaddingTop(5).Text(name).Bold().FontSize(11);
                                     c.Item().Text(line1).FontSize(9);
-                                    if(!string.IsNullOrEmpty(line2)) c.Item().Text(line2).FontSize(9);
+                                    if (!string.IsNullOrEmpty(line2)) c.Item().Text(line2).FontSize(9);
                                     c.Item().Text(cityCountry).FontSize(9);
-                                    if(email != null) c.Item().PaddingTop(5).Text(email).FontSize(8).Italic();
+                                    if (email != null) c.Item().PaddingTop(5).Text(email).FontSize(8).Italic();
                                 });
                             }
 
-                            AddressBlock("BILL TO", 
-                                quote.Customer?.Name ?? "Customer", 
-                                quote.Customer?.BillingAddressLine1 ?? "N/A", 
-                                quote.Customer?.BillingAddressLine2, 
+                            AddressBlock("BILL TO",
+                                quote.Customer?.Name ?? "Customer",
+                                quote.Customer?.BillingAddressLine1 ?? "N/A",
+                                quote.Customer?.BillingAddressLine2,
                                 $"{quote.Customer?.BillingCity ?? ""}, {quote.Customer?.BillingCountry ?? ""}",
                                 quote.Customer?.ContactEmail);
 
                             row.ConstantItem(30); // Gap
 
-                            AddressBlock("SHIP TO", 
-                                quote.Customer?.Name ?? "Customer", 
-                                quote.Customer?.ShippingAddressLine1 ?? quote.Customer?.BillingAddressLine1 ?? "N/A", 
-                                quote.Customer?.ShippingAddressLine2, 
+                            AddressBlock("SHIP TO",
+                                quote.Customer?.Name ?? "Customer",
+                                quote.Customer?.ShippingAddressLine1 ?? quote.Customer?.BillingAddressLine1 ?? "N/A",
+                                quote.Customer?.ShippingAddressLine2,
                                 $"{quote.Customer?.ShippingCity ?? quote.Customer?.BillingCity ?? ""}, {quote.Customer?.ShippingCountry ?? quote.Customer?.BillingCountry ?? ""}");
                         });
 
@@ -676,14 +677,14 @@ namespace ERP_RFQ_Automation.Services
                             foreach (var item in quote.QuoteItems.Select((x, i) => new { x, i }))
                             {
                                 var backgroundColor = item.i % 2 == 0 ? Colors.White : Colors.Grey.Lighten5;
-                                
+
                                 IContainer RowStyle(IContainer container) => container.Background(backgroundColor).BorderBottom(1).BorderColor(Colors.Grey.Lighten4).PaddingVertical(8).PaddingHorizontal(5);
 
                                 table.Cell().Element(RowStyle).Text((item.i + 1).ToString());
-                                table.Cell().Element(RowStyle).Column(c => 
+                                table.Cell().Element(RowStyle).Column(c =>
                                 {
                                     c.Item().Text(item.x.ItemDescription).SemiBold();
-                                    if(item.x.Discount > 0) 
+                                    if (item.x.Discount > 0)
                                         c.Item().Text($"Discount: {quote.Currency?.Code} {item.x.Discount:N2}").FontSize(8).Italic().FontColor(Colors.Red.Medium);
                                 });
                                 table.Cell().Element(RowStyle).AlignRight().Text(item.x.Quantity.ToString("N0"));
@@ -700,7 +701,7 @@ namespace ERP_RFQ_Automation.Services
                             {
                                 c.Item().PaddingTop(10).Text("Terms & Conditions").Bold().FontSize(10).FontColor(primaryColor);
                                 c.Item().PaddingTop(5).Text(termsContent).FontSize(8).LineHeight(1.2f).FontColor(Colors.Grey.Darken1);
-                                
+
                                 c.Item().PaddingTop(30).Text("Thank you for your business!").Italic().FontSize(10).FontColor(Colors.Grey.Medium);
                             });
 
@@ -723,16 +724,16 @@ namespace ERP_RFQ_Automation.Services
                                     });
                                 }
 
-                                c.Item().PaddingTop(10).Column(inner => 
+                                c.Item().PaddingTop(10).Column(inner =>
                                 {
                                     FinancialRow("Subtotal", subTotal);
-                                    if(totalItemDiscounts > 0) FinancialRow("Item Discounts", -totalItemDiscounts);
-                                    if(headerDiscount > 0) FinancialRow("Additional Discount", -headerDiscount);
-                                    if(totalTax > 0) FinancialRow("Tax / VAT", totalTax);
-                                    
+                                    if (totalItemDiscounts > 0) FinancialRow("Item Discounts", -totalItemDiscounts);
+                                    if (headerDiscount > 0) FinancialRow("Additional Discount", -headerDiscount);
+                                    if (totalTax > 0) FinancialRow("Tax / VAT", totalTax);
+
                                     inner.Item().PaddingVertical(5).LineHorizontal(1).LineColor(Colors.Grey.Lighten3);
-                                    
-                                    inner.Item().Background(primaryColor).Padding(10).Row(r => 
+
+                                    inner.Item().Background(primaryColor).Padding(10).Row(r =>
                                     {
                                         r.RelativeItem().Text("GRAND TOTAL").FontSize(12).Bold().FontColor(Colors.White);
                                         r.RelativeItem().AlignRight().Text($"{currency} {(quote.TotalAmount ?? 0):N2}").FontSize(14).Bold().FontColor(Colors.White);
@@ -799,12 +800,12 @@ namespace ERP_RFQ_Automation.Services
 
             if (quote == null) throw new KeyNotFoundException("Quote not found");
 
-            var subject = !string.IsNullOrEmpty(customSubject) 
-                ? customSubject 
+            var subject = !string.IsNullOrEmpty(customSubject)
+                ? customSubject
                 : $"Quote #{quote.QuoteNo} from {quote.BusinessUnit?.BusinessUnitName ?? "Our Company"}";
 
-            var body = !string.IsNullOrEmpty(customBody) 
-                ? customBody.Replace("\n", "<br/>") 
+            var body = !string.IsNullOrEmpty(customBody)
+                ? customBody.Replace("\n", "<br/>")
                 : $@"
                 <p>Dear Customer,</p>
                 <p>Please find attached the quote #{quote.QuoteNo}.</p>

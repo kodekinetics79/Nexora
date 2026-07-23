@@ -241,3 +241,21 @@ Complete the first-class invoice, payment, accounts-receivable, and credit/debit
   Its EF `Down()` is intentionally destructive and drops policy, request, attempt, and
   budget history; it must not be executed in production without an approved ledger export
   and retention procedure.
+
+## Commercial money and quote-to-order integrity (2026-07-23)
+- Quote line and header totals now include displayed line tax, so persisted values and
+  generated quotation PDFs use the same deterministic `gross - discounts + tax` equation.
+- A persisted calculation-version marker preserves legacy tax-exclusive quote semantics
+  during conversion, preventing historical line tax from being misclassified as discount.
+  All active quote writers stamp current tax-inclusive semantics; migration preflight
+  classifies historical taxed lines and rejects mixed or unrecognized quote arithmetic.
+- Quote-to-order conversion recomputes gross subtotal, line and header discounts, tax,
+  total and balance server-side; it carries currency and lead linkage into the order.
+- Order creation and quote status movement now share one EF transaction. Exact retries
+  return the existing order, while a tenant/quote filtered unique index prevents duplicate
+  orders under concurrent submissions. The migration refuses ambiguous legacy duplicates
+  with an explicit reconciliation error instead of silently deleting commercial records.
+- Verification: **280/280 backend tests pass**, including focused money-footing,
+  idempotency, database uniqueness and PostgreSQL migration tests; EF reports no pending
+  model changes. First-class invoice/payment/AR entities and governed tax/margin policy
+  remain the next commercial-finance increment.
