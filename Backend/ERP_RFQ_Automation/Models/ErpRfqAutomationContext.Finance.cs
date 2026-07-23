@@ -11,4 +11,5 @@ public partial class ErpRfqAutomationContext
     public DbSet<PaymentAllocation> PaymentAllocations => Set<PaymentAllocation>();
     public DbSet<LegalDocumentCounter> LegalDocumentCounters => Set<LegalDocumentCounter>();
     public DbSet<CommercialFinanceAudit> CommercialFinanceAudits => Set<CommercialFinanceAudit>();
+    public DbSet<FinanceOutboxMessage> FinanceOutboxMessages => Set<FinanceOutboxMessage>();
 }

@@ -23,6 +23,7 @@ public partial class ErpRfqAutomationContext
 
     // Null when there is no tenant context -> filters become no-ops.
     private long? CurrentTenantId => _tenant?.BusinessUnitId;
+    internal long? ScopedTenantId => CurrentTenantId;
 
     partial void OnModelCreatingPartial(ModelBuilder modelBuilder)
     {
@@ -56,6 +57,7 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<PaymentAllocation>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<LegalDocumentCounter>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CommercialFinanceAudit>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<FinanceOutboxMessage>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
 
         // Dependent commercial rows inherit the tenant boundary from their required
         // aggregate root. Keep these filters aligned with the PostgreSQL parent-derived

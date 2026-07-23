@@ -139,6 +139,24 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
         transitionAudits.Parameters.AddWithValue("directIssue", directIssueDraftId);
         Assert.Equal(2L, (long)(await transitionAudits.ExecuteScalarAsync())!);
 
+        await using var finalizedOutbox = connection.CreateCommand();
+        finalizedOutbox.CommandText = """
+            SELECT count(*) FROM "FinanceOutboxMessages"
+            WHERE "BusinessUnitId" = @tenant
+              AND "EventType" IN ('finance.receivable.issued', 'finance.receivable.cancelled')
+            """;
+        finalizedOutbox.Parameters.AddWithValue("tenant", BusinessUnitId);
+        Assert.Equal(5L, (long)(await finalizedOutbox.ExecuteScalarAsync())!);
+
+        await using var rewriteOutbox = connection.CreateCommand();
+        rewriteOutbox.CommandText = """
+            UPDATE "FinanceOutboxMessages" SET "Payload" = '{}'::jsonb
+            WHERE "BusinessUnitId" = @tenant AND "EventType" = 'finance.receivable.issued'
+            """;
+        rewriteOutbox.Parameters.AddWithValue("tenant", BusinessUnitId);
+        Assert.Equal("55000", (await Assert.ThrowsAsync<PostgresException>(
+            () => rewriteOutbox.ExecuteNonQueryAsync())).SqlState);
+
         await using var rewriteAudit = connection.CreateCommand();
         rewriteAudit.CommandText = "UPDATE \"CommercialFinanceAudits\" SET \"Action\" = 'Forged' WHERE \"AggregateId\" = @id";
         rewriteAudit.Parameters.AddWithValue("id", issued[0].Id);
@@ -194,6 +212,104 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
         forgedReversal.Parameters.AddWithValue("paymentId", paymentId);
         Assert.Equal("55000", (await Assert.ThrowsAsync<PostgresException>(
             () => forgedReversal.ExecuteNonQueryAsync())).SqlState);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task FinanceOutbox_ClaimsConcurrentlyReclaimsExpiryAndDeniesTenantStateWrites()
+    {
+        var otherTenantId = OutboxTenantId + 1;
+        await using (var seed = _database.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(seed, OutboxTenantId);
+            Seed.EnsureBusinessUnit(seed, otherTenantId);
+            var now = DateTime.UtcNow;
+            seed.FinanceOutboxMessages.AddRange(Enumerable.Range(1, 4).Select(index => new FinanceOutboxMessage
+            {
+                BusinessUnitId = OutboxTenantId,
+                AggregateType = "ReceivableDocument",
+                AggregateId = OutboxAggregateBase + index,
+                AggregateVersion = 1,
+                EventType = "finance.test.ready",
+                Payload = "{}",
+                OccurredOn = now,
+                AvailableOn = now
+            }));
+            seed.FinanceOutboxMessages.Add(new FinanceOutboxMessage
+            {
+                BusinessUnitId = otherTenantId,
+                AggregateType = "ReceivableDocument",
+                AggregateId = OutboxAggregateBase + 100,
+                AggregateVersion = 1,
+                EventType = "finance.test.other-tenant",
+                Payload = "{}",
+                OccurredOn = now,
+                AvailableOn = now
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await using var contextA = _database.ContextFor(OutboxTenantId);
+        await using var contextB = _database.ContextFor(OutboxTenantId);
+        var storeA = new FinanceOutboxStore(contextA);
+        var storeB = new FinanceOutboxStore(contextB);
+        var claims = await Task.WhenAll(
+            storeA.ClaimAsync("pg-worker-a", 4, TimeSpan.FromMinutes(1), default),
+            storeB.ClaimAsync("pg-worker-b", 4, TimeSpan.FromMinutes(1), default));
+        Assert.Equal(4, claims.SelectMany(x => x).Select(x => x.Id).Distinct().Count());
+        Assert.Empty(claims[0].Select(x => x.Id).Intersect(claims[1].Select(x => x.Id)));
+
+        var expiring = claims.SelectMany(x => x).First();
+        await using (var expire = _database.ContextFor(OutboxTenantId))
+        {
+            await expire.FinanceOutboxMessages.Where(x => x.Id == expiring.Id)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.LeaseUntil, DateTime.UtcNow.AddMinutes(-1)));
+        }
+        await using (var reclaimContext = _database.ContextFor(OutboxTenantId))
+        {
+            var reclaimed = await new FinanceOutboxStore(reclaimContext)
+                .ClaimAsync("pg-worker-c", 4, TimeSpan.FromMinutes(1), default);
+            Assert.Contains(reclaimed, x => x.Id == expiring.Id && x.LeaseToken != expiring.LeaseToken);
+        }
+
+        await using var connection = await _database.OpenConnectionAsync();
+        await using (var tenantRead = await connection.BeginTransactionAsync())
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = tenantRead;
+            command.CommandText = $"""
+                SET LOCAL ROLE nexora_tenant_app;
+                SET LOCAL nexora.business_unit_id = '{OutboxTenantId}';
+                SELECT count(*) FROM "FinanceOutboxMessages";
+                """;
+            Assert.Equal(4L, (long)(await command.ExecuteScalarAsync())!);
+            await tenantRead.RollbackAsync();
+        }
+
+        await AssertTenantOutboxWriteDeniedAsync(connection,
+            "UPDATE \"FinanceOutboxMessages\" SET \"ProcessedOn\" = now() WHERE \"BusinessUnitId\" = " + OutboxTenantId);
+        await AssertTenantOutboxWriteDeniedAsync(connection, $"""
+            INSERT INTO "FinanceOutboxMessages"
+                ("BusinessUnitId", "EventId", "AggregateType", "AggregateId", "AggregateVersion",
+                 "EventType", "Payload", "SchemaVersion", "OccurredOn", "AvailableOn", "AttemptCount")
+            VALUES ({OutboxTenantId}, gen_random_uuid(), 'ReceivableDocument', {OutboxAggregateBase + 999}, 1,
+                'finance.receivable.issued', jsonb_build_object(), 1, now(), now(), 0)
+            """);
+    }
+
+    private static async Task AssertTenantOutboxWriteDeniedAsync(NpgsqlConnection connection, string statement)
+    {
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"""
+            SET LOCAL ROLE nexora_tenant_app;
+            SET LOCAL nexora.business_unit_id = '{OutboxTenantId}';
+            {statement};
+            """;
+        Assert.Equal(PostgresErrorCodes.InsufficientPrivilege,
+            (await Assert.ThrowsAsync<PostgresException>(() => command.ExecuteNonQueryAsync())).SqlState);
+        await transaction.RollbackAsync();
     }
 
     private async Task<ReceivableDocumentDto> IssueAsync(long documentId)
@@ -328,4 +444,6 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
     private const long OrderFiveId = 96_010;
     private const long OrderSixId = 96_011;
     private const long OrderSevenId = 96_012;
+    private const long OutboxTenantId = 96_100;
+    private const long OutboxAggregateBase = 96_200;
 }

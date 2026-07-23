@@ -336,3 +336,39 @@ Complete the first-class invoice, payment, accounts-receivable, and credit/debit
   the database transition controls were strengthened. A dedicated HTTP-middleware 403
   test for the cancellation route remains P2; permission-attribute and shared RBAC-handler
   coverage currently prove the authorization contract.
+
+## Transactional commercial-finance outbox (2026-07-23)
+- Receivable draft creation, issue and cancellation plus payment posting and reversal now
+  create versioned, tenant-scoped integration events in the same transaction as their
+  authoritative commercial mutation. Event payloads intentionally exclude cancellation
+  reasons and bank references; consumers receive stable aggregate identity, status,
+  document/receipt identity where applicable, and schema/version metadata.
+- PostgreSQL creates every receivable and payment event from database-owned source-table
+  triggers, so direct governed transitions cannot bypass event publication. Existing
+  finance records are backfilled during migration. A deterministic event ID and
+  aggregate/version/event unique key make trigger retries idempotent.
+- The outbox store supports bounded `SKIP LOCKED` claims, expiring leases, token fencing,
+  delayed retry, capped attempts, dead-lettering, and completion. A stable claim token makes
+  retry-after-ambiguous-commit idempotent; PostgreSQL time governs lease decisions, and
+  stale or foreign lease tokens fail closed.
+- Outbox event identity and payload are append-only at the database boundary. PostgreSQL
+  RLS and the EF tenant filter enforce business-unit isolation. The tenant runtime role has
+  read-only outbox access and cannot pre-insert a colliding event or forge delivery state.
+- A hosted dispatcher publishes camel-case envelopes to a configured HTTPS endpoint with
+  event/idempotency headers, production-required HMAC-SHA256 signing, bounded timeout and
+  concurrency, exponential retry, and dead-letter handling. Enable it in deployment with
+  `CommercialFinance__OutboxDispatcher__Enabled=true`, set
+  `CommercialFinance__OutboxDispatcher__Endpoint`, and store a 32+ character secret in
+  `CommercialFinance__OutboxDispatcher__HmacSecret`.
+- Verification: the focused commercial-finance, dispatcher, and PostgreSQL lane passes
+  **16/16**, the complete backend regression passes **296/296**, EF reports no model drift,
+  PostgreSQL proves concurrent non-overlapping claims, expired-lease reclamation, RLS
+  isolation, and tenant-role insert/update denial, and the signed HTTP contract has a unit
+  test. The inspected idempotent forward-upgrade script contains no destructive downgrade
+  command.
+- Independent re-review returned **SHIP** with no P0/P1 findings. Its three P2 notes were
+  also closed before release: failed HTTP bodies are read through a bounded buffer, option
+  validation reserves at least five seconds of lease time after the request timeout, and
+  hosted-dispatch orchestration tests prove both publish-to-complete and fail-to-retry paths.
+  Downstream consumer-specific business contracts remain separate delivery increments;
+  this slice establishes the durable, replayable publication and delivery boundary.

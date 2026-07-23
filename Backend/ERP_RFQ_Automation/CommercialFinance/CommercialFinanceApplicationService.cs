@@ -114,6 +114,9 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
             _context.ReceivableDocuments.Add(document);
             await _context.SaveChangesAsync();
             AddAudit(businessUnitId, "ReceivableDocument", document.Id, "DraftCreated", actor, new { orderId });
+            if (!_context.Database.IsNpgsql())
+                AddOutbox(businessUnitId, "ReceivableDocument", document.Id, document.Version,
+                    "finance.receivable.draft-created", new { document.Id, document.OrderId, document.Status, document.Version });
             await _context.SaveChangesAsync();
             return await MapDocumentAsync(document);
         });
@@ -146,7 +149,11 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
             document.IssuedBy = actor;
             document.Version++;
             if (!databaseAllocatesNumber)
+            {
                 AddAudit(businessUnitId, "ReceivableDocument", document.Id, "Issued", actor, new { number });
+                AddOutbox(businessUnitId, "ReceivableDocument", document.Id, document.Version,
+                    "finance.receivable.issued", new { document.Id, document.OrderId, document.Status, document.DocumentNumber, document.Version });
+            }
             await _context.SaveChangesAsync();
             if (databaseAllocatesNumber)
                 await _context.Entry(document).ReloadAsync();
@@ -182,8 +189,12 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
             document.VoidedBy = actor;
             document.Version++;
             if (!databaseWritesAudit)
+            {
                 AddAudit(businessUnitId, "ReceivableDocument", document.Id, "DraftCancelled", actor,
                     new { Reason = reason });
+                AddOutbox(businessUnitId, "ReceivableDocument", document.Id, document.Version,
+                    "finance.receivable.cancelled", new { document.Id, document.OrderId, document.Status, document.Version });
+            }
             await _context.SaveChangesAsync();
             if (databaseWritesAudit)
                 await _context.Entry(document).ReloadAsync();
@@ -290,6 +301,9 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
             _context.CustomerPayments.Add(payment);
             await _context.SaveChangesAsync();
             AddAudit(businessUnitId, "CustomerPayment", payment.Id, "Posted", actor, new { receipt });
+            if (!_context.Database.IsNpgsql())
+                AddOutbox(businessUnitId, "CustomerPayment", payment.Id, payment.Version,
+                    "finance.payment.posted", new { payment.Id, payment.Status, payment.ReceiptNumber, payment.Version });
             await _context.SaveChangesAsync();
             return await MapPaymentAsync(payment);
         });
@@ -325,6 +339,9 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
             payment.ReversalReason = request.Reason.Trim();
             payment.Version++;
             AddAudit(businessUnitId, "CustomerPayment", payment.Id, "Reversed", actor, new { request.Reason });
+            if (!_context.Database.IsNpgsql())
+                AddOutbox(businessUnitId, "CustomerPayment", payment.Id, payment.Version,
+                    "finance.payment.reversed", new { payment.Id, payment.Status, payment.ReceiptNumber, payment.Version });
             await _context.SaveChangesAsync();
             return await MapPaymentAsync(payment);
         });
@@ -576,6 +593,25 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
             OccurredOn = DateTime.UtcNow,
             DetailJson = JsonSerializer.Serialize(detail)
         });
+
+    private void AddOutbox(
+        long businessUnitId, string aggregateType, long aggregateId, long aggregateVersion,
+        string eventType, object payload)
+    {
+        var now = DateTime.UtcNow;
+        _context.FinanceOutboxMessages.Add(new FinanceOutboxMessage
+        {
+            BusinessUnitId = businessUnitId,
+            AggregateType = aggregateType,
+            AggregateId = aggregateId,
+            AggregateVersion = aggregateVersion,
+            EventType = eventType,
+            Payload = JsonSerializer.Serialize(payload),
+            SchemaVersion = 1,
+            OccurredOn = now,
+            AvailableOn = now
+        });
+    }
 
     private static void ValidateKey(string key)
     {

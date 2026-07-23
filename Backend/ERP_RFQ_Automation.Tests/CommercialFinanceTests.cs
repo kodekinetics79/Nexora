@@ -96,6 +96,8 @@ public sealed class CommercialFinanceTests
         Assert.Equal("AED", created.CurrencyCode);
         Assert.Equal(209m, Assert.Single(created.Lines).LineTotal);
         Assert.Single(await db.CommercialFinanceAudits.ToListAsync());
+        Assert.Equal("finance.receivable.draft-created",
+            (await db.FinanceOutboxMessages.SingleAsync()).EventType);
 
         var changed = request with { DueDate = DateTime.UtcNow.Date.AddDays(31) };
         await Assert.ThrowsAsync<FinanceConflictException>(() =>
@@ -155,6 +157,45 @@ public sealed class CommercialFinanceTests
         Assert.Equal(CustomerPaymentStatuses.Reversed, reversed.Status);
         Assert.Equal(0m, reversed.UnappliedAmount);
         Assert.Equal(209m, openAfterReversal.OutstandingAmount);
+        var eventTypes = await db.FinanceOutboxMessages.OrderBy(x => x.Id).Select(x => x.EventType).ToListAsync();
+        Assert.Contains("finance.receivable.draft-created", eventTypes);
+        Assert.Contains("finance.receivable.issued", eventTypes);
+        Assert.Contains("finance.payment.posted", eventTypes);
+        Assert.Contains("finance.payment.reversed", eventTypes);
+    }
+
+    [Fact]
+    public async Task FinanceOutbox_LeasesFenceCompletionAndDeadLetterFailures()
+    {
+        using var database = new TestDb();
+        await using var db = database.ContextFor(BusinessUnitId);
+        Seed.EnsureBusinessUnit(db, BusinessUnitId);
+        db.FinanceOutboxMessages.Add(new FinanceOutboxMessage
+        {
+            BusinessUnitId = BusinessUnitId,
+            AggregateType = "ReceivableDocument",
+            AggregateId = 42,
+            AggregateVersion = 1,
+            EventType = "finance.test",
+            Payload = "{}",
+            OccurredOn = DateTime.UtcNow,
+            AvailableOn = DateTime.UtcNow
+        });
+        await db.SaveChangesAsync();
+        var store = new FinanceOutboxStore(db);
+
+        var first = Assert.Single(await store.ClaimAsync("worker-a", 10, TimeSpan.FromMinutes(1), default));
+        await Assert.ThrowsAsync<FinanceOutboxLeaseConflictException>(() =>
+            store.CompleteAsync(first.Id, "worker-a", Guid.NewGuid(), default));
+        await store.FailAsync(first.Id, "worker-a", first.LeaseToken, "downstream unavailable",
+            TimeSpan.FromSeconds(1), 1, default);
+
+        db.ChangeTracker.Clear();
+        var failed = await db.FinanceOutboxMessages.IgnoreQueryFilters().SingleAsync(x => x.Id == first.Id);
+        Assert.NotNull(failed.DeadLetteredOn);
+        Assert.Null(failed.LeaseOwner);
+        Assert.Equal(1, failed.AttemptCount);
+        Assert.Empty(await store.ClaimAsync("worker-b", 10, TimeSpan.FromMinutes(1), default));
     }
 
     [Fact]

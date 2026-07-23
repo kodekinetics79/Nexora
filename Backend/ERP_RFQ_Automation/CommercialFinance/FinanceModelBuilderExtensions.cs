@@ -130,5 +130,27 @@ public static class FinanceModelBuilderExtensions
             entity.Property(x => x.DetailJson).HasColumnType("jsonb").IsRequired();
             entity.HasIndex(x => new { x.BusinessUnitId, x.AggregateType, x.AggregateId, x.OccurredOn });
         });
+
+        modelBuilder.Entity<FinanceOutboxMessage>(entity =>
+        {
+            entity.ToTable("FinanceOutboxMessages");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.AggregateType).HasMaxLength(50).IsRequired();
+            entity.Property(x => x.EventType).HasMaxLength(120).IsRequired();
+            entity.Property(x => x.Payload).HasColumnType("jsonb").IsRequired();
+            entity.Property(x => x.SchemaVersion).HasDefaultValue(1);
+            entity.Property(x => x.LeaseOwner).HasMaxLength(200);
+            entity.Property(x => x.LastError).HasMaxLength(2000);
+            entity.HasIndex(x => x.EventId).IsUnique().HasDatabaseName("UX_FinanceOutbox_EventId");
+            entity.HasIndex(x => new { x.BusinessUnitId, x.AggregateType, x.AggregateId, x.AggregateVersion, x.EventType })
+                .IsUnique().HasDatabaseName("UX_FinanceOutbox_AggregateVersionEvent");
+            entity.HasIndex(x => new { x.AvailableOn, x.LeaseUntil, x.OccurredOn, x.Id })
+                .HasFilter("\"ProcessedOn\" IS NULL AND \"DeadLetteredOn\" IS NULL")
+                .HasDatabaseName("IX_FinanceOutbox_Ready");
+            entity.HasCheckConstraint("CK_FinanceOutbox_State",
+                "\"AttemptCount\" >= 0 AND \"SchemaVersion\" > 0 AND \"AggregateId\" > 0 AND \"AggregateVersion\" >= 0 AND trim(\"AggregateType\") <> '' AND trim(\"EventType\") <> '' AND ((\"LeaseOwner\" IS NULL) = (\"LeaseUntil\" IS NULL)) AND ((\"LeaseToken\" IS NULL) = (\"LeaseUntil\" IS NULL)) AND NOT (\"ProcessedOn\" IS NOT NULL AND \"DeadLetteredOn\" IS NOT NULL) AND ((\"ProcessedOn\" IS NULL AND \"DeadLetteredOn\" IS NULL) OR (\"LeaseOwner\" IS NULL AND \"LeaseUntil\" IS NULL AND \"LeaseToken\" IS NULL))");
+            entity.HasOne<BusinessUnit>().WithMany().HasForeignKey(x => x.BusinessUnitId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
     }
 }

@@ -28,6 +28,7 @@ using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.CommercialCases;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.CommercialRouting;
+using ERP_RFQ_Automation.CommercialFinance;
 using ERP_RFQ_Automation.CustomFields;
 using ERP_RFQ_Automation.AI;
 using System.Text.Json.Serialization;
@@ -138,6 +139,7 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.IInventoryAvailabilitySe
 builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.IOrderStockReservationService, ERP_RFQ_Automation.Inventory.OrderStockReservationService>();
 builder.Services.AddScoped<ILifecycleApplicationService, LifecycleApplicationService>();
 builder.Services.AddScoped<ILifecycleOutboxStore, LifecycleOutboxStore>();
+builder.Services.AddCommercialFinanceOutboxDispatcher(builder.Configuration);
 builder.Services.AddScoped<ICommercialRoutingApplicationService, CommercialRoutingApplicationService>();
 builder.Services.AddScoped<ICustomFieldApplicationService, CustomFieldApplicationService>();
 builder.Services.AddSingleton<DeterministicRoutingEngine>();
