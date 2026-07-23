@@ -2,19 +2,38 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions, DialogContent,
-  DialogTitle, Divider, IconButton, MenuItem, Paper, Stack, Tab, Tabs, Table,
-  TableBody, TableCell, TableContainer, TableHead, TableRow, TextField, Tooltip, Typography,
+  DialogTitle, Divider, IconButton, Menu, MenuItem, Paper, Stack, Tab, Tabs, Table,
+  TableBody, TableCell, TableContainer, TableHead, TableRow, TextField, ToggleButton,
+  ToggleButtonGroup, Tooltip, Typography, useMediaQuery, useTheme,
 } from '@mui/material';
-import { Ban, Banknote, CheckCircle2, CreditCard, FileCheck2, RefreshCw, RotateCcw } from 'lucide-react';
+import { Ban, Banknote, CheckCircle2, CreditCard, FileCheck2, FileMinus2, FilePlus2, MoreVertical, RefreshCw, RotateCcw } from 'lucide-react';
 import dayjs from 'dayjs';
 import { useSnackbar } from 'notistack';
 import { useSearchParams } from 'react-router-dom';
-import commercialFinanceService, { type ArOpenItem, type CustomerPayment, type ReceivableDocument } from '../../../api/services/commercialFinanceService';
+import commercialFinanceService, {
+  type ArOpenItem,
+  type CustomerPayment,
+  type ReceivableAdjustmentType,
+  type ReceivableDocument,
+} from '../../../api/services/commercialFinanceService';
 import { useAuth } from '../../../context/AuthContext';
 
 const money = (value: number) => value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const roundMoney = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
+const documentTypeLabel = (type: string) => type === 'CreditNote' ? 'credit note' : type === 'DebitNote' ? 'debit note' : 'invoice';
+const documentTypeTitle = (type: string) => `${documentTypeLabel(type)[0].toUpperCase()}${documentTypeLabel(type).slice(1)}`;
+
+const adjustmentReasons = [
+  ['PRICE_ADJUSTMENT', 'Price adjustment'],
+  ['RETURN_ALLOWANCE', 'Return or allowance'],
+  ['TAX_CORRECTION', 'Tax correction'],
+  ['SERVICE_ADJUSTMENT', 'Service adjustment'],
+  ['OTHER', 'Other'],
+] as const;
 
 export default function AccountsReceivablePage() {
+  const theme = useTheme();
+  const adjustmentFullScreen = useMediaQuery(theme.breakpoints.down('md'));
   const [searchParams] = useSearchParams();
   const targetDocumentId = Number(searchParams.get('documentId')) || null;
   const [tab, setTab] = useState(targetDocumentId ? 1 : 0);
@@ -27,11 +46,21 @@ export default function AccountsReceivablePage() {
   const [reversalReason, setReversalReason] = useState('');
   const [cancelling, setCancelling] = useState<ReceivableDocument | null>(null);
   const [cancellationReason, setCancellationReason] = useState('');
+  const [documentMenu, setDocumentMenu] = useState<{ anchor: HTMLElement; invoice: ReceivableDocument } | null>(null);
+  const [adjustingInvoice, setAdjustingInvoice] = useState<ReceivableDocument | null>(null);
+  const [adjustmentType, setAdjustmentType] = useState<ReceivableAdjustmentType>('CreditNote');
+  const [adjustmentReasonCode, setAdjustmentReasonCode] = useState('PRICE_ADJUSTMENT');
+  const [adjustmentReason, setAdjustmentReason] = useState('');
+  const [adjustmentQuantities, setAdjustmentQuantities] = useState<Record<number, string>>({});
+  const [adjustmentIdempotencyKey, setAdjustmentIdempotencyKey] = useState('');
+  const [adjustmentSubmitted, setAdjustmentSubmitted] = useState(false);
   const targetRowRef = useRef<HTMLTableRowElement | null>(null);
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
   const { hasPermission } = useAuth();
   const canEditReceivables = hasPermission('Accounts Receivable', 'edit');
+  const canCreateAdjustments = hasPermission('Receivable Adjustments', 'create');
+  const canApproveAdjustments = hasPermission('Receivable Adjustments', 'edit');
   const canRecordPayment = hasPermission('Customer Payments', 'create');
   const canViewPayments = hasPermission('Customer Payments');
   const canReversePayment = hasPermission('Customer Payments', 'edit');
@@ -56,21 +85,64 @@ export default function AccountsReceivablePage() {
     return () => window.cancelAnimationFrame(frame);
   }, [documents.data, targetDocumentId]);
 
+  useEffect(() => {
+    if (!adjustingInvoice || !documents.data) return;
+    const refreshed = documents.data.find(document => document.id === adjustingInvoice.id);
+    if (refreshed && refreshed !== adjustingInvoice) setAdjustingInvoice(refreshed);
+  }, [adjustingInvoice, documents.data]);
+
   const issue = useMutation({
-    mutationFn: ({ id, version }: { id: number; version: number }) => commercialFinanceService.issueDocument(id, version),
-    onSuccess: () => { enqueueSnackbar('Invoice issued', { variant: 'success' }); refresh(); },
-    onError: (error: any) => enqueueSnackbar(error.response?.data?.detail ?? 'Invoice could not be issued', { variant: 'error' }),
+    mutationFn: (document: ReceivableDocument) => commercialFinanceService.issueDocument(document.id, document.version, document.documentType),
+    onSuccess: (_, document) => { enqueueSnackbar(`${documentTypeTitle(document.documentType)} issued`, { variant: 'success' }); refresh(); },
+    onError: (error: any, document) => enqueueSnackbar(error.response?.data?.detail ?? `${documentTypeTitle(document.documentType)} could not be issued`, { variant: 'error' }),
   });
   const cancelDocument = useMutation({
-    mutationFn: () => commercialFinanceService.cancelDocument(cancelling!.id, {
+    mutationFn: () => commercialFinanceService.cancelDocument(cancelling!.id, cancelling!.documentType, {
       reason: cancellationReason.trim(),
       expectedVersion: cancelling!.version,
     }),
     onSuccess: () => {
-      enqueueSnackbar('Invoice draft cancelled', { variant: 'success' });
+      enqueueSnackbar(`${documentTypeTitle(cancelling!.documentType)} draft cancelled`, { variant: 'success' });
       setCancelling(null); setCancellationReason(''); refresh();
     },
-    onError: (error: any) => enqueueSnackbar(error.response?.data?.detail ?? 'Invoice draft could not be cancelled', { variant: 'error' }),
+    onError: (error: any) => enqueueSnackbar(error.response?.data?.detail ?? `${documentTypeTitle(cancelling?.documentType ?? 'Invoice')} draft could not be cancelled`, { variant: 'error' }),
+  });
+  const createAdjustment = useMutation({
+    mutationFn: () => commercialFinanceService.createAdjustment(adjustingInvoice!.id, {
+      documentType: adjustmentType,
+      documentDate: null,
+      dueDate: null,
+      reasonCode: adjustmentReasonCode,
+      reason: adjustmentReason.trim(),
+      lines: adjustingInvoice!.lines.flatMap(line => {
+        const quantity = Number(adjustmentQuantities[line.id]);
+        return quantity > 0 ? [{ parentLineId: line.id, quantity }] : [];
+      }),
+    }, adjustmentIdempotencyKey),
+    onSuccess: document => {
+      enqueueSnackbar(`${documentTypeTitle(document.documentType)} draft created`, { variant: 'success' });
+      setAdjustingInvoice(null);
+      refresh();
+      setTab(1);
+    },
+    onError: (error: any) => {
+      const status = error.response?.status;
+      const resultIsUncertain = !status || status >= 500;
+      if (status === 409) {
+        void queryClient.invalidateQueries({ queryKey: ['ar-open-items'] });
+        void queryClient.invalidateQueries({ queryKey: ['receivable-documents'] });
+      }
+      if (!resultIsUncertain) {
+        setAdjustmentSubmitted(false);
+        setAdjustmentIdempotencyKey(crypto.randomUUID());
+      }
+      enqueueSnackbar(
+        error.response?.data?.detail ?? (resultIsUncertain
+          ? 'The result is uncertain. Retry will use the same operation key.'
+          : 'Adjustment draft could not be created.'),
+        { variant: 'error' },
+      );
+    },
   });
   const payment = useMutation({
     mutationFn: () => commercialFinanceService.postPayment({
@@ -114,6 +186,43 @@ export default function AccountsReceivablePage() {
     return [...grouped.values()].sort((a, b) => (a.currencyId ?? Number.MAX_SAFE_INTEGER) - (b.currencyId ?? Number.MAX_SAFE_INTEGER));
   }, [openItems.data]);
 
+  const adjustmentTotal = useMemo(() => {
+    if (!adjustingInvoice) return 0;
+    return roundMoney(adjustingInvoice.lines.reduce((total, line) => {
+      const quantity = Number(adjustmentQuantities[line.id]);
+      if (!(quantity > 0) || quantity > line.quantity) return total;
+      const ratio = quantity / line.quantity;
+      const gross = roundMoney(quantity * line.unitPrice);
+      const discount = roundMoney(line.discountAmount * ratio);
+      const tax = roundMoney(line.taxAmount * ratio);
+      return total + roundMoney(gross - discount + tax);
+    }, 0));
+  }, [adjustingInvoice, adjustmentQuantities]);
+
+  const availableAdjustmentQuantities = useMemo(() => {
+    const result = new Map<number, number>();
+    if (!adjustingInvoice) return result;
+    const used = new Map<number, number>();
+    (documents.data ?? [])
+      .filter(document => document.parentDocumentId === adjustingInvoice.id &&
+        document.documentType === adjustmentType && document.status === 'Issued')
+      .flatMap(document => document.lines)
+      .forEach(line => {
+        if (line.parentDocumentLineId) {
+          used.set(line.parentDocumentLineId, (used.get(line.parentDocumentLineId) ?? 0) + line.quantity);
+        }
+      });
+    adjustingInvoice.lines.forEach(line => result.set(line.id, Math.max(0, line.quantity - (used.get(line.id) ?? 0))));
+    return result;
+  }, [adjustingInvoice, adjustmentType, documents.data]);
+
+  const selectedAdjustmentLines = adjustingInvoice?.lines.filter(line => Number(adjustmentQuantities[line.id]) > 0) ?? [];
+  const adjustmentHasInvalidQuantity = selectedAdjustmentLines.some(line =>
+    Number(adjustmentQuantities[line.id]) > (availableAdjustmentQuantities.get(line.id) ?? 0));
+  const projectedInvoiceBalance = adjustingInvoice
+    ? roundMoney(adjustingInvoice.outstandingAmount + (adjustmentType === 'CreditNote' ? -adjustmentTotal : adjustmentTotal))
+    : 0;
+
   const openPaymentDialog = (item: ArOpenItem) => {
     setSelected(item);
     setAmount(String(item.outstandingAmount));
@@ -130,6 +239,25 @@ export default function AccountsReceivablePage() {
   const closeCancellationDialog = () => {
     if (cancelDocument.isPending) return;
     setCancelling(null); setCancellationReason('');
+  };
+  const openAdjustmentDialog = (invoice: ReceivableDocument, type: ReceivableAdjustmentType) => {
+    setDocumentMenu(null);
+    createAdjustment.reset();
+    setAdjustingInvoice(invoice);
+    setAdjustmentType(type);
+    setAdjustmentReasonCode('PRICE_ADJUSTMENT');
+    setAdjustmentReason('');
+    setAdjustmentQuantities({});
+    setAdjustmentIdempotencyKey(crypto.randomUUID());
+    setAdjustmentSubmitted(false);
+  };
+  const closeAdjustmentDialog = () => {
+    if (createAdjustment.isPending) return;
+    setAdjustingInvoice(null);
+  };
+  const submitAdjustment = () => {
+    setAdjustmentSubmitted(true);
+    createAdjustment.mutate();
   };
 
   if (openItems.isLoading || documents.isLoading || (canViewPayments && payments.isLoading)) return <Box sx={{ display: 'grid', placeItems: 'center', minHeight: 400 }}><CircularProgress /></Box>;
@@ -170,10 +298,11 @@ export default function AccountsReceivablePage() {
       <Paper variant="outlined" sx={{ borderRadius: 1, overflow: 'hidden' }}>
         {tab === 0 ? (
           <TableContainer sx={{ overflowX: 'auto' }}><Table size="small" sx={{ minWidth: 760 }}>
-            <TableHead><TableRow><TableCell>Invoice</TableCell><TableCell>Currency</TableCell><TableCell>Due</TableCell><TableCell>Aging</TableCell><TableCell align="right">Original</TableCell><TableCell align="right">Outstanding</TableCell><TableCell align="center">Action</TableCell></TableRow></TableHead>
+            <TableHead><TableRow><TableCell>Document</TableCell><TableCell>Type</TableCell><TableCell>Currency</TableCell><TableCell>Due</TableCell><TableCell>Aging</TableCell><TableCell align="right">Original</TableCell><TableCell align="right">Outstanding</TableCell><TableCell align="center">Action</TableCell></TableRow></TableHead>
             <TableBody>{(openItems.data ?? []).map(item => (
               <TableRow key={item.documentId} hover>
                 <TableCell sx={{ fontWeight: 700 }}>{item.documentNumber}</TableCell>
+                <TableCell><Chip size="small" variant="outlined" label={documentTypeTitle(item.documentType)} /></TableCell>
                 <TableCell>{item.currencyCode || (item.currencyId == null ? 'Unassigned' : `Currency ${item.currencyId}`)}</TableCell>
                 <TableCell>{dayjs(item.dueDate).format('DD MMM YYYY')}</TableCell>
                 <TableCell><Chip size="small" label={item.agingBucket} color={item.daysPastDue > 30 ? 'error' : item.daysPastDue > 0 ? 'warning' : 'default'} /></TableCell>
@@ -181,11 +310,11 @@ export default function AccountsReceivablePage() {
                 <TableCell align="right" sx={{ fontWeight: 800 }}>{money(item.outstandingAmount)}</TableCell>
                 <TableCell align="center">{canRecordPayment && <Button size="small" startIcon={<CreditCard size={16} />} onClick={() => openPaymentDialog(item)}>Record payment</Button>}</TableCell>
               </TableRow>
-            ))}{!openItems.data?.length && <TableRow><TableCell colSpan={7} align="center" sx={{ py: 6 }}>No open receivables.</TableCell></TableRow>}</TableBody>
+            ))}{!openItems.data?.length && <TableRow><TableCell colSpan={8} align="center" sx={{ py: 6 }}>No open receivables.</TableCell></TableRow>}</TableBody>
           </Table></TableContainer>
         ) : tab === 1 ? (
-          <TableContainer sx={{ overflowX: 'auto' }}><Table size="small" sx={{ minWidth: 820 }}>
-            <TableHead><TableRow><TableCell>Number</TableCell><TableCell>Currency</TableCell><TableCell>Status</TableCell><TableCell>Document date</TableCell><TableCell>Due date</TableCell><TableCell align="right">Total</TableCell><TableCell align="right">Balance</TableCell><TableCell align="center">Action</TableCell></TableRow></TableHead>
+          <TableContainer sx={{ overflowX: 'auto' }}><Table size="small" sx={{ minWidth: 900 }}>
+            <TableHead><TableRow><TableCell>Number</TableCell><TableCell>Type</TableCell><TableCell>Currency</TableCell><TableCell>Status</TableCell><TableCell>Document date</TableCell><TableCell>Due date</TableCell><TableCell align="right">Total</TableCell><TableCell align="right">Balance</TableCell><TableCell align="center">Action</TableCell></TableRow></TableHead>
             <TableBody>{(documents.data ?? []).map(document => (
               <TableRow
                 key={document.id}
@@ -200,18 +329,24 @@ export default function AccountsReceivablePage() {
                     {document.voidReason}{document.voidedBy ? ` - ${document.voidedBy}` : ''}{document.voidedOn ? ` - ${dayjs(document.voidedOn).format('DD MMM YYYY HH:mm')}` : ''}
                   </Typography>}
                 </TableCell>
+                <TableCell><Chip size="small" variant="outlined" label={document.documentType === 'CreditNote' ? 'Credit note' : document.documentType === 'DebitNote' ? 'Debit note' : 'Invoice'} /></TableCell>
                 <TableCell>{document.currencyCode || (document.currencyId == null ? 'Unassigned' : `Currency ${document.currencyId}`)}</TableCell>
                 <TableCell><Chip size="small" label={document.status} color={document.status === 'Issued' ? 'success' : 'default'} /></TableCell>
                 <TableCell>{dayjs(document.documentDate).format('DD MMM YYYY')}</TableCell>
                 <TableCell>{dayjs(document.dueDate).format('DD MMM YYYY')}</TableCell>
                 <TableCell align="right">{money(document.totalAmount)}</TableCell>
                 <TableCell align="right">{money(document.outstandingAmount)}</TableCell>
-                <TableCell align="center">{canEditReceivables && document.status === 'Draft' && <Stack direction="row" spacing={0.5} sx={{ justifyContent: 'center' }}>
-                  <Tooltip title="Issue invoice"><span><IconButton size="small" disabled={issue.isPending || cancelDocument.isPending} onClick={() => issue.mutate({ id: document.id, version: document.version })}><FileCheck2 size={18} /></IconButton></span></Tooltip>
-                  <Tooltip title="Cancel invoice draft"><span><IconButton size="small" color="error" disabled={issue.isPending || cancelDocument.isPending} onClick={() => setCancelling(document)}><Ban size={18} /></IconButton></span></Tooltip>
-                </Stack>}</TableCell>
+                <TableCell align="center">
+                  {((document.documentType === 'Invoice' && canEditReceivables) || (document.documentType !== 'Invoice' && canApproveAdjustments)) && document.status === 'Draft' && <Stack direction="row" spacing={0.5} sx={{ justifyContent: 'center' }}>
+                    <Tooltip title={`Issue ${documentTypeLabel(document.documentType)}`}><span><IconButton size="small" disabled={issue.isPending || cancelDocument.isPending} onClick={() => issue.mutate(document)}><FileCheck2 size={18} /></IconButton></span></Tooltip>
+                    <Tooltip title={`Cancel ${documentTypeLabel(document.documentType)} draft`}><span><IconButton size="small" color="error" disabled={issue.isPending || cancelDocument.isPending} onClick={() => setCancelling(document)}><Ban size={18} /></IconButton></span></Tooltip>
+                  </Stack>}
+                  {canCreateAdjustments && document.documentType === 'Invoice' && document.status === 'Issued' && <Tooltip title="Invoice adjustments">
+                    <IconButton size="small" aria-label={`Adjust invoice ${document.documentNumber ?? document.id}`} onClick={event => setDocumentMenu({ anchor: event.currentTarget, invoice: document })}><MoreVertical size={18} /></IconButton>
+                  </Tooltip>}
+                </TableCell>
               </TableRow>
-            ))}{!documents.data?.length && <TableRow><TableCell colSpan={8} align="center" sx={{ py: 6 }}>No receivable documents.</TableCell></TableRow>}</TableBody>
+            ))}{!documents.data?.length && <TableRow><TableCell colSpan={9} align="center" sx={{ py: 6 }}>No receivable documents.</TableCell></TableRow>}</TableBody>
           </Table></TableContainer>
         ) : (
           <TableContainer sx={{ overflowX: 'auto' }}><Table size="small" sx={{ minWidth: 860 }}>
@@ -232,6 +367,101 @@ export default function AccountsReceivablePage() {
           </Table></TableContainer>
         )}
       </Paper>
+
+      <Menu anchorEl={documentMenu?.anchor ?? null} open={Boolean(documentMenu)} onClose={() => setDocumentMenu(null)}>
+        <MenuItem onClick={() => documentMenu && openAdjustmentDialog(documentMenu.invoice, 'CreditNote')}><FileMinus2 size={17} style={{ marginRight: 10 }} />Create credit note</MenuItem>
+        <MenuItem onClick={() => documentMenu && openAdjustmentDialog(documentMenu.invoice, 'DebitNote')}><FilePlus2 size={17} style={{ marginRight: 10 }} />Create debit note</MenuItem>
+      </Menu>
+
+      <Dialog open={Boolean(adjustingInvoice)} onClose={closeAdjustmentDialog} fullWidth fullScreen={adjustmentFullScreen} maxWidth="md">
+        <DialogTitle sx={{ fontWeight: 800 }}>Create receivable adjustment</DialogTitle><Divider />
+        <DialogContent sx={{ p: { xs: 2, sm: 2.5 } }}>
+          <Stack spacing={2.5}>
+            <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'minmax(0, 1fr) auto' }, gap: 1, alignItems: 'center' }}>
+              <Box sx={{ minWidth: 0 }}>
+                <Typography variant="caption" color="text.secondary">Issued invoice</Typography>
+                <Typography variant="body1" sx={{ fontWeight: 800, overflowWrap: 'anywhere' }}>{adjustingInvoice?.documentNumber}</Typography>
+                <Typography variant="body2" color="text.secondary">
+                  {adjustingInvoice?.currencyCode || (adjustingInvoice?.currencyId == null ? 'Currency unassigned' : `Currency ${adjustingInvoice.currencyId}`)} · Balance {money(adjustingInvoice?.outstandingAmount ?? 0)}
+                </Typography>
+              </Box>
+              <ToggleButtonGroup
+                exclusive
+                size="small"
+                value={adjustmentType}
+                disabled={adjustmentSubmitted}
+                onChange={(_, value: ReceivableAdjustmentType | null) => value && setAdjustmentType(value)}
+                aria-label="Adjustment type"
+                sx={{ justifySelf: { sm: 'end' }, '& .MuiToggleButton-root': { minWidth: 118 } }}
+              >
+                <ToggleButton value="CreditNote"><FileMinus2 size={16} style={{ marginRight: 7 }} />Credit note</ToggleButton>
+                <ToggleButton value="DebitNote"><FilePlus2 size={16} style={{ marginRight: 7 }} />Debit note</ToggleButton>
+              </ToggleButtonGroup>
+            </Box>
+
+            {adjustmentSubmitted && createAdjustment.isError && <Alert severity="warning">The request may have reached the server. Retry safely with the same operation key; the financial draft will not be duplicated.</Alert>}
+
+            <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'minmax(180px, 0.45fr) minmax(0, 1fr)' }, gap: 2 }}>
+              <TextField select size="small" required label="Reason code" value={adjustmentReasonCode} disabled={adjustmentSubmitted} onChange={event => setAdjustmentReasonCode(event.target.value)}>
+                {adjustmentReasons.map(([value, label]) => <MenuItem key={value} value={value}>{label}</MenuItem>)}
+              </TextField>
+              <TextField size="small" required label="Reason" value={adjustmentReason} disabled={adjustmentSubmitted} onChange={event => setAdjustmentReason(event.target.value)} helperText={`${adjustmentReason.length}/500`} slotProps={{ htmlInput: { maxLength: 500 } }} />
+            </Box>
+
+            <Box sx={{ borderBlock: '1px solid', borderColor: 'divider' }}>
+              <Box sx={{ display: { xs: 'none', sm: 'grid' }, gridTemplateColumns: 'minmax(0, 1fr) 100px 105px 112px', gap: 1.5, px: 1.5, py: 1, bgcolor: 'action.hover' }}>
+                <Typography variant="caption" sx={{ fontWeight: 700 }}>Invoice line</Typography>
+                <Typography variant="caption" sx={{ fontWeight: 700 }} align="right">Available</Typography>
+                <Typography variant="caption" sx={{ fontWeight: 700 }} align="right">Quantity</Typography>
+                <Typography variant="caption" sx={{ fontWeight: 700 }} align="right">Projected</Typography>
+              </Box>
+              {(adjustingInvoice?.lines ?? []).map((line, index) => {
+                const quantity = Number(adjustmentQuantities[line.id]);
+                const availableQuantity = availableAdjustmentQuantities.get(line.id) ?? 0;
+                const validQuantity = quantity > 0 && quantity <= availableQuantity;
+                const ratio = validQuantity ? quantity / line.quantity : 0;
+                const lineProjection = validQuantity ? roundMoney(
+                  roundMoney(quantity * line.unitPrice) - roundMoney(line.discountAmount * ratio) + roundMoney(line.taxAmount * ratio),
+                ) : 0;
+                return <Box key={line.id} sx={{ display: 'grid', gridTemplateColumns: { xs: 'minmax(0, 1fr) 112px', sm: 'minmax(0, 1fr) 100px 105px 112px' }, gap: 1.5, alignItems: 'center', px: 1.5, py: 1.25, borderTop: index ? '1px solid' : 0, borderColor: 'divider' }}>
+                  <Box sx={{ minWidth: 0 }}>
+                    <Typography variant="body2" sx={{ fontWeight: 700, overflowWrap: 'anywhere' }}>{line.description}</Typography>
+                    <Typography variant="caption" color="text.secondary">{money(line.unitPrice)} each</Typography>
+                  </Box>
+                  <Typography variant="body2" align="right" sx={{ display: { xs: 'none', sm: 'block' } }}>{availableQuantity}</Typography>
+                  <TextField
+                    size="small"
+                    type="number"
+                    value={adjustmentQuantities[line.id] ?? ''}
+                    disabled={adjustmentSubmitted}
+                    error={quantity > availableQuantity}
+                    onChange={event => setAdjustmentQuantities(current => ({ ...current, [line.id]: event.target.value }))}
+                    slotProps={{ htmlInput: { min: 0, max: availableQuantity, step: 'any', 'aria-label': `Adjustment quantity for ${line.description}` } }}
+                  />
+                  <Typography variant="body2" align="right" sx={{ fontWeight: lineProjection ? 700 : 400, gridColumn: { xs: '1 / -1', sm: 'auto' } }}>
+                    <Box component="span" sx={{ display: { sm: 'none' }, color: 'text.secondary', mr: 1 }}>Projected</Box>{money(lineProjection)}
+                  </Typography>
+                </Box>;
+              })}
+            </Box>
+
+            <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))' }, borderBlock: '1px solid', borderColor: 'divider' }}>
+              <Box sx={{ p: 1.5, borderRight: { sm: '1px solid' }, borderColor: 'divider' }}><Typography variant="caption" color="text.secondary">{adjustmentType === 'CreditNote' ? 'Credit' : 'Debit'} note total</Typography><Typography variant="h6" sx={{ fontWeight: 800 }}>{money(adjustmentTotal)}</Typography></Box>
+              <Box sx={{ p: 1.5 }}><Typography variant="caption" color="text.secondary">{adjustmentType === 'CreditNote' ? 'Projected invoice balance' : 'Projected account exposure'}</Typography><Typography variant="h6" color={projectedInvoiceBalance < 0 ? 'error.main' : 'text.primary'} sx={{ fontWeight: 800 }}>{money(projectedInvoiceBalance)}</Typography></Box>
+            </Box>
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ px: 2.5, py: 1.5, borderTop: '1px solid', borderColor: 'divider' }}>
+          <Button disabled={createAdjustment.isPending} onClick={closeAdjustmentDialog}>Cancel</Button>
+          <Button
+            variant="contained"
+            disabled={createAdjustment.isPending || !adjustmentReasonCode || !adjustmentReason.trim() || !selectedAdjustmentLines.length || adjustmentHasInvalidQuantity || adjustmentTotal <= 0}
+            onClick={submitAdjustment}
+          >
+            {adjustmentSubmitted && createAdjustment.isError ? 'Retry safely' : 'Create draft'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Dialog open={Boolean(selected)} onClose={closePaymentDialog} fullWidth maxWidth="xs">
         <DialogTitle>Record payment</DialogTitle><Divider />
@@ -258,10 +488,10 @@ export default function AccountsReceivablePage() {
       </Dialog>
 
       <Dialog open={Boolean(cancelling)} onClose={closeCancellationDialog} fullWidth maxWidth="xs">
-        <DialogTitle>Cancel invoice draft</DialogTitle><Divider />
+        <DialogTitle>Cancel {documentTypeLabel(cancelling?.documentType ?? 'Invoice')} draft</DialogTitle><Divider />
         <DialogContent sx={{ pt: 2 }}>
           <Stack spacing={2}>
-            <Alert severity="warning">Draft {cancelling?.documentNumber ?? `#${cancelling?.id}`} will no longer be available for issuing.</Alert>
+            <Alert severity="warning">This {documentTypeLabel(cancelling?.documentType ?? 'Invoice')} draft will no longer be available for issuing.</Alert>
             <TextField label="Reason" value={cancellationReason} onChange={event => setCancellationReason(event.target.value)} required multiline minRows={3} autoFocus helperText={`${cancellationReason.length}/500`} slotProps={{ htmlInput: { maxLength: 500 } }} />
           </Stack>
         </DialogContent>

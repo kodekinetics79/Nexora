@@ -11,8 +11,11 @@ namespace ERP_RFQ_Automation.CommercialFinance;
 public interface ICommercialFinanceApplicationService
 {
     Task<ReceivableDocumentDto> CreateInvoiceAsync(long businessUnitId, long orderId, string idempotencyKey, CreateInvoiceRequest request, string actor);
+    Task<ReceivableDocumentDto> CreateAdjustmentAsync(long businessUnitId, long invoiceId, string idempotencyKey, CreateAdjustmentRequest request, string actor);
     Task<ReceivableDocumentDto> IssueAsync(long businessUnitId, long documentId, IssueDocumentRequest request, string actor);
+    Task<ReceivableDocumentDto> IssueAdjustmentAsync(long businessUnitId, long documentId, IssueDocumentRequest request, string actor);
     Task<ReceivableDocumentDto> CancelAsync(long businessUnitId, long documentId, CancelDocumentRequest request, string actor);
+    Task<ReceivableDocumentDto> CancelAdjustmentAsync(long businessUnitId, long documentId, CancelDocumentRequest request, string actor);
     Task<ReceivableDocumentDto?> GetDocumentAsync(long businessUnitId, long documentId);
     Task<IReadOnlyList<ReceivableDocumentDto>> GetDocumentsAsync(long businessUnitId, long? customerId, string? status);
     Task<CustomerPaymentDto> PostPaymentAsync(long businessUnitId, string idempotencyKey, PostPaymentRequest request, string actor);
@@ -57,6 +60,7 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
 
             var priorLines = await _context.ReceivableDocumentLines
             .Where(x => x.BusinessUnitId == businessUnitId && requested.Keys.Contains(x.OrderItemId ?? 0) &&
+                        x.Document.DocumentType == ReceivableDocumentTypes.Invoice &&
                         x.Document.Status == ReceivableDocumentStatuses.Issued)
             .GroupBy(x => x.OrderItemId!.Value)
             .Select(x => new { OrderItemId = x.Key, Quantity = x.Sum(y => y.Quantity) })
@@ -113,7 +117,7 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
 
             _context.ReceivableDocuments.Add(document);
             await _context.SaveChangesAsync();
-            AddAudit(businessUnitId, "ReceivableDocument", document.Id, "DraftCreated", actor, new { orderId });
+            await AddAuditAsync(businessUnitId, "ReceivableDocument", document.Id, "DraftCreated", actor, new { orderId });
             if (!_context.Database.IsNpgsql())
                 AddOutbox(businessUnitId, "ReceivableDocument", document.Id, document.Version,
                     "finance.receivable.draft-created", new { document.Id, document.OrderId, document.Status, document.Version });
@@ -122,22 +126,140 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
         });
     }
 
+    public async Task<ReceivableDocumentDto> CreateAdjustmentAsync(
+        long businessUnitId, long invoiceId, string idempotencyKey, CreateAdjustmentRequest request, string actor)
+    {
+        ValidateKey(idempotencyKey);
+        var documentType = request.DocumentType?.Trim();
+        if (documentType is not (ReceivableDocumentTypes.CreditNote or ReceivableDocumentTypes.DebitNote))
+            throw new ArgumentException("Document type must be CreditNote or DebitNote.");
+        var reason = request.Reason?.Trim();
+        var reasonCode = request.ReasonCode?.Trim().ToUpperInvariant();
+        if (string.IsNullOrWhiteSpace(reasonCode) || reasonCode.Length > 50)
+            throw new ArgumentException("An adjustment reason code up to 50 characters is required.");
+        if (string.IsNullOrWhiteSpace(reason) || reason.Length > 500)
+            throw new ArgumentException("An adjustment reason up to 500 characters is required.");
+        if (request.Lines is not { Count: > 0 } || request.Lines.Any(x => x.Quantity <= 0) ||
+            request.Lines.GroupBy(x => x.ParentLineId).Any(x => x.Count() > 1))
+            throw new ArgumentException("Adjustment lines must be unique and have positive quantities.");
+
+        var normalized = request with { DocumentType = documentType, ReasonCode = reasonCode, Reason = reason };
+        var requestHash = Hash(new { InvoiceId = invoiceId, Request = normalized });
+        return await InSerializableTransactionAsync(async () =>
+        {
+            var replay = await _context.ReceivableDocuments.Include(x => x.Lines)
+                .FirstOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.IdempotencyKey == idempotencyKey);
+            if (replay is not null)
+            {
+                EnsureReplay(replay.RequestHash, requestHash);
+                return await MapDocumentAsync(replay);
+            }
+
+            var invoice = await LockDocumentAsync(invoiceId, businessUnitId);
+            if (invoice.DocumentType != ReceivableDocumentTypes.Invoice ||
+                invoice.Status != ReceivableDocumentStatuses.Issued)
+                throw new FinanceConflictException("Adjustments can only be created against an issued invoice.");
+
+            var documentDate = request.DocumentDate?.Date ?? DateTime.UtcNow.Date;
+            var dueDate = request.DueDate?.Date ?? invoice.DueDate.Date;
+            if (dueDate < documentDate) dueDate = documentDate;
+            var document = new ReceivableDocument
+            {
+                BusinessUnitId = businessUnitId,
+                CommercialCaseId = invoice.CommercialCaseId,
+                CustomerId = invoice.CustomerId,
+                OrderId = invoice.OrderId,
+                ParentDocumentId = invoice.Id,
+                AdjustmentReasonCode = reasonCode,
+                AdjustmentReason = reason,
+                CurrencyId = invoice.CurrencyId,
+                DocumentType = documentType,
+                Status = ReceivableDocumentStatuses.Draft,
+                DocumentDate = documentDate,
+                DueDate = dueDate,
+                IdempotencyKey = idempotencyKey,
+                RequestHash = requestHash,
+                CreatedBy = actor,
+                CreatedOn = DateTime.UtcNow
+            };
+
+            foreach (var requestedLine in request.Lines)
+            {
+                var source = invoice.Lines.SingleOrDefault(x => x.Id == requestedLine.ParentLineId)
+                    ?? throw new ArgumentException($"Invoice line {requestedLine.ParentLineId} does not belong to the parent invoice.");
+                if (requestedLine.Quantity > source.Quantity)
+                    throw new FinanceConflictException("An adjustment quantity cannot exceed its parent invoice line quantity.");
+                var ratio = requestedLine.Quantity / source.Quantity;
+                var gross = Round(requestedLine.Quantity * source.UnitPrice);
+                var discount = Round(source.DiscountAmount * ratio);
+                var tax = Round(source.TaxAmount * ratio);
+                document.Lines.Add(new ReceivableDocumentLine
+                {
+                    BusinessUnitId = businessUnitId,
+                    OrderItemId = source.OrderItemId,
+                    ParentDocumentLineId = source.Id,
+                    Description = source.Description,
+                    Quantity = requestedLine.Quantity,
+                    UnitPrice = source.UnitPrice,
+                    DiscountAmount = discount,
+                    TaxAmount = tax,
+                    LineTotal = Round(gross - discount + tax)
+                });
+            }
+
+            document.SubTotal = Round(document.Lines.Sum(x => Round(x.Quantity * x.UnitPrice)));
+            document.DiscountAmount = Round(document.Lines.Sum(x => x.DiscountAmount));
+            document.TaxAmount = Round(document.Lines.Sum(x => x.TaxAmount));
+            document.TotalAmount = Round(document.SubTotal - document.DiscountAmount + document.TaxAmount);
+            _context.ReceivableDocuments.Add(document);
+            await _context.SaveChangesAsync();
+            await AddAuditAsync(businessUnitId, "ReceivableDocument", document.Id, "AdjustmentDraftCreated", actor,
+                new { invoiceId, documentType });
+            if (!_context.Database.IsNpgsql())
+                AddOutbox(businessUnitId, "ReceivableDocument", document.Id, document.Version,
+                    AdjustmentEventType(document.DocumentType, "draft-created"),
+                    new { document.Id, document.ParentDocumentId, document.DocumentType, document.Status, document.Version });
+            await _context.SaveChangesAsync();
+            return await MapDocumentAsync(document);
+        });
+    }
+
     public async Task<ReceivableDocumentDto> IssueAsync(
         long businessUnitId, long documentId, IssueDocumentRequest request, string actor)
+        => await IssueCoreAsync(businessUnitId, documentId, request, actor, adjustment: false);
+
+    public async Task<ReceivableDocumentDto> IssueAdjustmentAsync(
+        long businessUnitId, long documentId, IssueDocumentRequest request, string actor)
+        => await IssueCoreAsync(businessUnitId, documentId, request, actor, adjustment: true);
+
+    private async Task<ReceivableDocumentDto> IssueCoreAsync(
+        long businessUnitId, long documentId, IssueDocumentRequest request, string actor, bool adjustment)
     {
         return await InSerializableTransactionAsync(async () =>
         {
             var document = await LockDocumentAsync(documentId, businessUnitId);
-            if (document.Version != request.ExpectedVersion)
-                throw new FinanceConflictException("The document changed; reload it before issuing.");
+            var isAdjustment = document.DocumentType is ReceivableDocumentTypes.CreditNote or ReceivableDocumentTypes.DebitNote;
+            if (isAdjustment != adjustment)
+                throw new FinanceConflictException(adjustment
+                    ? "Only credit or debit note drafts can be issued through this operation."
+                    : "Only invoice drafts can be issued through this operation.");
             if (document.Status == ReceivableDocumentStatuses.Issued)
                 return await MapDocumentAsync(document);
+            if (document.Version != request.ExpectedVersion)
+                throw new FinanceConflictException("The document changed; reload it before issuing.");
             if (document.Status != ReceivableDocumentStatuses.Draft)
                 throw new FinanceConflictException("Only draft documents can be issued.");
             if (document.Lines.Count == 0 || document.TotalAmount <= 0)
                 throw new FinanceConflictException("A document must have positive reconciled lines before issue.");
             EnsureDocumentReconciles(document);
-            await EnsureIssueQuantitiesAsync(document, businessUnitId);
+            if (document.DocumentType == ReceivableDocumentTypes.Invoice)
+                await EnsureIssueQuantitiesAsync(document, businessUnitId);
+            else
+            {
+                if (string.Equals(document.CreatedBy, actor, StringComparison.OrdinalIgnoreCase))
+                    throw new FinanceConflictException("The adjustment creator cannot issue the same note.");
+                await EnsureAdjustmentIssueAsync(document, businessUnitId);
+            }
 
             var databaseAllocatesNumber = _context.Database.IsNpgsql();
             var number = databaseAllocatesNumber
@@ -150,9 +272,9 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
             document.Version++;
             if (!databaseAllocatesNumber)
             {
-                AddAudit(businessUnitId, "ReceivableDocument", document.Id, "Issued", actor, new { number });
+                await AddAuditAsync(businessUnitId, "ReceivableDocument", document.Id, "Issued", actor, new { number });
                 AddOutbox(businessUnitId, "ReceivableDocument", document.Id, document.Version,
-                    "finance.receivable.issued", new { document.Id, document.OrderId, document.Status, document.DocumentNumber, document.Version });
+                    DocumentEventType(document.DocumentType, "issued"), new { document.Id, document.OrderId, document.Status, document.DocumentNumber, document.Version });
             }
             await _context.SaveChangesAsync();
             if (databaseAllocatesNumber)
@@ -163,6 +285,14 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
 
     public async Task<ReceivableDocumentDto> CancelAsync(
         long businessUnitId, long documentId, CancelDocumentRequest request, string actor)
+        => await CancelCoreAsync(businessUnitId, documentId, request, actor, adjustment: false);
+
+    public async Task<ReceivableDocumentDto> CancelAdjustmentAsync(
+        long businessUnitId, long documentId, CancelDocumentRequest request, string actor)
+        => await CancelCoreAsync(businessUnitId, documentId, request, actor, adjustment: true);
+
+    private async Task<ReceivableDocumentDto> CancelCoreAsync(
+        long businessUnitId, long documentId, CancelDocumentRequest request, string actor, bool adjustment)
     {
         var reason = request.Reason?.Trim();
         if (string.IsNullOrWhiteSpace(reason) || reason.Length > 500)
@@ -171,14 +301,19 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
         return await InSerializableTransactionAsync(async () =>
         {
             var document = await LockDocumentAsync(documentId, businessUnitId);
-            if (document.Version != request.ExpectedVersion)
-                throw new FinanceConflictException("The document changed; reload it before cancelling.");
+            var isAdjustment = document.DocumentType is ReceivableDocumentTypes.CreditNote or ReceivableDocumentTypes.DebitNote;
+            if (isAdjustment != adjustment)
+                throw new FinanceConflictException(adjustment
+                    ? "Only credit or debit note drafts can be cancelled through this operation."
+                    : "Only invoice drafts can be cancelled through this operation.");
             if (document.Status == ReceivableDocumentStatuses.Cancelled)
             {
                 if (!string.Equals(document.VoidReason, reason, StringComparison.Ordinal))
                     throw new FinanceConflictException("The document was already cancelled with a different reason.");
                 return await MapDocumentAsync(document);
             }
+            if (document.Version != request.ExpectedVersion)
+                throw new FinanceConflictException("The document changed; reload it before cancelling.");
             if (document.Status != ReceivableDocumentStatuses.Draft)
                 throw new FinanceConflictException("Only draft documents can be cancelled.");
 
@@ -190,10 +325,10 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
             document.Version++;
             if (!databaseWritesAudit)
             {
-                AddAudit(businessUnitId, "ReceivableDocument", document.Id, "DraftCancelled", actor,
+                await AddAuditAsync(businessUnitId, "ReceivableDocument", document.Id, "DraftCancelled", actor,
                     new { Reason = reason });
                 AddOutbox(businessUnitId, "ReceivableDocument", document.Id, document.Version,
-                    "finance.receivable.cancelled", new { document.Id, document.OrderId, document.Status, document.Version });
+                    DocumentEventType(document.DocumentType, "cancelled"), new { document.Id, document.OrderId, document.Status, document.Version });
             }
             await _context.SaveChangesAsync();
             if (databaseWritesAudit)
@@ -256,12 +391,13 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
             foreach (var allocation in normalizedAllocations)
             {
                 var document = await LockDocumentAsync(allocation.ReceivableDocumentId, businessUnitId);
-                if (document.DocumentType != ReceivableDocumentTypes.Invoice || document.Status != ReceivableDocumentStatuses.Issued)
-                    throw new FinanceConflictException("Payments can only be allocated to issued invoices.");
+                if (document.DocumentType is not (ReceivableDocumentTypes.Invoice or ReceivableDocumentTypes.DebitNote) ||
+                    document.Status != ReceivableDocumentStatuses.Issued)
+                    throw new FinanceConflictException("Payments can only be allocated to issued invoices or debit notes.");
                 if (document.CustomerId != request.CustomerId || document.CurrencyId != request.CurrencyId)
                     throw new FinanceConflictException("Payment and invoice customer/currency must match.");
-                var allocated = await ActiveAllocatedAsync(document.Id);
-                if (allocated + allocation.Amount > document.TotalAmount)
+                var outstanding = await DocumentOutstandingAsync(document);
+                if (allocation.Amount > outstanding)
                     throw new FinanceConflictException($"Allocation exceeds invoice {document.DocumentNumber} outstanding amount.");
                 documents.Add(document);
             }
@@ -300,7 +436,7 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
                 });
             _context.CustomerPayments.Add(payment);
             await _context.SaveChangesAsync();
-            AddAudit(businessUnitId, "CustomerPayment", payment.Id, "Posted", actor, new { receipt });
+            await AddAuditAsync(businessUnitId, "CustomerPayment", payment.Id, "Posted", actor, new { receipt });
             if (!_context.Database.IsNpgsql())
                 AddOutbox(businessUnitId, "CustomerPayment", payment.Id, payment.Version,
                     "finance.payment.posted", new { payment.Id, payment.Status, payment.ReceiptNumber, payment.Version });
@@ -338,7 +474,7 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
             payment.ReversedOn = DateTime.UtcNow;
             payment.ReversalReason = request.Reason.Trim();
             payment.Version++;
-            AddAudit(businessUnitId, "CustomerPayment", payment.Id, "Reversed", actor, new { request.Reason });
+            await AddAuditAsync(businessUnitId, "CustomerPayment", payment.Id, "Reversed", actor, new { request.Reason });
             if (!_context.Database.IsNpgsql())
                 AddOutbox(businessUnitId, "CustomerPayment", payment.Id, payment.Version,
                     "finance.payment.reversed", new { payment.Id, payment.Status, payment.ReceiptNumber, payment.Version });
@@ -352,20 +488,21 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
         var effectiveDate = (asOf ?? DateTime.UtcNow).Date;
         var documents = await _context.ReceivableDocuments
             .Where(x => x.BusinessUnitId == businessUnitId &&
-                        x.DocumentType == ReceivableDocumentTypes.Invoice &&
+                        (x.DocumentType == ReceivableDocumentTypes.Invoice ||
+                         x.DocumentType == ReceivableDocumentTypes.DebitNote) &&
                         x.Status == ReceivableDocumentStatuses.Issued &&
+                        x.IssuedOn < effectiveDate.AddDays(1) &&
                         x.DocumentDate <= effectiveDate)
             .OrderBy(x => x.DueDate)
             .ToListAsync();
         var result = new List<ArOpenItemDto>();
         foreach (var document in documents)
         {
-            var allocated = await ActiveAllocatedAsync(document.Id, effectiveDate.AddDays(1));
-            var outstanding = Round(document.TotalAmount - allocated);
+            var outstanding = await DocumentOutstandingAsync(document, effectiveDate.AddDays(1));
             if (outstanding <= 0) continue;
             var days = Math.Max(0, (effectiveDate - document.DueDate.Date).Days);
             result.Add(new ArOpenItemDto(
-                document.Id, document.DocumentNumber!, document.CustomerId, document.CommercialCaseId,
+                document.Id, document.DocumentNumber!, document.DocumentType, document.CustomerId, document.CommercialCaseId,
                 document.CurrencyId, await CurrencyCodeAsync(document.CurrencyId), document.DocumentDate, document.DueDate, document.TotalAmount,
                 outstanding, days, AgingBucket(days)));
         }
@@ -380,6 +517,37 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
                 $"SELECT * FROM \"ReceivableDocuments\" WHERE \"Id\" = {documentId} FOR UPDATE").Include(x => x.Lines);
         return await query.FirstOrDefaultAsync(x => x.Id == documentId && x.BusinessUnitId == businessUnitId)
             ?? throw new KeyNotFoundException("Receivable document not found.");
+    }
+
+    private async Task EnsureAdjustmentIssueAsync(ReceivableDocument document, long businessUnitId)
+    {
+        if (!document.ParentDocumentId.HasValue)
+            throw new FinanceConflictException("An adjustment must reference its parent invoice.");
+        var invoice = await LockDocumentAsync(document.ParentDocumentId.Value, businessUnitId);
+        if (invoice.DocumentType != ReceivableDocumentTypes.Invoice ||
+            invoice.Status != ReceivableDocumentStatuses.Issued ||
+            invoice.CustomerId != document.CustomerId || invoice.CurrencyId != document.CurrencyId ||
+            invoice.OrderId != document.OrderId)
+            throw new FinanceConflictException("The adjustment parent invoice is no longer eligible.");
+
+        foreach (var line in document.Lines)
+        {
+            var source = invoice.Lines.SingleOrDefault(x => x.Id == line.ParentDocumentLineId)
+                ?? throw new FinanceConflictException("An adjustment line no longer matches its parent invoice.");
+            if (line.Quantity > source.Quantity || line.UnitPrice != source.UnitPrice)
+                throw new FinanceConflictException("An adjustment line exceeds or diverges from its parent invoice line.");
+            var priorAdjustmentQuantity = await _context.ReceivableDocumentLines
+                    .Where(x => x.BusinessUnitId == businessUnitId && x.ReceivableDocumentId != document.Id &&
+                        x.ParentDocumentLineId == source.Id && x.Document.ParentDocumentId == invoice.Id &&
+                        x.Document.DocumentType == document.DocumentType &&
+                        x.Document.Status == ReceivableDocumentStatuses.Issued)
+                    .SumAsync(x => (decimal?)x.Quantity) ?? 0m;
+            if (priorAdjustmentQuantity + line.Quantity > source.Quantity)
+                throw new FinanceConflictException($"Issued {document.DocumentType} quantities cannot exceed the parent invoice line quantity.");
+        }
+        if (document.DocumentType == ReceivableDocumentTypes.CreditNote &&
+            document.TotalAmount > await DocumentOutstandingAsync(invoice))
+            throw new FinanceConflictException("A credit note cannot exceed the parent invoice's live outstanding balance.");
     }
 
     private async Task<Order> LockOrderAsync(long orderId, long businessUnitId)
@@ -436,6 +604,7 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
             .Where(x => x.BusinessUnitId == businessUnitId &&
                         x.ReceivableDocumentId != document.Id &&
                         lineIds.Contains(x.OrderItemId ?? 0) &&
+                        x.Document.DocumentType == ReceivableDocumentTypes.Invoice &&
                         x.Document.Status == ReceivableDocumentStatuses.Issued)
             .GroupBy(x => x.OrderItemId!.Value)
             .Select(x => new { OrderItemId = x.Key, Quantity = x.Sum(y => y.Quantity) })
@@ -511,19 +680,40 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
         return Round(await query.SumAsync(x => (decimal?)x.Amount) ?? 0m);
     }
 
+    private async Task<decimal> DocumentOutstandingAsync(ReceivableDocument document, DateTime? before = null)
+    {
+        var credits = 0m;
+        if (document.DocumentType == ReceivableDocumentTypes.Invoice)
+        {
+            var adjustments = _context.ReceivableDocuments.Where(x => x.BusinessUnitId == document.BusinessUnitId &&
+                x.ParentDocumentId == document.Id && x.DocumentType == ReceivableDocumentTypes.CreditNote &&
+                x.Status == ReceivableDocumentStatuses.Issued);
+            if (before.HasValue) adjustments = adjustments.Where(x => x.IssuedOn < before.Value);
+            credits = Round(await adjustments.SumAsync(x => (decimal?)x.TotalAmount) ?? 0m);
+        }
+        return Round(document.TotalAmount - credits - await ActiveAllocatedAsync(document.Id, before));
+    }
+
     private async Task<ReceivableDocumentDto> MapDocumentAsync(ReceivableDocument document)
     {
-        var allocated = document.Status == ReceivableDocumentStatuses.Issued
+        var allocated = document.Status == ReceivableDocumentStatuses.Issued &&
+                        document.DocumentType is ReceivableDocumentTypes.Invoice or ReceivableDocumentTypes.DebitNote
             ? await ActiveAllocatedAsync(document.Id)
             : 0m;
+        var outstanding = document.Status != ReceivableDocumentStatuses.Issued
+            ? document.TotalAmount
+            : document.DocumentType == ReceivableDocumentTypes.CreditNote
+                ? 0m
+                : await DocumentOutstandingAsync(document);
         return new ReceivableDocumentDto(
             document.Id, document.CommercialCaseId, document.CustomerId, document.OrderId,
-            document.CurrencyId, await CurrencyCodeAsync(document.CurrencyId), document.DocumentType, document.Status, document.DocumentNumber,
+            document.ParentDocumentId, document.AdjustmentReasonCode, document.AdjustmentReason, document.CurrencyId,
+            await CurrencyCodeAsync(document.CurrencyId), document.DocumentType, document.Status, document.DocumentNumber,
             document.DocumentDate, document.DueDate, document.IssuedOn, document.VoidedOn, document.VoidReason, document.VoidedBy, document.SubTotal,
             document.DiscountAmount, document.TaxAmount, document.TotalAmount, allocated,
-            Round(document.TotalAmount - allocated), document.Version,
+            outstanding, document.Version,
             document.Lines.OrderBy(x => x.Id).Select(x => new ReceivableLineDto(
-                x.Id, x.OrderItemId, x.Description, x.Quantity, x.UnitPrice,
+                x.Id, x.OrderItemId, x.ParentDocumentLineId, x.Description, x.Quantity, x.UnitPrice,
                 x.DiscountAmount, x.TaxAmount, x.LineTotal)).ToList());
     }
 
@@ -582,8 +772,12 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
         return false;
     }
 
-    private void AddAudit(long businessUnitId, string type, long id, string action, string actor, object detail)
-        => _context.CommercialFinanceAudits.Add(new CommercialFinanceAudit
+    private async Task AddAuditAsync(long businessUnitId, string type, long id, string action, string actor, object detail)
+    {
+        var detailJson = JsonSerializer.Serialize(detail);
+        if (_context.Database.IsNpgsql())
+            return;
+        _context.CommercialFinanceAudits.Add(new CommercialFinanceAudit
         {
             BusinessUnitId = businessUnitId,
             AggregateType = type,
@@ -591,8 +785,9 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
             Action = action,
             Actor = actor,
             OccurredOn = DateTime.UtcNow,
-            DetailJson = JsonSerializer.Serialize(detail)
+            DetailJson = detailJson
         });
+    }
 
     private void AddOutbox(
         long businessUnitId, string aggregateType, long aggregateId, long aggregateVersion,
@@ -630,6 +825,17 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
         => Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(value)));
 
     private static decimal Round(decimal value) => Math.Round(value, 2, MidpointRounding.AwayFromZero);
+
+    private static string DocumentEventType(string documentType, string action)
+        => documentType switch
+        {
+            ReceivableDocumentTypes.CreditNote => AdjustmentEventType(documentType, action),
+            ReceivableDocumentTypes.DebitNote => AdjustmentEventType(documentType, action),
+            _ => $"finance.receivable.{action}"
+        };
+
+    private static string AdjustmentEventType(string documentType, string action)
+        => $"finance.{(documentType == ReceivableDocumentTypes.CreditNote ? "credit-note" : "debit-note")}.{action}";
 
     private static string AgingBucket(int days) => days switch
     {

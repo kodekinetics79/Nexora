@@ -3,6 +3,7 @@ import axiosInstance from '../axiosInstance';
 export interface ReceivableLine {
   id: number;
   orderItemId?: number;
+  parentDocumentLineId?: number;
   description: string;
   quantity: number;
   unitPrice: number;
@@ -16,6 +17,9 @@ export interface ReceivableDocument {
   commercialCaseId?: number;
   customerId: number;
   orderId?: number;
+  parentDocumentId?: number;
+  adjustmentReasonCode?: string;
+  adjustmentReason?: string;
   currencyId?: number;
   currencyCode?: string;
   documentType: string;
@@ -37,9 +41,21 @@ export interface ReceivableDocument {
   lines: ReceivableLine[];
 }
 
+export type ReceivableAdjustmentType = 'CreditNote' | 'DebitNote';
+
+export interface CreateReceivableAdjustmentRequest {
+  documentType: ReceivableAdjustmentType;
+  documentDate: null;
+  dueDate: null;
+  reasonCode: string;
+  reason: string;
+  lines: { parentLineId: number; quantity: number }[];
+}
+
 export interface ArOpenItem {
   documentId: number;
   documentNumber: string;
+  documentType: string;
   customerId: number;
   commercialCaseId?: number;
   currencyId?: number;
@@ -86,14 +102,24 @@ const commercialFinanceService = {
       withKey(`order-invoice-${orderId}-full`),
     )).data,
 
-  issueDocument: async (documentId: number, expectedVersion: number) =>
+  createAdjustment: async (
+    invoiceId: number,
+    data: CreateReceivableAdjustmentRequest,
+    idempotencyKey: string,
+  ) => (await axiosInstance.post<ReceivableDocument>(
+    `/api/commercial-finance/documents/${invoiceId}/adjustments`,
+    data,
+    withKey(idempotencyKey),
+  )).data,
+
+  issueDocument: async (documentId: number, expectedVersion: number, documentType: string) =>
     (await axiosInstance.post<ReceivableDocument>(
-      `/api/commercial-finance/documents/${documentId}/issue`, { expectedVersion },
+      `/api/commercial-finance/documents/${documentId}/${documentType === 'Invoice' ? 'issue' : 'issue-adjustment'}`, { expectedVersion },
     )).data,
 
-  cancelDocument: async (documentId: number, data: { reason: string; expectedVersion: number }) =>
+  cancelDocument: async (documentId: number, documentType: string, data: { reason: string; expectedVersion: number }) =>
     (await axiosInstance.post<ReceivableDocument>(
-      `/api/commercial-finance/documents/${documentId}/cancel`, data,
+      `/api/commercial-finance/documents/${documentId}/${documentType === 'Invoice' ? 'cancel' : 'cancel-adjustment'}`, data,
     )).data,
 
   postPayment: async (data: {

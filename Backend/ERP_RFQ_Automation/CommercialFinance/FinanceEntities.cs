@@ -29,6 +29,8 @@ public sealed class ReceivableDocument
     public long CustomerId { get; set; }
     public long? OrderId { get; set; }
     public long? ParentDocumentId { get; set; }
+    public string? AdjustmentReasonCode { get; set; }
+    public string? AdjustmentReason { get; set; }
     public long? CurrencyId { get; set; }
     public string DocumentType { get; set; } = ReceivableDocumentTypes.Invoice;
     public string Status { get; set; } = ReceivableDocumentStatuses.Draft;
@@ -60,6 +62,7 @@ public sealed class ReceivableDocumentLine
     public long BusinessUnitId { get; set; }
     public long ReceivableDocumentId { get; set; }
     public long? OrderItemId { get; set; }
+    public long? ParentDocumentLineId { get; set; }
     public string Description { get; set; } = null!;
     public decimal Quantity { get; set; }
     public decimal UnitPrice { get; set; }

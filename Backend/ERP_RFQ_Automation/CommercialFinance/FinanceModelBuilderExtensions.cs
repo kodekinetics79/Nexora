@@ -18,6 +18,8 @@ public static class FinanceModelBuilderExtensions
             entity.Property(x => x.DocumentType).HasMaxLength(20).IsRequired();
             entity.Property(x => x.Status).HasMaxLength(20).IsRequired();
             entity.Property(x => x.DocumentNumber).HasMaxLength(50);
+            entity.Property(x => x.AdjustmentReasonCode).HasMaxLength(50);
+            entity.Property(x => x.AdjustmentReason).HasMaxLength(500);
             entity.Property(x => x.IdempotencyKey).HasMaxLength(128).IsRequired();
             entity.Property(x => x.RequestHash).HasMaxLength(64).IsRequired();
             entity.Property(x => x.VoidReason).HasMaxLength(500);
@@ -37,6 +39,7 @@ public static class FinanceModelBuilderExtensions
             entity.HasIndex(x => new { x.BusinessUnitId, x.Status, x.DueDate })
                 .HasDatabaseName("IX_ReceivableDocuments_BU_Status_Due");
             entity.HasCheckConstraint("CK_ReceivableDocuments_Total", "\"TotalAmount\" >= 0 AND \"SubTotal\" >= 0 AND \"DiscountAmount\" >= 0 AND \"TaxAmount\" >= 0");
+            entity.HasCheckConstraint("CK_ReceivableDocuments_Type", "(\"DocumentType\" = 'Invoice' AND \"ParentDocumentId\" IS NULL AND \"AdjustmentReasonCode\" IS NULL AND \"AdjustmentReason\" IS NULL) OR (\"DocumentType\" IN ('CreditNote','DebitNote') AND \"ParentDocumentId\" IS NOT NULL AND \"AdjustmentReasonCode\" IS NOT NULL AND length(trim(\"AdjustmentReasonCode\")) > 0 AND \"AdjustmentReason\" IS NOT NULL AND length(trim(\"AdjustmentReason\")) > 0)");
             entity.HasCheckConstraint("CK_ReceivableDocuments_Reconciles", "\"TotalAmount\" = round(\"SubTotal\" - \"DiscountAmount\" + \"TaxAmount\", 2)");
             entity.HasCheckConstraint("CK_ReceivableDocuments_Issue", "(\"Status\" = 'Draft' AND \"DocumentNumber\" IS NULL AND \"IssuedOn\" IS NULL AND \"VoidedOn\" IS NULL AND \"VoidReason\" IS NULL AND \"VoidedBy\" IS NULL) OR (\"Status\" = 'Cancelled' AND \"DocumentNumber\" IS NULL AND \"IssuedOn\" IS NULL AND \"VoidedOn\" IS NOT NULL AND \"VoidReason\" IS NOT NULL AND length(trim(\"VoidReason\")) > 0 AND \"VoidedBy\" IS NOT NULL AND length(trim(\"VoidedBy\")) > 0) OR (\"Status\" IN ('Issued', 'Void') AND \"DocumentNumber\" IS NOT NULL AND \"IssuedOn\" IS NOT NULL)");
             entity.HasOne<Order>().WithMany()
@@ -56,6 +59,7 @@ public static class FinanceModelBuilderExtensions
         {
             entity.ToTable("ReceivableDocumentLines");
             entity.HasKey(x => x.Id);
+            entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
             entity.Property(x => x.Description).HasMaxLength(1000).IsRequired();
             entity.HasCheckConstraint("CK_ReceivableDocumentLines_Money", "\"Quantity\" > 0 AND \"UnitPrice\" >= 0 AND \"DiscountAmount\" >= 0 AND \"TaxAmount\" >= 0 AND \"LineTotal\" >= 0");
             entity.Property(x => x.Quantity).HasPrecision(18, 6);
@@ -67,6 +71,9 @@ public static class FinanceModelBuilderExtensions
                 .HasForeignKey(x => new { x.BusinessUnitId, x.ReceivableDocumentId })
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne<OrderItem>().WithMany().HasForeignKey(x => x.OrderItemId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<ReceivableDocumentLine>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.ParentDocumentLineId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<CustomerPayment>(entity =>

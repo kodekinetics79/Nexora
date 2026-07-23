@@ -13,12 +13,86 @@ public sealed class CommercialFinanceTests
     public void Controller_UsesDedicatedFinancePermissions()
     {
         AssertPermission(nameof(CommercialFinanceController.CreateInvoice), "Accounts Receivable", PermissionAction.Create);
+        AssertPermission(nameof(CommercialFinanceController.CreateAdjustment), "Receivable Adjustments", PermissionAction.Create);
         AssertPermission(nameof(CommercialFinanceController.Issue), "Accounts Receivable", PermissionAction.Edit);
+        AssertPermission(nameof(CommercialFinanceController.IssueAdjustment), "Receivable Adjustments", PermissionAction.Edit);
         AssertPermission(nameof(CommercialFinanceController.Cancel), "Accounts Receivable", PermissionAction.Edit);
+        AssertPermission(nameof(CommercialFinanceController.CancelAdjustment), "Receivable Adjustments", PermissionAction.Edit);
         AssertPermission(nameof(CommercialFinanceController.GetDocuments), "Accounts Receivable", PermissionAction.View);
         AssertPermission(nameof(CommercialFinanceController.PostPayment), "Customer Payments", PermissionAction.Create);
         AssertPermission(nameof(CommercialFinanceController.GetPayments), "Customer Payments", PermissionAction.View);
         AssertPermission(nameof(CommercialFinanceController.ReversePayment), "Customer Payments", PermissionAction.Edit);
+    }
+
+    [Fact]
+    public async Task CreditAndDebitNotes_DriveSignedArAndReplayIdempotently()
+    {
+        using var database = new TestDb();
+        await using var db = database.ContextFor(BusinessUnitId);
+        var order = SeedOrder(db);
+        var service = new CommercialFinanceApplicationService(db);
+        var invoiceDraft = await service.CreateInvoiceAsync(BusinessUnitId, order.Id, "adjustment-invoice",
+            new CreateInvoiceRequest(null, null, null), "invoice-maker@test");
+        var invoice = await service.IssueAsync(BusinessUnitId, invoiceDraft.Id,
+            new IssueDocumentRequest(invoiceDraft.Version), "invoice-checker@test");
+        var invoiceLine = Assert.Single(invoice.Lines);
+
+        var creditRequest = new CreateAdjustmentRequest(ReceivableDocumentTypes.CreditNote, null, null,
+            "RETURN", "Customer returned half the shipment", [new(invoiceLine.Id, 1m)]);
+        var creditDraft = await service.CreateAdjustmentAsync(BusinessUnitId, invoice.Id,
+            "credit-note-one", creditRequest, "credit-maker@test");
+        var creditReplay = await service.CreateAdjustmentAsync(BusinessUnitId, invoice.Id,
+            "credit-note-one", creditRequest, "credit-maker@test");
+        var credit = await service.IssueAdjustmentAsync(BusinessUnitId, creditDraft.Id,
+            new IssueDocumentRequest(creditDraft.Version), "credit-checker@test");
+
+        Assert.Equal(creditDraft.Id, creditReplay.Id);
+        Assert.Equal(104.50m, credit.TotalAmount);
+        Assert.StartsWith("CRN-", credit.DocumentNumber);
+        Assert.Equal(invoice.Id, credit.ParentDocumentId);
+        Assert.Equal(invoiceLine.Id, Assert.Single(credit.Lines).ParentDocumentLineId);
+        var afterCredit = Assert.Single(await service.GetOpenItemsAsync(BusinessUnitId, DateTime.UtcNow));
+        Assert.Equal(invoice.Id, afterCredit.DocumentId);
+        Assert.Equal(104.50m, afterCredit.OutstandingAmount);
+
+        var debitDraft = await service.CreateAdjustmentAsync(BusinessUnitId, invoice.Id,
+            "debit-note-one", new CreateAdjustmentRequest(ReceivableDocumentTypes.DebitNote, null, null,
+                "PRICE_CORRECTION", "Approved underbilling correction", [new(invoiceLine.Id, 1m)]),
+            "debit-maker@test");
+        var debit = await service.IssueAdjustmentAsync(BusinessUnitId, debitDraft.Id,
+            new IssueDocumentRequest(debitDraft.Version), "debit-checker@test");
+        var openItems = await service.GetOpenItemsAsync(BusinessUnitId, DateTime.UtcNow);
+
+        Assert.StartsWith("DBN-", debit.DocumentNumber);
+        Assert.Equal(2, openItems.Count);
+        Assert.Contains(openItems, x => x.DocumentId == invoice.Id && x.OutstandingAmount == 104.50m);
+        Assert.Contains(openItems, x => x.DocumentId == debit.Id && x.OutstandingAmount == 104.50m);
+    }
+
+    [Fact]
+    public async Task CreditNote_EnforcesMakerCheckerAndLiveOutstandingCeiling()
+    {
+        using var database = new TestDb();
+        await using var db = database.ContextFor(BusinessUnitId);
+        var order = SeedOrder(db);
+        var service = new CommercialFinanceApplicationService(db);
+        var draft = await service.CreateInvoiceAsync(BusinessUnitId, order.Id, "credit-limit-invoice",
+            new CreateInvoiceRequest(null, null, null), "invoice-maker@test");
+        var invoice = await service.IssueAsync(BusinessUnitId, draft.Id,
+            new IssueDocumentRequest(draft.Version), "invoice-checker@test");
+        await service.PostPaymentAsync(BusinessUnitId, "credit-limit-payment", new PostPaymentRequest(
+            CustomerId, null, CurrencyId, null, 150m, "BankTransfer", null,
+            [new(invoice.Id, 150m)]), "collector@test");
+
+        var creditDraft = await service.CreateAdjustmentAsync(BusinessUnitId, invoice.Id,
+            "credit-over-live-balance", new CreateAdjustmentRequest(ReceivableDocumentTypes.CreditNote,
+                null, null, "RETURN", "Full return after partial payment", [new(invoice.Lines.Single().Id, 2m)]),
+            "credit-maker@test");
+
+        await Assert.ThrowsAsync<FinanceConflictException>(() => service.IssueAdjustmentAsync(BusinessUnitId,
+            creditDraft.Id, new IssueDocumentRequest(creditDraft.Version), "credit-maker@test"));
+        await Assert.ThrowsAsync<FinanceConflictException>(() => service.IssueAdjustmentAsync(BusinessUnitId,
+            creditDraft.Id, new IssueDocumentRequest(creditDraft.Version), "credit-checker@test"));
     }
 
     [Fact]
@@ -40,12 +114,13 @@ public sealed class CommercialFinanceTests
             BusinessUnitId, draft.Id, new CancelDocumentRequest(draft.Version, " Duplicate draft "), "finance@test");
         var replay = await service.CancelAsync(
             BusinessUnitId, draft.Id, new CancelDocumentRequest(cancelled.Version, "Duplicate draft"), "finance@test");
-        await Assert.ThrowsAsync<FinanceConflictException>(() => service.CancelAsync(
-            BusinessUnitId, draft.Id, new CancelDocumentRequest(draft.Version, "Duplicate draft"), "finance@test"));
+        var staleReplay = await service.CancelAsync(
+            BusinessUnitId, draft.Id, new CancelDocumentRequest(draft.Version, "Duplicate draft"), "finance@test");
         await Assert.ThrowsAsync<FinanceConflictException>(() => service.CancelAsync(
             BusinessUnitId, draft.Id, new CancelDocumentRequest(cancelled.Version, "Different reason"), "finance@test"));
 
         Assert.Equal(ReceivableDocumentStatuses.Cancelled, cancelled.Status);
+        Assert.Equal(cancelled.Version, staleReplay.Version);
         Assert.Equal(draft.Version + 1, cancelled.Version);
         Assert.Null(cancelled.DocumentNumber);
         Assert.NotNull(cancelled.VoidedOn);
@@ -137,10 +212,11 @@ public sealed class CommercialFinanceTests
 
         var issued = await service.IssueAsync(BusinessUnitId, draft.Id, new IssueDocumentRequest(draft.Version), "issuer@test");
         var issueReplay = await service.IssueAsync(BusinessUnitId, draft.Id, new IssueDocumentRequest(issued.Version), "issuer@test");
-        await Assert.ThrowsAsync<FinanceConflictException>(() => service.IssueAsync(
-            BusinessUnitId, draft.Id, new IssueDocumentRequest(draft.Version), "issuer@test"));
+        var staleIssueReplay = await service.IssueAsync(
+            BusinessUnitId, draft.Id, new IssueDocumentRequest(draft.Version), "issuer@test");
 
         Assert.Equal(issued.DocumentNumber, issueReplay.DocumentNumber);
+        Assert.Equal(issued.DocumentNumber, staleIssueReplay.DocumentNumber);
         Assert.StartsWith($"INV-{DateTime.UtcNow.Year}-", issued.DocumentNumber);
         Assert.Equal(ReceivableDocumentStatuses.Issued, issued.Status);
 
@@ -266,6 +342,8 @@ public sealed class CommercialFinanceTests
         var draft = await service.CreateInvoiceAsync(BusinessUnitId, order.Id, "history-invoice",
             new CreateInvoiceRequest(DateTime.UtcNow.Date.AddDays(-30), DateTime.UtcNow.Date.AddDays(-20), null), "finance@test");
         var invoice = await service.IssueAsync(BusinessUnitId, draft.Id, new IssueDocumentRequest(1), "issuer@test");
+        db.ReceivableDocuments.Single(x => x.Id == invoice.Id).IssuedOn = DateTime.UtcNow.AddDays(-30);
+        await db.SaveChangesAsync();
         var payment = await service.PostPaymentAsync(BusinessUnitId, "history-payment", new PostPaymentRequest(
             CustomerId, null, CurrencyId, DateTime.UtcNow.AddDays(-10), 100m, "BankTransfer", null,
             [new PaymentAllocationRequest(invoice.Id, 100m)]), "collector@test");

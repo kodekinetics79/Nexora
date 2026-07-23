@@ -2,6 +2,8 @@ using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.CommercialFinance;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 namespace ERP_RFQ_Automation.Controllers;
 
@@ -21,15 +23,34 @@ public sealed class CommercialFinanceController(ICommercialFinanceApplicationSer
             return CreatedAtAction(nameof(GetDocument), new { documentId = result.Id }, result);
         });
 
+    [HttpPost("documents/{invoiceId:long}/adjustments")]
+    [RequireModulePermission("Receivable Adjustments", PermissionAction.Create)]
+    public Task<IActionResult> CreateAdjustment(long invoiceId, [FromBody] CreateAdjustmentRequest request)
+        => ExecuteMutation(async () =>
+        {
+            var result = await _service.CreateAdjustmentAsync(TenantId(), invoiceId, IdempotencyKey(), request, Actor());
+            return CreatedAtAction(nameof(GetDocument), new { documentId = result.Id }, result);
+        });
+
     [HttpPost("documents/{documentId:long}/issue")]
     [RequireModulePermission("Accounts Receivable", PermissionAction.Edit)]
     public Task<IActionResult> Issue(long documentId, [FromBody] IssueDocumentRequest request)
         => ExecuteMutation(async () => Ok(await _service.IssueAsync(TenantId(), documentId, request, Actor())));
 
+    [HttpPost("documents/{documentId:long}/issue-adjustment")]
+    [RequireModulePermission("Receivable Adjustments", PermissionAction.Edit)]
+    public Task<IActionResult> IssueAdjustment(long documentId, [FromBody] IssueDocumentRequest request)
+        => ExecuteMutation(async () => Ok(await _service.IssueAdjustmentAsync(TenantId(), documentId, request, Actor())));
+
     [HttpPost("documents/{documentId:long}/cancel")]
     [RequireModulePermission("Accounts Receivable", PermissionAction.Edit)]
     public Task<IActionResult> Cancel(long documentId, [FromBody] CancelDocumentRequest request)
         => ExecuteMutation(async () => Ok(await _service.CancelAsync(TenantId(), documentId, request, Actor())));
+
+    [HttpPost("documents/{documentId:long}/cancel-adjustment")]
+    [RequireModulePermission("Receivable Adjustments", PermissionAction.Edit)]
+    public Task<IActionResult> CancelAdjustment(long documentId, [FromBody] CancelDocumentRequest request)
+        => ExecuteMutation(async () => Ok(await _service.CancelAdjustmentAsync(TenantId(), documentId, request, Actor())));
 
     [HttpGet("documents/{documentId:long}")]
     [RequireModulePermission("Accounts Receivable", PermissionAction.View)]
@@ -77,6 +98,24 @@ public sealed class CommercialFinanceController(ICommercialFinanceApplicationSer
         catch (FinanceConflictException exception)
         {
             return Conflict(new ProblemDetails { Status = 409, Title = "Commercial finance conflict", Detail = exception.Message });
+        }
+        catch (PostgresException exception) when (exception.SqlState is PostgresErrorCodes.UniqueViolation
+            or PostgresErrorCodes.CheckViolation or PostgresErrorCodes.SerializationFailure)
+        {
+            return Conflict(new ProblemDetails { Status = 409, Title = "Commercial finance conflict",
+                Detail = "The request conflicts with a concurrent or existing financial record. Reload and try again." });
+        }
+        catch (DbUpdateException exception) when (exception.InnerException is PostgresException postgres &&
+            postgres.SqlState is PostgresErrorCodes.UniqueViolation or PostgresErrorCodes.CheckViolation
+                or PostgresErrorCodes.SerializationFailure)
+        {
+            return Conflict(new ProblemDetails { Status = 409, Title = "Commercial finance conflict",
+                Detail = "The request conflicts with a concurrent or existing financial record. Reload and try again." });
+        }
+        catch (DbUpdateException)
+        {
+            return BadRequest(new ProblemDetails { Status = 400, Title = "Invalid commercial finance request",
+                Detail = "The request violates a financial data constraint." });
         }
         catch (KeyNotFoundException exception)
         {

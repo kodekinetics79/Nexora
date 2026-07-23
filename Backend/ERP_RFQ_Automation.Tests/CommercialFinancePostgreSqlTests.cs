@@ -13,6 +13,149 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
+    public async Task ReceivableAdjustments_EnforceLegalNumbersNetArCreditCeilingAndAuditPrivileges()
+    {
+        ReceivableDocumentDto invoice;
+        ReceivableDocumentDto credit;
+        ReceivableDocumentDto debit;
+        long overCreditDraftId;
+        long overCreditDraftLineId;
+        long firstRaceCreditDraftId;
+        long secondRaceCreditDraftId;
+        await using (var context = _database.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(context, AdjustmentBusinessUnitId);
+            Seed.Customer(context, AdjustmentCustomerId, AdjustmentBusinessUnitId, "Adjustment customer");
+            context.Currencies.Add(new Currency
+            {
+                Id = AdjustmentCurrencyId, Code = "ADJ", CurrencyName = "Adjustment currency", Symbol = "A",
+                ExchangeRate = 1m, IsBaseCurrency = true, IsActive = true, CreatedBy = "tests",
+                CreatedOn = DateTime.UtcNow, BusinessUnitId = AdjustmentBusinessUnitId
+            });
+            context.Products.Add(new Product
+            {
+                Id = AdjustmentProductId, ProductName = "Adjustment product", PartNo = "ADJ-1",
+                Buid = AdjustmentBusinessUnitId, CreatedBy = "tests", CreatedOn = DateTime.UtcNow, IsActive = true
+            });
+            context.SetupMasters.Add(new SetupMaster
+            {
+                SetupId = AdjustmentStatusId, SetupType = "OrderStatus", SetupCode = "CONFIRMED",
+                SetupValue = "Confirmed", BusinessUnitId = AdjustmentBusinessUnitId, IsActive = true,
+                CreatedBy = "tests", CreatedOn = DateTime.UtcNow
+            });
+            var order = new Order
+            {
+                Id = AdjustmentOrderId, OrderNo = "ORD-ADJUSTMENT-PG", CustomerId = AdjustmentCustomerId,
+                BusinessUnitId = AdjustmentBusinessUnitId, StatusId = AdjustmentStatusId,
+                CurrencyId = AdjustmentCurrencyId, OrderDate = DateTime.UtcNow, SubTotal = 200m,
+                DiscountAmount = 10m, TaxAmount = 19m, TotalAmount = 209m, BalanceAmount = 209m,
+                CreatedBy = "tests", CreatedOn = DateTime.UtcNow, IsActive = true,
+                OrderItems = [new OrderItem
+                {
+                    Id = AdjustmentOrderLineId, ProductId = AdjustmentProductId, Description = "Adjustment product",
+                    Quantity = 2m, UnitPrice = 100m, Discount = 10m, TaxAmount = 19m, TotalAmount = 209m,
+                    CreatedBy = "tests", CreatedDate = DateTime.UtcNow, IsActive = true
+                }]
+            };
+            context.Orders.Add(order);
+            await context.SaveChangesAsync();
+            var service = new CommercialFinanceApplicationService(context);
+            var invoiceDraft = await service.CreateInvoiceAsync(AdjustmentBusinessUnitId, order.Id,
+                "pg-adjustment-invoice", new CreateInvoiceRequest(null, null, null), "invoice-maker");
+            invoice = await service.IssueAsync(AdjustmentBusinessUnitId, invoiceDraft.Id,
+                new(invoiceDraft.Version), "invoice-checker");
+            var parentLineId = invoice.Lines.Single().Id;
+            var creditDraft = await service.CreateAdjustmentAsync(AdjustmentBusinessUnitId, invoice.Id,
+                "pg-adjustment-credit", new(ReceivableDocumentTypes.CreditNote, null, null, "RETURN",
+                    "Partial return", [new(parentLineId, 1m)]), "credit-maker");
+            credit = await service.IssueAdjustmentAsync(AdjustmentBusinessUnitId, creditDraft.Id,
+                new(creditDraft.Version), "credit-checker");
+            var debitDraft = await service.CreateAdjustmentAsync(AdjustmentBusinessUnitId, invoice.Id,
+                "pg-adjustment-debit", new(ReceivableDocumentTypes.DebitNote, null, null, "CORRECTION",
+                    "Underbilling correction", [new(parentLineId, 1m)]), "debit-maker");
+            debit = await service.IssueAdjustmentAsync(AdjustmentBusinessUnitId, debitDraft.Id,
+                new(debitDraft.Version), "debit-checker");
+            var overCredit = await service.CreateAdjustmentAsync(AdjustmentBusinessUnitId, invoice.Id,
+                "pg-adjustment-over-credit", new(ReceivableDocumentTypes.CreditNote, null, null, "RETURN",
+                    "Excess return", [new(parentLineId, 2m)]), "other-maker");
+            overCreditDraftId = overCredit.Id;
+            overCreditDraftLineId = overCredit.Lines.Single().Id;
+
+            var open = await service.GetOpenItemsAsync(AdjustmentBusinessUnitId, DateTime.UtcNow);
+            Assert.Contains(open, x => x.DocumentId == invoice.Id && x.OutstandingAmount == 104.50m);
+            Assert.Contains(open, x => x.DocumentId == debit.Id && x.OutstandingAmount == 104.50m);
+            await service.PostPaymentAsync(AdjustmentBusinessUnitId, "pg-adjustment-debit-payment",
+                new(AdjustmentCustomerId, null, AdjustmentCurrencyId, null, 104.50m, "BankTransfer", null,
+                    [new(debit.Id, 104.50m)]), "collector");
+            firstRaceCreditDraftId = (await service.CreateAdjustmentAsync(AdjustmentBusinessUnitId, invoice.Id,
+                "pg-adjustment-credit-race-1", new(ReceivableDocumentTypes.CreditNote, null, null, "RETURN",
+                    "Concurrent return one", [new(parentLineId, 1m)]), "race-maker-one")).Id;
+            secondRaceCreditDraftId = (await service.CreateAdjustmentAsync(AdjustmentBusinessUnitId, invoice.Id,
+                "pg-adjustment-credit-race-2", new(ReceivableDocumentTypes.CreditNote, null, null, "RETURN",
+                    "Concurrent return two", [new(parentLineId, 1m)]), "race-maker-two")).Id;
+        }
+
+        var creditRace = await Task.WhenAll(
+            CaptureAdjustmentIssueAsync(firstRaceCreditDraftId),
+            CaptureAdjustmentIssueAsync(secondRaceCreditDraftId));
+        Assert.Single(creditRace, x => x.Document is not null);
+        Assert.IsType<FinanceConflictException>(Assert.Single(creditRace, x => x.Error is not null).Error);
+
+        Assert.Matches($"^CRN-{DateTime.UtcNow.Year}-[0-9]{{6}}$", credit.DocumentNumber!);
+        Assert.Matches($"^DBN-{DateTime.UtcNow.Year}-[0-9]{{6}}$", debit.DocumentNumber!);
+        await using var connection = await _database.OpenConnectionAsync();
+        await using var directOverCredit = connection.CreateCommand();
+        directOverCredit.CommandText = """
+            UPDATE "ReceivableDocuments" SET "Status" = 'Issued', "IssuedOn" = now(),
+                "IssuedBy" = 'direct-checker', "Version" = "Version" + 1
+            WHERE "Id" = @id
+            """;
+        directOverCredit.Parameters.AddWithValue("id", overCreditDraftId);
+        Assert.Equal(PostgresErrorCodes.CheckViolation,
+            (await Assert.ThrowsAsync<PostgresException>(() => directOverCredit.ExecuteNonQueryAsync())).SqlState);
+
+        await using var mutateDraft = connection.CreateCommand();
+        mutateDraft.CommandText = "UPDATE \"ReceivableDocuments\" SET \"CreatedBy\" = 'forged-maker' WHERE \"Id\" = @id";
+        mutateDraft.Parameters.AddWithValue("id", overCreditDraftId);
+        Assert.Equal(PostgresErrorCodes.ObjectNotInPrerequisiteState,
+            (await Assert.ThrowsAsync<PostgresException>(() => mutateDraft.ExecuteNonQueryAsync())).SqlState);
+
+        await using var mutateDraftLine = connection.CreateCommand();
+        mutateDraftLine.CommandText = "UPDATE \"ReceivableDocumentLines\" SET \"Description\" = 'forged source' WHERE \"Id\" = @id";
+        mutateDraftLine.Parameters.AddWithValue("id", overCreditDraftLineId);
+        Assert.Equal(PostgresErrorCodes.ObjectNotInPrerequisiteState,
+            (await Assert.ThrowsAsync<PostgresException>(() => mutateDraftLine.ExecuteNonQueryAsync())).SqlState);
+
+        await using var auditTransaction = await connection.BeginTransactionAsync();
+        await using var forgedAudit = connection.CreateCommand();
+        forgedAudit.Transaction = auditTransaction;
+        forgedAudit.CommandText = $"""
+            SET LOCAL ROLE nexora_tenant_app;
+            SET LOCAL nexora.business_unit_id = '{AdjustmentBusinessUnitId}';
+            INSERT INTO "CommercialFinanceAudits"
+                ("BusinessUnitId", "AggregateType", "AggregateId", "Action", "Actor", "OccurredOn", "DetailJson")
+            VALUES ({AdjustmentBusinessUnitId}, 'ReceivableDocument', {invoice.Id}, 'Forged', 'attacker', now(), jsonb_build_object())
+            """;
+        Assert.Equal(PostgresErrorCodes.InsufficientPrivilege,
+            (await Assert.ThrowsAsync<PostgresException>(() => forgedAudit.ExecuteNonQueryAsync())).SqlState);
+        await auditTransaction.RollbackAsync();
+
+        await using var writerTransaction = await connection.BeginTransactionAsync();
+        await using var forgedWriterCall = connection.CreateCommand();
+        forgedWriterCall.Transaction = writerTransaction;
+        forgedWriterCall.CommandText = $"""
+            SET LOCAL ROLE nexora_tenant_app;
+            SET LOCAL nexora.business_unit_id = '{AdjustmentBusinessUnitId}';
+            SELECT public.nexora_write_finance_audit({AdjustmentBusinessUnitId}, 'ReceivableDocument',
+                {invoice.Id}, 'Issued', 'attacker', jsonb_build_object('forged', true), now()::timestamp without time zone)
+            """;
+        Assert.Equal(PostgresErrorCodes.InsufficientPrivilege,
+            (await Assert.ThrowsAsync<PostgresException>(() => forgedWriterCall.ExecuteNonQueryAsync())).SqlState);
+        await writerTransaction.RollbackAsync();
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
     public async Task FinanceLedger_ControlsConcurrentNumbersImmutabilityAndTenantForeignKeys()
     {
         long firstDraftId;
@@ -185,9 +328,9 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
             VALUES (@tenant, @documentId, @orderItemId, 'forged', 1, 1, 0, 0, 1)
             """;
         wrongOrderItem.Parameters.AddWithValue("tenant", BusinessUnitId);
-        wrongOrderItem.Parameters.AddWithValue("documentId", issued[0].Id);
+        wrongOrderItem.Parameters.AddWithValue("documentId", directOverInvoiceDraftId);
         wrongOrderItem.Parameters.AddWithValue("orderItemId", wrongOrderItemId);
-        Assert.Equal(PostgresErrorCodes.ForeignKeyViolation,
+        Assert.Equal(PostgresErrorCodes.ObjectNotInPrerequisiteState,
             (await Assert.ThrowsAsync<PostgresException>(() => wrongOrderItem.ExecuteNonQueryAsync())).SqlState);
 
         await using var overAllocate = connection.CreateCommand();
@@ -338,6 +481,18 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
         catch (Exception exception) { return (null, exception); }
     }
 
+    private async Task<(ReceivableDocumentDto? Document, Exception? Error)> CaptureAdjustmentIssueAsync(long documentId)
+    {
+        try
+        {
+            await using var context = _database.ContextFor(AdjustmentBusinessUnitId);
+            var document = await new CommercialFinanceApplicationService(context).IssueAdjustmentAsync(
+                AdjustmentBusinessUnitId, documentId, new IssueDocumentRequest(1), "race-checker");
+            return (document, null);
+        }
+        catch (Exception exception) { return (null, exception); }
+    }
+
     private async Task<ReceivableDocumentDto> CreateDraftAsync(long orderId, string idempotencyKey)
     {
         await using var context = _database.ContextFor(BusinessUnitId);
@@ -446,4 +601,11 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
     private const long OrderSevenId = 96_012;
     private const long OutboxTenantId = 96_100;
     private const long OutboxAggregateBase = 96_200;
+    private const long AdjustmentBusinessUnitId = 96_300;
+    private const long AdjustmentCustomerId = 96_301;
+    private const long AdjustmentCurrencyId = 96_302;
+    private const long AdjustmentProductId = 96_303;
+    private const long AdjustmentStatusId = 96_304;
+    private const long AdjustmentOrderId = 96_305;
+    private const long AdjustmentOrderLineId = 96_306;
 }
