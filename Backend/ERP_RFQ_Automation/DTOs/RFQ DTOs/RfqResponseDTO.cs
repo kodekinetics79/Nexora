@@ -5,6 +5,8 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
     public class RfqResponseDTO
     {
         public long Id { get; set; }
+        public long? CommercialCaseId { get; set; }
+        public string? CommercialCaseReference { get; set; }
         public string Rfqno { get; set; } = null!;
         public string? BuyersName { get; set; }
         public DateTime RecDate { get; set; }

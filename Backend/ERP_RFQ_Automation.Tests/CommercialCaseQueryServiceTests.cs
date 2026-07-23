@@ -1,5 +1,6 @@
 using ERP_RFQ_Automation.CommercialCases;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
+using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.Tests.Support;
 
 namespace ERP_RFQ_Automation.Tests;
@@ -20,7 +21,7 @@ public sealed class CommercialCaseQueryServiceTests
         }
 
         await using var context = db.ContextFor(91);
-        var service = new CommercialCaseQueryService(context);
+        var service = new CommercialCaseQueryService(context, new StubTenant(91));
 
         var results = await service.SearchAsync(91, "NXR-2026", 20, CancellationToken.None);
 
@@ -48,7 +49,7 @@ public sealed class CommercialCaseQueryServiceTests
         }
 
         await using var context = db.ContextFor(93);
-        var service = new CommercialCaseQueryService(context);
+        var service = new CommercialCaseQueryService(context, new StubTenant(93));
 
         var result = await service.GetAsync(93, caseId, CancellationToken.None);
 
@@ -74,7 +75,7 @@ public sealed class CommercialCaseQueryServiceTests
         }
 
         await using var context = db.ContextFor(95);
-        var service = new CommercialCaseQueryService(context);
+        var service = new CommercialCaseQueryService(context, new StubTenant(95));
 
         Assert.Null(await service.GetAsync(95, caseId, CancellationToken.None));
     }

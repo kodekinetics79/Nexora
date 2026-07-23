@@ -16,6 +16,8 @@ export interface LeadFilters {
 
 export interface LeadResponseDTO {
   id: number;
+  commercialCaseId?: number | null;
+  commercialCaseReference?: string | null;
   rfqno: string;
   buyersName: string;
   leadSource: string;

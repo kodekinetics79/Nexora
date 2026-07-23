@@ -7,6 +7,8 @@ namespace ERP_RFQ_Automation.DTOs.AcceptedLeadDTOs;
 public class AcceptedLeadResponseDTO
 {
     public long Id { get; set; }
+    public long? CommercialCaseId { get; set; }
+    public string? CommercialCaseReference { get; set; }
     public string? Rfqno { get; set; }
     public string? BuyersName { get; set; }
     public DateTime RecDate { get; set; }

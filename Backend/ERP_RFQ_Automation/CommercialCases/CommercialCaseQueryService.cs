@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.MultiTenancy;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.CommercialCases;
@@ -15,12 +16,18 @@ public interface ICommercialCaseQueryService
 public sealed class CommercialCaseQueryService : ICommercialCaseQueryService
 {
     private readonly ErpRfqAutomationContext _db;
+    private readonly ITenantContext _tenantContext;
 
-    public CommercialCaseQueryService(ErpRfqAutomationContext db) => _db = db;
+    public CommercialCaseQueryService(ErpRfqAutomationContext db, ITenantContext tenantContext)
+    {
+        _db = db;
+        _tenantContext = tenantContext;
+    }
 
     public async Task<IReadOnlyList<CommercialCaseSearchResult>> SearchAsync(
         long businessUnitId, string query, int limit, CancellationToken cancellationToken)
     {
+        businessUnitId = _tenantContext.BusinessUnitId ?? businessUnitId;
         var term = query.Trim().ToLower();
         limit = Math.Clamp(limit, 1, 50);
 
@@ -60,6 +67,7 @@ public sealed class CommercialCaseQueryService : ICommercialCaseQueryService
     public async Task<CommercialCaseDetail?> GetAsync(
         long businessUnitId, long commercialCaseId, CancellationToken cancellationToken)
     {
+        businessUnitId = _tenantContext.BusinessUnitId ?? businessUnitId;
         var header = await _db.CommercialCases
             .AsNoTracking()
             .Where(c => c.BusinessUnitId == businessUnitId && c.Id == commercialCaseId)

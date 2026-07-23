@@ -3,6 +3,8 @@ import axiosInstance from '../axiosInstance';
 
 export interface RfqResponseDTO {
     id: number;
+    commercialCaseId?: number | null;
+    commercialCaseReference?: string | null;
     rfqno: string;
     buyersName?: string;
     recDate: string;

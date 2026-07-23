@@ -76,6 +76,8 @@ namespace ERP_RFQ_Automation.Repositories
             var dtos = rfqs.Select(r => new RfqResponseDTO
             {
                 Id = r.Id,
+                CommercialCaseId = r.Lead != null ? r.Lead.CommercialCaseId : null,
+                CommercialCaseReference = r.Lead != null ? r.Lead.CommercialCaseReference : null,
                 Rfqno = r.Rfqno,
                 BuyersName = r.BuyersName,
                 RecDate = r.RecDate,
@@ -130,6 +132,8 @@ namespace ERP_RFQ_Automation.Repositories
             return new RfqResponseDTO
             {
                 Id = rfq.Id,
+                CommercialCaseId = rfq.Lead?.CommercialCaseId,
+                CommercialCaseReference = rfq.Lead?.CommercialCaseReference,
                 Rfqno = rfq.Rfqno,
                 BuyersName = rfq.BuyersName,
                 RecDate = rfq.RecDate,

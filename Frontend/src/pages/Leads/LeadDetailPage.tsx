@@ -14,6 +14,7 @@ import {
   Download as DownloadIcon,
   NavigateNext as NextIcon,
   AutoAwesome as SparkleIcon,
+  OpenInNew as WorkspaceIcon,
 } from '@mui/icons-material';
 import leadService from '../../api/services/leadService';
 import LifecycleActions from '../../components/common/LifecycleActions';
@@ -141,8 +142,27 @@ const LeadDetailPage: React.FC = () => {
           <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>
             {t('lead_detail_analysis') || 'Lead Details Analysis Engine'}
           </Typography>
+          {lead.commercialCaseReference && (
+            <Chip
+              label={lead.commercialCaseReference}
+              size="small"
+              variant="outlined"
+              sx={{ mt: 1, fontWeight: 900, fontFamily: 'monospace', width: 'fit-content' }}
+            />
+          )}
         </Box>
         <Stack direction="row" spacing={1.5}>
+          {lead.commercialCaseId && (
+            <Button
+              variant="outlined"
+              startIcon={<WorkspaceIcon />}
+              size="small"
+              onClick={() => navigate(`/commercial-cases/${lead.commercialCaseId}`)}
+              sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
+            >
+              Workspace
+            </Button>
+          )}
           <Button
             variant="contained"
             startIcon={<SparkleIcon />}

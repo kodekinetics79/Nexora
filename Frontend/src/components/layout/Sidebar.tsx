@@ -62,7 +62,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
     'security': location.pathname.includes('/security'),
     'inventory': location.pathname.includes('/inventory'),
     'supplier_mgmt': location.pathname.includes('/suppliers') || location.pathname.includes('/quoted-items') || location.pathname.includes('/purchase-orders'),
-    'lead_mgmt': location.pathname.includes('/leads'),
+    'lead_mgmt': location.pathname.includes('/leads') || location.pathname.includes('/commercial-cases'),
     'copilot': location.pathname.includes('/copilot'),
   });
 
@@ -113,6 +113,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
           { key: 'leads-outstanding', label: t('outstanding_leads'), path: '/procurement/leads/outstanding', moduleName: 'Leads' },
           { key: 'leads-assigned', label: t('assigned_leads'), path: '/procurement/leads/assigned', moduleName: 'Leads' },
           { key: 'leads-manual', label: t('manual_upload'), path: '/procurement/leads/manual-upload', moduleName: 'Leads' },
+          { key: 'commercial-workspace', label: 'Commercial Workspace', path: '/commercial-cases', moduleName: 'Leads', activePrefixes: ['/commercial-cases/'] },
         ]
       },
       {

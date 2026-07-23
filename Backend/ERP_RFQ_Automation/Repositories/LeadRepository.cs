@@ -105,6 +105,8 @@ namespace ERP_RFQ_Automation.Repositories
             var leadDtos = leads.Select(l => new LeadResponseDTO
             {
                 Id = l.Id,
+                CommercialCaseId = l.CommercialCaseId,
+                CommercialCaseReference = l.CommercialCaseReference,
                 Rfqno = l.Rfqno,
                 BuyersName = l.BuyersName,
                 RecDate = l.RecDate,
@@ -506,6 +508,8 @@ namespace ERP_RFQ_Automation.Repositories
             return new AcceptedLeadResponseDTO
             {
                 Id = lead.Id,
+                CommercialCaseId = lead.CommercialCaseId,
+                CommercialCaseReference = lead.CommercialCaseReference,
                 Rfqno = lead.Rfqno,
                 BuyersName = lead.BuyersName,
                 RecDate = lead.RecDate,
@@ -597,6 +601,8 @@ namespace ERP_RFQ_Automation.Repositories
             return new LeadResponseDTO
             {
                 Id = lead.Id,
+                CommercialCaseId = lead.CommercialCaseId,
+                CommercialCaseReference = lead.CommercialCaseReference,
                 Rfqno = lead.Rfqno,
                 BuyersName = lead.BuyersName,
                 RecDate = lead.RecDate,

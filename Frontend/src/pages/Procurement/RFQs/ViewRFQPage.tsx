@@ -15,6 +15,7 @@ import {
   NavigateNext as NextIcon,
   Schedule as HistoryIcon,
   AutoAwesome as SparkleIcon,
+  OpenInNew as WorkspaceIcon,
 } from '@mui/icons-material';
 import rfqService from '../../../api/services/rfqService';
 import { useAuth } from '../../../context/AuthContext';
@@ -96,6 +97,14 @@ const ViewRFQPage: React.FC = () => {
             <Typography variant="h4" sx={{ fontWeight: 950, color: 'text.primary', letterSpacing: '-0.02em' }}>
               {rfq.rfqno}
             </Typography>
+            {rfq.commercialCaseReference && (
+              <Chip
+                label={rfq.commercialCaseReference}
+                size="small"
+                variant="outlined"
+                sx={{ fontWeight: 900, fontFamily: 'monospace' }}
+              />
+            )}
             <Chip 
               label={rfq.rfqstatusValue || 'Unknown'} 
               color={isDraft ? "warning" : "success"}
@@ -104,6 +113,16 @@ const ViewRFQPage: React.FC = () => {
             />
           </Box>
           <Stack direction="row" spacing={1.5}>
+            {rfq.commercialCaseId && (
+              <Button
+                variant="outlined"
+                startIcon={<WorkspaceIcon />}
+                onClick={() => navigate(`/commercial-cases/${rfq.commercialCaseId}`)}
+                sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
+              >
+                Workspace
+              </Button>
+            )}
             <LifecycleActions aggregate="rfqs" id={rfq.id} onChanged={() => queryClient.invalidateQueries({ queryKey: ['rfq-detail', Number(id)] })} />
             <Button
               variant="outlined"
