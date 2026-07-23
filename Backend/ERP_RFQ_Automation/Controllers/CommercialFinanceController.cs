@@ -26,6 +26,11 @@ public sealed class CommercialFinanceController(ICommercialFinanceApplicationSer
     public Task<IActionResult> Issue(long documentId, [FromBody] IssueDocumentRequest request)
         => ExecuteMutation(async () => Ok(await _service.IssueAsync(TenantId(), documentId, request, Actor())));
 
+    [HttpPost("documents/{documentId:long}/cancel")]
+    [RequireModulePermission("Accounts Receivable", PermissionAction.Edit)]
+    public Task<IActionResult> Cancel(long documentId, [FromBody] CancelDocumentRequest request)
+        => ExecuteMutation(async () => Ok(await _service.CancelAsync(TenantId(), documentId, request, Actor())));
+
     [HttpGet("documents/{documentId:long}")]
     [RequireModulePermission("Accounts Receivable", PermissionAction.View)]
     public async Task<IActionResult> GetDocument(long documentId)

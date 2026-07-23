@@ -17,6 +17,10 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
     {
         long firstDraftId;
         long secondDraftId;
+        long cancellationDraftId;
+        long raceDraftId;
+        long directIssueDraftId;
+        long directOverInvoiceDraftId;
         await using (var seed = _database.ContextFor(null))
         {
             SeedParents(seed);
@@ -24,13 +28,24 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
             var secondOrder = NewOrder(OrderTwoId, "ORD-PG-AR-2");
             var replayOrder = NewOrder(OrderThreeId, "ORD-PG-AR-3");
             var conflictingReplayOrder = NewOrder(OrderFourId, "ORD-PG-AR-4");
-            seed.Orders.AddRange(firstOrder, secondOrder, replayOrder, conflictingReplayOrder);
+            var cancellationOrder = NewOrder(OrderFiveId, "ORD-PG-AR-5");
+            var raceOrder = NewOrder(OrderSixId, "ORD-PG-AR-6");
+            var directIssueOrder = NewOrder(OrderSevenId, "ORD-PG-AR-7");
+            seed.Orders.AddRange(firstOrder, secondOrder, replayOrder, conflictingReplayOrder, cancellationOrder, raceOrder, directIssueOrder);
             await seed.SaveChangesAsync();
             var service = new CommercialFinanceApplicationService(seed);
             firstDraftId = (await service.CreateInvoiceAsync(
                 BusinessUnitId, firstOrder.Id, "pg-finance-draft-1", new CreateInvoiceRequest(null, null, null), "tests")).Id;
             secondDraftId = (await service.CreateInvoiceAsync(
                 BusinessUnitId, secondOrder.Id, "pg-finance-draft-2", new CreateInvoiceRequest(null, null, null), "tests")).Id;
+            cancellationDraftId = (await service.CreateInvoiceAsync(
+                BusinessUnitId, cancellationOrder.Id, "pg-finance-cancel", new CreateInvoiceRequest(null, null, null), "tests")).Id;
+            raceDraftId = (await service.CreateInvoiceAsync(
+                BusinessUnitId, raceOrder.Id, "pg-finance-issue-cancel-race", new CreateInvoiceRequest(null, null, null), "tests")).Id;
+            directIssueDraftId = (await service.CreateInvoiceAsync(
+                BusinessUnitId, directIssueOrder.Id, "pg-finance-direct-issue", new CreateInvoiceRequest(null, null, null), "tests")).Id;
+            directOverInvoiceDraftId = (await service.CreateInvoiceAsync(
+                BusinessUnitId, directIssueOrder.Id, "pg-finance-direct-over-invoice", new CreateInvoiceRequest(null, null, null), "tests")).Id;
         }
 
         var concurrentReplay = await Task.WhenAll(
@@ -48,6 +63,20 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
         Assert.Equal(2, issued.Select(x => x.DocumentNumber).Distinct().Count());
         Assert.Equal(new[] { "INV-" + DateTime.UtcNow.Year + "-000001", "INV-" + DateTime.UtcNow.Year + "-000002" },
             issued.Select(x => x.DocumentNumber).Order().ToArray());
+
+        var cancelled = await CancelAsync(cancellationDraftId);
+        Assert.Equal(ReceivableDocumentStatuses.Cancelled, cancelled.Status);
+        Assert.Null(cancelled.DocumentNumber);
+        Assert.NotNull(cancelled.VoidedOn);
+
+        var race = await Task.WhenAll(CaptureIssueAsync(raceDraftId), CaptureCancelAsync(raceDraftId));
+        Assert.Single(race, x => x.Document is not null);
+        Assert.IsType<FinanceConflictException>(Assert.Single(race, x => x.Error is not null).Error);
+        await using (var verifyRace = _database.ContextFor(BusinessUnitId))
+        {
+            var final = await verifyRace.ReceivableDocuments.SingleAsync(x => x.Id == raceDraftId);
+            Assert.Contains(final.Status, new[] { ReceivableDocumentStatuses.Issued, ReceivableDocumentStatuses.Cancelled });
+        }
 
         long paymentId;
         await using (var paymentContext = _database.ContextFor(BusinessUnitId))
@@ -67,6 +96,48 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
         rewriteDocument.Parameters.AddWithValue("id", issued[0].Id);
         Assert.Equal("55000", (await Assert.ThrowsAsync<PostgresException>(
             () => rewriteDocument.ExecuteNonQueryAsync())).SqlState);
+
+        await using var rewriteCancelledDocument = connection.CreateCommand();
+        rewriteCancelledDocument.CommandText = "UPDATE \"ReceivableDocuments\" SET \"VoidReason\" = 'forged' WHERE \"Id\" = @id";
+        rewriteCancelledDocument.Parameters.AddWithValue("id", cancelled.Id);
+        Assert.Equal("55000", (await Assert.ThrowsAsync<PostgresException>(
+            () => rewriteCancelledDocument.ExecuteNonQueryAsync())).SqlState);
+
+        await using var governedDirectIssue = connection.CreateCommand();
+        governedDirectIssue.CommandText = """
+            UPDATE "ReceivableDocuments"
+            SET "Status" = 'Issued', "DocumentNumber" = 'FORGED-999', "IssuedOn" = now(),
+                "IssuedBy" = 'database-control-test', "Version" = "Version" + 1
+            WHERE "Id" = @id
+            RETURNING "DocumentNumber"
+            """;
+        governedDirectIssue.Parameters.AddWithValue("id", directIssueDraftId);
+        var databaseNumber = (string)(await governedDirectIssue.ExecuteScalarAsync())!;
+        Assert.NotEqual("FORGED-999", databaseNumber);
+        Assert.Matches($"^INV-{DateTime.UtcNow.Year}-[0-9]{{6}}$", databaseNumber);
+
+        await using var directOverInvoice = connection.CreateCommand();
+        directOverInvoice.CommandText = """
+            UPDATE "ReceivableDocuments"
+            SET "Status" = 'Issued', "DocumentNumber" = 'FORGED-OVER', "IssuedOn" = now(),
+                "IssuedBy" = 'database-control-test', "Version" = "Version" + 1
+            WHERE "Id" = @id
+            """;
+        directOverInvoice.Parameters.AddWithValue("id", directOverInvoiceDraftId);
+        Assert.Equal(PostgresErrorCodes.CheckViolation,
+            (await Assert.ThrowsAsync<PostgresException>(() => directOverInvoice.ExecuteNonQueryAsync())).SqlState);
+
+        await using var transitionAudits = connection.CreateCommand();
+        transitionAudits.CommandText = """
+            SELECT count(*) FROM "CommercialFinanceAudits"
+            WHERE "BusinessUnitId" = @tenant AND
+                (("AggregateId" = @cancelled AND "Action" = 'DraftCancelled' AND "Actor" = 'tests') OR
+                 ("AggregateId" = @directIssue AND "Action" = 'Issued' AND "Actor" = 'database-control-test'))
+            """;
+        transitionAudits.Parameters.AddWithValue("tenant", BusinessUnitId);
+        transitionAudits.Parameters.AddWithValue("cancelled", cancelled.Id);
+        transitionAudits.Parameters.AddWithValue("directIssue", directIssueDraftId);
+        Assert.Equal(2L, (long)(await transitionAudits.ExecuteScalarAsync())!);
 
         await using var rewriteAudit = connection.CreateCommand();
         rewriteAudit.CommandText = "UPDATE \"CommercialFinanceAudits\" SET \"Action\" = 'Forged' WHERE \"AggregateId\" = @id";
@@ -130,6 +201,25 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
         await using var context = _database.ContextFor(BusinessUnitId);
         return await new CommercialFinanceApplicationService(context)
             .IssueAsync(BusinessUnitId, documentId, new IssueDocumentRequest(1), "tests");
+    }
+
+    private async Task<ReceivableDocumentDto> CancelAsync(long documentId)
+    {
+        await using var context = _database.ContextFor(BusinessUnitId);
+        return await new CommercialFinanceApplicationService(context)
+            .CancelAsync(BusinessUnitId, documentId, new CancelDocumentRequest(1, "Duplicate draft"), "tests");
+    }
+
+    private async Task<(ReceivableDocumentDto? Document, Exception? Error)> CaptureIssueAsync(long documentId)
+    {
+        try { return (await IssueAsync(documentId), null); }
+        catch (Exception exception) { return (null, exception); }
+    }
+
+    private async Task<(ReceivableDocumentDto? Document, Exception? Error)> CaptureCancelAsync(long documentId)
+    {
+        try { return (await CancelAsync(documentId), null); }
+        catch (Exception exception) { return (null, exception); }
     }
 
     private async Task<ReceivableDocumentDto> CreateDraftAsync(long orderId, string idempotencyKey)
@@ -235,4 +325,7 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
     private const long OrderTwoId = 96_007;
     private const long OrderThreeId = 96_008;
     private const long OrderFourId = 96_009;
+    private const long OrderFiveId = 96_010;
+    private const long OrderSixId = 96_011;
+    private const long OrderSevenId = 96_012;
 }

@@ -5,11 +5,11 @@ import {
   DialogTitle, Divider, IconButton, MenuItem, Paper, Stack, Tab, Tabs, Table,
   TableBody, TableCell, TableContainer, TableHead, TableRow, TextField, Tooltip, Typography,
 } from '@mui/material';
-import { Banknote, CheckCircle2, CreditCard, FileCheck2, RefreshCw, RotateCcw } from 'lucide-react';
+import { Ban, Banknote, CheckCircle2, CreditCard, FileCheck2, RefreshCw, RotateCcw } from 'lucide-react';
 import dayjs from 'dayjs';
 import { useSnackbar } from 'notistack';
 import { useSearchParams } from 'react-router-dom';
-import commercialFinanceService, { type ArOpenItem, type CustomerPayment } from '../../../api/services/commercialFinanceService';
+import commercialFinanceService, { type ArOpenItem, type CustomerPayment, type ReceivableDocument } from '../../../api/services/commercialFinanceService';
 import { useAuth } from '../../../context/AuthContext';
 
 const money = (value: number) => value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -25,11 +25,13 @@ export default function AccountsReceivablePage() {
   const [reference, setReference] = useState('');
   const [reversing, setReversing] = useState<CustomerPayment | null>(null);
   const [reversalReason, setReversalReason] = useState('');
+  const [cancelling, setCancelling] = useState<ReceivableDocument | null>(null);
+  const [cancellationReason, setCancellationReason] = useState('');
   const targetRowRef = useRef<HTMLTableRowElement | null>(null);
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
   const { hasPermission } = useAuth();
-  const canIssue = hasPermission('Accounts Receivable', 'edit');
+  const canEditReceivables = hasPermission('Accounts Receivable', 'edit');
   const canRecordPayment = hasPermission('Customer Payments', 'create');
   const canViewPayments = hasPermission('Customer Payments');
   const canReversePayment = hasPermission('Customer Payments', 'edit');
@@ -58,6 +60,17 @@ export default function AccountsReceivablePage() {
     mutationFn: ({ id, version }: { id: number; version: number }) => commercialFinanceService.issueDocument(id, version),
     onSuccess: () => { enqueueSnackbar('Invoice issued', { variant: 'success' }); refresh(); },
     onError: (error: any) => enqueueSnackbar(error.response?.data?.detail ?? 'Invoice could not be issued', { variant: 'error' }),
+  });
+  const cancelDocument = useMutation({
+    mutationFn: () => commercialFinanceService.cancelDocument(cancelling!.id, {
+      reason: cancellationReason.trim(),
+      expectedVersion: cancelling!.version,
+    }),
+    onSuccess: () => {
+      enqueueSnackbar('Invoice draft cancelled', { variant: 'success' });
+      setCancelling(null); setCancellationReason(''); refresh();
+    },
+    onError: (error: any) => enqueueSnackbar(error.response?.data?.detail ?? 'Invoice draft could not be cancelled', { variant: 'error' }),
   });
   const payment = useMutation({
     mutationFn: () => commercialFinanceService.postPayment({
@@ -113,6 +126,10 @@ export default function AccountsReceivablePage() {
   const closeReversalDialog = () => {
     if (reversePayment.isPending) return;
     setReversing(null); setReversalReason('');
+  };
+  const closeCancellationDialog = () => {
+    if (cancelDocument.isPending) return;
+    setCancelling(null); setCancellationReason('');
   };
 
   if (openItems.isLoading || documents.isLoading || (canViewPayments && payments.isLoading)) return <Box sx={{ display: 'grid', placeItems: 'center', minHeight: 400 }}><CircularProgress /></Box>;
@@ -177,14 +194,22 @@ export default function AccountsReceivablePage() {
                 selected={document.id === targetDocumentId}
                 sx={document.id === targetDocumentId ? { outline: '2px solid', outlineColor: 'primary.main', outlineOffset: '-2px' } : undefined}
               >
-                <TableCell sx={{ fontWeight: 700 }}>{document.documentNumber ?? `Draft #${document.id}`}</TableCell>
+                <TableCell>
+                  <Typography variant="body2" sx={{ fontWeight: 700 }}>{document.documentNumber ?? `${document.status === 'Cancelled' ? 'Cancelled' : 'Draft'} #${document.id}`}</Typography>
+                  {document.status === 'Cancelled' && <Typography variant="caption" color="text.secondary" sx={{ display: 'block', maxWidth: 260, overflowWrap: 'anywhere' }}>
+                    {document.voidReason}{document.voidedBy ? ` - ${document.voidedBy}` : ''}{document.voidedOn ? ` - ${dayjs(document.voidedOn).format('DD MMM YYYY HH:mm')}` : ''}
+                  </Typography>}
+                </TableCell>
                 <TableCell>{document.currencyCode || (document.currencyId == null ? 'Unassigned' : `Currency ${document.currencyId}`)}</TableCell>
                 <TableCell><Chip size="small" label={document.status} color={document.status === 'Issued' ? 'success' : 'default'} /></TableCell>
                 <TableCell>{dayjs(document.documentDate).format('DD MMM YYYY')}</TableCell>
                 <TableCell>{dayjs(document.dueDate).format('DD MMM YYYY')}</TableCell>
                 <TableCell align="right">{money(document.totalAmount)}</TableCell>
                 <TableCell align="right">{money(document.outstandingAmount)}</TableCell>
-                <TableCell align="center">{canIssue && document.status === 'Draft' && <Tooltip title="Issue invoice"><span><IconButton size="small" disabled={issue.isPending} onClick={() => issue.mutate({ id: document.id, version: document.version })}><FileCheck2 size={18} /></IconButton></span></Tooltip>}</TableCell>
+                <TableCell align="center">{canEditReceivables && document.status === 'Draft' && <Stack direction="row" spacing={0.5} sx={{ justifyContent: 'center' }}>
+                  <Tooltip title="Issue invoice"><span><IconButton size="small" disabled={issue.isPending || cancelDocument.isPending} onClick={() => issue.mutate({ id: document.id, version: document.version })}><FileCheck2 size={18} /></IconButton></span></Tooltip>
+                  <Tooltip title="Cancel invoice draft"><span><IconButton size="small" color="error" disabled={issue.isPending || cancelDocument.isPending} onClick={() => setCancelling(document)}><Ban size={18} /></IconButton></span></Tooltip>
+                </Stack>}</TableCell>
               </TableRow>
             ))}{!documents.data?.length && <TableRow><TableCell colSpan={8} align="center" sx={{ py: 6 }}>No receivable documents.</TableCell></TableRow>}</TableBody>
           </Table></TableContainer>
@@ -230,6 +255,17 @@ export default function AccountsReceivablePage() {
           </Stack>
         </DialogContent>
         <DialogActions><Button disabled={reversePayment.isPending} onClick={closeReversalDialog}>Cancel</Button><Button color="error" variant="contained" disabled={reversePayment.isPending || !reversalReason.trim()} onClick={() => reversePayment.mutate()}>Reverse payment</Button></DialogActions>
+      </Dialog>
+
+      <Dialog open={Boolean(cancelling)} onClose={closeCancellationDialog} fullWidth maxWidth="xs">
+        <DialogTitle>Cancel invoice draft</DialogTitle><Divider />
+        <DialogContent sx={{ pt: 2 }}>
+          <Stack spacing={2}>
+            <Alert severity="warning">Draft {cancelling?.documentNumber ?? `#${cancelling?.id}`} will no longer be available for issuing.</Alert>
+            <TextField label="Reason" value={cancellationReason} onChange={event => setCancellationReason(event.target.value)} required multiline minRows={3} autoFocus helperText={`${cancellationReason.length}/500`} slotProps={{ htmlInput: { maxLength: 500 } }} />
+          </Stack>
+        </DialogContent>
+        <DialogActions><Button disabled={cancelDocument.isPending} onClick={closeCancellationDialog}>Keep draft</Button><Button color="error" variant="contained" disabled={cancelDocument.isPending || !cancellationReason.trim()} onClick={() => cancelDocument.mutate()}>Cancel draft</Button></DialogActions>
       </Dialog>
     </Box>
   );

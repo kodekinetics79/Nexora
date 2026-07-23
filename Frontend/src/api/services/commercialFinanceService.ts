@@ -24,6 +24,9 @@ export interface ReceivableDocument {
   documentDate: string;
   dueDate: string;
   issuedOn?: string;
+  voidedOn?: string;
+  voidReason?: string;
+  voidedBy?: string;
   subTotal: number;
   discountAmount: number;
   taxAmount: number;
@@ -86,6 +89,11 @@ const commercialFinanceService = {
   issueDocument: async (documentId: number, expectedVersion: number) =>
     (await axiosInstance.post<ReceivableDocument>(
       `/api/commercial-finance/documents/${documentId}/issue`, { expectedVersion },
+    )).data,
+
+  cancelDocument: async (documentId: number, data: { reason: string; expectedVersion: number }) =>
+    (await axiosInstance.post<ReceivableDocument>(
+      `/api/commercial-finance/documents/${documentId}/cancel`, data,
     )).data,
 
   postPayment: async (data: {

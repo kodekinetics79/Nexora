@@ -12,6 +12,7 @@ public interface ICommercialFinanceApplicationService
 {
     Task<ReceivableDocumentDto> CreateInvoiceAsync(long businessUnitId, long orderId, string idempotencyKey, CreateInvoiceRequest request, string actor);
     Task<ReceivableDocumentDto> IssueAsync(long businessUnitId, long documentId, IssueDocumentRequest request, string actor);
+    Task<ReceivableDocumentDto> CancelAsync(long businessUnitId, long documentId, CancelDocumentRequest request, string actor);
     Task<ReceivableDocumentDto?> GetDocumentAsync(long businessUnitId, long documentId);
     Task<IReadOnlyList<ReceivableDocumentDto>> GetDocumentsAsync(long businessUnitId, long? customerId, string? status);
     Task<CustomerPaymentDto> PostPaymentAsync(long businessUnitId, string idempotencyKey, PostPaymentRequest request, string actor);
@@ -124,25 +125,68 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
         return await InSerializableTransactionAsync(async () =>
         {
             var document = await LockDocumentAsync(documentId, businessUnitId);
+            if (document.Version != request.ExpectedVersion)
+                throw new FinanceConflictException("The document changed; reload it before issuing.");
             if (document.Status == ReceivableDocumentStatuses.Issued)
                 return await MapDocumentAsync(document);
             if (document.Status != ReceivableDocumentStatuses.Draft)
                 throw new FinanceConflictException("Only draft documents can be issued.");
-            if (document.Version != request.ExpectedVersion)
-                throw new FinanceConflictException("The document changed; reload it before issuing.");
             if (document.Lines.Count == 0 || document.TotalAmount <= 0)
                 throw new FinanceConflictException("A document must have positive reconciled lines before issue.");
             EnsureDocumentReconciles(document);
             await EnsureIssueQuantitiesAsync(document, businessUnitId);
 
-            var number = await AllocateNumberAsync(businessUnitId, document.DocumentType, document.DocumentDate.Year);
+            var databaseAllocatesNumber = _context.Database.IsNpgsql();
+            var number = databaseAllocatesNumber
+                ? "PENDING-DATABASE-ALLOCATION"
+                : await AllocateNumberAsync(businessUnitId, document.DocumentType, document.DocumentDate.Year);
             document.DocumentNumber = number;
             document.Status = ReceivableDocumentStatuses.Issued;
             document.IssuedOn = DateTime.UtcNow;
             document.IssuedBy = actor;
             document.Version++;
-            AddAudit(businessUnitId, "ReceivableDocument", document.Id, "Issued", actor, new { number });
+            if (!databaseAllocatesNumber)
+                AddAudit(businessUnitId, "ReceivableDocument", document.Id, "Issued", actor, new { number });
             await _context.SaveChangesAsync();
+            if (databaseAllocatesNumber)
+                await _context.Entry(document).ReloadAsync();
+            return await MapDocumentAsync(document);
+        });
+    }
+
+    public async Task<ReceivableDocumentDto> CancelAsync(
+        long businessUnitId, long documentId, CancelDocumentRequest request, string actor)
+    {
+        var reason = request.Reason?.Trim();
+        if (string.IsNullOrWhiteSpace(reason) || reason.Length > 500)
+            throw new ArgumentException("A cancellation reason up to 500 characters is required.");
+
+        return await InSerializableTransactionAsync(async () =>
+        {
+            var document = await LockDocumentAsync(documentId, businessUnitId);
+            if (document.Version != request.ExpectedVersion)
+                throw new FinanceConflictException("The document changed; reload it before cancelling.");
+            if (document.Status == ReceivableDocumentStatuses.Cancelled)
+            {
+                if (!string.Equals(document.VoidReason, reason, StringComparison.Ordinal))
+                    throw new FinanceConflictException("The document was already cancelled with a different reason.");
+                return await MapDocumentAsync(document);
+            }
+            if (document.Status != ReceivableDocumentStatuses.Draft)
+                throw new FinanceConflictException("Only draft documents can be cancelled.");
+
+            var databaseWritesAudit = _context.Database.IsNpgsql();
+            document.Status = ReceivableDocumentStatuses.Cancelled;
+            document.VoidedOn = DateTime.UtcNow;
+            document.VoidReason = reason;
+            document.VoidedBy = actor;
+            document.Version++;
+            if (!databaseWritesAudit)
+                AddAudit(businessUnitId, "ReceivableDocument", document.Id, "DraftCancelled", actor,
+                    new { Reason = reason });
+            await _context.SaveChangesAsync();
+            if (databaseWritesAudit)
+                await _context.Entry(document).ReloadAsync();
             return await MapDocumentAsync(document);
         });
     }
@@ -458,7 +502,7 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
         return new ReceivableDocumentDto(
             document.Id, document.CommercialCaseId, document.CustomerId, document.OrderId,
             document.CurrencyId, await CurrencyCodeAsync(document.CurrencyId), document.DocumentType, document.Status, document.DocumentNumber,
-            document.DocumentDate, document.DueDate, document.IssuedOn, document.SubTotal,
+            document.DocumentDate, document.DueDate, document.IssuedOn, document.VoidedOn, document.VoidReason, document.VoidedBy, document.SubTotal,
             document.DiscountAmount, document.TaxAmount, document.TotalAmount, allocated,
             Round(document.TotalAmount - allocated), document.Version,
             document.Lines.OrderBy(x => x.Id).Select(x => new ReceivableLineDto(

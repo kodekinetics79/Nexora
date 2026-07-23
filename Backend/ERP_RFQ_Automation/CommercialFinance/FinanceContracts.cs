@@ -3,6 +3,7 @@ namespace ERP_RFQ_Automation.CommercialFinance;
 public sealed record CreateInvoiceRequest(DateTime? DocumentDate, DateTime? DueDate, IReadOnlyList<CreateInvoiceLineRequest>? Lines);
 public sealed record CreateInvoiceLineRequest(long OrderItemId, decimal Quantity);
 public sealed record IssueDocumentRequest(long ExpectedVersion);
+public sealed record CancelDocumentRequest(long ExpectedVersion, string Reason);
 public sealed record ReversePaymentRequest(long ExpectedVersion, string Reason);
 public sealed record PostPaymentRequest(
     long CustomerId,
@@ -21,7 +22,7 @@ public sealed record ReceivableLineDto(
 public sealed record ReceivableDocumentDto(
     long Id, long? CommercialCaseId, long CustomerId, long? OrderId, long? CurrencyId, string? CurrencyCode,
     string DocumentType, string Status, string? DocumentNumber, DateTime DocumentDate,
-    DateTime DueDate, DateTime? IssuedOn, decimal SubTotal, decimal DiscountAmount,
+    DateTime DueDate, DateTime? IssuedOn, DateTime? VoidedOn, string? VoidReason, string? VoidedBy, decimal SubTotal, decimal DiscountAmount,
     decimal TaxAmount, decimal TotalAmount, decimal AllocatedAmount, decimal OutstandingAmount,
     long Version, IReadOnlyList<ReceivableLineDto> Lines);
 public sealed record CustomerPaymentDto(

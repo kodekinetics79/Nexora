@@ -14,10 +14,64 @@ public sealed class CommercialFinanceTests
     {
         AssertPermission(nameof(CommercialFinanceController.CreateInvoice), "Accounts Receivable", PermissionAction.Create);
         AssertPermission(nameof(CommercialFinanceController.Issue), "Accounts Receivable", PermissionAction.Edit);
+        AssertPermission(nameof(CommercialFinanceController.Cancel), "Accounts Receivable", PermissionAction.Edit);
         AssertPermission(nameof(CommercialFinanceController.GetDocuments), "Accounts Receivable", PermissionAction.View);
         AssertPermission(nameof(CommercialFinanceController.PostPayment), "Customer Payments", PermissionAction.Create);
         AssertPermission(nameof(CommercialFinanceController.GetPayments), "Customer Payments", PermissionAction.View);
         AssertPermission(nameof(CommercialFinanceController.ReversePayment), "Customer Payments", PermissionAction.Edit);
+    }
+
+    [Fact]
+    public async Task CancelDraft_RequiresCurrentVersionAndReasonAndBecomesImmutableState()
+    {
+        using var database = new TestDb();
+        await using var db = database.ContextFor(BusinessUnitId);
+        var order = SeedOrder(db);
+        var service = new CommercialFinanceApplicationService(db);
+        var draft = await service.CreateInvoiceAsync(
+            BusinessUnitId, order.Id, "cancel-draft-1", new CreateInvoiceRequest(null, null, null), "finance@test");
+
+        await Assert.ThrowsAsync<ArgumentException>(() => service.CancelAsync(
+            BusinessUnitId, draft.Id, new CancelDocumentRequest(draft.Version, "  "), "finance@test"));
+        await Assert.ThrowsAsync<FinanceConflictException>(() => service.CancelAsync(
+            BusinessUnitId, draft.Id, new CancelDocumentRequest(draft.Version + 1, "Duplicate draft"), "finance@test"));
+
+        var cancelled = await service.CancelAsync(
+            BusinessUnitId, draft.Id, new CancelDocumentRequest(draft.Version, " Duplicate draft "), "finance@test");
+        var replay = await service.CancelAsync(
+            BusinessUnitId, draft.Id, new CancelDocumentRequest(cancelled.Version, "Duplicate draft"), "finance@test");
+        await Assert.ThrowsAsync<FinanceConflictException>(() => service.CancelAsync(
+            BusinessUnitId, draft.Id, new CancelDocumentRequest(draft.Version, "Duplicate draft"), "finance@test"));
+        await Assert.ThrowsAsync<FinanceConflictException>(() => service.CancelAsync(
+            BusinessUnitId, draft.Id, new CancelDocumentRequest(cancelled.Version, "Different reason"), "finance@test"));
+
+        Assert.Equal(ReceivableDocumentStatuses.Cancelled, cancelled.Status);
+        Assert.Equal(draft.Version + 1, cancelled.Version);
+        Assert.Null(cancelled.DocumentNumber);
+        Assert.NotNull(cancelled.VoidedOn);
+        Assert.Equal("Duplicate draft", cancelled.VoidReason);
+        Assert.Equal("finance@test", cancelled.VoidedBy);
+        Assert.Equal(cancelled.Id, replay.Id);
+        Assert.Equal(2, await db.CommercialFinanceAudits.CountAsync(x => x.AggregateId == draft.Id));
+        Assert.Contains(await db.CommercialFinanceAudits.ToListAsync(),
+            x => x.AggregateId == draft.Id && x.Action == "DraftCancelled");
+
+        await Assert.ThrowsAsync<FinanceConflictException>(() => service.IssueAsync(
+            BusinessUnitId, draft.Id, new IssueDocumentRequest(cancelled.Version), "issuer@test"));
+    }
+
+    [Fact]
+    public async Task CancelDraft_CannotCrossTenantBoundary()
+    {
+        using var database = new TestDb();
+        await using var db = database.ContextFor(BusinessUnitId);
+        var order = SeedOrder(db);
+        var service = new CommercialFinanceApplicationService(db);
+        var draft = await service.CreateInvoiceAsync(
+            BusinessUnitId, order.Id, "cancel-tenant-1", new CreateInvoiceRequest(null, null, null), "finance@test");
+
+        await Assert.ThrowsAsync<KeyNotFoundException>(() => service.CancelAsync(
+            BusinessUnitId + 1, draft.Id, new CancelDocumentRequest(draft.Version, "Wrong tenant"), "finance@test"));
     }
 
     [Fact]
@@ -80,7 +134,9 @@ public sealed class CommercialFinanceTests
             "finance@test");
 
         var issued = await service.IssueAsync(BusinessUnitId, draft.Id, new IssueDocumentRequest(draft.Version), "issuer@test");
-        var issueReplay = await service.IssueAsync(BusinessUnitId, draft.Id, new IssueDocumentRequest(draft.Version), "issuer@test");
+        var issueReplay = await service.IssueAsync(BusinessUnitId, draft.Id, new IssueDocumentRequest(issued.Version), "issuer@test");
+        await Assert.ThrowsAsync<FinanceConflictException>(() => service.IssueAsync(
+            BusinessUnitId, draft.Id, new IssueDocumentRequest(draft.Version), "issuer@test"));
 
         Assert.Equal(issued.DocumentNumber, issueReplay.DocumentNumber);
         Assert.StartsWith($"INV-{DateTime.UtcNow.Year}-", issued.DocumentNumber);

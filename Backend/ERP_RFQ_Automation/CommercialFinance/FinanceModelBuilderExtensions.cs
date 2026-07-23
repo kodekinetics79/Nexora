@@ -21,6 +21,7 @@ public static class FinanceModelBuilderExtensions
             entity.Property(x => x.IdempotencyKey).HasMaxLength(128).IsRequired();
             entity.Property(x => x.RequestHash).HasMaxLength(64).IsRequired();
             entity.Property(x => x.VoidReason).HasMaxLength(500);
+            entity.Property(x => x.VoidedBy).HasMaxLength(255);
             entity.Property(x => x.CreatedBy).HasMaxLength(255).IsRequired();
             entity.Property(x => x.IssuedBy).HasMaxLength(255);
             entity.Property(x => x.Version).IsConcurrencyToken();
@@ -37,7 +38,7 @@ public static class FinanceModelBuilderExtensions
                 .HasDatabaseName("IX_ReceivableDocuments_BU_Status_Due");
             entity.HasCheckConstraint("CK_ReceivableDocuments_Total", "\"TotalAmount\" >= 0 AND \"SubTotal\" >= 0 AND \"DiscountAmount\" >= 0 AND \"TaxAmount\" >= 0");
             entity.HasCheckConstraint("CK_ReceivableDocuments_Reconciles", "\"TotalAmount\" = round(\"SubTotal\" - \"DiscountAmount\" + \"TaxAmount\", 2)");
-            entity.HasCheckConstraint("CK_ReceivableDocuments_Issue", "(\"Status\" = 'Draft' AND \"DocumentNumber\" IS NULL AND \"IssuedOn\" IS NULL) OR (\"Status\" IN ('Issued', 'Void') AND \"DocumentNumber\" IS NOT NULL AND \"IssuedOn\" IS NOT NULL)");
+            entity.HasCheckConstraint("CK_ReceivableDocuments_Issue", "(\"Status\" = 'Draft' AND \"DocumentNumber\" IS NULL AND \"IssuedOn\" IS NULL AND \"VoidedOn\" IS NULL AND \"VoidReason\" IS NULL AND \"VoidedBy\" IS NULL) OR (\"Status\" = 'Cancelled' AND \"DocumentNumber\" IS NULL AND \"IssuedOn\" IS NULL AND \"VoidedOn\" IS NOT NULL AND \"VoidReason\" IS NOT NULL AND length(trim(\"VoidReason\")) > 0 AND \"VoidedBy\" IS NOT NULL AND length(trim(\"VoidedBy\")) > 0) OR (\"Status\" IN ('Issued', 'Void') AND \"DocumentNumber\" IS NOT NULL AND \"IssuedOn\" IS NOT NULL)");
             entity.HasOne<Order>().WithMany()
                 .HasForeignKey(x => new { x.BusinessUnitId, x.OrderId })
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);

@@ -305,5 +305,34 @@ Complete the first-class invoice, payment, accounts-receivable, and credit/debit
 - This increment deliberately does not claim the complete award-to-cash roadmap. Customer
   award records, credit/debit notes, write-offs/refunds, statements/dunning, bank
   reconciliation, GL export, and a transactional finance outbox remain the next governed
-  delivery slices. Draft cancellation/consolidation is also required before exposing
-  arbitrary partial-invoice drafting beyond the current deterministic full-order action.
+  delivery slices. Partial-draft consolidation remains required before exposing arbitrary
+  partial-invoice drafting beyond the current deterministic full-order action.
+
+## Governed invoice draft cancellation (2026-07-23)
+- Added a reason-required, version-checked cancellation command under the existing
+  `Accounts Receivable` edit permission. The command locks the tenant document inside a
+  serializable transaction, permits only `Draft` to `Cancelled`, writes the finance audit
+  in the same transaction, and never allocates or consumes a legal document number.
+- PostgreSQL now owns finalized receivable transitions: it replaces any caller-supplied
+  issue number with the next locked legal sequence and appends issue/cancellation audit
+  evidence inside the transition trigger. Direct SQL therefore cannot forge a legal
+  number, omit the transition audit, or perform an unrecognized status transition. Before
+  numbering, the trigger also locks and validates the eligible source order, reconciles
+  every line and header total, verifies order-line ownership, and rejects cumulative
+  issued quantity above the source order.
+- The document status constraint now distinguishes unnumbered drafts, unnumbered cancelled
+  drafts with cancellation evidence, and numbered issued/void documents. PostgreSQL
+  transition triggers permit only the governed cancellation field set and make cancelled
+  documents and their lines immutable afterward.
+- The AR workspace exposes cancellation only for draft documents and authorized editors,
+  requires a reason in a confirmation dialog, sends the current aggregate version,
+  enforces the server's 500-character limit, disables competing issue/cancel submissions,
+  refreshes documents and balances, and displays cancellation reason, actor, and time.
+- Verification includes focused service/controller tests, a production-dialect test that
+  runs issue and cancel concurrently and proves exactly one wins, direct SQL immutability
+  enforcement, clean EF model drift, inspected idempotent upgrade SQL, and a passing
+  TypeScript/Vite production build. The release gate passes **291/291 backend tests**.
+- Independent finance/security re-review returned **SHIP** with no P0/P1 findings after
+  the database transition controls were strengthened. A dedicated HTTP-middleware 403
+  test for the cancellation route remains P2; permission-attribute and shared RBAC-handler
+  coverage currently prove the authorization contract.

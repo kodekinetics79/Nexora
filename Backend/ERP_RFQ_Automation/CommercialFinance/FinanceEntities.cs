@@ -10,6 +10,7 @@ public static class ReceivableDocumentTypes
 public static class ReceivableDocumentStatuses
 {
     public const string Draft = "Draft";
+    public const string Cancelled = "Cancelled";
     public const string Issued = "Issued";
     public const string Void = "Void";
 }
@@ -37,6 +38,7 @@ public sealed class ReceivableDocument
     public DateTime? IssuedOn { get; set; }
     public DateTime? VoidedOn { get; set; }
     public string? VoidReason { get; set; }
+    public string? VoidedBy { get; set; }
     public decimal SubTotal { get; set; }
     public decimal DiscountAmount { get; set; }
     public decimal TaxAmount { get; set; }
