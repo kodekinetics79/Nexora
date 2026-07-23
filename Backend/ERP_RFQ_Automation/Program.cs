@@ -59,6 +59,15 @@ if (string.IsNullOrWhiteSpace(jwtKey) || jwtKey.Contains("__JWT_") || Encoding.U
         "Jwt:Key is missing, a placeholder, or shorter than 256 bits (32 bytes). " +
         "Provide a strong signing key via secure configuration.");
 
+var contactVerificationSecret = builder.Configuration["CommercialFinance:ContactVerificationSecret"];
+var dunningProviderSecret = builder.Configuration["CommercialFinance:DunningProviderWebhookSecret"];
+var auditActorSecret = builder.Configuration["CommercialFinance:AuditActorSecret"];
+if (string.IsNullOrWhiteSpace(contactVerificationSecret) || Encoding.UTF8.GetByteCount(contactVerificationSecret) < 32 ||
+    string.IsNullOrWhiteSpace(dunningProviderSecret) || Encoding.UTF8.GetByteCount(dunningProviderSecret) < 32 ||
+    string.IsNullOrWhiteSpace(auditActorSecret) || Encoding.UTF8.GetByteCount(auditActorSecret) < 32)
+    throw new InvalidOperationException(
+        "Commercial finance provider secrets are required and must each contain at least 32 bytes.");
+
 // Add services to the container.
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
@@ -133,6 +142,7 @@ builder.Services.AddScoped<IQuoteService, QuoteService>();
 builder.Services.AddScoped<IOrderRepository, OrderRepository>();
 builder.Services.AddScoped<IOrderService, OrderService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialFinance.ICommercialFinanceApplicationService, ERP_RFQ_Automation.CommercialFinance.CommercialFinanceApplicationService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.CommercialFinance.IReceivablesOperationsService, ERP_RFQ_Automation.CommercialFinance.ReceivablesOperationsService>();
 builder.Services.AddScoped<ICustomerAwardApplicationService, CustomerAwardApplicationService>();
 builder.Services.AddScoped<IShipmentRepository, ShipmentRepository>();
 builder.Services.AddScoped<IQuoteConfigurationRepository, QuoteConfigurationRepository>();
@@ -367,10 +377,10 @@ var app = builder.Build();
 // Database:ApplyMigrationsOnStartup=false only when an external release job owns it.
 var applyMigrations = app.Configuration.GetValue<bool?>("Database:ApplyMigrationsOnStartup")
     ?? app.Environment.IsProduction();
+var migrationConnection = app.Configuration.GetConnectionString("MigrationConnection")
+    ?? ResolveDirectMigrationConnection(connectionString);
 if (applyMigrations)
 {
-    var migrationConnection = app.Configuration.GetConnectionString("MigrationConnection")
-        ?? ResolveDirectMigrationConnection(connectionString);
     var migrationOptions = new DbContextOptionsBuilder<ErpRfqAutomationContext>()
         .UseNpgsql(migrationConnection, npgsql =>
         {
@@ -381,12 +391,34 @@ if (applyMigrations)
     await using var migrationDb = new ErpRfqAutomationContext(migrationOptions);
     await migrationDb.Database.MigrateAsync();
 }
+await SyncFinanceProviderSecretsAsync(
+    migrationConnection, contactVerificationSecret, dunningProviderSecret, auditActorSecret);
 
 if (app.Environment.IsProduction())
     await ValidateRuntimeDatabaseRoleAsync(connectionString);
 
 static string ResolveDirectMigrationConnection(string runtimeConnection)
     => runtimeConnection.Replace("-pooler.", ".", StringComparison.OrdinalIgnoreCase);
+
+static async Task SyncFinanceProviderSecretsAsync(
+    string connectionString, string contactSecret, string deliverySecret, string auditActorSecret)
+{
+    await using var connection = new NpgsqlConnection(connectionString);
+    await connection.OpenAsync();
+    await using var command = connection.CreateCommand();
+    command.CommandText = """
+        INSERT INTO public."FinanceProviderSecrets" ("Name", "Secret", "UpdatedOn")
+        VALUES ('ContactVerification', @contact_secret, now()),
+               ('DunningDelivery', @delivery_secret, now()),
+               ('AuditActor', @audit_actor_secret, now())
+        ON CONFLICT ("Name") DO UPDATE
+        SET "Secret" = EXCLUDED."Secret", "UpdatedOn" = EXCLUDED."UpdatedOn";
+        """;
+    command.Parameters.AddWithValue("contact_secret", contactSecret);
+    command.Parameters.AddWithValue("delivery_secret", deliverySecret);
+    command.Parameters.AddWithValue("audit_actor_secret", auditActorSecret);
+    await command.ExecuteNonQueryAsync();
+}
 
 static async Task ValidateRuntimeDatabaseRoleAsync(string runtimeConnection)
 {

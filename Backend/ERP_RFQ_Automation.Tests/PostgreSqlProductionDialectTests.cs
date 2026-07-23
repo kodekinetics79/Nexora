@@ -355,6 +355,82 @@ public sealed class PostgreSqlProductionDialectTests
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
+    public async Task ProviderEvidenceMigration_PreservesUnsignedHistoricalRows()
+    {
+        var databaseName = $"provider_evidence_{Guid.NewGuid():N}";
+        var adminBuilder = new NpgsqlConnectionStringBuilder(_database.ConnectionString) { Database = "postgres" };
+        var isolatedBuilder = new NpgsqlConnectionStringBuilder(_database.ConnectionString) { Database = databaseName };
+
+        await using (var admin = new NpgsqlConnection(adminBuilder.ConnectionString))
+        {
+            await admin.OpenAsync();
+            await using var create = admin.CreateCommand();
+            create.CommandText = $"CREATE DATABASE \"{databaseName}\"";
+            await create.ExecuteNonQueryAsync();
+        }
+
+        try
+        {
+            await using var context = _database.ContextForConnectionString(isolatedBuilder.ConnectionString, null);
+            var migrator = context.GetService<IMigrator>();
+            await migrator.MigrateAsync("20260723232000_GovernPromiseIdempotency");
+            await context.Database.ExecuteSqlRawAsync("""
+                INSERT INTO "BusinessUnits"
+                    ("ID", "BusinessUnitCode", "BusinessUnitName", "CreatedBy", "CreatedOn")
+                VALUES (94801, 'EVIDENCE', 'Evidence migration', 'tests', now());
+                INSERT INTO "Customers"
+                    ("ID", "Name", "ImageURL", "BUID", "CreatedBy", "CreatedOn")
+                VALUES (94802, 'Legacy evidence customer', '', 94801, 'tests', now());
+                INSERT INTO "FinanceCommunicationContacts"
+                    ("Id", "BusinessUnitId", "CustomerId", "Purpose", "Channel", "DestinationToken",
+                     "MaskedDestination", "IsVerified", "IsActive", "EffectiveFrom",
+                     "VerificationEvidenceReference", "VerificationProviderEventId", "IdempotencyKey",
+                     "RequestHash", "Version", "CreatedBy", "CreatedOn")
+                VALUES (94803, 94801, 94802, 'Collections', 'Email', 'vault:legacy-contact',
+                        'l***@example.com', true, true, timestamp '2026-07-01', 'legacy-provider-evidence',
+                        '94803000-0000-0000-0000-000000000001', 'legacy-contact-94803', repeat('1', 64),
+                        1, 'tests', timestamp '2026-07-01');
+
+                SET session_replication_role = replica;
+                INSERT INTO "DunningDeliveryAttempts"
+                    ("Id", "BusinessUnitId", "DunningNoticeId", "ProviderEventId", "AttemptNumber",
+                     "Status", "MaskedDestination", "ArtifactHash", "TemplateVersion", "ProviderReference",
+                     "ProviderOccurredOn", "SignedEvidenceReference", "OccurredOn", "RecordedBy")
+                VALUES (94804, 94801, 94899, '94804000-0000-0000-0000-000000000001', 1,
+                        'Delivered', 'l***@example.com', repeat('2', 64), 'legacy-v1', 'legacy-provider-ref',
+                        timestamp '2026-07-01', 'legacy-signed-evidence', timestamp '2026-07-01', 'tests');
+                SET session_replication_role = origin;
+                """);
+
+            await migrator.MigrateAsync("20260723233000_GovernProviderEvidence");
+
+            var unsignedRows = await context.Database.SqlQueryRaw<long>("""
+                SELECT
+                    (SELECT count(*) FROM "FinanceCommunicationContacts" WHERE "ProviderSignature" IS NULL) +
+                    (SELECT count(*) FROM "DunningDeliveryAttempts" WHERE "ProviderSignature" IS NULL)
+                    AS "Value"
+                """).SingleAsync();
+            Assert.Equal(2, unsignedRows);
+
+            await migrator.MigrateAsync("20260723232000_GovernPromiseIdempotency");
+            var secretTableSurvivedDowngrade = await context.Database.SqlQueryRaw<bool>("""
+                SELECT to_regclass('public."FinanceProviderSecrets"') IS NOT NULL AS "Value"
+                """).SingleAsync();
+            Assert.True(secretTableSurvivedDowngrade);
+        }
+        finally
+        {
+            NpgsqlConnection.ClearAllPools();
+            await using var admin = new NpgsqlConnection(adminBuilder.ConnectionString);
+            await admin.OpenAsync();
+            await using var drop = admin.CreateCommand();
+            drop.CommandText = $"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)";
+            await drop.ExecuteNonQueryAsync();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
     public async Task AllMigrationsApplyToAnEmptyPostgreSqlDatabase()
     {
         await using var context = _database.ContextFor(null);

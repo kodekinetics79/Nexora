@@ -1,5 +1,8 @@
 using System.Collections.Concurrent;
 using System.Data.Common;
+using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 
 namespace ERP_RFQ_Automation.MultiTenancy;
@@ -15,10 +18,21 @@ public sealed class TenantRlsCommandInterceptor : DbCommandInterceptor
     public const string TenantRole = "nexora_tenant_app";
 
     private readonly ITenantContext _tenantContext;
+    private readonly IHttpContextAccessor? _httpContextAccessor;
+    private readonly byte[]? _auditActorSecret;
     private readonly ConcurrentDictionary<Guid, DbTransaction> _ownedTransactions = new();
 
     public TenantRlsCommandInterceptor(ITenantContext tenantContext)
         => _tenantContext = tenantContext;
+
+    public TenantRlsCommandInterceptor(
+        ITenantContext tenantContext, IHttpContextAccessor httpContextAccessor, IConfiguration configuration)
+    {
+        _tenantContext = tenantContext;
+        _httpContextAccessor = httpContextAccessor;
+        var secret = configuration["CommercialFinance:AuditActorSecret"];
+        if (!string.IsNullOrWhiteSpace(secret)) _auditActorSecret = Encoding.UTF8.GetBytes(secret);
+    }
 
     public override InterceptionResult<DbDataReader> ReaderExecuting(
         DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result)
@@ -128,7 +142,7 @@ public sealed class TenantRlsCommandInterceptor : DbCommandInterceptor
 
         try
         {
-            using var setup = CreateSetupCommand(command, businessUnitId);
+            using var setup = CreateSetupCommand(command, businessUnitId, SignedActor(businessUnitId));
             setup.ExecuteNonQuery();
         }
         catch
@@ -152,7 +166,7 @@ public sealed class TenantRlsCommandInterceptor : DbCommandInterceptor
 
         try
         {
-            await using var setup = CreateSetupCommand(command, businessUnitId);
+            await using var setup = CreateSetupCommand(command, businessUnitId, SignedActor(businessUnitId));
             await setup.ExecuteNonQueryAsync(cancellationToken);
         }
         catch
@@ -162,16 +176,42 @@ public sealed class TenantRlsCommandInterceptor : DbCommandInterceptor
         }
     }
 
-    private static DbCommand CreateSetupCommand(DbCommand command, long businessUnitId)
+    private static DbCommand CreateSetupCommand(
+        DbCommand command, long businessUnitId, (string Actor, string Signature)? signedActor)
     {
         var setup = command.Connection!.CreateCommand();
         setup.Transaction = command.Transaction;
-        setup.CommandText = $"SET LOCAL ROLE {TenantRole}; SELECT set_config('nexora.business_unit_id', @tenant_id, true);";
+        setup.CommandText = $"SET LOCAL ROLE {TenantRole}; SELECT set_config('nexora.business_unit_id', @tenant_id, true), set_config('nexora.actor_id', @actor_id, true), set_config('nexora.actor_signature', @actor_signature, true);";
         var parameter = setup.CreateParameter();
         parameter.ParameterName = "tenant_id";
         parameter.Value = businessUnitId.ToString(System.Globalization.CultureInfo.InvariantCulture);
         setup.Parameters.Add(parameter);
+        var actor = setup.CreateParameter();
+        actor.ParameterName = "actor_id";
+        actor.Value = signedActor?.Actor ?? string.Empty;
+        setup.Parameters.Add(actor);
+        var signature = setup.CreateParameter();
+        signature.ParameterName = "actor_signature";
+        signature.Value = signedActor?.Signature ?? string.Empty;
+        setup.Parameters.Add(signature);
         return setup;
+    }
+
+    private (string Actor, string Signature)? SignedActor(long businessUnitId)
+    {
+        if (_auditActorSecret is null || _auditActorSecret.Length < 32) return null;
+        var user = _httpContextAccessor?.HttpContext?.User;
+        var actor = user?.FindFirst(ClaimTypes.NameIdentifier)?.Value
+            ?? user?.FindFirst("sub")?.Value
+            ?? user?.FindFirst(ClaimTypes.Email)?.Value
+            ?? user?.FindFirst("email")?.Value
+            ?? user?.Identity?.Name;
+        if (string.IsNullOrWhiteSpace(actor)) return null;
+        actor = actor.Trim();
+        var canonical = $"{businessUnitId}\n{actor}";
+        var signature = Convert.ToHexString(HMACSHA256.HashData(
+            _auditActorSecret, Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
+        return (actor, signature);
     }
 
     private void Complete(Guid commandId)

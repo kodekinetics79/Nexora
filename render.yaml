@@ -20,6 +20,12 @@ services:
         value: "true"
       - key: Jwt__Key
         sync: false
+      - key: CommercialFinance__DunningProviderWebhookSecret
+        sync: false
+      - key: CommercialFinance__ContactVerificationSecret
+        sync: false
+      - key: CommercialFinance__AuditActorSecret
+        sync: false
       - key: Ollama__BaseUrl
         sync: false
       - key: Ollama__ApiKey

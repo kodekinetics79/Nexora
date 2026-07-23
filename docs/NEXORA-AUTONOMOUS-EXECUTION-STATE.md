@@ -496,3 +496,42 @@ Complete the first-class invoice, payment, accounts-receivable, and credit/debit
   dead-letter duplicates, file and staging symlinks, aged active claims, concurrent valid
   claims, and concurrent unsupported quarantine. Independent tenant-security and ingestion-
   reliability re-reviews both returned **SHIP** with no P0/P1 findings.
+
+## Governed customer statements and dunning foundation (2026-07-23)
+- Added tenant-scoped statement snapshots, immutable statement lines and rendered artifacts,
+  single-successor corrections, collection contacts and controls, versioned dunning policies,
+  customer collection profiles, cases, promises to pay, notices, delivery attempts, runs, and
+  append-only candidate decisions. Draft artifacts receive legal statement numbers atomically
+  at finalization; cancelled corrections no longer consume the replacement slot.
+- Statement accounting reconstructs effective state at the requested cutoff from issue, void,
+  payment reversal, write-off reversal, refund release, and refund reversal timestamps.
+  Write-offs are explicit statement credits, aging covers opening-period outstanding documents,
+  and live exposure is refreshed before cases, promises, notices, retries, and automated runs.
+- Document-specific disputes fail closed for customer-level collection actions. Current balances
+  cannot enter dunning, and promise `Kept` status requires one unreversed posted tenant receipt
+  that is large enough, post-dates the promise, and cannot evidence another kept promise.
+- Notices freeze locale, subject, media type, body, template, and a canonical SHA-256 artifact
+  hash before approval. Maker, approver, and releaser are separate identities; delivery results
+  require an authenticated application identity plus an HMAC provider signature verified again
+  by PostgreSQL, and retain the provider event time, signed evidence reference, exact artifact
+  hash, and retry lineage. Signed transaction actors bind lifecycle evidence to JWT identities.
+- Dunning runs use committed `Pending` creation and `Running` lease claims. Every evaluated
+  profile receives an append-only created, suppressed, skipped, or failed decision with reason
+  and evidence hash. A unique run/profile checkpoint prevents recovered workers from repeating
+  committed candidates. Expired leases can be reclaimed with token fencing while active leases
+  cannot be stolen; mid-run failures persist as terminal failed runs with released leases.
+- PostgreSQL enforces initial states and allowed transitions, immutable business content,
+  maker-checker identities, exact notice/delivery artifact linkage, null-currency business-key
+  uniqueness, delete/truncate denial, forced RLS, narrow table/sequence grants, and database-owned
+  audit/outbox evidence across 13 new tables.
+- Verification passed **19/19 focused workflows**, **25/25 PostgreSQL production tests**,
+  **382/382 non-PostgreSQL backend regressions**, an empty-database migration, exact EF model
+  parity, and `git diff --check`. The Render deployment must set distinct 32-byte-or-longer
+  `CommercialFinance__DunningProviderWebhookSecret` and
+  `CommercialFinance__ContactVerificationSecret` and `CommercialFinance__AuditActorSecret`
+  values before provider integrations can work.
+- Independent finance and security re-review returned **SHIP** after accounting reversal,
+  migration upgrade/downgrade, provider evidence, actor binding, lease recovery, candidate
+  checkpoint, wall-clock, and timezone findings were repaired and regression-tested.
+- This increment certifies the governed backend foundation. Statements/dunning operator UI and
+  unattended scheduling remain separate delivery work and are not represented as customer-ready.

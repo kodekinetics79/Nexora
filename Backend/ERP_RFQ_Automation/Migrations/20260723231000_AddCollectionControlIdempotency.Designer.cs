@@ -3,6 +3,7 @@ using System;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace ERP_RFQ_Automation.Migrations
 {
     [DbContext(typeof(ErpRfqAutomationContext))]
-    partial class ErpRfqAutomationContextModelSnapshot : ModelSnapshot
+    [Migration("20260723231000_AddCollectionControlIdempotency")]
+    partial class AddCollectionControlIdempotency
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1376,6 +1379,8 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasAlternateKey("BusinessUnitId", "Id");
+
                     b.HasIndex("CurrencyId");
 
                     b.HasIndex("CustomerId");
@@ -2131,10 +2136,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
-                    b.Property<string>("ProviderSignature")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
                     b.Property<string>("RecordedBy")
                         .IsRequired()
                         .HasMaxLength(255)
@@ -2438,11 +2439,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsUnique()
                         .HasDatabaseName("UX_DunningPolicies_BU_Version");
 
-                    b.HasIndex("BusinessUnitId", "Status")
-                        .IsUnique()
-                        .HasDatabaseName("UX_DunningPolicies_BU_Active")
-                        .HasFilter("\"Status\" = 'Active'");
-
                     b.ToTable("DunningPolicies", null, t =>
                         {
                             t.HasCheckConstraint("CK_DunningPolicies_Rules", "\"PolicyVersion\" > 0 AND \"GraceDays\" >= 0 AND \"CadenceDays\" > 0 AND \"MaximumStage\" BETWEEN 1 AND 9 AND \"MinimumOverdueAmount\" >= 0 AND \"QuietHoursStart\" BETWEEN 0 AND 23 AND \"QuietHoursEnd\" BETWEEN 0 AND 23");
@@ -2621,9 +2617,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long?>("CurrencyId")
                         .HasColumnType("bigint");
 
-                    b.Property<long?>("CustomerCollectionProfileId")
-                        .HasColumnType("bigint");
-
                     b.Property<long>("CustomerId")
                         .HasColumnType("bigint");
 
@@ -2660,18 +2653,14 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasIndex("CustomerId");
 
-                    b.HasIndex("BusinessUnitId", "CustomerCollectionProfileId");
-
                     b.HasIndex("BusinessUnitId", "CustomerStatementId");
 
                     b.HasIndex("BusinessUnitId", "DunningCaseId");
 
                     b.HasIndex("BusinessUnitId", "DunningNoticeId");
 
-                    b.HasIndex("BusinessUnitId", "DunningRunId", "CustomerCollectionProfileId")
-                        .IsUnique()
-                        .HasDatabaseName("UX_DunningRunDecisions_BU_Run_Profile")
-                        .HasFilter("\"CustomerCollectionProfileId\" IS NOT NULL");
+                    b.HasIndex("BusinessUnitId", "DunningRunId", "CustomerId", "CurrencyId")
+                        .HasDatabaseName("IX_DunningRunDecisions_BU_Run_Customer_Currency");
 
                     b.ToTable("DunningRunDecisions", null, t =>
                         {
@@ -2743,10 +2732,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsRequired()
                         .HasMaxLength(120)
                         .HasColumnType("character varying(120)");
-
-                    b.Property<string>("ProviderSignature")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
 
                     b.Property<string>("Purpose")
                         .IsRequired()
@@ -2989,10 +2974,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
 
-                    b.Property<string>("IdempotencyKey")
-                        .IsRequired()
-                        .HasColumnType("text");
-
                     b.Property<decimal?>("MatchedAmount")
                         .HasPrecision(18, 2)
                         .HasColumnType("numeric(18,2)");
@@ -3002,10 +2983,6 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("PromisedOn")
                         .HasColumnType("timestamp without time zone");
-
-                    b.Property<string>("RequestHash")
-                        .IsRequired()
-                        .HasColumnType("text");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -3019,10 +2996,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("BusinessUnitId", "DunningCaseId");
-
-                    b.HasIndex("BusinessUnitId", "IdempotencyKey")
-                        .IsUnique()
-                        .HasDatabaseName("UX_PromisesToPay_BU_Idempotency");
 
                     b.HasIndex("BusinessUnitId", "MatchedPaymentId")
                         .IsUnique()
@@ -9823,12 +9796,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
-                    b.HasOne("ERP_RFQ_Automation.CommercialFinance.CustomerCollectionProfile", "Profile")
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "CustomerCollectionProfileId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict);
-
                     b.HasOne("ERP_RFQ_Automation.CommercialFinance.CustomerStatement", "Statement")
                         .WithMany()
                         .HasForeignKey("BusinessUnitId", "CustomerStatementId")
@@ -9857,8 +9824,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Navigation("Case");
 
                     b.Navigation("Notice");
-
-                    b.Navigation("Profile");
 
                     b.Navigation("Run");
 

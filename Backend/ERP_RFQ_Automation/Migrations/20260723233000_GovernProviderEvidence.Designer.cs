@@ -3,6 +3,7 @@ using System;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace ERP_RFQ_Automation.Migrations
 {
     [DbContext(typeof(ErpRfqAutomationContext))]
-    partial class ErpRfqAutomationContextModelSnapshot : ModelSnapshot
+    [Migration("20260723233000_GovernProviderEvidence")]
+    partial class GovernProviderEvidence
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1376,6 +1379,8 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasAlternateKey("BusinessUnitId", "Id");
+
                     b.HasIndex("CurrencyId");
 
                     b.HasIndex("CustomerId");
@@ -2621,9 +2626,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long?>("CurrencyId")
                         .HasColumnType("bigint");
 
-                    b.Property<long?>("CustomerCollectionProfileId")
-                        .HasColumnType("bigint");
-
                     b.Property<long>("CustomerId")
                         .HasColumnType("bigint");
 
@@ -2660,18 +2662,14 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasIndex("CustomerId");
 
-                    b.HasIndex("BusinessUnitId", "CustomerCollectionProfileId");
-
                     b.HasIndex("BusinessUnitId", "CustomerStatementId");
 
                     b.HasIndex("BusinessUnitId", "DunningCaseId");
 
                     b.HasIndex("BusinessUnitId", "DunningNoticeId");
 
-                    b.HasIndex("BusinessUnitId", "DunningRunId", "CustomerCollectionProfileId")
-                        .IsUnique()
-                        .HasDatabaseName("UX_DunningRunDecisions_BU_Run_Profile")
-                        .HasFilter("\"CustomerCollectionProfileId\" IS NOT NULL");
+                    b.HasIndex("BusinessUnitId", "DunningRunId", "CustomerId", "CurrencyId")
+                        .HasDatabaseName("IX_DunningRunDecisions_BU_Run_Customer_Currency");
 
                     b.ToTable("DunningRunDecisions", null, t =>
                         {
@@ -9823,12 +9821,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
-                    b.HasOne("ERP_RFQ_Automation.CommercialFinance.CustomerCollectionProfile", "Profile")
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "CustomerCollectionProfileId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict);
-
                     b.HasOne("ERP_RFQ_Automation.CommercialFinance.CustomerStatement", "Statement")
                         .WithMany()
                         .HasForeignKey("BusinessUnitId", "CustomerStatementId")
@@ -9857,8 +9849,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Navigation("Case");
 
                     b.Navigation("Notice");
-
-                    b.Navigation("Profile");
 
                     b.Navigation("Run");
 

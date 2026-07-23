@@ -15,4 +15,17 @@ public partial class ErpRfqAutomationContext
     public DbSet<ReceivableWriteOff> ReceivableWriteOffs => Set<ReceivableWriteOff>();
     public DbSet<WriteOffAllocation> WriteOffAllocations => Set<WriteOffAllocation>();
     public DbSet<CustomerRefund> CustomerRefunds => Set<CustomerRefund>();
+    public DbSet<FinanceCommunicationContact> FinanceCommunicationContacts => Set<FinanceCommunicationContact>();
+    public DbSet<CustomerStatement> CustomerStatements => Set<CustomerStatement>();
+    public DbSet<CustomerStatementLine> CustomerStatementLines => Set<CustomerStatementLine>();
+    public DbSet<DunningPolicy> DunningPolicies => Set<DunningPolicy>();
+    public DbSet<DunningPolicyStep> DunningPolicySteps => Set<DunningPolicyStep>();
+    public DbSet<CustomerCollectionProfile> CustomerCollectionProfiles => Set<CustomerCollectionProfile>();
+    public DbSet<CollectionControl> CollectionControls => Set<CollectionControl>();
+    public DbSet<DunningCase> DunningCases => Set<DunningCase>();
+    public DbSet<PromiseToPay> PromisesToPay => Set<PromiseToPay>();
+    public DbSet<DunningRun> DunningRuns => Set<DunningRun>();
+    public DbSet<DunningRunDecision> DunningRunDecisions => Set<DunningRunDecision>();
+    public DbSet<DunningNotice> DunningNotices => Set<DunningNotice>();
+    public DbSet<DunningDeliveryAttempt> DunningDeliveryAttempts => Set<DunningDeliveryAttempt>();
 }

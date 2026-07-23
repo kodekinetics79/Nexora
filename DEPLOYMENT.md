@@ -92,6 +92,9 @@ secrets, and rotate the credentials through the application before customer use.
 |---|---|
 | `ConnectionStrings__DefaultConnection` | Neon Postgres connection |
 | `Jwt__Key` | JWT signing key (**use a new strong key**; ≥32 bytes) |
+| `CommercialFinance__DunningProviderWebhookSecret` | HMAC secret for authenticated dunning delivery events (**use a distinct secret**; ≥32 bytes) |
+| `CommercialFinance__ContactVerificationSecret` | HMAC secret for trusted finance-contact verification assertions (**use a distinct secret**; ≥32 bytes) |
+| `CommercialFinance__AuditActorSecret` | HMAC secret binding authenticated actors to governed database mutations (**use a distinct secret**; ≥32 bytes) |
 | `Ollama__BaseUrl` / `Ollama__ApiKey` | AI extraction provider (until the Claude migration, ADR-0001) |
 | `Cors__AllowedOrigins__0..n` | allowed frontend origins (the Vercel URL) |
 | `ASPNETCORE_ENVIRONMENT` | `Production` (set by the Dockerfile) |

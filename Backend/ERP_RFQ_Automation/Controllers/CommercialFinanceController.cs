@@ -1,5 +1,6 @@
 using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.CommercialFinance;
+using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -217,7 +218,13 @@ public sealed class CommercialFinanceController(ICommercialFinanceApplicationSer
         return tenantId;
     }
 
-    private string Actor() => User.FindFirst("email")?.Value ?? User.Identity?.Name ?? "system";
+    private string Actor()
+        => User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+            ?? User.FindFirst("sub")?.Value
+            ?? User.FindFirst(ClaimTypes.Email)?.Value
+            ?? User.FindFirst("email")?.Value
+            ?? User.Identity?.Name
+            ?? throw new ArgumentException("An authenticated actor claim is required.");
 
     private string IdempotencyKey()
         => Request.Headers.TryGetValue("Idempotency-Key", out var value) && !string.IsNullOrWhiteSpace(value)
