@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.Extraction;
+using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
@@ -13,6 +14,205 @@ public sealed class PostgreSqlProductionDialectTests
 
     public PostgreSqlProductionDialectTests(PostgreSqlTestDatabase database)
         => _database = database;
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task AiLedger_IsTenantBoundAndImmutable()
+    {
+        Guid requestId;
+        await using (var context = _database.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(context, 9_911);
+            Seed.EnsureBusinessUnit(context, 9_912);
+            var request = new AiRequest
+            {
+                Id = Guid.NewGuid(),
+                BusinessUnitId = 9_911,
+                Operation = "RfqExtraction",
+                IdempotencyKey = "postgres-ai-ledger-test",
+                PromptHash = new string('B', 64),
+                PromptVersion = "rfq-v1",
+                Provider = "Ollama",
+                Model = "test",
+                Status = AiCallStatuses.Succeeded,
+                TokenSource = AiTokenSources.ProviderExact,
+                CreatedOn = DateTime.UtcNow,
+                CompletedOn = DateTime.UtcNow
+            };
+            requestId = request.Id;
+            context.AiRequests.Add(request);
+            context.AiCallAttempts.Add(new AiCallAttempt
+            {
+                Request = request,
+                BusinessUnitId = 9_911,
+                AttemptNumber = 1,
+                Provider = "Ollama",
+                Model = "test",
+                Status = AiCallStatuses.Succeeded,
+                TokenSource = AiTokenSources.ProviderExact,
+                StartedOn = DateTime.UtcNow,
+                CompletedOn = DateTime.UtcNow
+            });
+            await context.SaveChangesAsync();
+            Assert.False((await context.AiProcessingPolicies.IgnoreQueryFilters()
+                .SingleAsync(p => p.BusinessUnitId == 9_912)).ExternalProcessingAllowed);
+        }
+
+        await using var connection = await _database.OpenConnectionAsync();
+        await using var updateAttempt = connection.CreateCommand();
+        updateAttempt.CommandText = "UPDATE public.\"AiCallAttempts\" SET \"Status\" = 'Failed' WHERE \"RequestId\" = @id";
+        updateAttempt.Parameters.AddWithValue("id", requestId);
+        Assert.Equal("55000", (await Assert.ThrowsAsync<PostgresException>(
+            () => updateAttempt.ExecuteNonQueryAsync())).SqlState);
+
+        await using var deleteRequest = connection.CreateCommand();
+        deleteRequest.CommandText = "DELETE FROM public.\"AiRequests\" WHERE \"Id\" = @id";
+        deleteRequest.Parameters.AddWithValue("id", requestId);
+        Assert.Equal("55000", (await Assert.ThrowsAsync<PostgresException>(
+            () => deleteRequest.ExecuteNonQueryAsync())).SqlState);
+
+        await using var rewriteRequest = connection.CreateCommand();
+        rewriteRequest.CommandText = "UPDATE public.\"AiRequests\" SET \"Provider\" = 'Anthropic' WHERE \"Id\" = @id";
+        rewriteRequest.Parameters.AddWithValue("id", requestId);
+        Assert.Equal("55000", (await Assert.ThrowsAsync<PostgresException>(
+            () => rewriteRequest.ExecuteNonQueryAsync())).SqlState);
+
+        await using var rewriteTerminalUsage = connection.CreateCommand();
+        rewriteTerminalUsage.CommandText = "UPDATE public.\"AiRequests\" SET \"ErrorCode\" = 'rewritten' WHERE \"Id\" = @id";
+        rewriteTerminalUsage.Parameters.AddWithValue("id", requestId);
+        Assert.Equal("55000", (await Assert.ThrowsAsync<PostgresException>(
+            () => rewriteTerminalUsage.ExecuteNonQueryAsync())).SqlState);
+
+        await using var mismatch = connection.CreateCommand();
+        mismatch.CommandText = """
+            INSERT INTO public."AiCallAttempts"
+                ("RequestId", "BusinessUnitId", "AttemptNumber", "Provider", "Model", "Status",
+                 "InputTokens", "OutputTokens", "TokenSource", "LatencyMilliseconds", "StartedOn", "CompletedOn")
+            VALUES (@id, 9912, 2, 'Ollama', 'test', 'Succeeded', 0, 0, 'Estimated', 0, now(), now())
+            """;
+        mismatch.Parameters.AddWithValue("id", requestId);
+        Assert.Equal(PostgresErrorCodes.ForeignKeyViolation,
+            (await Assert.ThrowsAsync<PostgresException>(() => mismatch.ExecuteNonQueryAsync())).SqlState);
+
+        await using var tenantTx = await connection.BeginTransactionAsync();
+        await using (var scopeTenant = connection.CreateCommand())
+        {
+            scopeTenant.Transaction = tenantTx;
+            scopeTenant.CommandText = "SET LOCAL ROLE nexora_tenant_app; SELECT set_config('nexora.business_unit_id', '9912', true);";
+            await scopeTenant.ExecuteNonQueryAsync();
+        }
+        await using (var hidden = connection.CreateCommand())
+        {
+            hidden.Transaction = tenantTx;
+            hidden.CommandText = "SELECT count(*) FROM public.\"AiRequests\" WHERE \"Id\" = @id";
+            hidden.Parameters.AddWithValue("id", requestId);
+            Assert.Equal(0L, (long)(await hidden.ExecuteScalarAsync())!);
+        }
+        await tenantTx.RollbackAsync();
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task AiLedger_RuntimeLoginRequiresExplicitTenantRoleScope()
+    {
+        const string runtimeRole = "nexora_runtime_test";
+        const string runtimePassword = "runtime-test-password";
+        await using (var context = _database.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(context, 9_911);
+            await context.SaveChangesAsync();
+        }
+        await using (var admin = await _database.OpenConnectionAsync())
+        await using (var create = admin.CreateCommand())
+        {
+            create.CommandText = $"""
+                INSERT INTO platform."Tenants"
+                    ("Id", "Name", "Slug", "Status", "PrimaryBusinessUnitId", "CreatedOn")
+                VALUES (991100, 'Runtime Test Tenant', 'runtime-test-tenant', 'Active', 9911, now())
+                ON CONFLICT ("Id") DO NOTHING;
+                DROP ROLE IF EXISTS {runtimeRole};
+                CREATE ROLE {runtimeRole} LOGIN PASSWORD '{runtimePassword}' NOINHERIT NOSUPERUSER NOBYPASSRLS;
+                GRANT nexora_tenant_app TO {runtimeRole};
+                """;
+            await create.ExecuteNonQueryAsync();
+        }
+
+        try
+        {
+            var runtimeConnectionString = new NpgsqlConnectionStringBuilder(_database.ConnectionString)
+            {
+                Username = runtimeRole,
+                Password = runtimePassword,
+                Pooling = false
+            }.ConnectionString;
+            await using var runtime = new NpgsqlConnection(runtimeConnectionString);
+            await runtime.OpenAsync();
+
+            await using (var attributes = runtime.CreateCommand())
+            {
+                attributes.CommandText = """
+                    SELECT NOT runtime_role.rolinherit
+                           AND NOT runtime_role.rolsuper
+                           AND NOT runtime_role.rolbypassrls
+                           AND pg_has_role(current_user, 'nexora_tenant_app', 'MEMBER')
+                    FROM pg_roles runtime_role WHERE runtime_role.rolname = current_user;
+                    """;
+                Assert.True((bool)(await attributes.ExecuteScalarAsync())!);
+            }
+
+            await using (var direct = runtime.CreateCommand())
+            {
+                direct.CommandText = "SELECT count(*) FROM public.\"AiProcessingPolicies\"";
+                Assert.Equal(PostgresErrorCodes.InsufficientPrivilege,
+                    (await Assert.ThrowsAsync<PostgresException>(() => direct.ExecuteScalarAsync())).SqlState);
+            }
+
+            await using var transaction = await runtime.BeginTransactionAsync();
+            await using (var setup = runtime.CreateCommand())
+            {
+                setup.Transaction = transaction;
+                setup.CommandText = """
+                SET LOCAL ROLE nexora_tenant_app;
+                SELECT set_config('nexora.business_unit_id', '9911', true);
+                """;
+                await setup.ExecuteNonQueryAsync();
+            }
+            await using var scoped = runtime.CreateCommand();
+            scoped.Transaction = transaction;
+            scoped.CommandText = "SELECT count(*) FROM public.\"AiProcessingPolicies\" WHERE \"BusinessUnitId\" = 9911;";
+            Assert.Equal(1L, (long)(await scoped.ExecuteScalarAsync())!);
+            await using var audit = runtime.CreateCommand();
+            audit.Transaction = transaction;
+            audit.CommandText = """
+                INSERT INTO platform."PlatformAuditLogs"
+                    ("ActorPlatformUserId", "ActAsTenantId", "Action", "TargetType", "TargetId", "Metadata", "CreatedOn")
+                VALUES (1, 991100, 'tenant.ai-policy.update', 'AiProcessingPolicy', '9911', '{}', now());
+                """;
+            Assert.Equal(1, await audit.ExecuteNonQueryAsync());
+            await transaction.CommitAsync();
+
+            await using var deniedTransaction = await runtime.BeginTransactionAsync();
+            await using var forgedAudit = runtime.CreateCommand();
+            forgedAudit.Transaction = deniedTransaction;
+            forgedAudit.CommandText = """
+                SET LOCAL ROLE nexora_tenant_app;
+                SELECT set_config('nexora.business_unit_id', '9911', true);
+                INSERT INTO platform."PlatformAuditLogs"
+                    ("ActorPlatformUserId", "ActAsTenantId", "Action", "TargetType", "TargetId", "Metadata", "CreatedOn")
+                VALUES (1, 991100, 'tenant.suspend', 'Tenant', '991100', '{}', now());
+                """;
+            Assert.Equal(PostgresErrorCodes.InsufficientPrivilege,
+                (await Assert.ThrowsAsync<PostgresException>(() => forgedAudit.ExecuteNonQueryAsync())).SqlState);
+            await deniedTransaction.RollbackAsync();
+        }
+        finally
+        {
+            await using var admin = await _database.OpenConnectionAsync();
+            await using var drop = admin.CreateCommand();
+            drop.CommandText = $"REVOKE nexora_tenant_app FROM {runtimeRole}; DROP ROLE IF EXISTS {runtimeRole};";
+            await drop.ExecuteNonQueryAsync();
+        }
+    }
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
@@ -77,6 +277,7 @@ public sealed class PostgreSqlProductionDialectTests
         Assert.Empty(pending);
         Assert.Contains("20260723120000_CompleteTenantRlsCoverage", applied);
         Assert.Contains("20260723130000_GovernExtractionReview", applied);
+        Assert.Contains("20260723140000_AddAiGovernanceLedger", applied);
 
         await using var connection = await _database.OpenConnectionAsync();
         await using var roleCommand = connection.CreateCommand();
@@ -85,6 +286,11 @@ public sealed class PostgreSqlProductionDialectTests
             FROM pg_roles WHERE rolname = 'nexora_tenant_app';
             """;
         Assert.True((bool)(await roleCommand.ExecuteScalarAsync())!);
+
+        await using var removedMaintenanceRoleCommand = connection.CreateCommand();
+        removedMaintenanceRoleCommand.CommandText =
+            "SELECT NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexora_ai_maintenance');";
+        Assert.True((bool)(await removedMaintenanceRoleCommand.ExecuteScalarAsync())!);
 
         var filteredTables = context.Model.GetEntityTypes()
             .Where(entity => entity.GetQueryFilter() is not null && (entity.GetSchema() ?? "public") == "public")
@@ -124,6 +330,41 @@ public sealed class PostgreSqlProductionDialectTests
             """;
         policyCommand.Parameters.AddWithValue("tables", filteredTables);
         Assert.Null((await policyCommand.ExecuteScalarAsync()) as string);
+
+        await using var forcedAiRlsCommand = connection.CreateCommand();
+        forcedAiRlsCommand.CommandText = """
+            SELECT string_agg(expected.table_name, ', ' ORDER BY expected.table_name)
+            FROM unnest(ARRAY['AiProcessingPolicies', 'AiRequests', 'AiCallAttempts', 'AiBudgetPeriods'])
+                AS expected(table_name)
+            LEFT JOIN pg_class table_definition ON table_definition.relname = expected.table_name
+            LEFT JOIN pg_namespace schema_definition
+              ON schema_definition.oid = table_definition.relnamespace
+             AND schema_definition.nspname = 'public'
+            WHERE schema_definition.oid IS NULL
+               OR NOT table_definition.relrowsecurity
+               OR NOT table_definition.relforcerowsecurity;
+            """;
+        Assert.Null((await forcedAiRlsCommand.ExecuteScalarAsync()) as string);
+
+        await using var provisioningPolicyCommand = connection.CreateCommand();
+        provisioningPolicyCommand.CommandText = """
+            SELECT policy.polwithcheck IS NOT NULL
+                   AND position('ExternalProcessingAllowed' in pg_get_expr(policy.polwithcheck, policy.polrelid)) > 0
+                   AND position('tenant-provisioning' in pg_get_expr(policy.polwithcheck, policy.polrelid)) > 0
+            FROM pg_policy policy
+            JOIN pg_class table_definition ON table_definition.oid = policy.polrelid
+            WHERE table_definition.relname = 'AiProcessingPolicies'
+              AND policy.polname = 'nexora_ai_default_provisioning';
+            """;
+        Assert.True((bool)(await provisioningPolicyCommand.ExecuteScalarAsync())!);
+
+        await using var unresolvedIndexCommand = connection.CreateCommand();
+        unresolvedIndexCommand.CommandText = """
+            SELECT indexdef LIKE '%WHERE (("CompletedOn" IS NULL)%'
+            FROM pg_indexes
+            WHERE schemaname = 'public' AND indexname = 'IX_AiRequests_Unresolved_CreatedOn';
+            """;
+        Assert.True((bool)(await unresolvedIndexCommand.ExecuteScalarAsync())!);
 
         await using var tenantColumnCommand = connection.CreateCommand();
         tenantColumnCommand.CommandText = """

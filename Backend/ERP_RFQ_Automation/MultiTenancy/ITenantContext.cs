@@ -18,15 +18,42 @@ namespace ERP_RFQ_Automation.MultiTenancy
         long? BusinessUnitId { get; }
     }
 
+    public interface ITenantScopeAccessor
+    {
+        long? BusinessUnitId { get; }
+        IDisposable Push(long businessUnitId);
+    }
+
+    public sealed class TenantScopeAccessor : ITenantScopeAccessor
+    {
+        private readonly AsyncLocal<long?> _current = new();
+        public long? BusinessUnitId => _current.Value;
+
+        public IDisposable Push(long businessUnitId)
+        {
+            var previous = _current.Value;
+            _current.Value = businessUnitId;
+            return new Scope(() => _current.Value = previous);
+        }
+
+        private sealed class Scope(Action dispose) : IDisposable
+        {
+            private Action? _dispose = dispose;
+            public void Dispose() => Interlocked.Exchange(ref _dispose, null)?.Invoke();
+        }
+    }
+
     public sealed class HttpTenantContext : ITenantContext
     {
         public long? BusinessUnitId { get; }
 
-        public HttpTenantContext(IHttpContextAccessor accessor)
+        public HttpTenantContext(IHttpContextAccessor accessor, ITenantScopeAccessor tenantScope)
         {
             var raw = accessor.HttpContext?.User?.FindFirst("businessUnitId")?.Value;
             if (long.TryParse(raw, out var id) && id > 0)
                 BusinessUnitId = id;
+            else
+                BusinessUnitId = tenantScope.BusinessUnitId;
         }
     }
 }

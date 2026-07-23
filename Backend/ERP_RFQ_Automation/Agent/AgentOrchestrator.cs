@@ -6,6 +6,7 @@ using ERP_RFQ_Automation.Agent.Models;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using ERP_RFQ_Automation.AI;
 
 namespace ERP_RFQ_Automation.Agent;
 
@@ -65,7 +66,8 @@ public sealed class AgentOrchestrator : IAgentOrchestrator
 
         // Persist + append the current user message.
         var seq = await NextSequenceAsync(session.Id, ct);
-        await PersistMessageAsync(session, AgentMessageRole.User, message, null, null, null, seq++, ct);
+        var userMessageId = await PersistMessageAsync(
+            session, AgentMessageRole.User, message, null, null, null, seq++, ct);
         history.Add(AgentLlmMessage.User(message));
 
         var toolDefs = _tools.All
@@ -77,7 +79,9 @@ public sealed class AgentOrchestrator : IAgentOrchestrator
 
         for (var iteration = 0; iteration < MaxIterations; iteration++)
         {
-            var turn = await _llm.RunTurnAsync(systemPrompt, history, toolDefs, ct);
+            var turn = await _llm.RunTurnAsync(systemPrompt, history, toolDefs,
+                new AiCallContext(ctx.BusinessUnitId, AiPurposes.Agent,
+                    $"agent:{session.Id}:message:{userMessageId}:iteration:{iteration + 1}", "agent-tools-v1"), ct);
 
             if (turn.StopReason == AgentTurnStopReason.Error)
             {

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using ERP_RFQ_Automation.AI;
 
 namespace ERP_RFQ_Automation.Agent.Llm;
 
@@ -84,5 +85,6 @@ public interface IAgentLlm
         string systemPrompt,
         IReadOnlyList<AgentLlmMessage> history,
         IReadOnlyList<AgentToolDefinition> tools,
+        AiCallContext callContext,
         CancellationToken ct);
 }

@@ -1,15 +1,13 @@
 using ERP_RFQ_Automation.Authorization;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using System.Text;
-using System.Text.Json;
 
 namespace ERP_RFQ_Automation.Controllers
 {
     /// <summary>
     /// Manager-gated diagnostic for the configured LLM provider. Answers, from
-    /// inside the deployment's own network/config: (1) can we authenticate,
-    /// (2) does the configured model accept a completion. Never echoes the key.
+    /// inside the deployment's own network/config whether provider authentication
+    /// succeeds. It deliberately performs no billable completion and never echoes the key.
     /// </summary>
     [ApiController]
     [Route("api/llm-health")]
@@ -30,7 +28,6 @@ namespace ERP_RFQ_Automation.Controllers
         public async Task<IActionResult> Check(CancellationToken ct)
         {
             var baseUrl = _config["Ollama:BaseUrl"] ?? "(unset)";
-            var model = _config["Ollama:Model"] ?? "(unset)";
             var key = _config["Ollama:ApiKey"] ?? "";
             var result = new Dictionary<string, object?>
             {
@@ -59,24 +56,6 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 result["authCheck"] = "EXCEPTION";
                 return Ok(result);
-            }
-
-            // 2. Model completion check (tiny prompt)
-            try
-            {
-                var payload = JsonSerializer.Serialize(new
-                {
-                    model,
-                    messages = new[] { new { role = "user", content = "Reply with the single word: ok" } },
-                    stream = false,
-                });
-                var resp = await client.PostAsync("api/chat",
-                    new StringContent(payload, Encoding.UTF8, "application/json"), ct);
-                result["modelCheck"] = $"{(int)resp.StatusCode} {resp.StatusCode}";
-            }
-            catch (Exception)
-            {
-                result["modelCheck"] = "EXCEPTION";
             }
 
             return Ok(result);

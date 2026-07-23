@@ -113,6 +113,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         => new()
         {
             BusinessUnitId = job.BusinessUnitId,
+            SourceId = $"{job.Id}:claim:{job.Attempts}",
             SourceDocumentName = name,
             IsStructured = true,
             StructuredRows = rows,
@@ -138,6 +139,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         return new DocumentExtractionInput
         {
             BusinessUnitId = job.BusinessUnitId,
+            SourceId = $"{job.Id}:claim:{job.Attempts}",
             SourceDocumentName = name,
             IsStructured = false,
             HeaderText = header,

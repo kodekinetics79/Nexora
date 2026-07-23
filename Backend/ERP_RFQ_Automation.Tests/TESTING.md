@@ -55,13 +55,25 @@ closed, and after-images contain the assigned, distinct IDs for newly inserted l
 - Direct intelligence conversion cannot create an RFQ from unverified AI commercial facts.
 - The governed lifecycle rejects `UNDER_REVIEW -> QUALIFIED` until those facts are approved.
 
-### AI provider privacy boundary (`AiProviderPrivacySurfaceTests`, 4)
+### AI provider privacy boundary (`AiProviderPrivacySurfaceTests`, 5)
 - Provider implementations cannot log raw model output or provider response bodies.
 - Health diagnostics cannot disclose key prefixes, provider bodies, or model replies.
 - Captured Ollama requests prove trusted policy/task/schema content stays in the system
   role while hostile document text stays inside random matched boundaries in the user role.
 - Captured logs and health-controller results prove successful and failed provider bodies,
   endpoint/model metadata, key material, and exception details are not disclosed.
+- Provider usage counts, request IDs, duration, and the numeric output-token ceiling are
+  verified against captured Ollama HTTP requests and responses.
+
+### AI policy, budget, and accounting (`AiGovernanceServiceTests`, `AiGovernanceLedgerTests`)
+- Missing policy, disabled external processing, and exhausted hard budgets deny before a
+  provider call; idempotency-key collisions cannot reserve twice.
+- Successful calls release reserved capacity, settle exact usage, and persist only hashes
+  and character counts rather than source or model content.
+- Tenant query filters hide another tenant's policy, request, attempt, and budget rows;
+  composite foreign keys reject attributing an attempt to another tenant's request.
+- `AnthropicGovernanceTests` proves agent turns use the same reservation/attempt contract
+  and retain exact provider token usage and request identifiers.
 
 ### Chunked extraction invariants (`ChunkedExtractionServiceTests`, 12)
 Drives `ChunkedExtractionService` with a scripted LLM: item-count conservation (Σ chunk
@@ -110,6 +122,11 @@ Pre-existing; left untouched.
   pooled connection.
 - The extraction-review audit rejects update/delete with SQLSTATE `55000`, and its
   composite tenant/lead foreign key rejects cross-tenant attribution with SQLSTATE `23503`.
+- The AI ledger runs with forced RLS under `nexora_tenant_app`; cross-tenant requests are
+  invisible, attempts and request identity fields reject mutation with SQLSTATE `55000`,
+  and every newly inserted business unit receives an external-processing-disabled policy.
+  A distinct `NOINHERIT`, non-superuser runtime login has no direct ledger access and sees
+  one tenant only after transaction-local role/GUC setup.
 
 ### Tenant claim boundary (`TenantClaimGuardMiddlewareTests`)
 - Authenticated tenant API requests with missing, zero, or malformed `businessUnitId`
@@ -119,9 +136,6 @@ Pre-existing; left untouched.
 
 ## Deliberately skipped seams
 
-- **Remaining queue transitions** — claim and cap behavior now run on PostgreSQL; lease
-  renewal, completion, retry/backoff, expired-lease reclaim, and dead-letter transitions
-  remain expansion targets for the production-dialect lane.
 - **`ExtractionWorker` end-to-end** (claim → extract → persist → complete/backoff) — an
   `IHostedService` that composes the queue, the reader and the LLM; an integration-test
   target, not a unit target.

@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.Agent.Guardrails;
 
 namespace ERP_RFQ_Automation.Agent.Llm;
@@ -35,6 +36,7 @@ public sealed class MockAgentLlm : IAgentLlm
         string systemPrompt,
         IReadOnlyList<AgentLlmMessage> history,
         IReadOnlyList<AgentToolDefinition> tools,
+        AiCallContext callContext,
         CancellationToken ct)
     {
         var available = new HashSet<string>(tools.Select(t => t.Name), StringComparer.OrdinalIgnoreCase);

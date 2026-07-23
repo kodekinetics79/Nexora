@@ -3,6 +3,8 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using System.Diagnostics;
+using ERP_RFQ_Automation.AI;
 
 namespace ERP_RFQ_Automation.Agent.Llm;
 
@@ -22,8 +24,11 @@ public sealed class AnthropicAgentLlm : IAgentLlm
     private readonly string _apiKey;
     private readonly string _model;
     private readonly int _maxTokens;
+    private readonly IAiGovernanceService _governance;
 
-    public AnthropicAgentLlm(HttpClient http, IConfiguration config, ILogger<AnthropicAgentLlm> log)
+    public AnthropicAgentLlm(
+        HttpClient http, IConfiguration config, ILogger<AnthropicAgentLlm> log,
+        IAiGovernanceService governance)
     {
         _http = http;
         _log = log;
@@ -31,19 +36,26 @@ public sealed class AnthropicAgentLlm : IAgentLlm
         _model = string.IsNullOrWhiteSpace(config["Agent:Anthropic:Model"])
             ? "claude-sonnet-5"
             : config["Agent:Anthropic:Model"]!;
-        _maxTokens = int.TryParse(config["Agent:Anthropic:MaxTokens"], out var mt) && mt > 0 ? mt : 2048;
+        _maxTokens = int.TryParse(config["Agent:Anthropic:MaxTokens"], out var mt) && mt > 0
+            ? Math.Min(mt, 8192) : 2048;
+        _governance = governance;
     }
 
     public async Task<AgentLlmTurnResult> RunTurnAsync(
         string systemPrompt,
         IReadOnlyList<AgentLlmMessage> history,
         IReadOnlyList<AgentToolDefinition> tools,
+        AiCallContext callContext,
         CancellationToken ct)
     {
+        var body = BuildRequestBody(systemPrompt, history, tools);
+        var reservation = await _governance.ReserveAsync(
+            callContext, "Anthropic", _model, body, Encoding.UTF8.GetByteCount(body), _maxTokens, 1, ct);
+        var started = DateTime.UtcNow;
+        var stopwatch = Stopwatch.StartNew();
+        var providerResponseReceived = false;
         try
         {
-            var body = BuildRequestBody(systemPrompt, history, tools);
-
             using var req = new HttpRequestMessage(HttpMethod.Post, Endpoint)
             {
                 Content = new StringContent(body, Encoding.UTF8, "application/json")
@@ -54,9 +66,23 @@ public sealed class AnthropicAgentLlm : IAgentLlm
 
             using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
             var json = await resp.Content.ReadAsStringAsync(ct);
+            providerResponseReceived = true;
+            stopwatch.Stop();
+            var (inputTokens, outputTokens, tokenSource) = ReadUsage(json, Encoding.UTF8.GetByteCount(body));
+            var requestId = resp.Headers.TryGetValues("request-id", out var requestIds)
+                ? requestIds.FirstOrDefault() : null;
+            var success = resp.IsSuccessStatusCode;
+            await _governance.RecordAttemptAsync(reservation, new AiAttemptCompletion(
+                1, success ? AiCallStatuses.Succeeded : AiCallStatuses.Failed,
+                (int)resp.StatusCode, requestId, inputTokens, outputTokens, tokenSource,
+                stopwatch.ElapsedMilliseconds, null,
+                string.IsNullOrEmpty(json) ? null : AiGovernanceService.Hash(json),
+                success ? null : "provider_http_error", started, DateTime.UtcNow), CancellationToken.None);
 
-            if (!resp.IsSuccessStatusCode)
+            if (!success)
             {
+                await _governance.CompleteAsync(reservation, AiCallStatuses.Failed,
+                    inputTokens, outputTokens, tokenSource, null, "provider_http_error", CancellationToken.None);
                 _log.LogWarning("Anthropic API returned {Status}.", (int)resp.StatusCode);
                 return new AgentLlmTurnResult
                 {
@@ -65,17 +91,74 @@ public sealed class AnthropicAgentLlm : IAgentLlm
                 };
             }
 
-            return ParseResponse(json);
+            AgentLlmTurnResult result;
+            try
+            {
+                result = ParseResponse(json);
+            }
+            catch (JsonException)
+            {
+                await _governance.CompleteAsync(reservation, AiCallStatuses.Failed,
+                    inputTokens, outputTokens, tokenSource, null, "invalid_output", CancellationToken.None);
+                return new AgentLlmTurnResult
+                {
+                    StopReason = AgentTurnStopReason.Error,
+                    Error = "The provider returned an invalid response."
+                };
+            }
+            await _governance.CompleteAsync(reservation, AiCallStatuses.Succeeded,
+                inputTokens, outputTokens, tokenSource, json, null, CancellationToken.None);
+            return result;
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
+            if (providerResponseReceived)
+                throw;
+            stopwatch.Stop();
+            var estimatedInput = AiGovernanceService.ConservativeTokenUpperBound(Encoding.UTF8.GetByteCount(body));
+            await _governance.RecordAttemptAsync(reservation, new AiAttemptCompletion(
+                1, AiCallStatuses.Unknown, null, null, estimatedInput, _maxTokens, AiTokenSources.Estimated,
+                stopwatch.ElapsedMilliseconds, null, null, "provider_cancelled", started, DateTime.UtcNow),
+                CancellationToken.None);
+            await _governance.CompleteAsync(reservation, AiCallStatuses.Unknown,
+                estimatedInput, _maxTokens, AiTokenSources.Estimated, null, "provider_cancelled", CancellationToken.None);
             throw;
         }
         catch (Exception ex)
         {
+            if (providerResponseReceived)
+                throw;
+            stopwatch.Stop();
+            var estimatedInput = AiGovernanceService.ConservativeTokenUpperBound(Encoding.UTF8.GetByteCount(body));
+            await _governance.RecordAttemptAsync(reservation, new AiAttemptCompletion(
+                1, AiCallStatuses.Unknown, null, null, estimatedInput, _maxTokens, AiTokenSources.Estimated,
+                stopwatch.ElapsedMilliseconds, null, null, "provider_exception", started, DateTime.UtcNow),
+                CancellationToken.None);
+            await _governance.CompleteAsync(reservation, AiCallStatuses.Unknown,
+                estimatedInput, _maxTokens, AiTokenSources.Estimated, null, "provider_exception", CancellationToken.None);
             _log.LogError(ex, "Anthropic API call failed.");
             return new AgentLlmTurnResult { StopReason = AgentTurnStopReason.Error, Error = "LLM call failed." };
         }
+    }
+
+    private static (long InputTokens, long OutputTokens, string TokenSource) ReadUsage(string json, int requestBytes)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("usage", out var usage)
+                && usage.TryGetProperty("input_tokens", out var input)
+                && usage.TryGetProperty("output_tokens", out var output)
+                && input.TryGetInt64(out var inputTokens)
+                && output.TryGetInt64(out var outputTokens))
+                return (Math.Max(0, inputTokens), Math.Max(0, outputTokens), AiTokenSources.ProviderExact);
+        }
+        catch (JsonException) { }
+        return (AiGovernanceService.ConservativeTokenUpperBound(requestBytes),
+            string.IsNullOrEmpty(json)
+                ? 0
+                : AiGovernanceService.ConservativeTokenUpperBound(Encoding.UTF8.GetByteCount(json)),
+            AiTokenSources.Estimated);
     }
 
     private string BuildRequestBody(

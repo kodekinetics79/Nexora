@@ -4,6 +4,7 @@ using ERP_RFQ_Automation.Services.Interfaces;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
+using ERP_RFQ_Automation.AI;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -30,9 +31,11 @@ public class BoqEngineTests
     private sealed class StubLlm : ILLMService
     {
         public BoqDraftResult? BoqResult { get; set; }
-        public Task<LeadExtractionResult?> ExtractLeadDataAsync(string fullText) =>
+        public Task<LeadExtractionResult?> ExtractLeadDataAsync(
+            string fullText, AiCallContext context, CancellationToken cancellationToken = default) =>
             Task.FromResult<LeadExtractionResult?>(null);
-        public Task<BoqDraftResult?> DraftServiceBoqAsync(string scopeText) =>
+        public Task<BoqDraftResult?> DraftServiceBoqAsync(
+            string scopeText, AiCallContext context, CancellationToken cancellationToken = default) =>
             Task.FromResult(BoqResult);
     }
 

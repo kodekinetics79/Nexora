@@ -29,7 +29,9 @@ using ERP_RFQ_Automation.CommercialCases;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.CommercialRouting;
 using ERP_RFQ_Automation.CustomFields;
+using ERP_RFQ_Automation.AI;
 using System.Text.Json.Serialization;
+using Npgsql;
 
 // PostgreSQL migration: restore pre-6.0 Npgsql timestamp semantics so the
 // existing DateTime usage (DateTime.Now / Unspecified-kind values inherited from
@@ -86,6 +88,7 @@ builder.Services.AddDbContext<ErpRfqAutomationContext>((services, options) =>
 
 // Per-request tenant scope for EF global query filters (ADR-0005 tenant isolation).
 builder.Services.AddHttpContextAccessor();
+builder.Services.AddSingleton<ITenantScopeAccessor, TenantScopeAccessor>();
 builder.Services.AddScoped<ERP_RFQ_Automation.MultiTenancy.ITenantContext, ERP_RFQ_Automation.MultiTenancy.HttpTenantContext>();
 builder.Services.AddSingleton<IFileStorage, LocalFileStorage>();
 
@@ -184,6 +187,9 @@ builder.Services.AddScoped<QuotationUploaderService>();
 builder.Services.AddScoped<FolderService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<ILLMService, OllamaLlmService>();
+builder.Services.AddSingleton<IAiGovernanceService, AiGovernanceService>();
+builder.Services.AddSingleton<IAiReservationReconciler, AiReservationReconciler>();
+builder.Services.AddHostedService<AiReservationReconciliationWorker>();
 builder.Services.AddHttpClient<OllamaLlmService>(client =>
 {
     // DATA-06: honor the configured provider URL instead of a hardcoded localhost.
@@ -368,8 +374,30 @@ if (applyMigrations)
     await migrationDb.Database.MigrateAsync();
 }
 
+if (app.Environment.IsProduction())
+    await ValidateRuntimeDatabaseRoleAsync(connectionString);
+
 static string ResolveDirectMigrationConnection(string runtimeConnection)
     => runtimeConnection.Replace("-pooler.", ".", StringComparison.OrdinalIgnoreCase);
+
+static async Task ValidateRuntimeDatabaseRoleAsync(string runtimeConnection)
+{
+    await using var connection = new NpgsqlConnection(runtimeConnection);
+    await connection.OpenAsync();
+    await using var command = connection.CreateCommand();
+    command.CommandText = """
+        SELECT NOT runtime_role.rolinherit
+               AND NOT runtime_role.rolsuper
+               AND NOT runtime_role.rolbypassrls
+               AND pg_has_role(current_user, 'nexora_tenant_app', 'MEMBER')
+               AND NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexora_ai_maintenance')
+        FROM pg_roles runtime_role
+        WHERE runtime_role.rolname = current_user;
+        """;
+    if (await command.ExecuteScalarAsync() is not true)
+        throw new InvalidOperationException(
+            "The runtime database role must be NOINHERIT, non-superuser, non-BYPASSRLS, a member of nexora_tenant_app, and have no AI maintenance bypass role.");
+}
 
 await DemoUserSeeder.EnsureAsync(app.Services, app.Configuration, app.Environment);
 

@@ -22,6 +22,7 @@ using Docnet.Core.Models;
 using Tesseract;
 using UglyToad.PdfPig;
 using ERP_RFQ_Automation.Infrastructure.Storage;
+using ERP_RFQ_Automation.AI;
 
 namespace ERP_RFQ_Automation.Services
 {
@@ -229,7 +230,9 @@ namespace ERP_RFQ_Automation.Services
                 {
                     // Apply smart token limiting before sending to LLM
                     string limitedText = LimitTextForLLM(combinedExtractedText);
-                    ai = await _llmService.ExtractLeadDataAsync(limitedText);
+                    ai = await _llmService.ExtractLeadDataAsync(limitedText,
+                        new AiCallContext(businessUnitId, AiPurposes.RfqExtraction,
+                            $"manual-ingest:{dummyIngest.Id}", "rfq-extraction-v1"));
                 }
                 catch (Exception ex)
                 {

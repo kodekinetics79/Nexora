@@ -55,6 +55,36 @@ public class TenantStatusChangeRequest
     public string Reason { get; set; } = null!;
 }
 
+public class TenantAiPolicyDto
+{
+    public long BusinessUnitId { get; set; }
+    public bool IsEnabled { get; set; }
+    public bool ExternalProcessingAllowed { get; set; }
+    public string[] AllowedPurposes { get; set; } = [];
+    public string? AllowedProvider { get; set; }
+    public string? AllowedModel { get; set; }
+    public long? MonthlySoftTokenLimit { get; set; }
+    public long? MonthlyHardTokenLimit { get; set; }
+    public long Version { get; set; }
+    public DateTime UpdatedOn { get; set; }
+    public string UpdatedBy { get; set; } = null!;
+}
+
+public class UpdateTenantAiPolicyRequest
+{
+    public bool IsEnabled { get; set; } = true;
+    public bool ExternalProcessingAllowed { get; set; }
+    public string[] AllowedPurposes { get; set; } = [];
+    public string? AllowedProvider { get; set; }
+    public string? AllowedModel { get; set; }
+    public long? MonthlySoftTokenLimit { get; set; }
+    public long? MonthlyHardTokenLimit { get; set; }
+    public long Version { get; set; }
+
+    [Required]
+    public string Reason { get; set; } = null!;
+}
+
 // ---- Impersonation -------------------------------------------------------
 
 public class ImpersonationRequest

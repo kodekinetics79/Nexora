@@ -9,6 +9,7 @@ using ERP_RFQ_Automation.DTOs.DocumentIntelligence;
 using ERP_RFQ_Automation.Services.DocumentIntelligence;
 using ERP_RFQ_Automation.Services.Interfaces;
 using Microsoft.Extensions.Logging;
+using ERP_RFQ_Automation.AI;
 
 namespace ERP_RFQ_Automation.Extraction;
 
@@ -33,6 +34,7 @@ public sealed class DocumentExtractionInput
 {
     public long BusinessUnitId { get; init; }
     public string SourceDocumentName { get; init; } = "RFQ document";
+    public string SourceId { get; init; } = Guid.NewGuid().ToString("N");
 
     /// <summary>Header/context text extracted once (buyer, RFQ no, dates, terms).</summary>
     public string HeaderText { get; init; } = "";
@@ -132,7 +134,10 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         if (expected == 0)
         {
             // No detected line-item rows: a single whole-document pass (header + any body).
-            var single = await _llm.ExtractLeadDataAsync(Clip(input.HeaderText, MaxChunkChars));
+            var single = await _llm.ExtractLeadDataAsync(
+                Clip(input.HeaderText, MaxChunkChars),
+                new AiCallContext(input.BusinessUnitId, AiPurposes.RfqExtraction,
+                    $"extraction:{input.SourceId}:whole", "rfq-extraction-v1"), ct);
             if (single is null)
                 return Failed(0, "LLM returned no result for the document.");
             var items0 = single.Items ?? new List<LeadItemData>();
@@ -179,7 +184,9 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             LeadExtractionResult? chunkResult;
             try
             {
-                chunkResult = await _llm.ExtractLeadDataAsync(prompt);
+                chunkResult = await _llm.ExtractLeadDataAsync(prompt,
+                    new AiCallContext(input.BusinessUnitId, AiPurposes.RfqExtraction,
+                        $"extraction:{input.SourceId}:chunk:{i + 1}", "rfq-extraction-v1"), ct);
             }
             catch (Exception ex)
             {

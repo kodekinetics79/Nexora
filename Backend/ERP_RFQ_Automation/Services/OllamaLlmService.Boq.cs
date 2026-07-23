@@ -1,5 +1,7 @@
 using ERP_RFQ_Automation.Services.Interfaces;
 using System.Text.Json;
+using System.Diagnostics;
+using ERP_RFQ_Automation.AI;
 
 namespace ERP_RFQ_Automation.Services
 {
@@ -9,7 +11,8 @@ namespace ERP_RFQ_Automation.Services
     // schema. The extraction path in the main file is untouched.
     public partial class OllamaLlmService
     {
-        public async Task<BoqDraftResult?> DraftServiceBoqAsync(string scopeText)
+        public async Task<BoqDraftResult?> DraftServiceBoqAsync(
+            string scopeText, AiCallContext context, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(scopeText))
             {
@@ -21,79 +24,154 @@ namespace ERP_RFQ_Automation.Services
             // truncation) — service scopes are prose-heavy, the same limits apply.
             var processedText = PreprocessText(scopeText);
             var instructions = BuildBoqInstructions();
+            var maximumRequestBytes = MeasureRequestBytes(instructions, processedText);
+            var reservation = await _governance.ReserveAsync(
+                context, "Ollama", _model, processedText, maximumRequestBytes,
+                _maximumOutputTokens, MAX_RETRIES, cancellationToken);
+            long totalInputTokens = 0;
+            long totalOutputTokens = 0;
+            var aggregateSource = AiTokenSources.ProviderExact;
 
             _log.LogInformation("Sending BOQ draft request to Ollama Cloud. Text length: {Length} chars",
                 processedText.Length);
 
             for (int attempt = 1; attempt <= MAX_RETRIES; attempt++)
             {
+                var started = DateTime.UtcNow;
+                var stopwatch = Stopwatch.StartNew();
+                var providerCallCompleted = false;
                 try
                 {
-                    var result = await SendBoqDraftRequestAsync(instructions, processedText);
-                    if (result != null)
+                    var call = await SendBoqDraftRequestAsync(instructions, processedText, cancellationToken);
+                    providerCallCompleted = true;
+                    stopwatch.Stop();
+                    var usage = Usage(call, maximumRequestBytes);
+                    totalInputTokens += usage.InputTokens;
+                    totalOutputTokens += usage.OutputTokens;
+                    if (usage.TokenSource != AiTokenSources.ProviderExact)
+                        aggregateSource = usage.TokenSource;
+                    await _governance.RecordAttemptAsync(reservation, new AiAttemptCompletion(
+                        attempt, call.Result is not null ? AiCallStatuses.Succeeded : AiCallStatuses.Failed,
+                        call.HttpStatus, call.ProviderRequestId, usage.InputTokens, usage.OutputTokens,
+                        usage.TokenSource, stopwatch.ElapsedMilliseconds, call.ProviderDurationNanoseconds,
+                        string.IsNullOrEmpty(call.RawContent) ? null : AiGovernanceService.Hash(call.RawContent),
+                        call.ErrorCode, started, DateTime.UtcNow), CancellationToken.None);
+                    if (call.Result != null)
                     {
+                        await _governance.CompleteAsync(reservation, AiCallStatuses.Succeeded,
+                            totalInputTokens, totalOutputTokens, aggregateSource, call.RawContent, null, CancellationToken.None);
                         _log.LogInformation(
                             "Successfully drafted BOQ. Sections: {Sections}, overall confidence: {Confidence:P0}",
-                            result.Sections?.Count ?? 0, result.OverallConfidence);
-                        return result;
+                            call.Result.Sections?.Count ?? 0, call.Result.OverallConfidence);
+                        return call.Result;
                     }
+                    if (!IsTransient(call.HttpStatus))
+                        break;
                     if (attempt < MAX_RETRIES)
                     {
                         _log.LogWarning("BOQ draft attempt {Attempt} failed, retrying...", attempt);
-                        await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt)));
+                        await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt)), cancellationToken);
                     }
                 }
                 catch (HttpRequestException ex)
                 {
+                    stopwatch.Stop();
+                    var estimatedInput = AiGovernanceService.ConservativeTokenUpperBound(maximumRequestBytes);
+                    totalInputTokens += estimatedInput;
+                    totalOutputTokens += _maximumOutputTokens;
+                    aggregateSource = AiTokenSources.Estimated;
+                    await RecordExceptionAttemptAsync(reservation, attempt, AiCallStatuses.Unknown,
+                        "transport_unknown", estimatedInput, _maximumOutputTokens,
+                        stopwatch.ElapsedMilliseconds, started, CancellationToken.None);
                     _log.LogError(ex, "HTTP error on BOQ draft attempt {Attempt}/{MaxRetries}", attempt, MAX_RETRIES);
-                    if (attempt == MAX_RETRIES) return null;
-                    await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt)));
+                    if (attempt < MAX_RETRIES)
+                        await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt)), cancellationToken);
                 }
-                catch (TaskCanceledException ex)
+                catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
                 {
+                    stopwatch.Stop();
+                    var estimatedInput = AiGovernanceService.ConservativeTokenUpperBound(maximumRequestBytes);
+                    totalInputTokens += estimatedInput;
+                    totalOutputTokens += _maximumOutputTokens;
+                    aggregateSource = AiTokenSources.Estimated;
+                    await RecordExceptionAttemptAsync(reservation, attempt, AiCallStatuses.Unknown,
+                        "provider_timeout", estimatedInput, _maximumOutputTokens,
+                        stopwatch.ElapsedMilliseconds, started, CancellationToken.None);
                     _log.LogError(ex, "BOQ draft timeout on attempt {Attempt}/{MaxRetries}", attempt, MAX_RETRIES);
-                    if (attempt == MAX_RETRIES) return null;
-                    await Task.Delay(TimeSpan.FromSeconds(5 * attempt));
+                    if (attempt < MAX_RETRIES)
+                        await Task.Delay(TimeSpan.FromSeconds(5 * attempt), cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    stopwatch.Stop();
+                    if (providerCallCompleted)
+                    {
+                        await _governance.CompleteAsync(reservation, AiCallStatuses.Failed,
+                            totalInputTokens, totalOutputTokens, aggregateSource, null,
+                            "cancelled_during_backoff", CancellationToken.None);
+                        throw;
+                    }
+                    var estimatedInput = AiGovernanceService.ConservativeTokenUpperBound(maximumRequestBytes);
+                    await RecordExceptionAttemptAsync(reservation, attempt, AiCallStatuses.Unknown,
+                        "caller_cancelled", estimatedInput, _maximumOutputTokens,
+                        stopwatch.ElapsedMilliseconds, started, CancellationToken.None);
+                    await _governance.CompleteAsync(reservation, AiCallStatuses.Unknown,
+                        totalInputTokens + estimatedInput, totalOutputTokens + _maximumOutputTokens, AiTokenSources.Estimated,
+                        null, "caller_cancelled", CancellationToken.None);
+                    throw;
                 }
                 catch (Exception ex)
                 {
+                    if (providerCallCompleted)
+                        throw;
+                    stopwatch.Stop();
+                    await RecordExceptionAttemptAsync(reservation, attempt, AiCallStatuses.Failed,
+                        "unexpected_error", 0, 0, stopwatch.ElapsedMilliseconds, started, CancellationToken.None);
                     _log.LogError(ex, "Unexpected error during BOQ draft attempt {Attempt}", attempt);
-                    return null;
+                    break;
                 }
             }
+            await _governance.CompleteAsync(reservation, AiCallStatuses.Failed,
+                totalInputTokens, totalOutputTokens, aggregateSource, null, "attempts_exhausted", CancellationToken.None);
             _log.LogWarning("All BOQ draft attempts failed");
             return null;
         }
 
-        private async Task<BoqDraftResult?> SendBoqDraftRequestAsync(
-            string trustedInstructions, string untrustedDocument)
+        private async Task<ProviderCallResult<BoqDraftResult>> SendBoqDraftRequestAsync(
+            string trustedInstructions, string untrustedDocument, CancellationToken ct)
         {
             var payload = new OllamaRequest(
                 Model: _model,
                 Messages: BuildGovernedMessages(trustedInstructions, untrustedDocument),
                 Stream: false,
                 Format: "json",
-                Options: new OllamaOptions(Temperature: TEMPERATURE)
+                Options: new OllamaOptions(Temperature: TEMPERATURE, NumPredict: _maximumOutputTokens)
             );
 
-            var response = await _http.PostAsJsonAsync("api/chat", payload, _jsonOptions);
+            using var response = await _http.PostAsJsonAsync("api/chat", payload, _jsonOptions, ct);
+            var providerRequestId = ReadProviderRequestId(response);
 
             if (!response.IsSuccessStatusCode)
             {
                 _log.LogWarning("Ollama API returned {StatusCode} for BOQ draft.", response.StatusCode);
-                return null;
+                return new(null, null, (int)response.StatusCode, providerRequestId, null, null, null, "provider_http_error");
             }
 
-            var ollamaResponse = await response.Content.ReadFromJsonAsync<OllamaResponse>(_jsonOptions);
+            var ollamaResponse = await response.Content.ReadFromJsonAsync<OllamaResponse>(_jsonOptions, ct);
             var rawContent = ollamaResponse?.Message?.Content?.Trim();
 
             if (string.IsNullOrWhiteSpace(rawContent))
             {
                 _log.LogWarning("Received empty BOQ draft response from Ollama");
-                return null;
+                return new(null, null, (int)response.StatusCode, providerRequestId,
+                    ollamaResponse?.PromptEvalCount, ollamaResponse?.EvalCount,
+                    ollamaResponse?.TotalDuration, "empty_response");
             }
 
-            return ParseBoqJsonResponse(rawContent);
+            var parsed = ParseBoqJsonResponse(rawContent);
+            return new(parsed, rawContent, (int)response.StatusCode, providerRequestId,
+                ollamaResponse?.PromptEvalCount, ollamaResponse?.EvalCount,
+                ollamaResponse?.TotalDuration, parsed is null ? "invalid_output" : null);
         }
 
         private BoqDraftResult? ParseBoqJsonResponse(string rawContent)

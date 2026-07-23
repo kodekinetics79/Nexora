@@ -28,6 +28,8 @@ public partial class ErpRfqAutomationContext
         if (Database.IsNpgsql())
             modelBuilder.HasSequence<long>("CommercialCaseReferenceSequence");
 
+        ConfigureAiGovernance(modelBuilder);
+
         // Commercial documents (non-nullable BusinessUnitId).
         modelBuilder.Entity<Lead>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<Rfq>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
@@ -42,6 +44,10 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<User>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == null || e.Buid == CurrentTenantId);
         modelBuilder.Entity<CommercialLifecycleEvent>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<LifecycleOutboxMessage>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<ERP_RFQ_Automation.AI.AiProcessingPolicy>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<ERP_RFQ_Automation.AI.AiRequest>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<ERP_RFQ_Automation.AI.AiCallAttempt>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<ERP_RFQ_Automation.AI.AiBudgetPeriod>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
 
         // Dependent commercial rows inherit the tenant boundary from their required
         // aggregate root. Keep these filters aligned with the PostgreSQL parent-derived

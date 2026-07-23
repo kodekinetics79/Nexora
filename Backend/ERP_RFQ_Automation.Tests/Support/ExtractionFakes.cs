@@ -1,5 +1,6 @@
 using ERP_RFQ_Automation.Services.Interfaces;
 using Microsoft.Extensions.Logging;
+using ERP_RFQ_Automation.AI;
 
 namespace ERP_RFQ_Automation.Tests.Support;
 
@@ -27,7 +28,8 @@ public sealed class StubLlm : ILLMService
     public StubLlm(params LeadExtractionResult?[] responses)
         => _responses = new Queue<LeadExtractionResult?>(responses);
 
-    public Task<LeadExtractionResult?> ExtractLeadDataAsync(string fullText)
+    public Task<LeadExtractionResult?> ExtractLeadDataAsync(
+        string fullText, AiCallContext context, CancellationToken cancellationToken = default)
     {
         CallCount++;
         Prompts.Add(fullText);
@@ -37,7 +39,8 @@ public sealed class StubLlm : ILLMService
 
     // WP-BOQ member of ILLMService — not exercised by the extraction tests; returns
     // null ("model produced nothing usable") so any accidental call degrades safely.
-    public Task<BoqDraftResult?> DraftServiceBoqAsync(string scopeText)
+    public Task<BoqDraftResult?> DraftServiceBoqAsync(
+        string scopeText, AiCallContext context, CancellationToken cancellationToken = default)
         => Task.FromResult<BoqDraftResult?>(null);
 }
 

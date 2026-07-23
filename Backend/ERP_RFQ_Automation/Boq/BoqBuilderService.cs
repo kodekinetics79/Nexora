@@ -4,6 +4,7 @@ using System.Text.Json;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Services.Interfaces;
 using Microsoft.EntityFrameworkCore;
+using ERP_RFQ_Automation.AI;
 
 namespace ERP_RFQ_Automation.Boq;
 
@@ -130,7 +131,9 @@ public sealed class BoqBuilderService : IBoqBuilderService
         }
         else
         {
-            var draft = await _llm.DraftServiceBoqAsync(sourceText);
+            var draft = await _llm.DraftServiceBoqAsync(sourceText,
+                new AiCallContext(businessUnitId, AiPurposes.BoqDraft,
+                    $"boq:{request.LeadId?.ToString() ?? "adhoc"}:{Guid.NewGuid():N}", "boq-draft-v1"), ct);
             if (draft is null)
             {
                 // The model failed or its output was untrustworthy — degrade honestly

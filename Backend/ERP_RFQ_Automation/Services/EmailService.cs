@@ -23,6 +23,7 @@ using Docnet.Core.Models;
 using Tesseract;
 using UglyToad.PdfPig;
 using ERP_RFQ_Automation.Infrastructure.Storage;
+using ERP_RFQ_Automation.AI;
 
 namespace ERP_RFQ_Automation.Services
 {
@@ -555,7 +556,9 @@ namespace ERP_RFQ_Automation.Services
             // AI Extraction with validation
             try
             {
-                var ai = await llmService.ExtractLeadDataAsync(limitedText);
+                var ai = await llmService.ExtractLeadDataAsync(limitedText,
+                    new AiCallContext(config.BusinessUnitId, AiPurposes.RfqExtraction,
+                        $"email-ingest:{ingest.Id}", "rfq-extraction-v1"));
                 // Smart validation: Lower threshold if email clearly looks like RFQ
                 var minConfidence = HasStrongRFQIndicators(message, ai)
                     ? MIN_CONFIDENCE_WITH_VALIDATION

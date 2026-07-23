@@ -70,5 +70,7 @@ public sealed class PostgreSqlTestDatabase : IAsyncLifetime
         return connection;
     }
 
+    public string ConnectionString => _container.GetConnectionString();
+
     public Task DisposeAsync() => _container.DisposeAsync().AsTask();
 }

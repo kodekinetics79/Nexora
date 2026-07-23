@@ -414,6 +414,7 @@ public sealed class DefaultExtractionDocumentReader : IExtractionDocumentReader
                 return new DocumentExtractionInput
                 {
                     BusinessUnitId = job.BusinessUnitId,
+                    SourceId = $"{job.Id}:claim:{job.Attempts}",
                     SourceDocumentName = name,
                     IsStructured = true,
                     StructuredRows = rows,
@@ -433,6 +434,7 @@ public sealed class DefaultExtractionDocumentReader : IExtractionDocumentReader
         return new DocumentExtractionInput
         {
             BusinessUnitId = job.BusinessUnitId,
+            SourceId = $"{job.Id}:claim:{job.Attempts}",
             SourceDocumentName = name,
             IsStructured = false,
             HeaderText = header,

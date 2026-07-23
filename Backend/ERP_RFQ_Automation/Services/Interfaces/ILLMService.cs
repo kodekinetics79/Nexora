@@ -1,12 +1,14 @@
 using System.Buffers;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using ERP_RFQ_Automation.AI;
 
 namespace ERP_RFQ_Automation.Services.Interfaces
 {
     public interface ILLMService
     {
-        Task<LeadExtractionResult?> ExtractLeadDataAsync(string fullText);
+        Task<LeadExtractionResult?> ExtractLeadDataAsync(
+            string fullText, AiCallContext context, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// WP-BOQ (additive): reads a service request / scope-of-work text and drafts a
@@ -17,7 +19,8 @@ namespace ERP_RFQ_Automation.Services.Interfaces
         /// implementation (same retry/strict-parse shape as ExtractLeadDataAsync) is in
         /// Services/OllamaLlmService.Boq.cs.
         /// </summary>
-        Task<BoqDraftResult?> DraftServiceBoqAsync(string scopeText);
+        Task<BoqDraftResult?> DraftServiceBoqAsync(
+            string scopeText, AiCallContext context, CancellationToken cancellationToken = default);
     }
     public record LeadExtractionResult(
         string? Rfqno, double? RfqnoConfidence,

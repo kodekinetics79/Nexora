@@ -32,8 +32,8 @@ Pilot-readiness evaluation complete (9-discipline SME board, run wf_3d130c34-a6f
 
 ### P1 — fix in pilot week 1
 - **tessdata not in publish output** — OCR silently broken in the deployed container (csproj had no Content item). **FIXED** — added `<Content Include="tessdata/**">`.
-- **No AI gateway** — OllamaLlmService + AnthropicAgentLlm call providers directly; default extraction provider is Ollama **Cloud** receiving up to 30k raw chars/call (contradicts local-first). *Open — CTO decision: self-host Ollama vs build IAiGateway seam.*
-- **Zero token/usage/billing metering** — no UsageEvent/LlmCallLog entity; provider `usage` blocks discarded at call sites; Plan quotas (MaxDocsPerMonth/MaxSeats/Weight) are dead schema. Corroborated by Billing + DocInt + QA + Architecture. *Open — CTO scope decision for pilots.*
+- **No AI gateway** — **FIXED** for every current Ollama and Anthropic completion path: fail-closed tenant policy, purpose/provider/model controls, independent budget reservation/settlement, immutable per-attempt ledger, exact/estimated usage, idempotency, and output ceilings. External processing remains disabled until explicitly enabled by a platform tenant administrator.
+- **Zero token/usage/billing metering** — **FIXED for AI token metering and hard monthly budgets**. Commercial invoicing/plan monetization remains separate finance work.
 - **LLM path has no determinism guard** — qty/price/UOM/MPN persisted verbatim from model output; no source-evidence check; evidence-ledger tables (SourceDocument/FieldEvidence...) migrated but never written. *Open.*
 - **Scanned PDFs >10 pages silently truncated** and can save as clean "Ok" leads (ProductionDocumentReader.cs:214). *Open — hours-scale: flag truncation → NeedsReview.*
 - **No DB migration execution path** in any deploy flow (no Migrate(), no release_command). Schema drift one forgotten command away. *Open.*
@@ -69,8 +69,7 @@ Job-completion non-idempotency (duplicate lead on crash between persist+complete
 ## Blockers / CTO decisions required
 1. Object storage provider for evidence (Tigris/S3/R2) — unblocks P0 #1.
 2. Single deploy host (Render vs Fly) — unblocks split-brain.
-3. Metering scope for pilots: descope (flat-fee, reconstruct doc volume from ExtractionJobs later) vs. minimal UsageEvent + LlmCallLog now.
-4. AI privacy posture: self-host Ollama vs. build IAiGateway seam (raw doc text currently leaves to Ollama Cloud by default).
+3. AI hosting posture: external providers now require explicit per-tenant consent and are metered; self-hosted inference remains an optional sovereignty enhancement.
 5. Migration execution mechanism (release_command vs. guarded startup Migrate).
 
 ## Money-path implementation (priority per user, 2026-07-22)
@@ -92,7 +91,7 @@ Priority spine: Lead -> RFQ -> Quote -> PO/Order -> Delivery(Shipment) -> Invent
   - Commercial Case reference has thin/no frontend surface (per FE review).
 
 ## Next smallest executable task
-Add a real PostgreSQL integration harness for queue claims, reference allocation, HTTP tenant-negative tests, and the first DB-RLS policy. This is the next independent-board P0 and does not depend on a product-provider choice.
+Complete the first-class invoice, payment, accounts-receivable, and credit/debit-note domain, then expose the commercial finance workflow in the frontend.
 
 ## Next command
 `cd /Users/zackkhan/Nexora/Nexora-main/Backend && dotnet test ERP_RFQ_Automation.sln --nologo -v minimal`
@@ -125,9 +124,8 @@ Add a real PostgreSQL integration harness for queue claims, reference allocation
   their independent audience/policy boundary and anonymous login remains available.
 - Verification: **243/243 backend tests pass** in one run, including the disposable
   PostgreSQL lane; an idempotent SQL migration script generates through the new marker.
-- RLS certification remains open. Do not enable policies until the normal app role,
-  privileged maintenance role, explicit transaction/session GUC, and background-worker
-  tenant iteration are implemented and proven against Neon-compatible pooling.
+- This checkpoint originally left RLS certification open. The later RLS and AI-governance
+  increments below close it with an explicit tenant role/GUC and tenant-iterating workers.
 
 ## PostgreSQL row-level tenant isolation (2026-07-23)
 - Added migration `AddTenantRowLevelSecurity`: creates a restricted NOLOGIN,
@@ -206,3 +204,40 @@ Add a real PostgreSQL integration harness for queue claims, reference allocation
 - Behavioral request/logger/controller tests prevent those disclosures and verify the
   serialized trust boundary using hostile document content. Verification:
   **258/258 backend tests pass**.
+
+## Governed AI policy, metering, and provider accounting (2026-07-23)
+- Added tenant-scoped AI processing policies, logical requests, immutable provider-call
+  attempts, and monthly budget periods. The PostgreSQL migration applies forced RLS,
+  restricted grants, tenant-composite foreign keys, status/hash/time/usage constraints,
+  immutable attempt and request-identity triggers, and fail-closed policy creation for
+  both existing and newly provisioned business units.
+- External processing is disabled by default. Platform tenant administrators can inspect
+  and update a tenant's policy through versioned, reason-required, audited control-plane
+  endpoints, including purpose/provider/model restrictions and soft/hard token limits.
+- Ollama extraction, Ollama BOQ drafting, and Anthropic agent turns now require explicit
+  business-unit, purpose, prompt-version, and stable idempotency context. Each logical
+  call reserves its maximum retry budget in an independent serializable transaction;
+  every real HTTP attempt records exact provider usage when available or a labeled
+  conservative estimate, then settles the reservation independently of business data.
+- Output token ceilings are sent to both providers. Permanent Ollama 4xx responses are
+  not retried; transient timeouts/cancellation are recorded as unknown rather than free.
+  The health endpoint no longer performs an unmetered completion.
+- Accounting stores content length and SHA-256 hashes only, never raw prompts or model
+  output. PostgreSQL tests execute under `nexora_tenant_app`, prove cross-tenant AI rows
+  are hidden, forced RLS is present, request identity and attempts cannot be rewritten,
+  and new-business-unit policy provisioning remains fail closed.
+- The runtime login is required to be `NOINHERIT` and enters `nexora_tenant_app` only with
+  transaction-local `SET ROLE`. Production startup validates this contract and refuses to
+  serve if an implicit AI maintenance bypass exists. Platform policy operations and stale
+  reservation reconciliation use ordinary one-tenant scopes.
+- AI-policy audit inserts remain atomic with policy updates through a narrowly constrained
+  platform-audit RLS policy; the action, target, and tenant-to-business-unit mapping are
+  database-validated, and those audit rows reject updates and deletes.
+- Verification: **274/274 backend tests pass**, including **8/8 PostgreSQL** production
+  tests; EF reports no pending model changes; the frontend TypeScript/Vite production
+  build passes. Existing dependency advisories and missing ESLint configuration remain
+  release-hardening work.
+- Production rollback for `AddAiGovernanceLedger` is application-only or forward-fix.
+  Its EF `Down()` is intentionally destructive and drops policy, request, attempt, and
+  budget history; it must not be executed in production without an approved ledger export
+  and retention procedure.

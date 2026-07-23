@@ -7,6 +7,10 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
+using ERP_RFQ_Automation.AI;
+using System.Security.Claims;
+using System.Text.Json;
+using ERP_RFQ_Automation.MultiTenancy;
 
 namespace ERP_RFQ_Automation.Platform.Controllers;
 
@@ -24,13 +28,18 @@ public class TenantsController : ControllerBase
     private readonly ErpRfqAutomationContext _context;
     private readonly IPlatformAuditService _audit;
     private readonly ILogger<TenantsController> _logger;
+    private readonly IServiceScopeFactory _scopeFactory;
+    private readonly ITenantScopeAccessor _tenantScope;
 
     public TenantsController(
-        ErpRfqAutomationContext context, IPlatformAuditService audit, ILogger<TenantsController> logger)
+        ErpRfqAutomationContext context, IPlatformAuditService audit, ILogger<TenantsController> logger,
+        IServiceScopeFactory scopeFactory, ITenantScopeAccessor tenantScope)
     {
         _context = context;
         _audit = audit;
         _logger = logger;
+        _scopeFactory = scopeFactory;
+        _tenantScope = tenantScope;
     }
 
     // GET /api/platform/tenants
@@ -144,6 +153,85 @@ public class TenantsController : ControllerBase
         return CreatedAtAction(nameof(Get), new { id = created.Id }, ToDto(withPlan));
     }
 
+    [HttpGet("{id:long}/ai-policy")]
+    public async Task<ActionResult<TenantAiPolicyDto>> GetAiPolicy(long id, CancellationToken ct)
+    {
+        var tenant = await _context.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
+            .FirstOrDefaultAsync(t => t.Id == id, ct);
+        if (tenant?.PrimaryBusinessUnitId is not long businessUnitId)
+            return NotFound();
+        using var tenantScope = _tenantScope.Push(businessUnitId);
+        using var scope = _scopeFactory.CreateScope();
+        var tenantDb = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        var policy = await tenantDb.AiProcessingPolicies.AsNoTracking()
+            .SingleOrDefaultAsync(p => p.BusinessUnitId == businessUnitId, ct);
+        return policy is null ? NotFound() : Ok(ToAiPolicyDto(policy));
+    }
+
+    [HttpPut("{id:long}/ai-policy")]
+    [Authorize(Policy = PlatformPolicies.TenantAdmin)]
+    public async Task<ActionResult<TenantAiPolicyDto>> UpdateAiPolicy(
+        long id, [FromBody] UpdateTenantAiPolicyRequest request, CancellationToken ct)
+    {
+        if (request is null || string.IsNullOrWhiteSpace(request.Reason))
+            return BadRequest(new { error = "A reason is required." });
+        if (request.MonthlySoftTokenLimit is < 0 || request.MonthlyHardTokenLimit is < 0
+            || request.MonthlySoftTokenLimit is { } soft && request.MonthlyHardTokenLimit is { } hard && soft > hard)
+            return BadRequest(new { error = "Token limits must be non-negative and soft cannot exceed hard." });
+
+        var allowedPurposeSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { AiPurposes.RfqExtraction, AiPurposes.BoqDraft, AiPurposes.Agent };
+        var purposes = (request.AllowedPurposes ?? [])
+            .Where(p => !string.IsNullOrWhiteSpace(p)).Select(p => p.Trim()).Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (purposes.Any(p => !allowedPurposeSet.Contains(p)))
+            return BadRequest(new { error = "One or more AI purposes are invalid." });
+        if (request.ExternalProcessingAllowed && purposes.Length == 0)
+            return BadRequest(new { error = "At least one purpose is required when external processing is allowed." });
+
+        var tenant = await _context.Set<Tenant>().IgnoreQueryFilters()
+            .FirstOrDefaultAsync(t => t.Id == id, ct);
+        if (tenant?.PrimaryBusinessUnitId is not long businessUnitId)
+            return NotFound();
+        using var tenantScope = _tenantScope.Push(businessUnitId);
+        using var scope = _scopeFactory.CreateScope();
+        var tenantDb = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        var policy = await tenantDb.AiProcessingPolicies
+            .SingleOrDefaultAsync(p => p.BusinessUnitId == businessUnitId, ct);
+        if (policy is null)
+            return Conflict(new { error = "The tenant AI policy has not been provisioned." });
+        if (policy.Version != request.Version)
+            return Conflict(new { error = "The AI policy changed; reload and try again.", currentVersion = policy.Version });
+
+        var before = ToAiPolicyDto(policy);
+        policy.IsEnabled = request.IsEnabled;
+        policy.ExternalProcessingAllowed = request.ExternalProcessingAllowed;
+        policy.AllowedPurposes = string.Join(',', purposes);
+        policy.AllowedProvider = Normalize(request.AllowedProvider);
+        policy.AllowedModel = Normalize(request.AllowedModel);
+        policy.MonthlySoftTokenLimit = request.MonthlySoftTokenLimit;
+        policy.MonthlyHardTokenLimit = request.MonthlyHardTokenLimit;
+        policy.Version++;
+        policy.UpdatedOn = DateTime.UtcNow;
+        policy.UpdatedBy = User.FindFirst("email")?.Value ?? "platform";
+        var after = ToAiPolicyDto(policy);
+        var subject = User.FindFirst("sub")?.Value ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        long.TryParse(subject, out var actorId);
+        tenantDb.Set<PlatformAuditLog>().Add(new PlatformAuditLog
+        {
+            ActorPlatformUserId = actorId,
+            ActAsTenantId = id,
+            Action = "tenant.ai-policy.update",
+            TargetType = nameof(AiProcessingPolicy),
+            TargetId = businessUnitId.ToString(),
+            Metadata = JsonSerializer.Serialize(new { before, after, reason = request.Reason.Trim() }),
+            Ip = HttpContext.Connection.RemoteIpAddress?.ToString(),
+            CreatedOn = DateTime.UtcNow
+        });
+        await tenantDb.SaveChangesAsync(ct);
+        return Ok(after);
+    }
+
     // POST /api/platform/tenants/{id}/suspend
     [HttpPost("{id:long}/suspend")]
     [Authorize(Policy = PlatformPolicies.TenantAdmin)]
@@ -202,6 +290,24 @@ public class TenantsController : ControllerBase
         CreatedOn = t.CreatedOn,
         StatusReason = t.StatusReason
     };
+
+    private static TenantAiPolicyDto ToAiPolicyDto(AiProcessingPolicy p) => new()
+    {
+        BusinessUnitId = p.BusinessUnitId,
+        IsEnabled = p.IsEnabled,
+        ExternalProcessingAllowed = p.ExternalProcessingAllowed,
+        AllowedPurposes = p.AllowedPurposes.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+        AllowedProvider = p.AllowedProvider,
+        AllowedModel = p.AllowedModel,
+        MonthlySoftTokenLimit = p.MonthlySoftTokenLimit,
+        MonthlyHardTokenLimit = p.MonthlyHardTokenLimit,
+        Version = p.Version,
+        UpdatedOn = p.UpdatedOn,
+        UpdatedBy = p.UpdatedBy
+    };
+
+    private static string? Normalize(string? value)
+        => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
     private static string Slugify(string input)
     {

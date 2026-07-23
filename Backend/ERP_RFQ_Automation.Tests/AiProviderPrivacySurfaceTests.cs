@@ -6,6 +6,7 @@ using ERP_RFQ_Automation.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using ERP_RFQ_Automation.AI;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -18,7 +19,7 @@ public sealed class AiProviderPrivacySurfaceTests
         var handler = new RecordingHandler(_ => Success("{}"));
         var service = CreateService(handler, new CapturingLogger<OllamaLlmService>());
 
-        await service.ExtractLeadDataAsync(hostileDocument);
+        await service.ExtractLeadDataAsync(hostileDocument, Context());
 
         using var request = JsonDocument.Parse(Assert.Single(handler.RequestBodies));
         var messages = request.RootElement.GetProperty("messages").EnumerateArray().ToArray();
@@ -49,11 +50,85 @@ public sealed class AiProviderPrivacySurfaceTests
         var logger = new CapturingLogger<OllamaLlmService>();
         var service = CreateService(handler, logger);
 
-        await service.ExtractLeadDataAsync("ordinary document");
+        await service.ExtractLeadDataAsync("ordinary document", Context());
 
         var logText = string.Join('\n', logger.Messages);
         Assert.DoesNotContain("PROVIDER_ERROR_SECRET", logText, StringComparison.Ordinal);
         Assert.DoesNotContain("MODEL_OUTPUT_SECRET", logText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ProviderUsage_IsCapturedPerRealAttemptAndOutputIsCapped()
+    {
+        var response = Success("{\"Items\":[]}");
+        response.Headers.Add("x-request-id", "ollama-request-1");
+        response.Content = new StringContent(JsonSerializer.Serialize(new
+        {
+            message = new { role = "assistant", content = "{\"Items\":[]}" },
+            prompt_eval_count = 31,
+            eval_count = 9,
+            total_duration = 1234
+        }), Encoding.UTF8, "application/json");
+        var handler = new RecordingHandler(_ => response);
+        var governance = new PermissiveGovernance();
+        var service = CreateService(handler, new CapturingLogger<OllamaLlmService>(), governance);
+
+        await service.ExtractLeadDataAsync("ordinary document", Context());
+
+        var attempt = Assert.Single(governance.Attempts);
+        Assert.Equal(31, attempt.InputTokens);
+        Assert.Equal(9, attempt.OutputTokens);
+        Assert.Equal(AiTokenSources.ProviderExact, attempt.TokenSource);
+        Assert.Equal("ollama-request-1", attempt.ProviderRequestId);
+        using var request = JsonDocument.Parse(Assert.Single(handler.RequestBodies));
+        Assert.Equal(4096, request.RootElement.GetProperty("options").GetProperty("num_predict").GetInt32());
+    }
+
+    [Fact]
+    public async Task MissingProviderUsage_SettlesAgainstCompleteSerializedRequest()
+    {
+        var handler = new RecordingHandler(_ => Success("{\"Items\":[]}"));
+        var governance = new PermissiveGovernance();
+        var service = CreateService(handler, new CapturingLogger<OllamaLlmService>(), governance);
+
+        await service.ExtractLeadDataAsync("x", Context());
+
+        var requestBytes = Encoding.UTF8.GetByteCount(Assert.Single(handler.RequestBodies));
+        var attempt = Assert.Single(governance.Attempts);
+        Assert.Equal(requestBytes, attempt.InputTokens);
+        Assert.Equal(AiTokenSources.Estimated, attempt.TokenSource);
+        Assert.True(attempt.InputTokens > AiGovernanceService.EstimateTokens(1));
+        Assert.Equal(requestBytes, governance.CompletedInputTokens);
+    }
+
+    [Fact]
+    public async Task BoqMissingProviderUsage_SettlesAgainstCompleteSerializedRequest()
+    {
+        var handler = new RecordingHandler(_ => Success("{\"Sections\":[],\"OverallConfidence\":0.9}"));
+        var governance = new PermissiveGovernance();
+        var service = CreateService(handler, new CapturingLogger<OllamaLlmService>(), governance);
+
+        await service.DraftServiceBoqAsync("x", new AiCallContext(
+            1, AiPurposes.BoqDraft, Guid.NewGuid().ToString("N"), "test-v1"));
+
+        var requestBytes = Encoding.UTF8.GetByteCount(Assert.Single(handler.RequestBodies));
+        Assert.Equal(requestBytes, Assert.Single(governance.Attempts).InputTokens);
+        Assert.Equal(requestBytes, governance.CompletedInputTokens);
+    }
+
+    [Fact]
+    public async Task CancellationDuringBackoff_DoesNotDuplicateAttemptAccounting()
+    {
+        var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+        var governance = new PermissiveGovernance();
+        var service = CreateService(handler, new CapturingLogger<OllamaLlmService>(), governance);
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            service.ExtractLeadDataAsync("ordinary document", Context(), cts.Token));
+
+        Assert.Single(governance.Attempts);
+        Assert.Equal(AiCallStatuses.Failed, governance.CompletedStatus);
     }
 
     [Fact]
@@ -90,13 +165,17 @@ public sealed class AiProviderPrivacySurfaceTests
     }
 
     private static OllamaLlmService CreateService(
-        HttpMessageHandler handler, ILogger<OllamaLlmService> logger)
+        HttpMessageHandler handler, ILogger<OllamaLlmService> logger,
+        IAiGovernanceService? governance = null)
         => new(new HttpClient(handler), logger, Configuration(new Dictionary<string, string?>
         {
             ["Ollama:BaseUrl"] = "https://ollama.test/",
             ["Ollama:Model"] = "test-model",
             ["Ollama:ApiKey"] = "test-key"
-        }));
+        }), governance ?? new PermissiveGovernance());
+
+    private static AiCallContext Context() =>
+        new(1, AiPurposes.RfqExtraction, Guid.NewGuid().ToString("N"), "test-v1");
 
     private static IConfiguration Configuration(Dictionary<string, string?> values)
         => new ConfigurationBuilder().AddInMemoryCollection(values).Build();
@@ -133,6 +212,29 @@ public sealed class AiProviderPrivacySurfaceTests
     private sealed class SingleClientFactory(HttpClient client) : IHttpClientFactory
     {
         public HttpClient CreateClient(string name) => client;
+    }
+
+    private sealed class PermissiveGovernance : IAiGovernanceService
+    {
+        public List<AiAttemptCompletion> Attempts { get; } = [];
+        public string? CompletedStatus { get; private set; }
+        public long? CompletedInputTokens { get; private set; }
+        public Task<AiReservation> ReserveAsync(AiCallContext context, string provider, string model,
+            string input, int maximumInputBytes, int maximumOutputTokens, int maximumAttempts, CancellationToken ct)
+            => Task.FromResult(new AiReservation(Guid.NewGuid(), context.BusinessUnitId,
+                maximumOutputTokens, AiGovernanceService.EstimateTokens(input.Length), 1));
+        public Task RecordAttemptAsync(AiReservation reservation, AiAttemptCompletion attempt, CancellationToken ct)
+        {
+            Attempts.Add(attempt);
+            return Task.CompletedTask;
+        }
+        public Task CompleteAsync(AiReservation reservation, string status, long inputTokens,
+            long outputTokens, string tokenSource, string? output, string? errorCode, CancellationToken ct)
+        {
+            CompletedStatus = status;
+            CompletedInputTokens = inputTokens;
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class CapturingLogger<T> : ILogger<T>
