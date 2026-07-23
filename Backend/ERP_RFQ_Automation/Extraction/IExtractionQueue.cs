@@ -52,6 +52,7 @@ public sealed class EnqueueResult
     public Guid BatchId { get; init; }
     public string ContentHash { get; init; } = null!;
     public EnqueueOutcome Outcome { get; init; }
+    public ExtractionStatus? ExistingStatus { get; init; }
 }
 
 /// <summary>

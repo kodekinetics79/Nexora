@@ -17,6 +17,7 @@ public sealed class IngestedDocument
     public string ContentHash { get; init; } = null!;
     public string StoragePath { get; init; } = null!;
     public EnqueueOutcome Outcome { get; init; }
+    public ExtractionStatus? ExistingStatus { get; init; }
 }
 
 /// <summary>
@@ -103,7 +104,8 @@ public sealed class DocumentIngestionService : IDocumentIngestion
             BatchId = enqueue.BatchId,
             ContentHash = enqueue.ContentHash,
             StoragePath = storagePath,
-            Outcome = enqueue.Outcome
+            Outcome = enqueue.Outcome,
+            ExistingStatus = enqueue.ExistingStatus
         };
     }
 

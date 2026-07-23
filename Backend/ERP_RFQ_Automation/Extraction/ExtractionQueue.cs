@@ -116,12 +116,16 @@ RETURNING {ReturningColumns};";
         // covers the rare race where two enqueues create the tenant's WFQ state row at once.
         for (var attempt = 0; attempt < 3; attempt++)
         {
-            var existingId = await jobs.AsNoTracking()
+            var existing = await jobs.AsNoTracking()
                 .Where(j => j.BusinessUnitId == request.BusinessUnitId && j.ContentHash == hash)
-                .Select(j => j.Id)
+                .Select(j => new { j.Id, j.Status })
                 .FirstOrDefaultAsync(ct);
-            if (existingId != 0)
-                return new EnqueueResult { JobId = existingId, BatchId = batchId, ContentHash = hash, Outcome = EnqueueOutcome.Duplicate };
+            if (existing is not null)
+                return new EnqueueResult
+                {
+                    JobId = existing.Id, BatchId = batchId, ContentHash = hash,
+                    Outcome = EnqueueOutcome.Duplicate, ExistingStatus = existing.Status
+                };
 
             var state = await tenants.FindAsync(new object[] { request.BusinessUnitId }, ct);
             if (state is null)
@@ -172,16 +176,20 @@ RETURNING {ReturningColumns};";
         }
 
         // Final resolution after exhausting retries: the row must exist by now.
-        var settledId = await jobs.AsNoTracking()
+        var settled = await jobs.AsNoTracking()
             .Where(j => j.BusinessUnitId == request.BusinessUnitId && j.ContentHash == hash)
-            .Select(j => j.Id)
+            .Select(j => new { j.Id, j.Status })
             .FirstOrDefaultAsync(ct);
+        if (settled is null)
+            throw new InvalidOperationException(
+                "The extraction job could not be enqueued or resolved after bounded retries.");
         return new EnqueueResult
         {
-            JobId = settledId,
+            JobId = settled.Id,
             BatchId = batchId,
             ContentHash = hash,
-            Outcome = EnqueueOutcome.Duplicate
+            Outcome = EnqueueOutcome.Duplicate,
+            ExistingStatus = settled.Status
         };
     }
 

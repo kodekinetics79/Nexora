@@ -471,3 +471,28 @@ Complete the first-class invoice, payment, accounts-receivable, and credit/debit
   and impersonation behavior. Independent authorization and SMTP/SSRF reviews both returned
   **SHIP** with no P0/P1 findings. Existing NU1701 legacy document-package compatibility
   warnings remain a separate modernization item.
+
+## Tenant-isolated watched-folder ingestion (2026-07-23)
+- Folder upload, processing, and email-fetch mutations now require `Leads:Create` and
+  derive the business unit exclusively from the authenticated claim. Global SEC/Aramco
+  processing entry points are no longer callable; watched, processing, processed,
+  quarantine, and retry paths are partitioned under `Tenants/<businessUnitId>`.
+- Uploads use a symlink-checked tenant staging directory, bounded size/type policy, flush,
+  and atomic rename. Every watched entry is atomically claimed into a processing directory
+  before validation or read, claim time is refreshed, and abandoned claims are recovered.
+  File and staging-directory symlinks, path escapes, concurrent claims, and archive
+  collisions fail closed without cross-tenant reads or evidence overwrite.
+- The durable ingestion result exposes an existing duplicate job's actual status. Missing
+  queue rows after bounded insert retries now throw rather than synthesizing job `0`;
+  dead-letter duplicates are quarantined instead of disappearing into the processed archive.
+- Unsupported, empty, oversized, symbolic-link, dead-letter, and three-time staging failures
+  move to tenant quarantine with a recoverable staged manifest. Results report one batch ID
+  with separate enqueued, duplicate, rejected, and retrying counts. The existing background
+  service sweeps tenant folders independently of email polling and isolates each tenant's
+  failure so unattended retries continue.
+- Verification passed **12/12 focused folder security/reliability tests**, **363/363
+  non-PostgreSQL backend regressions**, and **15/15 PostgreSQL production tests**. Focused
+  coverage includes two-tenant isolation, cancellation cleanup, bounded retry/quarantine,
+  dead-letter duplicates, file and staging symlinks, aged active claims, concurrent valid
+  claims, and concurrent unsupported quarantine. Independent tenant-security and ingestion-
+  reliability re-reviews both returned **SHIP** with no P0/P1 findings.

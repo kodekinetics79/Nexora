@@ -28,15 +28,37 @@ namespace ERP_RFQ_Automation.Services
                     _logger.LogInformation("Starting email fetch...");
                     await emailService.FetchAndSaveLeadsAsync();
                     _logger.LogInformation("Email fetch completed successfully.");
-
-                    // _logger.LogInformation("Starting shared folder fetch...");
-                    // var folderService = scope.ServiceProvider.GetRequiredService<FolderService>();
-                    // await folderService.ProcessSharedFolderAsync();
-                    // _logger.LogInformation("Shared folder fetch completed successfully.");
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
                 }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Critical error in email background service");
+                }
+
+                var folderService = scope.ServiceProvider.GetRequiredService<FolderService>();
+                foreach (var businessUnitId in folderService.DiscoverTenantFolderIds())
+                {
+                    try
+                    {
+                        var report = await folderService.ProcessAllFoldersAsync(businessUnitId, stoppingToken);
+                        if (report.Enqueued + report.Duplicates + report.Rejected + report.Failed > 0)
+                        {
+                            _logger.LogInformation(
+                                "Folder sweep {BatchId} for BU {BusinessUnitId}: {Enqueued} enqueued, {Duplicates} duplicates, {Rejected} rejected, {Failed} retrying.",
+                                report.BatchId, businessUnitId, report.Enqueued, report.Duplicates, report.Rejected, report.Failed);
+                        }
+                    }
+                    catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                    {
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Folder sweep failed for BU {BusinessUnitId}; continuing with other tenants.", businessUnitId);
+                    }
                 }
 
                 // DATA-01: this DB read must NOT be able to fault ExecuteAsync — a single

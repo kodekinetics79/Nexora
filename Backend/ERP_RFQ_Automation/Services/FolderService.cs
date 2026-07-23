@@ -18,6 +18,15 @@ using ERP_RFQ_Automation.Infrastructure.Storage;
 
 namespace ERP_RFQ_Automation.Services
 {
+    public sealed class FolderProcessingReport
+    {
+        public Guid BatchId { get; init; } = Guid.NewGuid();
+        public int Enqueued { get; set; }
+        public int Duplicates { get; set; }
+        public int Rejected { get; set; }
+        public int Failed { get; set; }
+    }
+
     public class FolderService
     {
         private readonly ErpRfqAutomationContext _context;
@@ -29,12 +38,9 @@ namespace ERP_RFQ_Automation.Services
         private readonly string _aramcoFolderPath;
         private readonly string _processedFolderPath;
         private readonly string _attachmentPath;
+        private readonly IFileStorage _storage;
         private const long MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024; // 25 MB
 
-        // ING-05: when true (default) folder files are enqueued as durable extraction
-        // jobs (one per file) instead of the in-place SEC/Aramco parsers below.
-        // Config: Ingestion:UseUnifiedQueue (set false to restore the legacy parsers).
-        private readonly bool _useUnifiedQueue;
         private readonly ERP_RFQ_Automation.Extraction.IDocumentIngestion? _ingestion;
 
         public FolderService(
@@ -42,7 +48,6 @@ namespace ERP_RFQ_Automation.Services
             IWebHostEnvironment env,
             ILogger<FolderService> logger,
             ILLMService llmService,
-            IConfiguration configuration,
             IFileStorage storage,
             ERP_RFQ_Automation.Extraction.IDocumentIngestion? ingestion = null)
         {
@@ -50,18 +55,14 @@ namespace ERP_RFQ_Automation.Services
             _env = env;
             _logger = logger;
             _llmService = llmService;
-            _useUnifiedQueue = configuration.GetValue("Ingestion:UseUnifiedQueue", true);
             _ingestion = ingestion;
+            _storage = storage;
             _sharedFolderPath = storage.GetPath("Shared_Leads_Folder");
             _secFolderPath = storage.GetPath("SEC_Leads_Folder");
             _aramcoFolderPath = storage.GetPath("Aramco_Leads_Folder");
             _processedFolderPath = storage.GetPath("Processed_Leads_Folder");
             _attachmentPath = storage.GetPath("Leads_Folder_Attachments");
             
-            Directory.CreateDirectory(_sharedFolderPath);
-            Directory.CreateDirectory(_secFolderPath);
-            Directory.CreateDirectory(_aramcoFolderPath);
-            Directory.CreateDirectory(_processedFolderPath);
             Directory.CreateDirectory(_attachmentPath);
         }
 
@@ -78,9 +79,16 @@ namespace ERP_RFQ_Automation.Services
         //  Main Processing Methods
         // ============================================================
 
-        public async Task SaveFilesToSharedFolderAsync(List<Microsoft.AspNetCore.Http.IFormFile> files, string folderType)
+        public async Task SaveFilesToSharedFolderAsync(
+            List<Microsoft.AspNetCore.Http.IFormFile> files,
+            string folderType,
+            long businessUnitId,
+            CancellationToken cancellationToken = default)
         {
-            var targetFolder = GetFolderPath(folderType);
+            if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
+            var targetFolder = GetTenantFolderPath(businessUnitId, folderType);
+            Directory.CreateDirectory(targetFolder);
+            _storage.ResolvePath(targetFolder);
             
             foreach (var file in files)
             {
@@ -95,27 +103,72 @@ namespace ERP_RFQ_Automation.Services
                         _logger.LogWarning("Rejected upload with unusable filename '{FileName}'.", file.FileName);
                         continue;
                     }
-                    var filePath = Path.Combine(targetFolder, safeName);
+                    var extension = Path.GetExtension(safeName).ToLowerInvariant();
+                    if (!IsAllowedUploadExtension(folderType, extension))
+                        throw new ArgumentException($"File type '{extension}' is not permitted for {folderType} ingestion.");
+                    if (file.Length > MAX_ATTACHMENT_SIZE)
+                        throw new InvalidOperationException($"File '{safeName}' exceeds the 25 MB limit.");
+                    var finalName = $"{Guid.NewGuid():N}_{safeName}";
+                    var filePath = Path.Combine(targetFolder, finalName);
                     var fullTarget = Path.GetFullPath(targetFolder);
                     var fullPath = Path.GetFullPath(filePath);
-                    if (!fullPath.StartsWith(fullTarget, StringComparison.OrdinalIgnoreCase))
+                    var targetPrefix = fullTarget.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                        + Path.DirectorySeparatorChar;
+                    if (!fullPath.StartsWith(targetPrefix, StringComparison.OrdinalIgnoreCase))
                     {
                         _logger.LogWarning("Rejected path-traversal filename '{FileName}'.", file.FileName);
                         continue;
                     }
-                    using (var stream = new FileStream(filePath, FileMode.Create))
+                    var stagingFolder = Path.Combine(targetFolder, ".staging");
+                    Directory.CreateDirectory(stagingFolder);
+                    _storage.ResolvePath(stagingFolder);
+                    var temporaryPath = Path.Combine(stagingFolder, finalName + ".tmp");
+                    _storage.ResolvePath(temporaryPath);
+                    _storage.ResolvePath(filePath);
+                    try
                     {
-                        await file.CopyToAsync(stream);
+                        await using (var stream = new FileStream(
+                            temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                            bufferSize: 64 * 1024, useAsync: true))
+                        {
+                            await file.CopyToAsync(stream, cancellationToken);
+                            await stream.FlushAsync(cancellationToken);
+                        }
+                        File.Move(temporaryPath, filePath, false);
+                    }
+                    catch
+                    {
+                        if (File.Exists(temporaryPath)) File.Delete(temporaryPath);
+                        throw;
                     }
                     _logger.LogInformation("Saved file {FileName} to folder {FolderType}.", safeName, folderType);
                 }
             }
         }
 
-        public async Task ProcessAllFoldersAsync()
+        public async Task<FolderProcessingReport> ProcessAllFoldersAsync(
+            long businessUnitId,
+            CancellationToken cancellationToken = default)
         {
-            await ProcessSECFoldersAsync();
-            await ProcessAramcoFoldersAsync();
+            if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
+            if (_ingestion is null)
+                throw new InvalidOperationException("The durable document-ingestion gateway is unavailable.");
+
+            var sec = GetTenantFolderPath(businessUnitId, "SEC");
+            var aramco = GetTenantFolderPath(businessUnitId, "Aramco");
+            var shared = GetTenantFolderPath(businessUnitId, "Shared");
+            Directory.CreateDirectory(sec);
+            Directory.CreateDirectory(aramco);
+            Directory.CreateDirectory(shared);
+            var report = new FolderProcessingReport();
+            await EnqueueFolderFilesAsync(
+                sec, "SEC Leads", IsSupportedExtension, businessUnitId, report, cancellationToken);
+            await EnqueueFolderFilesAsync(
+                aramco, "Aramco Leads", ext => ext == ".docx", businessUnitId, report, cancellationToken);
+            await EnqueueFolderFilesAsync(
+                shared, "Shared Leads", ext => ext is ".doc" or ".docx" or ".pdf" or ".xlsx" or ".xls",
+                businessUnitId, report, cancellationToken);
+            return report;
         }
 
         /// <summary>
@@ -126,8 +179,19 @@ namespace ERP_RFQ_Automation.Services
         /// so the next run retries it; re-enqueueing already-seen content is a no-op via
         /// the (BusinessUnitId, ContentHash) idempotency.
         /// </summary>
-        private async Task EnqueueFolderFilesAsync(string folder, string leadSourceLabel, Func<string, bool> extFilter)
+        private async Task EnqueueFolderFilesAsync(
+            string folder,
+            string leadSourceLabel,
+            Func<string, bool> extFilter,
+            long businessUnitId,
+            FolderProcessingReport report,
+            CancellationToken cancellationToken)
         {
+            var processingFolder = _storage.GetPath(
+                "Tenants", businessUnitId.ToString(CultureInfo.InvariantCulture),
+                "Processing", leadSourceLabel.Replace(' ', '_'));
+            Directory.CreateDirectory(processingFolder);
+            RecoverStaleClaims(processingFolder, folder);
             var filePaths = Directory.GetFiles(folder);
             if (!filePaths.Any())
             {
@@ -135,69 +199,124 @@ namespace ERP_RFQ_Automation.Services
                 return;
             }
 
-            var defaultConfig = await _context.EmailConfigurations
-                .AsNoTracking()
-                .FirstOrDefaultAsync(e => e.IsActive);
-            if (defaultConfig == null)
-            {
-                _logger.LogWarning("No active email configuration found for {Label} folder processing. Aborting.", leadSourceLabel);
-                return;
-            }
-
-            var batchId = Guid.NewGuid();
             foreach (var filePath in filePaths)
             {
                 var fileName = Path.GetFileName(filePath);
+                if (fileName.EndsWith(".nexora-retry.json", StringComparison.OrdinalIgnoreCase)) continue;
                 var ext = Path.GetExtension(fileName).ToLowerInvariant();
-                if (!extFilter(ext))
-                {
-                    _logger.LogInformation("Skipping unsupported file in {Label} folder: {FileName}", leadSourceLabel, fileName);
-                    continue;
-                }
 
+                string? claimedPath = null;
                 try
                 {
-                    var bytes = await File.ReadAllBytesAsync(filePath);
-                    if (bytes.Length == 0) continue;
+                    var claimCandidate = Path.Combine(processingFolder, $"{Guid.NewGuid():N}_{fileName}");
+                    File.Move(filePath, claimCandidate, false);
+                    claimedPath = claimCandidate;
+                    File.SetLastWriteTimeUtc(claimedPath, DateTime.UtcNow);
+
+                    if (new FileInfo(claimedPath).LinkTarget is not null)
+                    {
+                        _logger.LogWarning("Rejected symbolic-link file in {Label} folder: {FileName}", leadSourceLabel, fileName);
+                        await QuarantineAsync(claimedPath, businessUnitId, leadSourceLabel,
+                            "Symbolic-link files are prohibited.", 1, cancellationToken);
+                        report.Rejected++;
+                        continue;
+                    }
+                    if (!extFilter(ext))
+                    {
+                        await QuarantineAsync(claimedPath, businessUnitId, leadSourceLabel,
+                            "Unsupported file type.", 1, cancellationToken);
+                        report.Rejected++;
+                        continue;
+                    }
+
+                    var resolvedPath = _storage.ResolvePath(claimedPath);
+                    if (!Path.GetFullPath(resolvedPath).Equals(Path.GetFullPath(claimedPath), PathComparison()))
+                        throw new UnauthorizedAccessException("The watched file path did not resolve to itself.");
+                    var bytes = await File.ReadAllBytesAsync(resolvedPath, cancellationToken);
+                    if (bytes.Length == 0)
+                    {
+                        await QuarantineAsync(claimedPath, businessUnitId, leadSourceLabel,
+                            "Empty file.", 1, cancellationToken);
+                        report.Rejected++;
+                        continue;
+                    }
                     if (bytes.Length > MAX_ATTACHMENT_SIZE)
                     {
-                        _logger.LogWarning("File {FileName} exceeds max size. Skipping.", fileName);
+                        await QuarantineAsync(claimedPath, businessUnitId, leadSourceLabel,
+                            "File exceeds the 25 MB limit.", 1, cancellationToken);
+                        report.Rejected++;
                         continue;
                     }
 
                     var result = await _ingestion!.IngestAsync(
-                        bytes, fileName, defaultConfig.BusinessUnitId,
+                        bytes, fileName, businessUnitId,
                         ERP_RFQ_Automation.Extraction.ExtractionSourceType.Folder,
-                        batchId, priority: 0,
+                        report.BatchId, priority: 0,
                         new ERP_RFQ_Automation.Extraction.ExtractionJobMetadata
                         {
                             ClientEmail = "",
                             LeadSource = leadSourceLabel,
                             EmailSource = leadSourceLabel == "Aramco Leads" ? "Aramco RFP Document" : GetFileTypeLabel(ext)
-                        });
+                        }, cancellationToken);
                     _logger.LogInformation("Enqueued {Label} file {FileName} as job {JobId} ({Outcome}).",
                         leadSourceLabel, fileName, result.JobId, result.Outcome);
 
-                    // The queue owns an immutable copy now — archive the original.
-                    var processedPath = Path.Combine(_processedFolderPath, fileName);
-                    File.Move(filePath, processedPath, true);
+                    if (result.Outcome == ERP_RFQ_Automation.Extraction.EnqueueOutcome.Duplicate &&
+                        result.ExistingStatus == ERP_RFQ_Automation.Extraction.ExtractionStatus.DeadLetter)
+                    {
+                        await QuarantineAsync(claimedPath, businessUnitId, leadSourceLabel,
+                            $"Matching extraction job {result.JobId} is dead-lettered.", 1, cancellationToken);
+                        report.Rejected++;
+                        continue;
+                    }
+
+                    _storage.ResolvePath(claimedPath);
+                    var processedFolder = _storage.GetPath(
+                        "Tenants", businessUnitId.ToString(CultureInfo.InvariantCulture), "Processed", leadSourceLabel.Replace(' ', '_'));
+                    Directory.CreateDirectory(processedFolder);
+                    var processedPath = Path.Combine(processedFolder, $"{result.ContentHash}_{result.JobId}{ext}");
+                    if (File.Exists(processedPath))
+                        processedPath = Path.Combine(processedFolder, $"{Guid.NewGuid():N}_{fileName}");
+                    File.Move(claimedPath, processedPath, false);
+                    DeleteRetryState(filePath);
+                    if (result.Outcome == ERP_RFQ_Automation.Extraction.EnqueueOutcome.Enqueued)
+                        report.Enqueued++;
+                    else
+                        report.Duplicates++;
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    if (claimedPath is not null && File.Exists(claimedPath) && !File.Exists(filePath))
+                        File.Move(claimedPath, filePath, false);
+                    throw;
+                }
+                catch (FileNotFoundException) when (claimedPath is null && !File.Exists(filePath))
+                {
+                    // Another concurrent sweep atomically claimed this watched file.
                 }
                 catch (Exception ex)
                 {
-                    // Poison-file isolation; the file stays in place for the next run.
                     _logger.LogError(ex, "Failed to enqueue {Label} file {FileName}.", leadSourceLabel, fileName);
+                    var attempts = await RecordRetryAsync(filePath, ex, cancellationToken);
+                    if (attempts >= 3)
+                    {
+                        await QuarantineAsync(claimedPath ?? filePath, businessUnitId, leadSourceLabel,
+                            "Staging failed after three attempts.", attempts, cancellationToken);
+                        DeleteRetryState(filePath);
+                        report.Rejected++;
+                    }
+                    else
+                    {
+                        if (claimedPath is not null && File.Exists(claimedPath) && !File.Exists(filePath))
+                            File.Move(claimedPath, filePath, false);
+                        report.Failed++;
+                    }
                 }
             }
         }
 
-        public async Task ProcessAramcoFoldersAsync()
+        private async Task ProcessLegacyAramcoFolderAsync()
         {
-            if (_useUnifiedQueue && _ingestion != null)
-            {
-                await EnqueueFolderFilesAsync(_aramcoFolderPath, "Aramco Leads", ext => ext == ".docx");
-                return;
-            }
-
             var targetFolder = _aramcoFolderPath;
             _logger.LogInformation("Processing Aramco folder: {Path}", targetFolder);
             
@@ -555,14 +674,8 @@ namespace ERP_RFQ_Automation.Services
             return string.Join("", texts);
         }
 
-        public async Task ProcessSECFoldersAsync()
+        private async Task ProcessLegacySecFolderAsync()
         {
-            if (_useUnifiedQueue && _ingestion != null)
-            {
-                await EnqueueFolderFilesAsync(_secFolderPath, "SEC Leads", IsSupportedExtension);
-                return;
-            }
-
             var targetFolder = _secFolderPath;
             _logger.LogInformation("ProcessSECFoldersAsync started. Folder path: {Path}", Path.GetFullPath(targetFolder));
 
@@ -1206,5 +1319,135 @@ namespace ERP_RFQ_Automation.Services
             "Customer2" => _aramcoFolderPath,
             _           => _sharedFolderPath
         };
+
+        private string GetTenantFolderPath(long businessUnitId, string folderType)
+        {
+            var folder = folderType.Trim().ToUpperInvariant() switch
+            {
+                "SHARED" => "Shared",
+                "SEC" or "CUSTOMER1" => "SEC",
+                "ARAMCO" or "CUSTOMER2" => "Aramco",
+                _ => throw new ArgumentException("Folder type must be Shared, SEC, or Aramco.", nameof(folderType))
+            };
+            return _storage.GetPath(
+                "Tenants", businessUnitId.ToString(CultureInfo.InvariantCulture), "Watched", folder);
+        }
+
+        private static bool IsAllowedUploadExtension(string folderType, string extension)
+            => folderType.Trim().ToUpperInvariant() switch
+            {
+                "SEC" or "CUSTOMER1" => extension == ".doc",
+                "ARAMCO" or "CUSTOMER2" => extension == ".docx",
+                "SHARED" => extension is ".doc" or ".docx" or ".pdf" or ".xlsx" or ".xls",
+                _ => false
+            };
+
+        public IReadOnlyList<long> DiscoverTenantFolderIds()
+        {
+            var tenantsRoot = _storage.GetPath("Tenants");
+            if (!Directory.Exists(tenantsRoot)) return Array.Empty<long>();
+            return Directory.GetDirectories(tenantsRoot)
+                .Select(Path.GetFileName)
+                .Select(x => long.TryParse(x, NumberStyles.None, CultureInfo.InvariantCulture, out var id) ? id : 0)
+                .Where(x => x > 0)
+                .Distinct()
+                .OrderBy(x => x)
+                .ToArray();
+        }
+
+        private async Task<int> RecordRetryAsync(
+            string filePath, Exception exception, CancellationToken cancellationToken)
+        {
+            var statePath = filePath + ".nexora-retry.json";
+            var attempts = 1;
+            try
+            {
+                if (File.Exists(statePath))
+                {
+                    var current = JsonSerializer.Deserialize<FolderRetryState>(
+                        await File.ReadAllTextAsync(statePath, cancellationToken));
+                    attempts = (current?.Attempts ?? 0) + 1;
+                }
+            }
+            catch (Exception readException) when (readException is not OperationCanceledException)
+            {
+                _logger.LogWarning(readException, "Could not read folder retry state for {FileName}.", Path.GetFileName(filePath));
+            }
+
+            var state = new FolderRetryState(attempts, exception.GetType().Name, DateTime.UtcNow);
+            var temporaryPath = statePath + ".tmp";
+            await File.WriteAllTextAsync(temporaryPath, JsonSerializer.Serialize(state), cancellationToken);
+            File.Move(temporaryPath, statePath, true);
+            return attempts;
+        }
+
+        private async Task QuarantineAsync(
+            string filePath,
+            long businessUnitId,
+            string sourceLabel,
+            string reason,
+            int attempts,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!File.Exists(filePath)) return;
+            _storage.ResolvePath(Path.GetDirectoryName(filePath)!);
+            var folderName = sourceLabel.Replace(' ', '_');
+            var quarantineFolder = _storage.GetPath(
+                "Tenants", businessUnitId.ToString(CultureInfo.InvariantCulture), "Quarantine", folderName);
+            Directory.CreateDirectory(quarantineFolder);
+            var quarantineName = $"{Guid.NewGuid():N}_{Path.GetFileName(filePath)}";
+            var quarantinePath = Path.Combine(quarantineFolder, quarantineName);
+            var metadata = JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                businessUnitId,
+                source = sourceLabel,
+                originalFileName = Path.GetFileName(filePath),
+                quarantinedFileName = quarantineName,
+                reason,
+                attempts,
+                quarantinedAt = DateTime.UtcNow
+            });
+            var metadataPath = quarantinePath + ".json";
+            var stagedMetadataPath = metadataPath + ".pending";
+            await File.WriteAllBytesAsync(stagedMetadataPath, metadata, cancellationToken);
+            try
+            {
+                File.Move(filePath, quarantinePath, false);
+                File.Move(stagedMetadataPath, metadataPath, false);
+                DeleteRetryState(filePath);
+            }
+            catch
+            {
+                // A .pending manifest is intentionally retained for the scheduled sweep
+                // or an operator to reconcile if the document move already occurred.
+                throw;
+            }
+        }
+
+        private static void DeleteRetryState(string filePath)
+        {
+            var statePath = filePath + ".nexora-retry.json";
+            if (File.Exists(statePath)) File.Delete(statePath);
+        }
+
+        private static void RecoverStaleClaims(string processingFolder, string watchedFolder)
+        {
+            var staleBefore = DateTime.UtcNow.AddMinutes(-5);
+            foreach (var path in Directory.GetFiles(processingFolder))
+            {
+                if (File.GetLastWriteTimeUtc(path) >= staleBefore) continue;
+                var name = Path.GetFileName(path);
+                var destination = Path.Combine(watchedFolder, name);
+                if (File.Exists(destination))
+                    destination = Path.Combine(watchedFolder, $"{Guid.NewGuid():N}_{name}");
+                File.Move(path, destination, false);
+            }
+        }
+
+        private static StringComparison PathComparison()
+            => OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+        private sealed record FolderRetryState(int Attempts, string ErrorType, DateTime UpdatedOn);
     }
 }
