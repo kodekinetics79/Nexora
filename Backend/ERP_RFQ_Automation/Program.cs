@@ -23,6 +23,7 @@ using ERP_RFQ_Automation.Intelligence.Pricing;
 using ERP_RFQ_Automation.Intelligence.Decision;
 using ERP_RFQ_Automation.Boq;
 using ERP_RFQ_Automation.Infrastructure;
+using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.CommercialCases;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.CommercialRouting;
@@ -81,6 +82,7 @@ builder.Services.AddDbContext<ErpRfqAutomationContext>(options =>
 // Per-request tenant scope for EF global query filters (ADR-0005 tenant isolation).
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ERP_RFQ_Automation.MultiTenancy.ITenantContext, ERP_RFQ_Automation.MultiTenancy.HttpTenantContext>();
+builder.Services.AddSingleton<IFileStorage, LocalFileStorage>();
 
 // Platform-Owner control-plane services (ADR-0005)
 builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Auth.IPlatformAuthService, ERP_RFQ_Automation.Platform.Auth.PlatformAuthService>();

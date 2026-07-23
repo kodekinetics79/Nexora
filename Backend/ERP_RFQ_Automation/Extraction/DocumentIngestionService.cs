@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Logging;
+using ERP_RFQ_Automation.Infrastructure.Storage;
 
 namespace ERP_RFQ_Automation.Extraction;
 
@@ -44,16 +45,16 @@ public sealed class DocumentIngestionService : IDocumentIngestion
 {
     private readonly IExtractionQueue _queue;
     private readonly ILogger<DocumentIngestionService> _log;
-    private readonly string _storageRoot;
+    private readonly IFileStorage _storage;
 
     public DocumentIngestionService(
         IExtractionQueue queue,
-        IWebHostEnvironment env,
+        IFileStorage storage,
         ILogger<DocumentIngestionService> log)
     {
         _queue = queue;
         _log = log;
-        _storageRoot = Path.Combine(env.ContentRootPath, "Uploads", "Extraction");
+        _storage = storage;
     }
 
     public async Task<IngestedDocument> IngestAsync(
@@ -116,25 +117,7 @@ public sealed class DocumentIngestionService : IDocumentIngestion
     {
         var ext = Path.GetExtension(originalName);
         var shard = hash[..2];
-        var dir = Path.Combine(_storageRoot, shard);
-        Directory.CreateDirectory(dir);
-
-        var path = Path.Combine(dir, hash + ext);
-        if (!File.Exists(path))
-        {
-            // Write to a temp file then atomically move so a concurrent reader never sees a partial file.
-            var tmp = path + "." + Guid.NewGuid().ToString("N")[..8] + ".tmp";
-            await File.WriteAllBytesAsync(tmp, bytes, ct);
-            try
-            {
-                File.Move(tmp, path, overwrite: false);
-            }
-            catch (IOException)
-            {
-                // Another request materialized the same content first; the existing file is authoritative.
-                try { File.Delete(tmp); } catch { /* best-effort cleanup */ }
-            }
-        }
-        return path;
+        return await _storage.WriteImmutableAsync(
+            Path.Combine("Extraction", shard, hash + ext), bytes, ct);
     }
 }

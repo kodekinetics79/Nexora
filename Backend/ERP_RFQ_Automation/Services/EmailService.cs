@@ -22,6 +22,7 @@ using Docnet.Core.Converters;
 using Docnet.Core.Models;
 using Tesseract;
 using UglyToad.PdfPig;
+using ERP_RFQ_Automation.Infrastructure.Storage;
 
 namespace ERP_RFQ_Automation.Services
 {
@@ -66,7 +67,7 @@ namespace ERP_RFQ_Automation.Services
         private readonly bool _useUnifiedQueue;
         public EmailService(ErpRfqAutomationContext context, IWebHostEnvironment env,
             ILogger<EmailService> logger, ILLMService llmService, IServiceScopeFactory scopeFactory,
-            IConfiguration configuration)
+            IConfiguration configuration, IFileStorage storage)
         {
             _context = context;
             _env = env;
@@ -74,8 +75,8 @@ namespace ERP_RFQ_Automation.Services
             _llmService = llmService;
             _scopeFactory = scopeFactory;
             _useUnifiedQueue = configuration.GetValue("Ingestion:UseUnifiedQueue", true);
-            _attachmentPath = Path.Combine(_env.ContentRootPath, "Uploads", "RFQ_Attachments");
-            _rawEmailPath = Path.Combine(_env.ContentRootPath, "Uploads", "Raw_Emails");
+            _attachmentPath = storage.GetPath("RFQ_Attachments");
+            _rawEmailPath = storage.GetPath("Raw_Emails");
             _tessDataPath = Path.Combine(_env.ContentRootPath, "tessdata");
             Directory.CreateDirectory(_attachmentPath);
             Directory.CreateDirectory(_rawEmailPath);

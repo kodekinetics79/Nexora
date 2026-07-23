@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: nexora-api
+    runtime: docker
+    rootDir: Backend
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: ASPNETCORE_ENVIRONMENT
+        value: Production
+      - key: Storage__RootPath
+        value: /var/data/nexora/uploads
+      - key: Storage__RequiredMountPath
+        value: /var/data
+      - key: ConnectionStrings__DefaultConnection
+        sync: false
+      - key: Jwt__Key
+        sync: false
+      - key: Ollama__BaseUrl
+        sync: false
+      - key: Ollama__ApiKey
+        sync: false
+      - key: Cors__AllowedOrigins__0
+        value: https://nexora1-ai.vercel.app
+    disk:
+      name: nexora-evidence
+      mountPath: /var/data
+      sizeGB: 10

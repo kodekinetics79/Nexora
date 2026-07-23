@@ -21,6 +21,7 @@ using Docnet.Core.Converters;
 using Docnet.Core.Models;
 using Tesseract;
 using UglyToad.PdfPig;
+using ERP_RFQ_Automation.Infrastructure.Storage;
 
 namespace ERP_RFQ_Automation.Services
 {
@@ -56,6 +57,7 @@ namespace ERP_RFQ_Automation.Services
             ILogger<ManualUploadService> logger,
             ILLMService llmService,
             IConfiguration configuration,
+            IFileStorage storage,
             ERP_RFQ_Automation.Extraction.IDocumentIngestion? ingestion = null)
         {
             _context = context;
@@ -64,7 +66,7 @@ namespace ERP_RFQ_Automation.Services
             _llmService = llmService;
             _useUnifiedQueue = configuration.GetValue("Ingestion:UseUnifiedQueue", true);
             _ingestion = ingestion;
-            _attachmentPath = Path.Combine(_env.ContentRootPath, "Uploads", "Manual_Attachments");
+            _attachmentPath = storage.GetPath("Manual_Attachments");
             _tessDataPath = Path.Combine(_env.ContentRootPath, "tessdata");
             Directory.CreateDirectory(_attachmentPath);
         }

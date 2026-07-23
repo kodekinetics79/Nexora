@@ -14,6 +14,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using DocumentFormat.OpenXml.Packaging;
+using ERP_RFQ_Automation.Infrastructure.Storage;
 
 namespace ERP_RFQ_Automation.Services
 {
@@ -42,6 +43,7 @@ namespace ERP_RFQ_Automation.Services
             ILogger<FolderService> logger,
             ILLMService llmService,
             IConfiguration configuration,
+            IFileStorage storage,
             ERP_RFQ_Automation.Extraction.IDocumentIngestion? ingestion = null)
         {
             _context = context;
@@ -50,11 +52,11 @@ namespace ERP_RFQ_Automation.Services
             _llmService = llmService;
             _useUnifiedQueue = configuration.GetValue("Ingestion:UseUnifiedQueue", true);
             _ingestion = ingestion;
-            _sharedFolderPath = Path.Combine(_env.ContentRootPath, "Uploads", "Shared_Leads_Folder");
-            _secFolderPath = Path.Combine(_env.ContentRootPath, "Uploads", "SEC_Leads_Folder");
-            _aramcoFolderPath = Path.Combine(_env.ContentRootPath, "Uploads", "Aramco_Leads_Folder");
-            _processedFolderPath = Path.Combine(_env.ContentRootPath, "Uploads", "Processed_Leads_Folder");
-            _attachmentPath = Path.Combine(_env.ContentRootPath, "Uploads", "Leads_Folder_Attachments");
+            _sharedFolderPath = storage.GetPath("Shared_Leads_Folder");
+            _secFolderPath = storage.GetPath("SEC_Leads_Folder");
+            _aramcoFolderPath = storage.GetPath("Aramco_Leads_Folder");
+            _processedFolderPath = storage.GetPath("Processed_Leads_Folder");
+            _attachmentPath = storage.GetPath("Leads_Folder_Attachments");
             
             Directory.CreateDirectory(_sharedFolderPath);
             Directory.CreateDirectory(_secFolderPath);

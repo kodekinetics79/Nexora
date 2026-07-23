@@ -22,7 +22,20 @@ Jwt__Key=<a NEW 32+ byte random key>
 Ollama__BaseUrl=https://ollama.com/
 Ollama__ApiKey=<ollama key>
 Cors__AllowedOrigins__0=https://nexora1-ai.vercel.app
+Storage__RootPath=/var/data/nexora/uploads
+Storage__RequiredMountPath=/var/data
 ```
+
+The repository includes `render.yaml` with a persistent disk mounted at `/var/data`.
+Use that Blueprint or attach an equivalent Render disk before accepting customer
+documents. A service without the disk remains stateless and must not be used for RFQ
+evidence ingestion.
+
+In Production, the filesystem provider fails startup unless both storage settings are
+present, the required Linux mount exists in the process mount table, and the evidence
+root is writable. Before moving an existing service to the mounted root, copy any
+recoverable legacy files and rewrite absolute `Attachments.FilePath` values to portable
+`Uploads/...` paths; absolute paths outside the configured root are deliberately rejected.
 
 - Health check: `GET /health` → `Healthy`.
 - The app URL is `https://nexora-fyjw.onrender.com`.
@@ -43,27 +56,31 @@ Vercel project settings:
 
 `vercel.json` already has the SPA rewrite for client-side routing.
 
-## 3. Demo login (Neon is seeded)
+## 3. Pilot login provisioning
 
 Tenant app:
 
 - URL: https://nexora1-ai.vercel.app
-- **Email:** `robert@example.com`
-- **Password:** `Nexora#Pilot-a9bc9e`
-- **Business Unit:** `Customer POC`
+- Credentials: provision through Render secrets and distribute out of band.
 
 Platform console:
 
 - URL: https://nexora1-ai.vercel.app/platform
-- **Email:** `owner@nexora.app`
-- **Password:** `Nexora#Pilot-a9bc9e`
+- Credentials: provision through Render secrets and distribute out of band.
 
-The backend verifies this demo account on startup so a fresh Render/Neon deploy
-can log in immediately. To disable that repair in a production tenant, set:
+The seeder is disabled by default and never overwrites an existing password. For an
+explicit first-run pilot seed, temporarily provide all five settings:
 
 ```text
-DemoUser__Enabled=false
+DemoUser__Enabled=true
+DemoUser__Email=<tenant-admin-email>
+DemoUser__Password=<unique-one-time-password>
+PlatformOwner__Email=<platform-owner-email>
+PlatformOwner__Password=<different-unique-one-time-password>
 ```
+
+After the first successful seed, set `DemoUser__Enabled=false`, remove both password
+secrets, and rotate the credentials through the application before customer use.
 
 ## Required backend env vars (reference)
 
@@ -78,4 +95,4 @@ DemoUser__Enabled=false
 ## Security reminders before a real pilot
 - **Rotate** the 3 original secrets (old SQL `sa` / JWT / Ollama) — `SECURITY.md`.
 - Consider rotating the Neon credentials (they passed through chat).
-- Change the demo user's password before a real pilot.
+- Keep pilot credentials out of source control and distribute them through an approved secret channel.

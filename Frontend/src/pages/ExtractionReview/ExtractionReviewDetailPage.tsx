@@ -25,7 +25,7 @@ import { useSnackbar } from 'notistack';
 import extractionReviewService from '../../api/services/extractionReviewService';
 import type { SubmitReviewPayload, ReviewItemPayload } from '../../api/services/extractionReviewService';
 import type { LeadItemResponseDTO } from '../../api/services/leadService';
-import axiosInstance from '../../api/axiosInstance';
+import { openAuthenticatedFile } from '../../utils/authenticatedFile';
 
 // Local editable representation of a line item. `id` doubles as the DataGrid
 // row id; new rows added during review use negative ids and set `isNew` so the
@@ -415,7 +415,13 @@ const ExtractionReviewDetailPage: React.FC = () => {
                     <IconButton
                       size="small"
                       aria-label={`Open source document ${file.fileName ?? file.id}`}
-                      onClick={() => window.open(`${axiosInstance.defaults.baseURL}/api/Lead/attachment/${file.id}`, '_blank', 'noopener,noreferrer')}
+                      onClick={async () => {
+                        try {
+                          await openAuthenticatedFile(`/api/File/attachment/${file.id}`);
+                        } catch {
+                          enqueueSnackbar('Could not open the source document', { variant: 'error' });
+                        }
+                      }}
                     >
                       <OpenIcon sx={{ fontSize: 16 }} />
                     </IconButton>

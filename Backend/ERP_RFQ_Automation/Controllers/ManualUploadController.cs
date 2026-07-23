@@ -11,6 +11,7 @@ using System.IO;
 using System.Linq;
 using System.Security.Claims;
 using System.Threading.Tasks;
+using ERP_RFQ_Automation.Infrastructure.Storage;
 
 namespace ERP_RFQ_Automation.Controllers
 {
@@ -28,12 +29,12 @@ namespace ERP_RFQ_Automation.Controllers
             ManualUploadService manualUploadService,
             ErpRfqAutomationContext context,
             ILogger<ManualUploadController> logger,
-            IWebHostEnvironment env)
+            IFileStorage storage)
         {
             _manualUploadService = manualUploadService;
             _context = context;
             _logger = logger;
-            _attachmentPath = Path.Combine(env.ContentRootPath, "Uploads", "Manual_Attachments");
+            _attachmentPath = storage.GetPath("Manual_Attachments");
         }
 
         /// <summary>

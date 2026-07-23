@@ -26,7 +26,7 @@ Pilot-readiness evaluation complete (9-discipline SME board, run wf_3d130c34-a6f
 
 ### P0 — pilot-blocking
 1. **Ephemeral evidence storage** — all uploads/attachments/raw emails written to container-local `Uploads/` (DocumentIngestionService.cs:56, EmailService.cs:77-81). No Fly volume / object store. Lost on every deploy; breaks with >1 machine. **Corroborated by SRE + DocInt + Architecture.** REQUIRES CTO INFRA DECISION (object storage provider). *Open.*
-2. **DemoUserSeeder fail-open** — ran by default in prod, reset Super Admin + Platform Owner password to repo-published `Nexora#Pilot-a9bc9e` on every restart (DemoUserSeeder.cs, DEPLOYMENT.md:46-66). Corroborated by SRE + Architecture. **FIXED** — default off, prod requires explicit passwords (no hardcoded fallback), never overwrites existing hashes. Tests: DemoUserSeederTests.cs (3).
+2. **DemoUserSeeder fail-open** — previously ran by default in prod and reset privileged passwords on every restart. Corroborated by SRE + Architecture. **FIXED** — default off, prod requires explicit passwords (no hardcoded fallback), never overwrites existing hashes, and deployment docs no longer publish pilot credentials. Tests: DemoUserSeederTests.cs (3).
 3. **Cross-tenant SMTP fallback** — SendEmailAsync fell back to "any active SMTP" when a tenant's config was missing, sending one tenant's quote through another's mail server (EmailService.cs:1319). **FIXED** — fallback scoped to the same BusinessUnit; throws a clear error otherwise. *Manual verification recommended (heavy ctor; no unit harness).* 
 4. **Postgres-only paths untested** — atomic queue claim/lease/dead-letter and NXR sequence allocation are certified only on a SQLite fallback that never runs in prod (TESTING.md:70-81). QA P0. Needs Testcontainers-Postgres harness. *Open.*
 
@@ -92,7 +92,17 @@ Priority spine: Lead -> RFQ -> Quote -> PO/Order -> Delivery(Shipment) -> Invent
   - Commercial Case reference has thin/no frontend surface (per FE review).
 
 ## Next smallest executable task
-Implement `IFileStorage` abstraction over object storage behind DocumentIngestionService (P0 #1) once provider is chosen; interim: attach a Fly volume via `[mounts]` (single-machine only).
+Add a real PostgreSQL integration harness for queue claims, reference allocation, HTTP tenant-negative tests, and the first DB-RLS policy. This is the next independent-board P0 and does not depend on a product-provider choice.
 
 ## Next command
 `cd /Users/zackkhan/Nexora/Nexora-main/Backend && dotnet test ERP_RFQ_Automation.sln --nologo -v minimal`
+
+## Evidence storage and authenticated download wave (2026-07-22)
+- Added `IFileStorage` plus a traversal-safe, immutable filesystem provider. Unified extraction, email, manual-upload, and watched-folder evidence roots now resolve through `Storage:RootPath`.
+- Added `render.yaml` with a 10 GB persistent disk at `/var/data` and configured evidence root `/var/data/nexora/uploads`. Production startup now requires an explicit root and required mount, verifies the Linux mount table and write access, and refuses ephemeral fallback. Disk attachment remains an operator deployment step for the existing live Render service.
+- Retired path-addressed downloads. `GET /api/File/attachment/{id}` now resolves the attachment, verifies its Lead belongs to the JWT business unit, constrains paths to the configured storage root, and returns a range-enabled stream.
+- Fixed lead detail and extraction review to fetch attachments with the authenticated Axios client. The review path opens its window synchronously so popup blockers do not race the authenticated request.
+- Added `LocalFileStorageTests` and `AttachmentDownloadSecurityTests`: immutable first-write behavior, legacy path resolution, traversal/absolute-path/symlink rejection, fail-closed production configuration, retired path route, own-tenant download, cross-tenant 404, and missing-tenant rejection.
+- Verification: **233/233 backend tests pass**; frontend production build passes; live Render `/health` returned HTTP 200 `Healthy` after cold start. Browser SIT was not executable because the in-app browser runtime failed to initialize; browser E2E remains open.
+- Consultant conditions retained as P1: legacy email/manual/folder paths now land on the configured volume but still use raw file writes rather than the immutable writer; FolderService attachment fan-out needs transaction/idempotency hardening; legacy absolute attachment paths require an explicit copy/backfill during deployment.
+- Independent board verdict remains **FAIL for enterprise certification**. This wave closes the direct attachment leak and creates a durable Render profile, but object storage/horizontal scaling, DB RLS/Postgres negative tests, page-complete evidence persistence, AI gateway/metering, finance entities, browser/load/restore testing, and alternate deployment certification remain P0/P1 conditions.

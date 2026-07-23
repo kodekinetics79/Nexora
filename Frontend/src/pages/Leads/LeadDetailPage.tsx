@@ -19,6 +19,7 @@ import {
 import leadService from '../../api/services/leadService';
 import LifecycleActions from '../../components/common/LifecycleActions';
 import { parseDateSafe, formatDateSafe } from '../../utils/dates';
+import { downloadAuthenticatedFile } from '../../utils/authenticatedFile';
 
 import { toast } from 'react-hot-toast';
 
@@ -77,13 +78,19 @@ const DataField: React.FC<{ label: string; value: string | number | null; boldVa
   </Box>
 );
 
-import axiosInstance from '../../api/axiosInstance';
-
 const LeadDetailPage: React.FC = () => {
   const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+
+  const downloadAttachment = async (attachmentId: number, fileName: string) => {
+    try {
+      await downloadAuthenticatedFile(`/api/File/attachment/${attachmentId}`, fileName);
+    } catch {
+      toast.error('Could not download this attachment');
+    }
+  };
 
   const { data: lead, isLoading } = useQuery({
     queryKey: ['lead-detail', Number(id)],
@@ -286,7 +293,13 @@ const LeadDetailPage: React.FC = () => {
                     <Typography noWrap sx={{ fontSize: '0.75rem', fontWeight: 800 }}>{file.fileName}</Typography>
                     <Typography variant="caption" color="text.disabled" sx={{ fontSize: '0.65rem' }}>{(file.fileSize / 1024).toFixed(1)} KB</Typography>
                   </Box>
-                  <IconButton size="small" onClick={() => window.open(`${axiosInstance.defaults.baseURL}/api/Lead/attachment/${file.id}`, '_blank')}><DownloadIcon sx={{ fontSize: 16 }} /></IconButton>
+                  <IconButton
+                    size="small"
+                    aria-label={`Download ${file.fileName}`}
+                    onClick={() => downloadAttachment(file.id, file.fileName)}
+                  >
+                    <DownloadIcon sx={{ fontSize: 16 }} />
+                  </IconButton>
                 </Paper>
               ))}
               {(!lead.attachments || lead.attachments.length === 0) && (
