@@ -20,7 +20,7 @@ import {
 import quoteService from '../../../api/services/quoteService';
 import QuoteOutcomeDialog from './QuoteOutcomeDialog';
 import EmailPromptDialog from '../../../components/common/EmailPromptDialog';
-import orderService from '../../../api/services/orderService';
+import { CustomerAwardDialog, type CustomerAwardQuote } from './customer-awards';
 import { useAuth } from '../../../context/AuthContext';
 import dayjs from 'dayjs';
 import { toast } from 'react-hot-toast';
@@ -96,18 +96,7 @@ const QuoteViewPage: React.FC = () => {
     onError: () => toast.error('Failed to mark as responded')
   });
 
-  const orderMutation = useMutation({
-    mutationFn: () => orderService.createFromQuote(Number(id), businessUnitId),
-    onSuccess: (data) => {
-      toast.success('Quote converted to Order successfully');
-      navigate(`/sales/orders/${data.id}`);
-    },
-    onError: (error: any) => {
-      console.error('Order Conversion Error:', error);
-      const errorMessage = error?.response?.data?.message || error?.response?.data || error.message || 'An unexpected error occurred';
-      toast.error(errorMessage, { duration: 5000 });
-    }
-  });
+  const [awardOpen, setAwardOpen] = React.useState(false);
 
   if (isLoading) return <Box sx={{ p: 4, display: 'flex', justifyContent: 'center' }}><CircularProgress /></Box>;
   if (!quote) return <Box sx={{ p: 4 }}>Quote not found</Box>;
@@ -119,6 +108,25 @@ const QuoteViewPage: React.FC = () => {
   const itemsDiscounts = quote.quoteItems.reduce((sum, i) => sum + (i.discount || 0), 0);
   const itemsNetTotal = itemsSubtotal - itemsDiscounts;
   const headerDiscount = itemsNetTotal - (quote.totalAmount || 0); // This is an approximation if tax is involved
+  const awardQuote: CustomerAwardQuote | null = quote.commercialCaseId && quote.customerId && quote.currencyId
+    ? {
+        id: quote.id,
+        quoteNo: quote.quoteNo,
+        version: quote.version,
+        commercialCaseId: quote.commercialCaseId,
+        customerId: quote.customerId,
+        currencyId: quote.currencyId,
+        currencyCode: quote.currencyCode,
+        lines: quote.quoteItems.map((item) => ({
+          id: item.id,
+          productId: item.productId,
+          productName: item.productName,
+          description: item.itemDescription || item.productName || `Quote line ${item.id}`,
+          quantity: item.quantity,
+          unitPrice: item.unitPrice,
+        })),
+      }
+    : null;
 
   return (
     <Box sx={{ p: 3, bgcolor: 'background.default', minHeight: '100vh' }}>
@@ -247,12 +255,12 @@ const QuoteViewPage: React.FC = () => {
             <Button 
                 variant="contained" 
                 color="primary" 
-                startIcon={orderMutation.isPending ? <CircularProgress size={20} color="inherit" /> : <OrderIcon />} 
-                onClick={() => orderMutation.mutate()}
-                disabled={orderMutation.isPending || quote.statusValue?.toUpperCase() === 'ORDERED'}
+                startIcon={<OrderIcon />}
+                onClick={() => setAwardOpen(true)}
+                disabled={!awardQuote || quote.statusValue?.toUpperCase() === 'ORDERED'}
                 sx={{ borderRadius: 2, fontWeight: 800 }}
             >
-              Convert to Order
+              Capture customer award
             </Button>
           )}
         </Stack>
@@ -345,6 +353,16 @@ const QuoteViewPage: React.FC = () => {
         quoteId={Number(id)}
         quoteNo={quote.quoteNo}
         invalidateKeys={[['quote-detail', id], ['quotes']]}
+      />
+
+      <CustomerAwardDialog
+        open={awardOpen}
+        quote={awardQuote}
+        onClose={() => setAwardOpen(false)}
+        onCompleted={(result) => {
+          setAwardOpen(false);
+          if (result.order) navigate(`/sales/orders/${result.order.id}`);
+        }}
       />
 
       <EmailPromptDialog

@@ -42,7 +42,10 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<Quote>(e =>
         {
             e.Property(x => x.RevisionNo).HasDefaultValue(1);
-            e.HasIndex(x => x.RevisionOfQuoteId).HasDatabaseName("IX_Quotes_RevisionOfQuoteId");
+            e.HasIndex(x => new { x.BusinessUnitId, x.RevisionOfQuoteId })
+                .IsUnique()
+                .HasFilter("\"RevisionOfQuoteId\" IS NOT NULL")
+                .HasDatabaseName("UX_Quotes_BU_RevisionOfQuoteId");
         });
     }
 }

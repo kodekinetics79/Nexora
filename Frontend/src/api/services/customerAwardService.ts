@@ -135,6 +135,10 @@ export interface VersionedCustomerAwardCommand {
   expectedVersion: number;
 }
 
+export interface CancelCustomerAwardCommand extends VersionedCustomerAwardCommand {
+  reason: string;
+}
+
 export interface CommandIdentity {
   idempotencyKey: string;
   correlationId: string;
@@ -195,6 +199,17 @@ const customerAwardService = {
   ): Promise<CustomerAward> =>
     (await axiosInstance.post<CustomerAward>(
       `/api/customer-awards/${awardId}/confirm`,
+      command,
+      commandConfig(identity),
+    )).data,
+
+  cancelAward: async (
+    awardId: number,
+    command: CancelCustomerAwardCommand,
+    identity: CommandIdentity,
+  ): Promise<CustomerAward> =>
+    (await axiosInstance.post<CustomerAward>(
+      `/api/customer-awards/${awardId}/cancel`,
       command,
       commandConfig(identity),
     )).data,

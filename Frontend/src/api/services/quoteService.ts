@@ -5,6 +5,8 @@ export interface QuoteDTO {
   quoteNo: string;
   rfqId?: number;
   rfqNo?: string;
+  commercialCaseId?: number;
+  version: number;
   customerId?: number;
   customerName?: string;
   businessUnitId: number;

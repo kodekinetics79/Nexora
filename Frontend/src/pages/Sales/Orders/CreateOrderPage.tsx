@@ -54,7 +54,6 @@ const CreateOrderPage: React.FC = () => {
   const isEditMode = !!id;
   const searchParams = new URLSearchParams(location.search);
   const rfqId = searchParams.get('rfqId');
-  const quoteId = searchParams.get('quoteId');
 
   const [customerId, setCustomerId] = useState<number | null>(null);
   const [orderDate, setOrderDate] = useState(dayjs().format('YYYY-MM-DD'));
@@ -210,7 +209,7 @@ const CreateOrderPage: React.FC = () => {
       termsAndConditions,
       items: items.map(({ tempId, ...rest }) => rest),
       rfqId: rfqId ? Number(rfqId) : null,
-      quoteId: quoteId ? Number(quoteId) : null
+      quoteId: null
     };
 
     mutation.mutate(payload);

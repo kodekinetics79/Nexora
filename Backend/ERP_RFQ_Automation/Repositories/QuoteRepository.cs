@@ -24,7 +24,7 @@ namespace ERP_RFQ_Automation.Repositories
                 .AsNoTracking()
                 .Where(q => q.BusinessUnitId == businessUnitId)
                 .Include(q => q.Customer)
-                .Include(q => q.Rfq)
+                .Include(q => q.Rfq).ThenInclude(r => r.Lead)
                 .Include(q => q.Status)
                 .Where(q => q.Status.SetupCode != "ORDERED")
                 .Include(q => q.Currency)
@@ -92,7 +92,7 @@ namespace ERP_RFQ_Automation.Repositories
             var quote = await _context.Quotes
                 .AsNoTracking()
                 .Include(q => q.Customer)
-                .Include(q => q.Rfq)
+                .Include(q => q.Rfq).ThenInclude(r => r.Lead)
                 .Include(q => q.Status)
                 .Include(q => q.Currency)
                 .Include(q => q.DiscountType)
@@ -119,6 +119,8 @@ namespace ERP_RFQ_Automation.Repositories
                 QuoteNo = q.QuoteNo,
                 RfqId = q.Rfqid,
                 RfqNo = q.Rfq?.Rfqno,
+                CommercialCaseId = q.Rfq?.Lead?.CommercialCaseId,
+                Version = q.RevisionNo,
                 CustomerId = q.CustomerId,
                 CustomerName = q.Customer?.Name,
                 CustomerEmail = q.Customer?.ContactEmail,

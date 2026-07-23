@@ -8,6 +8,7 @@ using QuestPDF.Infrastructure;
 using System.Linq;
 using Microsoft.EntityFrameworkCore;
 using System;
+using System.Data;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Services.Interfaces;
 
@@ -843,6 +844,15 @@ namespace ERP_RFQ_Automation.Services
 
         public async Task<QuoteResponseDTO> ReviseQuoteAsync(long quoteId, long businessUnitId, string actor)
         {
+            var isolation = _context.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
+            await using var transaction = await _context.Database.BeginTransactionAsync(isolation);
+            if (_context.Database.IsNpgsql())
+            {
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock(73001, {checked((int)businessUnitId)})");
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT 1 FROM \"Quotes\" WHERE \"BusinessUnitID\" = {businessUnitId} AND \"ID\" = {quoteId} FOR UPDATE");
+            }
             var source = await _context.Quotes
                 .Include(q => q.QuoteItems)
                 .FirstOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId);
@@ -907,6 +917,7 @@ namespace ERP_RFQ_Automation.Services
 
             _context.Quotes.Add(revision);
             await _context.SaveChangesAsync();
+            await transaction.CommitAsync();
 
             return await GetQuoteByIdAsync(revision.Id);
         }

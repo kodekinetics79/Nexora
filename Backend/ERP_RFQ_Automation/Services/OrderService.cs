@@ -1,6 +1,7 @@
 using ERP_RFQ_Automation.DTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.OrderToCash;
 using Microsoft.EntityFrameworkCore;
 using System;
 using System.Collections.Generic;
@@ -34,6 +35,9 @@ namespace ERP_RFQ_Automation.Services
 
         public async Task<OrderDto> CreateManualOrderAsync(CreateOrderDto dto, long businessUnitId)
         {
+            if (dto.QuoteId.HasValue)
+                throw new InvalidOperationException(
+                    "Quote-linked orders require a confirmed customer award. Capture the customer PO and award from the quote.");
             if (dto.Items == null || dto.Items.Count == 0)
                 throw new ArgumentException("An order must contain at least one line item.");
 
@@ -305,6 +309,7 @@ namespace ERP_RFQ_Automation.Services
             {
                 OrderNo = orderNo,
                 QuoteId = quote.Id,
+                SourceType = OrderSourceTypes.LegacyQuote,
                 LeadId = quote.Rfq?.LeadId,
                 Rfqid = quote.Rfqid,
                 CustomerId = quote.CustomerId.Value,

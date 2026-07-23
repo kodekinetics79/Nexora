@@ -166,23 +166,13 @@ namespace ERP_RFQ_Automation.Controllers
         // POST: api/Order/from-quote/{quoteId}
         [HttpPost("from-quote/{quoteId}")]
         [RequireModulePermission("Orders", PermissionAction.Create)]
-        public async Task<IActionResult> CreateOrderFromQuote(long quoteId, [FromQuery] long? businessUnitId = null)
+        public IActionResult CreateOrderFromQuote(long quoteId, [FromQuery] long? businessUnitId = null)
         {
-            try
+            return Conflict(new
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-                if (targetBUId <= 0)
-                    return BadRequest("Business Unit ID is required.");
-
-                var order = await _orderService.CreateOrderFromQuoteAsync(quoteId, targetBUId);
-                return CreatedAtAction(nameof(GetOrder), new { id = order.Id }, order);
-            }
-            catch (Exception ex)
-            {
-                return BadRequest(new { message = ex.Message });
-            }
+                message = "Direct quote conversion is retired. Capture the customer's purchase order and confirmed award, then use POST /api/customer-awards/{awardId}/convert-to-order.",
+                quoteId
+            });
         }
 
         // PUT: api/Order/5

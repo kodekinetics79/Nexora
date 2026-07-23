@@ -5,6 +5,7 @@ using ERP_RFQ_Automation.CustomFields;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.CommercialFinance;
+using ERP_RFQ_Automation.OrderToCash;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Models;
@@ -32,6 +33,7 @@ public partial class ErpRfqAutomationContext
 
         ConfigureAiGovernance(modelBuilder);
         modelBuilder.ConfigureCommercialFinance();
+        modelBuilder.ConfigureOrderToCash();
 
         // Commercial documents (non-nullable BusinessUnitId).
         modelBuilder.Entity<Lead>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
@@ -58,6 +60,12 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<LegalDocumentCounter>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CommercialFinanceAudit>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<FinanceOutboxMessage>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<CustomerPurchaseOrder>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<CustomerPurchaseOrderLine>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<CustomerAward>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<CustomerAwardLineAllocation>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<OrderToCashAuditEvent>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<OrderToCashDocumentCounter>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
 
         // Dependent commercial rows inherit the tenant boundary from their required
         // aggregate root. Keep these filters aligned with the PostgreSQL parent-derived
@@ -166,8 +174,8 @@ public partial class ErpRfqAutomationContext
             .HasDatabaseName("UX_Leads_CommercialCaseID");
         modelBuilder.Entity<Order>().HasIndex(e => new { e.BusinessUnitId, e.QuoteId })
             .IsUnique()
-            .HasFilter("\"QuoteID\" IS NOT NULL")
-            .HasDatabaseName("UX_Orders_BU_QuoteID");
+            .HasFilter("\"QuoteID\" IS NOT NULL AND \"CustomerAwardID\" IS NULL")
+            .HasDatabaseName("UX_Orders_BU_LegacyQuoteID");
         modelBuilder.Entity<Order>().HasIndex(e => e.BusinessUnitId)
             .HasDatabaseName("IX_Orders_BusinessUnitID");
         modelBuilder.Entity<Quote>().Property(e => e.FinancialCalculationVersion)

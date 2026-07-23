@@ -76,11 +76,6 @@ const orderService = {
     return response.data;
   },
 
-  createFromQuote: async (quoteId: number, businessUnitId: number) => {
-    const response = await axiosInstance.post<OrderDTO>(`/api/Order/from-quote/${quoteId}`, null, { params: { businessUnitId } });
-    return response.data;
-  },
-
   update: async (id: number, data: any) => {
     const response = await axiosInstance.put<OrderDTO>(`/api/Order/${id}`, data);
     return response.data;

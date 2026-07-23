@@ -30,6 +30,7 @@ import {
   DeleteOutlined as DeleteIcon,
   Refresh as RetryIcon,
   ShoppingCartCheckout as ConvertIcon,
+  CancelOutlined as CancelIcon,
 } from '@mui/icons-material';
 import customerAwardService, {
   createCustomerAwardCommandIdentity,
@@ -65,7 +66,7 @@ export interface CustomerAwardQuote {
 }
 
 export interface CustomerAwardCompletion {
-  purchaseOrder: CustomerPurchaseOrder;
+  purchaseOrder?: CustomerPurchaseOrder;
   award: CustomerAward;
   order?: CustomerAwardOrder;
 }
@@ -362,9 +363,104 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
     onError: () => setSubmitPhase(''),
   });
 
+  const existingAwardMutation = useMutation({
+    mutationFn: async ({ award, action, reason }: {
+      award: CustomerAward;
+      action: 'confirm' | 'convert' | 'cancel';
+      reason?: string;
+    }): Promise<CustomerAwardCompletion> => {
+      if (action === 'confirm') {
+        const confirmed = await customerAwardService.confirmAward(
+          award.id,
+          { expectedVersion: award.version },
+          createCustomerAwardCommandIdentity('resume-confirm'),
+        );
+        return { award: confirmed };
+      }
+      if (action === 'cancel') {
+        const cancelled = await customerAwardService.cancelAward(
+          award.id,
+          { expectedVersion: award.version, reason: reason || 'Cancelled by user' },
+          createCustomerAwardCommandIdentity('cancel'),
+        );
+        return { award: cancelled };
+      }
+      const order = await customerAwardService.convertToOrder(
+        award.id,
+        { expectedVersion: award.version },
+        createCustomerAwardCommandIdentity('resume-convert'),
+      );
+      return { award, order };
+    },
+    onSuccess: async (result) => {
+      await queryClient.invalidateQueries({ queryKey: ['customer-awards', 'quote', quote.id] });
+      await queryClient.invalidateQueries({ queryKey: ['orders'] });
+      if (result.order) onCompleted?.(result);
+    },
+  });
+
+  const awardHistory = projection.awards.length > 0 && (
+    <Stack spacing={1}>
+      <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>Existing awards</Typography>
+      {projection.awards.map((award) => (
+        <Stack
+          key={award.id}
+          direction={{ xs: 'column', sm: 'row' }}
+          spacing={1}
+          sx={{ alignItems: { sm: 'center' }, justifyContent: 'space-between', py: 1, borderBottom: '1px solid', borderColor: 'divider' }}
+        >
+          <Box>
+            <Typography variant="body2" sx={{ fontWeight: 700 }}>{award.awardNumber}</Typography>
+            <Typography variant="caption" color="text.secondary">
+              {award.status} · {award.allocations.reduce((sum, item) => sum + item.awardedQuantity, 0)} awarded
+            </Typography>
+          </Box>
+          <Stack direction="row" spacing={1}>
+            {award.status === 'DRAFT' && (
+              <Button
+                size="small"
+                startIcon={<ConfirmIcon />}
+                disabled={existingAwardMutation.isPending}
+                onClick={() => existingAwardMutation.mutate({ award, action: 'confirm' })}
+              >
+                Confirm
+              </Button>
+            )}
+            {award.status === 'CONFIRMED' && (
+              <Button
+                size="small"
+                variant="contained"
+                startIcon={<ConvertIcon />}
+                disabled={existingAwardMutation.isPending}
+                onClick={() => existingAwardMutation.mutate({ award, action: 'convert' })}
+              >
+                Create order
+              </Button>
+            )}
+            {(award.status === 'DRAFT' || award.status === 'CONFIRMED') && (
+              <Button
+                size="small"
+                color="error"
+                startIcon={<CancelIcon />}
+                disabled={existingAwardMutation.isPending}
+                onClick={() => {
+                  const reason = window.prompt('Cancellation reason');
+                  if (reason?.trim()) existingAwardMutation.mutate({ award, action: 'cancel', reason: reason.trim() });
+                }}
+              >
+                Cancel
+              </Button>
+            )}
+          </Stack>
+        </Stack>
+      ))}
+      {existingAwardMutation.isError && <Alert severity="error">{apiErrorMessage(existingAwardMutation.error)}</Alert>}
+    </Stack>
+  );
+
   React.useEffect(() => {
-    onBusyChange?.(saveMutation.isPending);
-  }, [onBusyChange, saveMutation.isPending]);
+    onBusyChange?.(saveMutation.isPending || existingAwardMutation.isPending);
+  }, [existingAwardMutation.isPending, onBusyChange, saveMutation.isPending]);
 
   const submit = () => {
     const result = validate();
@@ -397,7 +493,12 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
   }
 
   if (projection.remainingQuantity <= EPSILON) {
-    return <Alert severity="success">Quote {quote.quoteNo} is fully awarded.</Alert>;
+    return (
+      <Stack spacing={2}>
+        <Alert severity="success">Quote {quote.quoteNo} is fully awarded.</Alert>
+        {awardHistory}
+      </Stack>
+    );
   }
 
   return (
@@ -418,6 +519,8 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
           <Chip size="small" label={outcome} color={outcome === 'Full award' ? 'success' : 'info'} />
         </Stack>
       </Stack>
+
+      {awardHistory}
 
       {(validation.form || saveMutation.isError) && (
         <Alert severity="error">
