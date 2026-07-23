@@ -3,6 +3,7 @@ using System;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace ERP_RFQ_Automation.Migrations
 {
     [DbContext(typeof(ErpRfqAutomationContext))]
-    partial class ErpRfqAutomationContextModelSnapshot : ModelSnapshot
+    [Migration("20260723235000_AddGovernedGeneralLedger")]
+    partial class AddGovernedGeneralLedger
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -4940,29 +4943,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long>("BusinessUnitId")
                         .HasColumnType("bigint");
 
-                    b.Property<string>("CloseEvidenceReference")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
-                    b.Property<int?>("CloseJournalCount")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("CloseReason")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
-                    b.Property<decimal?>("CloseTotalCredit")
-                        .HasPrecision(18, 2)
-                        .HasColumnType("numeric(18,2)");
-
-                    b.Property<decimal?>("CloseTotalDebit")
-                        .HasPrecision(18, 2)
-                        .HasColumnType("numeric(18,2)");
-
-                    b.Property<string>("CloseTrialBalanceHash")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
                     b.Property<string>("ClosedBy")
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
@@ -5317,9 +5297,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<bool>("IsActive")
                         .HasColumnType("boolean");
 
-                    b.Property<bool>("IsContraAccount")
-                        .HasColumnType("boolean");
-
                     b.Property<bool>("IsControlAccount")
                         .HasColumnType("boolean");
 
@@ -5356,76 +5333,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.ToTable("LedgerAccounts", null, t =>
                         {
-                            t.HasCheckConstraint("CK_LedgerAccounts_State", "((\"Category\" IN ('Asset','Expense') AND ((NOT \"IsContraAccount\" AND \"NormalBalance\" = 'Debit') OR (\"IsContraAccount\" AND \"NormalBalance\" = 'Credit'))) OR (\"Category\" IN ('Liability','Equity','Revenue') AND ((NOT \"IsContraAccount\" AND \"NormalBalance\" = 'Credit') OR (\"IsContraAccount\" AND \"NormalBalance\" = 'Debit')))) AND ((\"IsActive\" AND \"DeactivatedBy\" IS NULL AND \"DeactivatedOn\" IS NULL AND \"DeactivationReason\" IS NULL) OR (NOT \"IsActive\" AND \"DeactivatedBy\" IS NOT NULL AND \"DeactivatedOn\" IS NOT NULL AND length(trim(\"DeactivationReason\")) >= 20))");
-                        });
-                });
-
-            modelBuilder.Entity("ERP_RFQ_Automation.GeneralLedger.LedgerBook", b =>
-                {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
-
-                    b.Property<long>("BusinessUnitId")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("CreatedBy")
-                        .IsRequired()
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
-
-                    b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
-
-                    b.Property<int>("FiscalYearStartMonth")
-                        .HasColumnType("integer");
-
-                    b.Property<long>("FunctionalCurrencyId")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("IdempotencyKey")
-                        .IsRequired()
-                        .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(160)
-                        .HasColumnType("character varying(160)");
-
-                    b.Property<string>("RequestHash")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<string>("TimeZoneId")
-                        .IsRequired()
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)");
-
-                    b.Property<long>("Version")
-                        .IsConcurrencyToken()
-                        .HasColumnType("bigint");
-
-                    b.HasKey("Id");
-
-                    b.HasAlternateKey("BusinessUnitId", "Id");
-
-                    b.HasIndex("BusinessUnitId")
-                        .IsUnique()
-                        .HasDatabaseName("UX_LedgerBooks_BU");
-
-                    b.HasIndex("FunctionalCurrencyId");
-
-                    b.HasIndex("BusinessUnitId", "IdempotencyKey")
-                        .IsUnique()
-                        .HasDatabaseName("UX_LedgerBooks_BU_Idempotency");
-
-                    b.ToTable("LedgerBooks", null, t =>
-                        {
-                            t.HasCheckConstraint("CK_LedgerBooks_State", "\"FiscalYearStartMonth\" BETWEEN 1 AND 12 AND \"Version\" = 1");
+                            t.HasCheckConstraint("CK_LedgerAccounts_State", "((\"Category\" IN ('Asset','Expense') AND \"NormalBalance\" = 'Debit') OR (\"Category\" IN ('Liability','Equity','Revenue') AND \"NormalBalance\" = 'Credit')) AND ((\"IsActive\" AND \"DeactivatedBy\" IS NULL AND \"DeactivatedOn\" IS NULL AND \"DeactivationReason\" IS NULL) OR (NOT \"IsActive\" AND \"DeactivatedBy\" IS NOT NULL AND \"DeactivatedOn\" IS NOT NULL AND length(trim(\"DeactivationReason\")) >= 20))");
                         });
                 });
 
@@ -10843,15 +10751,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .WithMany()
                         .HasForeignKey("CurrencyId")
                         .OnDelete(DeleteBehavior.Restrict);
-                });
-
-            modelBuilder.Entity("ERP_RFQ_Automation.GeneralLedger.LedgerBook", b =>
-                {
-                    b.HasOne("ERP_RFQ_Automation.Models.Currency", null)
-                        .WithMany()
-                        .HasForeignKey("FunctionalCurrencyId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Inventory.StockReservation", b =>

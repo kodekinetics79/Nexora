@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.CommercialFinance;
+using ERP_RFQ_Automation.GeneralLedger;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Models;
@@ -28,4 +29,9 @@ public partial class ErpRfqAutomationContext
     public DbSet<DunningRunDecision> DunningRunDecisions => Set<DunningRunDecision>();
     public DbSet<DunningNotice> DunningNotices => Set<DunningNotice>();
     public DbSet<DunningDeliveryAttempt> DunningDeliveryAttempts => Set<DunningDeliveryAttempt>();
+    public DbSet<LedgerAccount> LedgerAccounts => Set<LedgerAccount>();
+    public DbSet<LedgerBook> LedgerBooks => Set<LedgerBook>();
+    public DbSet<AccountingPeriod> AccountingPeriods => Set<AccountingPeriod>();
+    public DbSet<JournalEntry> JournalEntries => Set<JournalEntry>();
+    public DbSet<JournalEntryLine> JournalEntryLines => Set<JournalEntryLine>();
 }

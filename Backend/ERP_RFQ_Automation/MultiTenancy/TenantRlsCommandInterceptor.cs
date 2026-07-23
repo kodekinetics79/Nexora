@@ -177,11 +177,11 @@ public sealed class TenantRlsCommandInterceptor : DbCommandInterceptor
     }
 
     private static DbCommand CreateSetupCommand(
-        DbCommand command, long businessUnitId, (string Actor, string Signature)? signedActor)
+        DbCommand command, long businessUnitId, SignedActorEnvelope? signedActor)
     {
         var setup = command.Connection!.CreateCommand();
         setup.Transaction = command.Transaction;
-        setup.CommandText = $"SET LOCAL ROLE {TenantRole}; SELECT set_config('nexora.business_unit_id', @tenant_id, true), set_config('nexora.actor_id', @actor_id, true), set_config('nexora.actor_signature', @actor_signature, true);";
+        setup.CommandText = $"SET LOCAL ROLE {TenantRole}; SELECT set_config('nexora.business_unit_id', @tenant_id, true), set_config('nexora.actor_id', @actor_id, true), set_config('nexora.actor_signature', @actor_signature, true), set_config('nexora.gl_issued_at', @gl_issued_at, true), set_config('nexora.gl_expires_at', @gl_expires_at, true), set_config('nexora.gl_nonce', @gl_nonce, true), set_config('nexora.gl_signature', @gl_signature, true);";
         var parameter = setup.CreateParameter();
         parameter.ParameterName = "tenant_id";
         parameter.Value = businessUnitId.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -194,10 +194,25 @@ public sealed class TenantRlsCommandInterceptor : DbCommandInterceptor
         signature.ParameterName = "actor_signature";
         signature.Value = signedActor?.Signature ?? string.Empty;
         setup.Parameters.Add(signature);
+        AddParameter(setup, "gl_issued_at", signedActor?.IssuedAtUnix.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty);
+        AddParameter(setup, "gl_expires_at", signedActor?.ExpiresAtUnix.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty);
+        AddParameter(setup, "gl_nonce", signedActor?.Nonce ?? string.Empty);
+        AddParameter(setup, "gl_signature", signedActor?.EnvelopeSignature ?? string.Empty);
         return setup;
     }
 
-    private (string Actor, string Signature)? SignedActor(long businessUnitId)
+    private static void AddParameter(DbCommand command, string name, string value)
+    {
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = name;
+        parameter.Value = value;
+        command.Parameters.Add(parameter);
+    }
+
+    private sealed record SignedActorEnvelope(string Actor, string Signature, long IssuedAtUnix,
+        long ExpiresAtUnix, string Nonce, string EnvelopeSignature);
+
+    private SignedActorEnvelope? SignedActor(long businessUnitId)
     {
         if (_auditActorSecret is null || _auditActorSecret.Length < 32) return null;
         var user = _httpContextAccessor?.HttpContext?.User;
@@ -211,7 +226,13 @@ public sealed class TenantRlsCommandInterceptor : DbCommandInterceptor
         var canonical = $"{businessUnitId}\n{actor}";
         var signature = Convert.ToHexString(HMACSHA256.HashData(
             _auditActorSecret, Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
-        return (actor, signature);
+        var issuedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var expiresAt = issuedAt + 30;
+        var nonce = Guid.NewGuid().ToString("D");
+        var envelope = $"{businessUnitId}\n{actor}\n{issuedAt}\n{expiresAt}\n{nonce}";
+        var envelopeSignature = Convert.ToHexString(HMACSHA256.HashData(
+            _auditActorSecret, Encoding.UTF8.GetBytes(envelope))).ToLowerInvariant();
+        return new(actor, signature, issuedAt, expiresAt, nonce, envelopeSignature);
     }
 
     private void Complete(Guid commandId)

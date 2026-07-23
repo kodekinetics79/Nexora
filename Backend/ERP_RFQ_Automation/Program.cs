@@ -143,6 +143,7 @@ builder.Services.AddScoped<IOrderRepository, OrderRepository>();
 builder.Services.AddScoped<IOrderService, OrderService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialFinance.ICommercialFinanceApplicationService, ERP_RFQ_Automation.CommercialFinance.CommercialFinanceApplicationService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialFinance.IReceivablesOperationsService, ERP_RFQ_Automation.CommercialFinance.ReceivablesOperationsService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.GeneralLedger.IGeneralLedgerService, ERP_RFQ_Automation.GeneralLedger.GeneralLedgerService>();
 builder.Services.AddScoped<ICustomerAwardApplicationService, CustomerAwardApplicationService>();
 builder.Services.AddScoped<IShipmentRepository, ShipmentRepository>();
 builder.Services.AddScoped<IQuoteConfigurationRepository, QuoteConfigurationRepository>();
