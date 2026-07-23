@@ -3,6 +3,8 @@ using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Controllers;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Tests.Support;
+using ERP_RFQ_Automation.GeneralLedger;
+using ERP_RFQ_Automation.BankReconciliation;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Tests;
@@ -477,7 +479,7 @@ public sealed class CommercialFinanceTests
         Assert.Equal("1-30", openAfterPayment.AgingBucket);
 
         var reversed = await service.ReversePaymentAsync(BusinessUnitId, payment.Id,
-            new ReversePaymentRequest(payment.Version, "Bank returned payment"), "collector@test");
+            new ReversePaymentRequest(payment.Version, "Bank returned payment after treasury review"), "controller@test");
         var openAfterReversal = Assert.Single(await service.GetOpenItemsAsync(BusinessUnitId, DateTime.UtcNow));
         Assert.Equal(CustomerPaymentStatuses.Reversed, reversed.Status);
         Assert.Equal(0m, reversed.UnappliedAmount);
@@ -597,7 +599,7 @@ public sealed class CommercialFinanceTests
             CustomerId, null, CurrencyId, DateTime.UtcNow.AddDays(-10), 100m, "BankTransfer", null,
             [new PaymentAllocationRequest(invoice.Id, 100m)]), "collector@test");
         await service.ReversePaymentAsync(BusinessUnitId, payment.Id,
-            new ReversePaymentRequest(payment.Version, "Correction"), "collector@test");
+            new ReversePaymentRequest(payment.Version, "Correction approved by treasury controller"), "controller@test");
 
         var historical = Assert.Single(await service.GetOpenItemsAsync(BusinessUnitId, DateTime.UtcNow.Date.AddDays(-1)));
         var current = Assert.Single(await service.GetOpenItemsAsync(BusinessUnitId, DateTime.UtcNow.Date));
@@ -709,6 +711,13 @@ public sealed class CommercialFinanceTests
             ]
         };
         db.Orders.Add(order);
+        var cash = new LedgerAccount { Id = CashAccountId, BusinessUnitId = BusinessUnitId, Code = "1010", Name = "Operating cash", Category = LedgerAccountCategories.Asset, NormalBalance = LedgerNormalBalances.Debit, CurrencyId = CurrencyId, IsControlAccount = true, AllowsManualPosting = false, IdempotencyKey = "test-cash", RequestHash = new string('1', 64), CreatedBy = "test", CreatedOn = DateTime.UtcNow };
+        var receivables = new LedgerAccount { Id = ReceivablesAccountId, BusinessUnitId = BusinessUnitId, Code = "1100", Name = "Trade receivables", Category = LedgerAccountCategories.Asset, NormalBalance = LedgerNormalBalances.Debit, IsControlAccount = true, AllowsManualPosting = false, IdempotencyKey = "test-ar", RequestHash = new string('2', 64), CreatedBy = "test", CreatedOn = DateTime.UtcNow };
+        var unapplied = new LedgerAccount { Id = UnappliedAccountId, BusinessUnitId = BusinessUnitId, Code = "2100", Name = "Unapplied cash", Category = LedgerAccountCategories.Liability, NormalBalance = LedgerNormalBalances.Credit, IsControlAccount = false, AllowsManualPosting = false, IdempotencyKey = "test-unapplied", RequestHash = new string('3', 64), CreatedBy = "test", CreatedOn = DateTime.UtcNow };
+        db.LedgerAccounts.AddRange(cash, receivables, unapplied);
+        db.LedgerBooks.Add(new LedgerBook { Id = LedgerBookId, BusinessUnitId = BusinessUnitId, Name = "Test ledger", FunctionalCurrencyId = CurrencyId, TimeZoneId = "UTC", FiscalYearStartMonth = 1, ReceivablesControlAccountId = ReceivablesAccountId, UnappliedCashAccountId = UnappliedAccountId, IdempotencyKey = "test-book", RequestHash = new string('4', 64), CreatedBy = "test", CreatedOn = DateTime.UtcNow });
+        db.AccountingPeriods.Add(new AccountingPeriod { Id = PeriodId, BusinessUnitId = BusinessUnitId, FiscalYear = DateTime.UtcNow.Year, PeriodNumber = 1, Name = "Test period", StartsOn = DateTime.UtcNow.Date.AddYears(-2), EndsOn = DateTime.UtcNow.Date.AddYears(2), Status = AccountingPeriodStatuses.Open, IdempotencyKey = "test-period", RequestHash = new string('5', 64), CreatedBy = "test", CreatedOn = DateTime.UtcNow });
+        db.BankAccounts.Add(new BankAccount { Id = BankAccountId, BusinessUnitId = BusinessUnitId, Name = "Operating bank", InstitutionName = "Test bank", MaskedAccountNumber = "****4242", AccountFingerprint = new string('6', 64), CurrencyId = CurrencyId, LedgerAccountId = CashAccountId, Status = BankAccountStatuses.Active, OpeningDate = DateTime.UtcNow.Date.AddYears(-2), IdempotencyKey = "test-bank", RequestHash = new string('7', 64), CreatedBy = "test", CreatedOn = DateTime.UtcNow });
         db.SaveChanges();
         return order;
     }
@@ -727,4 +736,10 @@ public sealed class CommercialFinanceTests
     private const long CurrencyId = 95_003;
     private const long ProductId = 95_004;
     private const long StatusId = 95_005;
+    private const long CashAccountId = 95_006;
+    private const long ReceivablesAccountId = 95_007;
+    private const long UnappliedAccountId = 95_008;
+    private const long LedgerBookId = 95_009;
+    private const long PeriodId = 95_010;
+    private const long BankAccountId = 95_011;
 }

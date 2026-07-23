@@ -1,4 +1,6 @@
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.BankReconciliation;
+using ERP_RFQ_Automation.GeneralLedger;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.CommercialFinance;
@@ -88,19 +90,29 @@ public static class FinanceModelBuilderExtensions
             entity.Property(x => x.IdempotencyKey).HasMaxLength(128).IsRequired();
             entity.Property(x => x.RequestHash).HasMaxLength(64).IsRequired();
             entity.Property(x => x.ReversalReason).HasMaxLength(500);
+            entity.Property(x => x.ReversedBy).HasMaxLength(255);
             entity.Property(x => x.Version).IsConcurrencyToken();
             entity.Property(x => x.Amount).HasPrecision(18, 2);
+            entity.HasCheckConstraint("CK_CustomerPayments_AccountingBridge", "\"AccountingBridgeRequired\" OR (\"BankAccountId\" IS NULL AND \"JournalEntryId\" IS NULL AND \"ReversalJournalEntryId\" IS NULL)");
             entity.Property(x => x.CreatedBy).HasMaxLength(255).IsRequired();
             entity.HasIndex(x => new { x.BusinessUnitId, x.IdempotencyKey }).IsUnique()
                 .HasDatabaseName("UX_CustomerPayments_BU_Idempotency");
             entity.HasIndex(x => new { x.BusinessUnitId, x.ReceiptNumber }).IsUnique()
                 .HasDatabaseName("UX_CustomerPayments_BU_Number");
+            entity.HasIndex(x => new { x.BusinessUnitId, x.JournalEntryId }).IsUnique()
+                .HasFilter("\"JournalEntryId\" IS NOT NULL").HasDatabaseName("UX_CustomerPayments_BU_Journal");
             entity.HasCheckConstraint("CK_CustomerPayments_Amount", "\"Amount\" > 0");
             entity.HasOne<Customer>().WithMany().HasForeignKey(x => x.CustomerId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne<CommercialCase>().WithMany()
                 .HasForeignKey(x => new { x.BusinessUnitId, x.CommercialCaseId })
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne<Currency>().WithMany().HasForeignKey(x => x.CurrencyId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<BankAccount>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.BankAccountId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<JournalEntry>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.JournalEntryId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<JournalEntry>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.ReversalJournalEntryId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<PaymentAllocation>(entity =>
@@ -206,6 +218,8 @@ public static class FinanceModelBuilderExtensions
             entity.HasIndex(x => new { x.BusinessUnitId, x.RefundNumber }).IsUnique()
                 .HasFilter("\"RefundNumber\" IS NOT NULL")
                 .HasDatabaseName("UX_CustomerRefunds_BU_Number");
+            entity.HasIndex(x => new { x.BusinessUnitId, x.JournalEntryId }).IsUnique()
+                .HasFilter("\"JournalEntryId\" IS NOT NULL").HasDatabaseName("UX_CustomerRefunds_BU_Journal");
             entity.HasCheckConstraint("CK_CustomerRefunds_Amount", "\"Amount\" > 0");
             entity.HasOne(x => x.SourcePayment).WithMany()
                 .HasForeignKey(x => new { x.BusinessUnitId, x.SourcePaymentId })
@@ -214,6 +228,10 @@ public static class FinanceModelBuilderExtensions
             entity.HasOne<Currency>().WithMany().HasForeignKey(x => x.CurrencyId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne<CommercialCase>().WithMany()
                 .HasForeignKey(x => new { x.BusinessUnitId, x.CommercialCaseId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<BankAccount>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.BankAccountId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<JournalEntry>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.JournalEntryId })
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
         });
 

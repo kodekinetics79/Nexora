@@ -3,6 +3,7 @@ using System;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace ERP_RFQ_Automation.Migrations
 {
     [DbContext(typeof(ErpRfqAutomationContext))]
-    partial class ErpRfqAutomationContextModelSnapshot : ModelSnapshot
+    [Migration("20260724001000_GovernBankReconciliation")]
+    partial class GovernBankReconciliation
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -765,351 +768,6 @@ namespace ERP_RFQ_Automation.Migrations
                         });
                 });
 
-            modelBuilder.Entity("ERP_RFQ_Automation.BankReconciliation.BankAdjustment", b =>
-                {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
-
-                    b.Property<DateTime>("AccountingDate")
-                        .HasColumnType("timestamp without time zone");
-
-                    b.Property<long>("AccountingPeriodId")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("AdjustmentType")
-                        .IsRequired()
-                        .HasMaxLength(50)
-                        .HasColumnType("character varying(50)");
-
-                    b.Property<decimal>("Amount")
-                        .HasPrecision(18, 2)
-                        .HasColumnType("numeric(18,2)");
-
-                    b.Property<string>("ApprovedBy")
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
-
-                    b.Property<DateTime?>("ApprovedOn")
-                        .HasColumnType("timestamp without time zone");
-
-                    b.Property<long>("BankAccountId")
-                        .HasColumnType("bigint");
-
-                    b.Property<long?>("BankJournalEntryLineId")
-                        .HasColumnType("bigint");
-
-                    b.Property<long>("BankStatementLineId")
-                        .HasColumnType("bigint");
-
-                    b.Property<long>("BusinessUnitId")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("CancellationReason")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
-                    b.Property<string>("CancelledBy")
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
-
-                    b.Property<DateTime?>("CancelledOn")
-                        .HasColumnType("timestamp without time zone");
-
-                    b.Property<string>("Description")
-                        .IsRequired()
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
-                    b.Property<string>("EvidenceReference")
-                        .IsRequired()
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
-                    b.Property<string>("IdempotencyKey")
-                        .IsRequired()
-                        .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
-
-                    b.Property<long?>("JournalEntryId")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("PreparedBy")
-                        .IsRequired()
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
-
-                    b.Property<DateTime>("PreparedOn")
-                        .HasColumnType("timestamp without time zone");
-
-                    b.Property<string>("RejectedBy")
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
-
-                    b.Property<DateTime?>("RejectedOn")
-                        .HasColumnType("timestamp without time zone");
-
-                    b.Property<string>("RejectionReason")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
-                    b.Property<string>("RequestHash")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<long?>("ReversalBankJournalEntryLineId")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("ReversalEvidenceReference")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
-                    b.Property<long?>("ReversalJournalEntryId")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("ReversalReason")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
-                    b.Property<string>("ReversedBy")
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
-
-                    b.Property<DateTime?>("ReversedOn")
-                        .HasColumnType("timestamp without time zone");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
-
-                    b.Property<string>("SubmittedBy")
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
-
-                    b.Property<DateTime?>("SubmittedOn")
-                        .HasColumnType("timestamp without time zone");
-
-                    b.Property<long>("Version")
-                        .IsConcurrencyToken()
-                        .HasColumnType("bigint");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("BusinessUnitId", "AccountingPeriodId");
-
-                    b.HasIndex("BusinessUnitId", "BankAccountId");
-
-                    b.HasIndex("BusinessUnitId", "BankJournalEntryLineId");
-
-                    b.HasIndex("BusinessUnitId", "IdempotencyKey")
-                        .IsUnique()
-                        .HasDatabaseName("UX_BankAdjustments_BU_Idempotency");
-
-                    b.HasIndex("BusinessUnitId", "JournalEntryId")
-                        .IsUnique()
-                        .HasDatabaseName("UX_BankAdjustments_BU_Journal")
-                        .HasFilter("\"JournalEntryId\" IS NOT NULL");
-
-                    b.HasIndex("BusinessUnitId", "ReversalBankJournalEntryLineId");
-
-                    b.HasIndex("BusinessUnitId", "ReversalJournalEntryId");
-
-                    b.HasIndex("BusinessUnitId", "BankStatementLineId", "BankAccountId");
-
-                    b.ToTable("BankAdjustments", null, t =>
-                        {
-                            t.HasCheckConstraint("CK_BankAdjustments_State", "\"Amount\" > 0 AND \"Version\" > 0 AND \"Status\" IN ('Draft','InReview','Posted','Rejected','Cancelled','Reversed')");
-                        });
-                });
-
-            modelBuilder.Entity("ERP_RFQ_Automation.BankReconciliation.BankAdjustmentDistribution", b =>
-                {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
-
-                    b.Property<decimal>("Amount")
-                        .HasPrecision(18, 2)
-                        .HasColumnType("numeric(18,2)");
-
-                    b.Property<long>("BankAdjustmentId")
-                        .HasColumnType("bigint");
-
-                    b.Property<long>("BusinessUnitId")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("Description")
-                        .IsRequired()
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
-                    b.Property<long>("LedgerAccountId")
-                        .HasColumnType("bigint");
-
-                    b.Property<int>("Sequence")
-                        .HasColumnType("integer");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("BusinessUnitId", "LedgerAccountId");
-
-                    b.HasIndex("BusinessUnitId", "BankAdjustmentId", "Sequence")
-                        .IsUnique()
-                        .HasDatabaseName("UX_BankAdjustmentDistributions_Order");
-
-                    b.ToTable("BankAdjustmentDistributions", null, t =>
-                        {
-                            t.HasCheckConstraint("CK_BankAdjustmentDistributions_Amount", "\"Sequence\" > 0 AND \"Amount\" > 0");
-                        });
-                });
-
-            modelBuilder.Entity("ERP_RFQ_Automation.BankReconciliation.BankMatchingRule", b =>
-                {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
-
-                    b.Property<string>("ActivatedBy")
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
-
-                    b.Property<DateTime?>("ActivatedOn")
-                        .HasColumnType("timestamp without time zone");
-
-                    b.Property<decimal>("AmountTolerance")
-                        .HasPrecision(18, 2)
-                        .HasColumnType("numeric(18,2)");
-
-                    b.Property<string>("ApprovedBy")
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
-
-                    b.Property<DateTime?>("ApprovedOn")
-                        .HasColumnType("timestamp without time zone");
-
-                    b.Property<long?>("BankAccountId")
-                        .HasColumnType("bigint");
-
-                    b.Property<int>("BookingDateToleranceDays")
-                        .HasColumnType("integer");
-
-                    b.Property<long>("BusinessUnitId")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("Code")
-                        .IsRequired()
-                        .HasMaxLength(80)
-                        .HasColumnType("character varying(80)");
-
-                    b.Property<string>("CreatedBy")
-                        .IsRequired()
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
-
-                    b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
-
-                    b.Property<string>("DefinitionHash")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<string>("EvaluatorType")
-                        .IsRequired()
-                        .HasMaxLength(40)
-                        .HasColumnType("character varying(40)");
-
-                    b.Property<string>("EvidenceReference")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
-                    b.Property<string>("IdempotencyKey")
-                        .IsRequired()
-                        .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
-
-                    b.Property<string>("LifecycleReason")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(160)
-                        .HasColumnType("character varying(160)");
-
-                    b.Property<int>("Priority")
-                        .HasColumnType("integer");
-
-                    b.Property<long>("RecordVersion")
-                        .IsConcurrencyToken()
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("ReferenceMode")
-                        .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)");
-
-                    b.Property<string>("RequestHash")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<bool>("RequireUniquePair")
-                        .HasColumnType("boolean");
-
-                    b.Property<string>("RetiredBy")
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
-
-                    b.Property<DateTime?>("RetiredOn")
-                        .HasColumnType("timestamp without time zone");
-
-                    b.Property<int>("RuleVersion")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
-
-                    b.Property<long?>("SupersedesRuleId")
-                        .HasColumnType("bigint");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("BusinessUnitId", "BankAccountId");
-
-                    b.HasIndex("BusinessUnitId", "IdempotencyKey")
-                        .IsUnique()
-                        .HasDatabaseName("UX_BankMatchingRules_BU_Idempotency");
-
-                    b.HasIndex("BusinessUnitId", "SupersedesRuleId");
-
-                    b.HasIndex("BusinessUnitId", "Code", "BankAccountId")
-                        .IsUnique()
-                        .HasDatabaseName("UX_BankMatchingRules_BU_ActiveScope")
-                        .HasFilter("\"Status\" = 'Active'");
-
-                    b.HasIndex("BusinessUnitId", "Code", "RuleVersion")
-                        .IsUnique()
-                        .HasDatabaseName("UX_BankMatchingRules_BU_Code_Version");
-
-                    b.ToTable("BankMatchingRules", null, t =>
-                        {
-                            t.HasCheckConstraint("CK_BankMatchingRules_Definition", "\"RuleVersion\" > 0 AND \"RecordVersion\" > 0 AND \"Priority\" BETWEEN 1 AND 10000 AND \"AmountTolerance\" >= 0 AND \"BookingDateToleranceDays\" BETWEEN 0 AND 31 AND \"RequireUniquePair\" = TRUE");
-
-                            t.HasCheckConstraint("CK_BankMatchingRules_Type", "\"EvaluatorType\" = 'ExactAmountDirection' AND \"ReferenceMode\" IN ('Ignore','NormalizedExact') AND \"Status\" IN ('Draft','Approved','Active','Retired')");
-                        });
-                });
-
             modelBuilder.Entity("ERP_RFQ_Automation.BankReconciliation.BankStatement", b =>
                 {
                     b.Property<long>("Id")
@@ -1225,9 +883,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsRequired()
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
-
-                    b.Property<byte[]>("RawPayload")
-                        .HasColumnType("bytea");
 
                     b.Property<string>("RequestHash")
                         .IsRequired()
@@ -1413,9 +1068,6 @@ namespace ERP_RFQ_Automation.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
 
-                    b.Property<long?>("BankMatchingRuleId")
-                        .HasColumnType("bigint");
-
                     b.Property<long>("BusinessUnitId")
                         .HasColumnType("bigint");
 
@@ -1438,18 +1090,10 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<DateTime>("CreatedOn")
                         .HasColumnType("timestamp without time zone");
 
-                    b.Property<string>("EvidenceReference")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
                     b.Property<string>("IdempotencyKey")
                         .IsRequired()
                         .HasMaxLength(128)
                         .HasColumnType("character varying(128)");
-
-                    b.Property<string>("MatchReason")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
 
                     b.Property<string>("MatchType")
                         .IsRequired()
@@ -1468,10 +1112,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsRequired()
                         .HasMaxLength(80)
                         .HasColumnType("character varying(80)");
-
-                    b.Property<string>("RuleDefinitionHash")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
 
                     b.Property<int>("RuleVersion")
                         .HasColumnType("integer");
@@ -1497,8 +1137,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("timestamp without time zone");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("BusinessUnitId", "BankMatchingRuleId");
 
                     b.HasIndex("BusinessUnitId", "IdempotencyKey")
                         .IsUnique()
@@ -1602,14 +1240,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");
 
-                    b.Property<string>("RuleSetHash")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<DateTime>("RuleSetSnapshotOn")
-                        .HasColumnType("timestamp without time zone");
-
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(20)
@@ -1650,49 +1280,6 @@ namespace ERP_RFQ_Automation.Migrations
                             t.HasCheckConstraint("CK_ReconciliationRuns_Certificate", "(\"Status\" = 'Approved' AND \"ApprovedBy\" IS NOT NULL AND \"ApprovedOn\" IS NOT NULL AND \"CertificateHash\" IS NOT NULL AND \"CertificateLineCount\" IS NOT NULL AND \"CertificateJournalCount\" IS NOT NULL AND \"UnexplainedDifference\" = 0) OR (\"Status\" <> 'Approved')");
 
                             t.HasCheckConstraint("CK_ReconciliationRuns_Status", "\"Status\" IN ('Draft','InReview','Approved','Reopened') AND \"Version\" > 0");
-                        });
-                });
-
-            modelBuilder.Entity("ERP_RFQ_Automation.BankReconciliation.ReconciliationRunRule", b =>
-                {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
-
-                    b.Property<long>("BankMatchingRuleId")
-                        .HasColumnType("bigint");
-
-                    b.Property<long>("BusinessUnitId")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("DefinitionHash")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<int>("EvaluationOrder")
-                        .HasColumnType("integer");
-
-                    b.Property<long>("ReconciliationRunId")
-                        .HasColumnType("bigint");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("BusinessUnitId", "BankMatchingRuleId");
-
-                    b.HasIndex("BusinessUnitId", "ReconciliationRunId", "BankMatchingRuleId")
-                        .IsUnique()
-                        .HasDatabaseName("UX_ReconciliationRunRules_Evidence");
-
-                    b.HasIndex("BusinessUnitId", "ReconciliationRunId", "EvaluationOrder")
-                        .IsUnique()
-                        .HasDatabaseName("UX_ReconciliationRunRules_Order");
-
-                    b.ToTable("ReconciliationRunRules", null, t =>
-                        {
-                            t.HasCheckConstraint("CK_ReconciliationRunRules_Order", "\"EvaluationOrder\" > 0");
                         });
                 });
 
@@ -2430,15 +2017,9 @@ namespace ERP_RFQ_Automation.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
 
-                    b.Property<bool>("AccountingBridgeRequired")
-                        .HasColumnType("boolean");
-
                     b.Property<decimal>("Amount")
                         .HasPrecision(18, 2)
                         .HasColumnType("numeric(18,2)");
-
-                    b.Property<long?>("BankAccountId")
-                        .HasColumnType("bigint");
 
                     b.Property<string>("BankReference")
                         .HasMaxLength(200)
@@ -2469,9 +2050,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(128)
                         .HasColumnType("character varying(128)");
 
-                    b.Property<long?>("JournalEntryId")
-                        .HasColumnType("bigint");
-
                     b.Property<string>("Method")
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
@@ -2489,16 +2067,9 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");
 
-                    b.Property<long?>("ReversalJournalEntryId")
-                        .HasColumnType("bigint");
-
                     b.Property<string>("ReversalReason")
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
-
-                    b.Property<string>("ReversedBy")
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ReversedOn")
                         .HasColumnType("timestamp without time zone");
@@ -2518,29 +2089,18 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasIndex("CustomerId");
 
-                    b.HasIndex("BusinessUnitId", "BankAccountId");
-
                     b.HasIndex("BusinessUnitId", "CommercialCaseId");
 
                     b.HasIndex("BusinessUnitId", "IdempotencyKey")
                         .IsUnique()
                         .HasDatabaseName("UX_CustomerPayments_BU_Idempotency");
 
-                    b.HasIndex("BusinessUnitId", "JournalEntryId")
-                        .IsUnique()
-                        .HasDatabaseName("UX_CustomerPayments_BU_Journal")
-                        .HasFilter("\"JournalEntryId\" IS NOT NULL");
-
                     b.HasIndex("BusinessUnitId", "ReceiptNumber")
                         .IsUnique()
                         .HasDatabaseName("UX_CustomerPayments_BU_Number");
 
-                    b.HasIndex("BusinessUnitId", "ReversalJournalEntryId");
-
                     b.ToTable("CustomerPayments", null, t =>
                         {
-                            t.HasCheckConstraint("CK_CustomerPayments_AccountingBridge", "\"AccountingBridgeRequired\" OR (\"BankAccountId\" IS NULL AND \"JournalEntryId\" IS NULL AND \"ReversalJournalEntryId\" IS NULL)");
-
                             t.HasCheckConstraint("CK_CustomerPayments_Amount", "\"Amount\" > 0");
                         });
                 });
@@ -2563,9 +2123,6 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime?>("ApprovedOn")
                         .HasColumnType("timestamp without time zone");
-
-                    b.Property<long?>("BankAccountId")
-                        .HasColumnType("bigint");
 
                     b.Property<long>("BusinessUnitId")
                         .HasColumnType("bigint");
@@ -2625,9 +2182,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsRequired()
                         .HasMaxLength(128)
                         .HasColumnType("character varying(128)");
-
-                    b.Property<long?>("JournalEntryId")
-                        .HasColumnType("bigint");
 
                     b.Property<string>("JournalReference")
                         .HasMaxLength(100)
@@ -2707,18 +2261,11 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasIndex("CustomerId");
 
-                    b.HasIndex("BusinessUnitId", "BankAccountId");
-
                     b.HasIndex("BusinessUnitId", "CommercialCaseId");
 
                     b.HasIndex("BusinessUnitId", "IdempotencyKey")
                         .IsUnique()
                         .HasDatabaseName("UX_CustomerRefunds_BU_Idempotency");
-
-                    b.HasIndex("BusinessUnitId", "JournalEntryId")
-                        .IsUnique()
-                        .HasDatabaseName("UX_CustomerRefunds_BU_Journal")
-                        .HasFilter("\"JournalEntryId\" IS NOT NULL");
 
                     b.HasIndex("BusinessUnitId", "RefundNumber")
                         .IsUnique()
@@ -6464,9 +6011,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(160)
                         .HasColumnType("character varying(160)");
 
-                    b.Property<long?>("ReceivablesControlAccountId")
-                        .HasColumnType("bigint");
-
                     b.Property<string>("RequestHash")
                         .IsRequired()
                         .HasMaxLength(64)
@@ -6476,9 +6020,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsRequired()
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
-
-                    b.Property<long?>("UnappliedCashAccountId")
-                        .HasColumnType("bigint");
 
                     b.Property<long>("Version")
                         .IsConcurrencyToken()
@@ -6498,13 +6039,9 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsUnique()
                         .HasDatabaseName("UX_LedgerBooks_BU_Idempotency");
 
-                    b.HasIndex("BusinessUnitId", "ReceivablesControlAccountId");
-
-                    b.HasIndex("BusinessUnitId", "UnappliedCashAccountId");
-
                     b.ToTable("LedgerBooks", null, t =>
                         {
-                            t.HasCheckConstraint("CK_LedgerBooks_State", "\"FiscalYearStartMonth\" BETWEEN 1 AND 12 AND \"Version\" > 0");
+                            t.HasCheckConstraint("CK_LedgerBooks_State", "\"FiscalYearStartMonth\" BETWEEN 1 AND 12 AND \"Version\" = 1");
                         });
                 });
 
@@ -11090,96 +10627,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsRequired();
                 });
 
-            modelBuilder.Entity("ERP_RFQ_Automation.BankReconciliation.BankAdjustment", b =>
-                {
-                    b.HasOne("ERP_RFQ_Automation.GeneralLedger.AccountingPeriod", null)
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "AccountingPeriodId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("ERP_RFQ_Automation.BankReconciliation.BankAccount", "BankAccount")
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "BankAccountId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("ERP_RFQ_Automation.GeneralLedger.JournalEntryLine", null)
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "BankJournalEntryLineId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict);
-
-                    b.HasOne("ERP_RFQ_Automation.GeneralLedger.JournalEntry", null)
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "JournalEntryId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict);
-
-                    b.HasOne("ERP_RFQ_Automation.GeneralLedger.JournalEntryLine", null)
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "ReversalBankJournalEntryLineId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict);
-
-                    b.HasOne("ERP_RFQ_Automation.GeneralLedger.JournalEntry", null)
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "ReversalJournalEntryId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict);
-
-                    b.HasOne("ERP_RFQ_Automation.BankReconciliation.BankStatementLine", "BankStatementLine")
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "BankStatementLineId", "BankAccountId")
-                        .HasPrincipalKey("BusinessUnitId", "Id", "BankAccountId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("BankAccount");
-
-                    b.Navigation("BankStatementLine");
-                });
-
-            modelBuilder.Entity("ERP_RFQ_Automation.BankReconciliation.BankAdjustmentDistribution", b =>
-                {
-                    b.HasOne("ERP_RFQ_Automation.BankReconciliation.BankAdjustment", "Adjustment")
-                        .WithMany("Distributions")
-                        .HasForeignKey("BusinessUnitId", "BankAdjustmentId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("ERP_RFQ_Automation.GeneralLedger.LedgerAccount", null)
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "LedgerAccountId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("Adjustment");
-                });
-
-            modelBuilder.Entity("ERP_RFQ_Automation.BankReconciliation.BankMatchingRule", b =>
-                {
-                    b.HasOne("ERP_RFQ_Automation.BankReconciliation.BankAccount", "BankAccount")
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "BankAccountId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict);
-
-                    b.HasOne("ERP_RFQ_Automation.BankReconciliation.BankMatchingRule", "SupersedesRule")
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "SupersedesRuleId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict);
-
-                    b.Navigation("BankAccount");
-
-                    b.Navigation("SupersedesRule");
-                });
-
             modelBuilder.Entity("ERP_RFQ_Automation.BankReconciliation.BankStatement", b =>
                 {
                     b.HasOne("ERP_RFQ_Automation.Models.Currency", null)
@@ -11254,20 +10701,12 @@ namespace ERP_RFQ_Automation.Migrations
 
             modelBuilder.Entity("ERP_RFQ_Automation.BankReconciliation.ReconciliationMatch", b =>
                 {
-                    b.HasOne("ERP_RFQ_Automation.BankReconciliation.BankMatchingRule", "MatchingRule")
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "BankMatchingRuleId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict);
-
                     b.HasOne("ERP_RFQ_Automation.BankReconciliation.ReconciliationRun", "Run")
                         .WithMany("Matches")
                         .HasForeignKey("BusinessUnitId", "ReconciliationRunId")
                         .HasPrincipalKey("BusinessUnitId", "Id")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
-
-                    b.Navigation("MatchingRule");
 
                     b.Navigation("Run");
                 });
@@ -11287,27 +10726,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasPrincipalKey("BusinessUnitId", "Id", "BankAccountId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
-                });
-
-            modelBuilder.Entity("ERP_RFQ_Automation.BankReconciliation.ReconciliationRunRule", b =>
-                {
-                    b.HasOne("ERP_RFQ_Automation.BankReconciliation.BankMatchingRule", "Rule")
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "BankMatchingRuleId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("ERP_RFQ_Automation.BankReconciliation.ReconciliationRun", "Run")
-                        .WithMany("Rules")
-                        .HasForeignKey("BusinessUnitId", "ReconciliationRunId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("Rule");
-
-                    b.Navigation("Run");
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Boq.BoqAssemblyComponent", b =>
@@ -11460,27 +10878,9 @@ namespace ERP_RFQ_Automation.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
-                    b.HasOne("ERP_RFQ_Automation.BankReconciliation.BankAccount", null)
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "BankAccountId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict);
-
                     b.HasOne("ERP_RFQ_Automation.Models.CommercialCase", null)
                         .WithMany()
                         .HasForeignKey("BusinessUnitId", "CommercialCaseId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict);
-
-                    b.HasOne("ERP_RFQ_Automation.GeneralLedger.JournalEntry", null)
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "JournalEntryId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict);
-
-                    b.HasOne("ERP_RFQ_Automation.GeneralLedger.JournalEntry", null)
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "ReversalJournalEntryId")
                         .HasPrincipalKey("BusinessUnitId", "Id")
                         .OnDelete(DeleteBehavior.Restrict);
                 });
@@ -11498,21 +10898,9 @@ namespace ERP_RFQ_Automation.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
-                    b.HasOne("ERP_RFQ_Automation.BankReconciliation.BankAccount", null)
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "BankAccountId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict);
-
                     b.HasOne("ERP_RFQ_Automation.Models.CommercialCase", null)
                         .WithMany()
                         .HasForeignKey("BusinessUnitId", "CommercialCaseId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict);
-
-                    b.HasOne("ERP_RFQ_Automation.GeneralLedger.JournalEntry", null)
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "JournalEntryId")
                         .HasPrincipalKey("BusinessUnitId", "Id")
                         .OnDelete(DeleteBehavior.Restrict);
 
@@ -12198,18 +11586,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasForeignKey("FunctionalCurrencyId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
-
-                    b.HasOne("ERP_RFQ_Automation.GeneralLedger.LedgerAccount", null)
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "ReceivablesControlAccountId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict);
-
-                    b.HasOne("ERP_RFQ_Automation.GeneralLedger.LedgerAccount", null)
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "UnappliedCashAccountId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict);
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Inventory.StockReservation", b =>
@@ -13346,11 +12722,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Navigation("Attempts");
                 });
 
-            modelBuilder.Entity("ERP_RFQ_Automation.BankReconciliation.BankAdjustment", b =>
-                {
-                    b.Navigation("Distributions");
-                });
-
             modelBuilder.Entity("ERP_RFQ_Automation.BankReconciliation.BankStatement", b =>
                 {
                     b.Navigation("Lines");
@@ -13370,8 +12741,6 @@ namespace ERP_RFQ_Automation.Migrations
             modelBuilder.Entity("ERP_RFQ_Automation.BankReconciliation.ReconciliationRun", b =>
                 {
                     b.Navigation("Matches");
-
-                    b.Navigation("Rules");
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Boq.BoqAssembly", b =>

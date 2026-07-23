@@ -131,9 +131,14 @@ public sealed class CustomerPayment
     public decimal Amount { get; set; }
     public string? Method { get; set; }
     public string? BankReference { get; set; }
+    public long? BankAccountId { get; set; }
+    public long? JournalEntryId { get; set; }
+    public long? ReversalJournalEntryId { get; set; }
+    public bool AccountingBridgeRequired { get; set; } = true;
     public string IdempotencyKey { get; set; } = null!;
     public string RequestHash { get; set; } = null!;
     public long Version { get; set; } = 1;
+    public string? ReversedBy { get; set; }
     public DateTime? ReversedOn { get; set; }
     public string? ReversalReason { get; set; }
     public string CreatedBy { get; set; } = null!;
@@ -223,6 +228,8 @@ public sealed class CustomerRefund
     public string? EvidenceReference { get; set; }
     public string PostingStatus { get; set; } = "NotReleased";
     public string? JournalReference { get; set; }
+    public long? BankAccountId { get; set; }
+    public long? JournalEntryId { get; set; }
     public string IdempotencyKey { get; set; } = null!;
     public string RequestHash { get; set; } = null!;
     public long Version { get; set; } = 1;

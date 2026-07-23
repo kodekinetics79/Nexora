@@ -22,9 +22,13 @@ public static class GeneralLedgerModelBuilderExtensions
             entity.HasIndex(x => new { x.BusinessUnitId, x.IdempotencyKey }).IsUnique()
                 .HasDatabaseName("UX_LedgerBooks_BU_Idempotency");
             entity.HasCheckConstraint("CK_LedgerBooks_State",
-                "\"FiscalYearStartMonth\" BETWEEN 1 AND 12 AND \"Version\" = 1");
+                "\"FiscalYearStartMonth\" BETWEEN 1 AND 12 AND \"Version\" > 0");
             entity.HasOne<Currency>().WithMany().HasForeignKey(x => x.FunctionalCurrencyId)
                 .OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<LedgerAccount>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, Id = x.ReceivablesControlAccountId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<LedgerAccount>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, Id = x.UnappliedCashAccountId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<LedgerAccount>(entity =>
@@ -127,6 +131,7 @@ public static class GeneralLedgerModelBuilderExtensions
         {
             entity.ToTable("JournalEntryLines");
             entity.HasKey(x => x.Id);
+            entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
             entity.Property(x => x.Description).HasMaxLength(500).IsRequired();
             entity.Property(x => x.ExchangeRate).HasPrecision(20, 10);
             entity.Property(x => x.TransactionDebit).HasPrecision(18, 2);

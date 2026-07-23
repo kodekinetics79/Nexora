@@ -346,7 +346,8 @@ public sealed class ReceivablesOperationsPostgreSqlTests(PostgreSqlTestDatabase 
             SET LOCAL nexora.actor_signature = '{AuditActorSignature(actor)}';
             UPDATE "CustomerPayments"
             SET "Status" = 'Reversed', "ReversedOn" = timestamp '2026-07-23 13:00:00',
-                "ReversalReason" = 'Bank reversal evidence', "Version" = "Version" + 1
+                "ReversedBy" = '{actor}', "ReversalReason" = 'Bank reversal evidence',
+                "Version" = "Version" + 1
             WHERE "Id" = {paymentId};
             """);
 

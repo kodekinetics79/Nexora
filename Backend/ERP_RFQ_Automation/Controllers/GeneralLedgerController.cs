@@ -26,6 +26,11 @@ public sealed class GeneralLedgerController(IGeneralLedgerService service) : Con
     public async Task<IActionResult> GetBook()
         => await Read(async () => Ok(await _service.GetBookAsync(TenantId())));
 
+    [HttpPost("book/receivables-posting")]
+    [RequireModulePermission("Ledger Control", PermissionAction.Edit)]
+    public Task<IActionResult> ConfigureReceivablesPosting([FromBody] ConfigureReceivablesPostingRequest request)
+        => Mutate(async () => Ok(await _service.ConfigureReceivablesPostingAsync(TenantId(), request, Actor())));
+
     [HttpPost("accounts")]
     [RequireModulePermission("General Ledger", PermissionAction.Create)]
     public Task<IActionResult> CreateAccount([FromBody] CreateLedgerAccountRequest request)

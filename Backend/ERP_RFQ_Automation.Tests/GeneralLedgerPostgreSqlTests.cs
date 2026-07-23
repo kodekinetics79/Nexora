@@ -323,6 +323,48 @@ public sealed class GeneralLedgerPostgreSqlTests(PostgreSqlTestDatabase database
             persisted.Any(x => x.StartsOn < softClosed.StartsOn && x.Status != AccountingPeriodStatuses.Closed));
     }
 
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task ReceivablesPostingProfile_ConfiguresOnceAndRejectsMutationOrInvalidDirectProfile()
+    {
+        await using var context = _database.ContextFor(null);
+        await SeedTenantAsync(context, ProfileTenantId, ProfileCurrencyId);
+        var service = new GeneralLedgerService(context);
+        var receivables = await service.CreateAccountAsync(ProfileTenantId, "pg-profile-ar",
+            new("1200", "Trade receivables", LedgerAccountCategories.Asset,
+                LedgerNormalBalances.Debit, null, true, false), "account-maker@test");
+        var unapplied = await service.CreateAccountAsync(ProfileTenantId, "pg-profile-unapplied",
+            new("2200", "Unapplied cash", LedgerAccountCategories.Liability,
+                LedgerNormalBalances.Credit, null, false, false), "account-maker@test");
+        var invalidOffset = await service.CreateAccountAsync(ProfileTenantId, "pg-profile-invalid",
+            Account("4200", "Invalid revenue offset", LedgerAccountCategories.Revenue,
+                LedgerNormalBalances.Credit), "account-maker@test");
+        var book = await service.GetBookAsync(ProfileTenantId);
+
+        var configured = await service.ConfigureReceivablesPostingAsync(ProfileTenantId,
+            new(book.Version, receivables.Id, unapplied.Id), "controller@test");
+
+        Assert.Equal(receivables.Id, configured.ReceivablesControlAccountId);
+        Assert.Equal(unapplied.Id, configured.UnappliedCashAccountId);
+        var secondConfiguration = await Assert.ThrowsAnyAsync<Exception>(() =>
+            service.ConfigureReceivablesPostingAsync(ProfileTenantId,
+                new(configured.Version, receivables.Id, unapplied.Id), "controller@test"));
+        Assert.Equal(PostgresErrorCodes.ObjectNotInPrerequisiteState,
+            Assert.IsType<PostgresException>(secondConfiguration.GetBaseException()).SqlState);
+
+        await using var connection = await _database.OpenConnectionAsync();
+        await using var mutate = connection.CreateCommand();
+        mutate.CommandText = """
+            UPDATE "LedgerBooks"
+            SET "ReceivablesControlAccountId" = @invalid, "Version" = "Version" + 1
+            WHERE "BusinessUnitId" = @tenant
+            """;
+        mutate.Parameters.AddWithValue("invalid", invalidOffset.Id);
+        mutate.Parameters.AddWithValue("tenant", ProfileTenantId);
+        Assert.Equal(PostgresErrorCodes.ObjectNotInPrerequisiteState,
+            (await Assert.ThrowsAsync<PostgresException>(() => mutate.ExecuteNonQueryAsync())).SqlState);
+    }
+
     private static async Task SeedTenantAsync(ErpRfqAutomationContext context, long tenantId, long currencyId)
     {
         if (!await context.BusinessUnits.IgnoreQueryFilters().AnyAsync(x => x.Id == tenantId))
@@ -393,4 +435,6 @@ public sealed class GeneralLedgerPostgreSqlTests(PostgreSqlTestDatabase database
     private const long ConcurrencyCurrencyId = 97_502;
     private const long HorizonRaceTenantId = 97_601;
     private const long HorizonRaceCurrencyId = 97_602;
+    private const long ProfileTenantId = 97_701;
+    private const long ProfileCurrencyId = 97_702;
 }

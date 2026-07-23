@@ -1,8 +1,11 @@
 using ERP_RFQ_Automation.CommercialFinance;
+using ERP_RFQ_Automation.BankReconciliation;
+using ERP_RFQ_Automation.GeneralLedger;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
+using System.Text.Json;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -31,6 +34,7 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
                 ExchangeRate = 1m, IsBaseCurrency = true, IsActive = true, CreatedBy = "tests",
                 CreatedOn = DateTime.UtcNow, BusinessUnitId = ExceptionBusinessUnitId
             });
+            SeedCashPosting(seed, ExceptionBusinessUnitId, ExceptionCurrencyId, 96_400_100);
             seed.Products.Add(new Product
             {
                 Id = ExceptionProductId, ProductName = "Finance exception product", PartNo = "FXE-1",
@@ -187,6 +191,217 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
+    public async Task CashBridge_RejectsWrongOffsetAndExcessSourceJournalLineAtCommit()
+    {
+        await using (var seed = _database.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(seed, CashBridgeTenantId);
+            Seed.Customer(seed, CashBridgeCustomerId, CashBridgeTenantId, "Cash bridge adversarial customer");
+            seed.Currencies.Add(new Currency
+            {
+                Id = CashBridgeCurrencyId, BusinessUnitId = CashBridgeTenantId, Code = "CBX",
+                CurrencyName = "Cash bridge currency", Symbol = "C", ExchangeRate = 1m,
+                IsBaseCurrency = true, IsActive = true, CreatedBy = "tests", CreatedOn = DateTime.UtcNow
+            });
+            SeedCashPosting(seed, CashBridgeTenantId, CashBridgeCurrencyId, CashBridgeIdBase);
+            seed.LedgerAccounts.Add(new LedgerAccount
+            {
+                Id = CashBridgeWrongOffsetId, BusinessUnitId = CashBridgeTenantId, Code = "WRONG-OFFSET",
+                Name = "Wrong payment offset", Category = LedgerAccountCategories.Revenue,
+                NormalBalance = LedgerNormalBalances.Credit, IsControlAccount = false,
+                AllowsManualPosting = true, IdempotencyKey = "pg-cash-bridge-wrong-offset",
+                RequestHash = new string('8', 64), CreatedBy = "tests", CreatedOn = DateTime.UtcNow
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await using var connection = await _database.OpenConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO "CustomerPayments"
+                ("Id","BusinessUnitId","CustomerId","CurrencyId","ReceiptNumber","Status","PaymentDate",
+                 "Amount","Method","BankReference","BankAccountId","JournalEntryId","IdempotencyKey",
+                 "RequestHash","Version","CreatedBy","CreatedOn")
+            VALUES (@payment,@tenant,@customer,@currency,'RCPT-CASH-BRIDGE-BAD','Posted',current_date,
+                    100,'BankTransfer','BANK-BAD',@bank,NULL,'pg-cash-bridge-bad',repeat('9',64),1,'cashier@test',now());
+
+            INSERT INTO "JournalEntries"
+                ("Id","BusinessUnitId","AccountingPeriodId","FunctionalCurrencyId","AccountingDate","Status",
+                 "Description","SourceType","SourceReference","SourceVersion","TotalDebit","TotalCredit",
+                 "IdempotencyKey","RequestHash","Version","CreatedBy","CreatedOn")
+            VALUES (@journal,@tenant,@period,@currency,current_date,'Draft','Malformed payment source journal',
+                    'CustomerPayment',@payment::text,1,100,100,'pg-cash-bridge-bad-journal',repeat('a',64),1,
+                    'system:customerpayment',now());
+
+            INSERT INTO "JournalEntryLines"
+                ("Id","BusinessUnitId","JournalEntryId","Sequence","LedgerAccountId","Description",
+                 "TransactionCurrencyId","ExchangeRate","TransactionDebit","TransactionCredit",
+                 "FunctionalDebit","FunctionalCredit","SourceReference")
+            VALUES
+                (@line1,@tenant,@journal,1,@cash,'Cash',@currency,1,100,0,100,0,'PAY:' || @payment::text || ':BANK'),
+                (@line2,@tenant,@journal,2,@wrong,'Wrong offset',@currency,1,0,99,0,99,'PAY:' || @payment::text || ':UNAPPLIED'),
+                (@line3,@tenant,@journal,3,@wrong,'Excess line',@currency,1,0,1,0,1,'PAY:' || @payment::text || ':EXCESS');
+
+            UPDATE "JournalEntries" SET "Status" = 'Posted', "PostedBy" = 'journal-checker@test',
+                "PostedOn" = now(), "Version" = "Version" + 1 WHERE "Id" = @journal;
+            UPDATE "CustomerPayments" SET "JournalEntryId" = @journal WHERE "Id" = @payment;
+            """;
+        command.Parameters.AddWithValue("payment", CashBridgePaymentId);
+        command.Parameters.AddWithValue("journal", CashBridgeJournalId);
+        command.Parameters.AddWithValue("line1", CashBridgeJournalId + 1);
+        command.Parameters.AddWithValue("line2", CashBridgeJournalId + 2);
+        command.Parameters.AddWithValue("line3", CashBridgeJournalId + 3);
+        command.Parameters.AddWithValue("tenant", CashBridgeTenantId);
+        command.Parameters.AddWithValue("customer", CashBridgeCustomerId);
+        command.Parameters.AddWithValue("currency", CashBridgeCurrencyId);
+        command.Parameters.AddWithValue("bank", CashBridgeIdBase + 6);
+        command.Parameters.AddWithValue("period", CashBridgeIdBase + 5);
+        command.Parameters.AddWithValue("cash", CashBridgeIdBase + 1);
+        command.Parameters.AddWithValue("wrong", CashBridgeWrongOffsetId);
+        await command.ExecuteNonQueryAsync();
+
+        var failure = await Assert.ThrowsAsync<PostgresException>(() => transaction.CommitAsync());
+        Assert.Equal(PostgresErrorCodes.CheckViolation, failure.SqlState);
+        Assert.Contains("customer payment journal provenance is invalid", failure.MessageText);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task AccountingBridgeRequired_DirectSqlCannotOptOutOrDowngradePostedPayment()
+    {
+        await SeedBridgeTenantAsync(BridgeFlagTenantId, BridgeFlagCustomerId, BridgeFlagCurrencyId,
+            BridgeFlagIdBase, "BFG");
+        await using var connection = await _database.OpenConnectionAsync();
+        await using var insert = connection.CreateCommand();
+        insert.CommandText = """
+            INSERT INTO "CustomerPayments"
+                ("BusinessUnitId","CustomerId","CurrencyId","ReceiptNumber","Status","PaymentDate","Amount",
+                 "Method","AccountingBridgeRequired","IdempotencyKey","RequestHash","Version","CreatedBy","CreatedOn")
+            VALUES (@tenant,@customer,@currency,'RCPT-BRIDGE-OPT-OUT','Posted',current_date,10,
+                    'Cash',false,'pg-bridge-opt-out',repeat('a',64),1,'cashier@test',now())
+            """;
+        insert.Parameters.AddWithValue("tenant", BridgeFlagTenantId);
+        insert.Parameters.AddWithValue("customer", BridgeFlagCustomerId);
+        insert.Parameters.AddWithValue("currency", BridgeFlagCurrencyId);
+        var insertFailure = await Record.ExceptionAsync(() => insert.ExecuteNonQueryAsync());
+
+        long paymentId;
+        await using (var context = _database.ContextFor(null))
+        {
+            paymentId = (await new CommercialFinanceApplicationService(context).PostPaymentAsync(
+                BridgeFlagTenantId, "pg-bridge-required-payment",
+                new(BridgeFlagCustomerId, null, BridgeFlagCurrencyId, null, 25m,
+                    "BankTransfer", "BANK-BRIDGE-TRUE", []), "cashier@test")).Id;
+        }
+        await using var downgrade = connection.CreateCommand();
+        downgrade.CommandText = "UPDATE \"CustomerPayments\" SET \"AccountingBridgeRequired\" = false WHERE \"Id\" = @id";
+        downgrade.Parameters.AddWithValue("id", paymentId);
+        var downgradeFailure = await Record.ExceptionAsync(() => downgrade.ExecuteNonQueryAsync());
+
+        Assert.Equal(PostgresErrorCodes.CheckViolation, Assert.IsType<PostgresException>(insertFailure).SqlState);
+        Assert.Contains(Assert.IsType<PostgresException>(downgradeFailure).SqlState,
+            new[] { PostgresErrorCodes.CheckViolation, PostgresErrorCodes.ObjectNotInPrerequisiteState });
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task PaymentReversal_AuditAndOutboxCarryControllerAndJournalBridgeEvidence()
+    {
+        await SeedBridgeTenantAsync(AuditBridgeTenantId, AuditBridgeCustomerId, AuditBridgeCurrencyId,
+            AuditBridgeIdBase, "ABR");
+        CustomerPaymentDto reversed;
+        await using (var context = _database.ContextFor(null))
+        {
+            var service = new CommercialFinanceApplicationService(context);
+            var payment = await service.PostPaymentAsync(AuditBridgeTenantId, "pg-audit-bridge-payment",
+                new(AuditBridgeCustomerId, null, AuditBridgeCurrencyId, null, 75m,
+                    "BankTransfer", "BANK-AUDIT-BRIDGE", []), "cashier@test");
+            context.ChangeTracker.Clear();
+            reversed = await service.ReversePaymentAsync(AuditBridgeTenantId, payment.Id,
+                new(payment.Version, "Independent controller reversed duplicate receipt"), "controller@test");
+        }
+
+        await using var verify = _database.ContextFor(null);
+        var audit = await verify.CommercialFinanceAudits.AsNoTracking().SingleAsync(x =>
+            x.BusinessUnitId == AuditBridgeTenantId && x.AggregateType == "CustomerPayment" &&
+            x.AggregateId == reversed.Id && x.Action == "Reversed");
+        var outbox = await verify.FinanceOutboxMessages.AsNoTracking().SingleAsync(x =>
+            x.BusinessUnitId == AuditBridgeTenantId && x.AggregateType == "CustomerPayment" &&
+            x.AggregateId == reversed.Id && x.EventType == "finance.payment.reversed");
+        using var auditDetail = JsonDocument.Parse(audit.DetailJson);
+        using var outboxDetail = JsonDocument.Parse(outbox.Payload);
+
+        Assert.Equal("controller@test", audit.Actor);
+        AssertBridgeEvidence(auditDetail.RootElement, reversed);
+        AssertBridgeEvidence(outboxDetail.RootElement, reversed);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task CashBridge_RejectsPaymentAndRefundTransactionCurrencyMismatch()
+    {
+        await SeedBridgeTenantAsync(CurrencyBridgeTenantId, CurrencyBridgeCustomerId,
+            CurrencyBridgeCurrencyId, CurrencyBridgeIdBase, "CBP");
+        await using (var seed = _database.ContextFor(null))
+        {
+            seed.Currencies.Add(new Currency
+            {
+                Id = CurrencyBridgeOtherCurrencyId, BusinessUnitId = CurrencyBridgeTenantId, Code = "CBO",
+                CurrencyName = "Other bridge currency", Symbol = "O", ExchangeRate = 1m,
+                IsBaseCurrency = false, IsActive = true, CreatedBy = "tests", CreatedOn = DateTime.UtcNow
+            });
+            seed.LedgerAccounts.Add(new LedgerAccount
+            {
+                Id = CurrencyBridgeLooseCashId, BusinessUnitId = CurrencyBridgeTenantId, Code = "LOOSE-CASH",
+                Name = "Currency-neutral bank cash", Category = LedgerAccountCategories.Asset,
+                NormalBalance = LedgerNormalBalances.Debit, CurrencyId = null, IsControlAccount = false,
+                AllowsManualPosting = true, IdempotencyKey = "pg-currency-loose-cash",
+                RequestHash = new string('b', 64), CreatedBy = "tests", CreatedOn = DateTime.UtcNow
+            });
+            await seed.SaveChangesAsync();
+            seed.BankAccounts.Add(new BankAccount
+            {
+                Id = CurrencyBridgeLooseBankId, BusinessUnitId = CurrencyBridgeTenantId,
+                Name = "Loose currency bank", InstitutionName = "Integration bank", MaskedAccountNumber = "****8830",
+                AccountFingerprint = new string('c', 64), CurrencyId = CurrencyBridgeCurrencyId,
+                LedgerAccountId = CurrencyBridgeLooseCashId, Status = BankAccountStatuses.Active,
+                OpeningDate = DateTime.UtcNow.Date.AddYears(-1), IdempotencyKey = "pg-currency-loose-bank",
+                RequestHash = new string('d', 64), CreatedBy = "tests", CreatedOn = DateTime.UtcNow
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        var paymentFailure = await CommitCurrencyMismatchedPaymentAsync();
+
+        CustomerRefundDto released;
+        await using (var context = _database.ContextFor(null))
+        {
+            var service = new CommercialFinanceApplicationService(context);
+            var payment = await service.PostPaymentAsync(CurrencyBridgeTenantId, "pg-currency-refund-source",
+                new(CurrencyBridgeCustomerId, null, CurrencyBridgeCurrencyId, null, 60m,
+                    "BankTransfer", "BANK-CURRENCY-SOURCE", [], CurrencyBridgeIdBase + 6), "cashier@test");
+            var draft = await service.CreateRefundAsync(CurrencyBridgeTenantId, "pg-currency-refund",
+                new(payment.Id, null, 30m, "BankTransfer", "token:currency_refund_8830", true,
+                    "OVERPAYMENT", "Verified overpayment requires customer refund.", "case://currency-refund",
+                    CurrencyBridgeIdBase + 6),
+                "refund-maker@test");
+            var approved = await service.ApproveRefundAsync(CurrencyBridgeTenantId, draft.Id,
+                new(draft.Version), "refund-checker@test");
+            released = await service.ReleaseRefundAsync(CurrencyBridgeTenantId, approved.Id,
+                new(approved.Version), "refund-releaser@test");
+        }
+        var refundFailure = await CommitCurrencyMismatchedRefundAsync(released);
+
+        Assert.NotNull(paymentFailure);
+        Assert.NotNull(refundFailure);
+        Assert.Equal(PostgresErrorCodes.CheckViolation, paymentFailure.SqlState);
+        Assert.Equal(PostgresErrorCodes.CheckViolation, refundFailure.SqlState);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
     public async Task ReceivableAdjustments_EnforceLegalNumbersNetArCreditCeilingAndAuditPrivileges()
     {
         ReceivableDocumentDto invoice;
@@ -206,6 +421,7 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
                 ExchangeRate = 1m, IsBaseCurrency = true, IsActive = true, CreatedBy = "tests",
                 CreatedOn = DateTime.UtcNow, BusinessUnitId = AdjustmentBusinessUnitId
             });
+            SeedCashPosting(context, AdjustmentBusinessUnitId, AdjustmentCurrencyId, 96_300_100);
             context.Products.Add(new Product
             {
                 Id = AdjustmentProductId, ProductName = "Adjustment product", PartNo = "ADJ-1",
@@ -778,6 +994,7 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
             CreatedOn = DateTime.UtcNow,
             BusinessUnitId = BusinessUnitId
         });
+        SeedCashPosting(db, BusinessUnitId, CurrencyId, 96_001_100);
         db.Products.Add(new Product
         {
             Id = ProductId,
@@ -800,6 +1017,199 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
             CreatedOn = DateTime.UtcNow
         });
         db.SaveChanges();
+    }
+
+    private static void SeedCashPosting(
+        ErpRfqAutomationContext db,
+        long businessUnitId,
+        long currencyId,
+        long idBase)
+    {
+        var cashAccountId = idBase + 1;
+        var receivablesAccountId = idBase + 2;
+        var unappliedCashAccountId = idBase + 3;
+        db.LedgerAccounts.AddRange(
+            new LedgerAccount
+            {
+                Id = cashAccountId, BusinessUnitId = businessUnitId, Code = $"CASH-{businessUnitId}",
+                Name = "Operating cash", Category = LedgerAccountCategories.Asset,
+                NormalBalance = LedgerNormalBalances.Debit, CurrencyId = currencyId,
+                IsControlAccount = true, AllowsManualPosting = false,
+                IdempotencyKey = $"pg-cash-{businessUnitId}", RequestHash = new string('1', 64),
+                CreatedBy = "tests", CreatedOn = DateTime.UtcNow
+            },
+            new LedgerAccount
+            {
+                Id = receivablesAccountId, BusinessUnitId = businessUnitId, Code = $"AR-{businessUnitId}",
+                Name = "Trade receivables", Category = LedgerAccountCategories.Asset,
+                NormalBalance = LedgerNormalBalances.Debit, IsControlAccount = true,
+                AllowsManualPosting = false, IdempotencyKey = $"pg-ar-{businessUnitId}",
+                RequestHash = new string('2', 64), CreatedBy = "tests", CreatedOn = DateTime.UtcNow
+            },
+            new LedgerAccount
+            {
+                Id = unappliedCashAccountId, BusinessUnitId = businessUnitId, Code = $"UNAP-{businessUnitId}",
+                Name = "Unapplied cash", Category = LedgerAccountCategories.Liability,
+                NormalBalance = LedgerNormalBalances.Credit, IsControlAccount = false,
+                AllowsManualPosting = false, IdempotencyKey = $"pg-unapplied-{businessUnitId}",
+                RequestHash = new string('3', 64), CreatedBy = "tests", CreatedOn = DateTime.UtcNow
+            });
+        db.LedgerBooks.Add(new LedgerBook
+        {
+            Id = idBase + 4, BusinessUnitId = businessUnitId, Name = "Finance integration ledger",
+            FunctionalCurrencyId = currencyId, TimeZoneId = "UTC", FiscalYearStartMonth = 1,
+            ReceivablesControlAccountId = receivablesAccountId,
+            UnappliedCashAccountId = unappliedCashAccountId,
+            IdempotencyKey = $"pg-book-{businessUnitId}", RequestHash = new string('4', 64),
+            CreatedBy = "tests", CreatedOn = DateTime.UtcNow
+        });
+        db.SaveChanges();
+        db.AccountingPeriods.Add(new AccountingPeriod
+        {
+            Id = idBase + 5, BusinessUnitId = businessUnitId, FiscalYear = DateTime.UtcNow.Year,
+            PeriodNumber = 1, Name = "Finance integration period",
+            StartsOn = DateTime.UtcNow.Date.AddYears(-2), EndsOn = DateTime.UtcNow.Date.AddYears(2),
+            Status = AccountingPeriodStatuses.Open, IdempotencyKey = $"pg-period-{businessUnitId}",
+            RequestHash = new string('5', 64), CreatedBy = "tests", CreatedOn = DateTime.UtcNow
+        });
+        db.BankAccounts.Add(new BankAccount
+        {
+            Id = idBase + 6, BusinessUnitId = businessUnitId, Name = "Operating bank",
+            InstitutionName = "Integration bank", MaskedAccountNumber = "****4242",
+            AccountFingerprint = new string('6', 64), CurrencyId = currencyId,
+            LedgerAccountId = cashAccountId, Status = BankAccountStatuses.Active,
+            OpeningDate = DateTime.UtcNow.Date.AddYears(-2),
+            IdempotencyKey = $"pg-bank-{businessUnitId}", RequestHash = new string('7', 64),
+            CreatedBy = "tests", CreatedOn = DateTime.UtcNow
+        });
+    }
+
+    private async Task SeedBridgeTenantAsync(long tenantId, long customerId, long currencyId,
+        long idBase, string currencyCode)
+    {
+        await using var db = _database.ContextFor(null);
+        Seed.EnsureBusinessUnit(db, tenantId);
+        Seed.Customer(db, customerId, tenantId, $"Bridge customer {tenantId}");
+        db.Currencies.Add(new Currency
+        {
+            Id = currencyId, BusinessUnitId = tenantId, Code = currencyCode,
+            CurrencyName = $"Bridge currency {tenantId}", Symbol = currencyCode[..1], ExchangeRate = 1m,
+            IsBaseCurrency = true, IsActive = true, CreatedBy = "tests", CreatedOn = DateTime.UtcNow
+        });
+        SeedCashPosting(db, tenantId, currencyId, idBase);
+        await db.SaveChangesAsync();
+    }
+
+    private static void AssertBridgeEvidence(JsonElement payload, CustomerPaymentDto payment)
+    {
+        Assert.Equal(payment.BankAccountId, payload.GetProperty("BankAccountId").GetInt64());
+        Assert.Equal(payment.JournalEntryId, payload.GetProperty("JournalEntryId").GetInt64());
+        Assert.Equal(payment.ReversalJournalEntryId, payload.GetProperty("ReversalJournalEntryId").GetInt64());
+    }
+
+    private async Task<PostgresException?> CommitCurrencyMismatchedPaymentAsync()
+    {
+        await using var connection = await _database.OpenConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                INSERT INTO "CustomerPayments"
+                    ("Id","BusinessUnitId","CustomerId","CurrencyId","ReceiptNumber","Status","PaymentDate",
+                     "Amount","Method","BankAccountId","JournalEntryId","AccountingBridgeRequired",
+                     "IdempotencyKey","RequestHash","Version","CreatedBy","CreatedOn")
+                VALUES (@payment,@tenant,@customer,@currency,'RCPT-CURRENCY-MISMATCH','Posted',current_date,
+                        40,'BankTransfer',@bank,NULL,true,'pg-currency-mismatch-payment',repeat('e',64),1,'cashier@test',now());
+                INSERT INTO "JournalEntries"
+                    ("Id","BusinessUnitId","AccountingPeriodId","FunctionalCurrencyId","AccountingDate","Status",
+                     "Description","SourceType","SourceReference","SourceVersion","TotalDebit","TotalCredit",
+                     "IdempotencyKey","RequestHash","Version","CreatedBy","CreatedOn")
+                VALUES (@journal,@tenant,@period,@currency,current_date,'Draft','Currency mismatched payment',
+                        'CustomerPayment',@payment::text,1,40,40,'pg-currency-mismatch-payment-journal',
+                        repeat('f',64),1,'system:customerpayment',now());
+                INSERT INTO "JournalEntryLines"
+                    ("Id","BusinessUnitId","JournalEntryId","Sequence","LedgerAccountId","Description",
+                     "TransactionCurrencyId","ExchangeRate","TransactionDebit","TransactionCredit",
+                     "FunctionalDebit","FunctionalCredit","SourceReference")
+                VALUES
+                    (@line1,@tenant,@journal,1,@cash,'Cash',@otherCurrency,1,40,0,40,0,
+                     'PAY:' || @payment::text || ':BANK'),
+                    (@line2,@tenant,@journal,2,@unapplied,'Unapplied',@otherCurrency,1,0,40,0,40,
+                     'PAY:' || @payment::text || ':UNAPPLIED');
+                UPDATE "JournalEntries" SET "Status"='Posted',"PostedBy"='journal-checker@test',
+                    "PostedOn"=now(),"Version"="Version"+1 WHERE "Id"=@journal;
+                UPDATE "CustomerPayments" SET "JournalEntryId"=@journal WHERE "Id"=@payment;
+                """;
+            command.Parameters.AddWithValue("payment", CurrencyBridgePaymentId);
+            command.Parameters.AddWithValue("journal", CurrencyBridgePaymentJournalId);
+            command.Parameters.AddWithValue("line1", CurrencyBridgePaymentJournalId + 1);
+            command.Parameters.AddWithValue("line2", CurrencyBridgePaymentJournalId + 2);
+            command.Parameters.AddWithValue("tenant", CurrencyBridgeTenantId);
+            command.Parameters.AddWithValue("customer", CurrencyBridgeCustomerId);
+            command.Parameters.AddWithValue("currency", CurrencyBridgeCurrencyId);
+            command.Parameters.AddWithValue("otherCurrency", CurrencyBridgeOtherCurrencyId);
+            command.Parameters.AddWithValue("bank", CurrencyBridgeLooseBankId);
+            command.Parameters.AddWithValue("cash", CurrencyBridgeLooseCashId);
+            command.Parameters.AddWithValue("unapplied", CurrencyBridgeIdBase + 3);
+            command.Parameters.AddWithValue("period", CurrencyBridgeIdBase + 5);
+            await command.ExecuteNonQueryAsync();
+            await transaction.CommitAsync();
+            return null;
+        }
+        catch (PostgresException exception) { return exception; }
+    }
+
+    private async Task<PostgresException?> CommitCurrencyMismatchedRefundAsync(CustomerRefundDto refund)
+    {
+        await using var connection = await _database.OpenConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                INSERT INTO "JournalEntries"
+                    ("Id","BusinessUnitId","AccountingPeriodId","FunctionalCurrencyId","AccountingDate","Status",
+                     "Description","SourceType","SourceReference","SourceVersion","TotalDebit","TotalCredit",
+                     "IdempotencyKey","RequestHash","Version","CreatedBy","CreatedOn")
+                VALUES (@journal,@tenant,@period,@currency,current_date,'Draft','Currency mismatched refund',
+                        'CustomerRefund',@refund::text,@sourceVersion,@amount,@amount,
+                        'pg-currency-mismatch-refund-journal',repeat('1',64),1,'system:customerrefund',now());
+                INSERT INTO "JournalEntryLines"
+                    ("Id","BusinessUnitId","JournalEntryId","Sequence","LedgerAccountId","Description",
+                     "TransactionCurrencyId","ExchangeRate","TransactionDebit","TransactionCredit",
+                     "FunctionalDebit","FunctionalCredit","SourceReference")
+                VALUES
+                    (@line1,@tenant,@journal,1,@unapplied,'Refund liability',@otherCurrency,1,@amount,0,@amount,0,
+                     'REF:' || @refund::text || ':UNAPPLIED'),
+                    (@line2,@tenant,@journal,2,@cash,'Refund cash',@otherCurrency,1,0,@amount,0,@amount,
+                     'REF:' || @refund::text || ':BANK');
+                UPDATE "JournalEntries" SET "Status"='Posted',"PostedBy"='refund-reconciler@test',
+                    "PostedOn"=now(),"Version"="Version"+1 WHERE "Id"=@journal;
+                UPDATE "CustomerRefunds" SET "PostingStatus"='Settled',"JournalReference"='provider:currency-mismatch',
+                    "BankAccountId"=@bank,"JournalEntryId"=@journal,"DisbursementUpdatedBy"='refund-reconciler@test',
+                    "DisbursementUpdatedOn"=now(),"Version"="Version"+1 WHERE "Id"=@refund;
+                """;
+            command.Parameters.AddWithValue("journal", CurrencyBridgeRefundJournalId);
+            command.Parameters.AddWithValue("line1", CurrencyBridgeRefundJournalId + 1);
+            command.Parameters.AddWithValue("line2", CurrencyBridgeRefundJournalId + 2);
+            command.Parameters.AddWithValue("tenant", CurrencyBridgeTenantId);
+            command.Parameters.AddWithValue("currency", CurrencyBridgeCurrencyId);
+            command.Parameters.AddWithValue("otherCurrency", CurrencyBridgeOtherCurrencyId);
+            command.Parameters.AddWithValue("refund", refund.Id);
+            command.Parameters.AddWithValue("sourceVersion", refund.Version + 1);
+            command.Parameters.AddWithValue("amount", refund.Amount);
+            command.Parameters.AddWithValue("bank", CurrencyBridgeLooseBankId);
+            command.Parameters.AddWithValue("cash", CurrencyBridgeLooseCashId);
+            command.Parameters.AddWithValue("unapplied", CurrencyBridgeIdBase + 3);
+            command.Parameters.AddWithValue("period", CurrencyBridgeIdBase + 5);
+            await command.ExecuteNonQueryAsync();
+            await transaction.CommitAsync();
+            return null;
+        }
+        catch (PostgresException exception) { return exception; }
     }
 
     private static Order NewOrder(long id, string number) => new()
@@ -848,6 +1258,31 @@ public sealed class CommercialFinancePostgreSqlTests(PostgreSqlTestDatabase data
     private const long OrderSixId = 96_011;
     private const long OrderSevenId = 96_012;
     private const long OutboxTenantId = 96_100;
+    private const long CashBridgeTenantId = 96_800;
+    private const long CashBridgeCustomerId = 96_801;
+    private const long CashBridgeCurrencyId = 96_802;
+    private const long CashBridgeIdBase = 96_800_100;
+    private const long CashBridgeWrongOffsetId = 96_800_107;
+    private const long CashBridgePaymentId = 96_800_201;
+    private const long CashBridgeJournalId = 96_800_301;
+    private const long BridgeFlagTenantId = 96_810;
+    private const long BridgeFlagCustomerId = 96_811;
+    private const long BridgeFlagCurrencyId = 96_812;
+    private const long BridgeFlagIdBase = 96_810_100;
+    private const long AuditBridgeTenantId = 96_820;
+    private const long AuditBridgeCustomerId = 96_821;
+    private const long AuditBridgeCurrencyId = 96_822;
+    private const long AuditBridgeIdBase = 96_820_100;
+    private const long CurrencyBridgeTenantId = 96_830;
+    private const long CurrencyBridgeCustomerId = 96_831;
+    private const long CurrencyBridgeCurrencyId = 96_832;
+    private const long CurrencyBridgeOtherCurrencyId = 96_833;
+    private const long CurrencyBridgeIdBase = 96_830_100;
+    private const long CurrencyBridgeLooseCashId = 96_830_107;
+    private const long CurrencyBridgeLooseBankId = 96_830_108;
+    private const long CurrencyBridgePaymentId = 96_830_201;
+    private const long CurrencyBridgePaymentJournalId = 96_830_301;
+    private const long CurrencyBridgeRefundJournalId = 96_830_401;
     private const long OutboxAggregateBase = 96_200;
     private const long AdjustmentBusinessUnitId = 96_300;
     private const long AdjustmentCustomerId = 96_301;

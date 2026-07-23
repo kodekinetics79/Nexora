@@ -1,5 +1,6 @@
 using ERP_RFQ_Automation.CommercialFinance;
 using ERP_RFQ_Automation.GeneralLedger;
+using ERP_RFQ_Automation.BankReconciliation;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Models;
@@ -34,4 +35,15 @@ public partial class ErpRfqAutomationContext
     public DbSet<AccountingPeriod> AccountingPeriods => Set<AccountingPeriod>();
     public DbSet<JournalEntry> JournalEntries => Set<JournalEntry>();
     public DbSet<JournalEntryLine> JournalEntryLines => Set<JournalEntryLine>();
+    public DbSet<BankAccount> BankAccounts => Set<BankAccount>();
+    public DbSet<BankMatchingRule> BankMatchingRules => Set<BankMatchingRule>();
+    public DbSet<ReconciliationRunRule> ReconciliationRunRules => Set<ReconciliationRunRule>();
+    public DbSet<BankAdjustment> BankAdjustments => Set<BankAdjustment>();
+    public DbSet<BankAdjustmentDistribution> BankAdjustmentDistributions => Set<BankAdjustmentDistribution>();
+    public DbSet<BankStatementImport> BankStatementImports => Set<BankStatementImport>();
+    public DbSet<BankStatement> BankStatements => Set<BankStatement>();
+    public DbSet<BankStatementLine> BankStatementLines => Set<BankStatementLine>();
+    public DbSet<ReconciliationRun> ReconciliationRuns => Set<ReconciliationRun>();
+    public DbSet<ReconciliationMatch> ReconciliationMatches => Set<ReconciliationMatch>();
+    public DbSet<ReconciliationAllocation> ReconciliationAllocations => Set<ReconciliationAllocation>();
 }

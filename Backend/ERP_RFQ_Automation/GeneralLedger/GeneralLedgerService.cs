@@ -14,6 +14,8 @@ public interface IGeneralLedgerService
 {
     Task<LedgerBookDto> CreateBookAsync(long businessUnitId, string idempotencyKey, CreateLedgerBookRequest request, string actor);
     Task<LedgerBookDto> GetBookAsync(long businessUnitId);
+    Task<LedgerBookDto> ConfigureReceivablesPostingAsync(long businessUnitId,
+        ConfigureReceivablesPostingRequest request, string actor);
     Task<LedgerAccountDto> CreateAccountAsync(long businessUnitId, string idempotencyKey, CreateLedgerAccountRequest request, string actor);
     Task<LedgerAccountDto> DeactivateAccountAsync(long businessUnitId, long accountId, DeactivateLedgerAccountRequest request, string actor);
     Task<IReadOnlyList<LedgerAccountDto>> GetAccountsAsync(long businessUnitId, bool includeInactive);
@@ -76,6 +78,37 @@ public sealed class GeneralLedgerService(ErpRfqAutomationContext context) : IGen
     public async Task<LedgerBookDto> GetBookAsync(long businessUnitId)
         => Map(await _context.LedgerBooks.SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId)
             ?? throw new KeyNotFoundException("Ledger book not found."));
+
+    public async Task<LedgerBookDto> ConfigureReceivablesPostingAsync(long businessUnitId,
+        ConfigureReceivablesPostingRequest request, string actor)
+    {
+        return await InSerializableTransactionAsync(async () =>
+        {
+            var book = await RequireBookAsync(businessUnitId);
+            if (book.Version != request.ExpectedVersion)
+                throw new GeneralLedgerConflictException("The ledger book changed; reload it before configuring receivables.");
+            if (request.ReceivablesControlAccountId == request.UnappliedCashAccountId)
+                throw new ArgumentException("Receivables control and unapplied cash require distinct accounts.");
+            var accounts = await _context.LedgerAccounts.Where(x => x.BusinessUnitId == businessUnitId &&
+                (x.Id == request.ReceivablesControlAccountId || x.Id == request.UnappliedCashAccountId))
+                .ToDictionaryAsync(x => x.Id);
+            if (accounts.Count != 2) throw new ArgumentException("Both receivables posting accounts must belong to this tenant.");
+            var receivables = accounts[request.ReceivablesControlAccountId];
+            var unapplied = accounts[request.UnappliedCashAccountId];
+            if (!receivables.IsActive || !receivables.IsControlAccount ||
+                receivables.Category != LedgerAccountCategories.Asset)
+                throw new ArgumentException("Receivables requires an active asset control account.");
+            if (!unapplied.IsActive || unapplied.IsControlAccount ||
+                unapplied.Category != LedgerAccountCategories.Liability)
+                throw new ArgumentException("Unapplied cash requires an active non-control liability account.");
+            book.ReceivablesControlAccountId = receivables.Id; book.UnappliedCashAccountId = unapplied.Id;
+            book.Version++;
+            await EvidenceAsync(businessUnitId, "LedgerBook", book.Id, book.Version,
+                "ReceivablesConfigured", actor, "finance.ledger-book.receivables-configured",
+                new { book.Id, book.ReceivablesControlAccountId, book.UnappliedCashAccountId });
+            await _context.SaveChangesAsync(); return Map(book);
+        });
+    }
 
     public async Task<LedgerAccountDto> CreateAccountAsync(
         long businessUnitId, string idempotencyKey, CreateLedgerAccountRequest request, string actor)
@@ -327,6 +360,8 @@ public sealed class GeneralLedgerService(ErpRfqAutomationContext context) : IGen
             var journal = await LockJournalAsync(journalId, businessUnitId);
             if (post && journal.Status == JournalEntryStatuses.Posted) return Map(journal);
             if (!post && journal.Status == JournalEntryStatuses.Cancelled) return Map(journal);
+            if (journal.SourceType != "Manual")
+                throw new GeneralLedgerConflictException("Source-owned journals must transition through their owning module.");
             Expected(journal.Version, request.ExpectedVersion, "journal");
             if (journal.Status != JournalEntryStatuses.Draft)
                 throw new GeneralLedgerConflictException("Only a draft journal can transition.");
@@ -381,6 +416,8 @@ public sealed class GeneralLedgerService(ErpRfqAutomationContext context) : IGen
                 return Map(replay);
             }
             var original = await LockJournalAsync(journalId, businessUnitId);
+            if (original.SourceType != "Manual")
+                throw new GeneralLedgerConflictException("Source-owned journals must be reversed through their owning module.");
             Expected(original.Version, request.ExpectedVersion, "journal");
             if (original.Status != JournalEntryStatuses.Posted)
                 throw new GeneralLedgerConflictException("Only a posted journal can be reversed.");
@@ -639,7 +676,8 @@ public sealed class GeneralLedgerService(ErpRfqAutomationContext context) : IGen
     }
 
     private static LedgerBookDto Map(LedgerBook x) => new(x.Id, x.Name, x.FunctionalCurrencyId,
-        x.TimeZoneId, x.FiscalYearStartMonth, x.Version, x.CreatedBy, x.CreatedOn);
+        x.TimeZoneId, x.FiscalYearStartMonth, x.Version, x.CreatedBy, x.CreatedOn,
+        x.ReceivablesControlAccountId, x.UnappliedCashAccountId);
     private static LedgerAccountDto Map(LedgerAccount x) => new(x.Id, x.Code, x.Name, x.Category,
         x.NormalBalance, x.CurrencyId, x.IsControlAccount, x.IsContraAccount, x.AllowsManualPosting, x.IsActive,
         x.Version, x.CreatedBy, x.CreatedOn, x.DeactivatedBy, x.DeactivatedOn, x.DeactivationReason);

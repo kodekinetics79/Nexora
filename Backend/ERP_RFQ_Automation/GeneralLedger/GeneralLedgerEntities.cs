@@ -38,6 +38,8 @@ public sealed class LedgerBook
     public long FunctionalCurrencyId { get; set; }
     public string TimeZoneId { get; set; } = "UTC";
     public int FiscalYearStartMonth { get; set; } = 1;
+    public long? ReceivablesControlAccountId { get; set; }
+    public long? UnappliedCashAccountId { get; set; }
     public string IdempotencyKey { get; set; } = null!;
     public string RequestHash { get; set; } = null!;
     public long Version { get; set; } = 1;

@@ -5,6 +5,8 @@ public sealed record CreateLedgerAccountRequest(
     bool IsControlAccount, bool AllowsManualPosting, bool IsContraAccount = false);
 public sealed record CreateLedgerBookRequest(
     string Name, long FunctionalCurrencyId, string TimeZoneId, int FiscalYearStartMonth);
+public sealed record ConfigureReceivablesPostingRequest(long ExpectedVersion,
+    long ReceivablesControlAccountId, long UnappliedCashAccountId);
 public sealed record DeactivateLedgerAccountRequest(long ExpectedVersion, string Reason);
 public sealed record CreateAccountingPeriodRequest(
     int FiscalYear, int PeriodNumber, string Name, DateTime StartsOn, DateTime EndsOn);
@@ -27,7 +29,8 @@ public sealed record LedgerAccountDto(
     string? DeactivationReason);
 public sealed record LedgerBookDto(
     long Id, string Name, long FunctionalCurrencyId, string TimeZoneId, int FiscalYearStartMonth,
-    long Version, string CreatedBy, DateTime CreatedOn);
+    long Version, string CreatedBy, DateTime CreatedOn, long? ReceivablesControlAccountId = null,
+    long? UnappliedCashAccountId = null);
 public sealed record AccountingPeriodDto(
     long Id, int FiscalYear, int PeriodNumber, string Name, DateTime StartsOn, DateTime EndsOn,
     string Status, long Version, string CreatedBy, DateTime CreatedOn,

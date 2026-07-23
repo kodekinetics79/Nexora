@@ -4,6 +4,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.BankReconciliation;
+using ERP_RFQ_Automation.GeneralLedger;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 
@@ -40,10 +42,14 @@ public interface ICommercialFinanceApplicationService
     Task<IReadOnlyList<CustomerRefundDto>> GetRefundsAsync(long businessUnitId, long? customerId, string? status);
 }
 
-public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext context)
+public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext context,
+    IInternalSourceJournalPostingService journalWriter)
     : ICommercialFinanceApplicationService
 {
     private readonly ErpRfqAutomationContext _context = context;
+    private readonly IInternalSourceJournalPostingService _journalWriter = journalWriter;
+    public CommercialFinanceApplicationService(ErpRfqAutomationContext context)
+        : this(context, new InternalSourceJournalPostingService(context)) { }
 
     public async Task<ReceivableDocumentDto> CreateInvoiceAsync(
         long businessUnitId, long orderId, string idempotencyKey, CreateInvoiceRequest request, string actor)
@@ -403,6 +409,11 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
             var customerExists = await _context.Customers.AnyAsync(x => x.Id == request.CustomerId &&
                 (x.Buid == businessUnitId || x.Buid == null));
             if (!customerExists) throw new KeyNotFoundException("Customer not found.");
+            var bankAccount = await ResolveBankAccountAsync(businessUnitId, request.BankAccountId);
+            var book = await _context.LedgerBooks.SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId)
+                ?? throw new FinanceConflictException("Configure the governed ledger before posting customer cash.");
+            if (request.CurrencyId != book.FunctionalCurrencyId || bankAccount.CurrencyId != book.FunctionalCurrencyId)
+                throw new FinanceConflictException("Customer cash posting currently requires the ledger functional currency.");
 
             var documents = new List<ReceivableDocument>();
             foreach (var allocation in normalizedAllocations)
@@ -438,6 +449,7 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
                 Amount = paymentAmount,
                 Method = request.Method,
                 BankReference = request.BankReference,
+                BankAccountId = bankAccount.Id,
                 IdempotencyKey = idempotencyKey,
                 RequestHash = requestHash,
                 CreatedBy = actor,
@@ -453,6 +465,8 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
                 });
             _context.CustomerPayments.Add(payment);
             await _context.SaveChangesAsync();
+            payment.JournalEntryId = await _journalWriter.CreateAndPostCustomerPaymentAsync(payment, bankAccount,
+                normalizedAllocations.Sum(x => x.Amount), actor, CancellationToken.None);
             await AddAuditAsync(businessUnitId, "CustomerPayment", payment.Id, "Posted", actor, new { receipt });
             if (!_context.Database.IsNpgsql())
                 AddOutbox(businessUnitId, "CustomerPayment", payment.Id, payment.Version,
@@ -487,7 +501,15 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
                 throw new FinanceConflictException("The payment changed; reload it before reversing.");
             if (await ActiveRefundAmountAsync(payment.Id, includeReleased: true) > 0)
                 throw new FinanceConflictException("A receipt with an approved or released refund cannot be reversed.");
+            if (payment.JournalEntryId.HasValue)
+            {
+                if (string.Equals(payment.CreatedBy, actor, StringComparison.OrdinalIgnoreCase))
+                    throw new FinanceConflictException("Payment reversal requires an independent controller.");
+                payment.ReversalJournalEntryId = await _journalWriter.ReverseCustomerPaymentAsync(payment, actor,
+                    request.Reason.Trim(), CancellationToken.None);
+            }
             payment.Status = CustomerPaymentStatuses.Reversed;
+            payment.ReversedBy = actor;
             payment.ReversedOn = DateTime.UtcNow;
             payment.ReversalReason = request.Reason.Trim();
             payment.Version++;
@@ -695,6 +717,11 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
             var eligibility = await GetRefundEligibilityAsync(businessUnitId, payment.Id);
             if (amount > eligibility.AvailableAmount)
                 throw new FinanceConflictException("Refund amount exceeds the unapplied receipt balance.");
+            var bankAccountId = request.BankAccountId ?? payment.BankAccountId
+                ?? throw new FinanceConflictException("The source receipt has no governed bank account.");
+            var bankAccount = await ResolveBankAccountAsync(businessUnitId, bankAccountId);
+            if (payment.BankAccountId.HasValue && bankAccount.Id != payment.BankAccountId)
+                throw new FinanceConflictException("A refund must use the source receipt bank account.");
             var refund = new CustomerRefund
             {
                 BusinessUnitId = businessUnitId,
@@ -710,6 +737,7 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
                 ReasonCode = reasonCode,
                 Reason = reason,
                 EvidenceReference = evidence,
+                BankAccountId = bankAccount.Id,
                 IdempotencyKey = idempotencyKey,
                 RequestHash = requestHash,
                 CreatedBy = actor,
@@ -949,6 +977,12 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
 
             refund.PostingStatus = targetPostingStatus;
             refund.JournalReference = providerReference;
+            if (succeeded)
+            {
+                var bankAccount = await ResolveBankAccountAsync(businessUnitId, refund.BankAccountId);
+                refund.JournalEntryId = await _journalWriter.CreateAndPostCustomerRefundAsync(
+                    refund, bankAccount, actor, CancellationToken.None);
+            }
             refund.DisbursementUpdatedBy = actor;
             refund.DisbursementUpdatedOn = DateTime.UtcNow;
             refund.DisbursementFailureReason = failureReason;
@@ -1241,7 +1275,9 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
         return new CustomerPaymentDto(
             payment.Id, payment.CustomerId, payment.CommercialCaseId, payment.CurrencyId,
             await CurrencyCodeAsync(payment.CurrencyId), payment.ReceiptNumber, payment.Status, payment.PaymentDate, payment.Amount,
-            allocated, isPosted ? Round(payment.Amount - allocated - unavailableForRefund) : 0m, payment.Version);
+            allocated, isPosted ? Round(payment.Amount - allocated - unavailableForRefund) : 0m, payment.Version,
+            payment.BankAccountId, payment.JournalEntryId, payment.ReversalJournalEntryId,
+            payment.JournalEntryId.HasValue ? "Integrated" : "LegacyUnlinked");
     }
 
     private async Task<ReceivableWriteOffDto> MapWriteOffAsync(ReceivableWriteOff writeOff)
@@ -1281,13 +1317,26 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
             refund.ReleasedBy, refund.ReleasedOn, refund.DisbursementUpdatedBy, refund.DisbursementUpdatedOn,
             refund.DisbursementFailureReason, refund.CancelledBy, refund.CancelledOn,
             refund.CancellationReason, refund.ReversedBy, refund.ReversedOn, refund.ReversalReason,
-            refund.ReversalEvidenceReference);
+            refund.ReversalEvidenceReference, refund.BankAccountId, refund.JournalEntryId,
+            refund.JournalEntryId.HasValue ? "Integrated" : "LegacyUnlinked");
     }
 
     private async Task<string?> CurrencyCodeAsync(long? currencyId)
         => currencyId.HasValue
             ? await _context.Currencies.Where(x => x.Id == currencyId.Value).Select(x => x.Code).SingleOrDefaultAsync()
             : null;
+
+    private async Task<BankAccount> ResolveBankAccountAsync(long businessUnitId, long? requestedId)
+    {
+        var query = _context.BankAccounts.Where(x => x.BusinessUnitId == businessUnitId &&
+            x.Status == BankAccountStatuses.Active);
+        if (requestedId.HasValue)
+            return await query.SingleOrDefaultAsync(x => x.Id == requestedId.Value)
+                ?? throw new FinanceConflictException("The selected bank account is not active for this tenant.");
+        var accounts = await query.OrderBy(x => x.Id).Take(2).ToListAsync();
+        return accounts.Count == 1 ? accounts[0]
+            : throw new FinanceConflictException("Select a governed bank account when the tenant does not have exactly one active account.");
+    }
 
     private async Task<T> InSerializableTransactionAsync<T>(Func<Task<T>> action)
     {

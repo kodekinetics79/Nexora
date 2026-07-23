@@ -21,7 +21,8 @@ public sealed record PostPaymentRequest(
     decimal Amount,
     string? Method,
     string? BankReference,
-    IReadOnlyList<PaymentAllocationRequest> Allocations);
+    IReadOnlyList<PaymentAllocationRequest> Allocations,
+    long? BankAccountId = null);
 public sealed record PaymentAllocationRequest(long ReceivableDocumentId, decimal Amount);
 public sealed record CreateWriteOffRequest(
     DateTime? AccountingDate, string ReasonCode, string Reason, string? EvidenceReference,
@@ -30,7 +31,7 @@ public sealed record WriteOffAllocationRequest(long ReceivableDocumentId, decima
 public sealed record CreateRefundRequest(
     long SourcePaymentId, DateTime? RequestedExecutionDate, decimal Amount, string Method,
     string DestinationReference, bool DestinationVerified, string ReasonCode, string Reason,
-    string? EvidenceReference);
+    string? EvidenceReference, long? BankAccountId = null);
 public sealed record FinanceExceptionActionRequest(long ExpectedVersion, string? Reason = null, string? EvidenceReference = null);
 public sealed record RefundDisbursementRequest(long ExpectedVersion, string ProviderReference, string? Reason = null);
 
@@ -47,7 +48,8 @@ public sealed record ReceivableDocumentDto(
 public sealed record CustomerPaymentDto(
     long Id, long CustomerId, long? CommercialCaseId, long? CurrencyId, string? CurrencyCode, string ReceiptNumber,
     string Status, DateTime PaymentDate, decimal Amount, decimal AllocatedAmount,
-    decimal UnappliedAmount, long Version);
+    decimal UnappliedAmount, long Version, long? BankAccountId = null, long? JournalEntryId = null,
+    long? ReversalJournalEntryId = null, string AccountingIntegrationStatus = "LegacyUnlinked");
 public sealed record ArOpenItemDto(
     long DocumentId, string DocumentNumber, string DocumentType, long CustomerId, long? CommercialCaseId,
     long? CurrencyId, string? CurrencyCode, DateTime DocumentDate, DateTime DueDate, decimal OriginalAmount,
@@ -72,7 +74,8 @@ public sealed record CustomerRefundDto(
     DateTime CreatedOn, string? ApprovedBy, DateTime? ApprovedOn, string? ReleasedBy, DateTime? ReleasedOn,
     string? DisbursementUpdatedBy, DateTime? DisbursementUpdatedOn, string? DisbursementFailureReason,
     string? CancelledBy, DateTime? CancelledOn, string? CancellationReason,
-    string? ReversedBy, DateTime? ReversedOn, string? ReversalReason, string? ReversalEvidenceReference);
+    string? ReversedBy, DateTime? ReversedOn, string? ReversalReason, string? ReversalEvidenceReference,
+    long? BankAccountId = null, long? JournalEntryId = null, string AccountingIntegrationStatus = "LegacyUnlinked");
 public sealed record WriteOffEligibilityDto(long ReceivableDocumentId, decimal CurrentBalance, decimal PendingAmount, decimal AvailableAmount);
 public sealed record RefundEligibilityDto(long SourcePaymentId, decimal PaymentAmount, decimal AllocatedAmount, decimal ReservedAmount, decimal ReleasedAmount, decimal AvailableAmount);
 
