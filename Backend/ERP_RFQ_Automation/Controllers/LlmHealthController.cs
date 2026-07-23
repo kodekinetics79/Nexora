@@ -32,15 +32,9 @@ namespace ERP_RFQ_Automation.Controllers
             var baseUrl = _config["Ollama:BaseUrl"] ?? "(unset)";
             var model = _config["Ollama:Model"] ?? "(unset)";
             var key = _config["Ollama:ApiKey"] ?? "";
-            var keyInfo = string.IsNullOrWhiteSpace(key)
-                ? "(empty)"
-                : $"len={key.Length}, prefix={key[..Math.Min(8, key.Length)]}…";
-
             var result = new Dictionary<string, object?>
             {
-                ["baseUrl"] = baseUrl,
-                ["model"] = model,
-                ["apiKey"] = keyInfo,
+                ["provider"] = "Ollama-compatible",
             };
 
             var client = _httpFactory.CreateClient();
@@ -60,13 +54,10 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 var tags = await client.GetAsync("api/tags", ct);
                 result["authCheck"] = $"{(int)tags.StatusCode} {tags.StatusCode}";
-                if (!tags.IsSuccessStatusCode)
-                    result["authBody"] = Truncate(await tags.Content.ReadAsStringAsync(ct), 300);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
                 result["authCheck"] = "EXCEPTION";
-                result["authError"] = Truncate(ex.GetBaseException().Message, 300);
                 return Ok(result);
             }
 
@@ -82,19 +73,13 @@ namespace ERP_RFQ_Automation.Controllers
                 var resp = await client.PostAsync("api/chat",
                     new StringContent(payload, Encoding.UTF8, "application/json"), ct);
                 result["modelCheck"] = $"{(int)resp.StatusCode} {resp.StatusCode}";
-                var body = await resp.Content.ReadAsStringAsync(ct);
-                result[resp.IsSuccessStatusCode ? "modelReply" : "modelBody"] = Truncate(body, 300);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
                 result["modelCheck"] = "EXCEPTION";
-                result["modelError"] = Truncate(ex.GetBaseException().Message, 300);
             }
 
             return Ok(result);
         }
-
-        private static string Truncate(string? s, int max)
-            => string.IsNullOrEmpty(s) ? "" : (s.Length <= max ? s : s[..max] + "…");
     }
 }

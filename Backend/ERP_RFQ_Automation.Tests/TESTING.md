@@ -55,6 +55,14 @@ closed, and after-images contain the assigned, distinct IDs for newly inserted l
 - Direct intelligence conversion cannot create an RFQ from unverified AI commercial facts.
 - The governed lifecycle rejects `UNDER_REVIEW -> QUALIFIED` until those facts are approved.
 
+### AI provider privacy boundary (`AiProviderPrivacySurfaceTests`, 4)
+- Provider implementations cannot log raw model output or provider response bodies.
+- Health diagnostics cannot disclose key prefixes, provider bodies, or model replies.
+- Captured Ollama requests prove trusted policy/task/schema content stays in the system
+  role while hostile document text stays inside random matched boundaries in the user role.
+- Captured logs and health-controller results prove successful and failed provider bodies,
+  endpoint/model metadata, key material, and exception details are not disclosed.
+
 ### Chunked extraction invariants (`ChunkedExtractionServiceTests`, 12)
 Drives `ChunkedExtractionService` with a scripted LLM: item-count conservation (Σ chunk
 items == parsed rows) yields `Ok`; a count mismatch or low overall confidence routes to

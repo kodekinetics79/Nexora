@@ -57,7 +57,7 @@ public sealed class AnthropicAgentLlm : IAgentLlm
 
             if (!resp.IsSuccessStatusCode)
             {
-                _log.LogWarning("Anthropic API returned {Status}: {Body}", (int)resp.StatusCode, json);
+                _log.LogWarning("Anthropic API returned {Status}.", (int)resp.StatusCode);
                 return new AgentLlmTurnResult
                 {
                     StopReason = AgentTurnStopReason.Error,

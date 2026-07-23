@@ -20,7 +20,7 @@ namespace ERP_RFQ_Automation.Services
             // Reuse the extraction preprocessor (whitespace normalization + intelligent
             // truncation) — service scopes are prose-heavy, the same limits apply.
             var processedText = PreprocessText(scopeText);
-            var prompt = BuildBoqPrompt(processedText);
+            var instructions = BuildBoqInstructions();
 
             _log.LogInformation("Sending BOQ draft request to Ollama Cloud. Text length: {Length} chars",
                 processedText.Length);
@@ -29,7 +29,7 @@ namespace ERP_RFQ_Automation.Services
             {
                 try
                 {
-                    var result = await SendBoqDraftRequestAsync(prompt);
+                    var result = await SendBoqDraftRequestAsync(instructions, processedText);
                     if (result != null)
                     {
                         _log.LogInformation(
@@ -65,11 +65,12 @@ namespace ERP_RFQ_Automation.Services
             return null;
         }
 
-        private async Task<BoqDraftResult?> SendBoqDraftRequestAsync(string prompt)
+        private async Task<BoqDraftResult?> SendBoqDraftRequestAsync(
+            string trustedInstructions, string untrustedDocument)
         {
             var payload = new OllamaRequest(
                 Model: _model,
-                Messages: new[] { new OllamaMessage("user", prompt) },
+                Messages: BuildGovernedMessages(trustedInstructions, untrustedDocument),
                 Stream: false,
                 Format: "json",
                 Options: new OllamaOptions(Temperature: TEMPERATURE)
@@ -79,9 +80,7 @@ namespace ERP_RFQ_Automation.Services
 
             if (!response.IsSuccessStatusCode)
             {
-                var errorContent = await response.Content.ReadAsStringAsync();
-                _log.LogWarning("Ollama API returned {StatusCode} for BOQ draft. Error: {Error}",
-                    response.StatusCode, errorContent);
+                _log.LogWarning("Ollama API returned {StatusCode} for BOQ draft.", response.StatusCode);
                 return null;
             }
 
@@ -190,7 +189,7 @@ namespace ERP_RFQ_Automation.Services
             return true;
         }
 
-        private static string BuildBoqPrompt(string text)
+        private static string BuildBoqInstructions()
         {
             return $@"You are an expert estimation engineer building a BILL OF QUANTITIES (BOQ) from a service request / scope of work. Service types include maintenance scopes, installation & commissioning, testing, supply-and-install, and manpower/equipment hire.
 
@@ -205,9 +204,6 @@ namespace ERP_RFQ_Automation.Services
 8. ""Assumptions"": list every assumption you had to make (site access, working hours, exclusions, standards assumed). Empty array if none.
 9. ""ServiceCategory"": one of ""electrical"", ""mechanical"", ""civil"", ""maintenance"", ""manpower"", ""mixed"", ""other"".
 10. Do not duplicate the same physical work in two lines. Do not include headings as items.
-
-**INPUT SCOPE TEXT:**
-{text}
 
 **REQUIRED JSON SCHEMA:**
 {{

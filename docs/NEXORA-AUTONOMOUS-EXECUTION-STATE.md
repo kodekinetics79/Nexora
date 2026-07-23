@@ -194,3 +194,15 @@ Add a real PostgreSQL integration harness for queue claims, reference allocation
   has no migration drift, and the production frontend TypeScript/Vite build passes.
 - Frontend lint remains a certification tooling gap: the repository has a lint script but
   currently declares neither ESLint nor a configuration.
+
+## AI provider privacy boundary (2026-07-23)
+- Ollama extraction and BOQ calls now keep trusted task rules and JSON schemas in the
+  system role while placing only source-document text inside random matched boundaries
+  in the user role. Document instructions cannot redefine policy or output schema.
+- Raw model output, provider error bodies, and console response dumps were removed from
+  Ollama and Anthropic logging. The manager health endpoint reports only configuration
+  presence and status codes; it no longer exposes key prefixes, provider bodies, model
+  replies, or exception details.
+- Behavioral request/logger/controller tests prevent those disclosures and verify the
+  serialized trust boundary using hostile document content. Verification:
+  **258/258 backend tests pass**.
