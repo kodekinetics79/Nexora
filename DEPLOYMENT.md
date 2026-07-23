@@ -24,6 +24,7 @@ Ollama__ApiKey=<ollama key>
 Cors__AllowedOrigins__0=https://nexora1-ai.vercel.app
 Storage__RootPath=/var/data/nexora/uploads
 Storage__RequiredMountPath=/var/data
+Storage__EnforcePersistentMount=true
 ```
 
 The repository includes `render.yaml` with a persistent disk mounted at `/var/data`.
@@ -31,9 +32,12 @@ Use that Blueprint or attach an equivalent Render disk before accepting customer
 documents. A service without the disk remains stateless and must not be used for RFQ
 evidence ingestion.
 
-In Production, the filesystem provider fails startup unless both storage settings are
-present, the required Linux mount exists in the process mount table, and the evidence
-root is writable. Before moving an existing service to the mounted root, copy any
+In Production, the filesystem provider always requires an explicit storage root and
+verifies that it is writable. The disk-backed profile additionally enables strict mount
+verification with `Storage__EnforcePersistentMount=true`. For an emergency deployment
+without a disk, omit that flag and `Storage__RequiredMountPath`; this restores service
+but the files remain ephemeral and the deployment is not pilot-certified. Before moving
+an existing service to the mounted root, copy any
 recoverable legacy files and rewrite absolute `Attachments.FilePath` values to portable
 `Uploads/...` paths; absolute paths outside the configured root are deliberately rejected.
 

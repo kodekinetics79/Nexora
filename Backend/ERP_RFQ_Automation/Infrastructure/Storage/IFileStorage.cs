@@ -32,7 +32,8 @@ public sealed class LocalFileStorage : IFileStorage
             configuration["Storage:RootPath"],
             env.ContentRootPath,
             env.IsProduction(),
-            configuration["Storage:RequiredMountPath"])
+            configuration["Storage:RequiredMountPath"],
+            configuration.GetValue("Storage:EnforcePersistentMount", false))
     {
     }
 
@@ -40,14 +41,15 @@ public sealed class LocalFileStorage : IFileStorage
         string? configuredRoot,
         string contentRoot,
         bool requireConfiguredRoot = false,
-        string? requiredMountPath = null)
+        string? requiredMountPath = null,
+        bool enforceRequiredMount = false)
     {
         if (requireConfiguredRoot && string.IsNullOrWhiteSpace(configuredRoot))
             throw new InvalidOperationException(
                 "Storage:RootPath is required in Production. Refusing to use ephemeral container storage.");
-        if (requireConfiguredRoot && string.IsNullOrWhiteSpace(requiredMountPath))
+        if (enforceRequiredMount && string.IsNullOrWhiteSpace(requiredMountPath))
             throw new InvalidOperationException(
-                "Storage:RequiredMountPath is required in Production when using filesystem evidence storage.");
+                "Storage:RequiredMountPath is required when persistent-mount enforcement is enabled.");
 
         var root = string.IsNullOrWhiteSpace(configuredRoot)
             ? Path.Combine(contentRoot, "Uploads")
@@ -57,8 +59,8 @@ public sealed class LocalFileStorage : IFileStorage
             root = Path.Combine(contentRoot, root);
 
         RootPath = Path.GetFullPath(root);
-        if (!string.IsNullOrWhiteSpace(requiredMountPath))
-            VerifyRequiredMount(RootPath, requiredMountPath);
+        if (enforceRequiredMount)
+            VerifyRequiredMount(RootPath, requiredMountPath!);
         Directory.CreateDirectory(RootPath);
         var rootInfo = new DirectoryInfo(RootPath);
         if (rootInfo.LinkTarget is not null)
@@ -151,30 +153,11 @@ public sealed class LocalFileStorage : IFileStorage
         if (!rootPath.Equals(mountPath, comparison) && !rootPath.StartsWith(mountPrefix, comparison))
             throw new InvalidOperationException("Storage:RootPath must be located under Storage:RequiredMountPath.");
 
-        if (OperatingSystem.IsLinux())
-        {
-            const string mountInfoPath = "/proc/self/mountinfo";
-            if (!File.Exists(mountInfoPath))
-                throw new InvalidOperationException("Cannot verify the configured persistent storage mount.");
-
-            var isMounted = File.ReadLines(mountInfoPath).Any(line =>
-            {
-                var fields = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                if (fields.Length < 5) return false;
-                var mountedAt = fields[4]
-                    .Replace("\\040", " ")
-                    .Replace("\\011", "\t")
-                    .Replace("\\134", "\\");
-                return Path.GetFullPath(mountedAt).Equals(mountPath, StringComparison.Ordinal);
-            });
-            if (!isMounted)
-                throw new InvalidOperationException(
-                    $"Required persistent storage mount '{mountPath}' is not present. Refusing to start on ephemeral disk.");
-        }
-        else if (!Directory.Exists(mountPath))
-        {
+        // Render guarantees that an attached disk is available at its configured
+        // absolute mount path before the process starts. Do not depend on the host's
+        // internal /proc mount representation, which is not part of Render's contract.
+        if (!Directory.Exists(mountPath))
             throw new InvalidOperationException($"Required storage volume '{mountPath}' does not exist.");
-        }
     }
 
     public async Task<string> WriteImmutableAsync(

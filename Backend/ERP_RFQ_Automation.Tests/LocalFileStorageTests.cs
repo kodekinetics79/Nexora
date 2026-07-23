@@ -34,7 +34,20 @@ public sealed class LocalFileStorageTests : IDisposable
         Assert.Throws<InvalidOperationException>(() =>
             new LocalFileStorage(configuredRoot: null, contentRoot: Path.GetTempPath(), requireConfiguredRoot: true));
         Assert.Throws<InvalidOperationException>(() =>
-            new LocalFileStorage(_root, Path.GetTempPath(), requireConfiguredRoot: true, requiredMountPath: null));
+            new LocalFileStorage(
+                _root,
+                Path.GetTempPath(),
+                requireConfiguredRoot: true,
+                requiredMountPath: null,
+                enforceRequiredMount: true));
+
+        var configuredProductionStorage = new LocalFileStorage(
+            _root,
+            Path.GetTempPath(),
+            requireConfiguredRoot: true,
+            requiredMountPath: null,
+            enforceRequiredMount: false);
+        Assert.Equal(Path.GetFullPath(_root), configuredProductionStorage.RootPath);
     }
 
     [Fact]

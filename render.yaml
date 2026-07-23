@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: nexora-api
+    name: nexora-fyjw
     runtime: docker
     rootDir: Backend
     dockerfilePath: ./Dockerfile
@@ -12,6 +12,8 @@ services:
         value: /var/data/nexora/uploads
       - key: Storage__RequiredMountPath
         value: /var/data
+      - key: Storage__EnforcePersistentMount
+        value: "true"
       - key: ConnectionStrings__DefaultConnection
         sync: false
       - key: Jwt__Key
