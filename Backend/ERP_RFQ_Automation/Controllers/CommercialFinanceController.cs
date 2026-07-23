@@ -89,6 +89,89 @@ public sealed class CommercialFinanceController(ICommercialFinanceApplicationSer
     public async Task<IActionResult> GetOpenItems([FromQuery] DateTime? asOf)
         => Ok(await _service.GetOpenItemsAsync(TenantId(), asOf));
 
+    [HttpGet("documents/{documentId:long}/write-off-eligibility")]
+    [RequireModulePermission("Receivable Write-offs", PermissionAction.View)]
+    public async Task<IActionResult> GetWriteOffEligibility(long documentId)
+        => Ok(await _service.GetWriteOffEligibilityAsync(TenantId(), documentId));
+
+    [HttpPost("write-offs")]
+    [RequireModulePermission("Receivable Write-offs", PermissionAction.Create)]
+    public Task<IActionResult> CreateWriteOff([FromBody] CreateWriteOffRequest request)
+        => ExecuteMutation(async () =>
+        {
+            var result = await _service.CreateWriteOffAsync(TenantId(), IdempotencyKey(), request, Actor());
+            return Created($"api/commercial-finance/write-offs/{result.Id}", result);
+        });
+
+    [HttpGet("write-offs")]
+    [RequireModulePermission("Receivable Write-offs", PermissionAction.View)]
+    public async Task<IActionResult> GetWriteOffs([FromQuery] long? customerId, [FromQuery] string? status)
+        => Ok(await _service.GetWriteOffsAsync(TenantId(), customerId, status));
+
+    [HttpPost("write-offs/{writeOffId:long}/post")]
+    [RequireModulePermission("Receivable Write-offs", PermissionAction.Edit)]
+    public Task<IActionResult> PostWriteOff(long writeOffId, [FromBody] FinanceExceptionActionRequest request)
+        => ExecuteMutation(async () => Ok(await _service.PostWriteOffAsync(TenantId(), writeOffId, request, Actor())));
+
+    [HttpPost("write-offs/{writeOffId:long}/cancel")]
+    [RequireModulePermission("Receivable Write-offs", PermissionAction.Edit)]
+    public Task<IActionResult> CancelWriteOff(long writeOffId, [FromBody] FinanceExceptionActionRequest request)
+        => ExecuteMutation(async () => Ok(await _service.CancelWriteOffAsync(TenantId(), writeOffId, request, Actor())));
+
+    [HttpPost("write-offs/{writeOffId:long}/reverse")]
+    [RequireModulePermission("Receivable Write-offs", PermissionAction.Edit)]
+    public Task<IActionResult> ReverseWriteOff(long writeOffId, [FromBody] FinanceExceptionActionRequest request)
+        => ExecuteMutation(async () => Ok(await _service.ReverseWriteOffAsync(TenantId(), writeOffId, request, Actor())));
+
+    [HttpGet("payments/{paymentId:long}/refund-eligibility")]
+    [RequireModulePermission("Customer Refunds", PermissionAction.View)]
+    public async Task<IActionResult> GetRefundEligibility(long paymentId)
+        => Ok(await _service.GetRefundEligibilityAsync(TenantId(), paymentId));
+
+    [HttpPost("refunds")]
+    [RequireModulePermission("Customer Refunds", PermissionAction.Create)]
+    public Task<IActionResult> CreateRefund([FromBody] CreateRefundRequest request)
+        => ExecuteMutation(async () =>
+        {
+            var result = await _service.CreateRefundAsync(TenantId(), IdempotencyKey(), request, Actor());
+            return Created($"api/commercial-finance/refunds/{result.Id}", result);
+        });
+
+    [HttpGet("refunds")]
+    [RequireModulePermission("Customer Refunds", PermissionAction.View)]
+    public async Task<IActionResult> GetRefunds([FromQuery] long? customerId, [FromQuery] string? status)
+        => Ok(await _service.GetRefundsAsync(TenantId(), customerId, status));
+
+    [HttpPost("refunds/{refundId:long}/approve")]
+    [RequireModulePermission("Customer Refunds", PermissionAction.Edit)]
+    public Task<IActionResult> ApproveRefund(long refundId, [FromBody] FinanceExceptionActionRequest request)
+        => ExecuteMutation(async () => Ok(await _service.ApproveRefundAsync(TenantId(), refundId, request, Actor())));
+
+    [HttpPost("refunds/{refundId:long}/release")]
+    [RequireModulePermission("Customer Refunds", PermissionAction.Edit)]
+    public Task<IActionResult> ReleaseRefund(long refundId, [FromBody] FinanceExceptionActionRequest request)
+        => ExecuteMutation(async () => Ok(await _service.ReleaseRefundAsync(TenantId(), refundId, request, Actor())));
+
+    [HttpPost("refunds/{refundId:long}/confirm-disbursement")]
+    [RequireModulePermission("Customer Refunds", PermissionAction.Edit)]
+    public Task<IActionResult> ConfirmRefundDisbursement(long refundId, [FromBody] RefundDisbursementRequest request)
+        => ExecuteMutation(async () => Ok(await _service.ConfirmRefundDisbursementAsync(TenantId(), refundId, request, Actor())));
+
+    [HttpPost("refunds/{refundId:long}/fail-disbursement")]
+    [RequireModulePermission("Customer Refunds", PermissionAction.Edit)]
+    public Task<IActionResult> FailRefundDisbursement(long refundId, [FromBody] RefundDisbursementRequest request)
+        => ExecuteMutation(async () => Ok(await _service.FailRefundDisbursementAsync(TenantId(), refundId, request, Actor())));
+
+    [HttpPost("refunds/{refundId:long}/cancel")]
+    [RequireModulePermission("Customer Refunds", PermissionAction.Edit)]
+    public Task<IActionResult> CancelRefund(long refundId, [FromBody] FinanceExceptionActionRequest request)
+        => ExecuteMutation(async () => Ok(await _service.CancelRefundAsync(TenantId(), refundId, request, Actor())));
+
+    [HttpPost("refunds/{refundId:long}/reverse")]
+    [RequireModulePermission("Customer Refunds", PermissionAction.Edit)]
+    public Task<IActionResult> ReverseRefund(long refundId, [FromBody] FinanceExceptionActionRequest request)
+        => ExecuteMutation(async () => Ok(await _service.ReverseRefundAsync(TenantId(), refundId, request, Actor())));
+
     private async Task<IActionResult> ExecuteMutation(Func<Task<IActionResult>> action)
     {
         try

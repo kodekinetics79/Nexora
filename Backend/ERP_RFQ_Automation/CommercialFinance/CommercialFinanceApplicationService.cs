@@ -2,6 +2,7 @@ using System.Data;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -22,6 +23,21 @@ public interface ICommercialFinanceApplicationService
     Task<IReadOnlyList<CustomerPaymentDto>> GetPaymentsAsync(long businessUnitId, long? customerId, string? status);
     Task<CustomerPaymentDto> ReversePaymentAsync(long businessUnitId, long paymentId, ReversePaymentRequest request, string actor);
     Task<IReadOnlyList<ArOpenItemDto>> GetOpenItemsAsync(long businessUnitId, DateTime? asOf);
+    Task<WriteOffEligibilityDto> GetWriteOffEligibilityAsync(long businessUnitId, long documentId);
+    Task<ReceivableWriteOffDto> CreateWriteOffAsync(long businessUnitId, string idempotencyKey, CreateWriteOffRequest request, string actor);
+    Task<ReceivableWriteOffDto> PostWriteOffAsync(long businessUnitId, long writeOffId, FinanceExceptionActionRequest request, string actor);
+    Task<ReceivableWriteOffDto> CancelWriteOffAsync(long businessUnitId, long writeOffId, FinanceExceptionActionRequest request, string actor);
+    Task<ReceivableWriteOffDto> ReverseWriteOffAsync(long businessUnitId, long writeOffId, FinanceExceptionActionRequest request, string actor);
+    Task<IReadOnlyList<ReceivableWriteOffDto>> GetWriteOffsAsync(long businessUnitId, long? customerId, string? status);
+    Task<RefundEligibilityDto> GetRefundEligibilityAsync(long businessUnitId, long paymentId);
+    Task<CustomerRefundDto> CreateRefundAsync(long businessUnitId, string idempotencyKey, CreateRefundRequest request, string actor);
+    Task<CustomerRefundDto> ApproveRefundAsync(long businessUnitId, long refundId, FinanceExceptionActionRequest request, string actor);
+    Task<CustomerRefundDto> ReleaseRefundAsync(long businessUnitId, long refundId, FinanceExceptionActionRequest request, string actor);
+    Task<CustomerRefundDto> ConfirmRefundDisbursementAsync(long businessUnitId, long refundId, RefundDisbursementRequest request, string actor);
+    Task<CustomerRefundDto> FailRefundDisbursementAsync(long businessUnitId, long refundId, RefundDisbursementRequest request, string actor);
+    Task<CustomerRefundDto> CancelRefundAsync(long businessUnitId, long refundId, FinanceExceptionActionRequest request, string actor);
+    Task<CustomerRefundDto> ReverseRefundAsync(long businessUnitId, long refundId, FinanceExceptionActionRequest request, string actor);
+    Task<IReadOnlyList<CustomerRefundDto>> GetRefundsAsync(long businessUnitId, long? customerId, string? status);
 }
 
 public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext context)
@@ -366,7 +382,8 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
         if (request.Allocations.GroupBy(x => x.ReceivableDocumentId).Any(x => x.Count() > 1))
             throw new ArgumentException("Combine duplicate allocations for the same document.");
         var normalizedAllocations = request.Allocations
-            .Select(x => new PaymentAllocationRequest(x.ReceivableDocumentId, Round(x.Amount))).ToList();
+            .Select(x => new PaymentAllocationRequest(x.ReceivableDocumentId, Round(x.Amount)))
+            .OrderBy(x => x.ReceivableDocumentId).ToList();
         if (normalizedAllocations.Any(x => x.Amount <= 0) ||
             Round(normalizedAllocations.Sum(x => x.Amount)) > paymentAmount)
             throw new ArgumentException("Allocations must be positive and cannot exceed the payment amount.");
@@ -464,12 +481,12 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
         if (string.IsNullOrWhiteSpace(request.Reason)) throw new ArgumentException("A reversal reason is required.");
         return await InSerializableTransactionAsync(async () =>
         {
-            var payment = await _context.CustomerPayments.Include(x => x.Allocations)
-                .FirstOrDefaultAsync(x => x.Id == paymentId && x.BusinessUnitId == businessUnitId)
-                ?? throw new KeyNotFoundException("Payment not found.");
+            var payment = await LockPaymentAsync(paymentId, businessUnitId);
             if (payment.Status == CustomerPaymentStatuses.Reversed) return await MapPaymentAsync(payment);
             if (payment.Version != request.ExpectedVersion)
                 throw new FinanceConflictException("The payment changed; reload it before reversing.");
+            if (await ActiveRefundAmountAsync(payment.Id, includeReleased: true) > 0)
+                throw new FinanceConflictException("A receipt with an approved or released refund cannot be reversed.");
             payment.Status = CustomerPaymentStatuses.Reversed;
             payment.ReversedOn = DateTime.UtcNow;
             payment.ReversalReason = request.Reason.Trim();
@@ -507,6 +524,478 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
                 outstanding, days, AgingBucket(days)));
         }
         return result;
+    }
+
+    public async Task<WriteOffEligibilityDto> GetWriteOffEligibilityAsync(long businessUnitId, long documentId)
+    {
+        var document = await _context.ReceivableDocuments.SingleOrDefaultAsync(x =>
+            x.Id == documentId && x.BusinessUnitId == businessUnitId)
+            ?? throw new KeyNotFoundException("Receivable document not found.");
+        if (document.Status != ReceivableDocumentStatuses.Issued ||
+            document.DocumentType is not (ReceivableDocumentTypes.Invoice or ReceivableDocumentTypes.DebitNote))
+            throw new FinanceConflictException("Only issued invoice and debit-note balances can be written off.");
+        var current = await DocumentOutstandingAsync(document);
+        var pending = Round(await _context.WriteOffAllocations
+            .Where(x => x.BusinessUnitId == businessUnitId && x.ReceivableDocumentId == documentId &&
+                x.WriteOff.Status == FinanceExceptionStatuses.Draft)
+            .SumAsync(x => (decimal?)x.Amount) ?? 0m);
+        return new(documentId, current, pending, current);
+    }
+
+    public async Task<ReceivableWriteOffDto> CreateWriteOffAsync(
+        long businessUnitId, string idempotencyKey, CreateWriteOffRequest request, string actor)
+    {
+        ValidateKey(idempotencyKey);
+        var reasonCode = RequiredCode(request.ReasonCode, "write-off");
+        var reason = RequiredReason(request.Reason, "write-off");
+        var evidence = OptionalEvidence(request.EvidenceReference);
+        if (request.Allocations is not { Count: > 0 } || request.Allocations.Any(x => x.Amount <= 0) ||
+            request.Allocations.GroupBy(x => x.ReceivableDocumentId).Any(x => x.Count() > 1))
+            throw new ArgumentException("Write-off allocations must be unique and positive.");
+        var allocations = request.Allocations.Select(x => new WriteOffAllocationRequest(
+            x.ReceivableDocumentId, Round(x.Amount))).OrderBy(x => x.ReceivableDocumentId).ToList();
+        var normalized = request with { ReasonCode = reasonCode, Reason = reason, EvidenceReference = evidence, Allocations = allocations };
+        var requestHash = Hash(normalized);
+
+        return await InSerializableTransactionAsync(async () =>
+        {
+            var replay = await _context.ReceivableWriteOffs.Include(x => x.Allocations)
+                .FirstOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.IdempotencyKey == idempotencyKey);
+            if (replay is not null)
+            {
+                EnsureReplay(replay.RequestHash, requestHash);
+                return await MapWriteOffAsync(replay);
+            }
+
+            var documents = new List<ReceivableDocument>();
+            foreach (var allocation in allocations)
+            {
+                var document = await LockDocumentAsync(allocation.ReceivableDocumentId, businessUnitId);
+                if (document.Status != ReceivableDocumentStatuses.Issued ||
+                    document.DocumentType is not (ReceivableDocumentTypes.Invoice or ReceivableDocumentTypes.DebitNote))
+                    throw new FinanceConflictException("Write-offs require issued invoices or debit notes.");
+                var available = await DocumentOutstandingAsync(document);
+                if (allocation.Amount > available)
+                    throw new FinanceConflictException($"Write-off exceeds {document.DocumentNumber} collectible balance.");
+                documents.Add(document);
+            }
+            EnsureSingleCustomerCurrencyCase(documents);
+            var first = documents[0];
+            var writeOff = new ReceivableWriteOff
+            {
+                BusinessUnitId = businessUnitId,
+                CustomerId = first.CustomerId,
+                CommercialCaseId = first.CommercialCaseId,
+                CurrencyId = first.CurrencyId,
+                AccountingDate = (request.AccountingDate ?? DateTime.UtcNow).Date,
+                TotalAmount = Round(allocations.Sum(x => x.Amount)),
+                ReasonCode = reasonCode,
+                Reason = reason,
+                EvidenceReference = evidence,
+                IdempotencyKey = idempotencyKey,
+                RequestHash = requestHash,
+                CreatedBy = actor,
+                CreatedOn = DateTime.UtcNow
+            };
+            for (var index = 0; index < allocations.Count; index++)
+            {
+                var balance = await DocumentOutstandingAsync(documents[index]);
+                writeOff.Allocations.Add(new WriteOffAllocation
+                {
+                    BusinessUnitId = businessUnitId,
+                    ReceivableDocumentId = documents[index].Id,
+                    Amount = allocations[index].Amount,
+                    BalanceBefore = balance,
+                    BalanceAfter = Round(balance - allocations[index].Amount)
+                });
+            }
+            _context.ReceivableWriteOffs.Add(writeOff);
+            await _context.SaveChangesAsync();
+            await AddAuditAsync(businessUnitId, "ReceivableWriteOff", writeOff.Id, "DraftCreated", actor,
+                new { writeOff.TotalAmount, writeOff.ReasonCode });
+            if (!_context.Database.IsNpgsql())
+                AddOutbox(businessUnitId, "ReceivableWriteOff", writeOff.Id, writeOff.Version,
+                    "finance.write-off.draft-created", new { writeOff.Id, writeOff.TotalAmount, writeOff.Status, writeOff.Version });
+            await _context.SaveChangesAsync();
+            return await MapWriteOffAsync(writeOff);
+        });
+    }
+
+    public Task<ReceivableWriteOffDto> PostWriteOffAsync(
+        long businessUnitId, long writeOffId, FinanceExceptionActionRequest request, string actor)
+        => TransitionWriteOffAsync(businessUnitId, writeOffId, request, actor, FinanceExceptionStatuses.Posted);
+
+    public Task<ReceivableWriteOffDto> CancelWriteOffAsync(
+        long businessUnitId, long writeOffId, FinanceExceptionActionRequest request, string actor)
+        => TransitionWriteOffAsync(businessUnitId, writeOffId, request, actor, FinanceExceptionStatuses.Cancelled);
+
+    public Task<ReceivableWriteOffDto> ReverseWriteOffAsync(
+        long businessUnitId, long writeOffId, FinanceExceptionActionRequest request, string actor)
+        => TransitionWriteOffAsync(businessUnitId, writeOffId, request, actor, FinanceExceptionStatuses.Reversed);
+
+    public async Task<IReadOnlyList<ReceivableWriteOffDto>> GetWriteOffsAsync(
+        long businessUnitId, long? customerId, string? status)
+    {
+        var query = _context.ReceivableWriteOffs.Include(x => x.Allocations)
+            .Where(x => x.BusinessUnitId == businessUnitId);
+        if (customerId.HasValue) query = query.Where(x => x.CustomerId == customerId);
+        if (!string.IsNullOrWhiteSpace(status)) query = query.Where(x => x.Status == status);
+        var rows = await query.OrderByDescending(x => x.CreatedOn).ToListAsync();
+        var result = new List<ReceivableWriteOffDto>(rows.Count);
+        foreach (var row in rows) result.Add(await MapWriteOffAsync(row));
+        return result;
+    }
+
+    public async Task<RefundEligibilityDto> GetRefundEligibilityAsync(long businessUnitId, long paymentId)
+    {
+        var payment = await _context.CustomerPayments.Include(x => x.Allocations)
+            .SingleOrDefaultAsync(x => x.Id == paymentId && x.BusinessUnitId == businessUnitId)
+            ?? throw new KeyNotFoundException("Payment not found.");
+        var allocated = payment.Status == CustomerPaymentStatuses.Posted ? Round(payment.Allocations.Sum(x => x.Amount)) : 0m;
+        var reserved = await ActiveRefundAmountAsync(paymentId, includeReleased: false);
+        var released = await ReleasedRefundAmountAsync(paymentId);
+        var available = payment.Status == CustomerPaymentStatuses.Posted
+            ? Round(payment.Amount - allocated - reserved - released)
+            : 0m;
+        return new(paymentId, payment.Amount, allocated, reserved, released, available);
+    }
+
+    public async Task<CustomerRefundDto> CreateRefundAsync(
+        long businessUnitId, string idempotencyKey, CreateRefundRequest request, string actor)
+    {
+        ValidateKey(idempotencyKey);
+        var amount = Round(request.Amount);
+        if (amount <= 0) throw new ArgumentException("Refund amount must be positive.");
+        var reasonCode = RequiredCode(request.ReasonCode, "refund");
+        var reason = RequiredReason(request.Reason, "refund");
+        var evidence = OptionalEvidence(request.EvidenceReference);
+        var method = request.Method?.Trim();
+        var destination = request.DestinationReference?.Trim();
+        if (string.IsNullOrWhiteSpace(method) || method.Length > 50)
+            throw new ArgumentException("A refund method up to 50 characters is required.");
+        if (string.IsNullOrWhiteSpace(destination) || destination.Length > 200 || !request.DestinationVerified ||
+            !Regex.IsMatch(destination, "^token:[A-Za-z0-9_-]{8,180}$", RegexOptions.CultureInvariant))
+            throw new ArgumentException("A verified provider destination token is required; raw bank or card details are not accepted.");
+        var normalized = request with { Amount = amount, Method = method, DestinationReference = destination,
+            ReasonCode = reasonCode, Reason = reason, EvidenceReference = evidence };
+        var requestHash = Hash(normalized);
+
+        return await InSerializableTransactionAsync(async () =>
+        {
+            var replay = await _context.CustomerRefunds.Include(x => x.SourcePayment)
+                .FirstOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.IdempotencyKey == idempotencyKey);
+            if (replay is not null)
+            {
+                EnsureReplay(replay.RequestHash, requestHash);
+                return await MapRefundAsync(replay);
+            }
+            var payment = await LockPaymentAsync(request.SourcePaymentId, businessUnitId);
+            if (payment.Status != CustomerPaymentStatuses.Posted)
+                throw new FinanceConflictException("Only posted receipts can fund a refund.");
+            var eligibility = await GetRefundEligibilityAsync(businessUnitId, payment.Id);
+            if (amount > eligibility.AvailableAmount)
+                throw new FinanceConflictException("Refund amount exceeds the unapplied receipt balance.");
+            var refund = new CustomerRefund
+            {
+                BusinessUnitId = businessUnitId,
+                SourcePaymentId = payment.Id,
+                CustomerId = payment.CustomerId,
+                CommercialCaseId = payment.CommercialCaseId,
+                CurrencyId = payment.CurrencyId,
+                RequestedExecutionDate = (request.RequestedExecutionDate ?? DateTime.UtcNow).Date,
+                Amount = amount,
+                Method = method,
+                DestinationReference = destination,
+                DestinationVerified = true,
+                ReasonCode = reasonCode,
+                Reason = reason,
+                EvidenceReference = evidence,
+                IdempotencyKey = idempotencyKey,
+                RequestHash = requestHash,
+                CreatedBy = actor,
+                CreatedOn = DateTime.UtcNow
+            };
+            _context.CustomerRefunds.Add(refund);
+            await _context.SaveChangesAsync();
+            await AddAuditAsync(businessUnitId, "CustomerRefund", refund.Id, "DraftCreated", actor,
+                new { refund.SourcePaymentId, refund.Amount, refund.ReasonCode });
+            if (!_context.Database.IsNpgsql())
+                AddOutbox(businessUnitId, "CustomerRefund", refund.Id, refund.Version,
+                    "finance.refund.draft-created", new { refund.Id, refund.SourcePaymentId, refund.Amount, refund.Status, refund.Version });
+            await _context.SaveChangesAsync();
+            return await MapRefundAsync(refund);
+        });
+    }
+
+    public Task<CustomerRefundDto> ApproveRefundAsync(long businessUnitId, long refundId, FinanceExceptionActionRequest request, string actor)
+        => TransitionRefundAsync(businessUnitId, refundId, request, actor, FinanceExceptionStatuses.Approved);
+    public Task<CustomerRefundDto> ReleaseRefundAsync(long businessUnitId, long refundId, FinanceExceptionActionRequest request, string actor)
+        => TransitionRefundAsync(businessUnitId, refundId, request, actor, FinanceExceptionStatuses.Released);
+    public Task<CustomerRefundDto> ConfirmRefundDisbursementAsync(
+        long businessUnitId, long refundId, RefundDisbursementRequest request, string actor)
+        => TransitionRefundDisbursementAsync(businessUnitId, refundId, request, actor, succeeded: true);
+    public Task<CustomerRefundDto> FailRefundDisbursementAsync(
+        long businessUnitId, long refundId, RefundDisbursementRequest request, string actor)
+        => TransitionRefundDisbursementAsync(businessUnitId, refundId, request, actor, succeeded: false);
+    public Task<CustomerRefundDto> CancelRefundAsync(long businessUnitId, long refundId, FinanceExceptionActionRequest request, string actor)
+        => TransitionRefundAsync(businessUnitId, refundId, request, actor, FinanceExceptionStatuses.Cancelled);
+    public Task<CustomerRefundDto> ReverseRefundAsync(long businessUnitId, long refundId, FinanceExceptionActionRequest request, string actor)
+        => TransitionRefundAsync(businessUnitId, refundId, request, actor, FinanceExceptionStatuses.Reversed);
+
+    public async Task<IReadOnlyList<CustomerRefundDto>> GetRefundsAsync(long businessUnitId, long? customerId, string? status)
+    {
+        var query = _context.CustomerRefunds.Include(x => x.SourcePayment).Where(x => x.BusinessUnitId == businessUnitId);
+        if (customerId.HasValue) query = query.Where(x => x.CustomerId == customerId);
+        if (!string.IsNullOrWhiteSpace(status)) query = query.Where(x => x.Status == status);
+        var rows = await query.OrderByDescending(x => x.CreatedOn).ToListAsync();
+        var result = new List<CustomerRefundDto>(rows.Count);
+        foreach (var row in rows) result.Add(await MapRefundAsync(row));
+        return result;
+    }
+
+    private async Task<ReceivableWriteOffDto> TransitionWriteOffAsync(
+        long businessUnitId, long writeOffId, FinanceExceptionActionRequest request, string actor, string targetStatus)
+    {
+        var reason = request.Reason?.Trim();
+        if (targetStatus is FinanceExceptionStatuses.Cancelled or FinanceExceptionStatuses.Reversed)
+            reason = RequiredReason(reason, targetStatus.ToLowerInvariant());
+        var reversalEvidence = targetStatus == FinanceExceptionStatuses.Reversed
+            ? OptionalEvidence(request.EvidenceReference)
+            : null;
+        if (targetStatus == FinanceExceptionStatuses.Reversed && string.IsNullOrWhiteSpace(reversalEvidence))
+            throw new ArgumentException("Write-off reversal evidence is required.");
+        return await InSerializableTransactionAsync(async () =>
+        {
+            var writeOff = await LockWriteOffAsync(writeOffId, businessUnitId);
+            if (writeOff.Status == targetStatus) return await MapWriteOffAsync(writeOff);
+            if (writeOff.Version != request.ExpectedVersion)
+                throw new FinanceConflictException("The write-off changed; reload it before continuing.");
+
+            if (targetStatus == FinanceExceptionStatuses.Posted)
+            {
+                if (writeOff.Status != FinanceExceptionStatuses.Draft)
+                    throw new FinanceConflictException("Only draft write-offs can be posted.");
+                if (string.Equals(writeOff.CreatedBy, actor, StringComparison.OrdinalIgnoreCase))
+                    throw new FinanceConflictException("The write-off creator cannot post the same write-off.");
+                foreach (var allocation in writeOff.Allocations.OrderBy(x => x.ReceivableDocumentId))
+                {
+                    var document = await LockDocumentAsync(allocation.ReceivableDocumentId, businessUnitId);
+                    var balance = await DocumentOutstandingAsync(document);
+                    if (allocation.Amount > balance)
+                        throw new FinanceConflictException($"Write-off exceeds {document.DocumentNumber} current balance.");
+                    if (allocation.BalanceBefore != balance)
+                        throw new FinanceConflictException($"{document.DocumentNumber} balance changed; cancel and recreate the write-off.");
+                }
+                writeOff.WriteOffNumber = _context.Database.IsNpgsql()
+                    ? "PENDING-DATABASE-ALLOCATION"
+                    : await AllocateNumberAsync(businessUnitId, "WriteOff", writeOff.AccountingDate.Year);
+                writeOff.Status = FinanceExceptionStatuses.Posted;
+                writeOff.ApprovedBy = actor;
+                writeOff.ApprovedOn = DateTime.UtcNow;
+                writeOff.PostingStatus = "PendingExport";
+            }
+            else if (targetStatus == FinanceExceptionStatuses.Cancelled)
+            {
+                if (writeOff.Status != FinanceExceptionStatuses.Draft)
+                    throw new FinanceConflictException("Only draft write-offs can be cancelled.");
+                writeOff.Status = FinanceExceptionStatuses.Cancelled;
+                writeOff.CancelledBy = actor;
+                writeOff.CancelledOn = DateTime.UtcNow;
+                writeOff.CancellationReason = reason;
+            }
+            else
+            {
+                if (writeOff.Status != FinanceExceptionStatuses.Posted)
+                    throw new FinanceConflictException("Only posted write-offs can be reversed.");
+                if (string.Equals(writeOff.CreatedBy, actor, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(writeOff.ApprovedBy, actor, StringComparison.OrdinalIgnoreCase))
+                    throw new FinanceConflictException("A write-off maker or poster cannot reverse the same write-off.");
+                writeOff.Status = FinanceExceptionStatuses.Reversed;
+                writeOff.ReversedBy = actor;
+                writeOff.ReversedOn = DateTime.UtcNow;
+                writeOff.ReversalReason = reason;
+                writeOff.ReversalEvidenceReference = reversalEvidence;
+                writeOff.PostingStatus = "ReversalPendingExport";
+            }
+            writeOff.Version++;
+            if (!_context.Database.IsNpgsql())
+            {
+                await AddAuditAsync(businessUnitId, "ReceivableWriteOff", writeOff.Id, targetStatus, actor,
+                    new { writeOff.TotalAmount, writeOff.ReasonCode, Reason = reason });
+                AddOutbox(businessUnitId, "ReceivableWriteOff", writeOff.Id, writeOff.Version,
+                    $"finance.write-off.{targetStatus.ToLowerInvariant()}",
+                    new { writeOff.Id, writeOff.WriteOffNumber, writeOff.TotalAmount, writeOff.Status, writeOff.Version });
+            }
+            await _context.SaveChangesAsync();
+            if (_context.Database.IsNpgsql()) await _context.Entry(writeOff).ReloadAsync();
+            return await MapWriteOffAsync(writeOff);
+        });
+    }
+
+    private async Task<CustomerRefundDto> TransitionRefundAsync(
+        long businessUnitId, long refundId, FinanceExceptionActionRequest request, string actor, string targetStatus)
+    {
+        var reason = request.Reason?.Trim();
+        if (targetStatus is FinanceExceptionStatuses.Cancelled or FinanceExceptionStatuses.Reversed)
+            reason = RequiredReason(reason, targetStatus.ToLowerInvariant());
+        return await InSerializableTransactionAsync(async () =>
+        {
+            var refund = await LockRefundAsync(refundId, businessUnitId);
+            if (refund.Status == targetStatus) return await MapRefundAsync(refund);
+            if (refund.Version != request.ExpectedVersion)
+                throw new FinanceConflictException("The refund changed; reload it before continuing.");
+            var payment = await LockPaymentAsync(refund.SourcePaymentId, businessUnitId);
+
+            if (targetStatus == FinanceExceptionStatuses.Approved)
+            {
+                if (refund.Status != FinanceExceptionStatuses.Draft || payment.Status != CustomerPaymentStatuses.Posted)
+                    throw new FinanceConflictException("Only a draft refund against a posted receipt can be approved.");
+                if (string.Equals(refund.CreatedBy, actor, StringComparison.OrdinalIgnoreCase))
+                    throw new FinanceConflictException("The refund creator cannot approve the same refund.");
+                var available = Round(payment.Amount - payment.Allocations.Sum(x => x.Amount) -
+                    await ActiveRefundAmountAsync(payment.Id, includeReleased: true, excludingRefundId: refund.Id));
+                if (refund.Amount > available)
+                    throw new FinanceConflictException("Refund approval exceeds the current unapplied receipt balance.");
+                refund.Status = FinanceExceptionStatuses.Approved;
+                refund.ApprovedBy = actor;
+                refund.ApprovedOn = DateTime.UtcNow;
+                refund.PostingStatus = "Reserved";
+            }
+            else if (targetStatus == FinanceExceptionStatuses.Released)
+            {
+                if (refund.Status != FinanceExceptionStatuses.Approved)
+                    throw new FinanceConflictException("Only approved refunds can be released.");
+                if (string.Equals(refund.CreatedBy, actor, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(refund.ApprovedBy, actor, StringComparison.OrdinalIgnoreCase))
+                    throw new FinanceConflictException("Refund release requires a third, independent operator.");
+                refund.RefundNumber = _context.Database.IsNpgsql()
+                    ? "PENDING-DATABASE-ALLOCATION"
+                    : await AllocateNumberAsync(businessUnitId, "Refund", refund.RequestedExecutionDate.Year);
+                refund.Status = FinanceExceptionStatuses.Released;
+                refund.ReleasedBy = actor;
+                refund.ReleasedOn = DateTime.UtcNow;
+                refund.PostingStatus = "PendingDisbursement";
+            }
+            else if (targetStatus == FinanceExceptionStatuses.Cancelled)
+            {
+                if (refund.Status is not (FinanceExceptionStatuses.Draft or FinanceExceptionStatuses.Approved))
+                    throw new FinanceConflictException("Only draft or approved refunds can be cancelled.");
+                if (refund.Status == FinanceExceptionStatuses.Approved &&
+                    string.Equals(refund.CreatedBy, actor, StringComparison.OrdinalIgnoreCase))
+                    throw new FinanceConflictException("The refund creator cannot cancel an approved refund.");
+                refund.Status = FinanceExceptionStatuses.Cancelled;
+                refund.CancelledBy = actor;
+                refund.CancelledOn = DateTime.UtcNow;
+                refund.CancellationReason = reason;
+                refund.PostingStatus = "Cancelled";
+            }
+            else
+            {
+                if (refund.Status != FinanceExceptionStatuses.Released)
+                    throw new FinanceConflictException("Only released refunds can be reversed.");
+                if (refund.PostingStatus != "Failed")
+                    throw new FinanceConflictException("Only a confirmed failed disbursement can restore refundable funds.");
+                if (string.Equals(refund.CreatedBy, actor, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(refund.ApprovedBy, actor, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(refund.ReleasedBy, actor, StringComparison.OrdinalIgnoreCase))
+                    throw new FinanceConflictException("Refund reversal requires an independent operator.");
+                var evidence = OptionalEvidence(request.EvidenceReference);
+                if (string.IsNullOrWhiteSpace(evidence))
+                    throw new ArgumentException("Refund reversal evidence is required.");
+                refund.Status = FinanceExceptionStatuses.Reversed;
+                refund.ReversedBy = actor;
+                refund.ReversedOn = DateTime.UtcNow;
+                refund.ReversalReason = reason;
+                refund.ReversalEvidenceReference = evidence;
+                refund.PostingStatus = "ReversalPendingExport";
+            }
+            refund.Version++;
+            if (!_context.Database.IsNpgsql())
+            {
+                await AddAuditAsync(businessUnitId, "CustomerRefund", refund.Id, targetStatus, actor,
+                    new { refund.SourcePaymentId, refund.Amount, refund.ReasonCode, Reason = reason });
+                AddOutbox(businessUnitId, "CustomerRefund", refund.Id, refund.Version,
+                    $"finance.refund.{targetStatus.ToLowerInvariant()}",
+                    new { refund.Id, refund.RefundNumber, refund.SourcePaymentId, refund.Amount, refund.Status, refund.Version });
+            }
+            await _context.SaveChangesAsync();
+            if (_context.Database.IsNpgsql()) await _context.Entry(refund).ReloadAsync();
+            return await MapRefundAsync(refund);
+        });
+    }
+
+    private async Task<CustomerRefundDto> TransitionRefundDisbursementAsync(
+        long businessUnitId, long refundId, RefundDisbursementRequest request, string actor, bool succeeded)
+    {
+        var providerReference = request.ProviderReference?.Trim();
+        if (string.IsNullOrWhiteSpace(providerReference) || providerReference.Length > 100 ||
+            !Regex.IsMatch(providerReference, "^[A-Za-z0-9][A-Za-z0-9._:/-]{7,99}$", RegexOptions.CultureInvariant))
+            throw new ArgumentException("A provider reference between 8 and 100 safe characters is required.");
+        var failureReason = succeeded ? null : RequiredReason(request.Reason, "disbursement failure");
+        return await InSerializableTransactionAsync(async () =>
+        {
+            var refund = await LockRefundAsync(refundId, businessUnitId);
+            var targetPostingStatus = succeeded ? "Settled" : "Failed";
+            if (refund.Status == FinanceExceptionStatuses.Released && refund.PostingStatus == targetPostingStatus)
+                return await MapRefundAsync(refund);
+            if (refund.Version != request.ExpectedVersion)
+                throw new FinanceConflictException("The refund changed; reload it before recording the disbursement result.");
+            if (refund.Status != FinanceExceptionStatuses.Released || refund.PostingStatus != "PendingDisbursement")
+                throw new FinanceConflictException("Only a pending released refund can receive a disbursement result.");
+            if (string.Equals(refund.CreatedBy, actor, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(refund.ApprovedBy, actor, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(refund.ReleasedBy, actor, StringComparison.OrdinalIgnoreCase))
+                throw new FinanceConflictException("Disbursement confirmation requires an independent reconciler or provider identity.");
+
+            refund.PostingStatus = targetPostingStatus;
+            refund.JournalReference = providerReference;
+            refund.DisbursementUpdatedBy = actor;
+            refund.DisbursementUpdatedOn = DateTime.UtcNow;
+            refund.DisbursementFailureReason = failureReason;
+            refund.Version++;
+            if (!_context.Database.IsNpgsql())
+            {
+                var action = succeeded ? "DisbursementConfirmed" : "DisbursementFailed";
+                await AddAuditAsync(businessUnitId, "CustomerRefund", refund.Id, action, actor,
+                    new { refund.SourcePaymentId, refund.Amount, ProviderReference = providerReference, Reason = failureReason });
+                AddOutbox(businessUnitId, "CustomerRefund", refund.Id, refund.Version,
+                    succeeded ? "finance.refund.disbursement-confirmed" : "finance.refund.disbursement-failed",
+                    new { refund.Id, refund.RefundNumber, refund.SourcePaymentId, refund.Amount,
+                        refund.Status, refund.PostingStatus, ProviderReference = providerReference, refund.Version });
+            }
+            await _context.SaveChangesAsync();
+            return await MapRefundAsync(refund);
+        });
+    }
+
+    private async Task<ReceivableWriteOff> LockWriteOffAsync(long id, long businessUnitId)
+    {
+        IQueryable<ReceivableWriteOff> query = _context.ReceivableWriteOffs.Include(x => x.Allocations);
+        if (_context.Database.IsNpgsql())
+            query = _context.ReceivableWriteOffs.FromSqlInterpolated(
+                $"SELECT * FROM \"ReceivableWriteOffs\" WHERE \"Id\" = {id} FOR UPDATE").Include(x => x.Allocations);
+        return await query.SingleOrDefaultAsync(x => x.Id == id && x.BusinessUnitId == businessUnitId)
+            ?? throw new KeyNotFoundException("Write-off not found.");
+    }
+
+    private async Task<CustomerRefund> LockRefundAsync(long id, long businessUnitId)
+    {
+        IQueryable<CustomerRefund> query = _context.CustomerRefunds.Include(x => x.SourcePayment);
+        if (_context.Database.IsNpgsql())
+            query = _context.CustomerRefunds.FromSqlInterpolated(
+                $"SELECT * FROM \"CustomerRefunds\" WHERE \"Id\" = {id} FOR UPDATE").Include(x => x.SourcePayment);
+        return await query.SingleOrDefaultAsync(x => x.Id == id && x.BusinessUnitId == businessUnitId)
+            ?? throw new KeyNotFoundException("Refund not found.");
+    }
+
+    private async Task<CustomerPayment> LockPaymentAsync(long id, long businessUnitId)
+    {
+        IQueryable<CustomerPayment> query = _context.CustomerPayments.Include(x => x.Allocations);
+        if (_context.Database.IsNpgsql())
+            query = _context.CustomerPayments.FromSqlInterpolated(
+                $"SELECT * FROM \"CustomerPayments\" WHERE \"Id\" = {id} FOR UPDATE").Include(x => x.Allocations);
+        return await query.SingleOrDefaultAsync(x => x.Id == id && x.BusinessUnitId == businessUnitId)
+            ?? throw new KeyNotFoundException("Payment not found.");
     }
 
     private async Task<ReceivableDocument> LockDocumentAsync(long documentId, long businessUnitId)
@@ -653,6 +1142,8 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
             ReceivableDocumentTypes.Invoice => "INV",
             ReceivableDocumentTypes.CreditNote => "CRN",
             ReceivableDocumentTypes.DebitNote => "DBN",
+            "WriteOff" => "WOF",
+            "Refund" => "RFD",
             _ => "RCT"
         };
         return $"{prefix}-{fiscalYear}-{sequence:D6}";
@@ -691,8 +1182,31 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
             if (before.HasValue) adjustments = adjustments.Where(x => x.IssuedOn < before.Value);
             credits = Round(await adjustments.SumAsync(x => (decimal?)x.TotalAmount) ?? 0m);
         }
-        return Round(document.TotalAmount - credits - await ActiveAllocatedAsync(document.Id, before));
+        var writeOffs = _context.WriteOffAllocations.Where(x =>
+            x.BusinessUnitId == document.BusinessUnitId && x.ReceivableDocumentId == document.Id &&
+            (x.WriteOff.Status == FinanceExceptionStatuses.Posted ||
+             x.WriteOff.Status == FinanceExceptionStatuses.Reversed));
+        if (before.HasValue)
+            writeOffs = writeOffs.Where(x => x.WriteOff.ApprovedOn < before.Value &&
+                (!x.WriteOff.ReversedOn.HasValue || x.WriteOff.ReversedOn >= before.Value));
+        else
+            writeOffs = writeOffs.Where(x => x.WriteOff.Status == FinanceExceptionStatuses.Posted);
+        var writtenOff = Round(await writeOffs.SumAsync(x => (decimal?)x.Amount) ?? 0m);
+        return Round(document.TotalAmount - credits - await ActiveAllocatedAsync(document.Id, before) - writtenOff);
     }
+
+    private async Task<decimal> ActiveRefundAmountAsync(long paymentId, bool includeReleased, long? excludingRefundId = null)
+    {
+        var query = _context.CustomerRefunds.Where(x => x.SourcePaymentId == paymentId &&
+            (x.Status == FinanceExceptionStatuses.Approved ||
+             (includeReleased && x.Status == FinanceExceptionStatuses.Released)));
+        if (excludingRefundId.HasValue) query = query.Where(x => x.Id != excludingRefundId);
+        return Round(await query.SumAsync(x => (decimal?)x.Amount) ?? 0m);
+    }
+
+    private async Task<decimal> ReleasedRefundAmountAsync(long paymentId)
+        => Round(await _context.CustomerRefunds.Where(x => x.SourcePaymentId == paymentId &&
+            x.Status == FinanceExceptionStatuses.Released).SumAsync(x => (decimal?)x.Amount) ?? 0m);
 
     private async Task<ReceivableDocumentDto> MapDocumentAsync(ReceivableDocument document)
     {
@@ -723,10 +1237,51 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
         var allocated = isPosted
             ? Round(payment.Allocations.Sum(x => x.Amount))
             : 0m;
+        var unavailableForRefund = isPosted ? await ActiveRefundAmountAsync(payment.Id, includeReleased: true) : 0m;
         return new CustomerPaymentDto(
             payment.Id, payment.CustomerId, payment.CommercialCaseId, payment.CurrencyId,
             await CurrencyCodeAsync(payment.CurrencyId), payment.ReceiptNumber, payment.Status, payment.PaymentDate, payment.Amount,
-            allocated, isPosted ? Round(payment.Amount - allocated) : 0m, payment.Version);
+            allocated, isPosted ? Round(payment.Amount - allocated - unavailableForRefund) : 0m, payment.Version);
+    }
+
+    private async Task<ReceivableWriteOffDto> MapWriteOffAsync(ReceivableWriteOff writeOff)
+    {
+        if (!_context.Entry(writeOff).Collection(x => x.Allocations).IsLoaded)
+            await _context.Entry(writeOff).Collection(x => x.Allocations).LoadAsync();
+        var documentIds = writeOff.Allocations.Select(x => x.ReceivableDocumentId).Distinct().ToArray();
+        var numbers = await _context.ReceivableDocuments.Where(x => documentIds.Contains(x.Id))
+            .ToDictionaryAsync(x => x.Id, x => x.DocumentNumber ?? $"Document #{x.Id}");
+        return new ReceivableWriteOffDto(
+            writeOff.Id, writeOff.CustomerId, writeOff.CommercialCaseId, writeOff.CurrencyId,
+            await CurrencyCodeAsync(writeOff.CurrencyId), writeOff.WriteOffNumber, writeOff.Status,
+            writeOff.AccountingDate, writeOff.TotalAmount, writeOff.ReasonCode, writeOff.Reason,
+            writeOff.EvidenceReference, writeOff.PostingStatus, writeOff.JournalReference,
+            writeOff.Version, writeOff.CreatedBy, writeOff.CreatedOn, writeOff.ApprovedBy,
+            writeOff.ApprovedOn, writeOff.CancelledBy, writeOff.CancelledOn, writeOff.CancellationReason,
+            writeOff.ReversedBy, writeOff.ReversedOn, writeOff.ReversalReason,
+            writeOff.ReversalEvidenceReference, writeOff.Allocations.OrderBy(x => x.ReceivableDocumentId)
+                .Select(x => new WriteOffAllocationDto(x.Id, x.ReceivableDocumentId,
+                    numbers.GetValueOrDefault(x.ReceivableDocumentId, $"Document #{x.ReceivableDocumentId}"),
+                    x.Amount, x.BalanceBefore, x.BalanceAfter)).ToList());
+    }
+
+    private async Task<CustomerRefundDto> MapRefundAsync(CustomerRefund refund)
+    {
+        if (refund.SourcePayment is null)
+            await _context.Entry(refund).Reference(x => x.SourcePayment).LoadAsync();
+        var sourcePayment = refund.SourcePayment
+            ?? throw new FinanceConflictException("The refund source receipt is unavailable.");
+        return new CustomerRefundDto(
+            refund.Id, refund.SourcePaymentId, sourcePayment.ReceiptNumber, refund.CustomerId,
+            refund.CommercialCaseId, refund.CurrencyId, await CurrencyCodeAsync(refund.CurrencyId),
+            refund.RefundNumber, refund.Status, refund.RequestedExecutionDate, refund.Amount,
+            refund.Method, "Verified provider destination", refund.DestinationVerified, refund.ReasonCode,
+            refund.Reason, refund.EvidenceReference, refund.PostingStatus, refund.JournalReference,
+            refund.Version, refund.CreatedBy, refund.CreatedOn, refund.ApprovedBy, refund.ApprovedOn,
+            refund.ReleasedBy, refund.ReleasedOn, refund.DisbursementUpdatedBy, refund.DisbursementUpdatedOn,
+            refund.DisbursementFailureReason, refund.CancelledBy, refund.CancelledOn,
+            refund.CancellationReason, refund.ReversedBy, refund.ReversedOn, refund.ReversalReason,
+            refund.ReversalEvidenceReference);
     }
 
     private async Task<string?> CurrencyCodeAsync(long? currencyId)
@@ -766,7 +1321,9 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
                  postgres.SqlState == PostgresErrorCodes.DeadlockDetected ||
                  (postgres.SqlState == PostgresErrorCodes.UniqueViolation &&
                   postgres.ConstraintName is "UX_ReceivableDocuments_BU_Idempotency" or
-                      "UX_CustomerPayments_BU_Idempotency")))
+                      "UX_CustomerPayments_BU_Idempotency" or
+                      "UX_ReceivableWriteOffs_BU_Idempotency" or
+                      "UX_CustomerRefunds_BU_Idempotency")))
                 return true;
         }
         return false;
@@ -812,6 +1369,37 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
     {
         if (string.IsNullOrWhiteSpace(key) || key.Length > 128)
             throw new ArgumentException("Idempotency-Key is required and must be 128 characters or fewer.");
+    }
+
+    private static string RequiredCode(string? value, string subject)
+    {
+        var result = value?.Trim().ToUpperInvariant();
+        if (string.IsNullOrWhiteSpace(result) || result.Length > 50)
+            throw new ArgumentException($"A {subject} reason code up to 50 characters is required.");
+        return result;
+    }
+
+    private static string RequiredReason(string? value, string subject)
+    {
+        var result = value?.Trim();
+        if (string.IsNullOrWhiteSpace(result) || result.Length < 20 || result.Length > 500)
+            throw new ArgumentException($"A {subject} reason between 20 and 500 characters is required.");
+        return result;
+    }
+
+    private static string? OptionalEvidence(string? value)
+    {
+        var result = value?.Trim();
+        if (result?.Length > 500) throw new ArgumentException("Evidence reference cannot exceed 500 characters.");
+        return string.IsNullOrWhiteSpace(result) ? null : result;
+    }
+
+    private static void EnsureSingleCustomerCurrencyCase(IReadOnlyList<ReceivableDocument> documents)
+    {
+        if (documents.Select(x => x.CustomerId).Distinct().Count() != 1 ||
+            documents.Select(x => x.CurrencyId).Distinct().Count() != 1 ||
+            documents.Select(x => x.CommercialCaseId).Distinct().Count() != 1)
+            throw new FinanceConflictException("A write-off can only span one customer, currency, and commercial case.");
     }
 
     private static void EnsureReplay(string storedHash, string requestHash)

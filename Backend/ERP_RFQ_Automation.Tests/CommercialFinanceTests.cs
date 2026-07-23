@@ -22,6 +22,255 @@ public sealed class CommercialFinanceTests
         AssertPermission(nameof(CommercialFinanceController.PostPayment), "Customer Payments", PermissionAction.Create);
         AssertPermission(nameof(CommercialFinanceController.GetPayments), "Customer Payments", PermissionAction.View);
         AssertPermission(nameof(CommercialFinanceController.ReversePayment), "Customer Payments", PermissionAction.Edit);
+        AssertPermission(nameof(CommercialFinanceController.GetWriteOffEligibility), "Receivable Write-offs", PermissionAction.View);
+        AssertPermission(nameof(CommercialFinanceController.CreateWriteOff), "Receivable Write-offs", PermissionAction.Create);
+        AssertPermission(nameof(CommercialFinanceController.GetWriteOffs), "Receivable Write-offs", PermissionAction.View);
+        AssertPermission(nameof(CommercialFinanceController.PostWriteOff), "Receivable Write-offs", PermissionAction.Edit);
+        AssertPermission(nameof(CommercialFinanceController.CancelWriteOff), "Receivable Write-offs", PermissionAction.Edit);
+        AssertPermission(nameof(CommercialFinanceController.ReverseWriteOff), "Receivable Write-offs", PermissionAction.Edit);
+        AssertPermission(nameof(CommercialFinanceController.GetRefundEligibility), "Customer Refunds", PermissionAction.View);
+        AssertPermission(nameof(CommercialFinanceController.CreateRefund), "Customer Refunds", PermissionAction.Create);
+        AssertPermission(nameof(CommercialFinanceController.GetRefunds), "Customer Refunds", PermissionAction.View);
+        AssertPermission(nameof(CommercialFinanceController.ApproveRefund), "Customer Refunds", PermissionAction.Edit);
+        AssertPermission(nameof(CommercialFinanceController.ReleaseRefund), "Customer Refunds", PermissionAction.Edit);
+        AssertPermission(nameof(CommercialFinanceController.ConfirmRefundDisbursement), "Customer Refunds", PermissionAction.Edit);
+        AssertPermission(nameof(CommercialFinanceController.FailRefundDisbursement), "Customer Refunds", PermissionAction.Edit);
+        AssertPermission(nameof(CommercialFinanceController.CancelRefund), "Customer Refunds", PermissionAction.Edit);
+        AssertPermission(nameof(CommercialFinanceController.ReverseRefund), "Customer Refunds", PermissionAction.Edit);
+    }
+
+    [Fact]
+    public async Task WriteOff_CreateReplaysIdempotentlyAndRejectsAlteredRequest()
+    {
+        using var database = new TestDb();
+        await using var db = database.ContextFor(BusinessUnitId);
+        await AllowSqliteWriteOffSnapshotsAsync(db);
+        var service = new CommercialFinanceApplicationService(db);
+        var invoice = await CreateIssuedInvoiceAsync(db, service, "write-off-idempotency");
+        var request = WriteOffRequest(invoice.Id, 40m);
+
+        var created = await service.CreateWriteOffAsync(
+            BusinessUnitId, "write-off-create-1", request, "write-off-maker@test");
+        var replay = await service.CreateWriteOffAsync(
+            BusinessUnitId, "write-off-create-1", request, "write-off-maker@test");
+
+        Assert.Equal(created.Id, replay.Id);
+        Assert.Equal(FinanceExceptionStatuses.Draft, created.Status);
+        Assert.Equal(40m, created.TotalAmount);
+        Assert.Equal(209m, Assert.Single(created.Allocations).BalanceBefore);
+        Assert.Equal(169m, Assert.Single(created.Allocations).BalanceAfter);
+        Assert.Single(await db.ReceivableWriteOffs.ToListAsync());
+        await Assert.ThrowsAsync<FinanceConflictException>(() => service.CreateWriteOffAsync(
+            BusinessUnitId, "write-off-create-1", WriteOffRequest(invoice.Id, 41m), "write-off-maker@test"));
+    }
+
+    [Fact]
+    public async Task WriteOff_PostRequiresCheckerAndReversalRestoresOpenBalance()
+    {
+        using var database = new TestDb();
+        await using var db = database.ContextFor(BusinessUnitId);
+        await AllowSqliteWriteOffSnapshotsAsync(db);
+        var service = new CommercialFinanceApplicationService(db);
+        var invoice = await CreateIssuedInvoiceAsync(db, service, "write-off-lifecycle");
+        var draft = await service.CreateWriteOffAsync(BusinessUnitId, "write-off-lifecycle-1",
+            WriteOffRequest(invoice.Id, 60m), "write-off-maker@test");
+
+        await Assert.ThrowsAsync<FinanceConflictException>(() => service.PostWriteOffAsync(
+            BusinessUnitId, draft.Id, new FinanceExceptionActionRequest(draft.Version), "write-off-maker@test"));
+
+        var posted = await service.PostWriteOffAsync(BusinessUnitId, draft.Id,
+            new FinanceExceptionActionRequest(draft.Version), "write-off-checker@test");
+        var afterPost = Assert.Single(await service.GetOpenItemsAsync(BusinessUnitId, DateTime.UtcNow));
+
+        Assert.Equal(FinanceExceptionStatuses.Posted, posted.Status);
+        Assert.StartsWith("WOF-", posted.WriteOffNumber);
+        Assert.Equal(149m, afterPost.OutstandingAmount);
+        await Assert.ThrowsAsync<FinanceConflictException>(() => service.ReverseWriteOffAsync(
+            BusinessUnitId, posted.Id,
+            new FinanceExceptionActionRequest(posted.Version, "Approved balance correction reversal", "CASE-REV-1"),
+            "write-off-checker@test"));
+
+        var reversed = await service.ReverseWriteOffAsync(BusinessUnitId, posted.Id,
+            new FinanceExceptionActionRequest(posted.Version, "Approved balance correction reversal", "CASE-REV-1"),
+            "write-off-reverser@test");
+        var afterReversal = Assert.Single(await service.GetOpenItemsAsync(BusinessUnitId, DateTime.UtcNow));
+
+        Assert.Equal(FinanceExceptionStatuses.Reversed, reversed.Status);
+        Assert.Equal(209m, afterReversal.OutstandingAmount);
+    }
+
+    [Fact]
+    public async Task WriteOff_RejectsOverWriteOffAndStaleDraftBalance()
+    {
+        using var database = new TestDb();
+        await using var db = database.ContextFor(BusinessUnitId);
+        await AllowSqliteWriteOffSnapshotsAsync(db);
+        var service = new CommercialFinanceApplicationService(db);
+        var invoice = await CreateIssuedInvoiceAsync(db, service, "write-off-ceiling");
+
+        await Assert.ThrowsAsync<FinanceConflictException>(() => service.CreateWriteOffAsync(
+            BusinessUnitId, "write-off-over-1", WriteOffRequest(invoice.Id, 210m), "write-off-maker@test"));
+
+        var draft = await service.CreateWriteOffAsync(BusinessUnitId, "write-off-stale-1",
+            WriteOffRequest(invoice.Id, 100m), "write-off-maker@test");
+        await service.PostPaymentAsync(BusinessUnitId, "write-off-stale-payment",
+            new PostPaymentRequest(CustomerId, null, CurrencyId, null, 10m, "BankTransfer", "BANK-WOF-1",
+                [new PaymentAllocationRequest(invoice.Id, 10m)]), "collector@test");
+
+        await Assert.ThrowsAsync<FinanceConflictException>(() => service.PostWriteOffAsync(
+            BusinessUnitId, draft.Id, new FinanceExceptionActionRequest(draft.Version), "write-off-checker@test"));
+    }
+
+    [Fact]
+    public async Task Refund_CreateReplaysIdempotentlyAndRejectsAlteredRequest()
+    {
+        using var database = new TestDb();
+        await using var db = database.ContextFor(BusinessUnitId);
+        var service = new CommercialFinanceApplicationService(db);
+        var payment = await CreateUnappliedPaymentAsync(db, service, "refund-idempotency-payment", 150m);
+        var request = RefundRequest(payment.Id, 50m);
+
+        var created = await service.CreateRefundAsync(
+            BusinessUnitId, "refund-create-1", request, "refund-maker@test");
+        var replay = await service.CreateRefundAsync(
+            BusinessUnitId, "refund-create-1", request, "refund-maker@test");
+
+        Assert.Equal(created.Id, replay.Id);
+        Assert.Equal(FinanceExceptionStatuses.Draft, created.Status);
+        Assert.Equal(150m, (await service.GetRefundEligibilityAsync(BusinessUnitId, payment.Id)).AvailableAmount);
+        Assert.Single(await db.CustomerRefunds.ToListAsync());
+        await Assert.ThrowsAsync<FinanceConflictException>(() => service.CreateRefundAsync(
+            BusinessUnitId, "refund-create-1", RefundRequest(payment.Id, 51m), "refund-maker@test"));
+        var rawDestination = RefundRequest(payment.Id, 10m) with { DestinationReference = "GB82 WEST 1234 5698 7654 32" };
+        await Assert.ThrowsAsync<ArgumentException>(() => service.CreateRefundAsync(
+            BusinessUnitId, "refund-raw-destination", rawDestination, "refund-maker@test"));
+    }
+
+    [Fact]
+    public async Task Refund_RequiresIndependentApproverAndReleaserAndReversalRestoresUnapplied()
+    {
+        using var database = new TestDb();
+        await using var db = database.ContextFor(BusinessUnitId);
+        var service = new CommercialFinanceApplicationService(db);
+        var payment = await CreateUnappliedPaymentAsync(db, service, "refund-lifecycle-payment", 150m);
+        var draft = await service.CreateRefundAsync(BusinessUnitId, "refund-lifecycle-1",
+            RefundRequest(payment.Id, 60m), "refund-maker@test");
+
+        await Assert.ThrowsAsync<FinanceConflictException>(() => service.ApproveRefundAsync(
+            BusinessUnitId, draft.Id, new FinanceExceptionActionRequest(draft.Version), "refund-maker@test"));
+        var approved = await service.ApproveRefundAsync(BusinessUnitId, draft.Id,
+            new FinanceExceptionActionRequest(draft.Version), "refund-approver@test");
+        var reservedPayment = Assert.Single(await service.GetPaymentsAsync(
+            BusinessUnitId, CustomerId, CustomerPaymentStatuses.Posted));
+
+        Assert.Equal(FinanceExceptionStatuses.Approved, approved.Status);
+        Assert.Equal(90m, reservedPayment.UnappliedAmount);
+        Assert.Equal(60m, (await service.GetRefundEligibilityAsync(BusinessUnitId, payment.Id)).ReservedAmount);
+        await Assert.ThrowsAsync<FinanceConflictException>(() => service.ReleaseRefundAsync(
+            BusinessUnitId, approved.Id, new FinanceExceptionActionRequest(approved.Version), "refund-approver@test"));
+        await Assert.ThrowsAsync<FinanceConflictException>(() => service.ReleaseRefundAsync(
+            BusinessUnitId, approved.Id, new FinanceExceptionActionRequest(approved.Version), "refund-maker@test"));
+
+        var released = await service.ReleaseRefundAsync(BusinessUnitId, approved.Id,
+            new FinanceExceptionActionRequest(approved.Version), "refund-releaser@test");
+        Assert.StartsWith("RFD-", released.RefundNumber);
+        Assert.Equal(90m, Assert.Single(await service.GetPaymentsAsync(
+            BusinessUnitId, CustomerId, CustomerPaymentStatuses.Posted)).UnappliedAmount);
+        await Assert.ThrowsAsync<FinanceConflictException>(() => service.ReverseRefundAsync(
+            BusinessUnitId, released.Id,
+            new FinanceExceptionActionRequest(released.Version, "Bank rejected refund disbursement", "BANK-RETURN-1"),
+            "refund-releaser@test"));
+
+        var failed = await service.FailRefundDisbursementAsync(BusinessUnitId, released.Id,
+            new RefundDisbursementRequest(released.Version, "provider:failed-1001",
+                "Bank rejected the submitted refund transfer."), "refund-reconciler@test");
+
+        var reversed = await service.ReverseRefundAsync(BusinessUnitId, failed.Id,
+            new FinanceExceptionActionRequest(failed.Version, "Bank rejected refund disbursement", "BANK-RETURN-1"),
+            "refund-reverser@test");
+
+        Assert.Equal(FinanceExceptionStatuses.Reversed, reversed.Status);
+        Assert.Equal(150m, Assert.Single(await service.GetPaymentsAsync(
+            BusinessUnitId, CustomerId, CustomerPaymentStatuses.Posted)).UnappliedAmount);
+        Assert.Equal(150m, (await service.GetRefundEligibilityAsync(BusinessUnitId, payment.Id)).AvailableAmount);
+    }
+
+    [Fact]
+    public async Task Refund_CancelRulesReleaseAnyReservation()
+    {
+        using var database = new TestDb();
+        await using var db = database.ContextFor(BusinessUnitId);
+        var service = new CommercialFinanceApplicationService(db);
+        var payment = await CreateUnappliedPaymentAsync(db, service, "refund-cancel-payment", 150m);
+        var draft = await service.CreateRefundAsync(BusinessUnitId, "refund-cancel-draft",
+            RefundRequest(payment.Id, 20m), "refund-maker@test");
+
+        var cancelledDraft = await service.CancelRefundAsync(BusinessUnitId, draft.Id,
+            new FinanceExceptionActionRequest(draft.Version, "Duplicate refund request cancelled"),
+            "refund-maker@test");
+        Assert.Equal(FinanceExceptionStatuses.Cancelled, cancelledDraft.Status);
+
+        var secondDraft = await service.CreateRefundAsync(BusinessUnitId, "refund-cancel-approved",
+            RefundRequest(payment.Id, 30m), "refund-maker@test");
+        var approved = await service.ApproveRefundAsync(BusinessUnitId, secondDraft.Id,
+            new FinanceExceptionActionRequest(secondDraft.Version), "refund-approver@test");
+        await Assert.ThrowsAsync<FinanceConflictException>(() => service.CancelRefundAsync(
+            BusinessUnitId, approved.Id,
+            new FinanceExceptionActionRequest(approved.Version, "Approved request cancellation"),
+            "refund-maker@test"));
+
+        var cancelledApproved = await service.CancelRefundAsync(BusinessUnitId, approved.Id,
+            new FinanceExceptionActionRequest(approved.Version, "Approved request cancellation"),
+            "refund-approver@test");
+
+        Assert.Equal(FinanceExceptionStatuses.Cancelled, cancelledApproved.Status);
+        Assert.Equal(150m, Assert.Single(await service.GetPaymentsAsync(
+            BusinessUnitId, CustomerId, CustomerPaymentStatuses.Posted)).UnappliedAmount);
+    }
+
+    [Fact]
+    public async Task Refund_SettledDisbursementRemainsConsumedAndCannotBeReversed()
+    {
+        using var database = new TestDb();
+        await using var db = database.ContextFor(BusinessUnitId);
+        var service = new CommercialFinanceApplicationService(db);
+        var payment = await CreateUnappliedPaymentAsync(db, service, "refund-settlement-payment", 150m);
+        var draft = await service.CreateRefundAsync(BusinessUnitId, "refund-settlement",
+            RefundRequest(payment.Id, 60m), "refund-maker@test");
+        Assert.Equal("Verified provider destination", draft.DestinationReference);
+        var approved = await service.ApproveRefundAsync(BusinessUnitId, draft.Id,
+            new(draft.Version), "refund-approver@test");
+        var released = await service.ReleaseRefundAsync(BusinessUnitId, approved.Id,
+            new(approved.Version), "refund-releaser@test");
+        var settled = await service.ConfirmRefundDisbursementAsync(BusinessUnitId, released.Id,
+            new(released.Version, "provider:settled-1001"), "refund-reconciler@test");
+
+        Assert.Equal("Settled", settled.PostingStatus);
+        Assert.Equal("provider:settled-1001", settled.JournalReference);
+        Assert.Equal(90m, Assert.Single(await service.GetPaymentsAsync(
+            BusinessUnitId, CustomerId, CustomerPaymentStatuses.Posted)).UnappliedAmount);
+        await Assert.ThrowsAsync<FinanceConflictException>(() => service.ReverseRefundAsync(
+            BusinessUnitId, settled.Id,
+            new(settled.Version, "Attempted reversal after confirmed settlement", "BANK-RECOVERY-1"),
+            "refund-reverser@test"));
+    }
+
+    [Fact]
+    public async Task PaymentReversal_RejectsReceiptWithApprovedRefund()
+    {
+        using var database = new TestDb();
+        await using var db = database.ContextFor(BusinessUnitId);
+        var service = new CommercialFinanceApplicationService(db);
+        var payment = await CreateUnappliedPaymentAsync(db, service, "refund-payment-reversal", 150m);
+        var draft = await service.CreateRefundAsync(BusinessUnitId, "refund-before-payment-reversal",
+            RefundRequest(payment.Id, 50m), "refund-maker@test");
+        await service.ApproveRefundAsync(BusinessUnitId, draft.Id,
+            new FinanceExceptionActionRequest(draft.Version), "refund-approver@test");
+
+        await Assert.ThrowsAsync<FinanceConflictException>(() => service.ReversePaymentAsync(
+            BusinessUnitId, payment.Id,
+            new ReversePaymentRequest(payment.Version, "Receipt reversal requested after refund approval"),
+            "collector@test"));
     }
 
     [Fact]
@@ -356,6 +605,37 @@ public sealed class CommercialFinanceTests
         Assert.Equal(209m, current.OutstandingAmount);
         Assert.Single(await service.GetPaymentsAsync(BusinessUnitId, CustomerId, CustomerPaymentStatuses.Reversed));
     }
+
+    private static async Task<ReceivableDocumentDto> CreateIssuedInvoiceAsync(
+        ErpRfqAutomationContext db, CommercialFinanceApplicationService service, string keyPrefix)
+    {
+        var order = SeedOrder(db);
+        var draft = await service.CreateInvoiceAsync(BusinessUnitId, order.Id, $"{keyPrefix}-invoice",
+            new CreateInvoiceRequest(null, null, null), "invoice-maker@test");
+        return await service.IssueAsync(BusinessUnitId, draft.Id,
+            new IssueDocumentRequest(draft.Version), "invoice-checker@test");
+    }
+
+    private static Task<int> AllowSqliteWriteOffSnapshotsAsync(ErpRfqAutomationContext db)
+        // SQLite maps decimals to text, so its round(decimal) equality rejects valid snapshots.
+        => db.Database.ExecuteSqlRawAsync("PRAGMA ignore_check_constraints = ON;");
+
+    private static async Task<CustomerPaymentDto> CreateUnappliedPaymentAsync(
+        ErpRfqAutomationContext db, CommercialFinanceApplicationService service, string idempotencyKey, decimal amount)
+    {
+        SeedOrder(db);
+        return await service.PostPaymentAsync(BusinessUnitId, idempotencyKey,
+            new PostPaymentRequest(CustomerId, null, CurrencyId, null, amount, "BankTransfer", "BANK-UNAPPLIED",
+                Array.Empty<PaymentAllocationRequest>()), "collector@test");
+    }
+
+    private static CreateWriteOffRequest WriteOffRequest(long documentId, decimal amount)
+        => new(null, "SMALL_BALANCE", "Approved immaterial receivable balance write-off", "CASE-WOF-1",
+            [new WriteOffAllocationRequest(documentId, amount)]);
+
+    private static CreateRefundRequest RefundRequest(long paymentId, decimal amount)
+        => new(paymentId, null, amount, "BankTransfer", "token:acct_test_4242", true,
+            "CUSTOMER_REFUND", "Approved return of unapplied customer funds", "CASE-RFD-1");
 
     private static Order SeedOrder(ErpRfqAutomationContext db)
     {

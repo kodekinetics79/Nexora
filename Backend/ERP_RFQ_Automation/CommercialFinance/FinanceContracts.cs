@@ -23,6 +23,16 @@ public sealed record PostPaymentRequest(
     string? BankReference,
     IReadOnlyList<PaymentAllocationRequest> Allocations);
 public sealed record PaymentAllocationRequest(long ReceivableDocumentId, decimal Amount);
+public sealed record CreateWriteOffRequest(
+    DateTime? AccountingDate, string ReasonCode, string Reason, string? EvidenceReference,
+    IReadOnlyList<WriteOffAllocationRequest> Allocations);
+public sealed record WriteOffAllocationRequest(long ReceivableDocumentId, decimal Amount);
+public sealed record CreateRefundRequest(
+    long SourcePaymentId, DateTime? RequestedExecutionDate, decimal Amount, string Method,
+    string DestinationReference, bool DestinationVerified, string ReasonCode, string Reason,
+    string? EvidenceReference);
+public sealed record FinanceExceptionActionRequest(long ExpectedVersion, string? Reason = null, string? EvidenceReference = null);
+public sealed record RefundDisbursementRequest(long ExpectedVersion, string ProviderReference, string? Reason = null);
 
 public sealed record ReceivableLineDto(
     long Id, long? OrderItemId, long? ParentDocumentLineId, string Description, decimal Quantity, decimal UnitPrice,
@@ -42,5 +52,28 @@ public sealed record ArOpenItemDto(
     long DocumentId, string DocumentNumber, string DocumentType, long CustomerId, long? CommercialCaseId,
     long? CurrencyId, string? CurrencyCode, DateTime DocumentDate, DateTime DueDate, decimal OriginalAmount,
     decimal OutstandingAmount, int DaysPastDue, string AgingBucket);
+public sealed record WriteOffAllocationDto(
+    long Id, long ReceivableDocumentId, string DocumentNumber, decimal Amount,
+    decimal BalanceBefore, decimal BalanceAfter);
+public sealed record ReceivableWriteOffDto(
+    long Id, long CustomerId, long? CommercialCaseId, long? CurrencyId, string? CurrencyCode,
+    string? WriteOffNumber, string Status, DateTime AccountingDate, decimal TotalAmount,
+    string ReasonCode, string Reason, string? EvidenceReference, string PostingStatus,
+    string? JournalReference, long Version, string CreatedBy, DateTime CreatedOn,
+    string? ApprovedBy, DateTime? ApprovedOn, string? CancelledBy, DateTime? CancelledOn,
+    string? CancellationReason, string? ReversedBy, DateTime? ReversedOn, string? ReversalReason,
+    string? ReversalEvidenceReference, IReadOnlyList<WriteOffAllocationDto> Allocations);
+public sealed record CustomerRefundDto(
+    long Id, long SourcePaymentId, string ReceiptNumber, long CustomerId, long? CommercialCaseId,
+    long? CurrencyId, string? CurrencyCode, string? RefundNumber, string Status,
+    DateTime RequestedExecutionDate, decimal Amount, string Method, string DestinationReference,
+    bool DestinationVerified, string ReasonCode, string Reason, string? EvidenceReference,
+    string PostingStatus, string? JournalReference, long Version, string CreatedBy,
+    DateTime CreatedOn, string? ApprovedBy, DateTime? ApprovedOn, string? ReleasedBy, DateTime? ReleasedOn,
+    string? DisbursementUpdatedBy, DateTime? DisbursementUpdatedOn, string? DisbursementFailureReason,
+    string? CancelledBy, DateTime? CancelledOn, string? CancellationReason,
+    string? ReversedBy, DateTime? ReversedOn, string? ReversalReason, string? ReversalEvidenceReference);
+public sealed record WriteOffEligibilityDto(long ReceivableDocumentId, decimal CurrentBalance, decimal PendingAmount, decimal AvailableAmount);
+public sealed record RefundEligibilityDto(long SourcePaymentId, decimal PaymentAmount, decimal AllocatedAmount, decimal ReservedAmount, decimal ReleasedAmount, decimal AvailableAmount);
 
 public sealed class FinanceConflictException(string message) : Exception(message);

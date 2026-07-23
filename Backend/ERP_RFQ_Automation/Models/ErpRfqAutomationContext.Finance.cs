@@ -12,4 +12,7 @@ public partial class ErpRfqAutomationContext
     public DbSet<LegalDocumentCounter> LegalDocumentCounters => Set<LegalDocumentCounter>();
     public DbSet<CommercialFinanceAudit> CommercialFinanceAudits => Set<CommercialFinanceAudit>();
     public DbSet<FinanceOutboxMessage> FinanceOutboxMessages => Set<FinanceOutboxMessage>();
+    public DbSet<ReceivableWriteOff> ReceivableWriteOffs => Set<ReceivableWriteOff>();
+    public DbSet<WriteOffAllocation> WriteOffAllocations => Set<WriteOffAllocation>();
+    public DbSet<CustomerRefund> CustomerRefunds => Set<CustomerRefund>();
 }

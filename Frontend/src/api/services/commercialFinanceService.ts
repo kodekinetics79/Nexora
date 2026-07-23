@@ -83,6 +83,106 @@ export interface CustomerPayment {
   version: number;
 }
 
+export interface WriteOffAllocation {
+  id: number;
+  receivableDocumentId: number;
+  documentNumber: string;
+  amount: number;
+  balanceBefore: number;
+  balanceAfter: number;
+}
+
+export interface ReceivableWriteOff {
+  id: number;
+  customerId: number;
+  commercialCaseId?: number;
+  currencyId?: number;
+  currencyCode?: string;
+  writeOffNumber?: string;
+  status: string;
+  accountingDate: string;
+  totalAmount: number;
+  reasonCode: string;
+  reason: string;
+  evidenceReference?: string;
+  postingStatus: string;
+  journalReference?: string;
+  version: number;
+  createdBy: string;
+  createdOn: string;
+  approvedBy?: string;
+  approvedOn?: string;
+  cancelledBy?: string;
+  cancelledOn?: string;
+  cancellationReason?: string;
+  reversedBy?: string;
+  reversedOn?: string;
+  reversalReason?: string;
+  reversalEvidenceReference?: string;
+  allocations: WriteOffAllocation[];
+}
+
+export interface CustomerRefund {
+  id: number;
+  sourcePaymentId: number;
+  receiptNumber: string;
+  customerId: number;
+  commercialCaseId?: number;
+  currencyId?: number;
+  currencyCode?: string;
+  refundNumber?: string;
+  status: string;
+  requestedExecutionDate: string;
+  amount: number;
+  method: string;
+  destinationReference: string;
+  destinationVerified: boolean;
+  reasonCode: string;
+  reason: string;
+  evidenceReference?: string;
+  postingStatus: string;
+  journalReference?: string;
+  version: number;
+  createdBy: string;
+  createdOn: string;
+  approvedBy?: string;
+  approvedOn?: string;
+  releasedBy?: string;
+  releasedOn?: string;
+  disbursementUpdatedBy?: string;
+  disbursementUpdatedOn?: string;
+  disbursementFailureReason?: string;
+  cancelledBy?: string;
+  cancelledOn?: string;
+  cancellationReason?: string;
+  reversedBy?: string;
+  reversedOn?: string;
+  reversalReason?: string;
+  reversalEvidenceReference?: string;
+}
+
+export interface WriteOffEligibility {
+  receivableDocumentId: number;
+  currentBalance: number;
+  pendingAmount: number;
+  availableAmount: number;
+}
+
+export interface RefundEligibility {
+  sourcePaymentId: number;
+  paymentAmount: number;
+  allocatedAmount: number;
+  reservedAmount: number;
+  releasedAmount: number;
+  availableAmount: number;
+}
+
+export interface FinanceExceptionActionRequest {
+  expectedVersion: number;
+  reason?: string;
+  evidenceReference?: string;
+}
+
 const withKey = (key: string) => ({ headers: { 'Idempotency-Key': key } });
 
 const commercialFinanceService = {
@@ -94,6 +194,66 @@ const commercialFinanceService = {
 
   getPayments: async (params?: { customerId?: number; status?: string }) =>
     (await axiosInstance.get<CustomerPayment[]>('/api/commercial-finance/payments', { params })).data,
+
+  getWriteOffs: async (params?: { customerId?: number; status?: string }) =>
+    (await axiosInstance.get<ReceivableWriteOff[]>('/api/commercial-finance/write-offs', { params })).data,
+
+  getWriteOffEligibility: async (documentId: number) =>
+    (await axiosInstance.get<WriteOffEligibility>(`/api/commercial-finance/documents/${documentId}/write-off-eligibility`)).data,
+
+  createWriteOff: async (data: {
+    accountingDate: string;
+    reasonCode: string;
+    reason: string;
+    evidenceReference?: string;
+    allocations: { receivableDocumentId: number; amount: number }[];
+  }, idempotencyKey: string) => (await axiosInstance.post<ReceivableWriteOff>(
+    '/api/commercial-finance/write-offs', data, withKey(idempotencyKey),
+  )).data,
+
+  transitionWriteOff: async (
+    writeOffId: number,
+    action: 'post' | 'cancel' | 'reverse',
+    data: FinanceExceptionActionRequest,
+  ) => (await axiosInstance.post<ReceivableWriteOff>(
+    `/api/commercial-finance/write-offs/${writeOffId}/${action}`, data,
+  )).data,
+
+  getRefunds: async (params?: { customerId?: number; status?: string }) =>
+    (await axiosInstance.get<CustomerRefund[]>('/api/commercial-finance/refunds', { params })).data,
+
+  getRefundEligibility: async (paymentId: number) =>
+    (await axiosInstance.get<RefundEligibility>(`/api/commercial-finance/payments/${paymentId}/refund-eligibility`)).data,
+
+  createRefund: async (data: {
+    sourcePaymentId: number;
+    requestedExecutionDate: string;
+    amount: number;
+    method: string;
+    destinationReference: string;
+    destinationVerified: boolean;
+    reasonCode: string;
+    reason: string;
+    evidenceReference?: string;
+  }, idempotencyKey: string) => (await axiosInstance.post<CustomerRefund>(
+    '/api/commercial-finance/refunds', data, withKey(idempotencyKey),
+  )).data,
+
+  transitionRefund: async (
+    refundId: number,
+    action: 'approve' | 'release' | 'cancel' | 'reverse',
+    data: FinanceExceptionActionRequest,
+  ) => (await axiosInstance.post<CustomerRefund>(
+    `/api/commercial-finance/refunds/${refundId}/${action}`, data,
+  )).data,
+
+  recordRefundDisbursement: async (
+    refundId: number,
+    succeeded: boolean,
+    data: { expectedVersion: number; providerReference: string; reason?: string },
+  ) => (await axiosInstance.post<CustomerRefund>(
+    `/api/commercial-finance/refunds/${refundId}/${succeeded ? 'confirm-disbursement' : 'fail-disbursement'}`, data,
+  )).data,
 
   createInvoiceFromOrder: async (orderId: number) =>
     (await axiosInstance.post<ReceivableDocument>(

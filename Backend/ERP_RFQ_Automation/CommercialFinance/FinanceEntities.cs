@@ -21,6 +21,16 @@ public static class CustomerPaymentStatuses
     public const string Reversed = "Reversed";
 }
 
+public static class FinanceExceptionStatuses
+{
+    public const string Draft = "Draft";
+    public const string Approved = "Approved";
+    public const string Posted = "Posted";
+    public const string Released = "Released";
+    public const string Cancelled = "Cancelled";
+    public const string Reversed = "Reversed";
+}
+
 public sealed class ReceivableDocument
 {
     public long Id { get; set; }
@@ -108,6 +118,97 @@ public sealed class PaymentAllocation
 
     public CustomerPayment Payment { get; set; } = null!;
     public ReceivableDocument Document { get; set; } = null!;
+}
+
+public sealed class ReceivableWriteOff
+{
+    public long Id { get; set; }
+    public long BusinessUnitId { get; set; }
+    public long CustomerId { get; set; }
+    public long? CommercialCaseId { get; set; }
+    public long? CurrencyId { get; set; }
+    public string? WriteOffNumber { get; set; }
+    public string Status { get; set; } = FinanceExceptionStatuses.Draft;
+    public DateTime AccountingDate { get; set; }
+    public decimal TotalAmount { get; set; }
+    public string ReasonCode { get; set; } = null!;
+    public string Reason { get; set; } = null!;
+    public string? EvidenceReference { get; set; }
+    public string PostingStatus { get; set; } = "NotPosted";
+    public string? JournalReference { get; set; }
+    public string IdempotencyKey { get; set; } = null!;
+    public string RequestHash { get; set; } = null!;
+    public long Version { get; set; } = 1;
+    public string CreatedBy { get; set; } = null!;
+    public DateTime CreatedOn { get; set; }
+    public string? ApprovedBy { get; set; }
+    public DateTime? ApprovedOn { get; set; }
+    public string? CancelledBy { get; set; }
+    public DateTime? CancelledOn { get; set; }
+    public string? CancellationReason { get; set; }
+    public string? ReversedBy { get; set; }
+    public DateTime? ReversedOn { get; set; }
+    public string? ReversalReason { get; set; }
+    public string? ReversalEvidenceReference { get; set; }
+
+    public ICollection<WriteOffAllocation> Allocations { get; set; } = new List<WriteOffAllocation>();
+}
+
+public sealed class WriteOffAllocation
+{
+    public long Id { get; set; }
+    public long BusinessUnitId { get; set; }
+    public long ReceivableWriteOffId { get; set; }
+    public long ReceivableDocumentId { get; set; }
+    public decimal Amount { get; set; }
+    public decimal BalanceBefore { get; set; }
+    public decimal BalanceAfter { get; set; }
+
+    public ReceivableWriteOff WriteOff { get; set; } = null!;
+    public ReceivableDocument Document { get; set; } = null!;
+}
+
+public sealed class CustomerRefund
+{
+    public long Id { get; set; }
+    public long BusinessUnitId { get; set; }
+    public long SourcePaymentId { get; set; }
+    public long CustomerId { get; set; }
+    public long? CommercialCaseId { get; set; }
+    public long? CurrencyId { get; set; }
+    public string? RefundNumber { get; set; }
+    public string Status { get; set; } = FinanceExceptionStatuses.Draft;
+    public DateTime RequestedExecutionDate { get; set; }
+    public decimal Amount { get; set; }
+    public string Method { get; set; } = null!;
+    public string DestinationReference { get; set; } = null!;
+    public bool DestinationVerified { get; set; }
+    public string ReasonCode { get; set; } = null!;
+    public string Reason { get; set; } = null!;
+    public string? EvidenceReference { get; set; }
+    public string PostingStatus { get; set; } = "NotReleased";
+    public string? JournalReference { get; set; }
+    public string IdempotencyKey { get; set; } = null!;
+    public string RequestHash { get; set; } = null!;
+    public long Version { get; set; } = 1;
+    public string CreatedBy { get; set; } = null!;
+    public DateTime CreatedOn { get; set; }
+    public string? ApprovedBy { get; set; }
+    public DateTime? ApprovedOn { get; set; }
+    public string? ReleasedBy { get; set; }
+    public DateTime? ReleasedOn { get; set; }
+    public string? DisbursementUpdatedBy { get; set; }
+    public DateTime? DisbursementUpdatedOn { get; set; }
+    public string? DisbursementFailureReason { get; set; }
+    public string? CancelledBy { get; set; }
+    public DateTime? CancelledOn { get; set; }
+    public string? CancellationReason { get; set; }
+    public string? ReversedBy { get; set; }
+    public DateTime? ReversedOn { get; set; }
+    public string? ReversalReason { get; set; }
+    public string? ReversalEvidenceReference { get; set; }
+
+    public CustomerPayment SourcePayment { get; set; } = null!;
 }
 
 public sealed class LegalDocumentCounter

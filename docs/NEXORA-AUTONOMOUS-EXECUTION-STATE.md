@@ -372,3 +372,74 @@ Complete the first-class invoice, payment, accounts-receivable, and credit/debit
   hosted-dispatch orchestration tests prove both publish-to-complete and fail-to-retry paths.
   Downstream consumer-specific business contracts remain separate delivery increments;
   this slice establishes the durable, replayable publication and delivery boundary.
+
+## Governed customer awards and order conversion (2026-07-23)
+- Added tenant-scoped customer purchase orders, lines, award decisions, line allocations,
+  append-only order-to-cash evidence, and legal counters. One customer PO can capture
+  partial awards across eligible quote lines while preserving the commercial case and
+  source quotation relationships.
+- Award conversion is serializable, idempotent, quantity-capped, and database-validated.
+  Competing conversions cannot consume more than the awarded quantity, and generated
+  orders retain explicit customer-PO and award provenance instead of copied free text.
+- Dedicated `Customer Awards` permissions, maker-checker transitions, immutable finalized
+  records, RLS, tenant-composite foreign keys, database-owned audit/outbox evidence, and
+  guarded legal numbering are enforced in PostgreSQL.
+- The sales workspace supports PO capture, partial allocation, approval, order conversion,
+  and recovery from uncertain submissions with stable operation keys and refreshed state.
+- Independent review returned **SHIP**. The complete regression, focused PostgreSQL,
+  frontend production build, EF model-parity, and non-destructive migration gates passed.
+
+## Governed receivable credit and debit notes (2026-07-23)
+- Added reason-coded credit and debit notes linked to issued invoices and source invoice
+  lines. Server-side snapshots own all quantities and money; cumulative same-type line
+  quantities cannot exceed the parent invoice, and credits cannot exceed its live balance.
+- Credit notes reduce the parent invoice balance. Debit notes become distinct open items
+  that can receive governed payment allocations. Aging now reports the document type and
+  respects actual issue, payment, credit, and reversal effective times.
+- Dedicated `Receivable Adjustments` create/approval permissions separate invoice authority
+  from note authority. Maker-checker enforcement, idempotent uncertain retries, legal CRN/
+  DBN numbering, immutable draft provenance, protected audit writers, transactional outbox
+  evidence, and forced PostgreSQL RLS fail closed.
+- The AR workspace creates partial notes, derives remaining line availability from issued
+  notes, distinguishes invoice balance from debit exposure, refreshes stale conflict state,
+  and routes invoice versus adjustment approval through their dedicated permissions.
+- Verification passed **309/309 backend regressions**, **14/14 PostgreSQL production tests**,
+  EF model parity, a 656-line idempotent forward migration with no destructive table/column
+  drops, and the frontend production build. Independent finance/security review returned
+  **SHIP** with no remaining P0/P1 blockers.
+
+## Governed receivable write-offs and customer refunds (2026-07-23)
+- Added separate tenant-scoped write-off, allocation, and refund aggregates rather than
+  overloading tax adjustments or negative receipts. Write-offs support partial multi-item
+  allocations for one customer/currency/case; refunds initially consume verified unapplied
+  posted receipts through a distinct approval and disbursement lifecycle.
+- Write-off posting requires an independent checker. Refund approval reserves funds and
+  release requires a third independent operator. Cancellation and evidence-backed reversal
+  preserve the full maker, approver, releaser, cancellation, and reversal provenance.
+- Refund release means submitted for disbursement, not paid. A fourth independent provider
+  or reconciler identity must record `Settled` or `Failed` with a provider reference; only a
+  confirmed failure can be reversed to restore funds. Settled refunds remain consumed.
+- Refund destinations accept provider tokens only. Raw bank/card values fail validation and
+  the database constraint, list DTOs return a redacted label, and only the release outbox
+  event carries the token required by the payout integration boundary.
+- Serializable service transactions and PostgreSQL row locks revalidate live document and
+  receipt balances. Competing write-offs, payments, refunds, and receipt reversals cannot
+  over-consume receivables or unapplied cash. Legal `WOF` and `RFD` numbers are allocated by
+  database transition triggers only when the transaction is posted or released.
+- PostgreSQL enforces lifecycle field immutability, allocation/header reconciliation,
+  cumulative ceilings, source identity, delete/truncate denial, dedicated tenant RLS, and
+  forced RLS on the previously omitted `CustomerPayments` table. Database-owned audit and
+  deferred outbox events contain operational evidence without raw destination credentials.
+- Added dedicated `Receivable Write-offs` and `Customer Refunds` permission modules and API
+  surfaces. The AR workspace provides eligibility-driven partial amount dialogs, current/
+  reserved/projected balances, stable creation retry keys, conflict refresh, lifecycle
+  queues, and permission-aware post/approve/release/cancel/reverse actions.
+- Verification passed **318/318 backend regressions**, **15/15 PostgreSQL production tests**,
+  frontend TypeScript/Vite production build, clean EF model parity, and a clean migration
+  chain through `20260723220000_TrackRefundDisbursement`. The PostgreSQL lane covers the
+  competing final-balance write-off, simultaneous-refund, payment-versus-write-off, and
+  refund-approval-versus-receipt-reversal races plus legal numbering, forced RLS, direct
+  cross-tenant denial, immutable allocations, provider-result evidence, and outbox events.
+- Independent finance/security re-review returned **SHIP** with no P0/P1 findings after
+  verifying disbursement settlement semantics, destination-token protection, complete
+  multi-document allocation rendering, cross-operation races, and tenant isolation.

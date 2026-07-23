@@ -3,6 +3,7 @@ using System;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace ERP_RFQ_Automation.Migrations
 {
     [DbContext(typeof(ErpRfqAutomationContext))]
-    partial class ErpRfqAutomationContextModelSnapshot : ModelSnapshot
+    [Migration("20260723210000_GovernFinanceExceptions")]
+    partial class GovernFinanceExceptions
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1337,17 +1340,6 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<bool>("DestinationVerified")
                         .HasColumnType("boolean");
-
-                    b.Property<string>("DisbursementFailureReason")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
-                    b.Property<string>("DisbursementUpdatedBy")
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
-
-                    b.Property<DateTime?>("DisbursementUpdatedOn")
-                        .HasColumnType("timestamp without time zone");
 
                     b.Property<string>("EvidenceReference")
                         .HasMaxLength(500)

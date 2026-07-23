@@ -119,6 +119,104 @@ public static class FinanceModelBuilderExtensions
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
         });
 
+        modelBuilder.Entity<ReceivableWriteOff>(entity =>
+        {
+            entity.ToTable("ReceivableWriteOffs");
+            entity.HasKey(x => x.Id);
+            entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
+            entity.Property(x => x.WriteOffNumber).HasMaxLength(50);
+            entity.Property(x => x.Status).HasMaxLength(20).IsRequired();
+            entity.Property(x => x.TotalAmount).HasPrecision(18, 2);
+            entity.Property(x => x.ReasonCode).HasMaxLength(50).IsRequired();
+            entity.Property(x => x.Reason).HasMaxLength(500).IsRequired();
+            entity.Property(x => x.EvidenceReference).HasMaxLength(500);
+            entity.Property(x => x.PostingStatus).HasMaxLength(30).IsRequired();
+            entity.Property(x => x.JournalReference).HasMaxLength(100);
+            entity.Property(x => x.IdempotencyKey).HasMaxLength(128).IsRequired();
+            entity.Property(x => x.RequestHash).HasMaxLength(64).IsRequired();
+            entity.Property(x => x.CreatedBy).HasMaxLength(255).IsRequired();
+            entity.Property(x => x.ApprovedBy).HasMaxLength(255);
+            entity.Property(x => x.CancelledBy).HasMaxLength(255);
+            entity.Property(x => x.CancellationReason).HasMaxLength(500);
+            entity.Property(x => x.ReversedBy).HasMaxLength(255);
+            entity.Property(x => x.ReversalReason).HasMaxLength(500);
+            entity.Property(x => x.ReversalEvidenceReference).HasMaxLength(500);
+            entity.Property(x => x.Version).IsConcurrencyToken();
+            entity.HasIndex(x => new { x.BusinessUnitId, x.IdempotencyKey }).IsUnique()
+                .HasDatabaseName("UX_ReceivableWriteOffs_BU_Idempotency");
+            entity.HasIndex(x => new { x.BusinessUnitId, x.WriteOffNumber }).IsUnique()
+                .HasFilter("\"WriteOffNumber\" IS NOT NULL")
+                .HasDatabaseName("UX_ReceivableWriteOffs_BU_Number");
+            entity.HasCheckConstraint("CK_ReceivableWriteOffs_Amount", "\"TotalAmount\" > 0");
+            entity.HasOne<Customer>().WithMany().HasForeignKey(x => x.CustomerId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Currency>().WithMany().HasForeignKey(x => x.CurrencyId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<CommercialCase>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.CommercialCaseId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<WriteOffAllocation>(entity =>
+        {
+            entity.ToTable("WriteOffAllocations");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Amount).HasPrecision(18, 2);
+            entity.Property(x => x.BalanceBefore).HasPrecision(18, 2);
+            entity.Property(x => x.BalanceAfter).HasPrecision(18, 2);
+            entity.HasCheckConstraint("CK_WriteOffAllocations_Amount", "\"Amount\" > 0 AND \"BalanceBefore\" >= \"Amount\" AND \"BalanceAfter\" = round(\"BalanceBefore\" - \"Amount\", 2)");
+            entity.HasIndex(x => new { x.BusinessUnitId, x.ReceivableWriteOffId, x.ReceivableDocumentId }).IsUnique()
+                .HasDatabaseName("UX_WriteOffAllocations_BU_WriteOff_Document");
+            entity.HasOne(x => x.WriteOff).WithMany(x => x.Allocations)
+                .HasForeignKey(x => new { x.BusinessUnitId, x.ReceivableWriteOffId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(x => x.Document).WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.ReceivableDocumentId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<CustomerRefund>(entity =>
+        {
+            entity.ToTable("CustomerRefunds");
+            entity.HasKey(x => x.Id);
+            entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
+            entity.Property(x => x.RefundNumber).HasMaxLength(50);
+            entity.Property(x => x.Status).HasMaxLength(20).IsRequired();
+            entity.Property(x => x.Amount).HasPrecision(18, 2);
+            entity.Property(x => x.Method).HasMaxLength(50).IsRequired();
+            entity.Property(x => x.DestinationReference).HasMaxLength(200).IsRequired();
+            entity.Property(x => x.ReasonCode).HasMaxLength(50).IsRequired();
+            entity.Property(x => x.Reason).HasMaxLength(500).IsRequired();
+            entity.Property(x => x.EvidenceReference).HasMaxLength(500);
+            entity.Property(x => x.PostingStatus).HasMaxLength(30).IsRequired();
+            entity.Property(x => x.JournalReference).HasMaxLength(100);
+            entity.Property(x => x.IdempotencyKey).HasMaxLength(128).IsRequired();
+            entity.Property(x => x.RequestHash).HasMaxLength(64).IsRequired();
+            entity.Property(x => x.CreatedBy).HasMaxLength(255).IsRequired();
+            entity.Property(x => x.ApprovedBy).HasMaxLength(255);
+            entity.Property(x => x.ReleasedBy).HasMaxLength(255);
+            entity.Property(x => x.DisbursementUpdatedBy).HasMaxLength(255);
+            entity.Property(x => x.DisbursementFailureReason).HasMaxLength(500);
+            entity.Property(x => x.CancelledBy).HasMaxLength(255);
+            entity.Property(x => x.CancellationReason).HasMaxLength(500);
+            entity.Property(x => x.ReversedBy).HasMaxLength(255);
+            entity.Property(x => x.ReversalReason).HasMaxLength(500);
+            entity.Property(x => x.ReversalEvidenceReference).HasMaxLength(500);
+            entity.Property(x => x.Version).IsConcurrencyToken();
+            entity.HasIndex(x => new { x.BusinessUnitId, x.IdempotencyKey }).IsUnique()
+                .HasDatabaseName("UX_CustomerRefunds_BU_Idempotency");
+            entity.HasIndex(x => new { x.BusinessUnitId, x.RefundNumber }).IsUnique()
+                .HasFilter("\"RefundNumber\" IS NOT NULL")
+                .HasDatabaseName("UX_CustomerRefunds_BU_Number");
+            entity.HasCheckConstraint("CK_CustomerRefunds_Amount", "\"Amount\" > 0");
+            entity.HasOne(x => x.SourcePayment).WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.SourcePaymentId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Customer>().WithMany().HasForeignKey(x => x.CustomerId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Currency>().WithMany().HasForeignKey(x => x.CurrencyId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<CommercialCase>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.CommercialCaseId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+        });
+
         modelBuilder.Entity<LegalDocumentCounter>(entity =>
         {
             entity.ToTable("LegalDocumentCounters");
