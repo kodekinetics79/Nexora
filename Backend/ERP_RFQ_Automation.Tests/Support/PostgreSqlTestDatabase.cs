@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.MultiTenancy;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using Testcontainers.PostgreSql;
@@ -24,6 +25,7 @@ public sealed class PostgreSqlTestDatabase : IAsyncLifetime
         .Build();
 
     private DbContextOptions<ErpRfqAutomationContext> _options = null!;
+    private string _rlsConnectionString = null!;
 
     public async Task InitializeAsync()
     {
@@ -36,6 +38,12 @@ public sealed class PostgreSqlTestDatabase : IAsyncLifetime
             .UseNpgsql(_container.GetConnectionString())
             .EnableDetailedErrors()
             .Options;
+        var rlsConnection = new NpgsqlConnectionStringBuilder(_container.GetConnectionString())
+        {
+            ApplicationName = "NexoraRlsTests",
+            MaxPoolSize = 1
+        };
+        _rlsConnectionString = rlsConnection.ConnectionString;
 
         await using var context = ContextFor(null);
         await context.Database.MigrateAsync();
@@ -43,6 +51,17 @@ public sealed class PostgreSqlTestDatabase : IAsyncLifetime
 
     public ErpRfqAutomationContext ContextFor(long? businessUnitId)
         => new(_options, new StubTenant(businessUnitId));
+
+    public ErpRfqAutomationContext TenantContextWithRls(long businessUnitId)
+    {
+        var tenant = new StubTenant(businessUnitId);
+        var options = new DbContextOptionsBuilder<ErpRfqAutomationContext>()
+            .UseNpgsql(_rlsConnectionString)
+            .AddInterceptors(new TenantRlsCommandInterceptor(tenant))
+            .EnableDetailedErrors()
+            .Options;
+        return new ErpRfqAutomationContext(options, tenant);
+    }
 
     public async Task<NpgsqlConnection> OpenConnectionAsync()
     {

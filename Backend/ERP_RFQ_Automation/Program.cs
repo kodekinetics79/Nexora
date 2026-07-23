@@ -73,12 +73,16 @@ builder.Services.Configure<HostOptions>(options =>
 // Add DbContext with PostgreSQL / Npgsql (transient-fault resilience — DATA-04).
 // Provider is chosen here; the connection string stays in configuration
 // (ConnectionStrings:DefaultConnection) so pointing at Neon later is config-only.
-builder.Services.AddDbContext<ErpRfqAutomationContext>(options =>
+builder.Services.AddScoped<TenantRlsCommandInterceptor>();
+builder.Services.AddDbContext<ErpRfqAutomationContext>((services, options) =>
+{
     options.UseNpgsql(connectionString, npgsql =>
     {
         npgsql.EnableRetryOnFailure(maxRetryCount: 5, maxRetryDelay: TimeSpan.FromSeconds(10), errorCodesToAdd: null);
         npgsql.CommandTimeout(60);
-    }));
+    });
+    options.AddInterceptors(services.GetRequiredService<TenantRlsCommandInterceptor>());
+});
 
 // Per-request tenant scope for EF global query filters (ADR-0005 tenant isolation).
 builder.Services.AddHttpContextAccessor();
@@ -343,6 +347,29 @@ builder.Services.AddSingleton<ERP_RFQ_Automation.Sla.ISlaNotifications, ERP_RFQ_
 builder.Services.AddHostedService<ERP_RFQ_Automation.Sla.SlaSweepWorker>();
 
 var app = builder.Build();
+
+// Production defaults to applying migrations before serving traffic. This guarantees
+// tenant-role/RLS policy installation is atomic with the application rollout. Set
+// Database:ApplyMigrationsOnStartup=false only when an external release job owns it.
+var applyMigrations = app.Configuration.GetValue<bool?>("Database:ApplyMigrationsOnStartup")
+    ?? app.Environment.IsProduction();
+if (applyMigrations)
+{
+    var migrationConnection = app.Configuration.GetConnectionString("MigrationConnection")
+        ?? ResolveDirectMigrationConnection(connectionString);
+    var migrationOptions = new DbContextOptionsBuilder<ErpRfqAutomationContext>()
+        .UseNpgsql(migrationConnection, npgsql =>
+        {
+            npgsql.EnableRetryOnFailure(5, TimeSpan.FromSeconds(10), null);
+            npgsql.CommandTimeout(120);
+        })
+        .Options;
+    await using var migrationDb = new ErpRfqAutomationContext(migrationOptions);
+    await migrationDb.Database.MigrateAsync();
+}
+
+static string ResolveDirectMigrationConnection(string runtimeConnection)
+    => runtimeConnection.Replace("-pooler.", ".", StringComparison.OrdinalIgnoreCase);
 
 await DemoUserSeeder.EnsureAsync(app.Services, app.Configuration, app.Environment);
 

@@ -76,6 +76,10 @@ Pre-existing; left untouched.
   while the per-tenant concurrency cap leaves excess work pending.
 - Creates leads concurrently through raw PostgreSQL and proves permanent NXR references
   are server-generated, unique, and immutable.
+- Verifies the restricted `nexora_tenant_app` role and RLS policies on the commercial and
+  evidence tables. `IgnoreQueryFilters()` and raw cross-tenant writes remain blocked by
+  PostgreSQL, explicit service transactions work, missing tenant state fails closed, and
+  transaction-local role/GUC state does not leak through a reused pooled connection.
 
 ### Tenant claim boundary (`TenantClaimGuardMiddlewareTests`)
 - Authenticated tenant API requests with missing, zero, or malformed `businessUnitId`

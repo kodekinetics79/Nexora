@@ -128,3 +128,20 @@ Add a real PostgreSQL integration harness for queue claims, reference allocation
 - RLS certification remains open. Do not enable policies until the normal app role,
   privileged maintenance role, explicit transaction/session GUC, and background-worker
   tenant iteration are implemented and proven against Neon-compatible pooling.
+
+## PostgreSQL row-level tenant isolation (2026-07-23)
+- Added migration `AddTenantRowLevelSecurity`: creates a restricted NOLOGIN,
+  non-BYPASSRLS `nexora_tenant_app` role and fail-closed read/write policies on the core
+  commercial workspace, lifecycle ledger, and document-evidence tables.
+- Added `TenantRlsCommandInterceptor`. Tenant EF commands use `SET LOCAL ROLE` plus a
+  transaction-local `nexora.business_unit_id`; standalone commands receive a short
+  transaction and existing service-owned transactions remain intact. Platform and
+  background contexts retain their explicit owner path.
+- Production now applies migrations before serving traffic. An explicit
+  `ConnectionStrings:MigrationConnection` is supported; otherwise Neon `-pooler` hosts
+  are converted to their direct endpoint for EF migrations.
+- PostgreSQL SIT proves role attributes and all 16 policies, cross-tenant read/write
+  denial even with `IgnoreQueryFilters`, compatibility with explicit transactions,
+  fail-closed missing tenant state, and no state leakage with a one-connection pool.
+- Verification: **244/244 backend tests pass** in one run, including the PostgreSQL RLS
+  and production-dialect lane.

@@ -16,6 +16,8 @@ services:
         value: "true"
       - key: ConnectionStrings__DefaultConnection
         sync: false
+      - key: Database__ApplyMigrationsOnStartup
+        value: "true"
       - key: Jwt__Key
         sync: false
       - key: Ollama__BaseUrl
