@@ -74,6 +74,14 @@ Pre-existing; left untouched.
   metadata marker is recorded.
 - Runs concurrent `FOR UPDATE SKIP LOCKED` claims and proves workers receive distinct jobs
   while the per-tenant concurrency cap leaves excess work pending.
+- Exercises the complete queue state machine with lease ownership fencing: wrong and
+  expired workers and stale claim generations cannot renew, advance, fail, or complete
+  work; expired jobs are reclaimed, transitions cannot regress, retries honor backoff,
+  and crashed final attempts or poison documents reach `DeadLetter` at `MaxAttempts`.
+- Proves lead persistence and queue completion roll back together when the fenced
+  completion is rejected, preventing a durable lead from being left behind for retry.
+- Uses a deliberately hung renewal provider to prove active extraction is canceled by
+  the last known lease deadline instead of continuing after ownership can be reclaimed.
 - Creates leads concurrently through raw PostgreSQL and proves permanent NXR references
   are server-generated, unique, and immutable.
 - Derives expected RLS coverage from EF tenant query filters and verifies every mapped

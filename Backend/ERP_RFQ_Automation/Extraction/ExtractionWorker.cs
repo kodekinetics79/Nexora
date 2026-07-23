@@ -54,6 +54,16 @@ public interface IExtractionDocumentReader
 public interface ILeadPersister
 {
     Task<long> PersistAsync(ExtractionJob job, ChunkedExtractionOutcome outcome, CancellationToken ct = default);
+
+    /// <summary>Persist the lead graph and complete the fenced queue claim in one transaction.</summary>
+    Task<long?> PersistAndCompleteAsync(
+        ExtractionJob job,
+        ChunkedExtractionOutcome outcome,
+        IExtractionQueue queue,
+        string workerId,
+        int leaseAttempt,
+        TimeSpan leaseDuration,
+        CancellationToken ct = default);
 }
 
 /// <summary>
@@ -132,28 +142,50 @@ public sealed class ExtractionWorker : BackgroundService
         if (job is null)
             return false;
 
+        using var workCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var leaseState = new LeaseState(job.LeaseExpiresAt ?? DateTime.UtcNow);
+        var initialLeaseRemaining = leaseState.ExpiresAtUtc - DateTime.UtcNow;
+        if (initialLeaseRemaining <= TimeSpan.Zero)
+        {
+            leaseState.MarkLost();
+            workCts.Cancel();
+        }
+        else
+        {
+            workCts.CancelAfter(initialLeaseRemaining);
+        }
+        var heartbeatTask = MaintainLeaseAsync(
+            job.Id, workerId, job.Attempts, workCts, leaseState, heartbeatCts.Token);
+        var workToken = workCts.Token;
+
         try
         {
             var reader = scope.ServiceProvider.GetRequiredService<IExtractionDocumentReader>();
             var extractor = scope.ServiceProvider.GetRequiredService<IChunkedExtractionService>();
             var persister = scope.ServiceProvider.GetRequiredService<ILeadPersister>();
 
-            var input = await reader.ReadAsync(job, ct);
-            await queue.SetStatusAsync(job.Id, ExtractionStatus.Extracting, ct);
+            var input = await reader.ReadAsync(job, workToken);
+            if (!await queue.SetStatusAsync(job.Id, workerId, job.Attempts, ExtractionStatus.Extracting, workToken))
+            {
+                LogLeaseLost(job.Id, workerId, "starting extraction");
+                return true;
+            }
 
             ChunkedExtractionOutcome outcome;
             if (input.IsStructured && input.StructuredRows is { Count: > 0 })
             {
                 // Deterministic path bypasses the LLM entirely — no gate needed.
-                outcome = await extractor.ExtractStructuredAsync(input.StructuredRows, job.BusinessUnitId, input.SourceDocumentName, ct);
+                outcome = await extractor.ExtractStructuredAsync(
+                    input.StructuredRows, job.BusinessUnitId, input.SourceDocumentName, workToken);
             }
             else
             {
                 // Bound total in-flight LLM calls across the whole process.
-                await _llmGate.WaitAsync(ct);
+                await _llmGate.WaitAsync(workToken);
                 try
                 {
-                    outcome = await extractor.ExtractUnstructuredAsync(input, ct);
+                    outcome = await extractor.ExtractUnstructuredAsync(input, workToken);
                 }
                 finally
                 {
@@ -163,20 +195,45 @@ public sealed class ExtractionWorker : BackgroundService
 
             if (outcome.Status == ExtractionOutcomeStatus.Failed || outcome.Result is null)
             {
-                await queue.FailAsync(job.Id, outcome.ReviewReason ?? "Extraction produced no usable result.", ct);
+                if (!await queue.FailAsync(
+                        job.Id, workerId, job.Attempts,
+                        outcome.ReviewReason ?? "Extraction produced no usable result.", workToken))
+                    LogLeaseLost(job.Id, workerId, "recording extraction failure");
                 return true;
             }
 
             // Renew before the (potentially large) persist so a slow write isn't reclaimed.
-            await queue.RenewLeaseAsync(job.Id, workerId, _options.LeaseDuration, ct);
-            await queue.SetStatusAsync(job.Id, ExtractionStatus.Persisting, ct);
+            if (!await queue.RenewLeaseAsync(job.Id, workerId, job.Attempts, _options.LeaseDuration, workToken))
+            {
+                LogLeaseLost(job.Id, workerId, "renewing before persistence");
+                return true;
+            }
+            if (!await queue.SetStatusAsync(job.Id, workerId, job.Attempts, ExtractionStatus.Persisting, workToken))
+            {
+                LogLeaseLost(job.Id, workerId, "starting persistence");
+                return true;
+            }
 
-            var leadId = await persister.PersistAsync(job, outcome, ct);
-            await queue.CompleteAsync(job.Id, leadId, ct);
+            // The persister takes the queue row lock and commits both durable output and
+            // Succeeded together. Stop the independent heartbeat before that transaction.
+            heartbeatCts.Cancel();
+            await ObserveHeartbeatAsync(heartbeatTask);
+            var leadId = await persister.PersistAndCompleteAsync(
+                job, outcome, queue, workerId, job.Attempts, _options.LeaseDuration, ct);
+            if (leadId is null)
+            {
+                LogLeaseLost(job.Id, workerId, "starting the atomic persistence transaction");
+                return true;
+            }
 
             _log.LogInformation(
                 "Job {JobId} succeeded: lead {LeadId}, {Extracted}/{Expected} items, status {Status}.",
-                job.Id, leadId, outcome.ExtractedItemCount, outcome.ExpectedItemCount, outcome.Status);
+                job.Id, leadId.Value, outcome.ExtractedItemCount, outcome.ExpectedItemCount, outcome.Status);
+            return true;
+        }
+        catch (OperationCanceledException) when (leaseState.IsLost && !ct.IsCancellationRequested)
+        {
+            LogLeaseLost(job.Id, workerId, "processing the document");
             return true;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -187,11 +244,135 @@ public sealed class ExtractionWorker : BackgroundService
         catch (Exception ex)
         {
             _log.LogError(ex, "Job {JobId} failed; recording for retry/dead-letter.", job.Id);
-            try { await queue.FailAsync(job.Id, ex.Message, CancellationToken.None); }
+            try
+            {
+                if (!await queue.FailAsync(job.Id, workerId, job.Attempts, ex.Message, CancellationToken.None))
+                    LogLeaseLost(job.Id, workerId, "recording unexpected failure");
+            }
             catch (Exception failEx) { _log.LogError(failEx, "Also failed to record failure for job {JobId}.", job.Id); }
             return true;
         }
+        finally
+        {
+            heartbeatCts.Cancel();
+            await ObserveHeartbeatAsync(heartbeatTask);
+        }
     }
+
+    private async Task MaintainLeaseAsync(
+        long jobId,
+        string workerId,
+        int leaseAttempt,
+        CancellationTokenSource workCts,
+        LeaseState state,
+        CancellationToken ct)
+    {
+        var interval = TimeSpan.FromMilliseconds(Math.Max(1_000, _options.LeaseDuration.TotalMilliseconds / 3));
+        while (!ct.IsCancellationRequested && !workCts.IsCancellationRequested)
+        {
+            try
+            {
+                var remaining = state.ExpiresAtUtc - DateTime.UtcNow;
+                if (remaining <= TimeSpan.Zero)
+                {
+                    state.MarkLost();
+                    workCts.Cancel();
+                    return;
+                }
+                await Task.Delay(remaining < interval ? remaining : interval, ct);
+                remaining = state.ExpiresAtUtc - DateTime.UtcNow;
+                if (remaining <= TimeSpan.Zero)
+                {
+                    state.MarkLost();
+                    workCts.Cancel();
+                    return;
+                }
+
+                // The work cancellation is armed independently of the database call, so
+                // a hung driver/proxy cannot let processing run beyond known ownership.
+                workCts.CancelAfter(remaining);
+                using var renewalCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                renewalCts.CancelAfter(remaining);
+                var renewalStartedAt = DateTime.UtcNow;
+                using var scope = _scopeFactory.CreateScope();
+                var queue = scope.ServiceProvider.GetRequiredService<IExtractionQueue>();
+                if (await queue.RenewLeaseAsync(
+                        jobId, workerId, leaseAttempt, _options.LeaseDuration, renewalCts.Token))
+                {
+                    // The database computes expiry near request start. Using our own
+                    // pre-call timestamp is conservative and never overstates the lease.
+                    var renewedUntil = renewalStartedAt.Add(_options.LeaseDuration);
+                    if (renewedUntil <= DateTime.UtcNow)
+                    {
+                        state.MarkLost();
+                        workCts.Cancel();
+                        return;
+                    }
+                    state.RenewedUntil(renewedUntil);
+                    workCts.CancelAfter(renewedUntil - DateTime.UtcNow);
+                    continue;
+                }
+
+                state.MarkLost();
+                workCts.Cancel();
+                return;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (OperationCanceledException)
+            {
+                state.MarkLost();
+                workCts.Cancel();
+                return;
+            }
+            catch (Exception ex)
+            {
+                if (DateTime.UtcNow >= state.ExpiresAtUtc)
+                {
+                    state.MarkLost();
+                    workCts.Cancel();
+                    _log.LogError(ex,
+                        "Lease heartbeat failed through the known deadline for worker {Worker}, job {JobId}; cancelling work.",
+                        workerId, jobId);
+                    return;
+                }
+
+                _log.LogError(ex, "Lease heartbeat failed for worker {Worker}, job {JobId}; retrying before expiry.", workerId, jobId);
+                var retryDelay = state.ExpiresAtUtc - DateTime.UtcNow;
+                if (retryDelay > TimeSpan.FromSeconds(1))
+                    retryDelay = TimeSpan.FromSeconds(1);
+                if (retryDelay > TimeSpan.Zero)
+                    await Task.Delay(retryDelay, ct);
+            }
+        }
+    }
+
+    private static async Task ObserveHeartbeatAsync(Task heartbeat)
+    {
+        try { await heartbeat; }
+        catch (OperationCanceledException) { }
+    }
+
+    private sealed class LeaseState
+    {
+        private int _lost;
+        private long _expiresAtTicks;
+
+        public LeaseState(DateTime expiresAtUtc) => RenewedUntil(expiresAtUtc);
+
+        public bool IsLost => Volatile.Read(ref _lost) != 0;
+        public DateTime ExpiresAtUtc => new(Interlocked.Read(ref _expiresAtTicks), DateTimeKind.Utc);
+        public void RenewedUntil(DateTime expiresAtUtc)
+            => Interlocked.Exchange(ref _expiresAtTicks, expiresAtUtc.ToUniversalTime().Ticks);
+        public void MarkLost() => Interlocked.Exchange(ref _lost, 1);
+    }
+
+    private void LogLeaseLost(long jobId, string workerId, string operation)
+        => _log.LogWarning(
+            "Worker {Worker} lost or expired its lease for job {JobId} while {Operation}; stale transition was fenced.",
+            workerId, jobId, operation);
 }
 
 /// <summary>
@@ -355,7 +536,15 @@ public sealed class LeadPersister : ILeadPersister
         _routing = routing;
     }
 
-    public async Task<long> PersistAsync(ExtractionJob job, ChunkedExtractionOutcome outcome, CancellationToken ct = default)
+    public Task<long> PersistAsync(
+        ExtractionJob job, ChunkedExtractionOutcome outcome, CancellationToken ct = default)
+        => PersistInternalAsync(job, outcome, enrichAfterPersistence: true, ct);
+
+    private async Task<long> PersistInternalAsync(
+        ExtractionJob job,
+        ChunkedExtractionOutcome outcome,
+        bool enrichAfterPersistence,
+        CancellationToken ct)
     {
         if (outcome.Result is null)
             throw new InvalidOperationException("Cannot persist a null extraction result.");
@@ -420,52 +609,104 @@ public sealed class LeadPersister : ILeadPersister
 
         // WP-A3: duplicate detection AFTER the save, PER produced lead. Best-effort by
         // contract — a detection failure must never fail (or roll back) the persistence.
-        if (_duplicateDetector != null)
-        {
-            foreach (var lead in leads)
-            {
-                try
-                {
-                    var check = await _duplicateDetector.CheckAndFlagAsync(lead.Id, job.BusinessUnitId, ct);
-                    if (check.Flagged)
-                        _log.LogInformation(
-                            "Lead {LeadId} flagged as suspected duplicate of lead {OriginalId} ({Reason}).",
-                            check.FlaggedLeadId, check.OriginalLeadId, check.Reason);
-                }
-                catch (Exception ex)
-                {
-                    _log.LogError(ex, "Duplicate detection failed for lead {LeadId}; persistence succeeded.", lead.Id);
-                }
-            }
-        }
+        if (enrichAfterPersistence)
+            await TryDetectDuplicatesAsync(job, leads, ct);
 
         // Every extracted lead enters the governed routing flow. Matching may assign
         // an effective owner or create one durable unassigned work item. Routing is
         // idempotent per job/lead; a transient routing failure cannot duplicate the
         // commercial record and can be replayed through the routing API/reconciler.
-        if (_routing != null)
-        {
-            foreach (var lead in leads)
-            {
-                try
-                {
-                    await _routing.RouteLeadAsync(job.BusinessUnitId,
-                        new ERP_RFQ_Automation.CommercialRouting.RouteLeadCommand(
-                            lead.Id,
-                            $"extraction:{job.Id}:lead:{lead.Id}:route:v1",
-                            $"extraction-job:{job.Id}"),
-                        ct);
-                }
-                catch (Exception ex)
-                {
-                    _log.LogError(ex,
-                        "Commercial routing failed for extracted lead {LeadId}; the lead remains available for reconciliation.",
-                        lead.Id);
-                }
-            }
-        }
+        if (enrichAfterPersistence)
+            await TryRouteLeadsAsync(job, leads, ct);
 
         return leads[0].Id;
+    }
+
+    public async Task<long?> PersistAndCompleteAsync(
+        ExtractionJob job,
+        ChunkedExtractionOutcome outcome,
+        IExtractionQueue queue,
+        string workerId,
+        int leaseAttempt,
+        TimeSpan leaseDuration,
+        CancellationToken ct = default)
+    {
+        await using var transaction = await _context.Database.BeginTransactionAsync(ct);
+
+        // This conditional UPDATE both validates the fencing generation and holds the
+        // queue row lock until commit, preventing reclaim during the persistence write.
+        if (!await queue.RenewLeaseAsync(job.Id, workerId, leaseAttempt, leaseDuration, ct))
+        {
+            await transaction.RollbackAsync(ct);
+            return null;
+        }
+
+        var previouslyTrackedLeadIds = _context.ChangeTracker.Entries<Lead>()
+            .Select(entry => entry.Entity.Id)
+            .Where(id => id > 0)
+            .ToHashSet();
+        var leadId = await PersistInternalAsync(job, outcome, enrichAfterPersistence: false, ct);
+        var persistedLeads = _context.ChangeTracker.Entries<Lead>()
+            .Where(entry => entry.Entity.Id > 0 && !previouslyTrackedLeadIds.Contains(entry.Entity.Id))
+            .Select(entry => entry.Entity)
+            .DistinctBy(lead => lead.Id)
+            .ToArray();
+        if (!await queue.CompleteAsync(job.Id, workerId, leaseAttempt, leadId, ct))
+            throw new InvalidOperationException($"Fenced completion failed for extraction job {job.Id}.");
+
+        await transaction.CommitAsync(ct);
+        await TryDetectDuplicatesAsync(job, persistedLeads, ct);
+        await TryRouteLeadsAsync(job, persistedLeads, ct);
+        return leadId;
+    }
+
+    private async Task TryDetectDuplicatesAsync(
+        ExtractionJob job, IEnumerable<Lead> leads, CancellationToken ct)
+    {
+        if (_duplicateDetector is null)
+            return;
+
+        foreach (var lead in leads)
+        {
+            try
+            {
+                var check = await _duplicateDetector.CheckAndFlagAsync(lead.Id, job.BusinessUnitId, ct);
+                if (check.Flagged)
+                    _log.LogInformation(
+                        "Lead {LeadId} flagged as suspected duplicate of lead {OriginalId} ({Reason}).",
+                        check.FlaggedLeadId, check.OriginalLeadId, check.Reason);
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "Duplicate detection failed for lead {LeadId}; persistence succeeded.", lead.Id);
+            }
+        }
+    }
+
+    private async Task TryRouteLeadsAsync(
+        ExtractionJob job, IEnumerable<Lead> leads, CancellationToken ct)
+    {
+        if (_routing is null)
+            return;
+
+        foreach (var lead in leads)
+        {
+            try
+            {
+                await _routing.RouteLeadAsync(job.BusinessUnitId,
+                    new ERP_RFQ_Automation.CommercialRouting.RouteLeadCommand(
+                        lead.Id,
+                        $"extraction:{job.Id}:lead:{lead.Id}:route:v1",
+                        $"extraction-job:{job.Id}"),
+                    ct);
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex,
+                    "Commercial routing failed for extracted lead {LeadId}; the lead remains available for reconciliation.",
+                    lead.Id);
+            }
+        }
     }
 
     /// <summary>

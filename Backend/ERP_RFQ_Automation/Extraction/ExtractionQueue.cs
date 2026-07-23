@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 
@@ -44,7 +45,22 @@ public sealed class ExtractionQueue : IExtractionQueue
     // tenant already at its cap is skipped; among eligible jobs the highest Priority then
     // the lowest WFQ SchedulerTag wins. Expired leases (crashed workers) are reclaimable.
     private static readonly string ClaimSql = $@"
-WITH inflight AS (
+WITH exhausted AS (
+    UPDATE ""ExtractionJobs""
+    SET ""Status"" = 'DeadLetter',
+        ""LeasedBy"" = NULL,
+        ""LeaseExpiresAt"" = NULL,
+        ""LastError"" = COALESCE(""LastError"", 'Lease expired after final attempt.'),
+        ""UpdatedOn"" = @now
+    WHERE ""Attempts"" >= ""MaxAttempts""
+      AND (
+            ""Status"" = 'Pending'
+            OR (""Status"" IN ('Leased','Extracting','Persisting')
+                AND (""LeaseExpiresAt"" IS NULL OR ""LeaseExpiresAt"" <= @now))
+          )
+    RETURNING ""Id""
+),
+inflight AS (
     SELECT ""BusinessUnitId"" AS buid, COUNT(*) AS cnt
     FROM ""ExtractionJobs""
     WHERE ""Status"" IN ('Leased','Extracting','Persisting')
@@ -61,6 +77,7 @@ candidate AS (
                 AND (j.""LeaseExpiresAt"" IS NULL OR j.""LeaseExpiresAt"" <= @now))
           )
       AND j.""NextAttemptAt"" <= @now
+      AND j.""Attempts"" < j.""MaxAttempts""
       AND COALESCE(f.cnt, 0) < @cap
     ORDER BY j.""Priority"" DESC, j.""SchedulerTag"" ASC, j.""CreatedOn"" ASC
     FOR UPDATE OF j SKIP LOCKED
@@ -185,35 +202,55 @@ RETURNING {ReturningColumns};";
         return MapJob(reader);
     }
 
-    public async Task<bool> RenewLeaseAsync(long jobId, string workerId, TimeSpan leaseDuration, CancellationToken ct = default)
+    public async Task<bool> RenewLeaseAsync(
+        long jobId, string workerId, int leaseAttempt, TimeSpan leaseDuration, CancellationToken ct = default)
     {
         var now = DateTime.UtcNow;
         const string sql = @"UPDATE ""ExtractionJobs""
 SET ""LeaseExpiresAt"" = @leaseExpiry, ""UpdatedOn"" = @now
-WHERE ""Id"" = @id AND ""LeasedBy"" = @worker;";
+WHERE ""Id"" = @id AND ""LeasedBy"" = @worker AND ""Attempts"" = @attempt
+  AND ""LeaseExpiresAt"" > @now
+  AND ""Status"" IN ('Leased','Extracting','Persisting');";
         var rows = await ExecuteAsync(sql, ct,
-            ("id", jobId), ("worker", workerId), ("now", now), ("leaseExpiry", now.Add(leaseDuration)));
+            ("id", jobId), ("worker", workerId), ("attempt", leaseAttempt),
+            ("now", now), ("leaseExpiry", now.Add(leaseDuration)));
         return rows > 0;
     }
 
-    public async Task SetStatusAsync(long jobId, ExtractionStatus status, CancellationToken ct = default)
+    public async Task<bool> SetStatusAsync(
+        long jobId, string workerId, int leaseAttempt, ExtractionStatus status, CancellationToken ct = default)
     {
+        if (status is not (ExtractionStatus.Extracting or ExtractionStatus.Persisting))
+            throw new ArgumentOutOfRangeException(nameof(status), "Only in-progress statuses are valid here.");
         const string sql = @"UPDATE ""ExtractionJobs""
 SET ""Status"" = @status, ""UpdatedOn"" = @now
-WHERE ""Id"" = @id;";
-        await ExecuteAsync(sql, ct, ("id", jobId), ("status", status.ToString()), ("now", DateTime.UtcNow));
+WHERE ""Id"" = @id AND ""LeasedBy"" = @worker AND ""Attempts"" = @attempt
+  AND ""LeaseExpiresAt"" > @now
+  AND ((@status = 'Extracting' AND ""Status"" = 'Leased')
+    OR (@status = 'Persisting' AND ""Status"" = 'Extracting'));";
+        var rows = await ExecuteAsync(sql, ct,
+            ("id", jobId), ("worker", workerId), ("attempt", leaseAttempt),
+            ("status", status.ToString()), ("now", DateTime.UtcNow));
+        return rows > 0;
     }
 
-    public async Task CompleteAsync(long jobId, long resultLeadId, CancellationToken ct = default)
+    public async Task<bool> CompleteAsync(
+        long jobId, string workerId, int leaseAttempt, long resultLeadId, CancellationToken ct = default)
     {
         const string sql = @"UPDATE ""ExtractionJobs""
 SET ""Status"" = 'Succeeded', ""ResultLeadId"" = @leadId, ""LeasedBy"" = NULL,
     ""LeaseExpiresAt"" = NULL, ""LastError"" = NULL, ""UpdatedOn"" = @now
-WHERE ""Id"" = @id;";
-        await ExecuteAsync(sql, ct, ("id", jobId), ("leadId", resultLeadId), ("now", DateTime.UtcNow));
+WHERE ""Id"" = @id AND ""LeasedBy"" = @worker AND ""Attempts"" = @attempt
+  AND ""LeaseExpiresAt"" > @now
+  AND ""Status"" = 'Persisting';";
+        var rows = await ExecuteAsync(sql, ct,
+            ("id", jobId), ("worker", workerId), ("attempt", leaseAttempt),
+            ("leadId", resultLeadId), ("now", DateTime.UtcNow));
+        return rows > 0;
     }
 
-    public async Task FailAsync(long jobId, string error, CancellationToken ct = default)
+    public async Task<bool> FailAsync(
+        long jobId, string workerId, int leaseAttempt, string error, CancellationToken ct = default)
     {
         // Attempts was already incremented at claim time. Reschedule with exponential
         // backoff (capped at 1h); once Attempts >= MaxAttempts the job is dead-lettered.
@@ -224,8 +261,13 @@ SET ""Status"" = CASE WHEN ""Attempts"" >= ""MaxAttempts"" THEN 'DeadLetter' ELS
     ""LeasedBy"" = NULL,
     ""LeaseExpiresAt"" = NULL,
     ""UpdatedOn"" = @now
-WHERE ""Id"" = @id;";
-        await ExecuteAsync(sql, ct, ("id", jobId), ("error", Trim(error, 4000)), ("now", DateTime.UtcNow));
+WHERE ""Id"" = @id AND ""LeasedBy"" = @worker AND ""Attempts"" = @attempt
+  AND ""LeaseExpiresAt"" > @now
+  AND ""Status"" IN ('Leased','Extracting','Persisting');";
+        var rows = await ExecuteAsync(sql, ct,
+            ("id", jobId), ("worker", workerId), ("attempt", leaseAttempt),
+            ("error", Trim(error, 4000)), ("now", DateTime.UtcNow));
+        return rows > 0;
     }
 
     // ---- helpers ---------------------------------------------------------
@@ -242,6 +284,8 @@ WHERE ""Id"" = @id;";
     {
         var conn = await OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
+        if (_context.Database.CurrentTransaction is { } transaction)
+            cmd.Transaction = transaction.GetDbTransaction();
         cmd.CommandText = sql;
         foreach (var (name, value) in parameters)
             AddParam(cmd, name, value);

@@ -77,19 +77,19 @@ public interface IExtractionQueue
     /// </summary>
     Task<ExtractionJob?> ClaimAsync(string workerId, TimeSpan leaseDuration, int perTenantCap, CancellationToken ct = default);
 
-    /// <summary>Extend the lease on an in-progress job (called for long-running docs so it isn't reclaimed).</summary>
-    Task<bool> RenewLeaseAsync(long jobId, string workerId, TimeSpan leaseDuration, CancellationToken ct = default);
+    /// <summary>Extend the lease only for the matching worker and claim generation.</summary>
+    Task<bool> RenewLeaseAsync(long jobId, string workerId, int leaseAttempt, TimeSpan leaseDuration, CancellationToken ct = default);
 
-    /// <summary>Advance a claimed job to Extracting or Persisting (progress visibility). No-op-safe.</summary>
-    Task SetStatusAsync(long jobId, ExtractionStatus status, CancellationToken ct = default);
+    /// <summary>Advance the matching claim generation to Extracting or Persisting.</summary>
+    Task<bool> SetStatusAsync(long jobId, string workerId, int leaseAttempt, ExtractionStatus status, CancellationToken ct = default);
 
-    /// <summary>Mark a job Succeeded and record the produced Lead id; clears the lease.</summary>
-    Task CompleteAsync(long jobId, long resultLeadId, CancellationToken ct = default);
+    /// <summary>Complete the matching claim generation and clear its lease.</summary>
+    Task<bool> CompleteAsync(long jobId, string workerId, int leaseAttempt, long resultLeadId, CancellationToken ct = default);
 
     /// <summary>
     /// Record a failure. Reschedules the job to Pending with exponential backoff, or
     /// transitions it to DeadLetter once Attempts &gt;= MaxAttempts. Poison-doc isolation:
     /// the failing document never blocks or fails the rest of the batch.
     /// </summary>
-    Task FailAsync(long jobId, string error, CancellationToken ct = default);
+    Task<bool> FailAsync(long jobId, string workerId, int leaseAttempt, string error, CancellationToken ct = default);
 }

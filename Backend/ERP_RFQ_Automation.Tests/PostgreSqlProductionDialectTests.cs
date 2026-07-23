@@ -221,6 +221,74 @@ public sealed class PostgreSqlProductionDialectTests
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
+    public async Task QueueTransitionsAreLeaseFencedAndRetryToDeadLetter()
+    {
+        var marker = Guid.NewGuid().ToString("N");
+        const long businessUnitId = 91_101;
+
+        await using var context = _database.ContextFor(null);
+        var queue = NewQueue(context);
+
+        var completedJobId = await EnqueueJobAsync(queue, marker + "-complete", businessUnitId, 3);
+        var completedClaim = await queue.ClaimAsync("worker-a", TimeSpan.FromMinutes(5), 4);
+        Assert.Equal(completedJobId, completedClaim!.Id);
+        Assert.False(await queue.RenewLeaseAsync(completedJobId, "worker-b", completedClaim.Attempts, TimeSpan.FromMinutes(5)));
+        Assert.False(await queue.SetStatusAsync(completedJobId, "worker-b", completedClaim.Attempts, ExtractionStatus.Extracting));
+        Assert.False(await queue.FailAsync(completedJobId, "worker-b", completedClaim.Attempts, "not owner"));
+        Assert.False(await queue.CompleteAsync(completedJobId, "worker-b", completedClaim.Attempts, 77_001));
+        Assert.True(await queue.SetStatusAsync(completedJobId, "worker-a", completedClaim.Attempts, ExtractionStatus.Extracting));
+        Assert.False(await queue.CompleteAsync(completedJobId, "worker-a", completedClaim.Attempts, 77_001));
+        Assert.True(await queue.RenewLeaseAsync(completedJobId, "worker-a", completedClaim.Attempts, TimeSpan.FromMinutes(5)));
+        Assert.True(await queue.SetStatusAsync(completedJobId, "worker-a", completedClaim.Attempts, ExtractionStatus.Persisting));
+        Assert.False(await queue.SetStatusAsync(completedJobId, "worker-a", completedClaim.Attempts, ExtractionStatus.Extracting));
+        Assert.True(await queue.CompleteAsync(completedJobId, "worker-a", completedClaim.Attempts, 77_001));
+
+        var expiredJobId = await EnqueueJobAsync(queue, marker + "-expired", businessUnitId, 2);
+        var expiredClaim = await queue.ClaimAsync("worker-a", TimeSpan.FromMinutes(5), 4);
+        Assert.Equal(expiredJobId, expiredClaim!.Id);
+        await context.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE \"ExtractionJobs\" SET \"LeaseExpiresAt\" = now() - INTERVAL '1 second' WHERE \"Id\" = {expiredJobId}");
+        Assert.False(await queue.RenewLeaseAsync(expiredJobId, "worker-a", expiredClaim.Attempts, TimeSpan.FromMinutes(5)));
+
+        var reclaimed = await queue.ClaimAsync("worker-b", TimeSpan.FromMinutes(5), 4);
+        Assert.Equal(expiredJobId, reclaimed!.Id);
+        Assert.Equal(2, reclaimed.Attempts);
+        Assert.False(await queue.CompleteAsync(expiredJobId, "worker-a", expiredClaim.Attempts, 77_002));
+        Assert.False(await queue.FailAsync(expiredJobId, "worker-a", expiredClaim.Attempts, "stale worker"));
+        Assert.False(await queue.CompleteAsync(expiredJobId, "worker-b", expiredClaim.Attempts, 77_002));
+        Assert.True(await queue.FailAsync(expiredJobId, "worker-b", reclaimed.Attempts, "poison document"));
+
+        var deadLetter = await context.Set<ExtractionJob>().AsNoTracking().SingleAsync(job => job.Id == expiredJobId);
+        Assert.Equal(ExtractionStatus.DeadLetter, deadLetter.Status);
+        Assert.Equal("poison document", deadLetter.LastError);
+        Assert.Null(deadLetter.LeasedBy);
+
+        var retryJobId = await EnqueueJobAsync(queue, marker + "-retry", businessUnitId, 3);
+        var retryClaim = await queue.ClaimAsync("worker-c", TimeSpan.FromMinutes(5), 4);
+        Assert.Equal(retryJobId, retryClaim!.Id);
+        var failedAt = DateTime.UtcNow;
+        Assert.True(await queue.FailAsync(retryJobId, "worker-c", retryClaim!.Attempts, "transient"));
+        var retry = await context.Set<ExtractionJob>().AsNoTracking().SingleAsync(job => job.Id == retryJobId);
+        Assert.Equal(ExtractionStatus.Pending, retry.Status);
+        Assert.True(retry.NextAttemptAt > failedAt);
+        Assert.Null(await queue.ClaimAsync("worker-d", TimeSpan.FromMinutes(5), 4));
+
+        var crashedFinalJobId = await EnqueueJobAsync(queue, marker + "-crashed-final", businessUnitId, 1);
+        var finalClaim = await queue.ClaimAsync("stable-worker-id", TimeSpan.FromMinutes(5), 4);
+        Assert.Equal(crashedFinalJobId, finalClaim!.Id);
+        await context.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE \"ExtractionJobs\" SET \"LeaseExpiresAt\" = now() - INTERVAL '1 second' WHERE \"Id\" = {crashedFinalJobId}");
+
+        Assert.Null(await queue.ClaimAsync("stable-worker-id", TimeSpan.FromMinutes(5), 4));
+        var crashedFinal = await context.Set<ExtractionJob>().AsNoTracking()
+            .SingleAsync(job => job.Id == crashedFinalJobId);
+        Assert.Equal(ExtractionStatus.DeadLetter, crashedFinal.Status);
+        Assert.Equal(1, crashedFinal.Attempts);
+        Assert.Null(crashedFinal.LeasedBy);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
     public async Task CommercialCaseReferencesAreServerGeneratedUniqueAndImmutable()
     {
         var marker = Guid.NewGuid().ToString("N");
@@ -386,6 +454,23 @@ public sealed class PostgreSqlProductionDialectTests
         seed.Parameters.AddWithValue("rfqOne", marker + "-rfq-1");
         seed.Parameters.AddWithValue("rfqTwo", marker + "-rfq-2");
         await seed.ExecuteNonQueryAsync();
+    }
+
+    private static async Task<long> EnqueueJobAsync(
+        IExtractionQueue queue, string marker, long businessUnitId, int maxAttempts)
+    {
+        var result = await queue.EnqueueAsync(new EnqueueExtractionRequest
+        {
+            BusinessUnitId = businessUnitId,
+            SourceType = ExtractionSourceType.ManualUpload,
+            StoragePath = "test://" + marker,
+            ContentHash = marker.PadRight(64, '0')[..64],
+            FileName = marker + ".pdf",
+            FileType = "pdf",
+            MaxAttempts = maxAttempts
+        });
+        Assert.Equal(EnqueueOutcome.Enqueued, result.Outcome);
+        return result.JobId;
     }
 
     private static ExtractionQueue NewQueue(ERP_RFQ_Automation.Models.ErpRfqAutomationContext context)

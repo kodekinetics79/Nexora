@@ -188,4 +188,52 @@ public class LeadPersisterSplitTests : IDisposable
             try { File.Delete(ExtractionJobMetadata.SidecarPath(storagePath, job.BusinessUnitId)); } catch { }
         }
     }
+
+    [Fact]
+    public async Task AtomicPersistence_RollsBackLeadWhenFencedCompletionFails()
+    {
+        await using (var seedCtx = _db.ContextFor(null))
+        {
+            Seed.BusinessUnit(seedCtx, 1);
+            Seed.EmailConfig(seedCtx, 100, 1);
+            await seedCtx.SaveChangesAsync();
+        }
+
+        await using (var context = _db.ContextFor(null))
+        {
+            var persister = new LeadPersister(context, new NoopLogger<LeadPersister>());
+            await Assert.ThrowsAsync<InvalidOperationException>(() => persister.PersistAndCompleteAsync(
+                Job(),
+                SplitOutcome(Group("RFQ-ROLLBACK", 1)),
+                new CompletionRejectingQueue(),
+                "worker-a",
+                1,
+                TimeSpan.FromMinutes(5)));
+        }
+
+        await using var assertContext = _db.ContextFor(null);
+        Assert.Empty(await assertContext.Leads.ToListAsync());
+        Assert.Empty(await assertContext.EmailIngests.ToListAsync());
+    }
+
+    private sealed class CompletionRejectingQueue : IExtractionQueue
+    {
+        public Task<bool> RenewLeaseAsync(long jobId, string workerId, int leaseAttempt, TimeSpan leaseDuration, CancellationToken ct = default)
+            => Task.FromResult(true);
+
+        public Task<bool> CompleteAsync(long jobId, string workerId, int leaseAttempt, long resultLeadId, CancellationToken ct = default)
+            => Task.FromResult(false);
+
+        public Task<EnqueueResult> EnqueueAsync(EnqueueExtractionRequest request, CancellationToken ct = default)
+            => throw new NotSupportedException();
+
+        public Task<ExtractionJob?> ClaimAsync(string workerId, TimeSpan leaseDuration, int perTenantCap, CancellationToken ct = default)
+            => throw new NotSupportedException();
+
+        public Task<bool> SetStatusAsync(long jobId, string workerId, int leaseAttempt, ExtractionStatus status, CancellationToken ct = default)
+            => throw new NotSupportedException();
+
+        public Task<bool> FailAsync(long jobId, string workerId, int leaseAttempt, string error, CancellationToken ct = default)
+            => throw new NotSupportedException();
+    }
 }

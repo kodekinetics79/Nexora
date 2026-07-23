@@ -161,3 +161,17 @@ Add a real PostgreSQL integration harness for queue claims, reference allocation
   child-row visibility, and asserts SQLSTATE `42501` for cross-tenant writes. Broad table,
   sequence, and default grants are revoked; future-object canaries prove fail-closed
   permissions for later migrations.
+
+## Extraction queue lease fencing (2026-07-23)
+- Queue progress, failure, and completion transitions now require the active worker id,
+  claim-generation token, unexpired lease, and expected monotonic state. Stale tasks
+  cannot mutate a reclaimed job even if a worker id is reused.
+- The extraction worker runs a lease heartbeat in independent dependency-injection scopes,
+  avoiding concurrent use of its processing `DbContext`. Heartbeat failures cancel work
+  by the last known lease deadline. Lead persistence and `Succeeded` completion commit in
+  one transaction while holding the fenced queue-row lock.
+- PostgreSQL SIT covers wrong-worker denial, expiry/reclaim, stale completion/failure,
+  claim-generation ABA denial, monotonic transitions, retry backoff, and crash-expired
+  dead-letter exhaustion. A fault-injection test proves persistence rolls back when queue
+  completion is rejected, and a hung-renewal test proves work stops by the known lease
+  deadline. Verification after the new tests: **247/247 backend tests pass**.
