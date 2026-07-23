@@ -76,10 +76,16 @@ Pre-existing; left untouched.
   while the per-tenant concurrency cap leaves excess work pending.
 - Creates leads concurrently through raw PostgreSQL and proves permanent NXR references
   are server-generated, unique, and immutable.
-- Verifies the restricted `nexora_tenant_app` role and RLS policies on the commercial and
-  evidence tables. `IgnoreQueryFilters()` and raw cross-tenant writes remain blocked by
-  PostgreSQL, explicit service transactions work, missing tenant state fails closed, and
-  transaction-local role/GUC state does not leak through a reused pooled connection.
+- Derives expected RLS coverage from EF tenant query filters and verifies every mapped
+  tenant table has an enabled read/write policy assigned to `nexora_tenant_app`. It also
+  checks every public tenant-column table plus parent-derived commercial, attachment,
+  contact, email, and governed-custom-field children.
+- Proves the role has no privilege on any unprotected public table or unrelated sequence;
+  newly created table/sequence canaries also receive no access through default privileges.
+- `IgnoreQueryFilters()` and raw cross-tenant parent/child writes remain blocked by
+  PostgreSQL with SQLSTATE `42501`; explicit service transactions work, missing tenant
+  state fails closed, and transaction-local role/GUC state does not leak through a reused
+  pooled connection.
 
 ### Tenant claim boundary (`TenantClaimGuardMiddlewareTests`)
 - Authenticated tenant API requests with missing, zero, or malformed `businessUnitId`

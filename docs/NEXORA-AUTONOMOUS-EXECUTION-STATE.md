@@ -145,3 +145,19 @@ Add a real PostgreSQL integration harness for queue claims, reference allocation
   fail-closed missing tenant state, and no state leakage with a one-connection pool.
 - Verification: **244/244 backend tests pass** in one run, including the PostgreSQL RLS
   and production-dialect lane.
+
+## Schema-wide RLS coverage expansion (2026-07-23)
+- Independent review rejected the first RLS slice as a complete boundary because the
+  restricted role had broad public-table grants while only 16 tables had policies.
+- Added `CompleteTenantRlsCoverage`: all public tables with a recognized tenant column
+  receive role-specific read/write RLS. Nullable master-data tenant columns remain
+  readable as shared rows only for the explicit Customer/Supplier/Product/Inventory
+  allow-list, but tenant sessions cannot create or convert rows to global.
+- Added parent-derived policies for lead/RFQ/quote/order/shipment children, email ingests,
+  lead attachments, contacts, product attachments, shipment history, supplier purchase
+  history, and governed custom-field descendants. Migration-history access is revoked.
+- PostgreSQL certification now derives expected coverage from EF metadata, validates
+  policy role/read/write expressions, checks all tenant-column tables, tests dependent
+  child-row visibility, and asserts SQLSTATE `42501` for cross-tenant writes. Broad table,
+  sequence, and default grants are revoked; future-object canaries prove fail-closed
+  permissions for later migrations.

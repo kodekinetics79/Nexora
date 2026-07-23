@@ -43,12 +43,37 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<CommercialLifecycleEvent>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<LifecycleOutboxMessage>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
 
+        // Dependent commercial rows inherit the tenant boundary from their required
+        // aggregate root. Keep these filters aligned with the PostgreSQL parent-derived
+        // RLS policies so non-PostgreSQL test/provider paths retain the same isolation.
+        modelBuilder.Entity<LeadItem>().HasQueryFilter(e => CurrentTenantId == null || e.Lead.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<Rfqitem>().HasQueryFilter(e => CurrentTenantId == null || e.Rfq != null && e.Rfq.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<QuoteItem>().HasQueryFilter(e => CurrentTenantId == null || e.Quote.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<OrderItem>().HasQueryFilter(e => CurrentTenantId == null || e.Order.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<ShipmentItem>().HasQueryFilter(e => CurrentTenantId == null || e.Shipment.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<ShipmentStatusHistory>().HasQueryFilter(e => CurrentTenantId == null || e.Shipment.BusinessUnitId == CurrentTenantId);
+
         // Master data (nullable Buid). Rows with a null Buid are treated as shared
         // reference data (visible to all tenants); tenant-owned rows are scoped.
         modelBuilder.Entity<Customer>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == null || e.Buid == CurrentTenantId);
         modelBuilder.Entity<Supplier>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == null || e.Buid == CurrentTenantId);
         modelBuilder.Entity<Product>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == null || e.Buid == CurrentTenantId);
         modelBuilder.Entity<Inventory>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == null || e.Buid == CurrentTenantId);
+        modelBuilder.Entity<ProductAttachment>().HasQueryFilter(e =>
+            CurrentTenantId == null || e.Inventory.Buid == null || e.Inventory.Buid == CurrentTenantId);
+        modelBuilder.Entity<SupplierPurchaseHistory>().HasQueryFilter(e => CurrentTenantId == null ||
+            (e.Product.Buid == null || e.Product.Buid == CurrentTenantId) &&
+            (e.Supplier.Buid == null || e.Supplier.Buid == CurrentTenantId));
+        modelBuilder.Entity<SupplierQuotedItem>().HasQueryFilter(e =>
+            CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<EmailConfiguration>().HasQueryFilter(e =>
+            CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<EmailIngest>().HasQueryFilter(e =>
+            CurrentTenantId == null || e.EmailConfiguration.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<Contact>().HasQueryFilter(e => CurrentTenantId == null ||
+            (e.CustomerId != null || e.SupplierId != null) &&
+            (e.CustomerId == null || e.Customer!.Buid == null || e.Customer.Buid == CurrentTenantId) &&
+            (e.SupplierId == null || e.Supplier!.Buid == null || e.Supplier.Buid == CurrentTenantId));
 
         // LeadItem.ExtraFields (partial property in LeadItem.Extra.cs): verbatim
         // unrecognized customer-document columns, stored as jsonb.

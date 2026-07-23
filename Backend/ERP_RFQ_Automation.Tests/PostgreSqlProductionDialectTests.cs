@@ -23,7 +23,7 @@ public sealed class PostgreSqlProductionDialectTests
         var applied = await context.Database.GetAppliedMigrationsAsync();
 
         Assert.Empty(pending);
-        Assert.Contains("20260723031900_AddTenantRowLevelSecurity", applied);
+        Assert.Contains("20260723120000_CompleteTenantRlsCoverage", applied);
 
         await using var connection = await _database.OpenConnectionAsync();
         await using var roleCommand = connection.CreateCommand();
@@ -33,19 +33,149 @@ public sealed class PostgreSqlProductionDialectTests
             """;
         Assert.True((bool)(await roleCommand.ExecuteScalarAsync())!);
 
+        var filteredTables = context.Model.GetEntityTypes()
+            .Where(entity => entity.GetQueryFilter() is not null && (entity.GetSchema() ?? "public") == "public")
+            .Select(entity => entity.GetTableName())
+            .Where(table => table is not null)
+            .Concat(new[]
+            {
+                "Attachments", "Contacts", "EmailIngests", "LeadItems", "OrderItems",
+                "ProductAttachments", "QuoteItems", "RFQItems", "ShipmentItems",
+                "ShipmentStatusHistory", "SupplierPurchaseHistory"
+            })
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(table => table, StringComparer.Ordinal)
+            .ToArray()!;
+
         await using var policyCommand = connection.CreateCommand();
         policyCommand.CommandText = """
-            SELECT count(*)
-            FROM pg_class
-            WHERE relrowsecurity
-              AND relname = ANY (ARRAY[
-                  'Leads', 'RFQ', 'Quotes', 'Orders', 'Shipments', 'CommercialCases',
-                  'LeadStatusHistories', 'commercial_lifecycle_events',
-                  'lifecycle_outbox_messages', 'document_corpora', 'source_documents',
-                  'document_pages', 'document_regions', 'canonical_inquiries',
-                  'canonical_line_items', 'field_evidence']);
+            WITH expected(table_name) AS (SELECT unnest(@tables::text[]))
+            SELECT string_agg(expected.table_name, ', ' ORDER BY expected.table_name)
+            FROM expected
+            LEFT JOIN pg_class table_definition ON table_definition.relname = expected.table_name
+            LEFT JOIN pg_namespace schema_definition
+                ON schema_definition.oid = table_definition.relnamespace
+               AND schema_definition.nspname = 'public'
+            LEFT JOIN pg_policy policy
+                ON policy.polrelid = table_definition.oid
+               AND policy.polname = 'nexora_tenant_isolation'
+            LEFT JOIN pg_roles tenant_role ON tenant_role.rolname = 'nexora_tenant_app'
+            WHERE schema_definition.oid IS NULL
+               OR NOT table_definition.relrowsecurity
+               OR policy.oid IS NULL
+               OR policy.polqual IS NULL
+               OR policy.polwithcheck IS NULL
+               OR NOT tenant_role.oid = ANY(policy.polroles)
+               OR position('nexora.business_unit_id' in pg_get_expr(policy.polqual, policy.polrelid)) = 0
+               OR position('nexora.business_unit_id' in pg_get_expr(policy.polwithcheck, policy.polrelid)) = 0;
             """;
-        Assert.Equal(16L, (long)(await policyCommand.ExecuteScalarAsync())!);
+        policyCommand.Parameters.AddWithValue("tables", filteredTables);
+        Assert.Null((await policyCommand.ExecuteScalarAsync()) as string);
+
+        await using var tenantColumnCommand = connection.CreateCommand();
+        tenantColumnCommand.CommandText = """
+            SELECT string_agg(columns.table_name, ', ' ORDER BY columns.table_name)
+            FROM information_schema.columns columns
+            JOIN pg_class table_definition ON table_definition.relname = columns.table_name
+            JOIN pg_namespace schema_definition
+              ON schema_definition.oid = table_definition.relnamespace
+             AND schema_definition.nspname = columns.table_schema
+            WHERE columns.table_schema = 'public'
+              AND columns.column_name = ANY(ARRAY[
+                  'BusinessUnitID', 'BusinessUnitId', 'business_unit_id',
+                  'BUID', 'Buid', 'buid'])
+              AND NOT table_definition.relrowsecurity;
+            """;
+        Assert.Null((await tenantColumnCommand.ExecuteScalarAsync()) as string);
+
+        await using var privilegeCommand = connection.CreateCommand();
+        privilegeCommand.CommandText = """
+            SELECT string_agg(table_definition.relname, ', ' ORDER BY table_definition.relname)
+            FROM pg_class table_definition
+            JOIN pg_namespace schema_definition ON schema_definition.oid = table_definition.relnamespace
+            WHERE schema_definition.nspname = 'public'
+              AND table_definition.relkind IN ('r', 'p')
+              AND NOT table_definition.relrowsecurity
+              AND (
+                  has_table_privilege('nexora_tenant_app', table_definition.oid, 'SELECT')
+                  OR has_table_privilege('nexora_tenant_app', table_definition.oid, 'INSERT')
+                  OR has_table_privilege('nexora_tenant_app', table_definition.oid, 'UPDATE')
+                  OR has_table_privilege('nexora_tenant_app', table_definition.oid, 'DELETE'));
+            """;
+        Assert.Null((await privilegeCommand.ExecuteScalarAsync()) as string);
+
+        await using var deniedTableCommand = connection.CreateCommand();
+        deniedTableCommand.CommandText = """
+            SELECT table_definition.relrowsecurity,
+                   has_table_privilege('nexora_tenant_app', 'public."__EFMigrationsHistory"', 'SELECT')
+            FROM pg_class table_definition
+            JOIN pg_namespace schema_definition ON schema_definition.oid = table_definition.relnamespace
+            WHERE schema_definition.nspname = 'public' AND table_definition.relname = 'SetCountry';
+            """;
+        await using var privilegeReader = await deniedTableCommand.ExecuteReaderAsync();
+        Assert.True(await privilegeReader.ReadAsync());
+        Assert.True(privilegeReader.GetBoolean(0));
+        Assert.False(privilegeReader.GetBoolean(1));
+        await privilegeReader.DisposeAsync();
+
+        await using var futureTableCommand = connection.CreateCommand();
+        futureTableCommand.CommandText = """
+            CREATE TABLE public.rls_privilege_canary (id bigint PRIMARY KEY);
+            SELECT has_table_privilege('nexora_tenant_app', 'public.rls_privilege_canary', 'SELECT, INSERT, UPDATE, DELETE');
+            """;
+        Assert.False((bool)(await futureTableCommand.ExecuteScalarAsync())!);
+        await using var dropFutureTableCommand = connection.CreateCommand();
+        dropFutureTableCommand.CommandText = "DROP TABLE public.rls_privilege_canary;";
+        await dropFutureTableCommand.ExecuteNonQueryAsync();
+
+        await using var sequencePrivilegeCommand = connection.CreateCommand();
+        sequencePrivilegeCommand.CommandText = """
+            SELECT string_agg(sequence_definition.relname, ', ' ORDER BY sequence_definition.relname)
+            FROM pg_class sequence_definition
+            JOIN pg_namespace schema_definition ON schema_definition.oid = sequence_definition.relnamespace
+            WHERE schema_definition.nspname = 'public'
+              AND sequence_definition.relkind = 'S'
+              AND sequence_definition.relname <> 'CommercialCaseReferenceSequence'
+              AND CASE WHEN sequence_definition.relkind = 'S' THEN has_sequence_privilege(
+                      'nexora_tenant_app',
+                      format('%I.%I', schema_definition.nspname, sequence_definition.relname),
+                      'USAGE, SELECT, UPDATE')
+                  ELSE false END
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM pg_depend dependency
+                  JOIN pg_class table_definition ON table_definition.oid = dependency.refobjid
+                  WHERE dependency.objid = sequence_definition.oid
+                    AND dependency.deptype IN ('a', 'i')
+                    AND table_definition.relrowsecurity);
+            """;
+        Assert.Null((await sequencePrivilegeCommand.ExecuteScalarAsync()) as string);
+
+        await using var mutableSequenceCommand = connection.CreateCommand();
+        mutableSequenceCommand.CommandText = """
+            SELECT string_agg(sequence_definition.relname, ', ' ORDER BY sequence_definition.relname)
+            FROM pg_class sequence_definition
+            JOIN pg_namespace schema_definition ON schema_definition.oid = sequence_definition.relnamespace
+            WHERE schema_definition.nspname = 'public'
+              AND sequence_definition.relkind = 'S'
+              AND CASE WHEN sequence_definition.relkind = 'S' THEN
+                  has_sequence_privilege(
+                      'nexora_tenant_app',
+                      format('%I.%I', schema_definition.nspname, sequence_definition.relname),
+                      'SELECT, UPDATE')
+                  ELSE false END;
+            """;
+        Assert.Null((await mutableSequenceCommand.ExecuteScalarAsync()) as string);
+
+        await using var futureSequenceCommand = connection.CreateCommand();
+        futureSequenceCommand.CommandText = """
+            CREATE SEQUENCE public.rls_sequence_canary;
+            SELECT has_sequence_privilege('nexora_tenant_app', 'public.rls_sequence_canary', 'USAGE, SELECT, UPDATE');
+            """;
+        Assert.False((bool)(await futureSequenceCommand.ExecuteScalarAsync())!);
+        await using var dropFutureSequenceCommand = connection.CreateCommand();
+        dropFutureSequenceCommand.CommandText = "DROP SEQUENCE public.rls_sequence_canary;";
+        await dropFutureSequenceCommand.ExecuteNonQueryAsync();
     }
 
     [Fact]
@@ -163,6 +293,10 @@ public sealed class PostgreSqlProductionDialectTests
                 .ToListAsync();
 
             Assert.Equal(new[] { tenantOne }, visible);
+
+            var visibleChildRows = await tenantContext.LeadItems.IgnoreQueryFilters()
+                .CountAsync(item => item.LeadId == tenantOne || item.LeadId == tenantTwo);
+            Assert.Equal(1, visibleChildRows);
         }
 
         // The RLS test pool has MaxPoolSize=1, so this second scope reuses the same
@@ -188,11 +322,18 @@ public sealed class PostgreSqlProductionDialectTests
 
         await using (var tenantContext = _database.TenantContextWithRls(tenantOne))
         {
-            await Assert.ThrowsAsync<PostgresException>(() => tenantContext.Database.ExecuteSqlRawAsync("""
+            var childException = await Assert.ThrowsAsync<PostgresException>(() =>
+                tenantContext.Database.ExecuteSqlRawAsync("""
+                    INSERT INTO "LeadItems" ("LeadID", "Quantity") VALUES (93002, 1);
+                    """));
+            Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, childException.SqlState);
+
+            var exception = await Assert.ThrowsAsync<PostgresException>(() => tenantContext.Database.ExecuteSqlRawAsync("""
                 INSERT INTO "Leads"
                     ("RFQNo", "RecDate", "LeadSource", "CreatedBy", "CreatedDate", "BusinessUnitID", "EmailIngestsID")
                 VALUES ('rls-forged', now(), 'IntegrationTest', 'tests', now(), 93002, 93002);
                 """));
+            Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
         }
 
         await using var connection = await _database.OpenConnectionAsync();
@@ -230,10 +371,13 @@ public sealed class PostgreSqlProductionDialectTests
                 (@tenantTwo, @messageTwo, 'buyer2@nexora.invalid', @tenantTwo, now());
 
             INSERT INTO "Leads"
-                ("RFQNo", "RecDate", "LeadSource", "CreatedBy", "CreatedDate", "BusinessUnitID", "EmailIngestsID")
+                ("ID", "RFQNo", "RecDate", "LeadSource", "CreatedBy", "CreatedDate", "BusinessUnitID", "EmailIngestsID")
             VALUES
-                (@rfqOne, now(), 'IntegrationTest', 'tests', now(), @tenantOne, @tenantOne),
-                (@rfqTwo, now(), 'IntegrationTest', 'tests', now(), @tenantTwo, @tenantTwo);
+                (@tenantOne, @rfqOne, now(), 'IntegrationTest', 'tests', now(), @tenantOne, @tenantOne),
+                (@tenantTwo, @rfqTwo, now(), 'IntegrationTest', 'tests', now(), @tenantTwo, @tenantTwo);
+
+            INSERT INTO "LeadItems" ("LeadID", "Quantity")
+            VALUES (@tenantOne, 1), (@tenantTwo, 1);
             """;
         seed.Parameters.AddWithValue("tenantOne", tenantOne);
         seed.Parameters.AddWithValue("tenantTwo", tenantTwo);
