@@ -90,6 +90,26 @@ public sealed class LifecycleApplicationServiceTests
     }
 
     [Fact]
+    public async Task UnverifiedAiLead_CannotBeQualified()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(741);
+        var lead = Seed.Lead(context, 1041, 741, leadStatusId: 5051, parseStatus: "NeedsReview");
+        lead.RequiresCommercialReview = true;
+        lead.CommercialFactsVerified = false;
+        Status(context, 5051, 741, "LeadStatus", "UNDER_REVIEW", "Under Review");
+        Status(context, 5052, 741, "LeadStatus", "QUALIFIED", "Qualified");
+        await context.SaveChangesAsync();
+
+        var error = await Assert.ThrowsAsync<LifecycleValidationException>(() => Service(context).TransitionLeadAsync(
+            741, 1041, Actor(), Command("QUALIFIED", 1, "lead-1041-qualified"), false, default));
+
+        Assert.Contains("commercial facts", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(context.CommercialLifecycleEvents);
+        Assert.Equal(5051, context.Leads.Single().LeadStatusId);
+    }
+
+    [Fact]
     public async Task DirectLeadStatusMutationIsRejectedWithoutLifecycleEvent()
     {
         using var db = new TestDb();

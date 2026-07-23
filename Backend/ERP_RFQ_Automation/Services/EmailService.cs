@@ -301,7 +301,7 @@ namespace ERP_RFQ_Automation.Services
             ingest.ParsedAt = DateTime.UtcNow;
             if (leadId > 0)
             {
-                ingest.ParseStatus = STATUS_SUCCESS;
+                ingest.ParseStatus = "NeedsReview";
             }
             else if (ingest.ParseStatus == STATUS_PENDING)
             {
@@ -643,6 +643,9 @@ namespace ERP_RFQ_Automation.Services
                         EmailSource = emailSource,
                         Clientemail = config.EmailAddress,
                         Aiconfidence = (decimal?)ai.OverallConfidence,
+                        ReviewVersion = 1,
+                        RequiresCommercialReview = true,
+                        CommercialFactsVerified = false,
                         CreatedBy = "System",
                         CreatedDate = DateTime.UtcNow,
                         BusinessUnitId = config.BusinessUnitId,

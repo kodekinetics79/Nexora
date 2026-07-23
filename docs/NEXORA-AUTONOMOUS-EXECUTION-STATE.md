@@ -175,3 +175,22 @@ Add a real PostgreSQL integration harness for queue claims, reference allocation
   dead-letter exhaustion. A fault-injection test proves persistence rolls back when queue
   completion is rejected, and a hung-renewal test proves work stops by the known lease
   deadline. Verification after the new tests: **247/247 backend tests pass**.
+
+## Governed extraction review (2026-07-23)
+- AI-extracted leads are now explicitly marked as requiring commercial review and cannot
+  qualify or convert to an RFQ through either conversion API until a human approves their
+  commercial facts. Unified queue, email, manual-document, and watched-folder AI paths
+  all enter review; the migration backfills unconverted legacy AI leads.
+- Review saves preserve `NeedsReview`; approval requires a reason, validates commercial
+  values and product identity, records the authenticated reviewer and timestamp, and
+  advances an optimistic concurrency version. Stale pages fail with HTTP 409.
+- Every save and approval writes exact before/after JSON to an immutable, tenant-scoped
+  audit ledger in the same transaction as the lead changes. PostgreSQL enforces a
+  composite tenant/lead relationship, forced RLS, and application `SELECT/INSERT`-only
+  privileges on the ledger.
+- The review UI submits the expected version, distinguishes save from approval, requires
+  an approval reason, and surfaces API conflict/validation errors. Verification:
+  **254/254 backend tests pass**, the PostgreSQL production lane passes 6/6, the EF model
+  has no migration drift, and the production frontend TypeScript/Vite build passes.
+- Frontend lint remains a certification tooling gap: the repository has a lint script but
+  currently declares neither ESLint nor a configuration.

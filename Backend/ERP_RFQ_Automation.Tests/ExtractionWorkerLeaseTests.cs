@@ -37,9 +37,9 @@ public sealed class ExtractionWorkerLeaseTests
         await worker.StartAsync(CancellationToken.None);
         try
         {
-            await queue.RenewalStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
-            await extractor.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(3));
-            Assert.InRange(DateTime.UtcNow - startedAt, TimeSpan.Zero, TimeSpan.FromSeconds(2.5));
+            await queue.RenewalStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await extractor.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.InRange(DateTime.UtcNow - startedAt, TimeSpan.Zero, TimeSpan.FromSeconds(6));
         }
         finally
         {

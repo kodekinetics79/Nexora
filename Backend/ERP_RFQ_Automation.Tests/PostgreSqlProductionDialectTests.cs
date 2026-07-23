@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.Extraction;
+using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -15,6 +16,57 @@ public sealed class PostgreSqlProductionDialectTests
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
+    public async Task ReviewAudit_IsImmutableAndCannotReferenceAnotherTenantsLead()
+    {
+        await using (var context = _database.ContextFor(null))
+        {
+            Seed.Lead(context, 9_910_001, 9_901, parseStatus: "NeedsReview");
+            Seed.Lead(context, 9_920_001, 9_902, parseStatus: "NeedsReview");
+            await context.SaveChangesAsync();
+            context.Set<LeadReviewAudit>().Add(new LeadReviewAudit
+            {
+                BusinessUnitId = 9_901,
+                LeadId = 9_910_001,
+                FromVersion = 1,
+                ToVersion = 2,
+                Action = "save",
+                ReviewedBy = "database-test",
+                BeforeJson = "{}",
+                AfterJson = "{}",
+                ReviewedOn = DateTime.UtcNow
+            });
+            await context.SaveChangesAsync();
+        }
+
+        await using var connection = await _database.OpenConnectionAsync();
+        await using var update = connection.CreateCommand();
+        update.CommandText = "UPDATE public.\"LeadReviewAudits\" SET \"Action\" = 'approve' WHERE \"LeadId\" = 9910001";
+        var updateError = await Assert.ThrowsAsync<PostgresException>(() => update.ExecuteNonQueryAsync());
+        Assert.Equal("55000", updateError.SqlState);
+
+        await using var delete = connection.CreateCommand();
+        delete.CommandText = "DELETE FROM public.\"LeadReviewAudits\" WHERE \"LeadId\" = 9910001";
+        var deleteError = await Assert.ThrowsAsync<PostgresException>(() => delete.ExecuteNonQueryAsync());
+        Assert.Equal("55000", deleteError.SqlState);
+
+        await using var truncate = connection.CreateCommand();
+        truncate.CommandText = "TRUNCATE TABLE public.\"LeadReviewAudits\"";
+        var truncateError = await Assert.ThrowsAsync<PostgresException>(() => truncate.ExecuteNonQueryAsync());
+        Assert.Equal("55000", truncateError.SqlState);
+
+        await using var mismatch = connection.CreateCommand();
+        mismatch.CommandText = """
+            INSERT INTO public."LeadReviewAudits"
+                ("BusinessUnitId", "LeadId", "FromVersion", "ToVersion", "Action",
+                 "ReviewedBy", "BeforeJson", "AfterJson", "ReviewedOn")
+            VALUES (9901, 9920001, 1, 2, 'save', 'database-test', '{}', '{}', now())
+            """;
+        var mismatchError = await Assert.ThrowsAsync<PostgresException>(() => mismatch.ExecuteNonQueryAsync());
+        Assert.Equal(PostgresErrorCodes.ForeignKeyViolation, mismatchError.SqlState);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
     public async Task AllMigrationsApplyToAnEmptyPostgreSqlDatabase()
     {
         await using var context = _database.ContextFor(null);
@@ -24,6 +76,7 @@ public sealed class PostgreSqlProductionDialectTests
 
         Assert.Empty(pending);
         Assert.Contains("20260723120000_CompleteTenantRlsCoverage", applied);
+        Assert.Contains("20260723130000_GovernExtractionReview", applied);
 
         await using var connection = await _database.OpenConnectionAsync();
         await using var roleCommand = connection.CreateCommand();

@@ -30,6 +30,9 @@ export interface LeadResponseDTO {
   isRejected: boolean;
   aiconfidence: number;
   itemCount: number;
+  reviewVersion: number;
+  requiresCommercialReview: boolean;
+  commercialFactsVerified: boolean;
   headerRemarks?: string;
   opportunityNo?: string;
   biddingDecision?: string;

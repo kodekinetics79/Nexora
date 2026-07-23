@@ -561,7 +561,9 @@ public sealed class LeadPersister : ILeadPersister
         var metadata = ExtractionJobMetadata.TryLoad(job);
 
         var now = DateTime.UtcNow;
-        var parseStatus = outcome.Status == ExtractionOutcomeStatus.NeedsReview ? "NeedsReview" : "Success";
+        // AI-derived commercial facts always require a human approval before promotion,
+        // regardless of model confidence. Confidence still explains why review is needed.
+        var parseStatus = "NeedsReview";
         var ingest = await ResolveIngestAsync(job, metadata, parseStatus, now, ct);
 
         var reviewNote = outcome.Status == ExtractionOutcomeStatus.NeedsReview
@@ -789,6 +791,9 @@ public sealed class LeadPersister : ILeadPersister
             EmailSource = Truncate(metadata?.EmailSource ?? job.FileType, 255),
             Clientemail = metadata?.ClientEmail ?? "extraction@pipeline.local",
             Aiconfidence = ClampConfidence(ai.OverallConfidence),
+            ReviewVersion = 1,
+            RequiresCommercialReview = true,
+            CommercialFactsVerified = false,
             // WP-BOQ foundation: document-level "product" | "service" | "mixed"
             // classification (partial property; column added by a lead migration).
             InquiryType = NormalizeInquiryType(ai.InquiryType),

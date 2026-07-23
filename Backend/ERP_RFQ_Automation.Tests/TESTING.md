@@ -39,15 +39,21 @@ The suite targets the platform's highest-risk logic rather than trivial getters/
 - Master data (nullable `Buid`): a scoped context sees own-tenant **and** shared
   (null-`Buid`) rows but not the other tenant's; a null tenant sees every row.
 
-### Review workbench upsert (`LeadReviewUpsertTests`, 11)
+### Review workbench upsert (`LeadReviewUpsertTests`, 15)
 Exercises the real `LeadRepository.SubmitLeadReviewAsync` against SQLite (no EF mocking):
 existing item updated in place; new item (null id) inserted; omitted item deleted;
-`NoOfLineItems` recomputed across insert+delete; `EmailIngests.ParseStatus` flips
-`NeedsReview` → `Success`; `approve` sets `LeadStatusId = 24` while `save` leaves it null;
-header fields applied only when non-null; the `[NEEDS REVIEW]` marker is stripped from
-`HeaderRemarks` when no remark is supplied; a foreign/stale item id is ignored while
-unreferenced real items are removed ("opt-in survival"); a cross-tenant lead is not found
-and returns null without mutating it.
+`NoOfLineItems` recomputed across insert+delete; save preserves `NeedsReview` while
+approval flips it to `Success`; header fields apply only when non-null; the review marker
+survives save and is stripped on approval; a foreign/stale item id fails closed without
+deleting real items; and a cross-tenant lead is not found or mutated. Governance cases
+prove each write increments the expected version and creates one immutable before/after
+audit attributed to the reviewer, stale versions leave data untouched, and approval
+rejects invalid commercial values before marking facts verified. Omitted versions fail
+closed, and after-images contain the assigned, distinct IDs for newly inserted lines.
+
+### Commercial-review promotion gates (`LeadConversionGovernanceTests`, lifecycle suite)
+- Direct intelligence conversion cannot create an RFQ from unverified AI commercial facts.
+- The governed lifecycle rejects `UNDER_REVIEW -> QUALIFIED` until those facts are approved.
 
 ### Chunked extraction invariants (`ChunkedExtractionServiceTests`, 12)
 Drives `ChunkedExtractionService` with a scripted LLM: item-count conservation (Σ chunk
@@ -94,6 +100,8 @@ Pre-existing; left untouched.
   PostgreSQL with SQLSTATE `42501`; explicit service transactions work, missing tenant
   state fails closed, and transaction-local role/GUC state does not leak through a reused
   pooled connection.
+- The extraction-review audit rejects update/delete with SQLSTATE `55000`, and its
+  composite tenant/lead foreign key rejects cross-tenant attribution with SQLSTATE `23503`.
 
 ### Tenant claim boundary (`TenantClaimGuardMiddlewareTests`)
 - Authenticated tenant API requests with missing, zero, or malformed `businessUnitId`

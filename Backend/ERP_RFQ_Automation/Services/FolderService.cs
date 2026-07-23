@@ -293,6 +293,9 @@ namespace ERP_RFQ_Automation.Services
                             EmailSource = "Aramco RFP Document",
                             Clientemail = "",
                             Aiconfidence = (decimal?)extractionResult.OverallConfidence,
+                            ReviewVersion = 1,
+                            RequiresCommercialReview = true,
+                            CommercialFactsVerified = false,
                             CreatedBy = "System",
                             CreatedDate = DateTime.UtcNow,
                             BusinessUnitId = defaultConfig.BusinessUnitId,
@@ -319,7 +322,7 @@ namespace ERP_RFQ_Automation.Services
                         await SaveAttachmentsAsync(fileStreamData, lead.Id);
 
                         dummyIngest.ParsedAt = DateTime.UtcNow;
-                        dummyIngest.ParseStatus = "Success";
+                        dummyIngest.ParseStatus = "NeedsReview";
                         await _context.SaveChangesAsync();
 
                         _logger.LogInformation("Successfully created Aramco lead {LeadId} with {ItemCount} items ({MfgCount} with manufacturer info) from {FileName}.", 
@@ -661,6 +664,9 @@ namespace ERP_RFQ_Automation.Services
                             EmailSource      = GetFileTypeLabel(ext),
                             Clientemail      = "",
                             Aiconfidence     = (decimal?)ai.OverallConfidence,
+                            ReviewVersion = 1,
+                            RequiresCommercialReview = true,
+                            CommercialFactsVerified = false,
                             CreatedBy        = "System",
                             CreatedDate      = DateTime.UtcNow,
                             BusinessUnitId   = defaultConfig.BusinessUnitId,
@@ -687,7 +693,7 @@ namespace ERP_RFQ_Automation.Services
                         await SaveAttachmentsAsync(fileStreamData, lead.Id);
 
                         dummyIngest.ParsedAt   = DateTime.UtcNow;
-                        dummyIngest.ParseStatus = "Success";
+                        dummyIngest.ParseStatus = "NeedsReview";
                         await _context.SaveChangesAsync();
 
                         _logger.LogInformation("Successfully created SEC lead {LeadId} with {ItemCount} items ({MfgCount} with manufacturer) from {FileName}.", 

@@ -31,6 +31,9 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         public long? LeadStatusId { get; set; }
         public bool IsAccepted => LeadStatusId == 24;
         public bool IsRejected => LeadStatusId == 25;
+        public long ReviewVersion { get; set; }
+        public bool RequiresCommercialReview { get; set; }
+        public bool CommercialFactsVerified { get; set; }
 
         // WP-BOQ foundation: "product" | "service" | "mixed" | null (unclassified).
         public string? InquiryType { get; set; }

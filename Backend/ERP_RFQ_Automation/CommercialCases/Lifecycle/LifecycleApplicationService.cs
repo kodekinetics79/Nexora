@@ -82,6 +82,10 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
                 var currentCode = LifecyclePolicy.Canonicalize(aggregateType, aggregate.CurrentStatus?.SetupCode, aggregate.CurrentStatus?.SetupValue);
                 var targetCode = LifecyclePolicy.Canonicalize(aggregateType, target.SetupCode, target.SetupValue);
                 ValidateTransition(aggregateType, currentCode, targetCode, command.ReasonCode, reopen);
+                if (aggregateType == LeadAggregate && targetCode == "QUALIFIED"
+                    && aggregate.RequiresCommercialReview && !aggregate.CommercialFactsVerified)
+                    throw new LifecycleValidationException(
+                        "AI-extracted commercial facts must be approved before the lead can be qualified.");
 
                 if (_db.Database.IsNpgsql())
                 {
@@ -346,6 +350,8 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
             CurrentStatus = lead.LeadStatus;
             PreviousStatusId = lead.LeadStatusId;
             Version = lead.LifecycleVersion;
+            RequiresCommercialReview = lead.RequiresCommercialReview;
+            CommercialFactsVerified = lead.CommercialFactsVerified;
         }
         private LifecycleAggregate(Rfq rfq)
         {
@@ -365,6 +371,8 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
         public SetupMaster? CurrentStatus { get; }
         public long? PreviousStatusId { get; }
         public int Version { get; private set; }
+        public bool RequiresCommercialReview { get; }
+        public bool CommercialFactsVerified { get; }
         public static LifecycleAggregate ForLead(Lead lead) => new(lead);
         public static LifecycleAggregate ForRfq(Rfq rfq) => new(rfq);
         public void SetStatus(long statusId)

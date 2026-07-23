@@ -117,6 +117,7 @@ const ExtractionReviewDetailPage: React.FC = () => {
   const [items, setItems] = useState<ReviewLineItem[]>([]);
   const [newRowSeq, setNewRowSeq] = useState(-1);
   const [approveDialogOpen, setApproveDialogOpen] = useState(false);
+  const [approvalReason, setApprovalReason] = useState('Verified against the source document.');
 
   // Seed editable state once the lead loads.
   useEffect(() => {
@@ -163,6 +164,8 @@ const ExtractionReviewDetailPage: React.FC = () => {
 
   const buildPayload = (action: 'save' | 'approve'): SubmitReviewPayload => ({
     action,
+    expectedVersion: lead?.reviewVersion ?? 0,
+    reason: action === 'approve' ? approvalReason.trim() : undefined,
     header: {
       rfqno: header.rfqno || undefined,
       buyersName: header.buyersName || undefined,
@@ -195,15 +198,20 @@ const ExtractionReviewDetailPage: React.FC = () => {
       extractionReviewService.submitReview(Number(id), buildPayload(action)),
     onSuccess: (_data, action) => {
       enqueueSnackbar(
-        action === 'approve' ? 'Extraction approved successfully' : 'Corrections saved — cleared from the review queue',
+        action === 'approve' ? 'Extraction approved successfully' : 'Corrections saved and kept in the review queue',
         { variant: 'success' },
       );
       queryClient.invalidateQueries({ queryKey: ['needs-review'] });
       queryClient.invalidateQueries({ queryKey: ['needs-review-detail', Number(id)] });
       navigate('/procurement/extraction/review');
     },
-    onError: (err: any) =>
-      enqueueSnackbar(err?.response?.data?.message || err?.response?.data || 'Failed to submit review', { variant: 'error' }),
+    onError: (err: any) => {
+      const data = err?.response?.data;
+      const validationMessage = data?.errors
+        ? Object.values(data.errors).flat().find((value): value is string => typeof value === 'string')
+        : undefined;
+      enqueueSnackbar(data?.error || data?.message || validationMessage || 'Failed to submit review', { variant: 'error' });
+    },
   });
 
   const isSubmitting = mutation.isPending;
@@ -528,6 +536,17 @@ const ExtractionReviewDetailPage: React.FC = () => {
             Approving confirms the extracted data for <strong>{header.rfqno || `document #${lead.id}`}</strong> is correct.
             It will be removed from the review queue and released downstream.
           </Typography>
+          <TextField
+            autoFocus
+            fullWidth
+            required
+            multiline
+            minRows={2}
+            label="Approval reason"
+            value={approvalReason}
+            onChange={(event) => setApprovalReason(event.target.value)}
+            sx={{ mt: 2 }}
+          />
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
           <Button onClick={() => setApproveDialogOpen(false)} color="inherit" disabled={isSubmitting}>Cancel</Button>
@@ -536,7 +555,7 @@ const ExtractionReviewDetailPage: React.FC = () => {
             color="success"
             startIcon={isSubmitting ? <CircularProgress size={18} color="inherit" /> : <ApproveIcon />}
             onClick={() => { setApproveDialogOpen(false); mutation.mutate('approve'); }}
-            disabled={isSubmitting}
+            disabled={isSubmitting || !approvalReason.trim()}
           >
             Approve
           </Button>

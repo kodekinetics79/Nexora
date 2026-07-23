@@ -243,6 +243,32 @@ public partial class ErpRfqAutomationContext
             entity.Property(e => e.Weight).HasDefaultValue(1.0);
         });
 
+        modelBuilder.Entity<Lead>(entity =>
+        {
+            entity.Property(e => e.ReviewVersion).HasDefaultValue(1L).IsConcurrencyToken();
+            entity.Property(e => e.RequiresCommercialReview).HasDefaultValue(false);
+            entity.Property(e => e.CommercialFactsVerified).HasDefaultValue(false);
+            entity.Property(e => e.ReviewApprovedBy).HasMaxLength(255);
+        });
+        modelBuilder.Entity<LeadReviewAudit>(entity =>
+        {
+            entity.ToTable("LeadReviewAudits");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Action).HasMaxLength(20).IsRequired();
+            entity.Property(e => e.ReviewedBy).HasMaxLength(255).IsRequired();
+            entity.Property(e => e.Reason).HasMaxLength(1000);
+            entity.Property(e => e.BeforeJson).HasColumnType("jsonb").IsRequired();
+            entity.Property(e => e.AfterJson).HasColumnType("jsonb").IsRequired();
+            entity.Property(e => e.ReviewedOn).HasDefaultValueSql("now()");
+            entity.HasIndex(e => new { e.BusinessUnitId, e.LeadId, e.ToVersion }).IsUnique()
+                .HasDatabaseName("UX_LeadReviewAudits_BU_Lead_Version");
+            entity.HasOne(e => e.Lead).WithMany(e => e.ReviewAudits)
+                .HasForeignKey(e => new { e.BusinessUnitId, e.LeadId })
+                .HasPrincipalKey(e => new { e.BusinessUnitId, e.Id })
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        });
+
         // ==== Platform-Owner control plane (ADR-0005) — non-tenant, "platform" schema ====
         modelBuilder.Entity<ERP_RFQ_Automation.Platform.Models.PlatformUser>(e =>
         {

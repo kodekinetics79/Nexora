@@ -13,5 +13,6 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         public int ItemCount { get; set; }
         public string? ReviewReason { get; set; }
         public DateTime? ReceivedOn { get; set; }
+        public long ReviewVersion { get; set; }
     }
 }

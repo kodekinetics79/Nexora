@@ -107,6 +107,10 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             throw new InvalidOperationException(
                 $"This lead is flagged as a possible duplicate of lead #{lead.DuplicateOfLeadId} — resolve the duplicate flag first.");
 
+        if (lead.RequiresCommercialReview && !lead.CommercialFactsVerified)
+            throw new InvalidOperationException(
+                "AI-extracted commercial facts must be approved in extraction review before RFQ conversion.");
+
         var already = await _db.Rfqs
             .FirstOrDefaultAsync(r => r.LeadId == leadId && r.BusinessUnitId == businessUnitId, ct);
         if (already != null)

@@ -178,7 +178,7 @@ public class LeadPersisterSplitTests : IDisposable
                 Assert.Contains("Subject: RFQ for pumps", lead.HeaderRemarks);
 
                 var ingest = await assertCtx.EmailIngests.SingleAsync(e => e.Id == ingestId);
-                Assert.Equal("Success", ingest.ParseStatus);
+                Assert.Equal("NeedsReview", ingest.ParseStatus);
                 Assert.NotNull(ingest.ParsedAt);
             }
         }

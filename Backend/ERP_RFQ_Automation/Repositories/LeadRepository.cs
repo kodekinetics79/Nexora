@@ -8,9 +8,20 @@ using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using System.Text.Json;
 
 namespace ERP_RFQ_Automation.Repositories
 {
+    public sealed class LeadReviewConflictException : Exception
+    {
+        public LeadReviewConflictException(string message) : base(message) { }
+    }
+
+    public sealed class LeadReviewValidationException : Exception
+    {
+        public LeadReviewValidationException(string message) : base(message) { }
+    }
+
     public class LeadRepository : ILeadRepository
     {
         private readonly ErpRfqAutomationContext _context;
@@ -130,6 +141,9 @@ namespace ERP_RFQ_Automation.Repositories
                 EmailSource = l.EmailSource,
                 Clientemail = l.Clientemail,
                 LeadStatusId = l.LeadStatusId,
+                ReviewVersion = l.ReviewVersion,
+                RequiresCommercialReview = l.RequiresCommercialReview,
+                CommercialFactsVerified = l.CommercialFactsVerified,
                 InquiryType = l.InquiryType, // WP-BOQ: service/mixed list badge
                 DuplicateStatus = l.DuplicateStatus,
                 DuplicateOfLeadId = l.DuplicateOfLeadId,
@@ -183,6 +197,10 @@ namespace ERP_RFQ_Automation.Repositories
             if (lead.DuplicateStatus is "suspected" or "confirmed")
                 throw new InvalidOperationException(
                     $"This lead is flagged as a possible duplicate of lead #{lead.DuplicateOfLeadId} — resolve the duplicate flag first.");
+
+            if (lead.RequiresCommercialReview && !lead.CommercialFactsVerified)
+                throw new InvalidOperationException(
+                    "AI-extracted commercial facts must be approved in extraction review before RFQ conversion.");
 
             // Idempotency: never create a second RFQ for the same lead.
             var already = await _context.Rfqs
@@ -625,6 +643,9 @@ namespace ERP_RFQ_Automation.Repositories
                 EmailSource = lead.EmailSource,
                 Clientemail = lead.Clientemail,
                 LeadStatusId = lead.LeadStatusId,
+                ReviewVersion = lead.ReviewVersion,
+                RequiresCommercialReview = lead.RequiresCommercialReview,
+                CommercialFactsVerified = lead.CommercialFactsVerified,
 
                 // WP-BOQ: service/mixed badge
                 InquiryType = lead.InquiryType,
@@ -741,7 +762,8 @@ namespace ERP_RFQ_Automation.Repositories
                     l.Aiconfidence,
                     l.HeaderRemarks,
                     ReceivedOn = (DateTime?)l.EmailIngests.CreatedOn,
-                    ItemCount = l.LeadItems.Count
+                    ItemCount = l.LeadItems.Count,
+                    l.ReviewVersion
                 })
                 .ToListAsync();
 
@@ -756,17 +778,19 @@ namespace ERP_RFQ_Automation.Repositories
                 Aiconfidence = l.Aiconfidence,
                 ItemCount = l.ItemCount,
                 ReviewReason = ExtractReviewReason(l.HeaderRemarks),
-                ReceivedOn = l.ReceivedOn
+                ReceivedOn = l.ReceivedOn,
+                ReviewVersion = l.ReviewVersion
             }).ToList();
 
             return (dtos, totalCount);
         }
 
-        // Persist reviewer corrections against a low-confidence lead and clear the review flag.
+        // Persist reviewer corrections against a low-confidence lead; only approval clears the review flag.
         // Loads the aggregate TRACKED (LeadItems + EmailIngests) so header/item edits, inserts and
         // deletes all flush in a single SaveChanges. Tenant ownership is enforced by the global
         // query filter; any BusinessUnitId in the payload is ignored by design.
-        public async Task<LeadResponseDTO?> SubmitLeadReviewAsync(long id, long businessUnitId, LeadReviewSubmitDTO review)
+        public async Task<LeadResponseDTO?> SubmitLeadReviewAsync(
+            long id, long businessUnitId, LeadReviewSubmitDTO review, string reviewedBy = "system")
         {
             var lead = await _context.Leads
                 .Include(l => l.LeadItems)
@@ -774,6 +798,35 @@ namespace ERP_RFQ_Automation.Repositories
                 .FirstOrDefaultAsync(l => l.Id == id && l.BusinessUnitId == businessUnitId);
 
             if (lead == null) return null;
+
+            var action = review.Action?.Trim().ToLowerInvariant();
+            if (action is not ("save" or "approve"))
+                throw new LeadReviewValidationException("Action must be 'save' or 'approve'.");
+            if (string.IsNullOrWhiteSpace(reviewedBy))
+                throw new LeadReviewValidationException("Reviewer identity is required.");
+            if (!review.ExpectedVersion.HasValue)
+                throw new LeadReviewValidationException("Expected review version is required.");
+            if (review.ExpectedVersion.Value != lead.ReviewVersion)
+                throw new LeadReviewConflictException(
+                    $"Review version {review.ExpectedVersion} is stale; current version is {lead.ReviewVersion}.");
+            if (!string.Equals(lead.EmailIngests?.ParseStatus, "NeedsReview", StringComparison.OrdinalIgnoreCase))
+                throw new LeadReviewConflictException("This lead is no longer awaiting extraction review.");
+
+            var items = review.Items ?? new List<LeadItemReviewDTO>();
+            ValidateReviewItems(items, action);
+            var submittedIds = items.Where(i => i.Id is > 0).Select(i => i.Id!.Value).ToArray();
+            if (submittedIds.Length != submittedIds.Distinct().Count())
+                throw new LeadReviewValidationException("A line item cannot be submitted more than once.");
+            var existingIds = lead.LeadItems.Select(i => i.Id).ToHashSet();
+            var staleIds = submittedIds.Where(idValue => !existingIds.Contains(idValue)).ToArray();
+            if (staleIds.Length > 0)
+                throw new LeadReviewConflictException(
+                    $"Line item(s) {string.Join(", ", staleIds)} are stale or do not belong to this lead.");
+            if (action == "approve" && string.IsNullOrWhiteSpace(review.Reason))
+                throw new LeadReviewValidationException("An approval reason is required.");
+
+            var beforeJson = SerializeReviewSnapshot(lead);
+            var fromVersion = lead.ReviewVersion;
 
             var header = review.Header ?? new LeadReviewHeaderDTO();
 
@@ -797,10 +850,11 @@ namespace ERP_RFQ_Automation.Repositories
 
             // HeaderRemarks: a client-supplied value wins; otherwise strip the review marker
             // from the existing remark so the human note (if any) survives.
-            lead.HeaderRemarks = header.HeaderRemarks ?? StripNeedsReviewPrefix(lead.HeaderRemarks);
+            lead.HeaderRemarks = header.HeaderRemarks ?? (action == "approve"
+                ? StripNeedsReviewPrefix(lead.HeaderRemarks)
+                : lead.HeaderRemarks);
 
             // Upsert items: match existing by Id, insert new (Id null/0), delete the rest.
-            var items = review.Items ?? new List<LeadItemReviewDTO>();
             var keptIds = items.Where(i => i.Id.HasValue && i.Id.Value > 0)
                                .Select(i => i.Id!.Value)
                                .ToHashSet();
@@ -814,7 +868,8 @@ namespace ERP_RFQ_Automation.Repositories
                 if (dto.Id.HasValue && dto.Id.Value > 0)
                 {
                     var existing = lead.LeadItems.FirstOrDefault(li => li.Id == dto.Id.Value);
-                    if (existing == null) continue; // stale/foreign id; ignore rather than trust it
+                    if (existing == null)
+                        throw new LeadReviewConflictException($"Line item {dto.Id.Value} changed during review.");
 
                     // WP-B4 metric: diff BEFORE the upsert overwrites the stored values.
                     var changed = DiffItemFields(existing, dto);
@@ -840,13 +895,66 @@ namespace ERP_RFQ_Automation.Repositories
             // so exclude them when recomputing the resulting line-item count.
             lead.NoOfLineItems = lead.LeadItems.Count(li => !toRemove.Contains(li));
 
-            // Clear the canonical NeedsReview flag regardless of action.
             if (lead.EmailIngests != null)
-                lead.EmailIngests.ParseStatus = "Success";
+                lead.EmailIngests.ParseStatus = action == "approve" ? "Success" : "NeedsReview";
 
-            lead.ModifiedDate = DateTime.UtcNow;
+            lead.CommercialFactsVerified = action == "approve";
+            if (action == "approve")
+            {
+                lead.ReviewApprovedBy = reviewedBy.Trim();
+                lead.ReviewApprovedOn = DateTime.UtcNow;
+            }
+            else
+            {
+                lead.ReviewApprovedBy = null;
+                lead.ReviewApprovedOn = null;
+            }
 
-            await _context.SaveChangesAsync();
+            var reviewedOn = DateTime.UtcNow;
+            lead.ModifiedDate = reviewedOn;
+            lead.ReviewVersion++;
+            var audit = new LeadReviewAudit
+            {
+                BusinessUnitId = businessUnitId,
+                LeadId = lead.Id,
+                FromVersion = fromVersion,
+                ToVersion = lead.ReviewVersion,
+                Action = action,
+                ReviewedBy = reviewedBy.Trim(),
+                Reason = string.IsNullOrWhiteSpace(review.Reason) ? null : review.Reason.Trim(),
+                BeforeJson = beforeJson,
+                AfterJson = "{}",
+                ReviewedOn = reviewedOn
+            };
+
+            var ownsTransaction = _context.Database.CurrentTransaction == null;
+            await using var transaction = ownsTransaction
+                ? await _context.Database.BeginTransactionAsync()
+                : null;
+            try
+            {
+                // The first flush assigns database IDs to inserted lines. The audit is
+                // written by the second flush inside the same transaction, so its after
+                // image is exact without sacrificing atomicity.
+                await _context.SaveChangesAsync();
+                audit.AfterJson = SerializeReviewSnapshot(lead);
+                _context.Set<LeadReviewAudit>().Add(audit);
+                await _context.SaveChangesAsync();
+                if (transaction != null)
+                    await transaction.CommitAsync();
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                if (transaction != null)
+                    await transaction.RollbackAsync();
+                throw new LeadReviewConflictException("The lead changed while this review was being saved. Refresh and retry.");
+            }
+            catch (DbUpdateException)
+            {
+                if (transaction != null)
+                    await transaction.RollbackAsync();
+                throw new LeadReviewConflictException("The review changed while this update was being saved. Refresh and retry.");
+            }
 
             // WP-B4 passive metric (hook b): what the reviewer corrected. Additive,
             // null-safe, and the recorder never throws — review flow is unaffected.
@@ -872,6 +980,77 @@ namespace ERP_RFQ_Automation.Repositories
         // WP-B4: field-level diff between a stored lead item and the reviewer's
         // submission — the exact field set ApplyItemFields writes. Camel-cased
         // names are the metric payload contract (Sla/WAVEB-WIRING.md).
+        private static void ValidateReviewItems(IReadOnlyCollection<LeadItemReviewDTO> items, string action)
+        {
+            if (action == "approve" && items.Count == 0)
+                throw new LeadReviewValidationException("At least one line item is required for approval.");
+
+            foreach (var item in items)
+            {
+                if (action == "approve" && item.Quantity is null or <= 0)
+                    throw new LeadReviewValidationException("Every approved line requires a quantity greater than zero.");
+                if (action == "save" && item.Quantity is <= 0)
+                    throw new LeadReviewValidationException("Quantity must be greater than zero when supplied.");
+                if (item.UnitPrice is < 0)
+                    throw new LeadReviewValidationException("Unit price cannot be negative.");
+                if (item.LeadTime is < 0)
+                    throw new LeadReviewValidationException("Lead time cannot be negative.");
+                if (!string.IsNullOrWhiteSpace(item.Currency)
+                    && (item.Currency.Trim().Length != 3 || !item.Currency.Trim().All(char.IsLetter)))
+                    throw new LeadReviewValidationException("Currency must be a three-letter code.");
+                if (item.UnitPrice.HasValue && string.IsNullOrWhiteSpace(item.Currency))
+                    throw new LeadReviewValidationException("Currency is required when unit price is supplied.");
+                if (action == "approve"
+                    && string.IsNullOrWhiteSpace(item.ProductShortName)
+                    && string.IsNullOrWhiteSpace(item.ItemMaterialCode))
+                    throw new LeadReviewValidationException(
+                        "Each approved line requires a product name or material code.");
+            }
+        }
+
+        private static string SerializeReviewSnapshot(Lead lead, IReadOnlyCollection<LeadItem>? removed = null)
+        {
+            var removedIds = removed?.Select(item => item.Id).ToHashSet() ?? new HashSet<long>();
+            return JsonSerializer.Serialize(new
+            {
+                lead.Id,
+                lead.ReviewVersion,
+                lead.Rfqno,
+                lead.BuyersName,
+                lead.BidClosingDate,
+                lead.OpportunityNo,
+                lead.HeaderRemarks,
+                lead.RequiresCommercialReview,
+                lead.CommercialFactsVerified,
+                lead.ReviewApprovedBy,
+                lead.ReviewApprovedOn,
+                ParseStatus = lead.EmailIngests?.ParseStatus,
+                Items = lead.LeadItems
+                    .Where(item => !removedIds.Contains(item.Id))
+                    .OrderBy(item => item.Id)
+                    .Select(item => new
+                    {
+                        item.Id,
+                        item.LineItemNo,
+                        item.ProductShortName,
+                        item.ProductShortDescription,
+                        item.CommodityProduct,
+                        item.ItemMaterialCode,
+                        item.Currency,
+                        item.UnitOfMeasure,
+                        item.UnitPrice,
+                        item.Quantity,
+                        item.ManufacturerName,
+                        item.ManufacturerPartNumber,
+                        item.AlternateProductName,
+                        item.AlternatePartNumber,
+                        item.ItemText,
+                        item.LeadTime,
+                        item.ExtraFields
+                    })
+            }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        }
+
         private static List<string> DiffItemFields(LeadItem item, LeadItemReviewDTO dto)
         {
             var changed = new List<string>();

@@ -325,6 +325,9 @@ namespace ERP_RFQ_Automation.Services
                         EmailSource = emailSource,
                         Clientemail = "manual@upload.com",
                         Aiconfidence = (decimal?)ai.OverallConfidence,
+                        ReviewVersion = 1,
+                        RequiresCommercialReview = true,
+                        CommercialFactsVerified = false,
                         CreatedBy = "System",
                         CreatedDate = DateTime.UtcNow,
                         BusinessUnitId = businessUnitId,
@@ -377,7 +380,7 @@ namespace ERP_RFQ_Automation.Services
                     await SaveAttachmentsAsync(files, lead.Id);
 
                     // Update ingest status before commit
-                    dummyIngest.ParseStatus = "Success";
+                    dummyIngest.ParseStatus = "NeedsReview";
                     await _context.SaveChangesAsync();
 
                     // Commit transaction - all or nothing

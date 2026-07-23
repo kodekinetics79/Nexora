@@ -5,6 +5,8 @@ using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using System.Security.Claims;
+using ERP_RFQ_Automation.Repositories;
 
 [Route("api/[controller]")]
 [ApiController]
@@ -217,7 +219,7 @@ public class LeadController : ControllerBase
         }
     }
 
-    // Extraction review workbench: submit reviewer corrections and clear the review flag.
+    // Extraction review workbench: save corrections or explicitly approve commercial facts.
     [HttpPut("{id}/review")]
     [RequireModulePermission("Leads", PermissionAction.Edit)]
     public async Task<ActionResult<LeadResponseDTO>> SubmitLeadReview(long id, [FromBody] LeadReviewSubmitDTO review)
@@ -229,14 +231,27 @@ public class LeadController : ControllerBase
             var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
             if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
 
-            var lead = await _repository.SubmitLeadReviewAsync(id, businessUnitId, review);
+            var reviewedBy = User.FindFirstValue(ClaimTypes.NameIdentifier)
+                ?? User.FindFirstValue(ClaimTypes.Email)
+                ?? User.Identity?.Name
+                ?? string.Empty;
+            var lead = await _repository.SubmitLeadReviewAsync(id, businessUnitId, review, reviewedBy);
             if (lead == null) return NotFound($"Lead with ID {id} not found.");
 
             return Ok(lead);
         }
-        catch (Exception ex)
+        catch (LeadReviewConflictException ex)
         {
-            return StatusCode(StatusCodes.Status500InternalServerError, $"Error submitting lead review: {ex.Message}");
+            return Conflict(new { error = ex.Message });
+        }
+        catch (LeadReviewValidationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (Exception)
+        {
+            return StatusCode(StatusCodes.Status500InternalServerError,
+                new { error = "An unexpected error prevented the review from being saved." });
         }
     }
 

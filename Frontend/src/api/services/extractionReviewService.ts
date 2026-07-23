@@ -16,6 +16,7 @@ export interface NeedsReviewItem {
   itemCount: number;
   reviewReason: string | null;
   receivedOn: string | null;
+  reviewVersion: number;
 }
 
 export interface NeedsReviewParams {
@@ -56,6 +57,8 @@ export interface ReviewItemPayload {
 
 export interface SubmitReviewPayload {
   action: 'save' | 'approve';
+  expectedVersion: number;
+  reason?: string;
   header: ReviewHeaderPayload;
   items: ReviewItemPayload[];
 }
