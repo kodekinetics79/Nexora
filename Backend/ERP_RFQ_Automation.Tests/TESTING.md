@@ -6,8 +6,7 @@ xUnit test project for `ERP_RFQ_Automation`. Run from `Backend/`:
 dotnet test ERP_RFQ_Automation.sln
 ```
 
-39 tests, all green. The suite targets the platform's highest-risk logic rather than
-trivial getters/setters.
+The suite targets the platform's highest-risk logic rather than trivial getters/setters.
 
 ## Test infrastructure
 
@@ -24,6 +23,9 @@ trivial getters/setters.
   Lead, plus Setup_Master status rows and Customers).
 - `Support/ExtractionFakes.cs` — a scripted `ILLMService` stub (one response per chunk,
   records prompts) and builders for the verbose positional records, plus a no-op logger.
+- **Disposable PostgreSQL 16** (`Support/PostgreSqlTestDatabase.cs`) applies the real EF
+  migration chain through Testcontainers. These tests require a running Docker engine and
+  carry the `Category=PostgreSQL` trait for an independently selectable CI lane.
 
 ## What is covered
 
@@ -67,23 +69,28 @@ hashes dedup consistently; missing content/hash and blank storage path throw.
 ### Canonical normalizer (`DocumentIntelligence/CanonicalRfqNormalizerTests`, 3)
 Pre-existing; left untouched.
 
-## Deliberately skipped seams (would require production changes or a real Postgres)
+### PostgreSQL production dialect (`PostgreSqlProductionDialectTests`)
+- Applies every migration to an empty PostgreSQL database and verifies the latest model
+  metadata marker is recorded.
+- Runs concurrent `FOR UPDATE SKIP LOCKED` claims and proves workers receive distinct jobs
+  while the per-tenant concurrency cap leaves excess work pending.
+- Creates leads concurrently through raw PostgreSQL and proves permanent NXR references
+  are server-generated, unique, and immutable.
 
-- **`ExtractionQueue.ClaimAsync` / `RenewLease` / `Complete` / `Fail`** — the atomic
-  weighted-fair claim is PostgreSQL-only raw SQL (`FOR UPDATE ... SKIP LOCKED`,
-  `POWER(...)`, `INTERVAL`) with `PostgresException` handling. It cannot run on SQLite and
-  is not meaningfully unit-testable without a real Postgres. It belongs in an integration
-  test with Testcontainers/Postgres. The idempotent `EnqueueAsync` path *is* covered here.
-  The `IsUniqueViolation` catch is also Postgres-specific; the tests reach idempotency via
-  the pre-check path (the DB unique index remains the production backstop), so they never
-  depend on provider-specific exception translation.
+### Tenant claim boundary (`TenantClaimGuardMiddlewareTests`)
+- Authenticated tenant API requests with missing, zero, or malformed `businessUnitId`
+  claims fail with 403 before controllers can trust route/query/body tenant identifiers.
+- Valid tenant claims, anonymous login, and the separately authorized platform control
+  plane continue through their intended paths.
+
+## Deliberately skipped seams
+
+- **Remaining queue transitions** — claim and cap behavior now run on PostgreSQL; lease
+  renewal, completion, retry/backoff, expired-lease reclaim, and dead-letter transitions
+  remain expansion targets for the production-dialect lane.
 - **`ExtractionWorker` end-to-end** (claim → extract → persist → complete/backoff) — an
   `IHostedService` that composes the queue, the reader and the LLM; an integration-test
   target, not a unit target.
 - **`ChunkedExtractionService` private helpers** (`BuildChunks`, `ComputeOverallConfidence`)
   are private; they are covered indirectly through the public API (chunk counts asserted
   via `CallCount` + diagnostics, thresholds via outcome status) rather than via reflection.
-
-No production source file, `Program.cs`, or the main `.csproj` was modified to make code
-testable. Only the test project and the solution's existing test-project reference were
-used.

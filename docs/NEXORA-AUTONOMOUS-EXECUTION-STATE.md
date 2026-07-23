@@ -107,3 +107,24 @@ Add a real PostgreSQL integration harness for queue claims, reference allocation
 - Consultant conditions retained as P1: legacy email/manual/folder paths now land on the configured volume but still use raw file writes rather than the immutable writer; FolderService attachment fan-out needs transaction/idempotency hardening; legacy absolute attachment paths require an explicit copy/backfill during deployment.
 - Render deployment follow-up: the first deployment of `743962b` rolled back before the new attachment route became live. Mount enforcement was revised to use Render's documented mount-path contract instead of undocumented `/proc` representation, and is now explicitly controlled by `Storage:EnforcePersistentMount`; the Blueprint service name was aligned to `nexora-fyjw`.
 - Independent board verdict remains **FAIL for enterprise certification**. This wave closes the direct attachment leak and creates a durable Render profile, but object storage/horizontal scaling, DB RLS/Postgres negative tests, page-complete evidence persistence, AI gateway/metering, finance entities, browser/load/restore testing, and alternate deployment certification remain P0/P1 conditions.
+
+## PostgreSQL certification and tenant claim boundary (2026-07-23)
+- Added a Testcontainers PostgreSQL 16 fixture that applies the complete production EF
+  migration chain to an empty database. The suite now executes production-only queue SQL
+  and database triggers rather than inferring their behavior from SQLite.
+- Certified concurrent `FOR UPDATE SKIP LOCKED` claims: workers receive distinct jobs and
+  the per-tenant cap leaves excess work pending. Certified 12 concurrent lead inserts:
+  NXR references are server-generated, unique, and immutable.
+- Added the zero-SQL `SynchronizeProductionModelMetadata` migration. The preceding
+  hand-authored inventory migration lacked generated target-model metadata, causing EF 9
+  to reject clean-database `MigrateAsync`; the new marker repairs migration validation
+  without changing schema or data.
+- Added `TenantClaimGuardMiddleware`: authenticated non-platform API traffic now receives
+  403 when `businessUnitId` is missing, malformed, zero, or negative, closing controller
+  fallbacks that previously trusted request-supplied tenant IDs. Platform routes retain
+  their independent audience/policy boundary and anonymous login remains available.
+- Verification: **243/243 backend tests pass** in one run, including the disposable
+  PostgreSQL lane; an idempotent SQL migration script generates through the new marker.
+- RLS certification remains open. Do not enable policies until the normal app role,
+  privileged maintenance role, explicit transaction/session GUC, and background-worker
+  tenant iteration are implemented and proven against Neon-compatible pooling.

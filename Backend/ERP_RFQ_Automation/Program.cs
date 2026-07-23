@@ -24,6 +24,7 @@ using ERP_RFQ_Automation.Intelligence.Decision;
 using ERP_RFQ_Automation.Boq;
 using ERP_RFQ_Automation.Infrastructure;
 using ERP_RFQ_Automation.Infrastructure.Storage;
+using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.CommercialCases;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.CommercialRouting;
@@ -375,6 +376,8 @@ app.UseCors("DefaultCors");
 app.UseAuthentication();
 // Tenant + correlation-id logging scope — AFTER auth so the businessUnitId claim exists.
 app.UsePlatformObservability();
+// Authenticated tenant routes fail closed when a token has no valid tenant claim.
+app.UseTenantClaimGuard();
 app.UseAuthorization();
 // Built-in rate limiter — AFTER auth so the per-tenant partition uses the claim.
 app.UseRateLimiter();
