@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.DTOs.QuoteDTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
@@ -7,6 +8,7 @@ using ERP_RFQ_Automation.Sla;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -22,12 +24,32 @@ namespace ERP_RFQ_Automation.Controllers
         private readonly IQuoteRepository _repository;
         private readonly IQuoteService _quoteService;
         private readonly IQuoteOutcomeService _outcomeService;
+        private readonly ILifecycleApplicationService _lifecycle;
+        private readonly ErpRfqAutomationContext _context;
+        private readonly ILogger<QuoteController>? _logger;
 
-        public QuoteController(IQuoteRepository repository, IQuoteService quoteService, IQuoteOutcomeService outcomeService)
+        public QuoteController(
+            IQuoteRepository repository,
+            IQuoteService quoteService,
+            IQuoteOutcomeService outcomeService,
+            ILifecycleApplicationService lifecycle,
+            ErpRfqAutomationContext context,
+            ILogger<QuoteController>? logger = null)
         {
             _repository = repository;
             _quoteService = quoteService;
             _outcomeService = outcomeService;
+            _lifecycle = lifecycle;
+            _context = context;
+            _logger = logger;
+        }
+
+        private ObjectResult Unexpected(Exception exception, string operation)
+        {
+            var correlationId = HttpContext.TraceIdentifier;
+            _logger?.LogError(exception, "Quote operation {Operation} failed. CorrelationId={CorrelationId}", operation, correlationId);
+            return StatusCode(StatusCodes.Status500InternalServerError,
+                new { message = "An unexpected error occurred.", correlationId });
         }
 
         [HttpGet]
@@ -59,7 +81,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Failed to fetch quotes: {ex.Message}");
+                return Unexpected(ex, "list");
             }
         }
 
@@ -82,9 +104,17 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 return NotFound();
             }
+            catch (LifecycleValidationException ex)
+            {
+                return Conflict(ex.Message);
+            }
+            catch (LifecycleConflictException ex)
+            {
+                return Conflict(ex.Message);
+            }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving quote: {ex.Message}");
+                return Unexpected(ex, "detail");
             }
         }
 
@@ -95,16 +125,48 @@ namespace ERP_RFQ_Automation.Controllers
             try
             {
                 var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                if (claimBUId > 0) request.BusinessUnitId = claimBUId;
+                if (claimBUId <= 0) return BadRequest("Business Unit ID is required.");
+                if (!request.RfqId.HasValue) return BadRequest("An RFQ is required to create a Quote.");
+                request.BusinessUnitId = claimBUId;
+                request.CreatedBy = ActorEmail();
 
-                if (request.BusinessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+                var rfq = await _context.Rfqs.Include(item => item.Lead)
+                    .SingleOrDefaultAsync(item => item.Id == request.RfqId && item.BusinessUnitId == claimBUId);
+                if (rfq == null) return BadRequest("The selected RFQ was not found in this tenant.");
+                if (rfq.Lead == null) return Conflict("The selected RFQ is not linked to a commercial case.");
+                rfq.InheritCommercialIdentity(rfq.Lead);
+                if (request.CustomerId.HasValue && request.CustomerId != rfq.CustomerId)
+                    return Conflict("The selected customer does not match the RFQ commercial identity.");
+                request.CustomerId = rfq.CustomerId;
 
-                var quote = await _quoteService.CreateQuoteAsync(request);
+                await using var transaction = await _context.Database.BeginTransactionAsync();
+                var created = await _quoteService.CreateQuoteAsync(request);
+                var quoteEntity = await _context.Quotes.SingleAsync(item => item.Id == created.Id);
+                quoteEntity.InheritCommercialIdentity(rfq);
+                await _context.SaveChangesAsync();
+                await transaction.CommitAsync();
+                var quote = await _repository.GetByIdAsync(created.Id, claimBUId);
                 return CreatedAtAction(nameof(GetById), new { id = quote.Id, businessUnitId = quote.BusinessUnitId }, quote);
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(ex.Message);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Conflict(ex.Message);
+            }
+            catch (LifecycleValidationException ex)
+            {
+                return BadRequest(ex.Message);
+            }
+            catch (LifecycleConflictException ex)
+            {
+                return Conflict(ex.Message);
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error creating quote: {ex.Message}");
+                return Unexpected(ex, "create");
             }
         }
 
@@ -116,6 +178,16 @@ namespace ERP_RFQ_Automation.Controllers
 
             try
             {
+                var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+                if (businessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+                var existing = await _context.Quotes.AsNoTracking()
+                    .SingleOrDefaultAsync(item => item.Id == id && item.BusinessUnitId == businessUnitId);
+                if (existing == null) return NotFound();
+                if (request.CustomerId != existing.CustomerId)
+                    return Conflict("Quote customer identity cannot be changed by an ordinary update.");
+                if (request.StatusId != existing.StatusId)
+                    return Conflict("Quote status must be changed through the governed lifecycle command.");
+                request.ModifiedBy = ActorEmail();
                 var result = await _quoteService.UpdateQuoteAsync(id, request);
                 return Ok(result);
             }
@@ -125,7 +197,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(ex.Message);
+                return Unexpected(ex, "update");
             }
         }
 
@@ -146,7 +218,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error deleting quote: {ex.Message}");
+                return Unexpected(ex, "delete");
             }
         }
 
@@ -197,6 +269,14 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 return NotFound();
             }
+            catch (LifecycleValidationException ex)
+            {
+                return Conflict(ex.Message);
+            }
+            catch (LifecycleConflictException ex)
+            {
+                return Conflict(ex.Message);
+            }
         }
 
         // -------- POST /api/Quote/{id}/revise (revisions-lite, WP-B4) --------
@@ -244,23 +324,50 @@ namespace ERP_RFQ_Automation.Controllers
             }
         }
 
-        [HttpPost("{id}/status")]
-        [RequireModulePermission("Quotations", PermissionAction.Edit)]
-        public async Task<ActionResult<QuoteResponseDTO>> TransitionStatus(long id, [FromQuery] string status, [FromQuery] string modifiedBy)
+        [HttpGet("{id}/lifecycle")]
+        [RequireModulePermission("Quotations", PermissionAction.View)]
+        public async Task<ActionResult<LifecycleStateView>> GetLifecycle(long id)
         {
             try
             {
-                var result = await _quoteService.TransitionStatusAsync(id, status, modifiedBy);
+                var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+                if (businessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+                return Ok(await _lifecycle.GetQuoteStateAsync(businessUnitId, id, HttpContext.RequestAborted));
+            }
+            catch (LifecycleNotFoundException) { return NotFound(); }
+            catch (LifecycleValidationException ex) { return Conflict(ex.Message); }
+        }
+
+        [HttpPost("{id}/status")]
+        [RequireModulePermission("Quotations", PermissionAction.Edit)]
+        public async Task<ActionResult<LifecycleTransitionResult>> TransitionStatus(
+            long id, [FromBody] QuoteLifecycleTransitionRequestDTO request)
+        {
+            try
+            {
+                if (!ModelState.IsValid) return BadRequest(ModelState);
+                var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+                if (businessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+                var result = await _lifecycle.TransitionQuoteAsync(
+                    businessUnitId,
+                    id,
+                    new LifecycleActor(ActorEmail(), "AuthenticatedUser"),
+                    new LifecycleTransitionCommand(
+                        request.TargetStatusCode,
+                        request.ExpectedVersion,
+                        request.ReasonCode,
+                        request.ReasonNotes,
+                        "Api",
+                        request.CorrelationId,
+                        $"quote-{id}",
+                        request.IdempotencyKey),
+                    false,
+                    HttpContext.RequestAborted);
                 return Ok(result);
             }
-            catch (KeyNotFoundException)
-            {
-                return NotFound();
-            }
-            catch (ArgumentException ex)
-            {
-                return BadRequest(ex.Message);
-            }
+            catch (LifecycleNotFoundException) { return NotFound(); }
+            catch (LifecycleValidationException ex) { return BadRequest(ex.Message); }
+            catch (LifecycleConflictException ex) { return Conflict(ex.Message); }
         }
 
         public sealed class QuoteOutcomeRequestDto
@@ -300,6 +407,14 @@ namespace ERP_RFQ_Automation.Controllers
                 // Terminal-state immutability (non-manager correction attempt).
                 return Conflict(ex.Message);
             }
+            catch (LifecycleValidationException ex)
+            {
+                return BadRequest(ex.Message);
+            }
+            catch (LifecycleConflictException ex)
+            {
+                return Conflict(ex.Message);
+            }
         }
 
         // -------- POST /api/Quote/{id}/mark-responded (WP-A4) --------
@@ -323,6 +438,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // -------- GET /api/Quote/outcome-reasons (WP-A4 governed picklist) --------
         [HttpGet("outcome-reasons")]
+        [RequireModulePermission("Quotations", PermissionAction.View)]
         public async Task<IActionResult> GetOutcomeReasons()
         {
             var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
@@ -357,7 +473,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving stats: {ex.Message}");
+                return Unexpected(ex, "stats");
             }
         }
     }

@@ -80,6 +80,25 @@ public sealed class DeterministicRoutingEngineTests
     }
 
     [Fact]
+    public void Route_uses_backup_when_measured_workload_exceeds_relief_threshold()
+    {
+        var request = Request(
+            candidates: [new(7, 100, 1, CustomerIdentifierType.Email, 0.95m)],
+            ownerships: [Ownership(10, 100, 501, OwnershipScope.GeneralCustomer, backupUserId: 502)],
+            availability:
+            [
+                Available(501, workloadPoints: 70),
+                Available(502, workloadPoints: 10)
+            ]);
+
+        var result = _engine.Route(request, _policy);
+
+        Assert.Equal(RoutingOutcome.AssignedBackup, result.Decision.Outcome);
+        Assert.Equal("BACKUP_OWNER_ASSIGNED_FOR_WORKLOAD", result.Decision.DecisionCode);
+        Assert.Equal(502, result.Assignment?.ToUserId);
+    }
+
+    [Fact]
     public void Route_QueuesEvidenceBelowConfidenceThreshold()
     {
         var request = Request(candidates:
@@ -193,6 +212,8 @@ public sealed class DeterministicRoutingEngineTests
             IsActive = true
         };
 
-    private static RoutingUserAvailability Available(long userId, bool isAvailable = true) =>
-        new(7, userId, IsAvailable: isAvailable);
+    private static RoutingUserAvailability Available(
+        long userId, bool isAvailable = true, int workloadPoints = 0) =>
+        new(7, userId, IsAvailable: isAvailable, CapacityPercent: Math.Max(0, 100 - workloadPoints),
+            Workload: new RoutingWorkloadSnapshot(0, 0, 0, 0, 0, 0, 0, 0, workloadPoints));
 }

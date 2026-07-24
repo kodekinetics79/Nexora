@@ -11,6 +11,7 @@ using System;
 using System.Data;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Services.Interfaces;
+using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 
 namespace ERP_RFQ_Automation.Services
 {
@@ -29,6 +30,7 @@ namespace ERP_RFQ_Automation.Services
         Task<QuoteResponseDTO> CreateQuoteAsync(QuoteCreateRequestDTO request);
         Task<QuoteResponseDTO> UpdateQuoteAsync(long id, QuoteUpdateRequestDTO request);
         Task<QuoteResponseDTO> TransitionStatusAsync(long id, string statusCode, string modifiedBy);
+        Task<QuoteResponseDTO> GetQuoteAsync(long id);
 
         /// <summary>
         /// Revisions-lite (WP-B4): clones a non-DRAFT quote (+items) as a new DRAFT
@@ -48,6 +50,7 @@ namespace ERP_RFQ_Automation.Services
         private readonly IEmailService _emailService;
         private readonly IQuoteConfigurationRepository _quoteConfigRepository;
         private readonly ERP_RFQ_Automation.Intelligence.Pricing.IBelowFloorGuard? _belowFloorGuard;
+        private readonly ILifecycleApplicationService? _lifecycle;
 
         // The below-floor guard is optional (defaults to null) so existing direct
         // constructions (tests, pre-wiring DI) keep working; without it the send
@@ -56,12 +59,14 @@ namespace ERP_RFQ_Automation.Services
             ErpRfqAutomationContext context,
             IEmailService emailService,
             IQuoteConfigurationRepository quoteConfigRepository,
-            ERP_RFQ_Automation.Intelligence.Pricing.IBelowFloorGuard? belowFloorGuard = null)
+            ERP_RFQ_Automation.Intelligence.Pricing.IBelowFloorGuard? belowFloorGuard = null,
+            ILifecycleApplicationService? lifecycle = null)
         {
             _context = context;
             _emailService = emailService;
             _quoteConfigRepository = quoteConfigRepository;
             _belowFloorGuard = belowFloorGuard;
+            _lifecycle = lifecycle;
         }
 
         // Legacy QuoteStatus id map, used ONLY when no matching SetupMaster row is
@@ -203,7 +208,8 @@ namespace ERP_RFQ_Automation.Services
             quote.CustomerId = request.CustomerId;
             quote.QuoteDate = request.QuoteDate;
             quote.ValidUntil = request.ValidUntil;
-            quote.StatusId = request.StatusId;
+            if (request.StatusId != quote.StatusId)
+                throw new InvalidOperationException("Quote status changes require the governed lifecycle endpoint.");
             quote.CurrencyId = request.CurrencyId;
             quote.HeaderRemarks = request.HeaderRemarks;
             quote.ModifiedBy = request.ModifiedBy;
@@ -830,10 +836,33 @@ namespace ERP_RFQ_Automation.Services
 
             // Mark SENT (resolved via SetupMaster; legacy id 43 fallback) and stamp
             // SentOn so the SLA engine can compute staleness / auto-expiry (WP-A4).
-            quote.StatusId = await ResolveQuoteStatusIdAsync("SENT", quote.BusinessUnitId);
             quote.SentOn = DateTime.UtcNow;
             quote.ModifiedDate = DateTime.UtcNow;
-            await _context.SaveChangesAsync();
+            if (_lifecycle is not null)
+            {
+                await using var transaction = await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+                await _lifecycle.TransitionQuoteInCurrentTransactionAsync(
+                    quote.BusinessUnitId,
+                    quote.Id,
+                    new LifecycleActor(options.RequestedBy ?? "system:quote-send", "quote-service"),
+                    new LifecycleTransitionCommand(
+                        "SENT",
+                        quote.LifecycleVersion,
+                        null,
+                        null,
+                        "quote-email",
+                        Guid.NewGuid().ToString("N"),
+                        $"quote:{quote.Id}:send",
+                        $"quote-send:{quote.Id}:v{quote.LifecycleVersion}"),
+                    false,
+                    CancellationToken.None);
+                await transaction.CommitAsync();
+            }
+            else
+            {
+                quote.StatusId = await ResolveQuoteStatusIdAsync("SENT", quote.BusinessUnitId);
+                await _context.SaveChangesAsync();
+            }
 
             return QuoteSendResult.Sent();
         }
@@ -1023,22 +1052,45 @@ namespace ERP_RFQ_Automation.Services
             var quote = await _context.Quotes.FindAsync(id);
             if (quote == null) throw new KeyNotFoundException($"Quote with ID {id} not found.");
 
+            if (_lifecycle is not null)
+            {
+                var code = statusCode.Trim().ToUpperInvariant();
+                await _lifecycle.TransitionQuoteAsync(
+                    quote.BusinessUnitId,
+                    id,
+                    new LifecycleActor(modifiedBy, "quote-service-legacy-adapter"),
+                    new LifecycleTransitionCommand(
+                        code,
+                        quote.LifecycleVersion,
+                        LifecyclePolicy.RequiresReason("Quote", LifecyclePolicy.Canonicalize("Quote", code), false)
+                            ? "LEGACY_STATUS_TRANSITION"
+                            : null,
+                        null,
+                        "quote-service-legacy-adapter",
+                        Guid.NewGuid().ToString("N"),
+                        $"quote:{id}:status:{code}",
+                        $"quote-status:{id}:v{quote.LifecycleVersion}:{code}"),
+                    false,
+                    CancellationToken.None);
+                return await GetQuoteByIdAsync(id);
+            }
+
             // All codes resolve through SetupMaster (SetupType "QuoteStatus" +
             // SetupCode, BU-scoped first) with the documented legacy id map as the
             // last-resort fallback — no more hardcoded 42/43/44/45 branches.
-            var code = statusCode.ToUpperInvariant();
+            var legacyCode = statusCode.ToUpperInvariant();
             long? statusId;
-            switch (code)
+            switch (legacyCode)
             {
                 case "DRAFT":
                 case "SENT":
                 case "ACCEPTED":
                 case "REJECTED":
                 case "EXPIRED": // seeded create-if-absent by QuoteOutcomeService (WP-A4)
-                    statusId = await ResolveQuoteStatusIdAsync(code, quote.BusinessUnitId);
+                    statusId = await ResolveQuoteStatusIdAsync(legacyCode, quote.BusinessUnitId);
                     if (statusId is null)
                         throw new ArgumentException(
-                            $"No '{code}' QuoteStatus is configured for this business unit.");
+                            $"No '{legacyCode}' QuoteStatus is configured for this business unit.");
                     break;
 
                 case "ORDERED":
@@ -1062,5 +1114,7 @@ namespace ERP_RFQ_Automation.Services
 
             return await GetQuoteByIdAsync(id);
         }
+
+        public Task<QuoteResponseDTO> GetQuoteAsync(long id) => GetQuoteByIdAsync(id);
     }
 }

@@ -112,10 +112,10 @@ public class TenantIsolationTests
         Assert.Equal(3, bu2.Leads.Count()); // sibling context sees only its own rows
     }
 
-    // ---- Master data (nullable Buid): null Buid == shared reference data ----
+    // ---- Customer identity is tenant-owned even when legacy Buid is null ----
 
     [Fact]
-    public void ScopedContext_MasterData_SeesOwnTenantAndSharedNullBuid_ButNotOtherTenant()
+    public void ScopedContext_Customers_SeesOnlyOwnTenant()
     {
         using var db = new TestDb();
         using (var seed = db.ContextFor(null))
@@ -129,9 +129,9 @@ public class TenantIsolationTests
         using var ctx = db.ContextFor(Bu1);
         var visible = ctx.Customers.OrderBy(c => c.Id).ToList();
 
-        Assert.Equal(2, visible.Count);
+        Assert.Single(visible);
         Assert.Contains(visible, c => c.Id == 1);   // own tenant
-        Assert.Contains(visible, c => c.Id == 3);   // shared (null Buid)
+        Assert.DoesNotContain(visible, c => c.Id == 3); // legacy unowned customer hidden
         Assert.DoesNotContain(visible, c => c.Id == 2); // other tenant hidden
     }
 

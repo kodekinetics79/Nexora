@@ -8,6 +8,7 @@ using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using System.Data;
 using System.Text.Json;
 
 namespace ERP_RFQ_Automation.Repositories
@@ -118,6 +119,9 @@ namespace ERP_RFQ_Automation.Repositories
                 Id = l.Id,
                 CommercialCaseId = l.CommercialCaseId,
                 CommercialCaseReference = l.CommercialCaseReference,
+                CustomerId = l.CustomerId,
+                ContactId = l.ContactId,
+                CustomerMatchStatus = l.CustomerMatchStatus,
                 Rfqno = l.Rfqno,
                 BuyersName = l.BuyersName,
                 RecDate = l.RecDate,
@@ -141,6 +145,7 @@ namespace ERP_RFQ_Automation.Repositories
                 EmailSource = l.EmailSource,
                 Clientemail = l.Clientemail,
                 LeadStatusId = l.LeadStatusId,
+                LifecycleVersion = l.LifecycleVersion,
                 ReviewVersion = l.ReviewVersion,
                 RequiresCommercialReview = l.RequiresCommercialReview,
                 CommercialFactsVerified = l.CommercialFactsVerified,
@@ -184,40 +189,72 @@ namespace ERP_RFQ_Automation.Repositories
         // convention; resolving these via SetupMaster codes is tracked as ARCH-03.
         public async Task<(long RfqId, string Rfqno)> ConvertLeadToRfqAsync(long id, long businessUnitId, string createdBy)
         {
-            var lead = await _context.Leads
-                .Include(l => l.LeadItems)
-                .Include(l => l.LeadStatus)
-                .FirstOrDefaultAsync(l => l.Id == id && l.BusinessUnitId == businessUnitId);
-            if (lead == null)
-                throw new KeyNotFoundException($"Lead with ID {id} not found in Business Unit {businessUnitId}.");
-            if (LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue) != "QUALIFIED")
-                throw new InvalidOperationException("Only a qualified lead can be converted to an RFQ.");
+            if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
+            if (string.IsNullOrWhiteSpace(createdBy)) throw new ArgumentException("Authenticated actor is required.", nameof(createdBy));
 
-            // WP-A3 hard block: an unresolved duplicate flag stops conversion.
-            if (lead.DuplicateStatus is "suspected" or "confirmed")
-                throw new InvalidOperationException(
-                    $"This lead is flagged as a possible duplicate of lead #{lead.DuplicateOfLeadId} — resolve the duplicate flag first.");
-
-            if (lead.RequiresCommercialReview && !lead.CommercialFactsVerified)
-                throw new InvalidOperationException(
-                    "AI-extracted commercial facts must be approved in extraction review before RFQ conversion.");
-
-            // Idempotency: never create a second RFQ for the same lead.
-            var already = await _context.Rfqs
-                .FirstOrDefaultAsync(r => r.LeadId == id && r.BusinessUnitId == businessUnitId);
-            if (already != null)
+            var strategy = _context.Database.CreateExecutionStrategy();
+            return await strategy.ExecuteAsync(async () =>
             {
-                await CompleteConversionLifecycleAsync(lead, already.Id, createdBy);
-                return (already.Id, already.Rfqno);
-            }
+                _context.ChangeTracker.Clear();
+                await using var transaction = await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+                var lead = await _context.Leads
+                    .Include(l => l.LeadItems)
+                    .Include(l => l.LeadStatus)
+                    .FirstOrDefaultAsync(l => l.Id == id && l.BusinessUnitId == businessUnitId)
+                    ?? throw new KeyNotFoundException($"Lead with ID {id} not found in Business Unit {businessUnitId}.");
 
-            // Reuse the lead's RFQ number when present and unique; otherwise derive one.
+                var lifecycleCode = LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue);
+                var already = await _context.Rfqs
+                    .FirstOrDefaultAsync(r => r.LeadId == id && r.BusinessUnitId == businessUnitId);
+                if (already != null && lifecycleCode == "CONVERTED_TO_RFQ")
+                {
+                    already.InheritCommercialIdentity(lead);
+                    await _context.SaveChangesAsync();
+                    await transaction.CommitAsync();
+                    return (already.Id, already.Rfqno);
+                }
+                if (lifecycleCode != "QUALIFIED")
+                    throw new InvalidOperationException("Only a qualified lead can be converted to an RFQ.");
+                if (lead.DuplicateStatus is "suspected" or "confirmed")
+                    throw new InvalidOperationException(
+                        $"This lead is flagged as a possible duplicate of lead #{lead.DuplicateOfLeadId}; resolve the duplicate flag first.");
+                if (lead.RequiresCommercialReview && !lead.CommercialFactsVerified)
+                    throw new InvalidOperationException(
+                        "AI-extracted commercial facts must be approved in extraction review before RFQ conversion.");
+                if (!lead.CustomerId.HasValue)
+                    throw new InvalidOperationException("Resolve the lead customer before creating an RFQ.");
+
+                var rfq = already ?? await CreateRfqFromLeadAsync(lead, businessUnitId, createdBy);
+                if (already == null)
+                {
+                    _context.Rfqs.Add(rfq);
+                    await _context.SaveChangesAsync();
+                }
+                else
+                {
+                    rfq.InheritCommercialIdentity(lead);
+                    await _context.SaveChangesAsync();
+                }
+
+                await new LifecycleApplicationService(_context).TransitionLeadInCurrentTransactionAsync(
+                    lead.BusinessUnitId, lead.Id, new LifecycleActor(createdBy.Trim(), "AuthenticatedUser"),
+                    new LifecycleTransitionCommand("CONVERTED_TO_RFQ", lead.LifecycleVersion, null, null,
+                        "Api", $"conversion-{lead.Id}", $"rfq-{rfq.Id}",
+                        $"lead-conversion:{lead.BusinessUnitId}:{lead.Id}"), false, default);
+                await transaction.CommitAsync();
+                return (rfq.Id, rfq.Rfqno);
+            });
+        }
+
+        private async Task<Rfq> CreateRfqFromLeadAsync(Lead lead, long businessUnitId, string createdBy)
+        {
             var rfqno = !string.IsNullOrWhiteSpace(lead.Rfqno)
-                ? lead.Rfqno!
-                : $"RFQ-{id}-{DateTime.UtcNow:yyyyMMddHHmmss}";
+                ? lead.Rfqno
+                : $"RFQ-{lead.Id}-{DateTime.UtcNow:yyyyMMddHHmmss}";
             if (await _context.Rfqs.AnyAsync(r => r.Rfqno == rfqno && r.BusinessUnitId == businessUnitId))
                 rfqno = $"{rfqno}-{DateTime.UtcNow:yyyyMMddHHmmss}";
 
+            var now = DateTime.UtcNow;
             var rfq = new Rfq
             {
                 Rfqno = rfqno,
@@ -234,8 +271,8 @@ namespace ERP_RFQ_Automation.Repositories
                 LeadId = lead.Id,
                 BusinessUnitId = businessUnitId,
                 RfqstatusId = await LifecycleStatusCatalog.ResolveIdAsync(_context, businessUnitId, "Rfq", "DRAFT"),
-                CreatedBy = createdBy,
-                CreatedDate = DateTime.UtcNow,
+                CreatedBy = createdBy.Trim(),
+                CreatedDate = now,
                 Rfqitems = lead.LeadItems.Select(li => new Rfqitem
                 {
                     CompanyRef = li.CompanyRef,
@@ -263,28 +300,12 @@ namespace ERP_RFQ_Automation.Repositories
                     ReceivedDate = li.ReceivedDate,
                     BidClosingDateLine = li.BidClosingDateLine,
                     Aiconfidence = li.Aiconfidence,
-                    CreatedBy = createdBy,
-                    CreatedDate = DateTime.UtcNow
+                    CreatedBy = createdBy.Trim(),
+                    CreatedDate = now
                 }).ToList()
             };
-
-            using var tx = await _context.Database.BeginTransactionAsync();
-            _context.Rfqs.Add(rfq);
-            await _context.SaveChangesAsync();
-            await tx.CommitAsync();
-            await tx.DisposeAsync();
-            await CompleteConversionLifecycleAsync(lead, rfq.Id, createdBy);
-            return (rfq.Id, rfq.Rfqno);
-        }
-
-        private async Task CompleteConversionLifecycleAsync(Lead lead, long rfqId, string actor)
-        {
-            if (LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue) != "QUALIFIED") return;
-            await new LifecycleApplicationService(_context).TransitionLeadAsync(
-                lead.BusinessUnitId, lead.Id, new LifecycleActor(actor, "LeadConversion"),
-                new LifecycleTransitionCommand("CONVERTED_TO_RFQ", lead.LifecycleVersion, null, null,
-                    "Api", $"conversion-{lead.Id}", $"rfq-{rfqId}", $"lead-conversion:{lead.BusinessUnitId}:{lead.Id}"),
-                false, default);
+            rfq.InheritCommercialIdentity(lead);
+            return rfq;
         }
 
         public async Task<IEnumerable<RejectionReasonDTO>> GetLeadRejectionReasonsAsync()
@@ -621,6 +642,9 @@ namespace ERP_RFQ_Automation.Repositories
                 Id = lead.Id,
                 CommercialCaseId = lead.CommercialCaseId,
                 CommercialCaseReference = lead.CommercialCaseReference,
+                CustomerId = lead.CustomerId,
+                ContactId = lead.ContactId,
+                CustomerMatchStatus = lead.CustomerMatchStatus,
                 Rfqno = lead.Rfqno,
                 BuyersName = lead.BuyersName,
                 RecDate = lead.RecDate,
@@ -643,6 +667,7 @@ namespace ERP_RFQ_Automation.Repositories
                 EmailSource = lead.EmailSource,
                 Clientemail = lead.Clientemail,
                 LeadStatusId = lead.LeadStatusId,
+                LifecycleVersion = lead.LifecycleVersion,
                 ReviewVersion = lead.ReviewVersion,
                 RequiresCommercialReview = lead.RequiresCommercialReview,
                 CommercialFactsVerified = lead.CommercialFactsVerified,
@@ -830,6 +855,30 @@ namespace ERP_RFQ_Automation.Repositories
 
             var header = review.Header ?? new LeadReviewHeaderDTO();
 
+            if (header.ContactId.HasValue && !header.CustomerId.HasValue && !lead.CustomerId.HasValue)
+                throw new LeadReviewValidationException("A customer is required when selecting a contact.");
+            if (header.CustomerId.HasValue)
+            {
+                var customerExists = await _context.Customers.AsNoTracking().AnyAsync(customer =>
+                    customer.Id == header.CustomerId.Value && customer.Buid == businessUnitId && customer.IsActive != false);
+                if (!customerExists)
+                    throw new LeadReviewValidationException("The selected customer was not found in this tenant.");
+
+                if (header.ContactId.HasValue)
+                {
+                    var contactExists = await _context.Contacts.AsNoTracking().AnyAsync(contact =>
+                        contact.Id == header.ContactId.Value && contact.CustomerId == header.CustomerId.Value
+                        && contact.IsActive != false);
+                    if (!contactExists)
+                        throw new LeadReviewValidationException("The selected contact does not belong to the selected customer.");
+                }
+
+                lead.ResolveCommercialIdentity(
+                    header.CustomerId.Value,
+                    header.ContactId,
+                    header.ContactId.HasValue ? "CONFIRMED" : "CUSTOMER_CONFIRMED_CONTACT_UNRESOLVED");
+            }
+
             // WP-B4 passive metric (hook b): capture which fields the reviewer
             // actually changed vs. the stored values, BEFORE the edits are applied.
             var headerChanged = new List<string>();
@@ -838,6 +887,8 @@ namespace ERP_RFQ_Automation.Repositories
             if (header.BidClosingDate != null && header.BidClosingDate != lead.BidClosingDate) headerChanged.Add("bidClosingDate");
             if (header.OpportunityNo != null && header.OpportunityNo != lead.OpportunityNo) headerChanged.Add("opportunityNo");
             if (header.HeaderRemarks != null && header.HeaderRemarks != lead.HeaderRemarks) headerChanged.Add("headerRemarks");
+            if (header.CustomerId.HasValue && header.CustomerId != lead.CustomerId) headerChanged.Add("customerId");
+            if (header.ContactId.HasValue && header.ContactId != lead.ContactId) headerChanged.Add("contactId");
             var itemFieldChanges = new Dictionary<string, int>();
             var itemsChanged = 0;
             var itemsAdded = 0;
@@ -1020,6 +1071,9 @@ namespace ERP_RFQ_Automation.Repositories
                 lead.BidClosingDate,
                 lead.OpportunityNo,
                 lead.HeaderRemarks,
+                lead.CustomerId,
+                lead.ContactId,
+                lead.CustomerMatchStatus,
                 lead.RequiresCommercialReview,
                 lead.CommercialFactsVerified,
                 lead.ReviewApprovedBy,

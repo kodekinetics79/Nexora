@@ -224,6 +224,8 @@ internal sealed class CustomerAwardTestFixture : IDisposable
         var lead = Seed.Lead(context, LeadId, businessUnitId);
         context.SaveChanges();
         Seed.Customer(context, CustomerId, businessUnitId, "Customer Award Tests");
+        context.SaveChanges();
+        lead.ResolveCommercialIdentity(CustomerId, null, "VERIFIED");
         context.Currencies.Add(new Currency
         {
             Id = CurrencyId, BusinessUnitId = businessUnitId, Code = "USD", CurrencyName = "US Dollar",
@@ -236,17 +238,20 @@ internal sealed class CustomerAwardTestFixture : IDisposable
             Setup(QuoteStatusId, businessUnitId, "QuoteStatus", "SENT"),
             Setup(OrderStatusId, businessUnitId, "OrderStatus", "DRAFT"),
             Setup(PaymentStatusId, businessUnitId, "PaymentStatus", "UNPAID"));
-        context.Rfqs.Add(new Rfq
+        var rfq = new Rfq
         {
             Id = RfqId, Rfqno = $"RFQ-{RfqId}", RecDate = Now, LeadId = lead.Id,
             CustomerId = CustomerId, BusinessUnitId = businessUnitId, CreatedBy = "tests", CreatedDate = Now
-        });
+        };
+        rfq.InheritCommercialIdentity(lead);
+        context.Rfqs.Add(rfq);
         var quote = new Quote
         {
             Id = 880_011, QuoteNo = "QT-AWARD-TEST", Rfqid = RfqId, CustomerId = CustomerId,
             BusinessUnitId = businessUnitId, QuoteDate = Now, StatusId = QuoteStatusId, CurrencyId = CurrencyId,
             TotalAmount = twoQuoteLines ? 2_000m : 1_000m, CreatedBy = "tests", CreatedDate = Now, RevisionNo = 1
         };
+        quote.InheritCommercialIdentity(rfq);
         quote.QuoteItems.Add(NewQuoteItem(QuoteItemOneId, ProductOneId, 10m, 100m));
         if (twoQuoteLines) quote.QuoteItems.Add(NewQuoteItem(QuoteItemTwoId, ProductTwoId, 10m, 100m));
         context.Quotes.Add(quote);

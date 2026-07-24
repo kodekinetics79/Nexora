@@ -9,5 +9,7 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         public DateTime? BidClosingDate { get; set; }
         public string? OpportunityNo { get; set; }
         public string? HeaderRemarks { get; set; }
+        public long? CustomerId { get; set; }
+        public long? ContactId { get; set; }
     }
 }

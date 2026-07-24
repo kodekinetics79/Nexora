@@ -184,7 +184,7 @@ const CommercialCaseWorkspacePage: React.FC = () => {
         <Paper sx={{ p: 3, borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
           <Grid container spacing={2.5}>
             <Grid size={{ xs: 12, md: 4 }}>
-              <DataField label="Master Reference" value={current.masterReference} />
+              <DataField label="Nexora Serial" value={current.masterReference} />
             </Grid>
             <Grid size={{ xs: 12, md: 4 }}>
               <DataField label="Lead ID" value={current.leadId} />

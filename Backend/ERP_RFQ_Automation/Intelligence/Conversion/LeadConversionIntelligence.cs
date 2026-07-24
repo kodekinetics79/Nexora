@@ -268,6 +268,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
                 };
             }).ToList()
         };
+        rfq.InheritCommercialIdentity(lead);
 
         await using var tx = await _db.Database.BeginTransactionAsync(ct);
         _db.Rfqs.Add(rfq);

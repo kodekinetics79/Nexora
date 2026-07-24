@@ -62,6 +62,9 @@ namespace ERP_RFQ_Automation.DTOs
         public long Id { get; set; }
         public string OrderNo { get; set; } = null!;
         public long CustomerId { get; set; }
+        public long? CommercialCaseId { get; set; }
+        public string? NexoraSerial { get; set; }
+        public long? ContactId { get; set; }
         public string CustomerName { get; set; } = null!;
         public long? QuoteId { get; set; }
         public string? QuoteNo { get; set; }
@@ -107,6 +110,8 @@ namespace ERP_RFQ_Automation.DTOs
     {
         public long OrderId { get; set; }
         public string OrderNo { get; set; } = null!;
+        public long? CommercialCaseId { get; set; }
+        public string? NexoraSerial { get; set; }
         public DateTime OrderDate { get; set; }
         public DateTime? DeliveryDate { get; set; }
         public string Status { get; set; } = null!;

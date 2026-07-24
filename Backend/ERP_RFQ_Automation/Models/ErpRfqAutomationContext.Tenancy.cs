@@ -113,9 +113,8 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<ShipmentItem>().HasQueryFilter(e => CurrentTenantId == null || e.Shipment.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<ShipmentStatusHistory>().HasQueryFilter(e => CurrentTenantId == null || e.Shipment.BusinessUnitId == CurrentTenantId);
 
-        // Master data (nullable Buid). Rows with a null Buid are treated as shared
-        // reference data (visible to all tenants); tenant-owned rows are scoped.
-        modelBuilder.Entity<Customer>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == null || e.Buid == CurrentTenantId);
+        // Customer identity is tenant-owned. Other catalog master data may remain shared.
+        modelBuilder.Entity<Customer>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == CurrentTenantId);
         modelBuilder.Entity<Supplier>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == null || e.Buid == CurrentTenantId);
         modelBuilder.Entity<Product>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == null || e.Buid == CurrentTenantId);
         modelBuilder.Entity<Inventory>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == null || e.Buid == CurrentTenantId);
@@ -132,7 +131,7 @@ public partial class ErpRfqAutomationContext
             CurrentTenantId == null || e.EmailConfiguration.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<Contact>().HasQueryFilter(e => CurrentTenantId == null ||
             (e.CustomerId != null || e.SupplierId != null) &&
-            (e.CustomerId == null || e.Customer!.Buid == null || e.Customer.Buid == CurrentTenantId) &&
+            (e.CustomerId == null || e.Customer!.Buid == CurrentTenantId) &&
             (e.SupplierId == null || e.Supplier!.Buid == null || e.Supplier.Buid == CurrentTenantId));
 
         // LeadItem.ExtraFields (partial property in LeadItem.Extra.cs): verbatim
@@ -185,10 +184,13 @@ public partial class ErpRfqAutomationContext
 
             modelBuilder.Entity<DocumentCorpus>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
             modelBuilder.Entity<SourceDocument>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+            modelBuilder.Entity<SourceDocumentOccurrence>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+            modelBuilder.Entity<ExtractionRun>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
             modelBuilder.Entity<DocumentPage>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
             modelBuilder.Entity<DocumentRegion>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
             modelBuilder.Entity<CanonicalInquiry>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
             modelBuilder.Entity<CanonicalLineItem>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+            modelBuilder.Entity<ValidationFinding>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
             modelBuilder.Entity<FieldEvidence>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
 
         }

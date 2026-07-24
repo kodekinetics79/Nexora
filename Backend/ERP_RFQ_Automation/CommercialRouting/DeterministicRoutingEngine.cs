@@ -45,15 +45,26 @@ public sealed class DeterministicRoutingEngine
         if (ownership is null)
             return Unassigned(request, policy, CustomerMatchStatus.Matched, "NO_EFFECTIVE_OWNERSHIP", winner, winner.Confidence);
 
-        var primaryAvailable = IsAvailable(request, ownership.PrimaryUserId);
-        var backupAvailable = ownership.BackupUserId is long backupId && IsAvailable(request, backupId);
-        var selectedUserId = primaryAvailable ? ownership.PrimaryUserId : backupAvailable ? ownership.BackupUserId : null;
+        var primary = Availability(request, ownership.PrimaryUserId);
+        var backup = ownership.BackupUserId is long backupId ? Availability(request, backupId) : null;
+        var primaryAvailable = IsAvailable(primary);
+        var backupAvailable = IsAvailable(backup);
+        var relievePrimary = primaryAvailable && backupAvailable &&
+            WorkloadPoints(primary) - WorkloadPoints(backup) >= policy.BackupReliefThresholdPoints;
+        var selectedUserId = primaryAvailable && !relievePrimary
+            ? ownership.PrimaryUserId
+            : backupAvailable ? ownership.BackupUserId : null;
         if (selectedUserId is null)
             return Unassigned(request, policy, CustomerMatchStatus.Matched, "OWNER_UNAVAILABLE", winner, winner.Confidence, ownership);
 
-        var outcome = primaryAvailable ? RoutingOutcome.AssignedPrimary : RoutingOutcome.AssignedBackup;
+        var outcome = selectedUserId == ownership.PrimaryUserId
+            ? RoutingOutcome.AssignedPrimary
+            : RoutingOutcome.AssignedBackup;
+        var code = outcome == RoutingOutcome.AssignedPrimary
+            ? "PRIMARY_OWNER_ASSIGNED"
+            : relievePrimary ? "BACKUP_OWNER_ASSIGNED_FOR_WORKLOAD" : "BACKUP_OWNER_ASSIGNED";
         var decision = CreateDecision(request, policy, CustomerMatchStatus.Matched, outcome,
-            outcome == RoutingOutcome.AssignedPrimary ? "PRIMARY_OWNER_ASSIGNED" : "BACKUP_OWNER_ASSIGNED",
+            code,
             winner, winner.Confidence, ownership, selectedUserId);
         var assignment = new LeadAssignment
         {
@@ -100,12 +111,15 @@ public sealed class DeterministicRoutingEngine
             && string.Equals(requestKey.Trim(), ownership.ScopeKey?.Trim(), StringComparison.OrdinalIgnoreCase);
     }
 
-    private static bool IsAvailable(RoutingRequest request, long userId) => request.UserAvailability.Any(x =>
-        x.BusinessUnitId == request.BusinessUnitId &&
-        x.UserId == userId &&
-        x.IsActive &&
-        x.IsAvailable &&
-        x.CapacityPercent > 0);
+    private static RoutingUserAvailability? Availability(RoutingRequest request, long userId) =>
+        request.UserAvailability.SingleOrDefault(x =>
+            x.BusinessUnitId == request.BusinessUnitId && x.UserId == userId);
+
+    private static bool IsAvailable(RoutingUserAvailability? availability) =>
+        availability is { IsActive: true, IsAvailable: true, CapacityPercent: > 0 };
+
+    private static int WorkloadPoints(RoutingUserAvailability? availability) =>
+        availability?.Workload?.WorkloadPoints ?? 0;
 
     private static RoutingResult Unassigned(
         RoutingRequest request,
@@ -163,7 +177,37 @@ public sealed class DeterministicRoutingEngine
             {
                 matchStatus = status.ToString(),
                 outcome = outcome.ToString(),
-                decisionCode = code
+                decisionCode = code,
+                requestHash = request.RequestHash,
+                workloadPolicy = new
+                {
+                    maximumPoints = policy.MaximumWorkloadPoints,
+                    backupReliefThresholdPoints = policy.BackupReliefThresholdPoints,
+                    weights = new
+                    {
+                        activeLead = policy.ActiveLeadWeight,
+                        leadLine = policy.LeadLineWeight,
+                        maximumLinePointsPerJourney = policy.MaximumLinePointsPerJourney,
+                        overdueDeadline = policy.OverdueDeadlineWeight,
+                        urgentDeadline = policy.UrgentDeadlineWeight,
+                        approachingDeadline = policy.ApproachingDeadlineWeight,
+                        openRfq = policy.OpenRfqWeight,
+                        openQuote = policy.OpenQuoteWeight,
+                        followUp = policy.FollowUpWeight
+                    }
+                },
+                consideredOwners = request.UserAvailability
+                    .Where(item => item.UserId == ownership?.PrimaryUserId || item.UserId == ownership?.BackupUserId)
+                    .OrderBy(item => item.UserId)
+                    .Select(item => new
+                    {
+                        item.UserId,
+                        item.IsActive,
+                        item.IsAvailable,
+                        measurementStatus = item.Workload is null ? "unavailable" : "measured",
+                        capacityPercent = item.Workload is null ? (int?)null : item.CapacityPercent,
+                        workload = item.Workload
+                    })
             }),
             PolicyVersion = policy.Version,
             CorrelationId = request.CorrelationId,

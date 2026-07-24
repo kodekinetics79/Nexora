@@ -46,18 +46,35 @@ public static class LifecycleStatusCatalog
         ("CANCELLED", "Cancelled")
     };
 
+    private static readonly (string Code, string Label)[] QuoteStatuses =
+    {
+        ("DRAFT", "Draft"),
+        ("SENT", "Sent"),
+        ("ACCEPTED", "Accepted"),
+        ("REJECTED", "Rejected"),
+        ("EXPIRED", "Expired"),
+        ("ORDERED", "Ordered")
+    };
+
     public static IReadOnlyList<SetupMaster> CreateFor(BusinessUnit businessUnit, string actor, DateTime? now = null)
     {
         var createdOn = now ?? DateTime.UtcNow;
         return LeadStatuses.Select(item => Create("LeadStatus", item, businessUnit, actor, createdOn))
             .Concat(RfqStatuses.Select(item => Create("RFQStatus", item, businessUnit, actor, createdOn)))
+            .Concat(QuoteStatuses.Select(item => Create("QuoteStatus", item, businessUnit, actor, createdOn)))
             .ToArray();
     }
 
     public static async Task<long> ResolveIdAsync(
         ErpRfqAutomationContext db, long businessUnitId, string aggregateType, string code, CancellationToken ct = default)
     {
-        var setupType = aggregateType == "Lead" ? "leadstatus" : "rfqstatus";
+        var setupType = aggregateType switch
+        {
+            "Lead" => "leadstatus",
+            "Rfq" => "rfqstatus",
+            "Quote" => "quotestatus",
+            _ => throw new ArgumentOutOfRangeException(nameof(aggregateType), "Unsupported lifecycle aggregate type.")
+        };
         var statuses = await db.SetupMasters.AsNoTracking()
             .Where(item => item.BusinessUnitId == businessUnitId && item.IsActive != false)
             .Where(item => item.SetupType.ToLower().Replace(" ", "") == setupType)

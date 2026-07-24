@@ -5,6 +5,9 @@ export interface RfqResponseDTO {
     id: number;
     commercialCaseId?: number | null;
     commercialCaseReference?: string | null;
+    nexoraSerial?: string | null;
+    contactId?: number | null;
+    contactName?: string | null;
     rfqno: string;
     buyersName?: string;
     recDate: string;

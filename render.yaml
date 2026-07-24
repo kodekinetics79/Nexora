@@ -4,16 +4,30 @@ services:
     runtime: docker
     rootDir: Backend
     dockerfilePath: ./Dockerfile
-    healthCheckPath: /health
+    healthCheckPath: /ready
     envVars:
       - key: ASPNETCORE_ENVIRONMENT
         value: Production
       - key: Storage__RootPath
-        value: /var/data/nexora/uploads
-      - key: Storage__RequiredMountPath
-        value: /var/data
+        value: /tmp/nexora/uploads
       - key: Storage__EnforcePersistentMount
-        value: "true"
+        value: "false"
+      - key: EvidenceStorage__Provider
+        value: S3
+      - key: EvidenceStorage__ServiceUrl
+        sync: false
+      - key: EvidenceStorage__Region
+        value: auto
+      - key: EvidenceStorage__AccessKeyId
+        sync: false
+      - key: EvidenceStorage__SecretAccessKey
+        sync: false
+      - key: EvidenceStorage__Bucket
+        sync: false
+      - key: DocumentInspection__ClamAV__Host
+        sync: false
+      - key: DocumentInspection__ClamAV__Port
+        value: "3310"
       - key: ConnectionStrings__DefaultConnection
         sync: false
       - key: Database__ApplyMigrationsOnStartup
@@ -32,7 +46,3 @@ services:
         sync: false
       - key: Cors__AllowedOrigins__0
         value: https://nexora1-ai.vercel.app
-    disk:
-      name: nexora-evidence
-      mountPath: /var/data
-      sizeGB: 10

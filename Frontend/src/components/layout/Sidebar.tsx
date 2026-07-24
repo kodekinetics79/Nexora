@@ -33,6 +33,7 @@ import { useAuth } from '../../context/AuthContext';
 
 interface SidebarProps {
   collapsed: boolean;
+  onNavigate?: () => void;
 }
 
 interface MenuItem {
@@ -45,7 +46,7 @@ interface MenuItem {
   children?: { key: string; label: string; path: string; moduleName?: string; icon?: React.ReactNode; activePrefixes?: string[] }[];
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
+const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useTranslation();
@@ -69,6 +70,11 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
 
   const handleGroupClick = (key: string) => {
     setOpenGroups(prev => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const navigateTo = (path: string) => {
+    navigate(path);
+    onNavigate?.();
   };
 
   const menuItems: MenuItem[] = useMemo(() => {
@@ -218,7 +224,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
         <ListItem disablePadding sx={{ display: 'block', mb: 0.5 }}>
           <Tooltip title={collapsed ? item.label : ""} placement="right">
             <ListItemButton
-              onClick={() => hasChildren ? handleGroupClick(item.key) : navigate(item.path!)}
+              onClick={() => hasChildren ? handleGroupClick(item.key) : navigateTo(item.path!)}
               sx={{
                 minHeight: 44,
                 justifyContent: collapsed ? 'center' : 'initial',
@@ -268,7 +274,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
                 return (
                   <ListItemButton
                     key={child.key}
-                    onClick={() => navigate(child.path)}
+                    onClick={() => navigateTo(child.path)}
                     sx={{
                       minHeight: 40,
                       pl: 4,

@@ -14,9 +14,19 @@ using ERP_RFQ_Automation.Repositories;
 public class LeadController : ControllerBase
 {
     private readonly ILeadRepository _repository;
-    public LeadController(ILeadRepository repository)
+    private readonly ILogger<LeadController>? _logger;
+    public LeadController(ILeadRepository repository, ILogger<LeadController>? logger = null)
     {
         _repository = repository;
+        _logger = logger;
+    }
+
+    private ObjectResult Unexpected(Exception exception, string operation)
+    {
+        var correlationId = HttpContext.TraceIdentifier;
+        _logger?.LogError(exception, "Lead operation {Operation} failed. CorrelationId={CorrelationId}", operation, correlationId);
+        return StatusCode(StatusCodes.Status500InternalServerError,
+            new { message = "An unexpected error occurred.", correlationId });
     }
 
     [HttpGet]
@@ -62,7 +72,7 @@ public class LeadController : ControllerBase
         }
         catch (Exception ex)
         {
-            return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving data: {ex.Message}");
+            return Unexpected(ex, "list");
         }
     }
 
@@ -83,7 +93,7 @@ public class LeadController : ControllerBase
         }
         catch (Exception ex)
         {
-            return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving data: {ex.Message}");
+            return Unexpected(ex, "accepted-list");
         }
     }
 
@@ -102,7 +112,7 @@ public class LeadController : ControllerBase
         catch (InvalidOperationException ex) { return Conflict(new { error = ex.Message }); }
         catch (Exception ex)
         {
-            return StatusCode(StatusCodes.Status500InternalServerError, $"Error accepting lead: {ex.Message}");
+            return Unexpected(ex, "accept");
         }
     }
 
@@ -116,7 +126,11 @@ public class LeadController : ControllerBase
             var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
             if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
 
-            var createdBy = User.Identity?.Name ?? "System";
+            var createdBy = User.FindFirstValue(ClaimTypes.NameIdentifier)
+                ?? User.FindFirstValue(ClaimTypes.Email)
+                ?? User.Identity?.Name
+                ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(createdBy)) return Unauthorized();
             var (rfqId, rfqno) = await _repository.ConvertLeadToRfqAsync(id, businessUnitId, createdBy);
             return Ok(new { rfqId, rfqno, message = $"Lead converted to RFQ {rfqno}." });
         }
@@ -130,7 +144,7 @@ public class LeadController : ControllerBase
         }
         catch (Exception ex)
         {
-            return StatusCode(StatusCodes.Status500InternalServerError, $"Error converting lead: {ex.Message}");
+            return Unexpected(ex, "convert");
         }
     }
 
@@ -144,7 +158,7 @@ public class LeadController : ControllerBase
         }
         catch (Exception ex)
         {
-            return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving rejection reasons: {ex.Message}");
+            return Unexpected(ex, "rejection-reasons");
         }
     }
 
@@ -163,7 +177,7 @@ public class LeadController : ControllerBase
         catch (InvalidOperationException ex) { return Conflict(new { error = ex.Message }); }
         catch (Exception ex)
         {
-            return StatusCode(StatusCodes.Status500InternalServerError, $"Error rejecting lead: {ex.Message}");
+            return Unexpected(ex, "reject");
         }
     }
 
@@ -181,7 +195,7 @@ public class LeadController : ControllerBase
         }
         catch (Exception ex)
         {
-            return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving stats: {ex.Message}");
+            return Unexpected(ex, "stats");
         }
     }
 
@@ -215,7 +229,7 @@ public class LeadController : ControllerBase
         }
         catch (Exception ex)
         {
-            return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving needs-review leads: {ex.Message}");
+            return Unexpected(ex, "needs-review");
         }
     }
 
@@ -288,7 +302,7 @@ public class LeadController : ControllerBase
         }
         catch (Exception ex)
         {
-            return StatusCode(StatusCodes.Status500InternalServerError, $"Error resolving duplicate flag: {ex.Message}");
+            return Unexpected(ex, "resolve-duplicate");
         }
     }
 
@@ -308,7 +322,7 @@ public class LeadController : ControllerBase
         }
         catch (Exception ex)
         {
-            return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving lead details: {ex.Message}");
+            return Unexpected(ex, "detail");
         }
     }
 }

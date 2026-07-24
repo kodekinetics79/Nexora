@@ -64,6 +64,8 @@ public static class LifecycleModelBuilderExtensions
             .Property(x => x.LifecycleVersion).IsConcurrencyToken().HasDefaultValue(1);
         modelBuilder.Entity<ERP_RFQ_Automation.Models.Rfq>()
             .Property(x => x.LifecycleVersion).IsConcurrencyToken().HasDefaultValue(1);
+        modelBuilder.Entity<ERP_RFQ_Automation.Models.Quote>()
+            .Property(x => x.LifecycleVersion).IsConcurrencyToken().HasDefaultValue(1);
         modelBuilder.Entity<ERP_RFQ_Automation.Models.CommercialCase>()
             .HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
         modelBuilder.Entity<ERP_RFQ_Automation.Models.CommercialCase>()

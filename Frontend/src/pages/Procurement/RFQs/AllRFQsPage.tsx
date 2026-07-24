@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Chip, IconButton,
-  Tooltip, Stack,
+  Tooltip, Stack, Alert,
 } from '@mui/material';
 import {
   DataGrid, type GridColDef, type GridPaginationModel
@@ -13,7 +13,6 @@ import {
   Visibility as ViewIcon,
   Refresh as RefreshIcon,
   Layers as ItemsIcon,
-  Add as AddIcon,
   CloudUpload as UploadIcon,
 } from '@mui/icons-material';
 import rfqService from '../../../api/services/rfqService';
@@ -23,11 +22,11 @@ import { useAuth } from '../../../context/AuthContext';
 const AllRFQsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { userData } = useAuth();
+  const { userData, hasPermission } = useAuth();
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
   const [search, setSearch] = useState('');
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['rfqs', paginationModel, search],
     queryFn: () => rfqService.getAll({
       pageNumber: paginationModel.page + 1,
@@ -54,14 +53,18 @@ const AllRFQsPage: React.FC = () => {
     return 'success.main';
   };
 
-  const statusColorMap: Record<number, any> = {
-    34: { label: 'Draft', color: 'default' },
-    35: { label: 'In Progress', color: 'primary' },
-    36: { label: 'Completed', color: 'success' },
-    37: { label: 'Cancelled', color: 'error' },
-  };
-
   const columns: GridColDef[] = [
+    {
+      field: 'nexoraSerial',
+      headerName: 'Nexora Serial',
+      width: 180,
+      valueGetter: (_value, row) => row.nexoraSerial || row.commercialCaseReference || '',
+      renderCell: (p) => (
+        <Typography sx={{ fontWeight: 800, fontFamily: 'monospace', fontSize: '0.8rem', color: p.value ? 'primary.main' : 'text.disabled' }}>
+          {p.value || 'Unassigned'}
+        </Typography>
+      ),
+    },
     {
       field: 'rfqno',
       headerName: t('rfq_management'),
@@ -135,7 +138,7 @@ const AllRFQsPage: React.FC = () => {
       headerName: t('status'),
       width: 120,
       renderCell: (p) => {
-        const status = statusColorMap[p.row.rfqstatusId] || { label: p.row.rfqstatusValue || 'Unknown', color: 'default' };
+        const status = { label: p.row.rfqstatusValue || 'Unknown', color: 'default' as const };
         return (
           <Chip
             label={status.label}
@@ -179,21 +182,14 @@ const AllRFQsPage: React.FC = () => {
           </Typography>
         </Box>
         <Stack direction="row" spacing={2}>
-          <Button
+          {hasPermission('RFQ Management', 'create') && <Button
             variant="outlined"
             startIcon={<UploadIcon />}
+            onClick={() => navigate('/procurement/leads/manual-upload')}
             sx={{ fontWeight: 800, borderRadius: 2 }}
           >
-            Upload RFQ
-          </Button>
-          <Button
-            variant="contained"
-            startIcon={<AddIcon />}
-            onClick={() => navigate('/procurement/rfqs/create')}
-            sx={{ fontWeight: 800, borderRadius: 2 }}
-          >
-            Create RFQ
-          </Button>
+            Ingest RFQ
+          </Button>}
           <Tooltip title="Refresh Data">
             <IconButton onClick={() => refetch()} sx={{ bgcolor: 'white', boxShadow: 1 }}>
               <RefreshIcon />
@@ -204,12 +200,19 @@ const AllRFQsPage: React.FC = () => {
 
       {/* Filters */}
       <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
-        <SearchField width="400px" value={search} onChange={setSearch} placeholder="Search by RFQ No, Title, Buyer..." />
+        <SearchField width="400px" value={search} onChange={setSearch} placeholder="Search Nexora Serial, RFQ, customer or buyer" />
       </Paper>
 
       {/* Grid */}
       <Paper sx={{ height: 'calc(100vh - 240px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
-        <DataGrid
+        {isError ? (
+          <Box sx={{ height: '100%', display: 'grid', placeItems: 'center', p: 3 }}>
+            <Stack spacing={2} sx={{ alignItems: 'center', maxWidth: 480 }}>
+              <Alert severity="error">We couldn't load RFQs. No empty result has been assumed.</Alert>
+              <Button variant="contained" startIcon={<RefreshIcon />} onClick={() => refetch()}>Retry</Button>
+            </Stack>
+          </Box>
+        ) : <DataGrid
           rows={data?.items ?? []}
           columns={columns}
           rowCount={data?.totalItems ?? 0}
@@ -221,7 +224,7 @@ const AllRFQsPage: React.FC = () => {
           disableRowSelectionOnClick
           getRowId={(r) => r.id}
           rowHeight={85}
-        />
+        />}
       </Paper>
     </Box>
   );

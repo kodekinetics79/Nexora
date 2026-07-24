@@ -28,22 +28,35 @@ import { toast } from 'react-hot-toast';
 const QuoteViewPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { userData } = useAuth();
+  const { userData, hasPermission } = useAuth();
   const queryClient = useQueryClient();
   const businessUnitId = userData?.businessUnitId || 0;
 
-  const { data: quote, isLoading } = useQuery({
+  const { data: quote, isLoading, isError, refetch } = useQuery({
     queryKey: ['quote-detail', id],
     queryFn: () => quoteService.getById(Number(id), businessUnitId),
     enabled: !!id
   });
 
   const statusMutation = useMutation({
-    mutationFn: (status: string) => quoteService.transitionStatus(Number(id), status, userData?.userName || 'System'),
+    mutationFn: (status: string) => quoteService.transitionStatus(Number(id), status, quote?.lifecycleVersion ?? 1),
     onSuccess: () => {
       toast.success('Status updated successfully');
       queryClient.invalidateQueries({ queryKey: ['quote-detail', id] });
     }
+  });
+
+  const pdfMutation = useMutation({
+    mutationFn: () => quoteService.downloadPdf(Number(id)),
+    onSuccess: (blob) => {
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${quote?.quoteNo || `quote-${id}`}.pdf`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    },
+    onError: () => toast.error('Failed to export the quote PDF')
   });
 
   // WP-B4 revisions-lite: chain facts drive the "Rev n" chip + Revise button.
@@ -99,6 +112,7 @@ const QuoteViewPage: React.FC = () => {
   const [awardOpen, setAwardOpen] = React.useState(false);
 
   if (isLoading) return <Box sx={{ p: 4, display: 'flex', justifyContent: 'center' }}><CircularProgress /></Box>;
+  if (isError) return <Box sx={{ p: 4 }}><Alert severity="error" action={<Button color="inherit" onClick={() => refetch()}>Retry</Button>}>We couldn't load this quote.</Alert></Box>;
   if (!quote) return <Box sx={{ p: 4 }}>Quote not found</Box>;
 
   // Manual Calculation for header discount if not already in totalAmount
@@ -135,6 +149,9 @@ const QuoteViewPage: React.FC = () => {
           <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 1 }}>
             <IconButton onClick={() => navigate('/sales/quotes')} size="small"><BackIcon /></IconButton>
             <Typography variant="h4" sx={{ fontWeight: 900, letterSpacing: '-0.02em' }}>Quote: {quote.quoteNo}</Typography>
+            {(quote.nexoraSerial || quote.commercialCaseReference) && (
+              <Chip label={`Nexora Serial: ${quote.nexoraSerial || quote.commercialCaseReference}`} variant="outlined" sx={{ fontWeight: 900, fontFamily: 'monospace' }} />
+            )}
             <Chip label={quote.statusValue} color={quote.statusValue === 'Sent' ? 'success' : quote.statusValue === 'Accepted' ? 'primary' : 'default'} sx={{ fontWeight: 900, height: 28, borderRadius: 1.5 }} />
             {revisionInfo && revisionInfo.revisionNo > 1 && revisionInfo.revisionOfQuoteNo && (
               <Tooltip title={`This quote is revision ${revisionInfo.revisionNo} and replaces ${revisionInfo.revisionOfQuoteNo}`}>
@@ -183,7 +200,7 @@ const QuoteViewPage: React.FC = () => {
           <Typography variant="body2" color="text.secondary">Created on {dayjs(quote.createdDate).format('DD MMM YYYY')} by {quote.createdBy}</Typography>
         </Box>
         <Stack direction="row" spacing={1}>
-          <Button 
+          {hasPermission('Quotations', 'edit') && <Button
             variant="outlined" 
             startIcon={<EditIcon />} 
             onClick={() => navigate(`/sales/quotes/edit/${id}`)} 
@@ -191,15 +208,17 @@ const QuoteViewPage: React.FC = () => {
             sx={{ borderRadius: 2 }}
           >
             Edit
-          </Button>
+          </Button>}
           <Button 
             variant="outlined" 
             startIcon={<PdfIcon />} 
+            onClick={() => pdfMutation.mutate()}
+            disabled={pdfMutation.isPending}
             sx={{ borderRadius: 2 }}
           >
             Export PDF
           </Button>
-          <Button
+          {hasPermission('Quotations', 'edit') && quote.statusValue === 'Sent' && <Button
             variant="outlined"
             startIcon={<EmailIcon />}
             disabled={quote.statusValue?.toUpperCase() === 'ORDERED'}
@@ -207,9 +226,9 @@ const QuoteViewPage: React.FC = () => {
             sx={{ borderRadius: 2 }}
           >
             Email
-          </Button>
+          </Button>}
 
-          {revisionInfo?.canRevise && (
+          {hasPermission('Quotations', 'edit') && revisionInfo?.canRevise && (
             <Tooltip title="Create a new draft revision of this quote (the original stays untouched)">
               <Button
                 variant="outlined"
@@ -224,9 +243,9 @@ const QuoteViewPage: React.FC = () => {
             </Tooltip>
           )}
 
-          {quote.statusValue === 'Draft' && <Button variant="contained" startIcon={<SendIcon />} onClick={() => statusMutation.mutate('Sent')} sx={{ borderRadius: 2 }}>Finalize</Button>}
+          {hasPermission('Quotations', 'edit') && quote.statusValue === 'Draft' && <Button variant="contained" startIcon={<SendIcon />} onClick={() => statusMutation.mutate('Sent')} sx={{ borderRadius: 2 }}>Finalize</Button>}
 
-          {quote.statusValue === 'Sent' && (
+          {hasPermission('Quotations', 'edit') && quote.statusValue === 'Sent' && (
             <>
               {!quote.respondedOn && (
                 <Button
@@ -251,7 +270,7 @@ const QuoteViewPage: React.FC = () => {
             </>
           )}
 
-          {quote.statusValue === 'Accepted' && (
+          {hasPermission('Orders', 'create') && quote.statusValue === 'Accepted' && (
             <Button 
                 variant="contained" 
                 color="primary" 
@@ -287,7 +306,8 @@ const QuoteViewPage: React.FC = () => {
           <Paper sx={{ p: 3, borderRadius: 2, mb: 3, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
             <Typography variant="h6" sx={{ fontWeight: 800, mb: 2 }}>Customer & Quote Details</Typography>
             <Grid container spacing={2}>
-              <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Customer Name</Typography><Typography sx={{ fontWeight: 700 }}>{quote.customerName || 'N/A'}</Typography></Grid>
+              <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Customer Name</Typography><Typography sx={{ fontWeight: 700 }}>{quote.customerName || 'Customer unresolved'}</Typography></Grid>
+              <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Contact</Typography><Typography sx={{ fontWeight: 700 }}>{quote.contactName || quote.customerEmail || 'Contact unresolved'}</Typography></Grid>
               <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Email</Typography><Typography sx={{ fontWeight: 700 }}>{quote.customerEmail || 'N/A'}</Typography></Grid>
               <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Reference RFQ</Typography><Typography sx={{ fontWeight: 700, color: 'primary.main' }}>{quote.rfqNo || 'None'}</Typography></Grid>
               <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Validity</Typography><Typography sx={{ fontWeight: 700 }}>Until {dayjs(quote.validUntil).format('DD MMM YYYY')}</Typography></Grid>

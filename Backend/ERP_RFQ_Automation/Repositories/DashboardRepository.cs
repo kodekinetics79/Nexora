@@ -405,6 +405,313 @@ namespace ERP_RFQ_Automation.Repositories
             };
         }
 
+        public async Task<DashboardRelease01DTO> GetRelease01Async(
+            long businessUnitId,
+            long? ownerUserId,
+            string roleScope,
+            DateTime from,
+            DateTime to,
+            DateTime generatedAt,
+            CancellationToken cancellationToken = default)
+        {
+            if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
+            if (from >= to) throw new ArgumentException("The dashboard reporting window is invalid.");
+            if (generatedAt < to) throw new ArgumentException("The generated-at boundary cannot precede the reporting window.");
+
+            var scopedLeads = _context.Leads.AsNoTracking()
+                .Where(lead => lead.BusinessUnitId == businessUnitId
+                    && (!ownerUserId.HasValue || lead.AssignTo == ownerUserId.Value));
+
+            var leadRows = await scopedLeads
+                .Where(lead => lead.CreatedDate < to)
+                .Select(lead => new Release01LeadRow(
+                    lead.Id,
+                    lead.CommercialCaseId,
+                    lead.CommercialCaseReference,
+                    lead.CreatedDate,
+                    lead.RequiresCommercialReview,
+                    lead.CommercialFactsVerified,
+                    lead.LeadStatus != null ? lead.LeadStatus.SetupCode : null,
+                    lead.LeadStatus != null ? lead.LeadStatus.SetupValue : null))
+                .ToListAsync(cancellationToken);
+
+            var lifecycleRows = await (
+                from lifecycleEvent in _context.CommercialLifecycleEvents.AsNoTracking()
+                join lead in scopedLeads
+                    on new { lifecycleEvent.BusinessUnitId, lifecycleEvent.CommercialCaseId }
+                    equals new { lead.BusinessUnitId, lead.CommercialCaseId }
+                where lifecycleEvent.BusinessUnitId == businessUnitId
+                    && lifecycleEvent.AggregateType == "Lead"
+                    && lifecycleEvent.OccurredOn < generatedAt
+                    && (lifecycleEvent.NewStatusCode == "RECEIVED"
+                        || lifecycleEvent.NewStatusCode == "QUALIFIED"
+                        || lifecycleEvent.NewStatusCode == "DISQUALIFIED")
+                select new Release01LifecycleRow(
+                    lifecycleEvent.Id,
+                    lifecycleEvent.AggregateId,
+                    lifecycleEvent.CommercialCaseId,
+                    lifecycleEvent.CommercialCaseReference,
+                    lifecycleEvent.NewStatusCode,
+                    lifecycleEvent.OccurredOn))
+                .ToListAsync(cancellationToken);
+
+            var kpis = new List<DashboardRelease01KpiDTO>();
+            AddLeadsReceivedKpi(kpis, leadRows, lifecycleRows, from, to);
+            AddLeadsRequiringReviewKpi(kpis, leadRows);
+            AddQualificationKpis(kpis, lifecycleRows, from, to);
+
+            kpis.Add(Insufficient("assignment_sla", "Assignment SLA", "percentage",
+                "Cases assigned within the configured SLA divided by received cases requiring assignment.",
+                "LEAD_ASSIGNED events and a versioned assignment-SLA policy are not yet present in the authoritative event spine."));
+            kpis.Add(Insufficient("active_workload", "Active workload", "weighted_work",
+                "Measured weighted nonterminal Lead, RFQ, and Quote work at generatedAt.",
+                "Current routing capacity is not based on certified workload weights."));
+            kpis.Add(Insufficient("rfqs_created", "RFQs created", "count",
+                "Distinct commercial cases with RFQ_CREATED in [from,to).",
+                "RFQ_CREATED is not yet recorded as an authoritative commercial event."));
+            kpis.Add(Insufficient("lead_to_rfq_conversion", "Lead to RFQ conversion", "percentage",
+                "Received cases in the window that later have RFQ_CREATED, subject to a disclosed maturity cutoff.",
+                "The event spine does not yet contain RFQ_CREATED or a release maturity policy."));
+            kpis.Add(Insufficient("quotes_ready", "Quotes ready", "count",
+                "Distinct latest quote revisions with QUOTE_READY in [from,to).",
+                "Quote lifecycle events and revision governance are not yet authoritative."));
+            kpis.Add(Insufficient("quote_value_sent", "Quote value sent", "currency",
+                "Latest valid quote value at QUOTE_SENT in tenant base currency.",
+                "QUOTE_SENT events, revision governance, and an authoritative base-currency conversion boundary are incomplete."));
+            kpis.Add(Insufficient("quote_response_rate", "Quote response rate", "percentage",
+                "Mature sent cases with QUOTE_RESPONDED divided by mature QUOTE_SENT cases.",
+                "Quote response events and a release maturity policy are not yet authoritative."));
+            kpis.Add(Insufficient("win_rate", "Win rate", "percentage",
+                "Latest QUOTE_WON outcomes divided by latest QUOTE_WON plus QUOTE_LOST outcomes in the window.",
+                "Quote outcomes currently bypass the governed commercial event spine."));
+            kpis.Add(Insufficient("partial_outcome_rate", "Partial outcome rate", "percentage",
+                "QUOTE_PARTIAL cases divided by cases with a terminal quote outcome in the window.",
+                "QUOTE_PARTIAL is not yet an authoritative commercial event."));
+            kpis.Add(Insufficient("no_quote_rate", "No-quote rate", "percentage",
+                "NO_QUOTE decisions divided by cases reaching a quote decision in the window.",
+                "NO_QUOTE decisions and required reasons are not yet on the authoritative event spine."));
+            kpis.Add(Insufficient("follow_ups_overdue", "Follow-ups overdue", "count",
+                "Open FOLLOW_UP_DUE events past due without a later FOLLOW_UP_COMPLETED event.",
+                "Follow-up due and completion events are not yet authoritative."));
+            kpis.Add(Insufficient("order_conversion", "Order conversion", "percentage",
+                "Mature QUOTE_SENT cases with ORDER_CREATED divided by mature QUOTE_SENT cases.",
+                "Quote and order milestone events and a release maturity policy are incomplete."));
+            kpis.Add(Insufficient("straight_through_processing_rate", "Straight-through processing rate", "percentage",
+                "Completed lead-processing runs without human review divided by completed runs.",
+                "Processing path and review outcome are not yet linked to the commercial event cohort."));
+            kpis.Add(Insufficient("extraction_correction_rate", "Extraction correction rate", "percentage",
+                "User-corrected reviewed fields divided by reviewed extracted fields.",
+                "An append-only correction and reviewer-decision ledger is not yet available."));
+
+            return new DashboardRelease01DTO
+            {
+                GeneratedAt = generatedAt,
+                Filter = new DashboardRelease01FilterDTO { From = from, To = to },
+                RoleScope = new DashboardRelease01RoleScopeDTO
+                {
+                    Scope = roleScope,
+                    OwnerUserId = ownerUserId
+                },
+                Kpis = kpis
+            };
+        }
+
+        private static void AddLeadsReceivedKpi(
+            ICollection<DashboardRelease01KpiDTO> kpis,
+            IReadOnlyCollection<Release01LeadRow> leads,
+            IReadOnlyCollection<Release01LifecycleRow> lifecycleRows,
+            DateTime from,
+            DateTime to)
+        {
+            var operational = leads
+                .Where(lead => lead.CreatedDate >= from && lead.CreatedDate < to)
+                .GroupBy(lead => lead.CommercialCaseId)
+                .Select(group => group.First())
+                .ToList();
+            var received = lifecycleRows
+                .Where(row => row.StatusCode == "RECEIVED" && row.OccurredOn >= from && row.OccurredOn < to)
+                .GroupBy(row => row.CommercialCaseId)
+                .Select(group => group.OrderBy(row => row.OccurredOn).ThenBy(row => row.EventId).First())
+                .ToList();
+            var complete = operational.Count == received.Count
+                && operational.Select(row => row.CommercialCaseId).Order().SequenceEqual(
+                    received.Select(row => row.CommercialCaseId).Order());
+
+            kpis.Add(new DashboardRelease01KpiDTO
+            {
+                Key = "leads_received",
+                Label = "Leads received",
+                State = complete ? DashboardRelease01Contract.Available : DashboardRelease01Contract.InsufficientData,
+                Value = complete ? received.Count : null,
+                Unit = "count",
+                Numerator = received.Count,
+                Denominator = operational.Count,
+                Definition = "Distinct commercial cases with LEAD_RECEIVED in [from,to).",
+                InsufficientDataReason = complete ? null :
+                    "Operational leads in the window do not reconcile one-to-one with LEAD_RECEIVED events.",
+                DrillDownIdentifiers = received.Select(row => Identifier(row, "received")).ToList()
+            });
+        }
+
+        private static void AddLeadsRequiringReviewKpi(
+            ICollection<DashboardRelease01KpiDTO> kpis,
+            IReadOnlyCollection<Release01LeadRow> leads)
+        {
+            var review = leads.Where(IsLeadReviewOpen)
+                .OrderBy(lead => lead.Id)
+                .ToList();
+            kpis.Add(new DashboardRelease01KpiDTO
+            {
+                Key = "leads_requiring_review",
+                Label = "Leads requiring review",
+                State = DashboardRelease01Contract.Available,
+                Value = review.Count,
+                Unit = "count",
+                Definition = "Tenant- and role-visible leads received before the window end whose authoritative current record requires commercial review.",
+                DrillDownIdentifiers = review.Select(lead => new DashboardRelease01DrillDownIdentifierDTO
+                {
+                    RecordType = "lead",
+                    RecordId = lead.Id,
+                    CommercialCaseId = lead.CommercialCaseId,
+                    NexoraSerial = lead.NexoraSerial,
+                    Classification = "review_required"
+                }).ToList()
+            });
+        }
+
+        private static void AddQualificationKpis(
+            ICollection<DashboardRelease01KpiDTO> kpis,
+            IReadOnlyCollection<Release01LifecycleRow> lifecycleRows,
+            DateTime from,
+            DateTime to)
+        {
+            var decisions = lifecycleRows
+                .Where(row => row.OccurredOn >= from && row.OccurredOn < to
+                    && row.StatusCode is "QUALIFIED" or "DISQUALIFIED")
+                .GroupBy(row => row.CommercialCaseId)
+                .Select(group => group.OrderBy(row => row.OccurredOn).ThenBy(row => row.EventId).First())
+                .ToList();
+            var qualified = decisions.Where(row => row.StatusCode == "QUALIFIED").ToList();
+
+            kpis.Add(new DashboardRelease01KpiDTO
+            {
+                Key = "qualification_rate",
+                Label = "Qualification rate",
+                State = decisions.Count > 0 ? DashboardRelease01Contract.Available : DashboardRelease01Contract.InsufficientData,
+                Value = decisions.Count > 0 ? Math.Round((decimal)qualified.Count / decisions.Count * 100m, 2) : null,
+                Unit = "percentage",
+                Numerator = qualified.Count,
+                Denominator = decisions.Count,
+                Definition = "First valid QUALIFIED decisions divided by first valid QUALIFIED plus DISQUALIFIED decisions in [from,to), per commercial case.",
+                InsufficientDataReason = decisions.Count > 0 ? null : "No governed qualification decisions exist in the reporting window.",
+                DrillDownIdentifiers = decisions.Select(row => Identifier(row, row.StatusCode.ToLowerInvariant())).ToList()
+            });
+
+            var durations = new List<(Release01LifecycleRow Decision, decimal Hours)>();
+            var missingReceived = new List<Release01LifecycleRow>();
+            foreach (var decision in decisions)
+            {
+                var received = lifecycleRows
+                    .Where(row => row.CommercialCaseId == decision.CommercialCaseId
+                        && row.StatusCode == "RECEIVED" && row.OccurredOn <= decision.OccurredOn)
+                    .OrderBy(row => row.OccurredOn)
+                    .ThenBy(row => row.EventId)
+                    .FirstOrDefault();
+                if (received == null)
+                {
+                    missingReceived.Add(decision);
+                    continue;
+                }
+
+                durations.Add((decision, (decimal)(decision.OccurredOn - received.OccurredOn).TotalHours));
+            }
+
+            var complete = decisions.Count > 0 && missingReceived.Count == 0;
+            kpis.Add(new DashboardRelease01KpiDTO
+            {
+                Key = "median_time_to_qualify",
+                Label = "Median time to qualify",
+                State = complete ? DashboardRelease01Contract.Available : DashboardRelease01Contract.InsufficientData,
+                Value = complete ? Median(durations.Select(row => row.Hours).ToList()) : null,
+                Unit = "hours",
+                Denominator = decisions.Count,
+                Definition = "Median elapsed hours from the first valid LEAD_RECEIVED event to the latest qualification decision in [from,to), per commercial case.",
+                InsufficientDataReason = complete ? null : decisions.Count == 0
+                    ? "No governed qualification decisions exist in the reporting window."
+                    : "One or more qualification decisions have no preceding LEAD_RECEIVED event.",
+                DrillDownIdentifiers = durations.Select(row =>
+                {
+                    var identifier = Identifier(row.Decision, row.Decision.StatusCode.ToLowerInvariant());
+                    identifier.DurationHours = Math.Round(row.Hours, 2);
+                    return identifier;
+                }).Concat(missingReceived.Select(row => Identifier(row, "missing_received_event"))).ToList()
+            });
+        }
+
+        private static DashboardRelease01KpiDTO Insufficient(
+            string key, string label, string unit, string definition, string reason) => new()
+        {
+            Key = key,
+            Label = label,
+            State = DashboardRelease01Contract.InsufficientData,
+            Unit = unit,
+            Definition = definition,
+            InsufficientDataReason = reason
+        };
+
+        private static DashboardRelease01DrillDownIdentifierDTO Identifier(
+            Release01LifecycleRow row, string classification) => new()
+        {
+            RecordType = "lead",
+            RecordId = row.LeadId,
+            CommercialCaseId = row.CommercialCaseId,
+            NexoraSerial = row.NexoraSerial,
+            Classification = classification,
+            OccurredAt = row.OccurredOn
+        };
+
+        private static string CanonicalStatus(string? code, string? value)
+        {
+            var status = string.IsNullOrWhiteSpace(code) ? value : code;
+            return (status ?? string.Empty).Trim().Replace(' ', '_').ToUpperInvariant();
+        }
+
+        private static bool IsLeadReviewOpen(Release01LeadRow lead)
+        {
+            var status = CanonicalStatus(lead.StatusCode, lead.StatusValue);
+            if (status is "DISQUALIFIED" or "CONVERTED_TO_RFQ" or "LOST" or "CANCELLED"
+                or "COMPLETED" or "DUPLICATED") return false;
+            return status == "UNDER_REVIEW"
+                || lead.RequiresCommercialReview && !lead.CommercialFactsVerified;
+        }
+
+        private static decimal Median(IReadOnlyList<decimal> values)
+        {
+            var ordered = values.Order().ToArray();
+            var middle = ordered.Length / 2;
+            return Math.Round(ordered.Length % 2 == 1
+                ? ordered[middle]
+                : (ordered[middle - 1] + ordered[middle]) / 2m, 2);
+        }
+
+        private sealed record Release01LeadRow(
+            long Id,
+            long CommercialCaseId,
+            string NexoraSerial,
+            DateTime CreatedDate,
+            bool RequiresCommercialReview,
+            bool CommercialFactsVerified,
+            string? StatusCode,
+            string? StatusValue);
+
+        private sealed record Release01LifecycleRow(
+            long EventId,
+            long LeadId,
+            long CommercialCaseId,
+            string NexoraSerial,
+            string StatusCode,
+            DateTime OccurredOn);
+
         // ════════════════════════════════════════════════════════════════════
         // Shared status/SLA resolution helpers (Wave B)
         // ════════════════════════════════════════════════════════════════════

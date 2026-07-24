@@ -20,6 +20,7 @@ import leadService from '../../api/services/leadService';
 import LifecycleActions from '../../components/common/LifecycleActions';
 import { parseDateSafe, formatDateSafe } from '../../utils/dates';
 import { downloadAuthenticatedFile } from '../../utils/authenticatedFile';
+import { useAuth } from '../../context/AuthContext';
 
 import { toast } from 'react-hot-toast';
 
@@ -79,6 +80,7 @@ const DataField: React.FC<{ label: string; value: string | number | null; boldVa
 );
 
 const LeadDetailPage: React.FC = () => {
+  const { hasPermission } = useAuth();
   const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -92,7 +94,7 @@ const LeadDetailPage: React.FC = () => {
     }
   };
 
-  const { data: lead, isLoading } = useQuery({
+  const { data: lead, isLoading, isError, refetch } = useQuery({
     queryKey: ['lead-detail', Number(id)],
     queryFn: () => leadService.getById(Number(id)),
     enabled: !!id,
@@ -119,6 +121,7 @@ const LeadDetailPage: React.FC = () => {
   const formatDate = (dateStr: string | null) => formatDateSafe(dateStr);
 
   if (isLoading) return <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '60vh' }}><CircularProgress /></Box>;
+  if (isError) return <Box sx={{ p: 4 }}><Alert severity="error" action={<Button color="inherit" onClick={() => refetch()}>Retry</Button>}>We couldn't load this lead.</Alert></Box>;
   if (!lead) return <Box sx={{ p: 4 }}><Typography>Lead not found.</Typography></Box>;
 
   const aiConfidence = (lead.aiconfidence || 0) * 100;
@@ -149,13 +152,20 @@ const LeadDetailPage: React.FC = () => {
           <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>
             {t('lead_detail_analysis') || 'Lead Details Analysis Engine'}
           </Typography>
-          {lead.commercialCaseReference && (
+          {(lead.nexoraSerial || lead.commercialCaseReference) && (
             <Chip
-              label={lead.commercialCaseReference}
+              label={`Nexora Serial: ${lead.nexoraSerial || lead.commercialCaseReference}`}
               size="small"
               variant="outlined"
               sx={{ mt: 1, fontWeight: 900, fontFamily: 'monospace', width: 'fit-content' }}
             />
+          )}
+          {lead.customerId && (
+            <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: 'wrap' }}>
+              <Chip size="small" label={`Customer #${lead.customerId}`} variant="outlined" />
+              {lead.contactId && <Chip size="small" label={`Contact #${lead.contactId}`} variant="outlined" />}
+              <Chip size="small" label={lead.customerMatchStatus} color="success" variant="outlined" />
+            </Stack>
           )}
         </Box>
         <Stack direction="row" spacing={1.5}>
@@ -170,16 +180,16 @@ const LeadDetailPage: React.FC = () => {
               Workspace
             </Button>
           )}
-          <Button
+          {hasPermission('Leads', 'edit') && <Button
             variant="contained"
             startIcon={<SparkleIcon />}
             size="small"
             onClick={() => navigate(`/procurement/leads/${lead.id}/convert`)}
             sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
           >
-            Convert with AI
-          </Button>
-        <LifecycleActions aggregate="leads" id={lead.id} onChanged={() => queryClient.invalidateQueries({ queryKey: ['lead-detail', Number(id)] })} />
+            Prepare RFQ
+          </Button>}
+        {hasPermission('Leads', 'edit') && <LifecycleActions aggregate="leads" id={lead.id} onChanged={() => queryClient.invalidateQueries({ queryKey: ['lead-detail', Number(id)] })} />}
         </Stack>
       </Box>
 

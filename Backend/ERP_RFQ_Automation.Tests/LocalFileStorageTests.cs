@@ -8,12 +8,15 @@ public sealed class LocalFileStorageTests : IDisposable
     private readonly string _root = Path.Combine(Path.GetTempPath(), "nexora-storage-tests", Guid.NewGuid().ToString("N"));
 
     [Fact]
-    public async Task WriteImmutableAsync_PreservesFirstContentAndSupportsLegacyUploadsPath()
+    public async Task WriteImmutableAsync_RejectsConflictingContentAndSupportsLegacyUploadsPath()
     {
         var storage = new LocalFileStorage(_root, Path.GetTempPath());
 
         var path = await storage.WriteImmutableAsync("Extraction/aa/document.txt", Encoding.UTF8.GetBytes("first"));
-        await storage.WriteImmutableAsync("Extraction/aa/document.txt", Encoding.UTF8.GetBytes("second"));
+        Assert.Equal(path, await storage.WriteImmutableAsync(
+            "Extraction/aa/document.txt", Encoding.UTF8.GetBytes("first")));
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            storage.WriteImmutableAsync("Extraction/aa/document.txt", Encoding.UTF8.GetBytes("second")));
 
         Assert.Equal("first", await File.ReadAllTextAsync(path));
         Assert.Equal(path, storage.ResolvePath("Uploads/Extraction/aa/document.txt"));

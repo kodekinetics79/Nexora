@@ -41,10 +41,10 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
             var document = new CanonicalRfqDocument
             {
                 BusinessUnitId = businessUnitId,
-                RfqNo = RequiredText(first.RfqNo, first, "A", "RFQ_NO", "RFQ number is required."),
-                BuyerName = RequiredText(first.BuyerName, first, "B", "BUYER_NAME", "Buyer name is required."),
-                ReceivedDate = DateValue(first.ReceivedDate, first, "C", false, "RECEIVED_DATE"),
-                BidClosingDate = DateValue(first.BidClosingDate, first, "D", true, "BID_CLOSING_DATE")
+                RfqNo = RequiredText(first.RfqNo, first, RfqSpreadsheetFields.RfqNo, "RFQ_NO", "RFQ number is required."),
+                BuyerName = RequiredText(first.BuyerName, first, RfqSpreadsheetFields.BuyerName, "BUYER_NAME", "Buyer name is required."),
+                ReceivedDate = DateValue(first.ReceivedDate, first, RfqSpreadsheetFields.ReceivedDate, false, "RECEIVED_DATE"),
+                BidClosingDate = DateValue(first.BidClosingDate, first, RfqSpreadsheetFields.BidClosingDate, true, "BID_CLOSING_DATE")
             };
 
             foreach (var row in group)
@@ -52,13 +52,13 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
                 var line = new CanonicalRfqLineItem
                 {
                     LineItemNo = TextValue(row.RowNumber.ToString(CultureInfo.InvariantCulture), row, "row", CanonicalValueKind.Derived, 1.0m),
-                    ProductName = RequiredText(row.ProductName, row, "E", "PRODUCT_NAME", "Product name is required."),
-                    Quantity = IntValue(row.Quantity, row, "F", false, "QUANTITY"),
-                    UnitPrice = DecimalValue(row.UnitPrice, row, "G", true, "UNIT_PRICE"),
-                    Currency = TextValue(row.Currency, row, "H"),
-                    ManufacturerName = TextValue(row.ManufacturerName, row, "I"),
-                    ManufacturerPartNumber = TextValue(row.ManufacturerPartNumber, row, "J"),
-                    LeadTimeDays = IntValue(row.LeadTimeDays, row, "K", true, "LEAD_TIME_DAYS")
+                    ProductName = RequiredText(row.ProductName, row, RfqSpreadsheetFields.ProductName, "PRODUCT_NAME", "Product name is required."),
+                    Quantity = IntValue(row.Quantity, row, RfqSpreadsheetFields.Quantity, false, "QUANTITY"),
+                    UnitPrice = DecimalValue(row.UnitPrice, row, RfqSpreadsheetFields.UnitPrice, true, "UNIT_PRICE"),
+                    Currency = TextValue(row.Currency, row, RfqSpreadsheetFields.Currency),
+                    ManufacturerName = TextValue(row.ManufacturerName, row, RfqSpreadsheetFields.ManufacturerName),
+                    ManufacturerPartNumber = TextValue(row.ManufacturerPartNumber, row, RfqSpreadsheetFields.ManufacturerPartNumber),
+                    LeadTimeDays = IntValue(row.LeadTimeDays, row, RfqSpreadsheetFields.LeadTimeDays, true, "LEAD_TIME_DAYS")
                 };
 
                 var lineKey = BuildLineKey(row);
@@ -269,7 +269,7 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
 
     private static SourceEvidence Evidence(RfqSpreadsheetRow row, string column, string? rawValue)
     {
-        var location = column == "row" ? $"row {row.RowNumber}" : $"row {row.RowNumber}, column {column}";
+        var location = row.SourceAddress(column, LegacyColumn(column));
         return new SourceEvidence
         {
             SourceDocumentName = row.SourceDocumentName,
@@ -277,6 +277,22 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
             RawValue = rawValue
         };
     }
+
+    private static string LegacyColumn(string fieldName) => fieldName switch
+    {
+        RfqSpreadsheetFields.RfqNo => "A",
+        RfqSpreadsheetFields.BuyerName => "B",
+        RfqSpreadsheetFields.ReceivedDate => "C",
+        RfqSpreadsheetFields.BidClosingDate => "D",
+        RfqSpreadsheetFields.ProductName => "E",
+        RfqSpreadsheetFields.Quantity => "F",
+        RfqSpreadsheetFields.UnitPrice => "G",
+        RfqSpreadsheetFields.Currency => "H",
+        RfqSpreadsheetFields.ManufacturerName => "I",
+        RfqSpreadsheetFields.ManufacturerPartNumber => "J",
+        RfqSpreadsheetFields.LeadTimeDays => "K",
+        _ => "row"
+    };
 
     private static CanonicalValidationIssue Issue(ValidationSeverity severity, string code, string message, SourceEvidence? evidence)
     {

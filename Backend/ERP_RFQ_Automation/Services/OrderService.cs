@@ -7,6 +7,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Data;
+using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 
 namespace ERP_RFQ_Automation.Services
 {
@@ -14,11 +16,14 @@ namespace ERP_RFQ_Automation.Services
     {
         private readonly IOrderRepository _orderRepository;
         private readonly ErpRfqAutomationContext _context;
+        private readonly ILifecycleApplicationService? _lifecycle;
 
-        public OrderService(IOrderRepository orderRepository, ErpRfqAutomationContext context)
+        public OrderService(IOrderRepository orderRepository, ErpRfqAutomationContext context,
+            ILifecycleApplicationService? lifecycle = null)
         {
             _orderRepository = orderRepository;
             _context = context;
+            _lifecycle = lifecycle;
         }
 
         public async Task<IEnumerable<OrderDto>> GetAllOrdersAsync(long businessUnitId)
@@ -160,31 +165,6 @@ namespace ERP_RFQ_Automation.Services
 
             var createdOrder = await _orderRepository.CreateOrderAsync(order);
 
-            // Update Quote Status to ORDERED if it exists
-            if (dto.QuoteId.HasValue)
-            {
-                var quote = await _context.Quotes.FindAsync(dto.QuoteId.Value);
-                if (quote != null)
-                {
-                    var orderedStatus = await _context.SetupMasters
-                        .FirstOrDefaultAsync(sm => sm.SetupType == "QuoteStatus" &&
-                            (sm.SetupCode == "ORDERED" || sm.SetupValue == "ORDERED" || sm.SetupValue == "Ordered"));
-
-                    if (orderedStatus != null)
-                    {
-                        quote.StatusId = orderedStatus.SetupId;
-                    }
-                    else
-                    {
-                        // Fallback to ACCEPTED (44) if a specific ORDERED status doesn't exist
-                        quote.StatusId = 44;
-                    }
-
-                    _context.Quotes.Update(quote);
-                    await _context.SaveChangesAsync();
-                }
-            }
-
             return MapToDto(createdOrder);
         }
 
@@ -222,6 +202,9 @@ namespace ERP_RFQ_Automation.Services
                 Rfqid = rfq.Id,
                 LeadId = rfq.LeadId,
                 CustomerId = rfq.CustomerId ?? 0,
+                CommercialCaseId = rfq.CommercialCaseId,
+                NexoraSerial = rfq.NexoraSerial,
+                ContactId = rfq.ContactId,
                 BusinessUnitId = businessUnitId,
                 StatusId = draftStatus.SetupId,
                 PaymentStatusId = unpaidStatus?.SetupId,
@@ -313,6 +296,9 @@ namespace ERP_RFQ_Automation.Services
                 LeadId = quote.Rfq?.LeadId,
                 Rfqid = quote.Rfqid,
                 CustomerId = quote.CustomerId.Value,
+                CommercialCaseId = quote.CommercialCaseId,
+                NexoraSerial = quote.NexoraSerial,
+                ContactId = quote.ContactId,
                 BusinessUnitId = businessUnitId,
                 StatusId = draftStatus.SetupId,
                 PaymentStatusId = unpaidStatus?.SetupId,
@@ -349,19 +335,36 @@ namespace ERP_RFQ_Automation.Services
 
             _context.Orders.Add(order);
 
-            // Update Quote Status to Ordered
-            var orderedStatus = await _context.SetupMasters
-                .FirstOrDefaultAsync(sm => sm.SetupType == "QuoteStatus" &&
-                    (sm.SetupCode == "ORDERED" || sm.SetupValue == "ORDERED" || sm.SetupValue == "Ordered"));
-
-            if (orderedStatus != null)
-            {
-                quote.StatusId = orderedStatus.SetupId;
-            }
-
             try
             {
-                await _context.SaveChangesAsync();
+                if (_lifecycle is not null)
+                {
+                    await using var transaction = await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+                    await _lifecycle.TransitionQuoteInCurrentTransactionAsync(
+                        businessUnitId,
+                        quote.Id,
+                        new LifecycleActor("system:order-create", "order-service"),
+                        new LifecycleTransitionCommand(
+                            "ORDERED",
+                            quote.LifecycleVersion,
+                            null,
+                            null,
+                            "order-create",
+                            Guid.NewGuid().ToString("N"),
+                            $"order-from-quote:{quote.Id}",
+                            $"order-from-quote:{quote.Id}:v{quote.LifecycleVersion}"),
+                        false,
+                        CancellationToken.None);
+                    await transaction.CommitAsync();
+                }
+                else
+                {
+                    var orderedStatus = await _context.SetupMasters
+                        .FirstOrDefaultAsync(sm => sm.SetupType == "QuoteStatus" &&
+                            (sm.SetupCode == "ORDERED" || sm.SetupValue == "ORDERED" || sm.SetupValue == "Ordered"));
+                    if (orderedStatus != null) quote.StatusId = orderedStatus.SetupId;
+                    await _context.SaveChangesAsync();
+                }
             }
             catch (DbUpdateException)
             {
@@ -428,6 +431,8 @@ namespace ERP_RFQ_Automation.Services
             {
                 OrderId = order.Id,
                 OrderNo = order.OrderNo,
+                CommercialCaseId = order.CommercialCaseId,
+                NexoraSerial = order.NexoraSerial,
                 OrderDate = order.OrderDate,
                 DeliveryDate = order.DeliveryDate,
                 Status = order.Status?.SetupValue ?? "Draft",
@@ -498,6 +503,9 @@ namespace ERP_RFQ_Automation.Services
                 Id = order.Id,
                 OrderNo = order.OrderNo,
                 CustomerId = order.CustomerId,
+                CommercialCaseId = order.CommercialCaseId,
+                NexoraSerial = order.NexoraSerial,
+                ContactId = order.ContactId,
                 CustomerName = order.Customer?.Name ?? "Unknown",
                 QuoteId = order.QuoteId,
                 QuoteNo = order.Quote?.QuoteNo,

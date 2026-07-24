@@ -12,12 +12,17 @@ export interface LeadFilters {
   endDate?: string;
   emailSource?: string;
   clientemail?: string;
+  search?: string;
 }
 
 export interface LeadResponseDTO {
   id: number;
   commercialCaseId?: number | null;
   commercialCaseReference?: string | null;
+  nexoraSerial?: string | null;
+  customerId?: number | null;
+  contactId?: number | null;
+  customerMatchStatus: string;
   rfqno: string;
   buyersName: string;
   leadSource: string;
@@ -44,6 +49,7 @@ export interface LeadResponseDTO {
   createdDate?: string;
   businessUnitId: number;
   businessUnitName?: string;
+  lifecycleVersion: number;
   assignedToFullName?: string;
   // WP-A3 duplicate flag: null | 'suspected' | 'confirmed' | 'not_duplicate'.
   // Conversion is blocked while suspected/confirmed.

@@ -3,6 +3,7 @@ using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Services.DocumentIntelligence;
 using ERP_RFQ_Automation.Services.Interfaces;
 using ERP_RFQ_Automation.Tests.Support;
+using System.Diagnostics;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -170,6 +171,8 @@ public class ChunkedExtractionServiceTests
         Assert.Equal(0, llm.CallCount); // deterministic path, no LLM
         Assert.NotEqual(ExtractionOutcomeStatus.Failed, outcome.Status);
         Assert.Equal(2, outcome.ExtractedItemCount);
+        Assert.NotNull(outcome.CanonicalImport);
+        Assert.Equal(2, outcome.CanonicalImport.Documents.Single().LineItems.Count);
     }
 
     [Fact]
@@ -181,6 +184,35 @@ public class ChunkedExtractionServiceTests
 
         Assert.Equal(1, llm.CallCount);
         Assert.Equal(ExtractionOutcomeStatus.Ok, outcome.Status);
+    }
+
+    [Fact]
+    [Trait("Category", "LocalProcessingBenchmark")]
+    public async Task StructuredLocalPath_ProcessesTenThousandRowsWithoutExternalCalls()
+    {
+        var llm = new StubLlm();
+        var service = NewService(llm);
+        var rows = Enumerable.Range(2, 10_000)
+            .Select(row => SpreadsheetRow(row, "RFQ-BENCH", $"Part {row}", "1", "10.00"))
+            .ToArray();
+        var samples = new List<double>();
+        var allocatedBefore = GC.GetTotalAllocatedBytes(true);
+
+        for (var run = 0; run < 5; run++)
+        {
+            var timer = Stopwatch.StartNew();
+            var outcome = await service.ExtractStructuredAsync(rows, 7, "benchmark.xlsx");
+            timer.Stop();
+            Assert.Equal(10_000, outcome.ExtractedItemCount);
+            samples.Add(timer.Elapsed.TotalMilliseconds);
+        }
+
+        samples.Sort();
+        var allocated = GC.GetTotalAllocatedBytes(true) - allocatedBefore;
+        Console.WriteLine(
+            $"LOCAL_PROCESSING_BENCHMARK rows=10000 runs=5 p50_ms={samples[2]:F2} p95_ms={samples[4]:F2} allocated_bytes={allocated} external_calls={llm.CallCount}");
+        Assert.Equal(0, llm.CallCount);
+        Assert.True(samples[4] < 10_000, $"p95 local parse took {samples[4]:F2} ms");
     }
 
     private static RfqSpreadsheetRow SpreadsheetRow(int row, string rfqNo, string product, string qty, string price)

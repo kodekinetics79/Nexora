@@ -5,7 +5,7 @@ import {
   Box, Typography, Paper, Grid, Stack, Button, TextField,
   Autocomplete, IconButton, Divider, Table, TableHead,
   TableRow, TableCell, TableBody, InputAdornment, Card, CardContent,
-  CircularProgress, Breadcrumbs, Link, MenuItem, Select, FormControl, InputLabel
+  CircularProgress, Breadcrumbs, Link, MenuItem, Select, FormControl, InputLabel, Alert
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
@@ -15,7 +15,6 @@ import {
   Receipt as QuoteIcon
 } from '@mui/icons-material';
 import { useAuth } from '../../../context/AuthContext';
-import customerService from '../../../api/services/customerService';
 import rfqService from '../../../api/services/rfqService';
 import quoteService from '../../../api/services/quoteService';
 import setupService from '../../../api/services/setupService';
@@ -57,15 +56,11 @@ const CreateQuotePage: React.FC = () => {
   const [items, setItems] = useState<QuoteItem[]>([]);
 
   // Queries
-  const { data: customers = [] } = useQuery({
-    queryKey: ['customers-list', businessUnitId],
-    queryFn: () => customerService.getAll({ pageSize: 100, businessUnitId }).then(r => r.items),
-  });
-
   const { data: rfqs = [] } = useQuery({
     queryKey: ['rfqs-list', businessUnitId],
     queryFn: () => rfqService.getAll({ pageNumber: 1, pageSize: 100, businessUnitId }).then(r => r.items),
   });
+  const selectedRfq = rfqs.find((rfq) => rfq.id === rfqId) || null;
 
   const { data: products = [] } = useQuery({
     queryKey: ['products-list', businessUnitId],
@@ -156,8 +151,12 @@ const CreateQuotePage: React.FC = () => {
   };
 
   const handleSubmit = () => {
-    if (!customerId) {
-      toast.error('Please select a customer');
+    if (!rfqId) {
+      toast.error('Please select the RFQ this quote belongs to');
+      return;
+    }
+    if (!customerId || selectedRfq?.customerId !== customerId) {
+      toast.error('The selected RFQ must have a verified customer before a quote can be created');
       return;
     }
     if (items.length === 0) {
@@ -166,7 +165,7 @@ const CreateQuotePage: React.FC = () => {
     }
 
     const payload = {
-      customerId, rfqId, businessUnitId, quoteDate, validUntil, headerRemarks,
+      customerId, contactId: selectedRfq?.contactId ?? null, rfqId, businessUnitId, quoteDate, validUntil, headerRemarks,
       discountTypeId, discountValue,
       createdBy: userData?.userName || 'System',
       totalAmount: grandTotal,
@@ -222,23 +221,40 @@ const CreateQuotePage: React.FC = () => {
               <Grid size={{ xs: 12, md: 4 }}>
                 <Autocomplete
                   size="small"
-                  options={customers}
-                  getOptionLabel={(o) => o.name}
-                  value={customers.find(c => c.id === customerId) || null}
-                  onChange={(_, v) => setCustomerId(v?.id || null)}
-                  renderInput={(params) => <TextField {...params} label="Customer" required />}
-                />
-              </Grid>
-              <Grid size={{ xs: 12, md: 4 }}>
-                <Autocomplete
-                  size="small"
                   options={rfqs}
                   getOptionLabel={(o) => o.rfqno || `RFQ-${o.id}`}
                   value={rfqs.find(r => r.id === rfqId) || null}
-                  onChange={(_, v) => setRfqId(v?.id || null)}
-                  renderInput={(params) => <TextField {...params} label="Reference RFQ" />}
+                  onChange={(_, v) => {
+                    setRfqId(v?.id || null);
+                    setCustomerId(v?.customerId || null);
+                  }}
+                  renderInput={(params) => <TextField {...params} label="Reference RFQ" required />}
                 />
               </Grid>
+              <Grid size={{ xs: 12, md: 4 }}>
+                <TextField
+                  fullWidth
+                  size="small"
+                  label="Customer from RFQ"
+                  value={selectedRfq?.customerName || 'Customer unresolved'}
+                  disabled
+                  helperText={(selectedRfq?.nexoraSerial || selectedRfq?.commercialCaseReference) ? `Nexora Serial: ${selectedRfq.nexoraSerial || selectedRfq.commercialCaseReference}` : 'Select an RFQ to preserve commercial identity'}
+                />
+              </Grid>
+              <Grid size={{ xs: 12, md: 4 }}>
+                <TextField
+                  fullWidth
+                  size="small"
+                  label="Contact from RFQ"
+                  value={selectedRfq?.contactName || selectedRfq?.customerEmail || 'Contact unresolved'}
+                  disabled
+                />
+              </Grid>
+              {selectedRfq && !selectedRfq.customerId && (
+                <Grid size={{ xs: 12 }}>
+                  <Alert severity="warning">This RFQ has no verified customer. Resolve the customer on the RFQ before preparing a quote.</Alert>
+                </Grid>
+              )}
               <Grid size={{ xs: 12, md: 2 }}>
                 <TextField fullWidth type="date" label="Date" size="small" value={quoteDate} onChange={(e) => setQuoteDate(e.target.value)} slotProps={{ inputLabel: { shrink: true } }} />
               </Grid>

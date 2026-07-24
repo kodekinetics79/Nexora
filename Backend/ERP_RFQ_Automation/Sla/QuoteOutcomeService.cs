@@ -8,6 +8,8 @@ using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using System.Data;
+using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 
 namespace ERP_RFQ_Automation.Sla;
 
@@ -64,6 +66,7 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
     private readonly ILogger<QuoteOutcomeService> _logger;
     private readonly ERP_RFQ_Automation.Metrics.IMetricRecorder? _metrics;
     private readonly ERP_RFQ_Automation.Intelligence.Decision.ILeadDecisionService? _decisions;
+    private readonly ILifecycleApplicationService? _lifecycle;
 
     // WP-B4: metrics + decision-brief lookup are OPTIONAL passive add-ons
     // (default null) — existing constructions keep compiling, and outcome capture
@@ -73,13 +76,15 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
         IQuoteService quoteService,
         ILogger<QuoteOutcomeService> logger,
         ERP_RFQ_Automation.Metrics.IMetricRecorder? metrics = null,
-        ERP_RFQ_Automation.Intelligence.Decision.ILeadDecisionService? decisions = null)
+        ERP_RFQ_Automation.Intelligence.Decision.ILeadDecisionService? decisions = null,
+        ILifecycleApplicationService? lifecycle = null)
     {
         _context = context;
         _quoteService = quoteService;
         _logger = logger;
         _metrics = metrics;
         _decisions = decisions;
+        _lifecycle = lifecycle;
     }
 
     // Default governed picklist, seeded per-BU on demand (SetupMaster.BusinessUnitId
@@ -150,10 +155,6 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
                 ?? throw new ArgumentException($"Unknown outcome reason '{reasonCode}'.");
         }
 
-        // Single source of status logic: delegate the transition to QuoteService.
-        var dto = await _quoteService.TransitionStatusAsync(quoteId, statusCode, actorEmail);
-
-        // Stamp the outcome columns on the tracked entity (fresh SaveChanges).
         var now = DateTime.UtcNow;
         quote.OutcomeOn = now;
         quote.OutcomeReasonId = reasonId;
@@ -161,7 +162,25 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
         quote.RespondedOn ??= now; // any terminal manual outcome counts as a response
         quote.ModifiedBy = actorEmail;
         quote.ModifiedDate = now;
-        await _context.SaveChangesAsync(ct);
+        QuoteResponseDTO dto;
+        if (_lifecycle is not null)
+        {
+            await using var transaction = await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+            await _lifecycle.TransitionQuoteInCurrentTransactionAsync(
+                businessUnitId,
+                quoteId,
+                new LifecycleActor(actorEmail, "quote-outcome"),
+                OutcomeCommand(quote, statusCode, reasonCode, note, actorEmail),
+                false,
+                ct);
+            await transaction.CommitAsync(ct);
+            dto = await _quoteService.GetQuoteAsync(quoteId);
+        }
+        else
+        {
+            dto = await _quoteService.TransitionStatusAsync(quoteId, statusCode, actorEmail);
+            await _context.SaveChangesAsync(ct);
+        }
 
         dto.SentOn = quote.SentOn;
         dto.RespondedOn = quote.RespondedOn;
@@ -198,14 +217,28 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
         await EnsureReasonsSeededAsync(quote.BusinessUnitId, ct);
         var reasonId = await ResolveReasonIdAsync(quote.BusinessUnitId, reasonCode, ct);
 
-        await _quoteService.TransitionStatusAsync(quoteId, "EXPIRED", "system:sla-sweep");
-
         quote.OutcomeOn = DateTime.UtcNow;
         quote.OutcomeReasonId = reasonId;
         quote.ModifiedBy = "system:sla-sweep";
         quote.ModifiedDate = DateTime.UtcNow;
         // NOTE: RespondedOn deliberately NOT stamped — the customer never responded.
-        await _context.SaveChangesAsync(ct);
+        if (_lifecycle is not null)
+        {
+            await using var transaction = await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+            await _lifecycle.TransitionQuoteInCurrentTransactionAsync(
+                quote.BusinessUnitId,
+                quoteId,
+                new LifecycleActor("system:sla-sweep", "sla-worker"),
+                OutcomeCommand(quote, "EXPIRED", reasonCode, null, "system:sla-sweep"),
+                false,
+                ct);
+            await transaction.CommitAsync(ct);
+        }
+        else
+        {
+            await _quoteService.TransitionStatusAsync(quoteId, "EXPIRED", "system:sla-sweep");
+            await _context.SaveChangesAsync(ct);
+        }
 
         _logger.LogInformation("Quote {QuoteId} auto-expired (reason {Reason}).", quoteId, reasonCode);
 
@@ -214,6 +247,18 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
 
         return true;
     }
+
+    private static LifecycleTransitionCommand OutcomeCommand(
+        Quote quote, string statusCode, string? reasonCode, string? note, string actor)
+        => new(
+            statusCode,
+            quote.LifecycleVersion,
+            reasonCode ?? (statusCode is "REJECTED" or "EXPIRED" ? "OUTCOME_RECORDED" : null),
+            Truncate(note, 500),
+            "quote-outcome",
+            Guid.NewGuid().ToString("N"),
+            $"quote:{quote.Id}:outcome:{statusCode}",
+            $"quote-outcome:{quote.Id}:v{quote.LifecycleVersion}:{statusCode}:{actor.ToLowerInvariant()}");
 
     /// <summary>
     /// WP-B4 hook (c): appends an "outcome_recorded" MetricEvent with the outcome,

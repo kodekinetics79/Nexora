@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Grid, Stack, Chip,
   Table, TableHead, TableRow, TableCell, TableBody,
-  CircularProgress, Divider, Breadcrumbs, Link,
+  CircularProgress, Divider, Breadcrumbs, Link, Alert,
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
@@ -39,13 +39,13 @@ const ViewRFQPage: React.FC = () => {
   const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { userData } = useAuth();
+  const { userData, hasPermission } = useAuth();
   const { enqueueSnackbar } = useSnackbar();
   const queryClient = useQueryClient();
 
   const [approvalDialogOpen, setApprovalDialogOpen] = React.useState(false);
 
-  const { data: rfq, isLoading } = useQuery({
+  const { data: rfq, isLoading, isError, refetch } = useQuery({
     queryKey: ['rfq-detail', Number(id)],
     queryFn: () => rfqService.getById(Number(id), userData?.businessUnitId || 0),
     enabled: !!id && !!userData?.businessUnitId,
@@ -74,6 +74,7 @@ const ViewRFQPage: React.FC = () => {
   };
 
   if (isLoading) return <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '60vh' }}><CircularProgress /></Box>;
+  if (isError) return <Box sx={{ p: 4 }}><Alert severity="error" action={<Button color="inherit" onClick={() => refetch()}>Retry</Button>}>We couldn't load this RFQ.</Alert></Box>;
   if (!rfq) return <Box sx={{ p: 4 }}><Typography>RFQ not found.</Typography></Box>;
 
   const isDraft = lifecycle?.currentStatusCode === 'DRAFT';
@@ -97,9 +98,9 @@ const ViewRFQPage: React.FC = () => {
             <Typography variant="h4" sx={{ fontWeight: 950, color: 'text.primary', letterSpacing: '-0.02em' }}>
               {rfq.rfqno}
             </Typography>
-            {rfq.commercialCaseReference && (
+            {(rfq.nexoraSerial || rfq.commercialCaseReference) && (
               <Chip
-                label={rfq.commercialCaseReference}
+                label={`Nexora Serial: ${rfq.nexoraSerial || rfq.commercialCaseReference}`}
                 size="small"
                 variant="outlined"
                 sx={{ fontWeight: 900, fontFamily: 'monospace' }}
@@ -123,7 +124,7 @@ const ViewRFQPage: React.FC = () => {
                 Workspace
               </Button>
             )}
-            <LifecycleActions aggregate="rfqs" id={rfq.id} onChanged={() => queryClient.invalidateQueries({ queryKey: ['rfq-detail', Number(id)] })} />
+            {hasPermission('RFQ Management', 'edit') && <LifecycleActions aggregate="rfqs" id={rfq.id} onChanged={() => queryClient.invalidateQueries({ queryKey: ['rfq-detail', Number(id)] })} />}
             <Button
               variant="outlined"
               startIcon={<BackIcon />}
@@ -132,15 +133,15 @@ const ViewRFQPage: React.FC = () => {
             >
               Back
             </Button>
-            <Button
+            {hasPermission('RFQ Management', 'edit') && <Button
               variant="contained"
               startIcon={<SparkleIcon />}
               onClick={() => navigate(`/procurement/rfqs/${rfq.id}/pricing`)}
               sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
             >
               Smart Pricing
-            </Button>
-            {isDraft && (
+            </Button>}
+            {isDraft && hasPermission('RFQ Management', 'edit') && (
               <>
                 <Button
                   variant="outlined"
@@ -152,7 +153,7 @@ const ViewRFQPage: React.FC = () => {
                 </Button>
               </>
             )}
-            {canSendQuote && <Button variant="contained" color="success" startIcon={<ApproveIcon />}
+            {canSendQuote && hasPermission('Quotations', 'create') && <Button variant="contained" color="success" startIcon={<ApproveIcon />}
               onClick={() => setApprovalDialogOpen(true)} sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}>
               Generate & Send Quote
             </Button>}

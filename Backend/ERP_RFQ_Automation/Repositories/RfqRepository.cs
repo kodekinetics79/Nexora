@@ -54,7 +54,9 @@ namespace ERP_RFQ_Automation.Repositories
             if (!string.IsNullOrWhiteSpace(search))
             {
                 search = search.Trim().ToLower();
-                query = query.Where(r => r.Rfqno.ToLower().Contains(search) || (r.BuyersName != null && r.BuyersName.ToLower().Contains(search)));
+                query = query.Where(r => r.Rfqno.ToLower().Contains(search)
+                    || (r.NexoraSerial != null && r.NexoraSerial.ToLower().Contains(search))
+                    || (r.BuyersName != null && r.BuyersName.ToLower().Contains(search)));
             }
 
             var totalItems = await query.CountAsync();
@@ -76,8 +78,9 @@ namespace ERP_RFQ_Automation.Repositories
             var dtos = rfqs.Select(r => new RfqResponseDTO
             {
                 Id = r.Id,
-                CommercialCaseId = r.Lead != null ? r.Lead.CommercialCaseId : null,
-                CommercialCaseReference = r.Lead != null ? r.Lead.CommercialCaseReference : null,
+                CommercialCaseId = r.CommercialCaseId ?? (r.Lead != null ? r.Lead.CommercialCaseId : null),
+                CommercialCaseReference = r.NexoraSerial ?? (r.Lead != null ? r.Lead.CommercialCaseReference : null),
+                NexoraSerial = r.NexoraSerial ?? (r.Lead != null ? r.Lead.CommercialCaseReference : null),
                 Rfqno = r.Rfqno,
                 BuyersName = r.BuyersName,
                 RecDate = r.RecDate,
@@ -100,7 +103,10 @@ namespace ERP_RFQ_Automation.Repositories
                 BusinessUnitName = r.BusinessUnit?.BusinessUnitName,
                 RfqstatusId = r.RfqstatusId,
                 RfqstatusValue = r.Rfqstatus?.SetupValue,
+                RfqstatusCode = r.Rfqstatus?.SetupCode,
+                LifecycleVersion = r.LifecycleVersion,
                 CustomerId = r.CustomerId,
+                ContactId = r.ContactId,
                 CustomerName = r.Customer != null ? r.Customer.Name : null,
                 CustomerEmail = r.Customer != null ? r.Customer.ContactEmail : null,
                 LeadEmail = r.Lead != null ? r.Lead.Clientemail : null,
@@ -132,8 +138,9 @@ namespace ERP_RFQ_Automation.Repositories
             return new RfqResponseDTO
             {
                 Id = rfq.Id,
-                CommercialCaseId = rfq.Lead?.CommercialCaseId,
-                CommercialCaseReference = rfq.Lead?.CommercialCaseReference,
+                CommercialCaseId = rfq.CommercialCaseId ?? rfq.Lead?.CommercialCaseId,
+                CommercialCaseReference = rfq.NexoraSerial ?? rfq.Lead?.CommercialCaseReference,
+                NexoraSerial = rfq.NexoraSerial ?? rfq.Lead?.CommercialCaseReference,
                 Rfqno = rfq.Rfqno,
                 BuyersName = rfq.BuyersName,
                 RecDate = rfq.RecDate,
@@ -156,7 +163,10 @@ namespace ERP_RFQ_Automation.Repositories
                 BusinessUnitName = rfq.BusinessUnit?.BusinessUnitName,
                 RfqstatusId = rfq.RfqstatusId,
                 RfqstatusValue = rfq.Rfqstatus?.SetupValue,
+                RfqstatusCode = rfq.Rfqstatus?.SetupCode,
+                LifecycleVersion = rfq.LifecycleVersion,
                 CustomerId = rfq.CustomerId,
+                ContactId = rfq.ContactId,
                 CustomerName = rfq.Customer != null ? rfq.Customer.Name : null,
                 CustomerEmail = rfq.Customer != null ? rfq.Customer.ContactEmail : null,
                 LeadEmail = rfq.Lead != null ? rfq.Lead.Clientemail : null,
@@ -227,10 +237,13 @@ namespace ERP_RFQ_Automation.Repositories
 
             if (!rfq.LeadId.HasValue)
                 throw new ArgumentException("A tenant-owned lead is required so the RFQ belongs to a commercial case.");
-            var leadExists = await _context.Leads.AnyAsync(l =>
+            var lead = await _context.Leads.SingleOrDefaultAsync(l =>
                 l.Id == rfq.LeadId.Value && l.BusinessUnitId == rfq.BusinessUnitId);
-            if (!leadExists)
+            if (lead == null)
                 throw new ArgumentException($"Lead ID {rfq.LeadId} does not exist in this business unit.");
+            if (!lead.CustomerId.HasValue)
+                throw new ArgumentException("Resolve the lead customer before creating an RFQ.");
+            rfq.InheritCommercialIdentity(lead);
             rfq.RfqstatusId = await LifecycleStatusCatalog.ResolveIdAsync(
                 _context, rfq.BusinessUnitId, "Rfq", "DRAFT");
 
@@ -269,8 +282,8 @@ namespace ERP_RFQ_Automation.Repositories
             existing.Rfqtype = rfq.Rfqtype;
             existing.RfqtypeId = rfq.RfqtypeId;
             existing.DurationAgreement = rfq.DurationAgreement;
-            existing.LeadId = rfq.LeadId;
-            existing.CustomerId = rfq.CustomerId;
+            if (rfq.LeadId != existing.LeadId || rfq.CustomerId != existing.CustomerId)
+                throw new InvalidOperationException("RFQ commercial identity cannot be changed by an ordinary update.");
             existing.ModifiedBy = rfq.ModifiedBy;
             existing.ModifiedDate = DateTime.UtcNow;
             existing.BusinessUnitId = rfq.BusinessUnitId;
@@ -306,10 +319,11 @@ namespace ERP_RFQ_Automation.Repositories
             rfq.ModifiedBy = approvedBy;
             rfq.ModifiedDate = DateTime.UtcNow;
 
-            if (customerId.HasValue && !rfq.CustomerId.HasValue)
-            {
-                rfq.CustomerId = customerId.Value;
-            }
+            if (rfq.Lead == null)
+                throw new InvalidOperationException("The RFQ must be linked to a lead before a Quote can be created.");
+            rfq.InheritCommercialIdentity(rfq.Lead);
+            if (customerId.HasValue && customerId != rfq.CustomerId)
+                throw new InvalidOperationException("The selected customer does not match the RFQ commercial identity.");
 
             // Create Quote
             var quote = new Quote
@@ -320,7 +334,8 @@ namespace ERP_RFQ_Automation.Repositories
                 BusinessUnitId = rfq.BusinessUnitId,
                 QuoteDate = DateTime.UtcNow,
                 ValidUntil = DateTime.UtcNow.AddDays(30), // Default 30 days validity
-                StatusId = 31, // Pending Approval/Draft Quote status
+                StatusId = await LifecycleStatusCatalog.ResolveIdAsync(
+                    _context, rfq.BusinessUnitId, "Quote", "DRAFT"),
                 CreatedBy = approvedBy,
                 CreatedDate = DateTime.UtcNow,
                 HeaderRemarks = rfq.HeaderRemarks,
@@ -338,6 +353,7 @@ namespace ERP_RFQ_Automation.Repositories
                     CreatedDate = DateTime.UtcNow
                 }).ToList()
             };
+            quote.InheritCommercialIdentity(rfq);
 
             quote.TotalAmount = quote.QuoteItems.Sum(i => i.TotalAmount);
 

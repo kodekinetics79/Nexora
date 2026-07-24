@@ -1,271 +1,226 @@
-import { useMemo } from 'react';
-import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Box } from '@mui/material';
+import { useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import dayjs from 'dayjs';
-import { useAuth } from '../../context/AuthContext';
-import { useAppTheme } from '../../context/ThemeContext';
-import dashboardService from '../../api/services/dashboardService';
-import leadService from '../../api/services/leadService';
-import extractionReviewService from '../../api/services/extractionReviewService';
-import copilotService from '../../api/services/copilotService';
-import { composeClauses, composeOvernightClause, greetingForHour, type BriefingInput } from './briefing';
-import BriefingHero from './components/BriefingHero';
-import ActionQueue, { type DeadlineRow } from './components/ActionQueue';
-import PipelineSnapshot from './components/PipelineSnapshot';
-import PipelinePanel from './components/PipelinePanel';
-import TrendTiles from './components/TrendTiles';
-import AiPulseStrip from './components/AiPulseStrip';
-import { asRealDate } from './components/dashboardTheme';
+import {
+  Alert,
+  Box,
+  Button,
+  Chip,
+  CircularProgress,
+  Dialog,
+  DialogContent,
+  DialogTitle,
+  IconButton,
+  List,
+  ListItemButton,
+  ListItemText,
+  Paper,
+  Stack,
+  TextField,
+  Tooltip,
+  Typography,
+} from '@mui/material';
+import {
+  ArrowForward as DrillDownIcon,
+  Refresh as RefreshIcon,
+  Schedule as FreshnessIcon,
+  Close as CloseIcon,
+} from '@mui/icons-material';
+import dashboardService, {
+  type Release01KpiDTO,
+  type Release01KpiUnit,
+} from '../../api/services/dashboardService';
 
-const LIVE = {
-  refetchInterval: 60_000,
-  placeholderData: keepPreviousData,
-} as const;
+const formatValue = (kpi: Release01KpiDTO): string => {
+  if (kpi.state === 'insufficient_data' || kpi.value === null) {
+    return 'Insufficient data';
+  }
 
-/**
- * Nexora command center. Three questions, in visual priority:
- *   1. What needs me NOW?         → Action Queue (left, dominant)
- *   2. How is the money flowing?  → Pipeline + 6-month trend (right column)
- *   3. Is the AI working?         → plain-language strip (full width, below)
- * Every section degrades to a quiet skeleton/empty state on failure.
- */
-export default function DashboardPage() {
-  const { userData } = useAuth();
-  const { mode, primaryColor } = useAppTheme();
-  const queryClient = useQueryClient();
-  const businessUnitId = userData?.businessUnitId || 1;
+  if (kpi.unit === 'percentage') return `${kpi.value.toLocaleString('en-US', { maximumFractionDigits: 1 })}%`;
+  const formats: Record<Exclude<Release01KpiUnit, 'percentage'>, Intl.NumberFormatOptions> = {
+    count: { maximumFractionDigits: 0 },
+    currency: { maximumFractionDigits: 2 },
+    hours: { maximumFractionDigits: 1 },
+    score: { maximumFractionDigits: 1 },
+    weighted_work: { maximumFractionDigits: 1 },
+  };
+  const formatted = new Intl.NumberFormat('en-US', formats[kpi.unit]).format(kpi.value);
+  return kpi.unit === 'hours' ? `${formatted} h` : formatted;
+};
 
-  // ── Live data (60s auto-refresh; refetches never flash skeletons) ──
-  const core = useQuery({
-    queryKey: ['dashboard', 'core', businessUnitId],
-    queryFn: () => dashboardService.getDashboard(businessUnitId),
-    ...LIVE,
-  });
-  const leadStats = useQuery({
-    queryKey: ['dashboard', 'lead-stats'],
-    queryFn: dashboardService.getLeadStats,
-    ...LIVE,
-  });
-  const rfqStats = useQuery({
-    queryKey: ['dashboard', 'rfq-stats'],
-    queryFn: dashboardService.getRfqStats,
-    ...LIVE,
-  });
-  const quoteStats = useQuery({
-    queryKey: ['dashboard', 'quote-stats'],
-    queryFn: dashboardService.getQuoteStats,
-    ...LIVE,
-  });
-  const orderStats = useQuery({
-    queryKey: ['dashboard', 'order-stats'],
-    queryFn: dashboardService.getOrderStats,
-    ...LIVE,
-  });
-  const needsReview = useQuery({
-    queryKey: ['dashboard', 'needs-review'],
-    queryFn: () => extractionReviewService.getNeedsReview({ pageNumber: 1, pageSize: 5 }),
-    ...LIVE,
-  });
-  const recentLeads = useQuery({
-    queryKey: ['dashboard', 'recent-leads'],
-    queryFn: () => leadService.getAll({ pageNumber: 1, pageSize: 50 }),
-    ...LIVE,
-  });
-  const approvals = useQuery({
-    queryKey: ['dashboard', 'approvals'],
-    queryFn: () => copilotService.getApprovals('pending'),
-    ...LIVE,
-  });
-  const audit = useQuery({
-    queryKey: ['dashboard', 'audit'],
-    queryFn: () => copilotService.getAudit(100),
-    ...LIVE,
-  });
-  const unassigned = useQuery({
-    queryKey: ['dashboard', 'unassigned'],
-    queryFn: () =>
-      leadService.getOutstandingLeads({ pageNumber: 1, pageSize: 5, excludeAssigned: true, businessUnitId }),
-    ...LIVE,
-  });
+const drillDownRoute = (recordType: string, recordId: number): string | null => {
+  if (recordType === 'lead') return `/procurement/leads/view/${recordId}`;
+  if (recordType === 'rfq') return `/procurement/rfqs/view/${recordId}`;
+  if (recordType === 'quote') return `/sales/quotes/view/${recordId}`;
+  return null;
+};
 
-  // ── Bid deadlines: next 72h + freshly overdue (last 7 days), real dates only ──
-  const deadlineRows = useMemo<DeadlineRow[]>(() => {
-    const items = recentLeads.data?.items ?? [];
-    const now = dayjs();
-    const horizon = now.add(72, 'hour');
-    const overdueFloor = now.subtract(7, 'day');
-    return items
-      .filter((lead) => !lead.isRejected)
-      .flatMap((lead) => {
-        const closing = asRealDate(lead.bidClosingDate);
-        if (!closing || closing.isBefore(overdueFloor) || closing.isAfter(horizon)) return [];
-        return [
-          {
-            leadId: lead.id,
-            rfqno: lead.rfqno || null,
-            buyersName: lead.buyersName || null,
-            closing,
-            overdue: closing.isBefore(now),
-          },
-        ];
-      })
-      .sort((a, b) => a.closing.valueOf() - b.closing.valueOf())
-      .slice(0, 8);
-  }, [recentLeads.data]);
-
-  // ── Bid/Review/Skip decorations (in-flight API — silently absent on 404) ──
-  const decisionLeadIds = useMemo(() => {
-    const ids = new Set<number>();
-    deadlineRows.forEach((row) => ids.add(row.leadId));
-    (needsReview.data?.items ?? []).forEach((item) => ids.add(item.id));
-    return Array.from(ids).slice(0, 100);
-  }, [deadlineRows, needsReview.data]);
-
-  const decisions = useQuery({
-    queryKey: ['dashboard', 'decisions', decisionLeadIds],
-    queryFn: () => dashboardService.getDecisionSummaries(decisionLeadIds),
-    enabled: decisionLeadIds.length > 0,
-    retry: false,
-    refetchInterval: 60_000,
-    placeholderData: keepPreviousData,
-  });
-
-  // ── Derived view state ──
-  const stats = core.data?.stats;
-  const avgConfidencePct = core.data?.operationalHealth.find((r) => r.subject === 'AI Accuracy')?.a;
-  const actionsTakenRecently = audit.data?.filter((a) => a.decision?.toLowerCase() === 'executed').length;
-  const isBrandNew = core.isSuccess && stats !== undefined && stats.totalLeads === 0;
-  const isRefreshing =
-    core.isFetching || needsReview.isFetching || approvals.isFetching || recentLeads.isFetching;
-
-  // ── Narrative briefing: clauses only from queries that succeeded, counts > 0 ──
-  const briefingInput = useMemo<BriefingInput>(() => {
-    const leads = recentLeads.data?.items;
-    const dayAgo = dayjs().subtract(24, 'hour');
-    return {
-      deadlineCount: recentLeads.isSuccess ? deadlineRows.filter((r) => !r.overdue).length : null,
-      needsReviewCount: needsReview.isSuccess && needsReview.data ? needsReview.data.totalCount : null,
-      pendingQuoteCount: quoteStats.isSuccess && quoteStats.data ? quoteStats.data.pendingQuotes : null,
-      totalQuotedAmount: quoteStats.isSuccess && quoteStats.data ? quoteStats.data.totalQuotedAmount : null,
-      pendingApprovalCount: approvals.isSuccess && approvals.data ? approvals.data.length : null,
-      overnightDocCount:
-        recentLeads.isSuccess && leads
-          ? leads.filter((l) => {
-              const created = asRealDate(l.createdDate ?? l.recDate);
-              return created !== null && created.isAfter(dayAgo);
-            }).length
-          : null,
-    };
-  }, [
-    recentLeads.isSuccess,
-    recentLeads.data,
-    deadlineRows,
-    needsReview.isSuccess,
-    needsReview.data,
-    quoteStats.isSuccess,
-    quoteStats.data,
-    approvals.isSuccess,
-    approvals.data,
-  ]);
-
-  const briefingClauses = useMemo(() => composeClauses(briefingInput), [briefingInput]);
-  const overnightClause = useMemo(() => composeOvernightClause(briefingInput), [briefingInput]);
-  const briefingLoading =
-    recentLeads.isLoading || needsReview.isLoading || quoteStats.isLoading || approvals.isLoading;
-  const briefingAllFailed =
-    recentLeads.isError && needsReview.isError && quoteStats.isError && approvals.isError;
-  const greeting = greetingForHour(dayjs().hour(), userData?.userName);
-
-  const refreshAll = () => queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+const KpiCard = ({ kpi }: { kpi: Release01KpiDTO }) => {
+  const navigate = useNavigate();
+  const [drillDownOpen, setDrillDownOpen] = useState(false);
+  const drillDownRecords = kpi.drillDownIdentifiers.filter(
+    (record) => drillDownRoute(record.recordType, record.recordId) !== null,
+  );
+  const canDrillDown = kpi.state === 'available' && drillDownRecords.length > 0;
 
   return (
-    <Box sx={{ position: 'relative', maxWidth: 1440, mx: 'auto', p: { xs: 1, md: 2 } }}>
-      {/* Ambient wash behind the glass — subtle in both themes. */}
-      <Box
-        aria-hidden
-        sx={{
-          position: 'absolute',
-          inset: -24,
-          zIndex: 0,
-          pointerEvents: 'none',
-          background:
-            mode === 'dark'
-              ? `radial-gradient(640px 320px at 12% -4%, ${primaryColor}2e, transparent 70%),
-                 radial-gradient(560px 300px at 96% 12%, #0ea5e926, transparent 70%)`
-              : `radial-gradient(640px 320px at 12% -4%, ${primaryColor}1f, transparent 70%),
-                 radial-gradient(560px 300px at 96% 12%, #0ea5e91a, transparent 70%)`,
-        }}
-      />
-
-      <Box sx={{ position: 'relative', zIndex: 1, display: 'flex', flexDirection: 'column', gap: 2 }}>
-        {/* Narrative briefing hero — greeting, situation sentence, Ask Nexora */}
-        <BriefingHero
-          greeting={greeting}
-          clauses={briefingClauses}
-          overnight={overnightClause}
-          loading={briefingLoading}
-          allFailed={briefingAllFailed}
-          updatedAt={core.dataUpdatedAt}
-          refreshing={isRefreshing}
-          onRefresh={refreshAll}
+    <Paper
+      component="article"
+      variant="outlined"
+      sx={{ p: 2, minHeight: 172, borderRadius: 2, display: 'flex', flexDirection: 'column' }}
+    >
+      <Stack direction="row" spacing={1} sx={{ alignItems: 'flex-start', justifyContent: 'space-between' }}>
+        <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>
+          {kpi.label}
+        </Typography>
+        <Chip
+          size="small"
+          label={kpi.state === 'available' ? 'Available' : 'Insufficient data'}
+          color={kpi.state === 'available' ? 'success' : 'default'}
+          variant="outlined"
         />
-
-        {/* Bento grid */}
-        <Box
-          sx={{
-            display: 'grid',
-            gap: 2,
-            gridTemplateColumns: { xs: '1fr', lg: 'repeat(12, 1fr)' },
-            alignItems: 'stretch',
-          }}
+      </Stack>
+      <Typography
+        variant={kpi.state === 'available' ? 'h4' : 'h6'}
+        sx={{ mt: 1.5, fontWeight: 900, color: kpi.state === 'available' ? 'text.primary' : 'text.secondary' }}
+      >
+        {formatValue(kpi)}
+      </Typography>
+      <Tooltip title={kpi.definition} placement="top-start">
+        <Typography
+          variant="body2"
+          sx={{ mt: 1, color: 'text.secondary', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
         >
-          <Box sx={{ gridColumn: { xs: 'auto', lg: 'span 7' }, minWidth: 0 }}>
-            <ActionQueue
-              deadlines={deadlineRows}
-              deadlinesReady={recentLeads.isSuccess}
-              review={needsReview.data ? { items: needsReview.data.items, totalCount: needsReview.data.totalCount } : undefined}
-              approvals={approvals.data}
-              unassigned={unassigned.data ? { items: unassigned.data.items, totalCount: unassigned.data.totalCount } : undefined}
-              decisions={decisions.data?.summaries}
-              isLoading={needsReview.isLoading || recentLeads.isLoading}
-              isBrandNew={isBrandNew}
-            />
-          </Box>
+          {kpi.definition}
+        </Typography>
+      </Tooltip>
+      <Box sx={{ flexGrow: 1 }} />
+      {canDrillDown && (
+        <Button
+          size="small"
+          endIcon={<DrillDownIcon />}
+          onClick={() => setDrillDownOpen(true)}
+          sx={{ alignSelf: 'flex-start', mt: 1, px: 0 }}
+        >
+          View {kpi.drillDownIdentifiers.length} record{kpi.drillDownIdentifiers.length === 1 ? '' : 's'}
+        </Button>
+      )}
+      <Dialog open={drillDownOpen} onClose={() => setDrillDownOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          {kpi.label} records
+          <IconButton aria-label="Close drill-down" onClick={() => setDrillDownOpen(false)}>
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent dividers>
+          <List disablePadding>
+            {drillDownRecords.map((record) => (
+              <ListItemButton
+                key={`${record.recordType}-${record.recordId}`}
+                onClick={() => navigate(drillDownRoute(record.recordType, record.recordId)!)}
+              >
+                <ListItemText
+                  primary={record.nexoraSerial}
+                  secondary={`${record.recordType.toUpperCase()} #${record.recordId}${record.classification ? ` | ${record.classification}` : ''}`}
+                />
+                <DrillDownIcon />
+              </ListItemButton>
+            ))}
+          </List>
+        </DialogContent>
+      </Dialog>
+    </Paper>
+  );
+};
 
-          <Box sx={{ gridColumn: { xs: 'auto', lg: 'span 5' }, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
-            <PipelineSnapshot
-              leadStats={leadStats.data}
-              rfqStats={rfqStats.data}
-              quoteStats={quoteStats.data}
-              orderStats={orderStats.data}
-              isLoading={leadStats.isLoading || rfqStats.isLoading || quoteStats.isLoading || orderStats.isLoading}
-            />
-            <TrendTiles
-              volumeTrend={core.data?.volumeTrend}
-              rfqsTrend={stats?.rfqsTrend}
-              ordersTrend={stats?.ordersTrend}
-              isLoading={core.isLoading}
-            />
-          </Box>
+export default function DashboardPage() {
+  const initialTo = useMemo(() => dayjs().startOf('day').format('YYYY-MM-DD'), []);
+  const initialFrom = useMemo(() => dayjs(initialTo).subtract(30, 'day').format('YYYY-MM-DD'), [initialTo]);
+  const [from, setFrom] = useState(initialFrom);
+  const [to, setTo] = useState(initialTo);
+  const invalidWindow = !from || !to || !dayjs(from).isBefore(dayjs(to));
 
-          <Box sx={{ gridColumn: { xs: 'auto', lg: '1 / -1' }, minWidth: 0 }}>
-            <AiPulseStrip
-              documentsRead={stats?.totalLeads}
-              avgConfidencePct={avgConfidencePct}
-              reviewQueueDepth={needsReview.data?.totalCount}
-              recentActionsTaken={actionsTakenRecently}
-              auditAvailable={audit.isSuccess}
-              actionsHeld={approvals.data?.length}
-              isLoading={core.isLoading && needsReview.isLoading}
-            />
-          </Box>
+  const dashboard = useQuery({
+    queryKey: ['dashboard', 'release-01', from, to],
+    queryFn: () => dashboardService.getRelease01({ from, to }),
+    refetchInterval: 60_000,
+    retry: 1,
+    enabled: !invalidWindow,
+  });
 
-          {/* WP-B2: pipeline analytics — additive card below the existing bento. */}
-          <Box sx={{ gridColumn: { xs: 'auto', lg: '1 / -1' }, minWidth: 0 }}>
-            <PipelinePanel />
-          </Box>
+  const data = dashboard.data;
+  const generatedAt = data?.generatedAt ? dayjs(data.generatedAt) : null;
+  return (
+    <Box sx={{ maxWidth: 1440, mx: 'auto', p: { xs: 1, sm: 2, md: 3 } }}>
+      <Stack
+        direction={{ xs: 'column', md: 'row' }}
+        spacing={2}
+        sx={{ alignItems: { md: 'flex-end' }, justifyContent: 'space-between', mb: 2.5 }}
+      >
+        <Box>
+          <Typography variant="h4" sx={{ fontWeight: 900 }}>Dashboard</Typography>
+          <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mt: 0.5, flexWrap: 'wrap' }}>
+            <Chip size="small" label={data?.definitionVersion ?? 'release-01'} variant="outlined" />
+            {data?.roleScope && <Chip size="small" label={data.roleScope.scope} variant="outlined" />}
+            <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', color: 'text.secondary' }}>
+              <FreshnessIcon sx={{ fontSize: 16 }} />
+              <Typography variant="caption">
+                {generatedAt?.isValid() ? `Generated ${generatedAt.format('DD MMM YYYY, HH:mm')}` : 'Awaiting a verified snapshot'}
+              </Typography>
+            </Stack>
+          </Stack>
         </Box>
-      </Box>
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ width: { xs: '100%', md: 'auto' } }}>
+          <TextField
+            type="date"
+            label="From"
+            size="small"
+            value={from}
+            onChange={(event) => setFrom(event.target.value)}
+            slotProps={{ inputLabel: { shrink: true } }}
+          />
+          <TextField
+            type="date"
+            label="To"
+            size="small"
+            value={to}
+            onChange={(event) => setTo(event.target.value)}
+            error={invalidWindow}
+            slotProps={{ inputLabel: { shrink: true } }}
+          />
+          <Button
+            variant="outlined"
+            startIcon={dashboard.isFetching ? <CircularProgress size={16} /> : <RefreshIcon />}
+            onClick={() => dashboard.refetch()}
+            disabled={dashboard.isFetching || invalidWindow}
+          >
+            Refresh
+          </Button>
+        </Stack>
+      </Stack>
+
+      {invalidWindow && <Alert severity="warning" sx={{ mb: 2 }}>The start date must be earlier than the end date.</Alert>}
+
+      {dashboard.isError && (
+        <Alert
+          severity="error"
+          action={<Button color="inherit" size="small" onClick={() => dashboard.refetch()}>Retry</Button>}
+          sx={{ mb: 2 }}
+        >
+          The verified Release 01 dashboard snapshot is unavailable. No legacy totals are shown in its place.
+        </Alert>
+      )}
+
+      {dashboard.isLoading ? (
+        <Box sx={{ minHeight: 320, display: 'grid', placeItems: 'center' }}><CircularProgress /></Box>
+      ) : data?.kpis.length ? (
+        <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', lg: 'repeat(4, 1fr)' }, gap: 2 }}>
+          {data.kpis.map((kpi) => <KpiCard key={kpi.key} kpi={kpi} />)}
+        </Box>
+      ) : !dashboard.isError ? (
+        <Alert severity="info">No KPI definitions are available for this period and role scope.</Alert>
+      ) : null}
     </Box>
   );
 }

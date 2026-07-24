@@ -77,6 +77,48 @@ export interface DashboardDataDTO {
   sourceDistribution: CategoryDistributionDTO[];
 }
 
+// GET /api/dashboard/release-01
+// One server-generated snapshot. Unlike the legacy dashboard endpoints, every
+// value and drill-down shares the same tenant, cohort window, and freshness.
+export type Release01KpiState = 'available' | 'insufficient_data';
+export type Release01KpiUnit = 'count' | 'percentage' | 'currency' | 'hours' | 'score' | 'weighted_work';
+
+export interface Release01DrillDownIdentifierDTO {
+  recordType: string;
+  recordId: number;
+  commercialCaseId: number;
+  nexoraSerial: string;
+  classification?: string | null;
+  occurredAt?: string | null;
+  durationHours?: number | null;
+}
+
+export interface Release01KpiDTO {
+  key: string;
+  label: string;
+  value: number | null;
+  state: Release01KpiState;
+  unit: Release01KpiUnit;
+  numerator?: number | null;
+  denominator?: number | null;
+  definition: string;
+  insufficientDataReason?: string | null;
+  drillDownIdentifiers: Release01DrillDownIdentifierDTO[];
+}
+
+export interface Release01DashboardDTO {
+  definitionVersion: 'release-01';
+  generatedAt: string;
+  filter: { from: string; to: string; boundary: '[from,to)' };
+  roleScope: { scope: string; ownerUserId?: number | null };
+  kpis: Release01KpiDTO[];
+}
+
+export interface Release01DashboardParams {
+  from: string;
+  to: string;
+}
+
 // ─── Per-module stat endpoints (verified against backend DTOs) ──────────────
 
 /** GET /api/Lead/stats — LeadStatsDTO.cs */
@@ -182,6 +224,11 @@ export interface PipelineAnalyticsDTO {
 // ─── Service ────────────────────────────────────────────────────────────────
 
 const dashboardService = {
+  getRelease01: async (params: Release01DashboardParams): Promise<Release01DashboardDTO> => {
+    const r = await axiosInstance.get<Release01DashboardDTO>('/api/dashboard/release-01', { params });
+    return r.data;
+  },
+
   getDashboard: async (businessUnitId: number): Promise<DashboardDataDTO> => {
     const r = await axiosInstance.get<DashboardDataDTO>(`/api/Dashboard/${businessUnitId}`);
     return r.data;

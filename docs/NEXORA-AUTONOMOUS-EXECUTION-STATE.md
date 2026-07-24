@@ -535,3 +535,60 @@ Complete the first-class invoice, payment, accounts-receivable, and credit/debit
   checkpoint, wall-clock, and timezone findings were repaired and regression-tested.
 - This increment certifies the governed backend foundation. Statements/dunning operator UI and
   unattended scheduling remain separate delivery work and are not represented as customer-ready.
+
+## Authoritative RFQ evidence ingestion (2026-07-24)
+- Added one security-first ingestion boundary for interactive, manual Excel, email, and watched-
+  folder documents. Every upload is content-addressed into a tenant quarantine zone, signature-
+  inspected, bounded to 25 MB, structurally checked for hostile OOXML archives, and malware-
+  scanned before a cleared copy can enter the durable queue. Production ClamAV failures quarantine
+  rather than fail open; rejected and quarantined occurrences are retained without queue jobs.
+- Added S3-compatible immutable evidence storage for Cloudflare R2, MinIO, or equivalent providers,
+  including conditional create, SHA-256 metadata, object version/ETag provenance, and hash-verified
+  reads. Local storage remains available for development but reports non-durable. `/health` is
+  liveness (database) while `/ready` also requires durable evidence storage. The free Render
+  Blueprint now uses S3 configuration instead of an unavailable persistent disk.
+- Extended the evidence ledger with immutable source occurrences, extraction runs, validation
+  findings, exact page/sheet and row/column coordinates, inquiry dates and lifecycle, lead/lead-item
+  bindings, deterministic evidence keys, typed normalized values, validation state, and recorded
+  transformations. Tenant-composite foreign keys, forced RLS, narrow role grants, append-only
+  triggers, and guarded initial job binding enforce the boundary in PostgreSQL.
+- Replaced duplicated CSV/XLSX readers with one native deterministic parser. It processes every
+  non-empty workbook sheet, supports RFC-style escaped and multiline CSV records, retains physical
+  row numbers, and emits exact quoted cell addresses. Structured extraction keeps its canonical
+  graph and persists source, sheet, region, inquiry, line, field evidence, findings, and commercial
+  lead projections atomically inside the fenced queue-completion transaction.
+- Ingestion serializes concurrent identical tenant uploads with a PostgreSQL advisory transaction
+  lock. One source and one queue job are created while every occurrence remains auditable. A prior
+  quarantined/rejected source cannot be promoted by a later clear scan without a governed security
+  transition. Provenance records both quarantine and selected object identities plus scanner result.
+- The legacy `upload-rfq-excel` endpoint now enters the governed async gateway and returns `202`
+  with job/batch identity. Upload APIs expose controlled quarantined/rejected results instead of a
+  generic server error. Production readers open evidence only through hash-verifying object storage.
+- Migration `20260724004000_AuthoritativeEvidenceIngestion` applies cleanly to a fresh PostgreSQL 16
+  database, upgrades existing evidence rows with deterministic valid defaults, and has exact EF
+  model parity. PostgreSQL SIT proves complete CSV-to-lead/evidence persistence, exact coordinates,
+  concurrent idempotency, quarantine replay denial, transaction rollback on fenced completion
+  failure, tenant RLS invisibility, and append-only enforcement.
+- Verification: backend build succeeds; **466/466 non-PostgreSQL regressions** and **49/49 complete
+  PostgreSQL production-dialect tests** pass; EF reports no pending model changes; `git diff --check`
+  passes. Durable object-store credentials and a reachable ClamAV service remain deployment inputs,
+  surfaced by `/ready`; they are not falsely represented as configured by source code alone.
+
+## Release 01 dashboard and lead intelligence (2026-07-24)
+- Added immutable customer, contact, Commercial Case, and Nexora Serial continuity from Lead through
+  RFQ, Quote, Order, and invoice output. Data-bearing migrations preflight conflicting legacy rows,
+  seed governed Quote states for existing tenants, backfill only parent-consistent identity, and
+  enforce tenant, parent, and immutability rules with PostgreSQL triggers.
+- Unified Quote send, outcome, expiry, and order transitions with the optimistic lifecycle service,
+  append-only event ledger, and outbox. Ordinary quote edits and repositories cannot mutate status.
+- Added Dashboard 1.0 with one role/tenant-scoped cohort and freshness boundary, explicit
+  insufficient-data states, truthful KPI definitions, and a complete record drill-down dialog.
+- Completed local-first extraction classification, governed upload routing, source occurrence
+  idempotency, terminal integrity-failure persistence, measured workload routing, durable storage
+  write/read readiness, malware scanner readiness, and extraction-worker freshness.
+- Independent consultant and Security/SRE reviews completed; all identified P0 findings and the
+  actionable P1 integration findings were repaired before certification.
+- Verification passed **501/501 portable tests**, **51/51 PostgreSQL tests**, frontend lint and
+  production build, EF model-drift verification, and `git diff --check`. Browser SIT and live
+  Render/Neon/provider readiness remain deployment gates; no production deployment or live-data
+  mutation was performed. The release record documents the residual frontend dependency advisories.

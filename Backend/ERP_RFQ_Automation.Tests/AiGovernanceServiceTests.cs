@@ -38,6 +38,43 @@ public sealed class AiGovernanceServiceTests
     }
 
     [Fact]
+    public async Task InputLargerThanDeclaredMaximum_IsDeniedBeforeLedgerMutation()
+    {
+        using var fixture = new Fixture();
+
+        var error = await Assert.ThrowsAsync<AiPolicyDeniedException>(() => fixture.Service.ReserveAsync(
+            fixture.Context("oversized-input"), "Ollama", "test", "six bytes", 5, 10, 1, default));
+
+        Assert.Equal("input_too_large", error.Code);
+        await using var db = fixture.Database.ContextFor(null);
+        Assert.Empty(await db.AiRequests.IgnoreQueryFilters().ToListAsync());
+        Assert.Empty(await db.AiBudgetPeriods.IgnoreQueryFilters().ToListAsync());
+    }
+
+    [Fact]
+    public async Task LocalProvider_DoesNotRequireExternalProcessingConsent()
+    {
+        using var fixture = new Fixture(externalProcessingAllowed: false);
+
+        var reservation = await fixture.Service.ReserveAsync(
+            fixture.Context("local-provider", AiProviderClass.Local),
+            "OllamaLocal", "test", "local input", 32, 10, 1, default);
+
+        Assert.NotEqual(Guid.Empty, reservation.RequestId);
+    }
+
+    [Fact]
+    public async Task ExternalProvider_RequiresExternalProcessingConsent()
+    {
+        using var fixture = new Fixture(externalProcessingAllowed: false);
+
+        var error = await Assert.ThrowsAsync<AiPolicyDeniedException>(() => fixture.Service.ReserveAsync(
+            fixture.Context("external-provider"), "Ollama", "test", "external input", 32, 10, 1, default));
+
+        Assert.Equal("external_processing_denied", error.Code);
+    }
+
+    [Fact]
     public async Task SuccessfulCall_SettlesUsageAndStoresOnlyHashesAndCounts()
     {
         using var fixture = new Fixture(hardLimit: 10_000);
@@ -113,7 +150,10 @@ public sealed class AiGovernanceServiceTests
         public IServiceScopeFactory ScopeFactory => _provider.GetRequiredService<IServiceScopeFactory>();
         public ITenantScopeAccessor TenantScope => _provider.GetRequiredService<ITenantScopeAccessor>();
 
-        public Fixture(bool withPolicy = true, long? hardLimit = null)
+        public Fixture(
+            bool withPolicy = true,
+            long? hardLimit = null,
+            bool externalProcessingAllowed = true)
         {
             using (var db = Database.ContextFor(null))
             {
@@ -123,7 +163,7 @@ public sealed class AiGovernanceServiceTests
                     {
                         BusinessUnitId = BusinessUnitId,
                         IsEnabled = true,
-                        ExternalProcessingAllowed = true,
+                        ExternalProcessingAllowed = externalProcessingAllowed,
                         AllowedPurposes = AiPurposes.RfqExtraction,
                         MonthlyHardTokenLimit = hardLimit,
                         UpdatedOn = DateTime.UtcNow,
@@ -140,8 +180,10 @@ public sealed class AiGovernanceServiceTests
             Service = new AiGovernanceService(ScopeFactory, tenantScope);
         }
 
-        public AiCallContext Context(string key) =>
-            new(BusinessUnitId, AiPurposes.RfqExtraction, key, "test-v1");
+        public AiCallContext Context(
+            string key,
+            AiProviderClass providerClass = AiProviderClass.External) =>
+            new(BusinessUnitId, AiPurposes.RfqExtraction, key, "test-v1", ProviderClass: providerClass);
 
         public void Dispose()
         {

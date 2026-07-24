@@ -49,8 +49,9 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
     {
         ValidateKey(command.IdempotencyKey, nameof(command.IdempotencyKey));
         ValidateKey(command.CorrelationId, nameof(command.CorrelationId));
+        var requestHash = RoutingRequestFingerprint.ForRoute(businessUnitId, command);
 
-        var existing = await FindDecisionByKeyAsync(businessUnitId, command.IdempotencyKey, ct);
+        var existing = await FindDecisionByKeyAsync(businessUnitId, command.IdempotencyKey, requestHash, ct);
         if (existing != null) return existing;
 
         try
@@ -74,11 +75,8 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
                     .ToListAsync(ct);
                 var userIds = ownerships.SelectMany(o => new long?[] { o.PrimaryUserId, o.BackupUserId })
                     .Where(id => id.HasValue).Select(id => id!.Value).Distinct().ToArray();
-                var availability = await _db.Users.AsNoTracking()
-                    .Where(u => u.Buid == businessUnitId && userIds.Contains(u.Id))
-                    .Select(u => new RoutingUserAvailability(
-                        businessUnitId, u.Id, u.IsActive == true, u.IsActive == true, u.IsActive == true ? 100 : 0))
-                    .ToListAsync(ct);
+                var occurredOn = DateTime.UtcNow;
+                var availability = await LoadUserAvailabilityAsync(businessUnitId, userIds, occurredOn, ct);
 
                 var candidates = identifiers.Select(i => new CustomerMatchCandidate(
                     i.BusinessUnitId, i.CustomerId, i.Id, i.IdentifierType, i.Confidence, i.IsVerified)).ToArray();
@@ -88,11 +86,12 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
                     lead.Id,
                     command.IdempotencyKey.Trim(),
                     command.CorrelationId.Trim(),
-                    DateTime.UtcNow,
+                    occurredOn,
                     candidates,
                     ownerships,
                     availability,
-                    scopeKeys);
+                    scopeKeys,
+                    RequestHash: requestHash);
                 var result = _engine.Route(request, _policy);
 
                 await PersistRoutingResultAsync(lead, result, ct);
@@ -104,7 +103,8 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
         catch (DbUpdateException)
         {
             _db.ChangeTracker.Clear();
-            var concurrentResult = await FindDecisionByKeyAsync(businessUnitId, command.IdempotencyKey, ct);
+            var concurrentResult = await FindDecisionByKeyAsync(
+                businessUnitId, command.IdempotencyKey, requestHash, ct);
             if (concurrentResult != null) return concurrentResult;
             throw;
         }
@@ -115,7 +115,8 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
     {
         ValidateKey(command.IdempotencyKey, nameof(command.IdempotencyKey));
         ValidateKey(command.CorrelationId, nameof(command.CorrelationId));
-        var existing = await FindDecisionByKeyAsync(businessUnitId, command.IdempotencyKey, ct);
+        var requestHash = RoutingRequestFingerprint.ForManualAssignment(businessUnitId, command);
+        var existing = await FindDecisionByKeyAsync(businessUnitId, command.IdempotencyKey, requestHash, ct);
         if (existing != null) return existing;
 
         RoutingDecisionResponse assigned;
@@ -126,13 +127,14 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
                 var lead = await _db.Leads.SingleOrDefaultAsync(
                     l => l.BusinessUnitId == businessUnitId && l.Id == command.LeadId, ct)
                     ?? throw new RoutingNotFoundException($"Lead {command.LeadId} was not found.");
-                return await AssignCoreAsync(businessUnitId, lead, command, null, ct);
+                return await AssignCoreAsync(businessUnitId, lead, command, null, requestHash, ct);
             }, ct);
         }
         catch (DbUpdateException)
         {
             _db.ChangeTracker.Clear();
-            var concurrentResult = await FindDecisionByKeyAsync(businessUnitId, command.IdempotencyKey, ct);
+            var concurrentResult = await FindDecisionByKeyAsync(
+                businessUnitId, command.IdempotencyKey, requestHash, ct);
             if (concurrentResult == null) throw;
             assigned = concurrentResult;
         }
@@ -205,7 +207,8 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
     {
         ValidateKey(command.IdempotencyKey, nameof(command.IdempotencyKey));
         ValidateKey(command.CorrelationId, nameof(command.CorrelationId));
-        var replay = await FindDecisionByKeyAsync(businessUnitId, command.IdempotencyKey, ct);
+        var requestHash = RoutingRequestFingerprint.ForQueueAssignment(businessUnitId, workItemId, command);
+        var replay = await FindDecisionByKeyAsync(businessUnitId, command.IdempotencyKey, requestHash, ct);
         if (replay != null) return replay;
 
         RoutingDecisionResponse assigned;
@@ -225,13 +228,14 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
                     lead.Id, command.AssignedToUserId, command.AssignedByUserId,
                     command.IdempotencyKey, command.CorrelationId, command.AssignmentScope,
                     command.Comment, true, lead.AssignTo);
-                return await AssignCoreAsync(businessUnitId, lead, assign, item, ct);
+                return await AssignCoreAsync(businessUnitId, lead, assign, item, requestHash, ct);
             }, ct);
         }
         catch (DbUpdateException)
         {
             _db.ChangeTracker.Clear();
-            var concurrentResult = await FindDecisionByKeyAsync(businessUnitId, command.IdempotencyKey, ct);
+            var concurrentResult = await FindDecisionByKeyAsync(
+                businessUnitId, command.IdempotencyKey, requestHash, ct);
             if (concurrentResult == null) throw;
             assigned = concurrentResult;
         }
@@ -365,7 +369,7 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
 
     private async Task<RoutingDecisionResponse> AssignCoreAsync(
         long businessUnitId, Lead lead, ManualAssignLeadCommand command,
-        UnassignedWorkItem? queueItem, CancellationToken ct)
+        UnassignedWorkItem? queueItem, string requestHash, CancellationToken ct)
     {
         if (command.EnforceExpectedAssignee && lead.AssignTo != command.ExpectedAssigneeId)
             throw new RoutingConflictException("Lead assignment changed since it was loaded. Refresh and retry.");
@@ -388,7 +392,12 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
             Outcome = RoutingOutcome.AssignedPrimary,
             MatchConfidence = 0,
             DecisionCode = "MANUAL_ASSIGNMENT",
-            Explanation = JsonSerializer.Serialize(new { source = "manual", scope = command.AssignmentScope.ToString() }),
+            Explanation = JsonSerializer.Serialize(new
+            {
+                source = "manual",
+                scope = command.AssignmentScope.ToString(),
+                requestHash
+            }),
             PolicyVersion = _policy.Version,
             CorrelationId = command.CorrelationId.Trim(),
             IdempotencyKey = command.IdempotencyKey.Trim(),
@@ -514,6 +523,104 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
             item.MatchConfidence, item.RequiredAction, item.ClaimedByUserId, item.ClaimedUntil, item.Version);
     }
 
+    private async Task<List<RoutingUserAvailability>> LoadUserAvailabilityAsync(
+        long businessUnitId, long[] userIds, DateTime measuredOn, CancellationToken ct)
+    {
+        if (userIds.Length == 0) return [];
+
+        var statusRows = await _db.SetupMasters.AsNoTracking()
+            .Where(status => status.BusinessUnitId == businessUnitId && status.IsActive != false)
+            .Where(status => status.SetupType.ToLower().Contains("status"))
+            .Select(status => new RoutingStatusRow(
+                status.SetupId, status.SetupType, status.SetupCode, status.SetupValue))
+            .ToListAsync(ct);
+        var inactiveLeadStatusIds = StatusIds(statusRows, "lead",
+            "DISQUALIFIED", "CONVERTED_TO_RFQ", "QUOTED", "NEGOTIATION", "AWARDED",
+            "PARTIALLY_AWARDED", "LOST", "CANCELLED", "COMPLETED", "DUPLICATED");
+        var terminalRfqStatusIds = StatusIds(statusRows, "rfq",
+            "AWARDED", "PARTIALLY_AWARDED", "LOST", "EXPIRED", "CANCELLED");
+        var terminalQuoteStatusIds = StatusIds(statusRows, "quote",
+            "WON", "ACCEPTED", "LOST", "REJECTED", "EXPIRED", "CANCELLED", "VOID", "VOIDED");
+
+        var users = await _db.Users.AsNoTracking()
+            .Where(user => user.Buid == businessUnitId && userIds.Contains(user.Id))
+            .Select(user => new { user.Id, IsActive = user.IsActive == true })
+            .ToListAsync(ct);
+        var journeys = await _db.Leads.AsNoTracking()
+            .Where(lead => lead.BusinessUnitId == businessUnitId &&
+                lead.AssignTo.HasValue && userIds.Contains(lead.AssignTo.Value))
+            .Select(lead => new
+            {
+                UserId = lead.AssignTo!.Value,
+                IsActiveLead = !lead.LeadStatusId.HasValue || !inactiveLeadStatusIds.Contains(lead.LeadStatusId.Value),
+                LeadLineCount = lead.LeadItems.Count,
+                lead.BidClosingDate,
+                OpenRfqCount = lead.Rfqs.Count(rfq =>
+                    !rfq.RfqstatusId.HasValue || !terminalRfqStatusIds.Contains(rfq.RfqstatusId.Value)),
+                OpenQuoteCount = lead.Rfqs.SelectMany(rfq => rfq.Quotes).Count(quote =>
+                    !quote.OutcomeOn.HasValue &&
+                    (!quote.StatusId.HasValue || !terminalQuoteStatusIds.Contains(quote.StatusId.Value))),
+                FollowUpCount = lead.Rfqs.SelectMany(rfq => rfq.Quotes).Count(quote =>
+                    quote.SentOn.HasValue && !quote.RespondedOn.HasValue && !quote.OutcomeOn.HasValue)
+            })
+            .ToListAsync(ct);
+
+        return users.OrderBy(user => user.Id).Select(user =>
+        {
+            var assigned = journeys.Where(journey => journey.UserId == user.Id).ToArray();
+            var active = assigned.Where(journey =>
+                journey.IsActiveLead || journey.OpenRfqCount > 0 ||
+                journey.OpenQuoteCount > 0 || journey.FollowUpCount > 0).ToArray();
+            var deadlines = active.Where(journey => journey.BidClosingDate.HasValue)
+                .Select(journey => journey.BidClosingDate!.Value).ToArray();
+            var overdue = deadlines.Count(deadline => deadline < measuredOn);
+            var urgent = deadlines.Count(deadline => deadline >= measuredOn && deadline <= measuredOn.AddHours(24));
+            var approaching = deadlines.Count(deadline => deadline > measuredOn.AddHours(24) &&
+                deadline <= measuredOn.AddDays(3));
+            var activeLeadCount = active.Count(journey => journey.IsActiveLead);
+            var lineCount = active.Sum(journey => journey.LeadLineCount);
+            var linePoints = active.Sum(journey => Math.Min(
+                _policy.MaximumLinePointsPerJourney,
+                journey.LeadLineCount * _policy.LeadLineWeight));
+            var openRfqs = active.Sum(journey => journey.OpenRfqCount);
+            var openQuotes = active.Sum(journey => journey.OpenQuoteCount);
+            var followUps = active.Sum(journey => journey.FollowUpCount);
+            var points = activeLeadCount * _policy.ActiveLeadWeight + linePoints +
+                overdue * _policy.OverdueDeadlineWeight + urgent * _policy.UrgentDeadlineWeight +
+                approaching * _policy.ApproachingDeadlineWeight + openRfqs * _policy.OpenRfqWeight +
+                openQuotes * _policy.OpenQuoteWeight + followUps * _policy.FollowUpWeight;
+            var boundedPoints = Math.Max(0, points);
+            var capacity = Math.Max(0, 100 - (int)Math.Ceiling(
+                boundedPoints * 100m / _policy.MaximumWorkloadPoints));
+            var workload = new RoutingWorkloadSnapshot(
+                activeLeadCount, lineCount, overdue, urgent, approaching,
+                openRfqs, openQuotes, followUps, boundedPoints);
+            return new RoutingUserAvailability(
+                businessUnitId, user.Id, user.IsActive,
+                user.IsActive && boundedPoints < _policy.MaximumWorkloadPoints,
+                user.IsActive ? capacity : 0,
+                workload);
+        }).ToList();
+    }
+
+    private static long[] StatusIds(
+        IEnumerable<RoutingStatusRow> rows, string typeFragment, params string[] terminalCodes)
+    {
+        var accepted = terminalCodes.ToHashSet(StringComparer.Ordinal);
+        return rows.Where(row =>
+                row.SetupType.Contains(typeFragment, StringComparison.OrdinalIgnoreCase))
+            .Where(row => accepted.Contains(NormalizeStatusCode(row.SetupCode ?? row.SetupValue)))
+            .Select(row => row.SetupId)
+            .ToArray();
+    }
+
+    private static string NormalizeStatusCode(string? value) => string.Join('_',
+        (value ?? string.Empty).Trim().ToUpperInvariant()
+            .Split([' ', '-', '/'], StringSplitOptions.RemoveEmptyEntries));
+
+    private sealed record RoutingStatusRow(
+        long SetupId, string SetupType, string? SetupCode, string SetupValue);
+
     private async Task<IReadOnlyDictionary<OwnershipScope, string?>> BuildScopeKeysAsync(
         long businessUnitId, Lead lead, CancellationToken ct)
     {
@@ -567,11 +674,16 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
         string[] Values(CustomerIdentifierType type) => evidence.TryGetValue(type, out var values) ? values.ToArray() : [];
     }
 
-    private async Task<RoutingDecisionResponse?> FindDecisionByKeyAsync(long businessUnitId, string key, CancellationToken ct)
+    private async Task<RoutingDecisionResponse?> FindDecisionByKeyAsync(
+        long businessUnitId, string key, string expectedRequestHash, CancellationToken ct)
     {
         var decision = await _db.Set<LeadRoutingDecision>().AsNoTracking().SingleOrDefaultAsync(
             d => d.BusinessUnitId == businessUnitId && d.IdempotencyKey == key.Trim(), ct);
         if (decision == null) return null;
+        var storedRequestHash = RoutingRequestFingerprint.ReadFromExplanation(decision.Explanation);
+        if (!string.Equals(storedRequestHash, expectedRequestHash, StringComparison.Ordinal))
+            throw new RoutingConflictException(
+                "The idempotency key was already used for different routing request content.");
         var assignmentId = await _db.Set<LeadAssignment>().Where(a => a.RoutingDecisionId == decision.Id)
             .Select(a => (long?)a.Id).SingleOrDefaultAsync(ct);
         var workItemId = await _db.Set<UnassignedWorkItem>().Where(w => w.RoutingDecisionId == decision.Id)

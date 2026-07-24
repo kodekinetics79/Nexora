@@ -6,6 +6,10 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         public long Id { get; set; }
         public long? CommercialCaseId { get; set; }
         public string? CommercialCaseReference { get; set; }
+        public string? NexoraSerial => CommercialCaseReference;
+        public long? CustomerId { get; set; }
+        public long? ContactId { get; set; }
+        public string CustomerMatchStatus { get; set; } = "UNRESOLVED";
         public string? Rfqno { get; set; }
         public string? BuyersName { get; set; }
         public DateTime RecDate { get; set; }
@@ -29,6 +33,7 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         public string? EmailSource { get; set; }
         public string? Clientemail { get; set; }
         public long? LeadStatusId { get; set; }
+        public int LifecycleVersion { get; set; }
         public bool IsAccepted => LeadStatusId == 24;
         public bool IsRejected => LeadStatusId == 25;
         public long ReviewVersion { get; set; }

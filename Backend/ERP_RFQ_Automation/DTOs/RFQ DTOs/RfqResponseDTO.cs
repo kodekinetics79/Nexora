@@ -7,6 +7,7 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public long Id { get; set; }
         public long? CommercialCaseId { get; set; }
         public string? CommercialCaseReference { get; set; }
+        public string? NexoraSerial { get; set; }
         public string Rfqno { get; set; } = null!;
         public string? BuyersName { get; set; }
         public DateTime RecDate { get; set; }
@@ -29,7 +30,10 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public string? BusinessUnitName { get; set; }  // for UI
         public long? RfqstatusId { get; set; }
         public string? RfqstatusValue { get; set; }    // from SetupMaster
+        public string? RfqstatusCode { get; set; }
+        public int LifecycleVersion { get; set; }
         public long? CustomerId { get; set; }
+        public long? ContactId { get; set; }
         public string? CustomerName { get; set; }
         public string? CustomerEmail { get; set; }
         public string? LeadEmail { get; set; }
@@ -104,6 +108,7 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public long BusinessUnitId { get; set; }
         public long? RfqstatusId { get; set; }
         public long? CustomerId { get; set; }
+        public long? ContactId { get; set; }
         [Required]
         public string CreatedBy { get; set; } = null!;
         public List<RfqitemCreateRequestDTO> Rfqitems { get; set; } = new List<RfqitemCreateRequestDTO>();
@@ -170,6 +175,7 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public long BusinessUnitId { get; set; }
         public long? RfqstatusId { get; set; }
         public long? CustomerId { get; set; }
+        public long? ContactId { get; set; }
         [Required]
         public string ModifiedBy { get; set; } = null!;
         public List<RfqitemUpdateRequestDTO> Rfqitems { get; set; } = new List<RfqitemUpdateRequestDTO>();

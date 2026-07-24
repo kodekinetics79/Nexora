@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Hosting;
@@ -169,7 +170,10 @@ public sealed class LocalFileStorage : IFileStorage
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 
         if (File.Exists(path))
+        {
+            await VerifyExistingContentAsync(path, content, ct);
             return path;
+        }
 
         var temporaryPath = path + "." + Guid.NewGuid().ToString("N")[..8] + ".tmp";
         await File.WriteAllBytesAsync(temporaryPath, content.ToArray(), ct);
@@ -183,6 +187,23 @@ public sealed class LocalFileStorage : IFileStorage
         }
 
         return path;
+    }
+
+    private static async Task VerifyExistingContentAsync(
+        string path,
+        ReadOnlyMemory<byte> expected,
+        CancellationToken ct)
+    {
+        var info = new FileInfo(path);
+        if (info.Length != expected.Length)
+            throw new InvalidDataException("Existing immutable storage object has a conflicting length.");
+
+        await using var stream = new FileStream(
+            path, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, useAsync: true);
+        var actualHash = await SHA256.HashDataAsync(stream, ct);
+        var expectedHash = SHA256.HashData(expected.Span);
+        if (!CryptographicOperations.FixedTimeEquals(actualHash, expectedHash))
+            throw new InvalidDataException("Existing immutable storage object has conflicting content.");
     }
 
     public Task<Stream> OpenReadAsync(string storagePath, CancellationToken ct = default)

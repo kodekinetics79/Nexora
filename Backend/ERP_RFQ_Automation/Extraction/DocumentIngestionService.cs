@@ -1,11 +1,15 @@
 using System;
 using System.IO;
 using System.Security.Cryptography;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.AspNetCore.Hosting;
+using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using Microsoft.Extensions.Logging;
 using ERP_RFQ_Automation.Infrastructure.Storage;
+using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Security.DocumentInspection;
+using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Extraction;
 
@@ -18,6 +22,14 @@ public sealed class IngestedDocument
     public string StoragePath { get; init; } = null!;
     public EnqueueOutcome Outcome { get; init; }
     public ExtractionStatus? ExistingStatus { get; init; }
+}
+
+public sealed class DocumentInspectionException : IOException
+{
+    public DocumentInspectionException(FileInspectionResult inspection)
+        : base(inspection.Reason) => Inspection = inspection;
+
+    public FileInspectionResult Inspection { get; }
 }
 
 /// <summary>
@@ -46,16 +58,22 @@ public sealed class DocumentIngestionService : IDocumentIngestion
 {
     private readonly IExtractionQueue _queue;
     private readonly ILogger<DocumentIngestionService> _log;
-    private readonly IFileStorage _storage;
+    private readonly IEvidenceObjectStorage _storage;
+    private readonly IFileInspectionService _inspection;
+    private readonly ErpRfqAutomationContext _context;
 
     public DocumentIngestionService(
         IExtractionQueue queue,
-        IFileStorage storage,
+        IEvidenceObjectStorage storage,
+        IFileInspectionService inspection,
+        ErpRfqAutomationContext context,
         ILogger<DocumentIngestionService> log)
     {
         _queue = queue;
         _log = log;
         _storage = storage;
+        _inspection = inspection;
+        _context = context;
     }
 
     public async Task<IngestedDocument> IngestAsync(
@@ -73,26 +91,113 @@ public sealed class DocumentIngestionService : IDocumentIngestion
         if (businessUnitId <= 0)
             throw new ArgumentException("A valid businessUnitId is required.", nameof(businessUnitId));
 
+        var actualBatchId = batchId ?? Guid.NewGuid();
         var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
-        var storagePath = await PersistImmutableAsync(bytes, hash, fileName, ct);
+        var suppliedExtension = Path.GetExtension(fileName).ToLowerInvariant();
+        var quarantineObject = await _storage.WriteImmutableAsync(
+            businessUnitId, "quarantine", hash, suppliedExtension, bytes, ct);
 
-        // Provenance sidecar BEFORE enqueue so a worker can never claim the job and
-        // miss the metadata. Best-effort by contract.
-        if (metadata != null)
-            await metadata.SaveAsync(storagePath, businessUnitId, ct);
+        FileInspectionResult inspection;
+        await using (var content = new MemoryStream(bytes, writable: false))
+            inspection = await _inspection.InspectAsync(
+                new FileInspectionRequest(content, fileName, DeclaredLength: bytes.LongLength), ct);
 
-        var fileType = Path.GetExtension(fileName).TrimStart('.').ToLowerInvariant();
+        var selectedObject = inspection.IsCleared
+            ? await _storage.WriteImmutableAsync(
+                businessUnitId, "cleared", hash, suppliedExtension, bytes, ct)
+            : quarantineObject;
+
+        await using var transaction = await _context.Database.BeginTransactionAsync(ct);
+        if (_context.Database.IsNpgsql())
+        {
+            var lockIdentity = $"evidence-ingest:{businessUnitId}:{hash}";
+            await _context.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT pg_advisory_xact_lock(hashtextextended({lockIdentity}, 0))", ct);
+        }
+
+        var corpus = await _context.Set<DocumentCorpus>()
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.BatchId == actualBatchId, ct);
+        if (corpus is null)
+        {
+            corpus = DocumentCorpus.Create(businessUnitId, actualBatchId, MapSourceType(sourceType));
+            _context.Add(corpus);
+            await _context.SaveChangesAsync(ct);
+        }
+
+        var source = await _context.Set<SourceDocument>()
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.ContentHash == hash, ct);
+        if (source is null)
+        {
+            source = SourceDocument.Create(
+                businessUnitId,
+                corpus.Id,
+                hash,
+                fileName,
+                inspection.DetectedContentType ?? "application/octet-stream",
+                selectedObject.Bucket,
+                selectedObject.Key,
+                selectedObject.Version,
+                bytes.LongLength);
+            source.MarkSecurityStatus(MapSecurityStatus(inspection.Status));
+            _context.Add(source);
+            await _context.SaveChangesAsync(ct);
+        }
+
+        var occurrenceKey = SourceOccurrenceIdentity.BuildKey(actualBatchId, sourceType, metadata);
+        var occurrence = await _context.Set<SourceDocumentOccurrence>()
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.IdempotencyKey == occurrenceKey, ct);
+        if (occurrence is null)
+        {
+            occurrence = SourceDocumentOccurrence.Create(
+                businessUnitId,
+                source.Id,
+                corpus.Id,
+                occurrenceKey,
+                BuildSourceMetadata(fileName, sourceType, metadata, inspection,
+                    quarantineObject, selectedObject));
+            _context.Add(occurrence);
+            await _context.SaveChangesAsync(ct);
+        }
+
+        var sourceIsCleared = source.SecurityStatus == DocumentSecurityStatus.Cleared;
+        if (!inspection.IsCleared || !sourceIsCleared)
+        {
+            corpus.RequireReview();
+            await _context.SaveChangesAsync(ct);
+            await transaction.CommitAsync(ct);
+            throw new DocumentInspectionException(sourceIsCleared || !inspection.IsCleared
+                ? inspection
+                : new FileInspectionResult(
+                    source.SecurityStatus == DocumentSecurityStatus.Rejected
+                        ? FileInspectionStatus.Rejected
+                        : FileInspectionStatus.Quarantined,
+                    source.DetectedMimeType,
+                    source.ByteSize,
+                    "The authoritative source document has not passed security inspection.",
+                    "evidence-ledger",
+                    null));
+        }
+
+        var fileType = ExtensionForMime(inspection.DetectedContentType, suppliedExtension);
         var enqueue = await _queue.EnqueueAsync(new EnqueueExtractionRequest
         {
             BusinessUnitId = businessUnitId,
             SourceType = sourceType,
-            StoragePath = storagePath,
+            StoragePath = selectedObject.StorageUri,
             FileName = fileName,
             FileType = string.IsNullOrEmpty(fileType) ? null : fileType,
             ContentHash = hash,
-            BatchId = batchId,
+            BatchId = actualBatchId,
             Priority = priority
         }, ct);
+
+        occurrence.BindExtractionJob(enqueue.JobId);
+        if (!source.ExtractionJobId.HasValue)
+            source.BindExtractionJob(enqueue.JobId);
+        if (corpus.Status == CorpusStatus.Received)
+            corpus.StartProcessing();
+        await _context.SaveChangesAsync(ct);
+        await transaction.CommitAsync(ct);
 
         _log.LogInformation(
             "Ingested {FileName} ({Bytes} bytes) for BU {BU} via {Source}: job {JobId} ({Outcome}).",
@@ -103,23 +208,95 @@ public sealed class DocumentIngestionService : IDocumentIngestion
             JobId = enqueue.JobId,
             BatchId = enqueue.BatchId,
             ContentHash = enqueue.ContentHash,
-            StoragePath = storagePath,
+            StoragePath = selectedObject.StorageUri,
             Outcome = enqueue.Outcome,
             ExistingStatus = enqueue.ExistingStatus
         };
     }
 
-    /// <summary>
-    /// Writes the raw bytes to an immutable, content-addressed path
-    /// (Uploads/Extraction/&lt;aa&gt;/&lt;sha256&gt;&lt;ext&gt;). Identical bytes reuse the same
-    /// file — a re-upload never rewrites or mutates existing content. (Moved verbatim from
-    /// ExtractionController so every door shares one storage layout.)
-    /// </summary>
-    private async Task<string> PersistImmutableAsync(byte[] bytes, string hash, string originalName, CancellationToken ct)
+    private static CorpusSourceType MapSourceType(ExtractionSourceType sourceType) => sourceType switch
     {
-        var ext = Path.GetExtension(originalName);
-        var shard = hash[..2];
-        return await _storage.WriteImmutableAsync(
-            Path.Combine("Extraction", shard, hash + ext), bytes, ct);
+        ExtractionSourceType.Email => CorpusSourceType.Email,
+        ExtractionSourceType.ManualUpload => CorpusSourceType.ManualUpload,
+        ExtractionSourceType.Folder => CorpusSourceType.Folder,
+        ExtractionSourceType.ExcelTemplate => CorpusSourceType.Import,
+        _ => CorpusSourceType.Api
+    };
+
+    private static DocumentSecurityStatus MapSecurityStatus(FileInspectionStatus status) => status switch
+    {
+        FileInspectionStatus.Cleared => DocumentSecurityStatus.Cleared,
+        FileInspectionStatus.Quarantined => DocumentSecurityStatus.Quarantined,
+        _ => DocumentSecurityStatus.Rejected
+    };
+
+    private static string BuildSourceMetadata(
+        string fileName,
+        ExtractionSourceType sourceType,
+        ExtractionJobMetadata? metadata,
+        FileInspectionResult inspection,
+        EvidenceObject quarantineObject,
+        EvidenceObject selectedObject) => JsonSerializer.Serialize(new
+    {
+        fileName,
+        sourceType = sourceType.ToString(),
+        metadata,
+        immutableObjects = new
+        {
+            quarantine = ObjectIdentity(quarantineObject),
+            selected = ObjectIdentity(selectedObject)
+        },
+        inspection = new
+        {
+            status = inspection.Status.ToString(),
+            inspection.DetectedContentType,
+            inspection.Reason,
+            inspection.ScannerEngine,
+            inspection.ScannerSignature
+        }
+    });
+
+    private static object ObjectIdentity(EvidenceObject value) => new
+    {
+        value.StorageUri,
+        value.Bucket,
+        value.Key,
+        value.Version,
+        value.ETag,
+        value.ByteSize
+    };
+
+    private static string ExtensionForMime(string? mime, string suppliedExtension) => mime switch
+    {
+        "application/pdf" => "pdf",
+        "application/msword" => "doc",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" =>
+            suppliedExtension.Equals(".xlsm", StringComparison.OrdinalIgnoreCase) ? "xlsm" : "xlsx",
+        "text/csv" => "csv",
+        "text/plain" => "txt",
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/bmp" => "bmp",
+        "image/tiff" => "tiff",
+        "image/webp" => "webp",
+        _ => suppliedExtension.TrimStart('.').ToLowerInvariant()
+    };
+}
+
+public static class SourceOccurrenceIdentity
+{
+    public static string BuildKey(
+        Guid batchId,
+        ExtractionSourceType sourceType,
+        ExtractionJobMetadata? metadata)
+    {
+        var occurrenceIdentity = string.IsNullOrWhiteSpace(metadata?.SourceOccurrenceId)
+            ? Guid.NewGuid().ToString("N")
+            : Convert.ToHexString(SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(metadata.SourceOccurrenceId.Trim())))
+                .ToLowerInvariant();
+        return $"{batchId:D}:{sourceType}:{occurrenceIdentity}";
     }
 }

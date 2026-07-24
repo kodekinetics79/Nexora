@@ -33,6 +33,7 @@ using ERP_RFQ_Automation.OrderToCash;
 using ERP_RFQ_Automation.CustomFields;
 using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.Security;
+using ERP_RFQ_Automation.Security.DocumentInspection;
 using System.Text.Json.Serialization;
 using Npgsql;
 
@@ -103,14 +104,43 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<ITenantScopeAccessor, TenantScopeAccessor>();
 builder.Services.AddScoped<ERP_RFQ_Automation.MultiTenancy.ITenantContext, ERP_RFQ_Automation.MultiTenancy.HttpTenantContext>();
 builder.Services.AddSingleton<IFileStorage, LocalFileStorage>();
+builder.Services.Configure<S3EvidenceStorageOptions>(
+    builder.Configuration.GetSection(S3EvidenceStorageOptions.SectionName));
+builder.Services.AddSingleton<IEvidenceObjectStorage>(services =>
+{
+    var options = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<S3EvidenceStorageOptions>>();
+    return string.Equals(options.Value.Provider, "S3", StringComparison.OrdinalIgnoreCase)
+        ? new S3EvidenceObjectStorage(options)
+        : new LocalEvidenceObjectStorage(services.GetRequiredService<IFileStorage>());
+});
+builder.Services.AddSingleton<IMalwareScanner>(_ =>
+{
+    if (builder.Environment.IsDevelopment())
+        return new EicarMalwareScanner();
+
+    var scanner = builder.Configuration.GetSection("DocumentInspection:ClamAV")
+        .Get<ClamAvScannerOptions>() ?? new ClamAvScannerOptions();
+    return new ClamAvInstreamMalwareScanner(scanner);
+});
+builder.Services.AddSingleton<IFileInspectionService>(services =>
+{
+    var options = builder.Configuration.GetSection("DocumentInspection:Limits")
+        .Get<DocumentInspectionOptions>() ?? new DocumentInspectionOptions();
+    return new DocumentFileInspectionService(services.GetRequiredService<IMalwareScanner>(), options);
+});
 
 // Platform-Owner control-plane services (ADR-0005)
 builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Auth.IPlatformAuthService, ERP_RFQ_Automation.Platform.Auth.PlatformAuthService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Services.IPlatformAuditService, ERP_RFQ_Automation.Platform.Services.PlatformAuditService>();
 
 // Readiness/liveness health checks (DATA-05)
+builder.Services.AddSingleton<ERP_RFQ_Automation.HealthChecks.IExtractionWorkerHeartbeat,
+    ERP_RFQ_Automation.HealthChecks.ExtractionWorkerHeartbeat>();
 builder.Services.AddHealthChecks()
-    .AddCheck<ERP_RFQ_Automation.HealthChecks.DatabaseHealthCheck>("database");
+    .AddCheck<ERP_RFQ_Automation.HealthChecks.DatabaseHealthCheck>("database", tags: new[] { "live", "ready" })
+    .AddCheck<ERP_RFQ_Automation.HealthChecks.EvidenceStorageHealthCheck>("evidence-storage", tags: new[] { "ready" })
+    .AddCheck<ERP_RFQ_Automation.HealthChecks.MalwareScannerHealthCheck>("malware-scanner", tags: new[] { "ready" })
+    .AddCheck<ERP_RFQ_Automation.HealthChecks.ExtractionWorkerHealthCheck>("extraction-worker", tags: new[] { "ready" });
 // Register repositories
 builder.Services.AddScoped<ISetupMasterRepository, SetupMasterRepository>();
 builder.Services.AddScoped<ICurrencyRepository, CurrencyRepository>();
@@ -482,5 +512,12 @@ app.UseAuthorization();
 // Built-in rate limiter — AFTER auth so the per-tenant partition uses the claim.
 app.UseRateLimiter();
 app.MapControllers();
-app.MapHealthChecks("/health");
+app.MapHealthChecks("/health", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+{
+    Predicate = registration => registration.Tags.Contains("live")
+});
+app.MapHealthChecks("/ready", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+{
+    Predicate = registration => registration.Tags.Contains("ready")
+});
 app.Run();

@@ -358,6 +358,10 @@ public partial class ErpRfqAutomationContext : DbContext
 
             entity.HasIndex(e => e.RecDate, "IX_Leads_RecDate");
 
+            entity.HasIndex(e => new { e.BusinessUnitId, e.CustomerId }, "IX_Leads_BusinessUnitID_CustomerID");
+
+            entity.HasIndex(e => new { e.BusinessUnitId, e.ContactId }, "IX_Leads_BusinessUnitID_ContactID");
+
             entity.Property(e => e.Id).HasColumnName("ID");
             entity.Property(e => e.Aiconfidence)
                 .HasColumnType("decimal(5, 4)")
@@ -374,6 +378,9 @@ public partial class ErpRfqAutomationContext : DbContext
                 .IsUnicode(false);
             entity.Property(e => e.CreatedBy).HasMaxLength(20);
             entity.Property(e => e.CreatedDate).HasDefaultValueSql("now()");
+            entity.Property(e => e.CustomerId).HasColumnName("CustomerID");
+            entity.Property(e => e.ContactId).HasColumnName("ContactID");
+            entity.Property(e => e.CustomerMatchStatus).HasMaxLength(32).HasDefaultValue("UNRESOLVED");
             entity.Property(e => e.DurationAgreement).HasMaxLength(100);
             entity.Property(e => e.EmailIngestsId).HasColumnName("EmailIngestsID");
             entity.Property(e => e.EmailSource)
@@ -503,6 +510,9 @@ public partial class ErpRfqAutomationContext : DbContext
                 .HasComputedColumnSql("\"TotalAmount\" - \"PaidAmount\"", stored: true)
                 .HasColumnType("decimal(19, 2)");
             entity.Property(e => e.BusinessUnitId).HasColumnName("BusinessUnitID");
+            entity.Property(e => e.CommercialCaseId).HasColumnName("CommercialCaseID");
+            entity.Property(e => e.ContactId).HasColumnName("ContactID");
+            entity.Property(e => e.NexoraSerial).HasMaxLength(100);
             entity.Property(e => e.CreatedBy)
                 .HasMaxLength(255)
                 .IsUnicode(false);
@@ -549,6 +559,15 @@ public partial class ErpRfqAutomationContext : DbContext
                 .HasForeignKey(d => d.BusinessUnitId)
                 .OnDelete(DeleteBehavior.ClientSetNull)
                 .HasConstraintName("FK__Orders__Business__3F9B6DFF");
+
+            entity.HasOne<CommercialCase>()
+                .WithMany()
+                .HasForeignKey(e => new { e.BusinessUnitId, e.CommercialCaseId })
+                .HasPrincipalKey(e => new { e.BusinessUnitId, e.Id })
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasIndex(e => new { e.BusinessUnitId, e.CommercialCaseId });
+            entity.HasIndex(e => new { e.BusinessUnitId, e.NexoraSerial });
 
             entity.HasOne(d => d.Currency).WithMany(p => p.Orders)
                 .HasForeignKey(d => d.CurrencyId)
@@ -798,12 +817,19 @@ public partial class ErpRfqAutomationContext : DbContext
 
             entity.HasIndex(e => e.QuoteNo, "IX_Quotes_QuoteNo");
 
+            entity.HasIndex(e => new { e.BusinessUnitId, e.CommercialCaseId }, "IX_Quotes_BusinessUnitID_CommercialCaseID");
+
+            entity.HasIndex(e => new { e.BusinessUnitId, e.NexoraSerial }, "IX_Quotes_BusinessUnitID_NexoraSerial");
+
             entity.Property(e => e.Id).HasColumnName("ID");
             entity.Property(e => e.BusinessUnitId).HasColumnName("BusinessUnitID");
             entity.Property(e => e.CreatedBy).HasMaxLength(255);
             entity.Property(e => e.CreatedDate).HasDefaultValueSql("now()");
             entity.Property(e => e.CurrencyId).HasColumnName("CurrencyID");
             entity.Property(e => e.CustomerId).HasColumnName("CustomerID");
+            entity.Property(e => e.ContactId).HasColumnName("ContactID");
+            entity.Property(e => e.CommercialCaseId).HasColumnName("CommercialCaseID");
+            entity.Property(e => e.NexoraSerial).HasMaxLength(100);
             entity.Property(e => e.DiscountValue).HasColumnType("decimal(18, 2)");
             entity.Property(e => e.ModifiedBy).HasMaxLength(255);
             entity.Property(e => e.QuoteDate).HasDefaultValueSql("now()");
@@ -836,6 +862,11 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.HasOne(d => d.Status).WithMany(p => p.QuoteStatuses)
                 .HasForeignKey(d => d.StatusId)
                 .HasConstraintName("FK_Quotes_Status");
+
+            entity.HasOne<CommercialCase>().WithMany()
+                .HasForeignKey(e => new { e.BusinessUnitId, e.CommercialCaseId })
+                .HasPrincipalKey(e => new { e.BusinessUnitId, e.Id })
+                .OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<QuoteConfiguration>(entity =>
@@ -903,6 +934,10 @@ public partial class ErpRfqAutomationContext : DbContext
 
             entity.ToTable("RFQ");
 
+            entity.HasIndex(e => new { e.BusinessUnitId, e.CommercialCaseId }, "IX_RFQ_BusinessUnitID_CommercialCaseID");
+
+            entity.HasIndex(e => new { e.BusinessUnitId, e.NexoraSerial }, "IX_RFQ_BusinessUnitID_NexoraSerial");
+
             entity.Property(e => e.Id).HasColumnName("ID");
             entity.Property(e => e.BiddingDecision).HasMaxLength(200);
             entity.Property(e => e.BusinessUnitId).HasColumnName("BusinessUnitID");
@@ -910,6 +945,9 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.CreatedBy).HasMaxLength(40);
             entity.Property(e => e.CreatedDate).HasDefaultValueSql("now()");
             entity.Property(e => e.CustomerId).HasColumnName("CustomerID");
+            entity.Property(e => e.ContactId).HasColumnName("ContactID");
+            entity.Property(e => e.CommercialCaseId).HasColumnName("CommercialCaseID");
+            entity.Property(e => e.NexoraSerial).HasMaxLength(100);
             entity.Property(e => e.DurationAgreement).HasMaxLength(200);
             entity.Property(e => e.LeadId).HasColumnName("LeadID");
             entity.Property(e => e.ModifiedBy).HasMaxLength(40);
@@ -941,6 +979,11 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.HasOne(d => d.RfqtypeNavigation).WithMany(p => p.RfqRfqtypeNavigations)
                 .HasForeignKey(d => d.RfqtypeId)
                 .HasConstraintName("FK_RFQ_TypeID");
+
+            entity.HasOne<CommercialCase>().WithMany()
+                .HasForeignKey(e => new { e.BusinessUnitId, e.CommercialCaseId })
+                .HasPrincipalKey(e => new { e.BusinessUnitId, e.Id })
+                .OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<Rfqitem>(entity =>

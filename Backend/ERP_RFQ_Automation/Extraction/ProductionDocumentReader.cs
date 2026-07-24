@@ -11,6 +11,7 @@ using Docnet.Core;
 using Docnet.Core.Converters;
 using Docnet.Core.Models;
 using ERP_RFQ_Automation.Services.DocumentIntelligence;
+using ERP_RFQ_Automation.Infrastructure.Storage;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Logging;
 using OfficeOpenXml;
@@ -41,6 +42,8 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
 {
     private readonly ILogger<ProductionDocumentReader> _log;
     private readonly string _tessDataPath;
+    private readonly IEvidenceObjectStorage _evidenceStorage;
+    private readonly NativeSpreadsheetParser _spreadsheetParser = new();
 
     // A PDF/image that yields fewer than this many non-whitespace characters is treated as scanned.
     private const int NearEmptyThreshold = 20;
@@ -50,9 +53,13 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
     // pdfium (Docnet) and the Tesseract native engine are not thread-safe; serialize OCR.
     private static readonly object OcrLock = new();
 
-    public ProductionDocumentReader(ILogger<ProductionDocumentReader> log, IWebHostEnvironment env)
+    public ProductionDocumentReader(
+        ILogger<ProductionDocumentReader> log,
+        IWebHostEnvironment env,
+        IEvidenceObjectStorage evidenceStorage)
     {
         _log = log;
+        _evidenceStorage = evidenceStorage;
         _tessDataPath = Path.Combine(env.ContentRootPath, "tessdata");
         // EPPlus 7 requires a license context; the app sets this at startup, set it here too
         // so the reader is safe to use independently of startup ordering.
@@ -68,26 +75,32 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         byte[] bytes;
         try
         {
-            bytes = File.Exists(job.StoragePath)
-                ? await File.ReadAllBytesAsync(job.StoragePath, ct)
-                : Array.Empty<byte>();
+            await using var stream = await _evidenceStorage.OpenVerifiedReadAsync(
+                job.StoragePath, job.ContentHash, ct);
+            using var memory = new MemoryStream();
+            await stream.CopyToAsync(memory, ct);
+            bytes = memory.ToArray();
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
-            _log.LogWarning(ex, "Failed to read stored file {Path}.", job.StoragePath);
-            bytes = Array.Empty<byte>();
+            _log.LogError(ex, "Verified evidence read failed for extraction job {JobId}.", job.Id);
+            throw new EvidenceIntegrityException(job.Id, "verified_read_failed", ex);
         }
 
         // Structured spreadsheets/CSV bypass the LLM entirely via the deterministic normalizer.
         if (bytes.Length > 0 && (ext == "xlsx" || ext == "xlsm"))
         {
-            var rows = ReadXlsxRows(bytes, name);
+            var rows = TryParseSpreadsheet(() => _spreadsheetParser.ParseXlsx(bytes, name), name, "XLSX");
             if (rows.Count > 0)
                 return Structured(job, name, rows);
         }
         if (bytes.Length > 0 && ext == "csv")
         {
-            var rows = ReadCsvRows(bytes, name);
+            var rows = TryParseSpreadsheet(() => _spreadsheetParser.ParseCsv(bytes, name), name, "CSV");
             if (rows.Count > 0)
                 return Structured(job, name, rows);
         }
@@ -285,160 +298,20 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
 
     // ---- spreadsheets -> structured rows ---------------------------------
 
-    private List<RfqSpreadsheetRow> ReadXlsxRows(byte[] bytes, string name)
+    private List<RfqSpreadsheetRow> TryParseSpreadsheet(
+        Func<IReadOnlyList<RfqSpreadsheetRow>> parse,
+        string name,
+        string format)
     {
         try
         {
-            using var ms = new MemoryStream(bytes, writable: false);
-            using var package = new ExcelPackage(ms);
-            var ws = package.Workbook.Worksheets.FirstOrDefault(w => w.Dimension != null)
-                     ?? package.Workbook.Worksheets.FirstOrDefault();
-            if (ws?.Dimension == null)
-                return new List<RfqSpreadsheetRow>();
-
-            var firstRow = ws.Dimension.Start.Row;
-            var lastRow = ws.Dimension.End.Row;
-            var firstCol = ws.Dimension.Start.Column;
-            var lastCol = ws.Dimension.End.Column;
-            if (lastRow <= firstRow)
-                return new List<RfqSpreadsheetRow>();
-
-            // Header row = first row of the used range.
-            var headers = new List<string>();
-            for (var c = firstCol; c <= lastCol; c++)
-                headers.Add((ws.Cells[firstRow, c].Text ?? string.Empty).Trim().ToLowerInvariant());
-
-            var map = BuildColumnMap(headers.ToArray());
-
-            string? Cell(int excelRow, int localIndex)
-            {
-                if (localIndex < 0) return null;
-                var v = ws.Cells[excelRow, firstCol + localIndex].Text;
-                return string.IsNullOrWhiteSpace(v) ? null : v.Trim();
-            }
-
-            var rows = new List<RfqSpreadsheetRow>();
-            for (var r = firstRow + 1; r <= lastRow; r++)
-            {
-                var row = new RfqSpreadsheetRow
-                {
-                    RowNumber = r,
-                    SourceDocumentName = name,
-                    RfqNo = Cell(r, map.Rfq),
-                    BuyerName = Cell(r, map.Buyer),
-                    ReceivedDate = Cell(r, map.Recv),
-                    BidClosingDate = Cell(r, map.Bid),
-                    ProductName = Cell(r, map.Product),
-                    Quantity = Cell(r, map.Qty),
-                    UnitPrice = Cell(r, map.Price),
-                    Currency = Cell(r, map.Curr),
-                    ManufacturerName = Cell(r, map.Mfr),
-                    ManufacturerPartNumber = Cell(r, map.Mpn),
-                    LeadTimeDays = Cell(r, map.Lead)
-                };
-
-                // Skip fully-empty rows so trailing blanks don't inflate the item count.
-                if (row.ProductName is null && row.ManufacturerPartNumber is null &&
-                    row.Quantity is null && row.UnitPrice is null && row.RfqNo is null)
-                    continue;
-
-                rows.Add(row);
-            }
-            return rows;
+            return parse().ToList();
         }
         catch (Exception ex)
         {
-            _log.LogWarning(ex, "XLSX structured parse failed for {Name}.", name);
+            _log.LogWarning(ex, "{Format} structured parse failed for {Name}.", format, name);
             return new List<RfqSpreadsheetRow>();
         }
-    }
-
-    private List<RfqSpreadsheetRow> ReadCsvRows(byte[] bytes, string name)
-    {
-        var text = DecodeText(bytes);
-        var lines = text
-            .Replace("\r\n", "\n")
-            .Split('\n')
-            .Select(l => l.TrimEnd('\r'))
-            .Where(l => l.Trim().Length > 0)
-            .ToList();
-        if (lines.Count <= 1)
-            return new List<RfqSpreadsheetRow>();
-
-        var headers = SplitCsv(lines[0]).Select(h => h.Trim().ToLowerInvariant()).ToArray();
-        var map = BuildColumnMap(headers);
-
-        string? Cell(string[] cells, int i) => i >= 0 && i < cells.Length && cells[i].Trim().Length > 0 ? cells[i].Trim() : null;
-
-        var rows = new List<RfqSpreadsheetRow>();
-        for (var r = 1; r < lines.Count; r++)
-        {
-            var cells = SplitCsv(lines[r]);
-            rows.Add(new RfqSpreadsheetRow
-            {
-                RowNumber = r + 1,
-                SourceDocumentName = name,
-                RfqNo = Cell(cells, map.Rfq),
-                BuyerName = Cell(cells, map.Buyer),
-                ReceivedDate = Cell(cells, map.Recv),
-                BidClosingDate = Cell(cells, map.Bid),
-                ProductName = Cell(cells, map.Product),
-                Quantity = Cell(cells, map.Qty),
-                UnitPrice = Cell(cells, map.Price),
-                Currency = Cell(cells, map.Curr),
-                ManufacturerName = Cell(cells, map.Mfr),
-                ManufacturerPartNumber = Cell(cells, map.Mpn),
-                LeadTimeDays = Cell(cells, map.Lead)
-            });
-        }
-        return rows;
-    }
-
-    private readonly record struct ColumnMap(
-        int Rfq, int Buyer, int Recv, int Bid, int Product,
-        int Qty, int Price, int Curr, int Mfr, int Mpn, int Lead);
-
-    private static ColumnMap BuildColumnMap(string[] headers)
-    {
-        int Idx(params string[] keys) => Array.FindIndex(headers, h => keys.Contains(h));
-        return new ColumnMap(
-            Rfq: Idx("rfqno", "rfq no", "rfq"),
-            Buyer: Idx("buyername", "buyer name", "buyer"),
-            Recv: Idx("receiveddate", "received date"),
-            Bid: Idx("bidclosingdate", "bid closing date"),
-            Product: Idx("productname", "product name", "product", "description"),
-            Qty: Idx("quantity", "qty"),
-            Price: Idx("unitprice", "unit price", "price"),
-            Curr: Idx("currency"),
-            Mfr: Idx("manufacturername", "manufacturer"),
-            Mpn: Idx("manufacturerpartnumber", "mpn", "part number"),
-            Lead: Idx("leadtimedays", "lead time", "leadtime"));
-    }
-
-    // Minimal RFC-4180-ish splitter (handles quoted fields + escaped quotes).
-    private static string[] SplitCsv(string line)
-    {
-        var result = new List<string>();
-        var sb = new StringBuilder();
-        var inQuotes = false;
-        for (var i = 0; i < line.Length; i++)
-        {
-            var c = line[i];
-            if (inQuotes)
-            {
-                if (c == '"')
-                {
-                    if (i + 1 < line.Length && line[i + 1] == '"') { sb.Append('"'); i++; }
-                    else inQuotes = false;
-                }
-                else sb.Append(c);
-            }
-            else if (c == '"') inQuotes = true;
-            else if (c == ',') { result.Add(sb.ToString()); sb.Clear(); }
-            else sb.Append(c);
-        }
-        result.Add(sb.ToString());
-        return result.ToArray();
     }
 
     // ---- image encoding helpers (Docnet BGRA -> 24-bit BMP for Tesseract) -
@@ -503,4 +376,17 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
     }
 
     private static bool IsNearEmpty(string? s) => CountNonWhitespace(s) < NearEmptyThreshold;
+}
+
+public sealed class EvidenceIntegrityException : IOException
+{
+    public EvidenceIntegrityException(long extractionJobId, string code, Exception innerException)
+        : base("The authoritative source document failed evidence integrity verification.", innerException)
+    {
+        ExtractionJobId = extractionJobId;
+        Code = code;
+    }
+
+    public long ExtractionJobId { get; }
+    public string Code { get; }
 }

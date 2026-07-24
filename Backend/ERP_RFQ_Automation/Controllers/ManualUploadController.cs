@@ -12,6 +12,8 @@ using System.Linq;
 using System.Security.Claims;
 using System.Threading.Tasks;
 using ERP_RFQ_Automation.Infrastructure.Storage;
+using ERP_RFQ_Automation.Extraction;
+using ERP_RFQ_Automation.Authorization;
 
 namespace ERP_RFQ_Automation.Controllers
 {
@@ -24,17 +26,20 @@ namespace ERP_RFQ_Automation.Controllers
         private readonly ErpRfqAutomationContext _context;
         private readonly ILogger<ManualUploadController> _logger;
         private readonly string _attachmentPath;
+        private readonly IDocumentIngestion _ingestion;
 
         public ManualUploadController(
             ManualUploadService manualUploadService,
             ErpRfqAutomationContext context,
             ILogger<ManualUploadController> logger,
-            IFileStorage storage)
+            IFileStorage storage,
+            IDocumentIngestion ingestion)
         {
             _manualUploadService = manualUploadService;
             _context = context;
             _logger = logger;
             _attachmentPath = storage.GetPath("Manual_Attachments");
+            _ingestion = ingestion;
         }
 
         /// <summary>
@@ -50,13 +55,11 @@ namespace ERP_RFQ_Automation.Controllers
         /// <param name="businessUnitId">The BusinessUnitId for the lead.</param>
         /// <returns>The ID of the created Lead.</returns>
         [HttpPost("upload")]
+        [RequireModulePermission("Leads", PermissionAction.Create)]
         public async Task<IActionResult> UploadFiles(List<IFormFile> files, [FromForm] long? businessUnitId = null)
         {
-            var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-            var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-            if (targetBUId <= 0)
-                return BadRequest(new { success = false, message = "Business Unit ID is required." });
+            if (!TryGetAuthenticatedBusinessUnitId(out var targetBUId))
+                return BadRequest(new { success = false, message = "A valid businessUnitId claim is required." });
 
             if (files == null || !files.Any())
             {
@@ -65,14 +68,24 @@ namespace ERP_RFQ_Automation.Controllers
 
             try
             {
-                var result = await _manualUploadService.ProcessUploadedFilesAsync(files, targetBUId);
-                
-                if (!result.Success)
+                var accepted = new List<object>();
+                foreach (var file in files)
                 {
-                    return BadRequest(new { success = false, message = result.Message, errorCode = result.ErrorCode });
+                    if (file.Length == 0 || file.Length > 25L * 1024 * 1024)
+                        return BadRequest(new { success = false, message = $"{file.FileName} is empty or exceeds 25 MB." });
+                    await using var content = new MemoryStream();
+                    await file.CopyToAsync(content, HttpContext.RequestAborted);
+                    var metadata = new ExtractionJobMetadata
+                    {
+                        SourceOccurrenceId = Request.Headers.TryGetValue("Idempotency-Key", out var key)
+                            ? $"{key}:{file.FileName}" : null
+                    };
+                    var ingested = await _ingestion.IngestAsync(content.ToArray(), file.FileName, targetBUId,
+                        ExtractionSourceType.ManualUpload, priority: 10, metadata: metadata,
+                        ct: HttpContext.RequestAborted);
+                    accepted.Add(new { ingested.JobId, ingested.BatchId, outcome = ingested.Outcome.ToString() });
                 }
-
-                return Ok(new { success = true, message = result.Message, data = new { LeadId = result.Data } });
+                return Accepted(new { success = true, message = "Files accepted for governed extraction.", data = accepted });
             }
             catch (Exception ex)
             {
@@ -85,13 +98,11 @@ namespace ERP_RFQ_Automation.Controllers
         /// Uploads a specialized RFQ Excel file and creates an RFQ.
         /// </summary>
         [HttpPost("upload-rfq-excel")]
+        [RequireModulePermission("Leads", PermissionAction.Create)]
         public async Task<IActionResult> UploadCustomerRfqExcel(IFormFile file, [FromForm] long? businessUnitId = null, [FromForm] string? createdBy = null)
         {
-            var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-            var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-            if (targetBUId <= 0)
-                return BadRequest(new { success = false, message = "Business Unit ID is required." });
+            if (!TryGetAuthenticatedBusinessUnitId(out var targetBUId))
+                return BadRequest(new { success = false, message = "A valid businessUnitId claim is required." });
 
             if (file == null)
             {
@@ -100,15 +111,43 @@ namespace ERP_RFQ_Automation.Controllers
 
             try
             {
-                var userEmail = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? createdBy ?? "system";
-                var result = await _manualUploadService.ProcessCustomerRfqExcelAsync(file, targetBUId, userEmail);
+                if (file.Length == 0)
+                    return BadRequest(new { success = false, message = "The uploaded file is empty." });
+                if (file.Length > 25L * 1024 * 1024)
+                    return BadRequest(new { success = false, message = "File exceeds 25 MB limit." });
 
-                if (!result.Success)
+                byte[] bytes;
+                await using (var content = new MemoryStream())
                 {
-                    return BadRequest(new { success = false, message = result.Message });
+                    await file.CopyToAsync(content, HttpContext.RequestAborted);
+                    bytes = content.ToArray();
                 }
 
-                return Ok(new { success = true, message = result.Message, data = new { RfqId = result.Data } });
+                var metadata = new ExtractionJobMetadata
+                {
+                    SourceOccurrenceId = Request.Headers.TryGetValue("Idempotency-Key", out var key)
+                        ? $"{key}:{file.FileName}" : null
+                };
+                var ingested = await _ingestion.IngestAsync(bytes, file.FileName, targetBUId,
+                    ExtractionSourceType.ExcelTemplate, priority: 10,
+                    metadata: metadata, ct: HttpContext.RequestAborted);
+                return Accepted(new
+                {
+                    success = true,
+                    message = "RFQ spreadsheet accepted for governed extraction.",
+                    data = new { ingested.JobId, ingested.BatchId, outcome = ingested.Outcome.ToString() }
+                });
+            }
+            catch (DocumentInspectionException ex)
+            {
+                _logger.LogWarning("RFQ Excel upload stopped by inspection: {Status} {Reason}",
+                    ex.Inspection.Status, ex.Inspection.Reason);
+                return UnprocessableEntity(new
+                {
+                    success = false,
+                    outcome = ex.Inspection.Status.ToString(),
+                    message = ex.Inspection.Reason
+                });
             }
             catch (Exception ex)
             {
@@ -122,15 +161,13 @@ namespace ERP_RFQ_Automation.Controllers
         /// </summary>
         /// <returns>A list of file information.</returns>
         [HttpGet("list")]
+        [RequireModulePermission("Leads", PermissionAction.View)]
         public async Task<IActionResult> ListFiles([FromQuery] long? businessUnitId = null)
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-                if (targetBUId <= 0)
-                    return BadRequest(new { success = false, message = "Business Unit ID is required." });
+                if (!TryGetAuthenticatedBusinessUnitId(out var targetBUId))
+                    return BadRequest(new { success = false, message = "A valid businessUnitId claim is required." });
 
                 // Query attachments from DB where ParentType is Lead and Lead.LeadSource is Manual
                 var manualLeads = await _context.Leads
@@ -161,5 +198,9 @@ namespace ERP_RFQ_Automation.Controllers
                 return StatusCode(500, "Internal server error.");
             }
         }
+
+        private bool TryGetAuthenticatedBusinessUnitId(out long businessUnitId)
+            => long.TryParse(User.FindFirstValue("businessUnitId"), out businessUnitId)
+               && businessUnitId > 0;
     }
 }

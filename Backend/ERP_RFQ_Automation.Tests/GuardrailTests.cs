@@ -232,8 +232,8 @@ public class GuardrailTests
         {
             // Maximally permissive policy: only the fail-safe default can stop this.
             AgentSeed.Policy(seed, Bu1, AgentAutonomyLevel.Act,
-                maxAutoAwardValue: decimal.MaxValue,
-                maxAutoOrderValue: decimal.MaxValue,
+                maxAutoAwardValue: 1_000_000_000m,
+                maxAutoOrderValue: 1_000_000_000m,
                 requireApprovalForAwards: false,
                 requireApprovalForOrders: false,
                 requireApprovalForSupplierEmails: false);

@@ -1,5 +1,11 @@
 namespace ERP_RFQ_Automation.AI;
 
+public enum AiProviderClass
+{
+    External,
+    Local
+}
+
 public static class AiCallStatuses
 {
     public const string Reserved = "Reserved";

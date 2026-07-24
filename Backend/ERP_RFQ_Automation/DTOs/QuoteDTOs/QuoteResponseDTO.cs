@@ -11,6 +11,9 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public long? RfqId { get; set; }
         public string? RfqNo { get; set; }
         public long? CommercialCaseId { get; set; }
+        public string? NexoraSerial { get; set; }
+        public long? ContactId { get; set; }
+        public int LifecycleVersion { get; set; }
         public int Version { get; set; }
         public long? CustomerId { get; set; }
         public string? CustomerName { get; set; }
@@ -89,6 +92,26 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public decimal? DiscountValue { get; set; }
 
         public List<QuoteItemCreateRequestDTO> QuoteItems { get; set; } = new List<QuoteItemCreateRequestDTO>();
+    }
+
+    public sealed class QuoteLifecycleTransitionRequestDTO
+    {
+        [Required]
+        public string TargetStatusCode { get; set; } = null!;
+
+        [Range(1, int.MaxValue)]
+        public int ExpectedVersion { get; set; }
+
+        public string? ReasonCode { get; set; }
+        public string? ReasonNotes { get; set; }
+
+        [Required]
+        [StringLength(160)]
+        public string IdempotencyKey { get; set; } = null!;
+
+        [Required]
+        [StringLength(100)]
+        public string CorrelationId { get; set; } = null!;
     }
 
     public class QuoteItemCreateRequestDTO

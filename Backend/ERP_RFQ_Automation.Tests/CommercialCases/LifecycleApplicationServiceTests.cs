@@ -270,6 +270,84 @@ public sealed class LifecycleApplicationServiceTests
     }
 
     [Fact]
+    public async Task QuoteTransition_UsesAuthenticatedActorVersionIdempotencyAndNexoraSerial()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(821);
+        var lead = Seed.Lead(context, 1121, 821);
+        Seed.Customer(context, 9001, 821, "Lifecycle Customer");
+        await context.SaveChangesAsync();
+        lead.ResolveCommercialIdentity(9001, 9002, "CONFIRMED");
+        Status(context, 5151, 821, "QuoteStatus", "DRAFT", "Draft");
+        Status(context, 5152, 821, "QuoteStatus", "SENT", "Sent");
+        var rfq = new Rfq
+        {
+            Id = 2121,
+            Rfqno = "RFQ-QUOTE-LIFE",
+            RecDate = DateTime.UtcNow,
+            BusinessUnitId = 821,
+            LeadId = lead.Id,
+            CreatedBy = "seed",
+            CreatedDate = DateTime.UtcNow
+        };
+        rfq.InheritCommercialIdentity(lead);
+        context.Rfqs.Add(rfq);
+        await context.SaveChangesAsync();
+        var quote = new Quote
+        {
+            Id = 3121,
+            QuoteNo = "QT-LIFE-3121",
+            Rfqid = rfq.Id,
+            BusinessUnitId = 821,
+            StatusId = 5151,
+            QuoteDate = DateTime.UtcNow,
+            CreatedBy = "seed",
+            CreatedDate = DateTime.UtcNow
+        };
+        quote.InheritCommercialIdentity(rfq);
+        context.Quotes.Add(quote);
+        await context.SaveChangesAsync();
+
+        var command = Command("SENT", 1, "quote-3121-sent");
+        var service = Service(context);
+        var first = await service.TransitionQuoteAsync(821, quote.Id, Actor(), command, false, default);
+        var replay = await service.TransitionQuoteAsync(821, quote.Id, Actor(), command, false, default);
+
+        Assert.Equal("Quote", first.AggregateType);
+        Assert.Equal(lead.CommercialCaseReference, first.CommercialCaseReference);
+        Assert.Equal("user-42", first.ActorId);
+        Assert.Equal(2, first.Version);
+        Assert.True(replay.Replayed);
+        Assert.Equal(1, await context.CommercialLifecycleEvents.CountAsync(item => item.AggregateType == "Quote"));
+        Assert.Equal(5152, (await context.Quotes.SingleAsync(item => item.Id == quote.Id)).StatusId);
+    }
+
+    [Fact]
+    public async Task QuoteWithoutNexoraSerialFailsClosed()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(822);
+        Seed.BusinessUnit(context, 822);
+        Status(context, 5161, 822, "QuoteStatus", "DRAFT", "Draft");
+        Status(context, 5162, 822, "QuoteStatus", "SENT", "Sent");
+        context.Quotes.Add(new Quote
+        {
+            Id = 3122,
+            QuoteNo = "QT-ORPHAN",
+            BusinessUnitId = 822,
+            StatusId = 5161,
+            QuoteDate = DateTime.UtcNow,
+            CreatedBy = "seed",
+            CreatedDate = DateTime.UtcNow
+        });
+        await context.SaveChangesAsync();
+
+        await Assert.ThrowsAsync<LifecycleValidationException>(() => Service(context).TransitionQuoteAsync(
+            822, 3122, Actor(), Command("SENT", 1, "quote-orphan"), false, default));
+        Assert.Empty(context.CommercialLifecycleEvents);
+    }
+
+    [Fact]
     public async Task StateViewReturnsOnlyConfiguredLegalTargets()
     {
         using var db = new TestDb();

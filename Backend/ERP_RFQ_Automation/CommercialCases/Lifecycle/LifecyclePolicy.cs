@@ -27,6 +27,14 @@ public static partial class LifecyclePolicy
         ["CLOSED"] = "COMPLETED"
     };
 
+    private static readonly IReadOnlyDictionary<string, string> QuoteAliases = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["APPROVED_AND_SENT"] = "SENT",
+        ["WON"] = "ACCEPTED",
+        ["LOST"] = "REJECTED",
+        ["CANCELLED"] = "REJECTED"
+    };
+
     private static readonly IReadOnlyDictionary<string, IReadOnlySet<string>> LeadTransitions = Graph(
         Edge("RECEIVED", "PENDING_IDENTIFICATION", "CANCELLED"),
         Edge("PENDING_IDENTIFICATION", "UNASSIGNED", "ASSIGNED", "CANCELLED"),
@@ -55,10 +63,17 @@ public static partial class LifecyclePolicy
         Edge("REVISION_REQUESTED", "VALIDATING", "CANCELLED"),
         Edge("PARTIALLY_AWARDED", "AWARDED"));
 
+    private static readonly IReadOnlyDictionary<string, IReadOnlySet<string>> QuoteTransitions = Graph(
+        Edge("DRAFT", "SENT", "REJECTED"),
+        Edge("SENT", "ACCEPTED", "REJECTED", "EXPIRED"),
+        Edge("ACCEPTED", "ORDERED"));
+
     private static readonly IReadOnlySet<string> LeadTerminal = Set("DISQUALIFIED", "LOST", "CANCELLED", "COMPLETED", "DUPLICATED");
     private static readonly IReadOnlySet<string> RfqTerminal = Set("AWARDED", "LOST", "EXPIRED", "CANCELLED", "COMPLETED");
+    private static readonly IReadOnlySet<string> QuoteTerminal = Set("REJECTED", "EXPIRED", "ORDERED");
     private static readonly IReadOnlySet<string> LeadReopenable = Set("DISQUALIFIED", "LOST", "CANCELLED");
     private static readonly IReadOnlySet<string> RfqReopenable = Set("LOST", "EXPIRED", "CANCELLED");
+    private static readonly IReadOnlySet<string> QuoteReopenable = Set();
     private static readonly IReadOnlySet<string> ElevatedTargets = Set(
         "CONVERTED_TO_RFQ", "DISQUALIFIED", "CANCELLED", "AWARDED", "PARTIALLY_AWARDED", "LOST", "EXPIRED", "COMPLETED");
 
@@ -66,24 +81,54 @@ public static partial class LifecyclePolicy
     {
         var normalized = Normalize(string.IsNullOrWhiteSpace(code) ? value : code);
         if (normalized.Length == 0) return aggregateType == "Lead" ? "RECEIVED" : "DRAFT";
-        var aliases = aggregateType == "Lead" ? LeadAliases : RfqAliases;
+        var aliases = aggregateType switch
+        {
+            "Lead" => LeadAliases,
+            "Rfq" => RfqAliases,
+            "Quote" => QuoteAliases,
+            _ => throw new ArgumentOutOfRangeException(nameof(aggregateType), "Unsupported lifecycle aggregate type.")
+        };
         return aliases.TryGetValue(normalized, out var canonical) ? canonical : normalized;
     }
 
     public static IReadOnlySet<string> AllowedTargets(string aggregateType, string currentCode)
     {
-        var graph = aggregateType == "Lead" ? LeadTransitions : RfqTransitions;
+        var graph = aggregateType switch
+        {
+            "Lead" => LeadTransitions,
+            "Rfq" => RfqTransitions,
+            "Quote" => QuoteTransitions,
+            _ => throw new ArgumentOutOfRangeException(nameof(aggregateType), "Unsupported lifecycle aggregate type.")
+        };
         return graph.TryGetValue(currentCode, out var targets) ? targets : Set();
     }
 
     public static bool IsTerminal(string aggregateType, string code)
-        => (aggregateType == "Lead" ? LeadTerminal : RfqTerminal).Contains(code);
+        => (aggregateType switch
+        {
+            "Lead" => LeadTerminal,
+            "Rfq" => RfqTerminal,
+            "Quote" => QuoteTerminal,
+            _ => throw new ArgumentOutOfRangeException(nameof(aggregateType), "Unsupported lifecycle aggregate type.")
+        }).Contains(code);
 
     public static string ReopenTarget(string aggregateType)
-        => aggregateType == "Lead" ? "UNDER_REVIEW" : "NEEDS_REVIEW";
+        => aggregateType switch
+        {
+            "Lead" => "UNDER_REVIEW",
+            "Rfq" => "NEEDS_REVIEW",
+            "Quote" => "DRAFT",
+            _ => throw new ArgumentOutOfRangeException(nameof(aggregateType), "Unsupported lifecycle aggregate type.")
+        };
 
     public static bool IsReopenable(string aggregateType, string code)
-        => (aggregateType == "Lead" ? LeadReopenable : RfqReopenable).Contains(code);
+        => (aggregateType switch
+        {
+            "Lead" => LeadReopenable,
+            "Rfq" => RfqReopenable,
+            "Quote" => QuoteReopenable,
+            _ => throw new ArgumentOutOfRangeException(nameof(aggregateType), "Unsupported lifecycle aggregate type.")
+        }).Contains(code);
 
     public static bool RequiresElevatedAuthorization(string targetCode) => ElevatedTargets.Contains(targetCode);
 

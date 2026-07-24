@@ -35,6 +35,7 @@ namespace ERP_RFQ_Automation.Repositories
             {
                 search = search.Trim().ToLower();
                 query = query.Where(q => q.QuoteNo.ToLower().Contains(search) ||
+                                         (q.NexoraSerial != null && q.NexoraSerial.ToLower().Contains(search)) ||
                                          (q.Customer != null && q.Customer.Name.ToLower().Contains(search)));
             }
 
@@ -119,7 +120,10 @@ namespace ERP_RFQ_Automation.Repositories
                 QuoteNo = q.QuoteNo,
                 RfqId = q.Rfqid,
                 RfqNo = q.Rfq?.Rfqno,
-                CommercialCaseId = q.Rfq?.Lead?.CommercialCaseId,
+                CommercialCaseId = q.CommercialCaseId ?? q.Rfq?.CommercialCaseId ?? q.Rfq?.Lead?.CommercialCaseId,
+                NexoraSerial = q.NexoraSerial ?? q.Rfq?.NexoraSerial ?? q.Rfq?.Lead?.CommercialCaseReference,
+                ContactId = q.ContactId ?? q.Rfq?.ContactId,
+                LifecycleVersion = q.LifecycleVersion,
                 Version = q.RevisionNo,
                 CustomerId = q.CustomerId,
                 CustomerName = q.Customer?.Name,
@@ -200,10 +204,15 @@ namespace ERP_RFQ_Automation.Repositories
 
             // Update Header
             existing.QuoteNo = quote.QuoteNo;
-            existing.CustomerId = quote.CustomerId;
+            if (existing.CustomerId != quote.CustomerId
+                || quote.ContactId.HasValue && existing.ContactId != quote.ContactId
+                || quote.CommercialCaseId.HasValue && existing.CommercialCaseId != quote.CommercialCaseId
+                || quote.NexoraSerial != null && existing.NexoraSerial != quote.NexoraSerial)
+                throw new InvalidOperationException("Quote commercial identity cannot be changed by an ordinary update.");
             existing.QuoteDate = quote.QuoteDate;
             existing.ValidUntil = quote.ValidUntil;
-            existing.StatusId = quote.StatusId;
+            if (existing.StatusId != quote.StatusId)
+                throw new InvalidOperationException("Quote status changes require the governed lifecycle service.");
             existing.CurrencyId = quote.CurrencyId;
             existing.HeaderRemarks = quote.HeaderRemarks;
             existing.ModifiedBy = quote.ModifiedBy;

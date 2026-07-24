@@ -14,7 +14,6 @@ import {
   Refresh as RefreshIcon,
   PictureAsPdf as PdfIcon,
   Email as EmailIcon,
-  Delete as DeleteIcon,
   Add as AddIcon,
   EmojiEvents as OutcomeIcon,
   ContentCopy as ReviseIcon,
@@ -80,7 +79,7 @@ const QuoteStatusCell: React.FC<{ quote: QuoteDTO }> = ({ quote }) => {
 const QuotesPage: React.FC = () => {
   const { t: _t } = useTranslation();
   const navigate = useNavigate();
-  const { userData } = useAuth();
+  const { userData, hasPermission } = useAuth();
   const queryClient = useQueryClient();
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
   const [search, setSearch] = useState('');
@@ -91,7 +90,7 @@ const QuotesPage: React.FC = () => {
   });
   const [outcomeTarget, setOutcomeTarget] = useState<{ id: number; quoteNo: string } | null>(null);
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['quotes', paginationModel, search],
     queryFn: () => quoteService.getAll({
       pageNumber: paginationModel.page + 1,
@@ -115,17 +114,6 @@ const QuotesPage: React.FC = () => {
     }
   });
 
-  const deleteMutation = useMutation({
-    mutationFn: (id: number) => quoteService.delete(id, userData?.businessUnitId),
-    onSuccess: () => {
-      setSnackbar({ open: true, message: 'Quote deleted successfully', severity: 'success' });
-      queryClient.invalidateQueries({ queryKey: ['quotes'] });
-    },
-    onError: () => {
-      setSnackbar({ open: true, message: 'Failed to delete quote', severity: 'error' });
-    }
-  });
-
   const handleDownloadPdf = async (id: number, quoteNo: string) => {
     try {
       const blob = await quoteService.downloadPdf(id);
@@ -142,6 +130,17 @@ const QuotesPage: React.FC = () => {
   };
 
   const columns: GridColDef[] = [
+    {
+      field: 'nexoraSerial',
+      headerName: 'Nexora Serial',
+      width: 180,
+      valueGetter: (_value, row) => row.nexoraSerial || row.commercialCaseReference || '',
+      renderCell: (p) => (
+        <Typography sx={{ fontWeight: 800, fontFamily: 'monospace', fontSize: '0.8rem', color: p.value ? 'primary.main' : 'text.disabled' }}>
+          {p.value || 'Unassigned'}
+        </Typography>
+      ),
+    },
     {
       field: 'quoteNo',
       headerName: 'Quote Number',
@@ -167,7 +166,7 @@ const QuotesPage: React.FC = () => {
       renderCell: (p) => (
         <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
           <Typography sx={{ fontWeight: 700, fontSize: '0.85rem', color: 'text.primary' }}>
-            {p.row.customerName || 'Walk-in Customer'}
+            {p.row.customerName || 'Customer unresolved'}
           </Typography>
           <Typography variant="caption" sx={{ color: 'text.secondary' }}>
             {p.row.customerEmail || 'No email provided'}
@@ -213,14 +212,14 @@ const QuotesPage: React.FC = () => {
               <ViewIcon fontSize="small" />
             </IconButton>
           </Tooltip>
-          {(p.row.statusCode || p.row.statusValue)?.toUpperCase() === 'SENT' && (
+          {hasPermission('Quotations', 'edit') && (p.row.statusCode || p.row.statusValue)?.toUpperCase() === 'SENT' && (
             <Tooltip title="Record outcome (won / lost / expired)">
               <IconButton size="small" color="warning" onClick={() => setOutcomeTarget({ id: p.row.id, quoteNo: p.row.quoteNo })}>
                 <OutcomeIcon fontSize="small" />
               </IconButton>
             </Tooltip>
           )}
-          {!['DRAFT', 'ORDERED'].includes(((p.row.statusCode || p.row.statusValue) || '').toUpperCase()) && (
+          {hasPermission('Quotations', 'edit') && !['DRAFT', 'ORDERED'].includes(((p.row.statusCode || p.row.statusValue) || '').toUpperCase()) && (
             <Tooltip title="Revise — create a new draft revision of this quote">
               <IconButton
                 size="small"
@@ -237,20 +236,11 @@ const QuotesPage: React.FC = () => {
               <PdfIcon fontSize="small" color="error" />
             </IconButton>
           </Tooltip>
-          <Tooltip title="Email">
+          {hasPermission('Quotations', 'edit') && <Tooltip title="Email">
             <IconButton size="small">
               <EmailIcon fontSize="small" color="primary" />
             </IconButton>
-          </Tooltip>
-          <Tooltip title="Delete">
-            <IconButton size="small" onClick={() => {
-              if (window.confirm('Are you sure you want to delete this quote?')) {
-                deleteMutation.mutate(p.row.id);
-              }
-            }}>
-              <DeleteIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
+          </Tooltip>}
         </Stack>
       )
     },
@@ -268,14 +258,14 @@ const QuotesPage: React.FC = () => {
           </Typography>
         </Box>
         <Stack direction="row" spacing={2}>
-          <Button
+          {hasPermission('Quotations', 'create') && <Button
             variant="contained"
             startIcon={<AddIcon />}
             onClick={() => navigate('/sales/quotes/create')}
             sx={{ fontWeight: 800, borderRadius: 2 }}
           >
             Create Quote
-          </Button>
+          </Button>}
           <Tooltip title="Refresh Data">
             <IconButton onClick={() => refetch()} sx={{ bgcolor: 'white', boxShadow: 1 }}>
               <RefreshIcon />
@@ -285,11 +275,18 @@ const QuotesPage: React.FC = () => {
       </Stack>
 
       <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
-        <SearchField width="400px" value={search} onChange={setSearch} placeholder="Search by Quote No, Customer, RFQ No..." />
+        <SearchField width="400px" value={search} onChange={setSearch} placeholder="Search Nexora Serial, quote, customer or RFQ" />
       </Paper>
 
       <Paper sx={{ height: 'calc(100vh - 240px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
-        <DataGrid
+        {isError ? (
+          <Box sx={{ height: '100%', display: 'grid', placeItems: 'center', p: 3 }}>
+            <Stack spacing={2} sx={{ alignItems: 'center', maxWidth: 480 }}>
+              <Alert severity="error">We couldn't load quotes. No empty result has been assumed.</Alert>
+              <Button variant="contained" startIcon={<RefreshIcon />} onClick={() => refetch()}>Retry</Button>
+            </Stack>
+          </Box>
+        ) : <DataGrid
           rows={data?.items ?? []}
           columns={columns}
           rowCount={data?.totalItems ?? 0}
@@ -301,7 +298,7 @@ const QuotesPage: React.FC = () => {
           disableRowSelectionOnClick
           getRowId={(r) => r.id}
           rowHeight={70}
-        />
+        />}
       </Paper>
 
       <QuoteOutcomeDialog

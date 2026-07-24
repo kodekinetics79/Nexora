@@ -19,7 +19,8 @@ public sealed record AiCallContext(
     string Purpose,
     string IdempotencyKey,
     string PromptVersion,
-    bool InjectionDetected = false);
+    bool InjectionDetected = false,
+    AiProviderClass ProviderClass = AiProviderClass.External);
 
 public sealed record AiReservation(
     Guid RequestId,
@@ -83,8 +84,10 @@ public sealed class AiGovernanceService : IAiGovernanceService
         var now = DateTime.UtcNow;
         var inputHash = Hash(input);
         var estimatedInput = EstimateTokens(input.Length);
-        var maximumInput = Math.Max(Encoding.UTF8.GetByteCount(input), maximumInputBytes);
-        var perAttempt = checked(maximumInput + Math.Max(1, maximumOutputTokens));
+        var inputBytes = Encoding.UTF8.GetByteCount(input);
+        if (maximumInputBytes <= 0 || inputBytes > maximumInputBytes)
+            throw new AiPolicyDeniedException("input_too_large");
+        var perAttempt = checked((long)maximumInputBytes + Math.Max(1, maximumOutputTokens));
         var reserve = checked(perAttempt * Math.Max(1, maximumAttempts));
         var period = new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Utc);
 
@@ -111,7 +114,7 @@ public sealed class AiGovernanceService : IAiGovernanceService
 
             var policy = await db.AiProcessingPolicies
                 .SingleOrDefaultAsync(x => x.BusinessUnitId == context.BusinessUnitId, ct);
-            var denial = PolicyDenial(policy, context.Purpose, provider, model);
+            var denial = PolicyDenial(policy, context.Purpose, provider, model, context.ProviderClass);
             if (denial is not null)
             {
                 db.AiRequests.Add(NewRequest(context, provider, model, input, inputHash, estimatedInput, 0, now,
@@ -276,11 +279,17 @@ public sealed class AiGovernanceService : IAiGovernanceService
             CompletedOn = status == AiCallStatuses.Denied ? now : null
         };
 
-    private static string? PolicyDenial(AiProcessingPolicy? policy, string purpose, string provider, string model)
+    private static string? PolicyDenial(
+        AiProcessingPolicy? policy,
+        string purpose,
+        string provider,
+        string model,
+        AiProviderClass providerClass)
     {
         if (policy is null) return "policy_missing";
         if (!policy.IsEnabled) return "policy_disabled";
-        if (!policy.ExternalProcessingAllowed) return "external_processing_denied";
+        if (providerClass == AiProviderClass.External && !policy.ExternalProcessingAllowed)
+            return "external_processing_denied";
         var purposes = policy.AllowedPurposes.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (!purposes.Contains(purpose, StringComparer.OrdinalIgnoreCase)) return "purpose_denied";
         if (!string.IsNullOrWhiteSpace(policy.AllowedProvider)

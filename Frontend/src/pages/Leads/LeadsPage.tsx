@@ -27,6 +27,7 @@ import SearchField from '../../components/common/SearchField';
 import { useSnackbar } from 'notistack';
 import { formatDateSafe, parseDateSafe } from '../../utils/dates';
 import { confidenceLevel } from '../Intelligence/common';
+import { useAuth } from '../../context/AuthContext';
 
 // ---------------------------------------------------------------------------
 // Per-user view preferences (column visibility + density), persisted locally.
@@ -55,6 +56,7 @@ const userScopedKey = (base: string): string => {
 
 // Curated default column set. "actions" is always on and cannot be hidden.
 const DEFAULT_COLUMN_VISIBILITY: GridColumnVisibilityModel = {
+  nexoraSerial: true,
   rfqno: true,
   buyer: true,
   recDate: true,
@@ -69,6 +71,7 @@ const DEFAULT_COLUMN_VISIBILITY: GridColumnVisibilityModel = {
 };
 
 const HIDEABLE_COLUMNS: ReadonlyArray<{ field: string; label: string }> = [
+  { field: 'nexoraSerial', label: 'Nexora Serial' },
   { field: 'rfqno', label: 'RFQ #' },
   { field: 'buyer', label: 'Buyer' },
   { field: 'recDate', label: 'Received' },
@@ -212,6 +215,7 @@ const LeadsPage: React.FC = () => {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
+  const { hasPermission } = useAuth();
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
   const [search, setSearch] = useState('');
   const [leadSource, setLeadSource] = useState('all');
@@ -264,6 +268,7 @@ const LeadsPage: React.FC = () => {
       pageNumber: paginationModel.page + 1,
       pageSize: paginationModel.pageSize,
       rfqno: search || undefined,
+      search: search || undefined,
       leadSource: leadSource === 'all' ? undefined : leadSource,
     }),
   });
@@ -284,6 +289,21 @@ const LeadsPage: React.FC = () => {
   const decisionsLoading = visibleLeadIds.length > 0 && decisionQuery.isPending;
 
   const columns: GridColDef<LeadResponseDTO>[] = [
+    {
+      field: 'nexoraSerial',
+      headerName: 'Nexora Serial',
+      width: 180,
+      valueGetter: (_value, row) => row.nexoraSerial || row.commercialCaseReference || '',
+      renderCell: (p) => {
+        const serial = p.row.nexoraSerial || p.row.commercialCaseReference;
+        return serial ? (
+          <Link component="button" type="button" underline="hover" onClick={() => navigate(`/leads/view/${p.row.id}`)}
+            sx={{ fontWeight: 800, fontFamily: 'monospace', fontSize: '0.8rem' }}>
+            {serial}
+          </Link>
+        ) : <Typography variant="body2" color="text.disabled">Unassigned</Typography>;
+      },
+    },
     {
       field: 'rfqno',
       headerName: 'RFQ #',
@@ -513,16 +533,16 @@ const LeadsPage: React.FC = () => {
                 <ViewIcon fontSize="small" />
               </IconButton>
             </Tooltip>
-            <Tooltip title="Convert with AI">
+            {hasPermission('Leads', 'edit') && <Tooltip title="Prepare RFQ">
               <IconButton
                 size="small"
-                aria-label="Convert with AI"
+                aria-label="Prepare RFQ"
                 sx={{ color: 'secondary.main' }}
                 onClick={() => navigate(`/procurement/leads/${p.row.id}/convert`)}
               >
                 <SparkleIcon fontSize="small" />
               </IconButton>
-            </Tooltip>
+            </Tooltip>}
             {!decided && (
               <Tooltip title="More actions">
                 <IconButton
@@ -576,7 +596,7 @@ const LeadsPage: React.FC = () => {
 
       {/* Filters + view controls */}
       <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
-        <SearchField width="360px" value={search} onChange={setSearch} placeholder="Search by RFQ No, Buyer Name..." />
+        <SearchField width="360px" value={search} onChange={setSearch} placeholder="Search Nexora Serial, RFQ, buyer or email" />
         <TextField select size="small" value={leadSource} onChange={(e) => setLeadSource(e.target.value)} sx={{ minWidth: 160 }} label="Lead Source">
           <MenuItem value="all">All Sources</MenuItem>
           <MenuItem value="Email">Email</MenuItem>

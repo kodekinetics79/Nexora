@@ -23,6 +23,13 @@ namespace ERP_RFQ_Automation.Extraction;
 /// </summary>
 public sealed class ExtractionJobMetadata
 {
+    /// <summary>
+    /// Stable identity of this receipt within its source system, such as an email
+    /// attachment id, MIME ordinal, or folder event id. It identifies an occurrence,
+    /// not the immutable source bytes; content/job deduplication remains hash-based.
+    /// </summary>
+    public string? SourceOccurrenceId { get; set; }
+
     /// <summary>Id of a PRE-CREATED EmailIngest row the produced lead(s) must link to.
     /// Null for doors that have no real ingest (manual upload, folder).</summary>
     public long? EmailIngestId { get; set; }

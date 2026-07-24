@@ -12,5 +12,18 @@ namespace ERP_RFQ_Automation.Interfaces
 
         /// <summary>WP-B2: stage funnel, loss reasons, weighted forecast and quoted-vs-floor margin proxy.</summary>
         Task<PipelineAnalyticsDTO> GetPipelineAnalyticsAsync(long businessUnitId);
+
+        /// <summary>
+        /// Release-01 dashboard snapshot. All metrics share one tenant, role scope,
+        /// reporting window, and generated-at boundary.
+        /// </summary>
+        Task<DashboardRelease01DTO> GetRelease01Async(
+            long businessUnitId,
+            long? ownerUserId,
+            string roleScope,
+            DateTime from,
+            DateTime to,
+            DateTime generatedAt,
+            CancellationToken cancellationToken = default);
     }
 }

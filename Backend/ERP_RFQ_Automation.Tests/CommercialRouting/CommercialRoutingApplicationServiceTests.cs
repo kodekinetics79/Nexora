@@ -2,6 +2,7 @@ using ERP_RFQ_Automation.CommercialRouting;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
 
 namespace ERP_RFQ_Automation.Tests.CommercialRouting;
 
@@ -50,6 +51,85 @@ public sealed class CommercialRoutingApplicationServiceTests
     }
 
     [Fact]
+    public async Task Route_rejects_idempotency_key_reuse_with_different_request_content()
+    {
+        using var db = new TestDb();
+        await SeedRoutingGraphAsync(db, includeIdentifier: false, includeOwnership: false);
+        await using var context = db.ContextFor(71);
+        var service = Service(context);
+
+        await service.RouteLeadAsync(71,
+            new RouteLeadCommand(701, "route-content-bound", "corr-original"), CancellationToken.None);
+
+        var conflict = await Assert.ThrowsAsync<RoutingConflictException>(() =>
+            service.RouteLeadAsync(71,
+                new RouteLeadCommand(701, "route-content-bound", "corr-changed"), CancellationToken.None));
+
+        Assert.Contains("different routing request content", conflict.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(await context.Set<LeadRoutingDecision>().ToListAsync());
+    }
+
+    [Fact]
+    public async Task Route_uses_measured_workload_and_selects_lower_load_backup()
+    {
+        using var db = new TestDb();
+        await SeedRoutingGraphAsync(db, includeIdentifier: true, includeOwnership: true);
+        await using (var seed = db.ContextFor(null))
+        {
+            var first = Seed.Lead(seed, 702, 71, items: Enumerable.Range(1, 10)
+                .Select(index => Seed.LeadItem(7200 + index, index.ToString(), 1)));
+            first.AssignTo = 7101;
+            first.BidClosingDate = DateTime.UtcNow.AddHours(-2);
+            var rfq = new Rfq
+            {
+                Id = 7702,
+                Rfqno = "RFQ-WORKLOAD",
+                RecDate = DateTime.UtcNow.AddDays(-2),
+                LeadId = first.Id,
+                CreatedBy = "test",
+                CreatedDate = DateTime.UtcNow.AddDays(-2),
+                BusinessUnitId = 71
+            };
+            seed.Rfqs.Add(rfq);
+            seed.Quotes.Add(new Quote
+            {
+                Id = 7802,
+                QuoteNo = "QUOTE-WORKLOAD",
+                Rfqid = rfq.Id,
+                BusinessUnitId = 71,
+                QuoteDate = DateTime.UtcNow.AddDays(-1),
+                CreatedBy = "test",
+                CreatedDate = DateTime.UtcNow.AddDays(-1),
+                SentOn = DateTime.UtcNow.AddHours(-8)
+            });
+            await seed.SaveChangesAsync();
+        }
+        await using var context = db.ContextFor(71);
+        var service = Service(context);
+
+        var result = await service.RouteLeadAsync(71,
+            new RouteLeadCommand(701, "route-measured-load", "corr-measured-load"), CancellationToken.None);
+
+        Assert.Equal(RoutingOutcome.AssignedBackup, result.Outcome);
+        Assert.Equal(7102, result.SelectedUserId);
+        Assert.Equal("BACKUP_OWNER_ASSIGNED_FOR_WORKLOAD", result.DecisionCode);
+        using var explanation = JsonDocument.Parse(result.Explanation);
+        Assert.Equal(64, explanation.RootElement.GetProperty("requestHash").GetString()!.Length);
+        var owners = explanation.RootElement.GetProperty("consideredOwners").EnumerateArray().ToArray();
+        var primary = owners.Single(owner => owner.GetProperty("UserId").GetInt64() == 7101);
+        var backup = owners.Single(owner => owner.GetProperty("UserId").GetInt64() == 7102);
+        var workload = primary.GetProperty("workload");
+        Assert.Equal(1, workload.GetProperty("ActiveLeadCount").GetInt32());
+        Assert.Equal(10, workload.GetProperty("LeadLineCount").GetInt32());
+        Assert.Equal(1, workload.GetProperty("OverdueDeadlineCount").GetInt32());
+        Assert.Equal(1, workload.GetProperty("OpenRfqCount").GetInt32());
+        Assert.Equal(1, workload.GetProperty("OpenQuoteCount").GetInt32());
+        Assert.Equal(1, workload.GetProperty("FollowUpCount").GetInt32());
+        Assert.Equal(64, workload.GetProperty("WorkloadPoints").GetInt32());
+        Assert.Equal(0, backup.GetProperty("workload").GetProperty("WorkloadPoints").GetInt32());
+    }
+
+    [Fact]
     public async Task Manual_assignment_rejects_a_stale_expected_assignee()
     {
         using var db = new TestDb();
@@ -67,6 +147,26 @@ public sealed class CommercialRoutingApplicationServiceTests
         await Assert.ThrowsAsync<RoutingConflictException>(() =>
             service.AssignLeadAsync(71, stale, CancellationToken.None));
         Assert.Equal(7101, (await context.Leads.SingleAsync(l => l.Id == 701)).AssignTo);
+    }
+
+    [Fact]
+    public async Task Manual_assignment_idempotency_is_bound_to_assignee_and_actor_content()
+    {
+        using var db = new TestDb();
+        await SeedRoutingGraphAsync(db, includeIdentifier: false, includeOwnership: false);
+        await using var context = db.ContextFor(71);
+        var service = Service(context);
+        await service.AssignLeadAsync(71, new ManualAssignLeadCommand(
+            701, 7101, 7102, "manual-content-bound", "manual-correlation",
+            AssignmentScope.LeadOnly, "first", true, null), CancellationToken.None);
+
+        await Assert.ThrowsAsync<RoutingConflictException>(() => service.AssignLeadAsync(71,
+            new ManualAssignLeadCommand(
+                701, 7102, 7101, "manual-content-bound", "manual-correlation",
+                AssignmentScope.LeadOnly, "changed", true, null), CancellationToken.None));
+
+        Assert.Equal(7101, (await context.Leads.SingleAsync(l => l.Id == 701)).AssignTo);
+        Assert.Single(await context.Set<LeadAssignment>().ToListAsync());
     }
 
     [Fact]

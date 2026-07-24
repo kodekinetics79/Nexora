@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Box, Drawer, Toolbar, CssBaseline } from '@mui/material';
+import { Box, Drawer, Toolbar, CssBaseline, useMediaQuery, useTheme } from '@mui/material';
 import Sidebar from './Sidebar';
 import Navbar from './Navbar';
 import Branding from '../common/Branding';
@@ -13,9 +13,13 @@ interface MainLayoutProps {
 
 const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
   const [collapsed, setCollapsed] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
 
   const toggleSidebar = () => {
-    setCollapsed(!collapsed);
+    if (isMobile) setMobileOpen((open) => !open);
+    else setCollapsed((value) => !value);
   };
 
   const currentWidth = collapsed ? collapsedWidth : drawerWidth;
@@ -37,6 +41,19 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
           }),
         }}
       >
+        <Drawer
+          variant="temporary"
+          open={mobileOpen}
+          onClose={() => setMobileOpen(false)}
+          ModalProps={{ keepMounted: true }}
+          sx={{
+            display: { xs: 'block', sm: 'none' },
+            '& .MuiDrawer-paper': { boxSizing: 'border-box', width: drawerWidth, bgcolor: 'background.default' },
+          }}
+        >
+          <Toolbar sx={{ px: 2.5, mb: 1 }}><Branding showText fontSize={20} logoSize={32} /></Toolbar>
+          <Sidebar collapsed={false} onNavigate={() => setMobileOpen(false)} />
+        </Drawer>
         <Drawer
           variant="permanent"
           sx={{

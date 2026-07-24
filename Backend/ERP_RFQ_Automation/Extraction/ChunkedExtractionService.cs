@@ -67,6 +67,13 @@ public sealed class ChunkedExtractionOutcome
     /// with the merged view for consumers that don't split.
     /// </summary>
     public List<LeadExtractionResult>? SplitResults { get; init; }
+
+    /// <summary>
+    /// Authoritative deterministic representation for structured sources. Persistence
+    /// consumes this graph to retain validation state and source-cell evidence instead
+    /// of attempting to reconstruct it from the flattened commercial projection.
+    /// </summary>
+    public CanonicalRfqImportResult? CanonicalImport { get; init; }
 }
 
 public interface IChunkedExtractionService
@@ -313,7 +320,8 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             ExtractedItemCount = items.Count,
             ReviewReason = reviewReason,
             Diagnostics = diagnostics,
-            SplitResults = splitResults
+            SplitResults = splitResults,
+            CanonicalImport = import
         });
     }
 

@@ -6,13 +6,17 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Text.Json;
+using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Services.DocumentIntelligence;
 using ERP_RFQ_Automation.Services.Interfaces;
+using ERP_RFQ_Automation.MultiTenancy;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using ERP_RFQ_Automation.HealthChecks;
 
 namespace ERP_RFQ_Automation.Extraction;
 
@@ -79,16 +83,22 @@ public sealed class ExtractionWorker : BackgroundService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ExtractionWorkerOptions _options;
     private readonly ILogger<ExtractionWorker> _log;
+    private readonly ITenantScopeAccessor _tenantScope;
     private readonly SemaphoreSlim _llmGate; // process-wide LLM concurrency cap
+    private readonly IExtractionWorkerHeartbeat? _workerHeartbeat;
 
     public ExtractionWorker(
         IServiceScopeFactory scopeFactory,
         ExtractionWorkerOptions options,
-        ILogger<ExtractionWorker> log)
+        ILogger<ExtractionWorker> log,
+        ITenantScopeAccessor tenantScope,
+        IExtractionWorkerHeartbeat? workerHeartbeat = null)
     {
         _scopeFactory = scopeFactory;
         _options = options;
         _log = log;
+        _tenantScope = tenantScope;
+        _workerHeartbeat = workerHeartbeat;
         _llmGate = new SemaphoreSlim(Math.Max(1, options.MaxConcurrentLlmCalls));
     }
 
@@ -97,6 +107,7 @@ public sealed class ExtractionWorker : BackgroundService
         var count = Math.Max(1, _options.WorkerCount);
         _log.LogInformation("ExtractionWorker starting {Count} loop(s); LLM cap {Llm}, per-tenant cap {Cap}.",
             count, _options.MaxConcurrentLlmCalls, _options.PerTenantConcurrencyCap);
+        _workerHeartbeat?.Beat();
 
         var loops = new Task[count];
         var runId = Guid.NewGuid().ToString("N")[..8];
@@ -112,6 +123,7 @@ public sealed class ExtractionWorker : BackgroundService
     {
         while (!ct.IsCancellationRequested)
         {
+            _workerHeartbeat?.Beat();
             try
             {
                 var processed = await ProcessOnceAsync(workerId, ct);
@@ -135,12 +147,19 @@ public sealed class ExtractionWorker : BackgroundService
     /// <summary>Claim and process at most one job. Returns false when the queue is idle.</summary>
     private async Task<bool> ProcessOnceAsync(string workerId, CancellationToken ct)
     {
-        using var scope = _scopeFactory.CreateScope();
-        var queue = scope.ServiceProvider.GetRequiredService<IExtractionQueue>();
-
-        var job = await queue.ClaimAsync(workerId, _options.LeaseDuration, _options.PerTenantConcurrencyCap, ct);
+        ExtractionJob? job;
+        using (var claimScope = _scopeFactory.CreateScope())
+        {
+            var claimQueue = claimScope.ServiceProvider.GetRequiredService<IExtractionQueue>();
+            job = await claimQueue.ClaimAsync(
+                workerId, _options.LeaseDuration, _options.PerTenantConcurrencyCap, ct);
+        }
         if (job is null)
             return false;
+
+        using var tenantScope = _tenantScope.Push(job.BusinessUnitId);
+        using var scope = _scopeFactory.CreateScope();
+        var queue = scope.ServiceProvider.GetRequiredService<IExtractionQueue>();
 
         using var workCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -240,6 +259,35 @@ public sealed class ExtractionWorker : BackgroundService
         {
             // Leave the lease to expire; another worker reclaims it after shutdown.
             throw;
+        }
+        catch (EvidenceIntegrityException ex)
+        {
+            _log.LogCritical(ex,
+                "Evidence integrity incident for tenant {BusinessUnitId}, job {JobId}; source is being failed.",
+                job.BusinessUnitId, job.Id);
+            try
+            {
+                var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+                var source = await db.Set<SourceDocument>().Include(x => x.Corpus)
+                    .SingleOrDefaultAsync(x => x.BusinessUnitId == job.BusinessUnitId
+                        && x.ExtractionJobId == job.Id, CancellationToken.None);
+                if (source is not null)
+                {
+                    if (source.ProcessingStatus is not (DocumentProcessingStatus.Completed or DocumentProcessingStatus.Failed))
+                        source.Fail();
+                    if (source.Corpus.Status is not (CorpusStatus.Completed or CorpusStatus.Failed))
+                        source.Corpus.Fail();
+                    await db.SaveChangesAsync(CancellationToken.None);
+                }
+                if (!await queue.FailAsync(job.Id, workerId, job.Attempts,
+                        "Evidence integrity failure: " + ex.Message, CancellationToken.None))
+                    LogLeaseLost(job.Id, workerId, "recording evidence integrity failure");
+            }
+            catch (Exception failEx)
+            {
+                _log.LogCritical(failEx, "Failed to persist evidence integrity incident for job {JobId}.", job.Id);
+            }
+            return true;
         }
         catch (Exception ex)
         {
@@ -560,7 +608,7 @@ public sealed class LeadPersister : ILeadPersister
         // Ingest provenance sidecar (email door): real from/subject + a PRE-CREATED
         // EmailIngest id. Best-effort — a missing/corrupt sidecar falls back to the
         // synthetic-ingest behavior below.
-        var metadata = ExtractionJobMetadata.TryLoad(job);
+        var metadata = await ResolveMetadataAsync(job, ct);
 
         var now = DateTime.UtcNow;
         // AI-derived commercial facts always require a human approval before promotion,
@@ -601,6 +649,19 @@ public sealed class LeadPersister : ILeadPersister
             _context.ChangeTracker.AutoDetectChangesEnabled = autoDetect;
         }
 
+        if (outcome.CanonicalImport is not null)
+        {
+            var evidencePersister = new StructuredEvidenceLedgerPersister(_context);
+            await evidencePersister.PersistAsync(job, outcome, leads, ct);
+        }
+        else
+        {
+            // Lightweight provider tests intentionally use a reduced model without the
+            // evidence ledger. Production PostgreSQL contexts always include it.
+            if (_context.Model.FindEntityType(typeof(SourceDocument)) is not null)
+                await PersistUnstructuredRunAsync(job, outcome, ct);
+        }
+
         _log.LogInformation(
             "Persisted {LeadCount} lead(s) ({LeadIds}) with {Count} item(s) total from job {JobId}.",
             leads.Count, string.Join(",", leads.Select(l => l.Id)),
@@ -624,6 +685,39 @@ public sealed class LeadPersister : ILeadPersister
             await TryRouteLeadsAsync(job, leads, ct);
 
         return leads[0].Id;
+    }
+
+    private async Task PersistUnstructuredRunAsync(
+        ExtractionJob job, ChunkedExtractionOutcome outcome, CancellationToken ct)
+    {
+        var source = await _context.Set<SourceDocument>()
+            .Include(x => x.Corpus)
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == job.BusinessUnitId
+                                       && x.ContentHash == job.ContentHash, ct)
+            ?? throw new InvalidOperationException(
+                $"Extraction job {job.Id} has no authoritative source-document record.");
+        if (source.SecurityStatus != DocumentSecurityStatus.Cleared)
+            throw new InvalidOperationException($"Source document {source.Id} has not passed security inspection.");
+
+        var existing = await _context.Set<ExtractionRun>().AnyAsync(x =>
+            x.BusinessUnitId == job.BusinessUnitId && x.ExtractionJobId == job.Id
+            && x.AttemptNumber == job.Attempts, ct);
+        if (existing)
+            return;
+
+        source.StartExtraction();
+        var run = ExtractionRun.Create(job.BusinessUnitId, source.Id, Guid.NewGuid(), job.Id,
+            job.Attempts, "llm-unstructured/v1", "lead-extraction/v1");
+        run.Start();
+        _context.Add(run);
+        await _context.SaveChangesAsync(ct);
+
+        source.StartNormalization();
+        source.RequireReview(0);
+        if (source.Corpus.Status == CorpusStatus.Processing)
+            source.Corpus.RequireReview();
+        run.Complete(0, 0, 0, 0, 0, 0);
+        await _context.SaveChangesAsync(ct);
     }
 
     public async Task<long?> PersistAndCompleteAsync(
@@ -725,7 +819,8 @@ public sealed class LeadPersister : ILeadPersister
         {
             // Tracked lookup so graph-add links (not re-inserts) it.
             var existing = await _context.EmailIngests
-                .FirstOrDefaultAsync(e => e.Id == metadata.EmailIngestId.Value, ct);
+                .FirstOrDefaultAsync(e => e.Id == metadata.EmailIngestId.Value
+                    && e.EmailConfiguration.BusinessUnitId == job.BusinessUnitId, ct);
             if (existing != null)
             {
                 existing.ParseStatus = parseStatus;
@@ -736,15 +831,14 @@ public sealed class LeadPersister : ILeadPersister
                 return existing;
             }
             _log.LogWarning(
-                "Job {JobId} referenced EmailIngest {IngestId} which no longer exists; falling back to a synthetic ingest.",
-                job.Id, metadata.EmailIngestId);
+                "Job {JobId} referenced an EmailIngest unavailable in its tenant; using a synthetic ingest.",
+                job.Id);
         }
 
         var config = await _context.EmailConfigurations.AsNoTracking()
                          .FirstOrDefaultAsync(e => e.IsActive && e.BusinessUnitId == job.BusinessUnitId, ct)
-                     ?? await _context.EmailConfigurations.AsNoTracking()
-                         .FirstOrDefaultAsync(e => e.IsActive, ct)
-                     ?? throw new InvalidOperationException("No active EmailConfiguration available for lead persistence.");
+                     ?? throw new InvalidOperationException(
+                         "No active EmailConfiguration is available for this tenant's lead persistence.");
 
         return new EmailIngest
         {
@@ -759,6 +853,39 @@ public sealed class LeadPersister : ILeadPersister
             ParseStatus = parseStatus,
             ParsedAt = now
         };
+    }
+
+    private async Task<ExtractionJobMetadata?> ResolveMetadataAsync(
+        ExtractionJob job,
+        CancellationToken ct)
+    {
+        string? json = null;
+        if (_context.Model.FindEntityType(typeof(SourceDocumentOccurrence)) is not null)
+        {
+            json = await _context.Set<SourceDocumentOccurrence>()
+                .AsNoTracking()
+                .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.ExtractionJobId == job.Id)
+                .OrderBy(x => x.ReceivedOn)
+                .Select(x => x.SourceMetadataJson)
+                .FirstOrDefaultAsync(ct);
+        }
+        if (!string.IsNullOrWhiteSpace(json))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(json);
+                if (document.RootElement.TryGetProperty("metadata", out var element)
+                    && element.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined))
+                    return element.Deserialize<ExtractionJobMetadata>();
+            }
+            catch (JsonException ex)
+            {
+                _log.LogWarning(ex, "Stored ingestion metadata for job {JobId} is invalid.", job.Id);
+            }
+        }
+
+        // Compatibility for jobs created before database-owned provenance was introduced.
+        return ExtractionJobMetadata.TryLoad(job);
     }
 
     /// <summary>Builds one Lead (+ its LeadItems) for one extraction result/group.</summary>

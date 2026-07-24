@@ -6,8 +6,13 @@ export interface QuoteDTO {
   rfqId?: number;
   rfqNo?: string;
   commercialCaseId?: number;
+  commercialCaseReference?: string | null;
+  nexoraSerial?: string | null;
+  lifecycleVersion: number;
   version: number;
   customerId?: number;
+  contactId?: number | null;
+  contactName?: string | null;
   customerName?: string;
   businessUnitId: number;
   businessUnitName: string;
@@ -146,9 +151,13 @@ const quoteService = {
     return data;
   },
 
-  transitionStatus: async (id: number, status: string, modifiedBy: string): Promise<QuoteDTO> => {
-    const { data } = await axiosInstance.post(`/api/Quote/${id}/status`, null, {
-      params: { status, modifiedBy }
+  transitionStatus: async (id: number, status: string, expectedVersion: number): Promise<unknown> => {
+    const operationId = crypto.randomUUID();
+    const { data } = await axiosInstance.post(`/api/Quote/${id}/status`, {
+      targetStatusCode: status.toUpperCase(),
+      expectedVersion,
+      correlationId: operationId,
+      idempotencyKey: `quote-${id}-${status.toLowerCase()}-${operationId}`,
     });
     return data;
   },

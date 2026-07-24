@@ -11,14 +11,19 @@ public interface ILifecycleApplicationService
 {
     Task<LifecycleStateView> GetLeadStateAsync(long businessUnitId, long leadId, CancellationToken ct);
     Task<LifecycleStateView> GetRfqStateAsync(long businessUnitId, long rfqId, CancellationToken ct);
+    Task<LifecycleStateView> GetQuoteStateAsync(long businessUnitId, long quoteId, CancellationToken ct);
     Task<LifecycleTransitionResult> TransitionLeadAsync(long businessUnitId, long leadId, LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct);
     Task<LifecycleTransitionResult> TransitionRfqAsync(long businessUnitId, long rfqId, LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct);
+    Task<LifecycleTransitionResult> TransitionQuoteAsync(long businessUnitId, long quoteId, LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct);
+    Task<LifecycleTransitionResult> TransitionLeadInCurrentTransactionAsync(long businessUnitId, long leadId, LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct);
+    Task<LifecycleTransitionResult> TransitionQuoteInCurrentTransactionAsync(long businessUnitId, long quoteId, LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct);
 }
 
 public sealed class LifecycleApplicationService : ILifecycleApplicationService
 {
     private const string LeadAggregate = "Lead";
     private const string RfqAggregate = "Rfq";
+    private const string QuoteAggregate = "Quote";
     private readonly ErpRfqAutomationContext _db;
 
     public LifecycleApplicationService(ErpRfqAutomationContext db) => _db = db;
@@ -42,6 +47,16 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
             rfq.RfqstatusId, rfq.Rfqstatus, rfq.LifecycleVersion, businessUnitId, ct);
     }
 
+    public async Task<LifecycleStateView> GetQuoteStateAsync(long businessUnitId, long quoteId, CancellationToken ct)
+    {
+        var quote = await _db.Quotes.AsNoTracking().Include(x => x.Status)
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == quoteId, ct)
+            ?? throw new LifecycleNotFoundException("Quote was not found.");
+        EnsureLinked(quote);
+        return await BuildStateAsync(QuoteAggregate, quote.Id, quote.CommercialCaseId!.Value, quote.NexoraSerial!,
+            quote.StatusId, quote.Status, quote.LifecycleVersion, businessUnitId, ct);
+    }
+
     public Task<LifecycleTransitionResult> TransitionLeadAsync(
         long businessUnitId, long leadId, LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct)
         => ExecuteAsync(LeadAggregate, businessUnitId, leadId, actor, command, reopen, ct);
@@ -49,6 +64,30 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
     public Task<LifecycleTransitionResult> TransitionRfqAsync(
         long businessUnitId, long rfqId, LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct)
         => ExecuteAsync(RfqAggregate, businessUnitId, rfqId, actor, command, reopen, ct);
+
+    public Task<LifecycleTransitionResult> TransitionQuoteAsync(
+        long businessUnitId, long quoteId, LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct)
+        => ExecuteAsync(QuoteAggregate, businessUnitId, quoteId, actor, command, reopen, ct);
+
+    public async Task<LifecycleTransitionResult> TransitionLeadInCurrentTransactionAsync(
+        long businessUnitId, long leadId, LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct)
+    {
+        if (_db.Database.CurrentTransaction == null)
+            throw new InvalidOperationException("An active database transaction is required.");
+        ValidateInput(businessUnitId, leadId, actor, command);
+        var requestHash = HashRequest(LeadAggregate, leadId, actor, command, reopen);
+        return await ExecuteCoreAsync(LeadAggregate, businessUnitId, leadId, actor, command, reopen, requestHash, ct);
+    }
+
+    public async Task<LifecycleTransitionResult> TransitionQuoteInCurrentTransactionAsync(
+        long businessUnitId, long quoteId, LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct)
+    {
+        if (_db.Database.CurrentTransaction == null)
+            throw new InvalidOperationException("An active database transaction is required.");
+        ValidateInput(businessUnitId, quoteId, actor, command);
+        var requestHash = HashRequest(QuoteAggregate, quoteId, actor, command, reopen);
+        return await ExecuteCoreAsync(QuoteAggregate, businessUnitId, quoteId, actor, command, reopen, requestHash, ct);
+    }
 
     private async Task<LifecycleTransitionResult> ExecuteAsync(
         string aggregateType,
@@ -69,105 +108,10 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
             {
                 _db.ChangeTracker.Clear();
                 await using var transaction = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
-                var aggregate = await LoadAggregateAsync(aggregateType, businessUnitId, aggregateId, ct);
-                var replay = await FindReplayAsync(businessUnitId, command.IdempotencyKey, ct);
-                if (replay != null)
-                    return VerifyReplay(replay, aggregateType, aggregateId, requestHash);
-
-                if (aggregate.Version != command.ExpectedVersion)
-                    throw new LifecycleConflictException("The lifecycle state changed. Reload it and retry with the current version.");
-
-                var statuses = await LoadStatusesAsync(aggregateType, businessUnitId, ct);
-                var target = ResolveTarget(statuses, aggregateType, command.TargetStatusCode);
-                var currentCode = LifecyclePolicy.Canonicalize(aggregateType, aggregate.CurrentStatus?.SetupCode, aggregate.CurrentStatus?.SetupValue);
-                var targetCode = LifecyclePolicy.Canonicalize(aggregateType, target.SetupCode, target.SetupValue);
-                ValidateTransition(aggregateType, currentCode, targetCode, command.ReasonCode, reopen);
-                if (aggregateType == LeadAggregate && targetCode == "QUALIFIED"
-                    && aggregate.RequiresCommercialReview && !aggregate.CommercialFactsVerified)
-                    throw new LifecycleValidationException(
-                        "AI-extracted commercial facts must be approved before the lead can be qualified.");
-
-                if (_db.Database.IsNpgsql())
-                {
-                    var triggerReason = string.Join(": ", new[]
-                    {
-                        Clean(command.ReasonCode)?.ToUpperInvariant(),
-                        Clean(command.ReasonNotes)
-                    }.Where(value => value != null));
-                    await _db.Database.ExecuteSqlInterpolatedAsync($"""
-                        SELECT set_config('nexora.actor', {actor.ActorId.Trim()}, true),
-                               set_config('nexora.actor_source', {actor.ActorSource.Trim()}, true),
-                               set_config('nexora.reason', {triggerReason}, true),
-                               set_config('nexora.lifecycle_command', 'true', true)
-                        """, ct);
-                }
-
-                aggregate.SetStatus(target.SetupId);
-                aggregate.IncrementVersion();
-                var now = DateTime.UtcNow;
-                var lifecycleEvent = new CommercialLifecycleEvent
-                {
-                    BusinessUnitId = businessUnitId,
-                    CommercialCaseId = aggregate.CommercialCaseId,
-                    CommercialCaseReference = aggregate.CommercialCaseReference,
-                    AggregateType = aggregateType,
-                    AggregateId = aggregateId,
-                    EventType = reopen ? "Reopened" : "StatusTransitioned",
-                    PreviousStatusId = aggregate.PreviousStatusId,
-                    PreviousStatusCode = currentCode,
-                    NewStatusId = target.SetupId,
-                    NewStatusCode = targetCode,
-                    AggregateVersion = aggregate.Version,
-                    ActorId = actor.ActorId.Trim(),
-                    ActorSource = actor.ActorSource.Trim(),
-                    OccurredOn = now,
-                    ReasonCode = Clean(command.ReasonCode)?.ToUpperInvariant(),
-                    ReasonNotes = Clean(command.ReasonNotes),
-                    PolicyVersion = LifecyclePolicy.Version,
-                    Source = command.Source.Trim(),
-                    CorrelationId = command.CorrelationId.Trim(),
-                    RequestReference = command.RequestReference.Trim(),
-                    IdempotencyKey = command.IdempotencyKey.Trim(),
-                    RequestHash = requestHash
-                };
-                _db.CommercialLifecycleEvents.Add(lifecycleEvent);
-                await _db.SaveChangesAsync(ct);
-
-                var payload = JsonSerializer.Serialize(new
-                {
-                    lifecycleEvent.Id,
-                    lifecycleEvent.BusinessUnitId,
-                    lifecycleEvent.CommercialCaseId,
-                    lifecycleEvent.CommercialCaseReference,
-                    lifecycleEvent.AggregateType,
-                    lifecycleEvent.AggregateId,
-                    lifecycleEvent.EventType,
-                    lifecycleEvent.PreviousStatusCode,
-                    lifecycleEvent.NewStatusCode,
-                    lifecycleEvent.AggregateVersion,
-                    lifecycleEvent.ActorId,
-                    lifecycleEvent.ActorSource,
-                    lifecycleEvent.OccurredOn,
-                    lifecycleEvent.ReasonCode,
-                    lifecycleEvent.ReasonNotes,
-                    lifecycleEvent.PolicyVersion,
-                    lifecycleEvent.Source,
-                    lifecycleEvent.CorrelationId,
-                    lifecycleEvent.RequestReference
-                });
-                _db.LifecycleOutboxMessages.Add(new LifecycleOutboxMessage
-                {
-                    BusinessUnitId = businessUnitId,
-                    LifecycleEvent = lifecycleEvent,
-                    EventType = $"commercial-case.{aggregateType.ToLowerInvariant()}.{lifecycleEvent.EventType.ToLowerInvariant()}",
-                    Payload = payload,
-                    SchemaVersion = 1,
-                    OccurredOn = now,
-                    AvailableOn = now
-                });
-                await _db.SaveChangesAsync(ct);
+                var result = await ExecuteCoreAsync(
+                    aggregateType, businessUnitId, aggregateId, actor, command, reopen, requestHash, ct);
                 await transaction.CommitAsync(ct);
-                return ToResult(lifecycleEvent, false);
+                return result;
             });
         }
         catch (DbUpdateConcurrencyException)
@@ -184,6 +128,109 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
         }
     }
 
+    private async Task<LifecycleTransitionResult> ExecuteCoreAsync(
+        string aggregateType, long businessUnitId, long aggregateId, LifecycleActor actor,
+        LifecycleTransitionCommand command, bool reopen, string requestHash, CancellationToken ct)
+    {
+        var aggregate = await LoadAggregateAsync(aggregateType, businessUnitId, aggregateId, ct);
+        var replay = await FindReplayAsync(businessUnitId, command.IdempotencyKey, ct);
+        if (replay != null)
+            return VerifyReplay(replay, aggregateType, aggregateId, requestHash);
+        if (aggregate.Version != command.ExpectedVersion)
+            throw new LifecycleConflictException("The lifecycle state changed. Reload it and retry with the current version.");
+
+        var statuses = await LoadStatusesAsync(aggregateType, businessUnitId, ct);
+        var target = ResolveTarget(statuses, aggregateType, command.TargetStatusCode);
+        var currentCode = LifecyclePolicy.Canonicalize(aggregateType, aggregate.CurrentStatus?.SetupCode, aggregate.CurrentStatus?.SetupValue);
+        var targetCode = LifecyclePolicy.Canonicalize(aggregateType, target.SetupCode, target.SetupValue);
+        ValidateTransition(aggregateType, currentCode, targetCode, command.ReasonCode, reopen);
+        if (aggregateType == LeadAggregate && targetCode == "QUALIFIED"
+            && aggregate.RequiresCommercialReview && !aggregate.CommercialFactsVerified)
+            throw new LifecycleValidationException(
+                "AI-extracted commercial facts must be approved before the lead can be qualified.");
+
+        if (_db.Database.IsNpgsql())
+        {
+            var triggerReason = string.Join(": ", new[]
+            {
+                Clean(command.ReasonCode)?.ToUpperInvariant(),
+                Clean(command.ReasonNotes)
+            }.Where(value => value != null));
+            await _db.Database.ExecuteSqlInterpolatedAsync($"""
+                SELECT set_config('nexora.actor', {actor.ActorId.Trim()}, true),
+                       set_config('nexora.actor_source', {actor.ActorSource.Trim()}, true),
+                       set_config('nexora.reason', {triggerReason}, true),
+                       set_config('nexora.lifecycle_command', 'true', true)
+                """, ct);
+        }
+
+        aggregate.SetStatus(target.SetupId);
+        aggregate.IncrementVersion();
+        var now = DateTime.UtcNow;
+        var lifecycleEvent = new CommercialLifecycleEvent
+        {
+            BusinessUnitId = businessUnitId,
+            CommercialCaseId = aggregate.CommercialCaseId,
+            CommercialCaseReference = aggregate.CommercialCaseReference,
+            AggregateType = aggregateType,
+            AggregateId = aggregateId,
+            EventType = reopen ? "Reopened" : "StatusTransitioned",
+            PreviousStatusId = aggregate.PreviousStatusId,
+            PreviousStatusCode = currentCode,
+            NewStatusId = target.SetupId,
+            NewStatusCode = targetCode,
+            AggregateVersion = aggregate.Version,
+            ActorId = actor.ActorId.Trim(),
+            ActorSource = actor.ActorSource.Trim(),
+            OccurredOn = now,
+            ReasonCode = Clean(command.ReasonCode)?.ToUpperInvariant(),
+            ReasonNotes = Clean(command.ReasonNotes),
+            PolicyVersion = LifecyclePolicy.Version,
+            Source = command.Source.Trim(),
+            CorrelationId = command.CorrelationId.Trim(),
+            RequestReference = command.RequestReference.Trim(),
+            IdempotencyKey = command.IdempotencyKey.Trim(),
+            RequestHash = requestHash
+        };
+        _db.CommercialLifecycleEvents.Add(lifecycleEvent);
+        await _db.SaveChangesAsync(ct);
+
+        var payload = JsonSerializer.Serialize(new
+        {
+            lifecycleEvent.Id,
+            lifecycleEvent.BusinessUnitId,
+            lifecycleEvent.CommercialCaseId,
+            lifecycleEvent.CommercialCaseReference,
+            lifecycleEvent.AggregateType,
+            lifecycleEvent.AggregateId,
+            lifecycleEvent.EventType,
+            lifecycleEvent.PreviousStatusCode,
+            lifecycleEvent.NewStatusCode,
+            lifecycleEvent.AggregateVersion,
+            lifecycleEvent.ActorId,
+            lifecycleEvent.ActorSource,
+            lifecycleEvent.OccurredOn,
+            lifecycleEvent.ReasonCode,
+            lifecycleEvent.ReasonNotes,
+            lifecycleEvent.PolicyVersion,
+            lifecycleEvent.Source,
+            lifecycleEvent.CorrelationId,
+            lifecycleEvent.RequestReference
+        });
+        _db.LifecycleOutboxMessages.Add(new LifecycleOutboxMessage
+        {
+            BusinessUnitId = businessUnitId,
+            LifecycleEvent = lifecycleEvent,
+            EventType = $"commercial-case.{aggregateType.ToLowerInvariant()}.{lifecycleEvent.EventType.ToLowerInvariant()}",
+            Payload = payload,
+            SchemaVersion = 1,
+            OccurredOn = now,
+            AvailableOn = now
+        });
+        await _db.SaveChangesAsync(ct);
+        return ToResult(lifecycleEvent, false);
+    }
+
     private async Task<LifecycleAggregate> LoadAggregateAsync(string aggregateType, long businessUnitId, long aggregateId, CancellationToken ct)
     {
         if (aggregateType == LeadAggregate)
@@ -194,11 +241,25 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
             return LifecycleAggregate.ForLead(lead);
         }
 
-        var rfq = await _db.Rfqs.Include(x => x.Rfqstatus).Include(x => x.Lead)
-            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == aggregateId, ct)
-            ?? throw new LifecycleNotFoundException("RFQ was not found.");
-        EnsureLinked(rfq);
-        return LifecycleAggregate.ForRfq(rfq);
+        if (aggregateType == RfqAggregate)
+        {
+            var rfq = await _db.Rfqs.Include(x => x.Rfqstatus).Include(x => x.Lead)
+                .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == aggregateId, ct)
+                ?? throw new LifecycleNotFoundException("RFQ was not found.");
+            EnsureLinked(rfq);
+            return LifecycleAggregate.ForRfq(rfq);
+        }
+
+        if (aggregateType == QuoteAggregate)
+        {
+            var quote = await _db.Quotes.Include(x => x.Status)
+                .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == aggregateId, ct)
+                ?? throw new LifecycleNotFoundException("Quote was not found.");
+            EnsureLinked(quote);
+            return LifecycleAggregate.ForQuote(quote);
+        }
+
+        throw new LifecycleValidationException("Unsupported lifecycle aggregate type.");
     }
 
     private async Task<LifecycleStateView> BuildStateAsync(
@@ -229,7 +290,13 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
 
     private async Task<List<SetupMaster>> LoadStatusesAsync(string aggregateType, long businessUnitId, CancellationToken ct)
     {
-        var expectedType = aggregateType == LeadAggregate ? "leadstatus" : "rfqstatus";
+        var expectedType = aggregateType switch
+        {
+            LeadAggregate => "leadstatus",
+            RfqAggregate => "rfqstatus",
+            QuoteAggregate => "quotestatus",
+            _ => throw new LifecycleValidationException("Unsupported lifecycle aggregate type.")
+        };
         return await _db.SetupMasters.AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && x.IsActive != false)
             .Where(x => x.SetupType.ToLower().Replace(" ", "") == expectedType)
@@ -335,10 +402,18 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
             throw new LifecycleValidationException("The RFQ must be linked to a commercial case before its lifecycle can change.");
     }
 
+    private static void EnsureLinked(Quote quote)
+    {
+        if (!quote.Rfqid.HasValue || !quote.CommercialCaseId.HasValue || quote.CommercialCaseId <= 0
+            || string.IsNullOrWhiteSpace(quote.NexoraSerial))
+            throw new LifecycleValidationException("The Quote must be linked to an RFQ and Nexora Serial before its lifecycle can change.");
+    }
+
     private sealed class LifecycleAggregate
     {
         private readonly Lead? _lead;
         private readonly Rfq? _rfq;
+        private readonly Quote? _quote;
         private LifecycleAggregate(Lead lead)
         {
             if (lead.LeadStatus != null && lead.LeadStatus.BusinessUnitId != lead.BusinessUnitId)
@@ -365,6 +440,18 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
             PreviousStatusId = rfq.RfqstatusId;
             Version = rfq.LifecycleVersion;
         }
+        private LifecycleAggregate(Quote quote)
+        {
+            if (quote.Status != null && quote.Status.BusinessUnitId != quote.BusinessUnitId)
+                throw new LifecycleValidationException("The current lifecycle status does not belong to this tenant.");
+            _quote = quote;
+            AggregateId = quote.Id;
+            CommercialCaseId = quote.CommercialCaseId!.Value;
+            CommercialCaseReference = quote.NexoraSerial!;
+            CurrentStatus = quote.Status;
+            PreviousStatusId = quote.StatusId;
+            Version = quote.LifecycleVersion;
+        }
         public long AggregateId { get; }
         public long CommercialCaseId { get; }
         public string CommercialCaseReference { get; }
@@ -375,16 +462,19 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
         public bool CommercialFactsVerified { get; }
         public static LifecycleAggregate ForLead(Lead lead) => new(lead);
         public static LifecycleAggregate ForRfq(Rfq rfq) => new(rfq);
+        public static LifecycleAggregate ForQuote(Quote quote) => new(quote);
         public void SetStatus(long statusId)
         {
             if (_lead != null) _lead.LeadStatusId = statusId;
-            else _rfq!.RfqstatusId = statusId;
+            else if (_rfq != null) _rfq.RfqstatusId = statusId;
+            else _quote!.StatusId = statusId;
         }
         public void IncrementVersion()
         {
             Version++;
             if (_lead != null) _lead.LifecycleVersion = Version;
-            else _rfq!.LifecycleVersion = Version;
+            else if (_rfq != null) _rfq.LifecycleVersion = Version;
+            else _quote!.LifecycleVersion = Version;
         }
     }
 }

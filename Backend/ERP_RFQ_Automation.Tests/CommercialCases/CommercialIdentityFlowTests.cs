@@ -1,0 +1,162 @@
+using ERP_RFQ_Automation.CommercialCases.Lifecycle;
+using ERP_RFQ_Automation.DTOs.Lead;
+using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Repositories;
+using ERP_RFQ_Automation.Tests.Support;
+using Microsoft.EntityFrameworkCore;
+
+namespace ERP_RFQ_Automation.Tests.CommercialCases;
+
+public sealed class CommercialIdentityFlowTests
+{
+    [Fact]
+    public async Task LeadReview_PersistsTenantValidatedCustomerAndContactIdentity()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(830);
+        var lead = Seed.Lead(context, 4001, 830, parseStatus: "NeedsReview");
+        Seed.Customer(context, 7001, 830, "Review Customer");
+        context.Contacts.Add(new Contact
+        {
+            Id = 7002,
+            CustomerId = 7001,
+            FirstName = "Casey",
+            LastName = "Buyer",
+            Email = "casey@example.com",
+            IsActive = true,
+            CreatedBy = "seed",
+            CreatedOn = DateTime.UtcNow
+        });
+        await context.SaveChangesAsync();
+
+        var result = await new LeadRepository(context).SubmitLeadReviewAsync(
+            lead.Id,
+            830,
+            new LeadReviewSubmitDTO
+            {
+                ExpectedVersion = 1,
+                Action = "save",
+                Header = new LeadReviewHeaderDTO { CustomerId = 7001, ContactId = 7002 }
+            },
+            "reviewer@example.com");
+
+        Assert.NotNull(result);
+        Assert.Equal(7001, result.CustomerId);
+        Assert.Equal(7002, result.ContactId);
+        Assert.Equal("CONFIRMED", result.CustomerMatchStatus);
+        var auditJson = (await context.Set<LeadReviewAudit>().SingleAsync()).AfterJson;
+        Assert.Contains("customerId", auditJson, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("7001", auditJson, StringComparison.Ordinal);
+        Assert.Contains("7002", auditJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task LeadConversion_PersistsIdentityRfqLifecycleEventAndOutboxAtomically()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(831);
+        var qualified = Status(context, 6101, 831, "LeadStatus", "QUALIFIED");
+        Status(context, 6102, 831, "LeadStatus", "CONVERTED_TO_RFQ");
+        Status(context, 6103, 831, "RFQStatus", "DRAFT");
+        Seed.Customer(context, 7101, 831, "Conversion Customer");
+        var lead = Seed.Lead(context, 4101, 831, qualified.SetupId,
+            items: new[] { Seed.LeadItem(4102, "1", 2, "Pump") });
+        await context.SaveChangesAsync();
+        lead.ResolveCommercialIdentity(7101, 7102, "CONFIRMED");
+        await context.SaveChangesAsync();
+
+        var repository = new LeadRepository(context);
+        var result = await repository.ConvertLeadToRfqAsync(lead.Id, 831, "user@example.com");
+        var retry = await repository.ConvertLeadToRfqAsync(lead.Id, 831, "user@example.com");
+
+        context.ChangeTracker.Clear();
+        var rfq = await context.Rfqs.SingleAsync(item => item.Id == result.RfqId);
+        var converted = await context.Leads.SingleAsync(item => item.Id == lead.Id);
+        var lifecycleEvent = await context.CommercialLifecycleEvents.SingleAsync();
+        Assert.Equal(lead.CommercialCaseId, rfq.CommercialCaseId);
+        Assert.Equal(result.RfqId, retry.RfqId);
+        Assert.Equal(lead.CommercialCaseReference, rfq.NexoraSerial);
+        Assert.Equal(7101, rfq.CustomerId);
+        Assert.Equal(7102, rfq.ContactId);
+        Assert.Equal(2, converted.LifecycleVersion);
+        Assert.Equal("CONVERTED_TO_RFQ", lifecycleEvent.NewStatusCode);
+        Assert.Equal("user@example.com", lifecycleEvent.ActorId);
+        Assert.Single(await context.LifecycleOutboxMessages.ToListAsync());
+        Assert.Single(await context.Rfqs.ToListAsync());
+    }
+
+    [Fact]
+    public async Task LeadConversion_RollsBackRfqWhenLifecycleCannotComplete()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(832);
+        var qualified = Status(context, 6201, 832, "LeadStatus", "QUALIFIED");
+        Status(context, 6203, 832, "RFQStatus", "DRAFT");
+        Seed.Customer(context, 7201, 832, "Rollback Customer");
+        var lead = Seed.Lead(context, 4201, 832, qualified.SetupId,
+            items: new[] { Seed.LeadItem(4202, "1", 2, "Valve") });
+        await context.SaveChangesAsync();
+        lead.ResolveCommercialIdentity(7201, null, "CUSTOMER_CONFIRMED_CONTACT_UNRESOLVED");
+        await context.SaveChangesAsync();
+
+        await Assert.ThrowsAsync<LifecycleValidationException>(() =>
+            new LeadRepository(context).ConvertLeadToRfqAsync(lead.Id, 832, "user@example.com"));
+
+        context.ChangeTracker.Clear();
+        Assert.Empty(await context.Rfqs.ToListAsync());
+        Assert.Empty(await context.CommercialLifecycleEvents.ToListAsync());
+        Assert.Equal(1, (await context.Leads.SingleAsync(item => item.Id == lead.Id)).LifecycleVersion);
+    }
+
+    [Fact]
+    public async Task RfqApproval_RejectsCustomerMismatch()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(833);
+        var lead = Seed.Lead(context, 4301, 833);
+        Seed.Customer(context, 7301, 833, "Matched Customer");
+        var preparing = Status(context, 6301, 833, "RFQStatus", "QUOTE_PREPARATION");
+        await context.SaveChangesAsync();
+        lead.ResolveCommercialIdentity(7301, 7302, "CONFIRMED");
+        await context.SaveChangesAsync();
+        var rfq = new Rfq
+        {
+            Id = 4302,
+            Rfqno = "RFQ-MISMATCH",
+            RecDate = DateTime.UtcNow,
+            LeadId = lead.Id,
+            BusinessUnitId = 833,
+            RfqstatusId = preparing.SetupId,
+            CreatedBy = "seed",
+            CreatedDate = DateTime.UtcNow
+        };
+        rfq.InheritCommercialIdentity(lead);
+        context.Rfqs.Add(rfq);
+        await context.SaveChangesAsync();
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new RfqRepository(context).ApproveAsync(rfq.Id, "user@example.com", 833, 9999));
+
+        Assert.Contains("does not match", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(await context.Quotes.ToListAsync());
+    }
+
+    private static SetupMaster Status(
+        ErpRfqAutomationContext context, long id, long businessUnitId, string type, string code)
+    {
+        Seed.EnsureBusinessUnit(context, businessUnitId);
+        var status = new SetupMaster
+        {
+            SetupId = id,
+            BusinessUnitId = businessUnitId,
+            SetupType = type,
+            SetupCode = code,
+            SetupValue = code.Replace('_', ' '),
+            IsActive = true,
+            CreatedBy = "seed",
+            CreatedOn = DateTime.UtcNow
+        };
+        context.SetupMasters.Add(status);
+        return status;
+    }
+}

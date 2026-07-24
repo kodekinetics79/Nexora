@@ -84,13 +84,33 @@ namespace ERP_RFQ_Automation.Controllers
                     var ingested = await _ingestion.IngestAsync(
                         bytes, file.FileName, businessUnitId,
                         ExtractionSourceType.ManualUpload,
-                        batchId, InteractivePriority, metadata: null, ct);
+                        batchId, InteractivePriority,
+                        metadata: new ExtractionJobMetadata
+                        {
+                            SourceOccurrenceId = Request.Headers.TryGetValue("Idempotency-Key", out var key)
+                                ? $"{key}:{file.FileName}"
+                                : null
+                        },
+                        ct);
 
                     results.Add(new
                     {
                         jobId = ingested.JobId,
                         fileName = file.FileName,
                         outcome = ingested.Outcome.ToString()
+                    });
+                }
+                catch (DocumentInspectionException ex)
+                {
+                    _logger.LogWarning(
+                        "Upload {FileName} stopped by document inspection: {Status} {Reason}",
+                        file.FileName, ex.Inspection.Status, ex.Inspection.Reason);
+                    results.Add(new
+                    {
+                        jobId = 0L,
+                        fileName = file.FileName,
+                        outcome = ex.Inspection.Status.ToString(),
+                        reason = ex.Inspection.Reason
                     });
                 }
                 catch (Exception ex)
