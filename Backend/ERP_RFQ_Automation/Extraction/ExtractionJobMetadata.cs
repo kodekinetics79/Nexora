@@ -40,7 +40,9 @@ public sealed class ExtractionJobMetadata
     /// <summary>Original email subject for email-sourced documents.</summary>
     public string? Subject { get; set; }
 
-    /// <summary>Value for Lead.Clientemail (e.g. the polled mailbox address).</summary>
+    public DateTimeOffset? SourceReceivedAtUtc { get; set; }
+
+    /// <summary>Legacy mailbox metadata. Customer identity must use <see cref="FromEmail"/>.</summary>
     public string? ClientEmail { get; set; }
 
     /// <summary>Overrides Lead.LeadSource (e.g. "Email", "SEC Leads", "Aramco Leads").

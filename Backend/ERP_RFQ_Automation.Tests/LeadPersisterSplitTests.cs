@@ -1,5 +1,7 @@
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Services.Interfaces;
+using ERP_RFQ_Automation.LeadIdentity;
+using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 
@@ -96,6 +98,36 @@ public class LeadPersisterSplitTests : IDisposable
     }
 
     [Fact]
+    public async Task Governed_split_uses_distinct_logical_source_keys_and_keeps_both_inquiries()
+    {
+        await using (var seed = _db.ContextFor(1))
+        { Seed.BusinessUnit(seed, 1); Seed.EmailConfig(seed, 100, 1); await seed.SaveChangesAsync(); }
+        var storagePath = Path.Combine(Path.GetTempPath(), $"split-identity-{Guid.NewGuid():N}.txt");
+        await File.WriteAllTextAsync(storagePath, "two inquiries");
+        var job = Job(storagePath: storagePath);
+        try
+        {
+            await new ExtractionJobMetadata { SourceOccurrenceId = "api-request-77", FromEmail = "buyer@customer.test" }.SaveAsync(storagePath, 1);
+            await using var context = _db.ContextFor(1);
+            var identity = new LeadIdentityApplicationService(context);
+            var persister = new LeadPersister(context, new NoopLogger<LeadPersister>(), leadIdentity: identity);
+            var outcome = SplitOutcome(Group("RFQ-A", 1), Group("RFQ-B", 1));
+            outcome = new ChunkedExtractionOutcome { Status = outcome.Status, Result = outcome.Result, SplitResults = outcome.SplitResults,
+                ExpectedItemCount = outcome.ExpectedItemCount, ExtractedItemCount = outcome.ExtractedItemCount, AiProviderClass = AiProviderClass.Local };
+            await persister.PersistAsync(job, outcome);
+
+            Assert.Equal(2, await context.Leads.CountAsync());
+            var sourceIds = await context.Set<LeadIngestionOccurrence>().OrderBy(x => x.Id).Select(x => x.ExternalSourceId).ToListAsync();
+            Assert.Equal(new[] { "api-request-77:inquiry:1", "api-request-77:inquiry:2" }, sourceIds);
+        }
+        finally
+        {
+            File.Delete(storagePath);
+            File.Delete(ExtractionJobMetadata.SidecarPath(storagePath, 1));
+        }
+    }
+
+    [Fact]
     public async Task SingleOutcome_StillPersistsOneLead_WithInquiryType()
     {
         await using (var seedCtx = _db.ContextFor(null))
@@ -174,7 +206,7 @@ public class LeadPersisterSplitTests : IDisposable
                 Assert.Equal(1, await assertCtx.EmailIngests.CountAsync());
                 // Email-door parity fields from the sidecar.
                 Assert.Equal("Email", lead.LeadSource);
-                Assert.Equal("inbox100@example.com", lead.Clientemail);
+        Assert.Equal("buyer@customer.com", lead.Clientemail);
                 Assert.Contains("Subject: RFQ for pumps", lead.HeaderRemarks);
 
                 var ingest = await assertCtx.EmailIngests.SingleAsync(e => e.Id == ingestId);

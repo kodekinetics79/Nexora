@@ -16,8 +16,11 @@ namespace ERP_RFQ_Automation.Services
         private readonly ILogger<OllamaLlmService> _log;
         private readonly string _model;
         private readonly IAiGovernanceService _governance;
+        private readonly AiProviderClass _providerClass;
         private readonly int _maximumOutputTokens;
         private readonly JsonSerializerOptions _jsonOptions;
+
+        public AiProviderClass ProviderClass => _providerClass;
 
         // Configuration constants
         private const int MAX_PROMPT_CHARS = 30000; // Increased for larger context to improve accuracy and confidence
@@ -36,17 +39,21 @@ namespace ERP_RFQ_Automation.Services
             _log = log;
 
             // Load configuration
-            _model = cfg["Ollama:Model"] ?? "deepseek-v3.1:671b-cloud";
+            _model = cfg["Ollama:Model"] ?? "qwen2.5:14b";
             _governance = governance;
             _maximumOutputTokens = int.TryParse(cfg["Ollama:MaxOutputTokens"], out var maximumOutputTokens)
                 && maximumOutputTokens > 0 ? Math.Min(maximumOutputTokens, 8192) : 4096;
-            var apiKey = cfg["Ollama:ApiKey"]
-                ?? throw new InvalidOperationException("Ollama API key is missing in configuration!");
-            var baseUrl = cfg["Ollama:BaseUrl"] ?? "https://ollama.com/";
+            var baseUrl = cfg["Ollama:BaseUrl"] ?? "http://127.0.0.1:11434/";
+            var providerUri = new Uri(baseUrl);
+            _providerClass = providerUri.IsLoopback ? AiProviderClass.Local : AiProviderClass.External;
+            var apiKey = cfg["Ollama:ApiKey"];
+            if (_providerClass == AiProviderClass.External && string.IsNullOrWhiteSpace(apiKey))
+                throw new InvalidOperationException("An API key is required for an explicitly configured external Ollama endpoint.");
 
             // Configure HTTP client
-            _http.BaseAddress = new Uri(baseUrl);
-            _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+            _http.BaseAddress = providerUri;
+            if (!string.IsNullOrWhiteSpace(apiKey))
+                _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
             _http.Timeout = TimeSpan.FromSeconds(TIMEOUT_SECONDS);
 
             // Configure JSON serialization options
@@ -74,15 +81,16 @@ namespace ERP_RFQ_Automation.Services
             var processedText = PreprocessText(fullText);
             var instructions = BuildExtractionInstructions();
             var maximumRequestBytes = MeasureRequestBytes(instructions, processedText);
+            var governedContext = context with { ProviderClass = _providerClass };
             var reservation = await _governance.ReserveAsync(
-                context, "Ollama", _model, processedText, maximumRequestBytes,
+                governedContext, "Ollama", _model, processedText, maximumRequestBytes,
                 _maximumOutputTokens, MAX_RETRIES, cancellationToken);
             long totalInputTokens = 0;
             long totalOutputTokens = 0;
             var aggregateSource = AiTokenSources.ProviderExact;
 
-            _log.LogInformation("Sending extraction request to Ollama Cloud. Text length: {Length} chars",
-                processedText.Length);
+            _log.LogInformation("Sending governed extraction request. ProviderClass={ProviderClass}, TextLength={Length}",
+                _providerClass, processedText.Length);
 
             // Retry logic for transient failures
             for (int attempt = 1; attempt <= MAX_RETRIES; attempt++)

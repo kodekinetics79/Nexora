@@ -3,6 +3,7 @@ using System;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace ERP_RFQ_Automation.Migrations
 {
     [DbContext(typeof(ErpRfqAutomationContext))]
-    partial class ErpRfqAutomationContextModelSnapshot : ModelSnapshot
+    [Migration("20260725004658_Release01ASourceDocumentLineage")]
+    partial class Release01ASourceDocumentLineage
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -271,11 +274,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
-                    b.Property<string>("ProviderClass")
-                        .IsRequired()
-                        .HasMaxLength(16)
-                        .HasColumnType("character varying(16)");
-
                     b.Property<long>("ReservedTokens")
                         .HasColumnType("bigint");
 
@@ -304,8 +302,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("BusinessUnitId", "IdempotencyKey")
                         .IsUnique()
                         .HasDatabaseName("UX_AiRequests_BU_IdempotencyKey");
-
-                    b.HasIndex("BusinessUnitId", "ProviderClass", "CreatedOn");
 
                     b.ToTable("AiRequests", (string)null);
                 });

@@ -115,6 +115,14 @@ public sealed class AiGovernanceService : IAiGovernanceService
             var policy = await db.AiProcessingPolicies
                 .SingleOrDefaultAsync(x => x.BusinessUnitId == context.BusinessUnitId, ct);
             var denial = PolicyDenial(policy, context.Purpose, provider, model, context.ProviderClass);
+            if (denial is null && context.ProviderClass == AiProviderClass.External)
+            {
+                var recentProviderClasses = await db.AiRequests.AsNoTracking()
+                    .Where(x => x.BusinessUnitId == context.BusinessUnitId && x.Status == AiCallStatuses.Succeeded)
+                    .OrderByDescending(x => x.CreatedOn).Take(100).Select(x => x.ProviderClass).ToListAsync(ct);
+                if ((recentProviderClasses.Count(x => x == AiProviderClass.External) + 1m) / (recentProviderClasses.Count + 1m) > .10m)
+                    denial = "external_dependency_cap";
+            }
             if (denial is not null)
             {
                 db.AiRequests.Add(NewRequest(context, provider, model, input, inputHash, estimatedInput, 0, now,
@@ -267,6 +275,7 @@ public sealed class AiGovernanceService : IAiGovernanceService
             PromptHash = inputHash,
             PromptVersion = context.PromptVersion,
             Provider = provider,
+            ProviderClass = context.ProviderClass,
             Model = model,
             Status = status,
             InputCharacters = input.Length,

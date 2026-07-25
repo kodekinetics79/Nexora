@@ -8,6 +8,7 @@ using ERP_RFQ_Automation.CommercialFinance;
 using ERP_RFQ_Automation.OrderToCash;
 using ERP_RFQ_Automation.GeneralLedger;
 using ERP_RFQ_Automation.BankReconciliation;
+using ERP_RFQ_Automation.LeadIdentity;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Models;
@@ -38,6 +39,7 @@ public partial class ErpRfqAutomationContext
         modelBuilder.ConfigureGeneralLedger();
         modelBuilder.ConfigureBankReconciliation();
         modelBuilder.ConfigureOrderToCash();
+        modelBuilder.ConfigureLeadIdentity();
 
         // Commercial documents (non-nullable BusinessUnitId).
         modelBuilder.Entity<Lead>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
@@ -102,6 +104,15 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<CustomerAwardLineAllocation>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<OrderToCashAuditEvent>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<OrderToCashDocumentCounter>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<LeadIngestionBatch>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<LeadIngestionOccurrence>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<LeadOccurrenceDocument>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<LeadRevision>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<LeadItemRevision>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<LeadRevisionDifference>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<LeadMatchCandidate>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<LeadIdentityAuditEvent>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<LeadRevisionImpact>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
 
         // Dependent commercial rows inherit the tenant boundary from their required
         // aggregate root. Keep these filters aligned with the PostgreSQL parent-derived
@@ -181,6 +192,34 @@ public partial class ErpRfqAutomationContext
         if (Database.IsNpgsql())
         {
             modelBuilder.AddEvidenceLedger();
+
+            modelBuilder.Entity<ERP_RFQ_Automation.Extraction.ExtractionJob>()
+                .HasAlternateKey(e => new { e.BusinessUnitId, e.Id })
+                .HasName("AK_ExtractionJobs_BusinessUnitId_Id");
+            modelBuilder.Entity<LeadIngestionOccurrence>()
+                .HasOne<SourceDocument>()
+                .WithMany()
+                .HasForeignKey(e => new { e.BusinessUnitId, e.SourceDocumentId })
+                .HasPrincipalKey(e => new { e.BusinessUnitId, e.Id })
+                .OnDelete(DeleteBehavior.Restrict);
+            modelBuilder.Entity<LeadIngestionOccurrence>()
+                .HasOne<ERP_RFQ_Automation.Extraction.ExtractionJob>()
+                .WithMany()
+                .HasForeignKey(e => new { e.BusinessUnitId, e.ExtractionJobId })
+                .HasPrincipalKey(e => new { e.BusinessUnitId, e.Id })
+                .OnDelete(DeleteBehavior.Restrict);
+            modelBuilder.Entity<LeadOccurrenceDocument>()
+                .HasOne<SourceDocument>()
+                .WithMany()
+                .HasForeignKey(e => new { e.BusinessUnitId, e.SourceDocumentId })
+                .HasPrincipalKey(e => new { e.BusinessUnitId, e.Id })
+                .OnDelete(DeleteBehavior.Restrict);
+            modelBuilder.Entity<CanonicalInquiry>()
+                .HasOne<Lead>()
+                .WithMany()
+                .HasForeignKey(e => new { e.BusinessUnitId, e.LeadId })
+                .HasPrincipalKey(e => new { e.BusinessUnitId, e.Id })
+                .OnDelete(DeleteBehavior.Restrict);
 
             modelBuilder.Entity<DocumentCorpus>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
             modelBuilder.Entity<SourceDocument>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);

@@ -11,12 +11,22 @@
 
 1. Upload/email ingestion enters a quarantine and inspection gateway, then creates an immutable source occurrence and idempotent extraction job.
 2. Structured CSV/XLSX processing is deterministic and local. PDF, image, and legacy document processing uses local text/OCR first and governed LLM fallback.
-3. Extraction persists Lead and LeadItems. A Commercial Case gives the Lead its immutable `CommercialCaseReference`, displayed as Nexora Serial.
+3. Extraction produces logical inquiry candidates. The Release 01A reconciliation service classifies each as new, exact duplicate, revision, or possible match before routing; only a genuinely new inquiry creates a Lead and immutable Nexora Serial.
 4. Lead qualification and conversion create an RFQ in a serializable transaction with inherited customer/contact identity, lifecycle event, and outbox record.
 5. RFQ processing creates Quotes; quote send/outcome/order transitions use optimistic lifecycle commands and append-only events. Orders inherit the same commercial identity, which is exposed on invoice data.
 6. Dashboard `release-01` computes one tenant/role-scoped snapshot with a shared cohort, timestamp, definitions, and complete drill-down identifiers. The legacy endpoint remains permission-gated but is not a certified KPI source.
 
 ## Release 01 Shared Contracts
+
+## Release 01A Identity Contract
+
+- `Lead.Id` remains the technical canonical key and `CommercialCaseReference` remains the Nexora Serial. No competing identifier was added.
+- `LeadIngestionBatch` groups one intake session; `LeadIngestionOccurrence` records every logical arrival; `LeadRevision` and `LeadItemRevision` are immutable snapshots.
+- `LeadOccurrenceDocument` is a tenant-qualified many-to-many bridge between logical occurrences and authoritative `source_documents`.
+- Deterministic resolution order is trusted source identity, customer-scoped exact content, customer plus RFQ reference, local line fingerprint similarity, then human review. Unresolved similarity never auto-merges.
+- Exact duplicates reuse the Lead/current revision and never route. Revisions reuse the Lead/serial, increment the revision, retain ownership and record RFQ/Quote/Order impacts without mutating committed artifacts.
+- Runtime access combines claims-derived tenant scope, module permission attributes, EF filters, composite tenant foreign keys and PostgreSQL RLS using `nexora.business_unit_id`.
+- Local loopback Ollama is the default unstructured provider. Any configured remote endpoint is classified external, requires a key and consent, and is blocked before invocation if its share of the rolling successful AI-request window would exceed 10%.
 
 ### Commercial Document Identity
 

@@ -178,6 +178,118 @@ export interface PaginatedResponse<T> {
   pageSize: number;
 }
 
+export type LeadOccurrenceClassification =
+  | 'Pending'
+  | 'New'
+  | 'ExactDuplicate'
+  | 'Revision'
+  | 'PossibleMatchReviewRequired'
+  | 'RejectedOrUnprocessable';
+
+export interface GovernedUploadJobDTO {
+  jobId: number;
+  fileName: string;
+  outcome: string;
+  reason?: string | null;
+}
+
+export interface GovernedUploadResponseDTO {
+  batchId?: string | null;
+  jobs: GovernedUploadJobDTO[];
+}
+
+export interface BatchReconciliationItemDTO {
+  occurrenceId: number;
+  leadId?: number | null;
+  nexoraSerial?: string | null;
+  classification: LeadOccurrenceClassification | string;
+  revisionNumber?: number | null;
+  fileName?: string | null;
+  ingestedAtUtc: string;
+  processingPath: string;
+  externalAiUsed: boolean;
+  confidence: number;
+  reasons: string[];
+  matchCandidates: LeadMatchCandidateDTO[];
+}
+
+export interface LeadMatchCandidateDTO {
+  candidateId: number;
+  candidateLeadId: number;
+  nexoraSerial: string;
+  customerRfqReference?: string | null;
+  confidence: number;
+  matchEvidenceJson: string;
+  differencesJson: string;
+  downstreamImpactJson: string;
+  reviewState: string;
+  version: number;
+}
+
+export interface BatchReconciliationDTO {
+  batchId: string;
+  filesReceived: number;
+  logicalInquiries: number;
+  newLeads: number;
+  exactDuplicates: number;
+  revisions: number;
+  possibleMatches: number;
+  rejected: number;
+  externalOccurrences: number;
+  externalCost: number;
+  items: BatchReconciliationItemDTO[];
+}
+
+export interface LeadRevisionDifferenceDTO {
+  changeType: 'Added' | 'Removed' | 'Modified' | 'Unchanged' | string;
+  scope: string;
+  path: string;
+  previousValueJson?: string | null;
+  currentValueJson?: string | null;
+}
+
+export interface LeadRevisionImpactDTO {
+  aggregateType: string;
+  aggregateId: number;
+  impactType: string;
+  status: string;
+  detailsJson: string;
+}
+
+export interface LeadRevisionDTO {
+  id: number;
+  revisionNumber: number;
+  createdAtUtc: string;
+  fingerprint: string;
+  customerRfqReference?: string | null;
+  processingPath: string;
+  externalAiUsed: boolean;
+  differences: LeadRevisionDifferenceDTO[];
+  impacts: LeadRevisionImpactDTO[];
+}
+
+export type MatchReviewDecisionAction = 'exact_duplicate' | 'revision' | 'link' | 'create_new' | 'defer' | 'reject';
+
+export interface MatchReviewDecisionRequestDTO {
+  action: MatchReviewDecisionAction;
+  candidateLeadId?: number | null;
+  expectedVersion: number;
+  reason: string;
+  idempotencyKey: string;
+}
+
+export interface LeadReconciliationResultDTO {
+  leadId: number;
+  nexoraSerial: string;
+  occurrenceId: number;
+  revisionId?: number | null;
+  revisionNumber: number;
+  classification: LeadOccurrenceClassification | string;
+  confidence: number;
+  reasons: string[];
+  shouldRoute: boolean;
+}
+
 const leadService = {
   getAll: async (filters: LeadFilters): Promise<PaginatedResponse<LeadResponseDTO>> => {
     const r = await axiosInstance.get('/api/Lead', { params: filters });
@@ -186,6 +298,27 @@ const leadService = {
 
   getById: async (id: number): Promise<LeadResponseDTO> => {
     const r = await axiosInstance.get(`/api/Lead/${id}`);
+    return r.data;
+  },
+
+  getIngestionBatch: async (batchId: string): Promise<BatchReconciliationDTO> => {
+    const r = await axiosInstance.get<BatchReconciliationDTO>(`/api/LeadIngestion/batches/${encodeURIComponent(batchId)}`);
+    return r.data;
+  },
+
+  getRevisions: async (leadId: number): Promise<LeadRevisionDTO[]> => {
+    const r = await axiosInstance.get<LeadRevisionDTO[]>(`/api/LeadIngestion/leads/${leadId}/revisions`);
+    return r.data;
+  },
+
+  decideMatchReview: async (
+    occurrenceId: number,
+    request: MatchReviewDecisionRequestDTO,
+  ): Promise<LeadReconciliationResultDTO> => {
+    const r = await axiosInstance.post<LeadReconciliationResultDTO>(
+      `/api/LeadIngestion/match-reviews/${occurrenceId}/decision`,
+      request,
+    );
     return r.data;
   },
 
@@ -241,6 +374,16 @@ const leadService = {
     return axiosInstance.post('/api/ManualUpload/upload', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
+  },
+
+  uploadGoverned: async (formData: FormData): Promise<GovernedUploadResponseDTO> => {
+    const r = await axiosInstance.post<GovernedUploadResponseDTO>('/api/Extraction/upload', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+        'Idempotency-Key': `manual-upload:${crypto.randomUUID()}`,
+      },
+    });
+    return r.data;
   },
 
   uploadRfqExcel: async (formData: FormData) => {

@@ -7,6 +7,8 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
+using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.Extraction;
 
 namespace ERP_RFQ_Automation.Controllers
 {
@@ -16,21 +18,24 @@ namespace ERP_RFQ_Automation.Controllers
     public class LeadUploaderController : ControllerBase
     {
         private readonly LeadUploaderService _service;
+        private readonly IDocumentIngestion _ingestion;
         private readonly ILogger<LeadUploaderController> _logger;
 
-        public LeadUploaderController(LeadUploaderService service, ILogger<LeadUploaderController> logger)
+        public LeadUploaderController(LeadUploaderService service, IDocumentIngestion ingestion, ILogger<LeadUploaderController> logger)
         {
             _service = service;
+            _ingestion = ingestion;
             _logger = logger;
         }
 
         [HttpGet("download-template")]
+        [RequireModulePermission("Leads", PermissionAction.View)]
         public async Task<IActionResult> DownloadTemplate([FromQuery] long? businessUnitId = null)
         {
             try
             {
                 var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
+                var targetBUId = claimBUId;
 
                 if (targetBUId <= 0)
                     return BadRequest(new { success = false, message = "Business Unit ID is required." });
@@ -48,10 +53,11 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPost("upload-template")]
+        [RequireModulePermission("Leads", PermissionAction.Create)]
         public async Task<IActionResult> UploadTemplate(IFormFile file, [FromForm] long? businessUnitId = null)
         {
             var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-            var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
+            var targetBUId = claimBUId;
 
             if (targetBUId <= 0)
                 return BadRequest(new { success = false, message = "Business Unit ID is required." });
@@ -61,14 +67,15 @@ namespace ERP_RFQ_Automation.Controllers
 
             try
             {
-                var createdBy = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? "system";
-                using var stream = file.OpenReadStream();
-                var result = await _service.UploadTemplateAsync(stream, targetBUId, createdBy);
-
-                if (!result.Success)
-                    return BadRequest(new { success = false, message = result.Message });
-
-                return Ok(new { success = true, message = result.Message });
+                await using var stream = new MemoryStream();
+                await file.CopyToAsync(stream, HttpContext.RequestAborted);
+                var batchId = Guid.NewGuid();
+                var idempotency = Request.Headers.TryGetValue("Idempotency-Key", out var key) ? key.ToString() : batchId.ToString("N");
+                var result = await _ingestion.IngestAsync(stream.ToArray(), file.FileName, targetBUId,
+                    ExtractionSourceType.ManualUpload, batchId, priority: 10,
+                    metadata: new ExtractionJobMetadata { SourceOccurrenceId = $"template:{idempotency}:{file.FileName}" },
+                    HttpContext.RequestAborted);
+                return StatusCode(StatusCodes.Status202Accepted, new { success = true, batchId, jobId = result.JobId, outcome = result.Outcome.ToString() });
             }
             catch (Exception ex)
             {

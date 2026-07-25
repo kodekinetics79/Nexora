@@ -330,9 +330,11 @@ namespace ERP_RFQ_Automation.Services
             var queued = 0;
             var metadata = new ERP_RFQ_Automation.Extraction.ExtractionJobMetadata
             {
+                SourceOccurrenceId = $"email:{message.MessageId ?? ingest.Id.ToString()}:body",
                 EmailIngestId = ingest.Id,
-                FromEmail = message.From.ToString(),
+                FromEmail = message.From.Mailboxes.FirstOrDefault()?.Address,
                 Subject = message.Subject ?? "",
+                SourceReceivedAtUtc = message.Date,
                 ClientEmail = config.EmailAddress,
                 LeadSource = "Email",
                 EmailSource = "Text Only" // per-attachment jobs override with their own label
@@ -362,8 +364,10 @@ namespace ERP_RFQ_Automation.Services
             }
 
             // 2) Each supported attachment is its own job (same batch, same provenance).
+            var attachmentOrdinal = 0;
             foreach (var att in message.Attachments)
             {
+                attachmentOrdinal++;
                 if (att is not MimePart part || part.FileName == null) continue;
                 var ext = Path.GetExtension(part.FileName).ToLowerInvariant();
                 if (!IsSupportedExtension(ext)) continue;
@@ -381,9 +385,11 @@ namespace ERP_RFQ_Automation.Services
 
                     var attMetadata = new ERP_RFQ_Automation.Extraction.ExtractionJobMetadata
                     {
+                        SourceOccurrenceId = $"email:{message.MessageId ?? ingest.Id.ToString()}:attachment:{attachmentOrdinal}",
                         EmailIngestId = ingest.Id,
                         FromEmail = metadata.FromEmail,
                         Subject = metadata.Subject,
+                        SourceReceivedAtUtc = metadata.SourceReceivedAtUtc,
                         ClientEmail = metadata.ClientEmail,
                         LeadSource = "Email",
                         EmailSource = GetFileTypeLabel(ext)
@@ -644,7 +650,7 @@ namespace ERP_RFQ_Automation.Services
                         DurationAgreement = Truncate(ai.DurationAgreement, 100),
                         LeadSource = "Email",
                         EmailSource = emailSource,
-                        Clientemail = config.EmailAddress,
+                        Clientemail = message.From.Mailboxes.FirstOrDefault()?.Address,
                         Aiconfidence = (decimal?)ai.OverallConfidence,
                         ReviewVersion = 1,
                         RequiresCommercialReview = true,

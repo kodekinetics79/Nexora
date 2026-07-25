@@ -10,6 +10,29 @@ namespace ERP_RFQ_Automation.Tests.CommercialCases;
 public sealed class CommercialIdentityFlowTests
 {
     [Fact]
+    public async Task Quote_revision_retains_tenant_rfq_serial_customer_and_contact()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(829);
+        var lead = Seed.Lead(context, 1, 829); Seed.Customer(context, 7001, 829, "Quote customer");
+        await context.SaveChangesAsync();
+        lead.ResolveCommercialIdentity(7001, 7002, "CONFIRMED");
+        await context.SaveChangesAsync();
+        var rfq = new Rfq { Id = 2, LeadId = 1, BusinessUnitId = 829 };
+        rfq.InheritCommercialIdentity(lead);
+        var predecessor = new Quote { Id = 3, Rfqid = 2, BusinessUnitId = 829 };
+        predecessor.InheritCommercialIdentity(rfq);
+        var revision = new Quote { Rfqid = 2, BusinessUnitId = 829 };
+
+        revision.InheritCommercialIdentity(predecessor);
+
+        Assert.Equal(predecessor.CommercialCaseId, revision.CommercialCaseId);
+        Assert.Equal(predecessor.NexoraSerial, revision.NexoraSerial);
+        Assert.Equal(predecessor.CustomerId, revision.CustomerId);
+        Assert.Equal(predecessor.ContactId, revision.ContactId);
+    }
+
+    [Fact]
     public async Task LeadReview_PersistsTenantValidatedCustomerAndContactIdentity()
     {
         using var db = new TestDb();

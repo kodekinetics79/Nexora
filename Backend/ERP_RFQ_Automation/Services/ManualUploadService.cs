@@ -326,7 +326,7 @@ namespace ERP_RFQ_Automation.Services
                         DurationAgreement = Truncate(ai.DurationAgreement, 100),
                         LeadSource = "Manual",
                         EmailSource = emailSource,
-                        Clientemail = "manual@upload.com",
+                        Clientemail = null,
                         Aiconfidence = (decimal?)ai.OverallConfidence,
                         ReviewVersion = 1,
                         RequiresCommercialReview = true,

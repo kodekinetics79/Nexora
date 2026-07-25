@@ -30,6 +30,7 @@ const LeadsPage = lazy(() => import('./pages/Leads/LeadsPage'));
 const OutstandingLeadsPage = lazy(() => import('./pages/Leads/OutstandingLeadsPage'));
 const AssignedLeadsPage = lazy(() => import('./pages/Leads/AssignedLeadsPage'));
 const ManualUploadLeadsPage = lazy(() => import('./pages/Leads/ManualUploadLeadsPage'));
+const LeadIngestionBatchPage = lazy(() => import('./pages/Leads/LeadIngestionBatchPage'));
 const LeadDetailPage = lazy(() => import('./pages/Leads/LeadDetailPage'));
 const CommercialCaseWorkspacePage = lazy(() => import('./pages/CommercialCases/CommercialCaseWorkspacePage'));
 const ExtractionReviewPage = lazy(() => import('./pages/ExtractionReview/ExtractionReviewPage'));
@@ -175,6 +176,7 @@ function App() {
       <Route path="/procurement/leads/outstanding" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><OutstandingLeadsPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/leads/assigned" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><AssignedLeadsPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/leads/manual-upload" element={<MainLayout><PermissionGuard moduleName="Leads" action="create" redirect><ManualUploadLeadsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/procurement/leads/ingestion/:batchId" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><LeadIngestionBatchPage /></PermissionGuard></MainLayout>} />
       {/* Customer 1 / Customer 2 folder-upload prototype removed from intake. Redirect legacy links to manual upload. */}
       <Route path="/procurement/leads/folder-upload" element={<Navigate to="/procurement/leads/manual-upload" replace />} />
       <Route path="/procurement/leads/view/:id" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><LeadDetailPage /></PermissionGuard></MainLayout>} />

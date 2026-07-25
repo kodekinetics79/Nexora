@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import {
   Box, Typography, Paper, Button, Stack,
   CircularProgress, Alert, IconButton, List,
@@ -19,14 +20,18 @@ import { useSnackbar } from 'notistack';
 const ManualUploadLeadsPage: React.FC = () => {
   const { t } = useTranslation();
   const { enqueueSnackbar } = useSnackbar();
+  const navigate = useNavigate();
   const [files, setFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
 
   const uploadMutation = useMutation({
-    mutationFn: (fd: FormData) => leadService.uploadManual(fd),
-    onSuccess: () => {
-      enqueueSnackbar('Documents queued — Nexora is reading them now. New leads will appear shortly.', { variant: 'success' });
+    mutationFn: (fd: FormData) => leadService.uploadGoverned(fd),
+    onSuccess: (result) => {
+      enqueueSnackbar('Documents queued for governed ingestion and reconciliation.', { variant: 'success' });
       setFiles([]);
+      if (result.batchId) {
+        navigate(`/procurement/leads/ingestion/${encodeURIComponent(result.batchId)}`);
+      }
     },
     onError: (err: any) => {
       enqueueSnackbar(err.response?.data?.message || 'Upload failed', { variant: 'error' });
@@ -76,10 +81,10 @@ const ManualUploadLeadsPage: React.FC = () => {
               '& .MuiAlert-icon': { color: '#3b82f6' }
             }}
           >
-            <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>AI-Powered Lead Extraction</Typography>
+            <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>Lead ingestion and reconciliation</Typography>
             <Typography variant="caption">
-              Upload RFQ documents, spreadsheets, or images. Our engine will automatically extract
-              technical specifications and buyer details.
+              Upload RFQ documents, spreadsheets, or images. Nexora preserves each source, extracts
+              its commercial facts, and checks whether it is new, duplicated, revised, or needs review.
             </Typography>
           </Alert>
 
@@ -156,7 +161,7 @@ const ManualUploadLeadsPage: React.FC = () => {
               }}
               startIcon={uploading ? <CircularProgress size={20} color="inherit" /> : <AIIcon />}
             >
-              {uploading ? 'Analyzing Documents...' : 'Analyze & Process Leads'}
+              {uploading ? 'Queueing documents...' : 'Queue for reconciliation'}
             </Button>
           </Box>
         </Box>

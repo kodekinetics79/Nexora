@@ -941,6 +941,7 @@ namespace ERP_RFQ_Automation.Services
                     CreatedDate = now
                 }).ToList()
             };
+            revision.InheritCommercialIdentity(source);
 
             await CalculateQuoteTotals(revision);
 

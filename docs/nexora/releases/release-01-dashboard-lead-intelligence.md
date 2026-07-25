@@ -58,6 +58,8 @@ Initial bounded reviews completed for commercial workflow, architecture/data, AI
 
 ## Residuals
 
+- **Release 01A remains NO-GO:** canonical occurrence/revision persistence and provider-path reporting are implemented, but Lead identity is still allocated after extraction rather than when intake is accepted, and automatic multi-document inquiry grouping is not certified.
+
 - **P0 deployment blocker:** browser SIT is not executed. The required in-app browser connection rejects initialization because its sandbox metadata is incomplete. Lead -> RFQ -> Quote, role variants, error states, and 375 px layout are therefore not accepted in a real browser.
 - **P1 acceptance blocker:** only leads received, leads requiring review, qualification rate, and median qualification time have calculated dashboard paths. The other 14 contract KPIs truthfully return `insufficient_data`, but Dashboard 1.0 is not feature-complete or fully reconciled.
 - **P1 acceptance blocker:** no TestServer plus PostgreSQL test proves 401/403, wrong permission, forged tenant input, and runtime-role RLS together for the changed endpoints.

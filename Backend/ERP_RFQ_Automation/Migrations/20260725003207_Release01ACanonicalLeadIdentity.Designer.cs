@@ -3,6 +3,7 @@ using System;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace ERP_RFQ_Automation.Migrations
 {
     [DbContext(typeof(ErpRfqAutomationContext))]
-    partial class ErpRfqAutomationContextModelSnapshot : ModelSnapshot
+    [Migration("20260725003207_Release01ACanonicalLeadIdentity")]
+    partial class Release01ACanonicalLeadIdentity
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -271,11 +274,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
-                    b.Property<string>("ProviderClass")
-                        .IsRequired()
-                        .HasMaxLength(16)
-                        .HasColumnType("character varying(16)");
-
                     b.Property<long>("ReservedTokens")
                         .HasColumnType("bigint");
 
@@ -304,8 +302,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("BusinessUnitId", "IdempotencyKey")
                         .IsUnique()
                         .HasDatabaseName("UX_AiRequests_BU_IdempotencyKey");
-
-                    b.HasIndex("BusinessUnitId", "ProviderClass", "CreatedOn");
 
                     b.ToTable("AiRequests", (string)null);
                 });
@@ -7326,44 +7322,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.ToTable("LeadMatchCandidates", (string)null);
                 });
 
-            modelBuilder.Entity("ERP_RFQ_Automation.LeadIdentity.LeadOccurrenceDocument", b =>
-                {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
-
-                    b.Property<long>("BusinessUnitId")
-                        .HasColumnType("bigint");
-
-                    b.Property<DateTimeOffset>("LinkedAtUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<long>("OccurrenceId")
-                        .HasColumnType("bigint");
-
-                    b.Property<int>("Ordinal")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("Role")
-                        .IsRequired()
-                        .HasMaxLength(40)
-                        .HasColumnType("character varying(40)");
-
-                    b.Property<long>("SourceDocumentId")
-                        .HasColumnType("bigint");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("BusinessUnitId", "SourceDocumentId");
-
-                    b.HasIndex("BusinessUnitId", "OccurrenceId", "SourceDocumentId")
-                        .IsUnique();
-
-                    b.ToTable("LeadOccurrenceDocuments", (string)null);
-                });
-
             modelBuilder.Entity("ERP_RFQ_Automation.LeadIdentity.LeadRevision", b =>
                 {
                     b.Property<long>("Id")
@@ -13438,25 +13396,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Navigation("Occurrence");
                 });
 
-            modelBuilder.Entity("ERP_RFQ_Automation.LeadIdentity.LeadOccurrenceDocument", b =>
-                {
-                    b.HasOne("ERP_RFQ_Automation.LeadIdentity.LeadIngestionOccurrence", "Occurrence")
-                        .WithMany("Documents")
-                        .HasForeignKey("BusinessUnitId", "OccurrenceId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("ERP_RFQ_Automation.DocumentIntelligence.Persistence.SourceDocument", null)
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "SourceDocumentId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("Occurrence");
-                });
-
             modelBuilder.Entity("ERP_RFQ_Automation.LeadIdentity.LeadRevision", b =>
                 {
                     b.HasOne("ERP_RFQ_Automation.LeadIdentity.LeadIngestionOccurrence", "EstablishedByOccurrence")
@@ -14839,8 +14778,6 @@ namespace ERP_RFQ_Automation.Migrations
 
             modelBuilder.Entity("ERP_RFQ_Automation.LeadIdentity.LeadIngestionOccurrence", b =>
                 {
-                    b.Navigation("Documents");
-
                     b.Navigation("MatchCandidates");
 
                     b.Navigation("Revision");

@@ -7,6 +7,8 @@ namespace ERP_RFQ_Automation.Services.Interfaces
 {
     public interface ILLMService
     {
+        AiProviderClass ProviderClass => AiProviderClass.External;
+
         Task<LeadExtractionResult?> ExtractLeadDataAsync(
             string fullText, AiCallContext context, CancellationToken cancellationToken = default);
 

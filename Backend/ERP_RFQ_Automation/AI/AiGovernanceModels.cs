@@ -2,6 +2,7 @@ namespace ERP_RFQ_Automation.AI;
 
 public enum AiProviderClass
 {
+    Unknown,
     External,
     Local
 }
@@ -47,6 +48,7 @@ public sealed class AiRequest
     public string PromptHash { get; set; } = null!;
     public string PromptVersion { get; set; } = null!;
     public string Provider { get; set; } = null!;
+    public AiProviderClass ProviderClass { get; set; }
     public string Model { get; set; } = null!;
     public string Status { get; set; } = AiCallStatuses.Reserved;
     public int InputCharacters { get; set; }

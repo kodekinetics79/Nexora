@@ -4,7 +4,11 @@ All times are UTC. Unless stated otherwise, the cohort is the tenant-visible set
 
 | KPI | Numerator / value | Denominator | Cohort and exclusions | Drill-down |
 |---|---|---|---|---|
-| Leads received | Distinct cases with `LEAD_RECEIVED` | None | Event occurred in window; exclude test/ambiguous legacy cases | Lead IDs and Nexora Serials |
+| Leads received | Distinct canonical Leads classified `New` | None | Canonical Lead creation occurred in window; duplicates, revisions and possible matches excluded | Lead IDs and Nexora Serials |
+| Ingestion volume | All ingestion occurrences | None | Occurrence `CreatedAtUtc` in window, including duplicates, revisions and possible matches | Occurrence and canonical Lead IDs where resolved |
+| Duplicate rate | Exact-duplicate occurrences | All ingestion occurrences | Identical tenant and time window | Occurrence IDs and canonical Lead IDs |
+| Revision rate | Revision occurrences | All ingestion occurrences | Identical tenant and time window; denominator version `release-01a` | Occurrence, Lead and revision IDs |
+| Possible-match rate | Possible-match-review occurrences | All ingestion occurrences | Identical tenant and time window | Occurrence and candidate Lead IDs |
 | Leads requiring review | Latest Lead state is review-required | None | Received by window end and not terminal/converted | Lead IDs |
 | Qualification rate | Cases with `LEAD_QUALIFIED` | Cases with a qualification decision (`QUALIFIED` or `DISQUALIFIED`) | Decision occurred in window; first valid decision per case | Qualified and disqualified Lead IDs |
 | Median time to qualify | Median duration from `LEAD_RECEIVED` to first valid qualification decision | None | Same case, nonnegative timestamps, both events present | Lead IDs with durations |
@@ -26,6 +30,7 @@ All times are UTC. Unless stated otherwise, the cohort is the tenant-visible set
 ## Reconciliation Rules
 
 - Counts use distinct tenant-qualified Commercial Case IDs unless the KPI explicitly measures documents or fields.
+- Release 01A ingestion rates use occurrence counts; `Leads received` uses canonical Lead creation and therefore cannot be inflated by resends or revisions.
 - Quote revision KPIs use the latest valid, non-superseded revision per commercial decision.
 - Currency totals require an authoritative tenant base currency and effective conversion rate; otherwise the value is `insufficient_data`.
 - Every displayed value must reconcile to the exact identifiers returned by its drill-down query under the same filters and freshness boundary.

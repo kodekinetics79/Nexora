@@ -571,6 +571,7 @@ public sealed class LeadPersister : ILeadPersister
     private readonly ILogger<LeadPersister> _log;
     private readonly ERP_RFQ_Automation.Deduplication.ILeadDuplicateDetector? _duplicateDetector;
     private readonly ERP_RFQ_Automation.CommercialRouting.ICommercialRoutingApplicationService? _routing;
+    private readonly ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService? _leadIdentity;
 
     // The detector is optional so persistence keeps working before (and without)
     // the Deduplication DI registration (see Deduplication/DEDUP-WIRING.md).
@@ -578,12 +579,14 @@ public sealed class LeadPersister : ILeadPersister
         ErpRfqAutomationContext context,
         ILogger<LeadPersister> log,
         ERP_RFQ_Automation.Deduplication.ILeadDuplicateDetector? duplicateDetector = null,
-        ERP_RFQ_Automation.CommercialRouting.ICommercialRoutingApplicationService? routing = null)
+        ERP_RFQ_Automation.CommercialRouting.ICommercialRoutingApplicationService? routing = null,
+        ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService? leadIdentity = null)
     {
         _context = context;
         _log = log;
         _duplicateDetector = duplicateDetector;
         _routing = routing;
+        _leadIdentity = leadIdentity;
     }
 
     public Task<long> PersistAsync(
@@ -634,22 +637,48 @@ public sealed class LeadPersister : ILeadPersister
                 $"{reviewNote}{splitNote}{sourceNote}"));
         }
 
-        var autoDetect = _context.ChangeTracker.AutoDetectChangesEnabled;
-        _context.ChangeTracker.AutoDetectChangesEnabled = false;
-        try
+        var reconciliation = new List<ERP_RFQ_Automation.LeadIdentity.LeadReconciliationResult>(leads.Count);
+        if (_leadIdentity is not null)
         {
-            // Add traverses each graph (ingest + lead + items). An ALREADY-TRACKED ingest
-            // (pre-created by the email door) is skipped by graph-add and simply linked.
-            foreach (var lead in leads)
-                _context.Add(lead);
-            await _context.SaveChangesAsync(ct); // one per-document transaction
+            long? sourceDocumentId = null;
+            if (_context.Model.FindEntityType(typeof(SourceDocument)) is not null)
+                sourceDocumentId = await _context.Set<SourceDocument>()
+                    .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.ContentHash == job.ContentHash)
+                    .Select(x => (long?)x.Id).SingleOrDefaultAsync(ct);
+            for (var i = 0; i < leads.Count; i++)
+            {
+                var path = outcome.CanonicalImport is not null
+                    ? ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.Deterministic
+                    : outcome.AiProviderClass == ERP_RFQ_Automation.AI.AiProviderClass.Local
+                        ? ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.LocalModel
+                        : ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.ExternalModel;
+                reconciliation.Add(await _leadIdentity.ReconcileAsync(leads[i],
+                    new ERP_RFQ_Automation.LeadIdentity.LeadIntakeDescriptor(
+                        job.BatchId, job.SourceType.ToString(),
+                        $"extraction:{job.BusinessUnitId}:{job.Id}:inquiry:{i + 1}",
+                        results.Count > 1 && metadata?.SourceOccurrenceId is { } sourceOccurrenceId
+                            ? $"{sourceOccurrenceId}:inquiry:{i + 1}" : metadata?.SourceOccurrenceId,
+                        null, job.SourceType.ToString(), metadata?.FromEmail,
+                        metadata?.Subject, job.FileName, null, null, job.ContentHash, sourceDocumentId, job.Id,
+                        metadata?.SourceReceivedAtUtc, DateTimeOffset.UtcNow, path, path == ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.ExternalModel,
+                        0m, "Service", "extraction-worker", $"extraction:{job.Id}"), ct));
+            }
+            var canonicalIds = reconciliation.Where(x => x.LeadId > 0).Select(x => x.LeadId).Distinct().ToArray();
+            leads = await _context.Leads.Include(x => x.LeadItems).Where(x => canonicalIds.Contains(x.Id)).ToListAsync(ct);
         }
-        finally
+        else
         {
-            _context.ChangeTracker.AutoDetectChangesEnabled = autoDetect;
+            var autoDetect = _context.ChangeTracker.AutoDetectChangesEnabled;
+            _context.ChangeTracker.AutoDetectChangesEnabled = false;
+            try
+            {
+                foreach (var lead in leads) _context.Add(lead);
+                await _context.SaveChangesAsync(ct);
+            }
+            finally { _context.ChangeTracker.AutoDetectChangesEnabled = autoDetect; }
         }
 
-        if (outcome.CanonicalImport is not null)
+        if (outcome.CanonicalImport is not null && leads.Count == results.Count)
         {
             var evidencePersister = new StructuredEvidenceLedgerPersister(_context);
             await evidencePersister.PersistAsync(job, outcome, leads, ct);
@@ -674,7 +703,7 @@ public sealed class LeadPersister : ILeadPersister
 
         // WP-A3: duplicate detection AFTER the save, PER produced lead. Best-effort by
         // contract — a detection failure must never fail (or roll back) the persistence.
-        if (enrichAfterPersistence)
+        if (enrichAfterPersistence && _leadIdentity is null)
             await TryDetectDuplicatesAsync(job, leads, ct);
 
         // Every extracted lead enters the governed routing flow. Matching may assign
@@ -682,9 +711,13 @@ public sealed class LeadPersister : ILeadPersister
         // idempotent per job/lead; a transient routing failure cannot duplicate the
         // commercial record and can be replayed through the routing API/reconciler.
         if (enrichAfterPersistence)
-            await TryRouteLeadsAsync(job, leads, ct);
+        {
+            var routeIds = _leadIdentity is null ? leads.Select(x => x.Id).ToHashSet()
+                : reconciliation.Where(x => x.ShouldRoute).Select(x => x.LeadId).ToHashSet();
+            await TryRouteLeadsAsync(job, leads.Where(x => routeIds.Contains(x.Id)), ct);
+        }
 
-        return leads[0].Id;
+        return reconciliation.Count > 0 ? reconciliation[0].LeadId : leads[0].Id;
     }
 
     private async Task PersistUnstructuredRunAsync(
@@ -753,8 +786,20 @@ public sealed class LeadPersister : ILeadPersister
             throw new InvalidOperationException($"Fenced completion failed for extraction job {job.Id}.");
 
         await transaction.CommitAsync(ct);
-        await TryDetectDuplicatesAsync(job, persistedLeads, ct);
-        await TryRouteLeadsAsync(job, persistedLeads, ct);
+        if (_leadIdentity is null)
+            await TryDetectDuplicatesAsync(job, persistedLeads, ct);
+        if (_leadIdentity is null)
+            await TryRouteLeadsAsync(job, persistedLeads, ct);
+        else
+        {
+            var newLeadIds = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadIngestionOccurrence>()
+                .AsNoTracking()
+                .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.ExtractionJobId == job.Id
+                    && x.Classification == ERP_RFQ_Automation.LeadIdentity.LeadOccurrenceClassification.New
+                    && x.LeadId != null)
+                .Select(x => x.LeadId!.Value).ToListAsync(ct);
+            await TryRouteLeadsAsync(job, persistedLeads.Where(x => newLeadIds.Contains(x.Id)), ct);
+        }
         return leadId;
     }
 
@@ -918,7 +963,7 @@ public sealed class LeadPersister : ILeadPersister
             DurationAgreement = Truncate(ai.DurationAgreement, 100),
             LeadSource = metadata?.LeadSource ?? job.SourceType.ToString(),
             EmailSource = Truncate(metadata?.EmailSource ?? job.FileType, 255),
-            Clientemail = metadata?.ClientEmail ?? "extraction@pipeline.local",
+            Clientemail = metadata?.FromEmail,
             Aiconfidence = ClampConfidence(ai.OverallConfidence),
             ReviewVersion = 1,
             RequiresCommercialReview = true,

@@ -21,6 +21,7 @@ import LifecycleActions from '../../components/common/LifecycleActions';
 import { parseDateSafe, formatDateSafe } from '../../utils/dates';
 import { downloadAuthenticatedFile } from '../../utils/authenticatedFile';
 import { useAuth } from '../../context/AuthContext';
+import LeadRevisionTimeline from './LeadRevisionTimeline';
 
 import { toast } from 'react-hot-toast';
 
@@ -401,6 +402,8 @@ const LeadDetailPage: React.FC = () => {
           </Box>
         </Grid>
       </Grid>
+
+      <LeadRevisionTimeline leadId={lead.id} />
 
       {/* WP-A3: confirm dialog for duplicate resolution */}
       <Dialog open={duplicateAction !== null} onClose={() => setDuplicateAction(null)} fullWidth maxWidth="xs">

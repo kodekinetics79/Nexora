@@ -69,7 +69,7 @@ public sealed class AiGovernanceServiceTests
         using var fixture = new Fixture(externalProcessingAllowed: false);
 
         var error = await Assert.ThrowsAsync<AiPolicyDeniedException>(() => fixture.Service.ReserveAsync(
-            fixture.Context("external-provider"), "Ollama", "test", "external input", 32, 10, 1, default));
+            fixture.Context("external-provider", AiProviderClass.External), "Ollama", "test", "external input", 32, 10, 1, default));
 
         Assert.Equal("external_processing_denied", error.Code);
     }
@@ -94,6 +94,7 @@ public sealed class AiGovernanceServiceTests
         var request = await db.AiRequests.IgnoreQueryFilters().SingleAsync();
         var budget = await db.AiBudgetPeriods.IgnoreQueryFilters().SingleAsync();
         Assert.Equal(AiCallStatuses.Succeeded, request.Status);
+        Assert.Equal(AiProviderClass.Local, request.ProviderClass);
         Assert.Equal(input.Length, request.InputCharacters);
         Assert.Equal(output.Length, request.OutputCharacters);
         Assert.DoesNotContain(input, request.InputHash ?? string.Empty, StringComparison.Ordinal);
@@ -141,6 +142,22 @@ public sealed class AiGovernanceServiceTests
         Assert.Single(await db.AiRequests.IgnoreQueryFilters().ToListAsync());
     }
 
+    [Fact]
+    public async Task External_dependency_is_reserved_only_at_or_below_ten_percent()
+    {
+        using var fixture = new Fixture(hardLimit: 100_000);
+        for (var i = 0; i < 9; i++)
+        {
+            var local = await fixture.Service.ReserveAsync(fixture.Context($"local-{i}"), "Ollama", "test", "local", 10, 10, 1, default);
+            await fixture.Service.CompleteAsync(local, AiCallStatuses.Succeeded, 1, 1, AiTokenSources.Estimated, null, null, default);
+        }
+        var external = await fixture.Service.ReserveAsync(fixture.Context("external-one", AiProviderClass.External), "Ollama", "test", "external", 10, 10, 1, default);
+        await fixture.Service.CompleteAsync(external, AiCallStatuses.Succeeded, 1, 1, AiTokenSources.Estimated, null, null, default);
+        var denied = await Assert.ThrowsAsync<AiPolicyDeniedException>(() => fixture.Service.ReserveAsync(
+            fixture.Context("external-two", AiProviderClass.External), "Ollama", "test", "external", 10, 10, 1, default));
+        Assert.Equal("external_dependency_cap", denied.Code);
+    }
+
     private sealed class Fixture : IDisposable
     {
         private const long BusinessUnitId = 44_001;
@@ -182,7 +199,7 @@ public sealed class AiGovernanceServiceTests
 
         public AiCallContext Context(
             string key,
-            AiProviderClass providerClass = AiProviderClass.External) =>
+            AiProviderClass providerClass = AiProviderClass.Local) =>
             new(BusinessUnitId, AiPurposes.RfqExtraction, key, "test-v1", ProviderClass: providerClass);
 
         public void Dispose()

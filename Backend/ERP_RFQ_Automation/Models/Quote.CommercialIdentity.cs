@@ -28,4 +28,17 @@ public partial class Quote
         CustomerId = rfq.CustomerId;
         ContactId = rfq.ContactId;
     }
+
+    public void InheritCommercialIdentity(Quote predecessor)
+    {
+        ArgumentNullException.ThrowIfNull(predecessor);
+        if (predecessor.BusinessUnitId != BusinessUnitId || predecessor.Rfqid != Rfqid)
+            throw new InvalidOperationException("Quote revisions must retain their tenant and RFQ.");
+        if (!predecessor.CommercialCaseId.HasValue || string.IsNullOrWhiteSpace(predecessor.NexoraSerial))
+            throw new InvalidOperationException("The predecessor quote has no canonical commercial identity.");
+        CommercialCaseId = predecessor.CommercialCaseId;
+        NexoraSerial = predecessor.NexoraSerial;
+        CustomerId = predecessor.CustomerId;
+        ContactId = predecessor.ContactId;
+    }
 }

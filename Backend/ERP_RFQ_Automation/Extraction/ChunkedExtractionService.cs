@@ -57,6 +57,7 @@ public sealed class ChunkedExtractionOutcome
     public int ExtractedItemCount { get; init; }
     public string? ReviewReason { get; init; }
     public List<string> Diagnostics { get; init; } = new();
+    public AiProviderClass? AiProviderClass { get; init; }
 
     /// <summary>
     /// Multi-inquiry auto-split (see <see cref="MultiInquirySplitter"/>): when the
@@ -170,7 +171,8 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                 ExtractedItemCount = items0.Count,
                 ReviewReason = status0 == ExtractionOutcomeStatus.NeedsReview ? "Overall confidence below threshold." : null,
                 Diagnostics = diagnostics,
-                SplitResults = split0
+                SplitResults = split0,
+                AiProviderClass = _llm.ProviderClass
             };
         }
 
@@ -251,7 +253,8 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             ExtractedItemCount = extracted,
             ReviewReason = reviewReason,
             Diagnostics = diagnostics,
-            SplitResults = splitResults
+            SplitResults = splitResults,
+            AiProviderClass = _llm.ProviderClass
         };
     }
 
