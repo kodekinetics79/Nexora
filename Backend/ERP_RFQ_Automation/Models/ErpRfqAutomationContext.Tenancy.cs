@@ -9,6 +9,7 @@ using ERP_RFQ_Automation.OrderToCash;
 using ERP_RFQ_Automation.GeneralLedger;
 using ERP_RFQ_Automation.BankReconciliation;
 using ERP_RFQ_Automation.LeadIdentity;
+using ERP_RFQ_Automation.CommercialIntelligence.Sales;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Models;
@@ -163,6 +164,7 @@ public partial class ErpRfqAutomationContext
         // PostgreSQL-only model because their constraints use jsonb and PostgreSQL
         // expressions.
         modelBuilder.ApplyCommercialRoutingModel();
+        modelBuilder.ApplyCommercialSalesModel();
 
         // Stock reservation ledger (portable relational model; enabled for the SQLite suite).
         modelBuilder.ApplyInventoryReservationModel();
@@ -173,6 +175,12 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<LeadRoutingDecision>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<LeadAssignment>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<UnassignedWorkItem>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<SalesRepProfile>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<SalesTeamMembership>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<CommercialActivity>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<FollowUpTask>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<FollowUpTransitionEvent>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<SalesContribution>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
 
         modelBuilder.ConfigureGovernedCustomFields();
         modelBuilder.ConfigureCommercialLifecycle();

@@ -111,6 +111,22 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
         ],
       },
       {
+        key: 'sales-management',
+        label: 'Sales Management',
+        icon: <CustomerIcon />,
+        moduleName: 'Leads',
+        activePrefixes: ['/sales/today', '/sales/team', '/sales/reps', '/sales/accounts', '/sales/routing', '/sales/follow-ups', '/sales/performance'],
+        children: [
+          { key: 'sales-today', label: 'Sales Today', path: '/sales/today', moduleName: 'Leads' },
+          { key: 'sales-team', label: 'Team Overview', path: '/sales/team', moduleName: 'Leads' },
+          { key: 'sales-reps', label: 'Sales Reps', path: '/sales/reps', moduleName: 'Users' },
+          { key: 'sales-accounts', label: 'Account Ownership', path: '/sales/accounts', moduleName: 'Customers' },
+          { key: 'sales-routing', label: 'Routing Queue', path: '/sales/routing', moduleName: 'Leads' },
+          { key: 'sales-follow-ups', label: 'Follow-ups', path: '/sales/follow-ups', moduleName: 'Quotations' },
+          { key: 'sales-performance', label: 'Performance', path: '/sales/performance', moduleName: 'Dashboard' },
+        ],
+      },
+      {
         key: 'lead_mgmt',
         label: t('lead_management'),
         icon: <LeadIcon />,

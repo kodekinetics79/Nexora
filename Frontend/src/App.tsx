@@ -58,6 +58,14 @@ const ShipmentViewPage = lazy(() => import('./pages/Sales/Shipments/ShipmentView
 const ShipmentInvoicePage = lazy(() => import('./pages/Sales/Shipments/ShipmentInvoicePage'));
 const PriceStructurePage = lazy(() => import('./pages/Setup/PriceStructure/PriceStructurePage'));
 const SlaSettingsPage = lazy(() => import('./pages/Setup/Sla/SlaSettingsPage'));
+const SalesTodayPage = lazy(() => import('./pages/SalesManagement/SalesTodayPage'));
+const TeamOverviewPage = lazy(() => import('./pages/SalesManagement/TeamOverviewPage'));
+const RepDirectoryPage = lazy(() => import('./pages/SalesManagement/RepDirectoryPage'));
+const RepProfilePage = lazy(() => import('./pages/SalesManagement/RepProfilePage'));
+const AccountOwnershipPage = lazy(() => import('./pages/SalesManagement/AccountOwnershipPage'));
+const RoutingQueuePage = lazy(() => import('./pages/SalesManagement/RoutingQueuePage'));
+const FollowUpsPage = lazy(() => import('./pages/SalesManagement/FollowUpsPage'));
+const PerformancePage = lazy(() => import('./pages/SalesManagement/PerformancePage'));
 
 // Intelligence surfaces — AI-assisted Lead→RFQ conversion and RFQ smart pricing.
 const LeadConvertPage = lazy(() => import('./pages/Intelligence/LeadConvertPage'));
@@ -100,6 +108,14 @@ function App() {
       <Route path="/services/boq/:id" element={<MainLayout><PermissionGuard moduleName="Quotations" redirect><BoqEditorPage /></PermissionGuard></MainLayout>} />
 
       {/* Sales Routes */}
+      <Route path="/sales/today" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><SalesTodayPage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/team" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><TeamOverviewPage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/reps" element={<MainLayout><PermissionGuard moduleName="Users" redirect><RepDirectoryPage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/reps/:userId" element={<MainLayout><PermissionGuard moduleName="Users" redirect><RepProfilePage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/accounts" element={<MainLayout><PermissionGuard moduleName="Customers" redirect><AccountOwnershipPage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/routing" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><RoutingQueuePage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/follow-ups" element={<MainLayout><PermissionGuard moduleName="Quotations" redirect><FollowUpsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/performance" element={<MainLayout><PermissionGuard moduleName="Dashboard" redirect><PerformancePage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/quotes" element={<MainLayout><PermissionGuard moduleName="Quotations" redirect><QuotesPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/quotes/create" element={<MainLayout><PermissionGuard moduleName="Quotations" action="create" redirect><CreateQuotePage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/quotes/view/:id" element={<MainLayout><PermissionGuard moduleName="Quotations" redirect><QuoteViewPage /></PermissionGuard></MainLayout>} />
