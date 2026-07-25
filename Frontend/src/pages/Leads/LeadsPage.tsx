@@ -566,13 +566,13 @@ const LeadsPage: React.FC = () => {
   const totalCount = data?.totalCount ?? 0;
 
   return (
-    <Box sx={{ p: 3, bgcolor: 'background.default', minHeight: '100vh' }}>
+    <Box sx={{ p: { xs: 1, sm: 2, md: 3 }, bgcolor: 'background.default', minHeight: '100vh', minWidth: 0 }}>
       {/* Header Section */}
-      <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ justifyContent: 'space-between', alignItems: { xs: 'stretch', sm: 'center' }, mb: 2 }}>
         <Typography variant="h5" sx={{ fontWeight: 700 }}>
           {t('leads')}
         </Typography>
-        <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center' }}>
+        <Stack direction="row" spacing={1} sx={{ alignItems: 'center', justifyContent: { xs: 'space-between', sm: 'flex-end' } }}>
           <Tooltip title="Fetches new emails from your connected inboxes now">
             <span>
               <Button
@@ -595,9 +595,11 @@ const LeadsPage: React.FC = () => {
       </Stack>
 
       {/* Filters + view controls */}
-      <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
-        <SearchField width="360px" value={search} onChange={setSearch} placeholder="Search Nexora Serial, RFQ, buyer or email" />
-        <TextField select size="small" value={leadSource} onChange={(e) => setLeadSource(e.target.value)} sx={{ minWidth: 160 }} label="Lead Source">
+      <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', flexWrap: 'wrap', gap: 1.5, alignItems: 'center', borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
+        <Box sx={{ width: { xs: '100%', sm: 360 }, maxWidth: '100%' }}>
+          <SearchField width="100%" value={search} onChange={setSearch} placeholder="Search Nexora Serial, RFQ, buyer or email" />
+        </Box>
+        <TextField select size="small" value={leadSource} onChange={(e) => setLeadSource(e.target.value)} sx={{ width: { xs: '100%', sm: 'auto' }, minWidth: { sm: 160 } }} label="Lead Source">
           <MenuItem value="all">All Sources</MenuItem>
           <MenuItem value="Email">Email</MenuItem>
           <MenuItem value="Manual">Manual</MenuItem>
@@ -620,7 +622,7 @@ const LeadsPage: React.FC = () => {
       </Paper>
 
       {/* Grid */}
-      <Paper sx={{ height: 'calc(100vh - 240px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
+      <Paper sx={{ height: { xs: 'calc(100vh - 330px)', sm: 'calc(100vh - 240px)' }, minHeight: 420, width: '100%', minWidth: 0, borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
         {isError ? (
           <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, p: 3, textAlign: 'center' }}>
             <Alert severity="error" sx={{ borderRadius: 2, maxWidth: 480 }}>

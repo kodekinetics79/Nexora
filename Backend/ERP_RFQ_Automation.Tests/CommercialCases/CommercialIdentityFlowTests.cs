@@ -15,6 +15,7 @@ public sealed class CommercialIdentityFlowTests
         using var db = new TestDb();
         await using var context = db.ContextFor(829);
         var lead = Seed.Lead(context, 1, 829); Seed.Customer(context, 7001, 829, "Quote customer");
+        Seed.Contact(context, 7002, 829, 7001);
         await context.SaveChangesAsync();
         lead.ResolveCommercialIdentity(7001, 7002, "CONFIRMED");
         await context.SaveChangesAsync();
@@ -39,17 +40,7 @@ public sealed class CommercialIdentityFlowTests
         await using var context = db.ContextFor(830);
         var lead = Seed.Lead(context, 4001, 830, parseStatus: "NeedsReview");
         Seed.Customer(context, 7001, 830, "Review Customer");
-        context.Contacts.Add(new Contact
-        {
-            Id = 7002,
-            CustomerId = 7001,
-            FirstName = "Casey",
-            LastName = "Buyer",
-            Email = "casey@example.com",
-            IsActive = true,
-            CreatedBy = "seed",
-            CreatedOn = DateTime.UtcNow
-        });
+        Seed.Contact(context, 7002, 830, 7001, "casey@example.com");
         await context.SaveChangesAsync();
 
         var result = await new LeadRepository(context).SubmitLeadReviewAsync(
@@ -82,6 +73,7 @@ public sealed class CommercialIdentityFlowTests
         Status(context, 6102, 831, "LeadStatus", "CONVERTED_TO_RFQ");
         Status(context, 6103, 831, "RFQStatus", "DRAFT");
         Seed.Customer(context, 7101, 831, "Conversion Customer");
+        Seed.Contact(context, 7102, 831, 7101);
         var lead = Seed.Lead(context, 4101, 831, qualified.SetupId,
             items: new[] { Seed.LeadItem(4102, "1", 2, "Pump") });
         await context.SaveChangesAsync();
@@ -138,6 +130,7 @@ public sealed class CommercialIdentityFlowTests
         await using var context = db.ContextFor(833);
         var lead = Seed.Lead(context, 4301, 833);
         Seed.Customer(context, 7301, 833, "Matched Customer");
+        Seed.Contact(context, 7302, 833, 7301);
         var preparing = Status(context, 6301, 833, "RFQStatus", "QUOTE_PREPARATION");
         await context.SaveChangesAsync();
         lead.ResolveCommercialIdentity(7301, 7302, "CONFIRMED");

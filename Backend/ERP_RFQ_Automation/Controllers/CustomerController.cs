@@ -68,9 +68,9 @@ namespace ERP_RFQ_Automation.Controllers
 
                 return Ok(response);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving data: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to retrieve customers.");
             }
         }
 
@@ -90,28 +90,32 @@ namespace ERP_RFQ_Automation.Controllers
                 var customer = await _repository.GetByIdAsync(id, targetBUId);
                 return Ok(MapToResponse(customer));
             }
-            catch (KeyNotFoundException ex)
+            catch (KeyNotFoundException)
             {
-                return NotFound(ex.Message);
+                return NotFound("Customer not found.");
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving data: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to retrieve the customer.");
             }
         }
 
         [HttpGet("by-email")]
-        public async Task<ActionResult<CustomerResponseDTO?>> GetByEmail([FromQuery] string email, [FromQuery] long businessUnitId)
+        [RequireModulePermission("Customers", PermissionAction.View)]
+        public async Task<ActionResult<CustomerResponseDTO?>> GetByEmail([FromQuery] string email)
         {
             try
             {
+                if (!long.TryParse(User.FindFirst("businessUnitId")?.Value, out var businessUnitId) || businessUnitId <= 0)
+                    return BadRequest("Business Unit ID is required.");
+
                 var customer = await _repository.GetByEmailAsync(email, businessUnitId);
                 if (customer == null) return Ok(null);
                 return Ok(MapToResponse(customer));
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving data: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to retrieve the customer.");
             }
         }
 
@@ -174,13 +178,13 @@ namespace ERP_RFQ_Automation.Controllers
                 var response = MapToResponse(customer);
                 return CreatedAtAction(nameof(GetById), new { id = customer.Id, businessUnitId = customer.Buid }, response);
             }
-            catch (ArgumentException ex)
+            catch (ArgumentException)
             {
-                return BadRequest(ex.Message);
+                return BadRequest("The customer request is invalid.");
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error creating data: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to create the customer.");
             }
         }
 
@@ -244,17 +248,17 @@ namespace ERP_RFQ_Automation.Controllers
 
                 return NoContent();
             }
-            catch (KeyNotFoundException ex)
+            catch (KeyNotFoundException)
             {
-                return NotFound(ex.Message);
+                return NotFound("Customer not found.");
             }
-            catch (ArgumentException ex)
+            catch (ArgumentException)
             {
-                return BadRequest(ex.Message);
+                return BadRequest("The customer request is invalid.");
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error updating data: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to update the customer.");
             }
         }
 
@@ -274,17 +278,17 @@ namespace ERP_RFQ_Automation.Controllers
                 await _repository.DeleteAsync(id, targetBUId);
                 return NoContent();
             }
-            catch (KeyNotFoundException ex)
+            catch (KeyNotFoundException)
             {
-                return NotFound(ex.Message);
+                return NotFound("Customer not found.");
             }
-            catch (InvalidOperationException ex)
+            catch (InvalidOperationException)
             {
-                return BadRequest(ex.Message);
+                return BadRequest("The customer cannot be deleted.");
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error deleting data: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to delete the customer.");
             }
         }
 

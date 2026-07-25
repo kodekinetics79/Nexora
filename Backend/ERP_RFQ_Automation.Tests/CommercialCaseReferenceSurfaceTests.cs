@@ -59,6 +59,7 @@ public sealed class CommercialCaseReferenceSurfaceTests
 
         var lead = Seed.Lead(context, 703, 73);
         Seed.Customer(context, 973, 73, "Known Customer");
+        Seed.Contact(context, 1973, 73, 973);
         await context.SaveChangesAsync();
         lead.ResolveCommercialIdentity(973, 1973, "CONFIRMED");
         var rfq = new Rfq

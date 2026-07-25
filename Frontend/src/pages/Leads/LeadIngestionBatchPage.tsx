@@ -52,6 +52,29 @@ const classificationMeta = (classification: string): { label: string; color: Chi
 
 const confidenceLabel = (confidence: number): string => `${Math.round(confidence * 100)}% confidence`;
 
+const evidenceText = (value: string): string => {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return value;
+  }
+};
+
+const responseStatus = (error: unknown): number | undefined => {
+  if (typeof error !== 'object' || error === null || !('response' in error)) return undefined;
+  const response = (error as { response?: { status?: unknown } }).response;
+  return typeof response?.status === 'number' ? response.status : undefined;
+};
+
+const batchErrorMessage = (status: number | undefined): { severity: 'warning' | 'error'; message: string } => {
+  if (status === 401) return { severity: 'error', message: 'Your session is no longer authorized. Sign in again to view this batch.' };
+  if (status === 403) return { severity: 'error', message: 'You do not have permission to view this reconciliation batch.' };
+  if (status === 404) return { severity: 'warning', message: 'This reconciliation batch was not found for your organization.' };
+  if (status === 409) return { severity: 'warning', message: 'This batch changed while it was being reviewed. Refresh to load the current state.' };
+  return { severity: 'error', message: 'The reconciliation service is unavailable. The source remains safely recorded; retry when the service recovers.' };
+};
+
 const MatchReviewPanel = ({ occurrenceId, candidate }: { occurrenceId: number; candidate: LeadMatchCandidateDTO }) => {
   const queryClient = useQueryClient();
   const [action, setAction] = useState<MatchReviewDecisionAction | null>(null);
@@ -74,16 +97,17 @@ const MatchReviewPanel = ({ occurrenceId, candidate }: { occurrenceId: number; c
       <Typography variant="body2" color="text.secondary">
         {candidate.customerRfqReference || 'Customer RFQ reference unavailable'} | {confidenceLabel(candidate.confidence)}
       </Typography>
-      <Typography variant="caption" component="pre" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', mt: 1 }}>
-        {candidate.matchEvidenceJson}{'\n'}Differences: {candidate.differencesJson}{'\n'}Commercial impact: {candidate.downstreamImpactJson}
-      </Typography>
+      <Stack spacing={1} sx={{ mt: 1 }}>
+        <Box><Typography variant="caption" sx={{ fontWeight: 800 }}>Match reasons and line-item overlap</Typography><Typography variant="body2" component="pre" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', m: 0 }}>{evidenceText(candidate.matchEvidenceJson)}</Typography></Box>
+        <Box><Typography variant="caption" sx={{ fontWeight: 800 }}>Material differences</Typography><Typography variant="body2" component="pre" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', m: 0 }}>{evidenceText(candidate.differencesJson)}</Typography></Box>
+        <Box><Typography variant="caption" sx={{ fontWeight: 800 }}>Downstream commercial impact</Typography><Typography variant="body2" component="pre" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', m: 0 }}>{evidenceText(candidate.downstreamImpactJson)}</Typography></Box>
+      </Stack>
       {candidate.reviewState === 'Pending' && (
         <Stack direction="row" spacing={1} sx={{ mt: 1.5, flexWrap: 'wrap', gap: 1 }}>
-          <Button size="small" variant="contained" onClick={() => choose('revision')}>Confirm revision</Button>
-          <Button size="small" onClick={() => choose('exact_duplicate')}>Exact duplicate</Button>
+          <Button size="small" variant="contained" onClick={() => choose('revision')}>Treat as revision</Button>
           <Button size="small" onClick={() => choose('create_new')}>Create new lead</Button>
-          <Button size="small" onClick={() => choose('defer')}>Defer</Button>
-          <Button size="small" color="error" onClick={() => choose('reject')}>Reject source</Button>
+          <Button size="small" color="error" onClick={() => choose('reject')}>Reject</Button>
+          <Button size="small" onClick={() => choose('defer')}>Return for review</Button>
         </Stack>
       )}
       <Dialog open={action !== null} onClose={() => !mutation.isPending && setAction(null)} fullWidth maxWidth="sm">
@@ -126,6 +150,10 @@ const ReconciliationRow = ({ item }: { item: BatchReconciliationItemDTO }) => {
             Ingested {dayjs(item.ingestedAtUtc).isValid() ? dayjs(item.ingestedAtUtc).format('DD MMM YYYY, HH:mm') : 'time unavailable'}
             {' | '}{readable(item.processingPath)}{' | '}{confidenceLabel(item.confidence)}
           </Typography>
+          <Typography variant="body2" sx={{ mt: 1 }}>
+            Customer: {readable(item.customerResolutionStatus || 'Awaiting customer resolution')}
+            {' | '}Owner: {item.assignedOpportunityOwner || 'Not assigned'}
+          </Typography>
           {item.reasons.length > 0 && (
             <Stack spacing={0.25} sx={{ mt: 1 }}>
               {item.reasons.map((reason) => (
@@ -163,14 +191,22 @@ const ReconciliationRow = ({ item }: { item: BatchReconciliationItemDTO }) => {
 export default function LeadIngestionBatchPage() {
   const { batchId = '' } = useParams<{ batchId: string }>();
   const navigate = useNavigate();
+  const [activeClassification, setActiveClassification] = useState<string | null>(null);
   const batchQuery = useQuery({
     queryKey: ['lead-ingestion-batch', batchId],
     queryFn: () => leadService.getIngestionBatch(batchId),
     enabled: Boolean(batchId),
-    retry: 8,
-    retryDelay: 1500,
-    refetchInterval: (query) => query.state.data?.items.some((item) =>
-      item.classification.replaceAll('_', '').toLowerCase() === 'pending') ? 4000 : false,
+    retry: (failureCount, error) => {
+      const status = responseStatus(error);
+      return failureCount < 2 && (status === undefined || status === 408 || status === 429 || status >= 500);
+    },
+    retryDelay: (attempt) => Math.min(1000 * (attempt + 1), 3000),
+    refetchInterval: (query) => {
+      const batch = query.state.data;
+      if (!batch) return 2000;
+      return batch.items.length < batch.filesReceived || batch.items.some((item) =>
+        item.classification.replaceAll('_', '').toLowerCase() === 'pending') ? 2000 : false;
+    },
   });
 
   if (batchQuery.isLoading) {
@@ -184,13 +220,14 @@ export default function LeadIngestionBatchPage() {
   }
 
   if (batchQuery.isError || !batchQuery.data) {
+    const error = batchErrorMessage(responseStatus(batchQuery.error));
     return (
       <Box sx={{ maxWidth: 900, mx: 'auto', p: 3 }}>
         <Alert
-          severity="info"
+          severity={error.severity}
           action={<Button color="inherit" startIcon={<RefreshIcon />} onClick={() => batchQuery.refetch()}>Check again</Button>}
         >
-          Reconciliation results are not available yet. The batch may still be entering the processing queue.
+          {error.message}
         </Alert>
       </Box>
     );
@@ -198,14 +235,18 @@ export default function LeadIngestionBatchPage() {
 
   const batch = batchQuery.data;
   const metrics = [
-    { label: 'Files received', value: batch.filesReceived, icon: <FilesIcon color="action" /> },
-    { label: 'Logical inquiries', value: batch.logicalInquiries, icon: <ReviewIcon color="action" /> },
-    { label: 'New leads', value: batch.newLeads, icon: <NewIcon color="success" /> },
-    { label: 'Exact duplicates', value: batch.exactDuplicates, icon: <DuplicateIcon color="info" /> },
-    { label: 'Revisions', value: batch.revisions, icon: <RevisionIcon color="primary" /> },
-    { label: 'Possible matches', value: batch.possibleMatches, icon: <ReviewIcon color="warning" /> },
-    { label: 'Rejected', value: batch.rejected, icon: <RejectedIcon color="error" /> },
+    { label: 'Files received', value: batch.filesReceived, classification: null, icon: <FilesIcon color="action" /> },
+    { label: 'Logical inquiries', value: batch.logicalInquiries, classification: null, icon: <ReviewIcon color="action" /> },
+    { label: 'New leads', value: batch.newLeads, classification: 'new', icon: <NewIcon color="success" /> },
+    { label: 'Exact duplicates', value: batch.exactDuplicates, classification: 'exactduplicate', icon: <DuplicateIcon color="info" /> },
+    { label: 'Revisions', value: batch.revisions, classification: 'revision', icon: <RevisionIcon color="primary" /> },
+    { label: 'Possible matches', value: batch.possibleMatches, classification: 'possiblematchreviewrequired', icon: <ReviewIcon color="warning" /> },
+    { label: 'Rejected', value: batch.rejected, classification: 'rejectedorunprocessable', icon: <RejectedIcon color="error" /> },
   ];
+  const pendingCount = Math.max(batch.filesReceived - batch.items.length, 0) + batch.items.filter((item) =>
+    item.classification.replaceAll('_', '').toLowerCase() === 'pending').length;
+  const visibleItems = activeClassification === null ? batch.items : batch.items.filter((item) =>
+    item.classification.replaceAll('_', '').toLowerCase() === activeClassification);
 
   return (
     <Box sx={{ maxWidth: 1400, mx: 'auto', p: { xs: 2, md: 3 } }}>
@@ -225,7 +266,9 @@ export default function LeadIngestionBatchPage() {
       <Grid container spacing={1.5} sx={{ mb: 3 }}>
         {metrics.map((metric) => (
           <Grid key={metric.label} size={{ xs: 6, sm: 4, lg: 12 / 7 }}>
-            <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, minHeight: 104 }}>
+            <Paper component="button" type="button" variant="outlined" onClick={() => setActiveClassification(metric.classification)}
+              aria-pressed={activeClassification === metric.classification}
+              sx={{ p: 2, borderRadius: 2, minHeight: 104, width: '100%', textAlign: 'left', cursor: 'pointer', bgcolor: activeClassification === metric.classification ? 'action.selected' : 'background.paper' }}>
               <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center' }}>
                 <Typography variant="h5" sx={{ fontWeight: 900 }}>{metric.value}</Typography>
                 {metric.icon}
@@ -236,6 +279,12 @@ export default function LeadIngestionBatchPage() {
         ))}
       </Grid>
 
+      <Alert severity={pendingCount > 0 ? 'info' : batch.rejected > 0 ? 'warning' : 'success'} sx={{ mb: 2 }}>
+        {pendingCount > 0
+          ? `${pendingCount} occurrence${pendingCount === 1 ? '' : 's'} still processing. Refresh to see completed classifications.`
+          : `Processing complete: ${batch.logicalInquiries} inquiries classified${batch.rejected > 0 ? `, including ${batch.rejected} rejected or unsupported` : ' with no processing failures'}.`}
+      </Alert>
+
       <Alert severity={batch.externalOccurrences > 0 ? 'warning' : 'success'} sx={{ mb: 3 }}>
         {batch.externalOccurrences > 0
           ? `${batch.externalOccurrences} occurrence${batch.externalOccurrences === 1 ? '' : 's'} used external processing. Recorded external cost: ${batch.externalCost.toFixed(4)}.`
@@ -244,13 +293,15 @@ export default function LeadIngestionBatchPage() {
 
       <Stack direction={{ xs: 'column', sm: 'row' }} sx={{ justifyContent: 'space-between', alignItems: { xs: 'stretch', sm: 'center' }, mb: 1.5 }}>
         <Typography variant="h6" sx={{ fontWeight: 900 }}>Reconciled inquiries</Typography>
-        <Typography variant="body2" color="text.secondary">{batch.items.length} recorded occurrence{batch.items.length === 1 ? '' : 's'}</Typography>
+        <Typography variant="body2" color="text.secondary">{visibleItems.length} of {batch.items.length} recorded occurrence{batch.items.length === 1 ? '' : 's'}</Typography>
       </Stack>
       {batch.items.length === 0 ? (
         <Alert severity="info">No ingestion occurrences have been recorded for this batch yet.</Alert>
+      ) : visibleItems.length === 0 ? (
+        <Alert severity="info">No recorded occurrences match this summary category.</Alert>
       ) : (
         <Stack spacing={1.5}>
-          {batch.items.map((item) => <ReconciliationRow key={item.occurrenceId} item={item} />)}
+          {visibleItems.map((item) => <ReconciliationRow key={item.occurrenceId} item={item} />)}
         </Stack>
       )}
     </Box>

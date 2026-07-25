@@ -28,7 +28,16 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
     public LeadIdentityApplicationService(ErpRfqAutomationContext db, ICommercialRoutingApplicationService? routing = null)
     { _db = db; _routing = routing; }
 
-    public async Task<LeadReconciliationResult> ReconcileAsync(Lead candidate, LeadIntakeDescriptor intake, CancellationToken ct = default)
+    public Task<LeadReconciliationResult> ReconcileAsync(Lead candidate, LeadIntakeDescriptor intake, CancellationToken ct = default)
+    {
+        if (_db.Database.CurrentTransaction is not null || !_db.Database.IsRelational())
+            return ReconcileCoreAsync(candidate, intake, ct);
+        return _db.Database.CreateExecutionStrategy().ExecuteAsync(
+            () => ReconcileCoreAsync(candidate, intake, ct));
+    }
+
+    private async Task<LeadReconciliationResult> ReconcileCoreAsync(
+        Lead candidate, LeadIntakeDescriptor intake, CancellationToken ct)
     {
         if (candidate.BusinessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(candidate.BusinessUnitId));
         if (string.IsNullOrWhiteSpace(intake.IdempotencyKey)) throw new ArgumentException("Idempotency key is required.");
@@ -58,12 +67,14 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         var replay = await _db.Set<LeadIngestionOccurrence>().AsNoTracking()
             .Where(x => x.BusinessUnitId == candidate.BusinessUnitId && x.IdempotencyKey == intake.IdempotencyKey)
             .Select(x => new { x.Id, x.LeadId, x.LeadRevisionId, x.Classification, x.Confidence, x.DecisionReasonsJson }).SingleOrDefaultAsync(ct);
-        if (replay is not null && replay.LeadId.HasValue)
+        if (replay is not null)
         {
-            var existingLead = await _db.Leads.AsNoTracking().SingleAsync(x => x.Id == replay.LeadId.Value, ct);
+            var existingLead = replay.LeadId.HasValue
+                ? await _db.Leads.AsNoTracking().SingleAsync(x => x.Id == replay.LeadId.Value, ct)
+                : null;
             if (ownsTransaction) await tx.CommitAsync(ct);
-            return new(existingLead.Id, existingLead.CommercialCaseReference, replay.Id, replay.LeadRevisionId,
-                existingLead.CurrentRevisionNumber, replay.Classification, replay.Confidence,
+            return new(existingLead?.Id ?? 0, existingLead?.CommercialCaseReference ?? string.Empty, replay.Id, replay.LeadRevisionId,
+                existingLead?.CurrentRevisionNumber ?? 0, replay.Classification, replay.Confidence,
                 JsonSerializer.Deserialize<string[]>(replay.DecisionReasonsJson) ?? [], false);
         }
 
@@ -104,13 +115,38 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             return await CreateRevisionAsync(strong, candidate, intake, fingerprint, scope,
                 ["Same tenant, customer scope and normalized customer RFQ reference with changed commercial content."], tx, ownsTransaction, ct);
 
-        var ranked = candidates.Select(x => new { Lead = x, Score = Similarity(candidate, x) })
+        var groupedLeadIds = string.IsNullOrWhiteSpace(intake.LogicalGroupKey)
+            ? Array.Empty<long>()
+            : await _db.Set<LeadIngestionOccurrence>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == candidate.BusinessUnitId
+                    && x.LogicalGroupKey == intake.LogicalGroupKey && x.LeadId.HasValue)
+                .Select(x => x.LeadId!.Value).Distinct().ToArrayAsync(ct);
+        var grouped = candidates.Where(x => groupedLeadIds.Contains(x.Id))
+            .Select(x => new { Lead = x, Score = Similarity(candidate, x) })
+            .OrderByDescending(x => x.Score).FirstOrDefault();
+        if (grouped is { Score: >= 0.65m })
+        {
+            var groupedScope = CustomerScope(grouped.Lead, null);
+            var groupedRfq = Normalize(grouped.Lead.Rfqno ?? grouped.Lead.LeadItems.Select(x => x.CustomerRfqno)
+                .FirstOrDefault(x => !string.IsNullOrWhiteSpace(x)));
+            if ((scope is not null && groupedScope == scope)
+                || (normalizedRfq is not null && groupedRfq == normalizedRfq))
+                return await CreateRevisionAsync(grouped.Lead, candidate, intake, fingerprint, scope,
+                    ["Corroborated logical document group, customer identity, and commercial content."], tx, ownsTransaction, ct);
+        }
+
+        var ranked = (grouped is { Score: >= 0.65m }
+                ? new[] { grouped }
+                : candidates.Select(x => new { Lead = x, Score = Similarity(candidate, x) }))
             .Where(x => x.Score >= 0.65m).OrderByDescending(x => x.Score).FirstOrDefault();
-        if (ranked is not null && (scope is null || CustomerScope(ranked.Lead, null) is null))
+        if (ranked is not null && (groupedLeadIds.Contains(ranked.Lead.Id)
+            || scope is null || CustomerScope(ranked.Lead, null) is null))
         {
             var occurrence = NewOccurrence(candidate.BusinessUnitId, intake, fingerprint, scope,
                 LeadOccurrenceClassification.PossibleMatchReviewRequired, ranked.Score,
-                ["Commercial content is similar, but customer identity is unresolved or conflicting."], null, null);
+                [groupedLeadIds.Contains(ranked.Lead.Id)
+                    ? "Documents share a logical group and similar content, but canonical identity requires review."
+                    : "Commercial content is similar, but customer identity is unresolved or conflicting."], null, null);
             await EnsureBatchAsync(candidate.BusinessUnitId, intake, ct); _db.Add(occurrence);
             _db.Add(new LeadMatchCandidate { BusinessUnitId = candidate.BusinessUnitId, Occurrence = occurrence,
                 CandidateLeadId = ranked.Lead.Id, Confidence = ranked.Score, ReviewState = LeadMatchReviewState.Pending,
@@ -176,8 +212,16 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
     public async Task<BatchReconciliationDto?> GetBatchAsync(long bu, Guid batchId, CancellationToken ct = default)
     {
         if (!await _db.Set<LeadIngestionBatch>().AnyAsync(x => x.BusinessUnitId == bu && x.Id == batchId, ct)) return null;
+        var filesReceived = await (
+            from occurrence in _db.Set<ERP_RFQ_Automation.DocumentIntelligence.Persistence.SourceDocumentOccurrence>().AsNoTracking()
+            join corpus in _db.Set<ERP_RFQ_Automation.DocumentIntelligence.Persistence.DocumentCorpus>().AsNoTracking()
+                on new { occurrence.BusinessUnitId, occurrence.CorpusId }
+                equals new { corpus.BusinessUnitId, CorpusId = corpus.Id }
+            where occurrence.BusinessUnitId == bu && corpus.BatchId == batchId
+            select occurrence.Id).Distinct().CountAsync(ct);
         var rows = await _db.Set<LeadIngestionOccurrence>().AsNoTracking().Where(x => x.BusinessUnitId == bu && x.BatchId == batchId)
-            .Include(x => x.Lead).Include(x => x.MatchCandidates).ThenInclude(x => x.CandidateLead)
+            .Include(x => x.Lead).ThenInclude(x => x!.AssignToNavigation)
+            .Include(x => x.MatchCandidates).ThenInclude(x => x.CandidateLead)
             .OrderBy(x => x.Id).ToListAsync(ct);
         var items = rows.Select(x => new BatchReconciliationItemDto(x.Id, x.LeadId, x.Lead?.CommercialCaseReference,
             x.Classification.ToString(), x.Lead?.CurrentRevisionNumber, x.OriginalFileName, x.IngestedAtUtc,
@@ -185,8 +229,11 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             x.MatchCandidates.Select(c => new LeadMatchCandidateDto(c.Id, c.CandidateLeadId,
                 c.CandidateLead.CommercialCaseReference, c.CandidateLead.Rfqno, c.Confidence,
                 c.MatchEvidenceJson, c.DifferencesJson, c.DownstreamImpactJson,
-                c.ReviewState.ToString(), c.Version)).ToArray())).ToArray();
-        return new(batchId, rows.Select(x => x.OriginalFileName).Where(x => x != null).Distinct().Count(), rows.Count,
+                c.ReviewState.ToString(), c.Version)).ToArray(),
+            x.Lead?.CustomerMatchStatus ?? "Awaiting customer resolution",
+            x.Lead?.AssignToNavigation is null ? null
+                : $"{x.Lead.AssignToNavigation.FirstName} {x.Lead.AssignToNavigation.LastName}".Trim())).ToArray();
+        return new(batchId, filesReceived, rows.Count,
             Count(LeadOccurrenceClassification.New), Count(LeadOccurrenceClassification.ExactDuplicate), Count(LeadOccurrenceClassification.Revision),
             Count(LeadOccurrenceClassification.PossibleMatchReviewRequired), Count(LeadOccurrenceClassification.RejectedOrUnprocessable),
             rows.Count(x => x.ExternalAiUsed), rows.Sum(x => x.ExternalCost), items);
@@ -208,30 +255,70 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
     public async Task<LeadIdentityAnalyticsDto> GetAnalyticsAsync(long bu, DateTimeOffset from, DateTimeOffset to, CancellationToken ct = default)
     {
         if (to <= from) throw new ArgumentException("The analytics window must have a positive duration.");
+        var windowStart = from;
+        var asOf = DateTimeOffset.UtcNow;
         var source = _db.Set<LeadIngestionOccurrence>().AsNoTracking().Where(x => x.BusinessUnitId == bu);
-        var rows = _db.Database.ProviderName?.Contains("Sqlite", StringComparison.OrdinalIgnoreCase) == true
-            ? (await source.Select(x => new { x.Id, x.LeadId, x.Classification, x.CreatedAtUtc }).ToListAsync(ct))
-                .Where(x => x.CreatedAtUtc >= from && x.CreatedAtUtc < to)
-                .Select(x => new { x.Id, x.LeadId, x.Classification }).ToList()
-            : await source.Where(x => x.CreatedAtUtc >= from && x.CreatedAtUtc < to)
-                .Select(x => new { x.Id, x.LeadId, x.Classification }).ToListAsync(ct);
-        var total = rows.Count;
+        var hasDurableIntake = _db.Model.FindEntityType(typeof(ERP_RFQ_Automation.DocumentIntelligence.Persistence.SourceDocumentOccurrence)) is not null;
+        long[] intakeOccurrenceIds;
+        List<LeadIngestionOccurrence> rows;
+        if (hasDurableIntake)
+        {
+            if (_db.Database.ProviderName?.Contains("Sqlite", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                var intake = (await _db.Set<ERP_RFQ_Automation.DocumentIntelligence.Persistence.SourceDocumentOccurrence>()
+                    .AsNoTracking().Where(x => x.BusinessUnitId == bu).ToListAsync(ct))
+                    .Where(x => x.ReceivedOn >= windowStart && x.ReceivedOn < to && x.ReceivedOn <= asOf).ToArray();
+                intakeOccurrenceIds = intake.Select(x => x.Id).Distinct().ToArray();
+                rows = (await source.ToListAsync(ct)).Where(x => x.CreatedAtUtc <= asOf
+                    && x.SourceDocumentOccurrenceId.HasValue
+                    && intakeOccurrenceIds.Contains(x.SourceDocumentOccurrenceId.Value)).ToList();
+            }
+            else
+            {
+                var cohort = await (
+                    from intake in _db.Set<ERP_RFQ_Automation.DocumentIntelligence.Persistence.SourceDocumentOccurrence>().AsNoTracking()
+                    join reconciliation in source.Where(x => x.CreatedAtUtc <= asOf)
+                        on new { intake.BusinessUnitId, OccurrenceId = (long?)intake.Id }
+                        equals new { reconciliation.BusinessUnitId, OccurrenceId = reconciliation.SourceDocumentOccurrenceId } into reconciliations
+                    from reconciliation in reconciliations.DefaultIfEmpty()
+                    where intake.BusinessUnitId == bu && intake.ReceivedOn >= windowStart && intake.ReceivedOn < to && intake.ReceivedOn <= asOf
+                    select new { intake.Id, Reconciliation = reconciliation }).ToListAsync(ct);
+                intakeOccurrenceIds = cohort.Select(x => x.Id).Distinct().ToArray();
+                rows = cohort.Where(x => x.Reconciliation is not null).Select(x => x.Reconciliation!).ToList();
+            }
+        }
+        else
+        {
+            var sourceRows = _db.Database.ProviderName?.Contains("Sqlite", StringComparison.OrdinalIgnoreCase) == true
+                ? await source.ToListAsync(ct)
+                : await source.Where(x => x.CreatedAtUtc <= asOf).ToListAsync(ct);
+            rows = sourceRows
+                .Where(x => x.CreatedAtUtc >= from && x.CreatedAtUtc < to).ToList();
+            intakeOccurrenceIds = rows.Select(x => x.Id).ToArray();
+        }
+        var total = intakeOccurrenceIds.Length;
+        long[] CohortOccurrenceIds(IEnumerable<LeadIngestionOccurrence> selected) => hasDurableIntake
+            ? selected.Where(x => x.SourceDocumentOccurrenceId.HasValue)
+                .Select(x => x.SourceDocumentOccurrenceId!.Value).Distinct().ToArray()
+            : selected.Select(x => x.Id).Distinct().ToArray();
         LeadIdentityMetricDto CountMetric(string key, LeadOccurrenceClassification classification, bool canonical = false)
         {
             var selected = rows.Where(x => x.Classification == classification).ToArray();
             var leadIds = selected.Where(x => x.LeadId.HasValue).Select(x => x.LeadId!.Value).Distinct().ToArray();
-            var numerator = canonical ? leadIds.Length : selected.Length;
-            return new(key, numerator, numerator, null, leadIds, selected.Select(x => x.Id).ToArray());
+            var occurrenceIds = CohortOccurrenceIds(selected);
+            var numerator = canonical ? leadIds.Length : occurrenceIds.Length;
+            return new(key, numerator, numerator, null, leadIds, occurrenceIds);
         }
         LeadIdentityMetricDto Rate(string key, LeadOccurrenceClassification classification)
         {
             var selected = rows.Where(x => x.Classification == classification).ToArray();
-            return new(key, total == 0 ? 0 : decimal.Round((decimal)selected.Length / total, 5), selected.Length, total,
-                selected.Where(x => x.LeadId.HasValue).Select(x => x.LeadId!.Value).Distinct().ToArray(), selected.Select(x => x.Id).ToArray());
+            var occurrenceIds = CohortOccurrenceIds(selected);
+            return new(key, total == 0 ? 0 : decimal.Round((decimal)occurrenceIds.Length / total, 5), occurrenceIds.Length, total,
+                selected.Where(x => x.LeadId.HasValue).Select(x => x.LeadId!.Value).Distinct().ToArray(), occurrenceIds);
         }
-        return new("release-01a", from, to, DateTimeOffset.UtcNow,
+        return new("release-01c/as-of-v1", from, to, asOf,
         [
-            new("ingestion-volume", total, total, null, rows.Where(x => x.LeadId.HasValue).Select(x => x.LeadId!.Value).Distinct().ToArray(), rows.Select(x => x.Id).ToArray()),
+            new("ingestion-volume", total, total, null, rows.Where(x => x.LeadId.HasValue).Select(x => x.LeadId!.Value).Distinct().ToArray(), intakeOccurrenceIds),
             CountMetric("leads-received", LeadOccurrenceClassification.New, canonical: true),
             Rate("duplicate-rate", LeadOccurrenceClassification.ExactDuplicate),
             Rate("revision-rate", LeadOccurrenceClassification.Revision),
@@ -239,7 +326,17 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         ]);
     }
 
-    public async Task<LeadReconciliationResult> DecideMatchAsync(long bu, long occurrenceId, MatchDecisionRequest request, string actorId, CancellationToken ct = default)
+    public Task<LeadReconciliationResult> DecideMatchAsync(long bu, long occurrenceId,
+        MatchDecisionRequest request, string actorId, CancellationToken ct = default)
+    {
+        if (_db.Database.CurrentTransaction is not null || !_db.Database.IsRelational())
+            return DecideMatchCoreAsync(bu, occurrenceId, request, actorId, ct);
+        return _db.Database.CreateExecutionStrategy().ExecuteAsync(
+            () => DecideMatchCoreAsync(bu, occurrenceId, request, actorId, ct));
+    }
+
+    private async Task<LeadReconciliationResult> DecideMatchCoreAsync(long bu, long occurrenceId,
+        MatchDecisionRequest request, string actorId, CancellationToken ct)
     {
         var ownsTransaction = _db.Database.CurrentTransaction is null;
         await using var transaction = ownsTransaction ? await _db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, ct) : null;
@@ -359,8 +456,9 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         var occurrence = new LeadIngestionOccurrence
         {
             BusinessUnitId = bu, BatchId = x.BatchId, LeadId = leadId, LeadRevisionId = revisionId, SourceDocumentId = x.SourceDocumentId,
+            SourceDocumentOccurrenceId = x.SourceDocumentOccurrenceId,
             ExtractionJobId = x.ExtractionJobId, SourceChannel = x.SourceChannel, IdempotencyKey = x.IdempotencyKey, ExternalSourceId = x.ExternalSourceId,
-            EmailThreadId = x.EmailThreadId, SourceSystem = x.SourceSystem, Sender = x.Sender, Subject = x.Subject, OriginalFileName = x.OriginalFileName,
+            EmailThreadId = x.EmailThreadId, LogicalGroupKey = x.LogicalGroupKey, SourceSystem = x.SourceSystem, Sender = x.Sender, Subject = x.Subject, OriginalFileName = x.OriginalFileName,
             MimeType = x.MimeType, FileSize = x.FileSize, ContentHash = x.ContentHash, CustomerScopeKey = scope, LogicalInquiryFingerprint = fingerprint,
             Classification = classification, Confidence = confidence, DecisionReasonsJson = JsonSerializer.Serialize(reasons), PolicyVersion = PolicyVersion,
             ProcessingPath = x.ProcessingPath, ExternalAiUsed = x.ExternalAiUsed, ExternalCost = x.ExternalCost, SourceReceivedAtUtc = x.SourceReceivedAtUtc,
@@ -422,7 +520,12 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
     private static ItemFingerprintSnapshot ItemSnapshot(LeadItem x) => new(Normalize(x.LineItemNo), Normalize(x.ManufacturerPartNumber ?? x.ItemMaterialCode),
         Normalize(x.ProductShortDescription ?? x.ItemText), x.Quantity, Normalize(x.UnitOfMeasure), x.BidClosingDateLine?.ToUniversalTime().ToString("O"));
     private static string LineFingerprint(LeadItem x) => Hash(JsonSerializer.Serialize(ItemSnapshot(x)));
-    private static string? CustomerScope(Lead x, string? sender) => x.CustomerId.HasValue ? $"customer:{x.CustomerId}" : Normalize(x.Clientemail ?? sender) is { } e ? $"email:{e}" : null;
+    private static string? CustomerScope(Lead x, string? sender)
+    {
+        if (x.CustomerId.HasValue) return $"customer:{x.CustomerId}";
+        if (Normalize(x.Clientemail ?? sender) is { } email) return $"email:{email}";
+        return Normalize(x.BuyersName) is { } buyer ? $"buyer:{buyer}" : null;
+    }
     private static string? Normalize(string? value) { if (string.IsNullOrWhiteSpace(value)) return null; var v = NonWord.Replace(value.Trim().ToLowerInvariant(), ""); return v.Length == 0 ? null : v; }
     private static string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
     private static decimal Similarity(Lead a, Lead b)

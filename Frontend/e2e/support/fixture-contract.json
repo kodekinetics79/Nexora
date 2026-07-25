@@ -1,0 +1,22 @@
+{
+  "baseUrl": "http://127.0.0.1:4173",
+  "apiUrl": "http://127.0.0.1:5193",
+  "businessUnitId": "9001",
+  "manager": { "email": "manager@release01c.test", "password": "Release01C-Manager!" },
+  "editor": { "email": "editor@release01c.test", "password": "Release01C-Editor!" },
+  "denied": { "email": "denied@release01c.test", "password": "Release01C-Denied!" },
+  "batchId": "release-01c-batch",
+  "leadId": "101",
+  "revisionLeadId": "101",
+  "rfqId": "201",
+  "quoteId": "301",
+  "nexoraSerial": "NXR-2026-000101",
+  "customerName": "Release 01C Test Customer",
+  "dashboardKpiLabel": "Leads Received",
+  "dashboardKpiValue": "2",
+  "dashboardDrillDownCount": "2",
+  "expectedNewLeads": "1",
+  "expectedExactDuplicates": "1",
+  "expectedRevisions": "1",
+  "expectedPossibleMatches": "1"
+}

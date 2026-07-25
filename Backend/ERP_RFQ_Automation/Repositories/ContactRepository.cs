@@ -22,6 +22,7 @@ namespace ERP_RFQ_Automation.Repositories
         {
             var query = _context.Contacts
                 .AsNoTracking()
+                .Where(contact => contact.BusinessUnitId == businessUnitId)
                 .GroupJoin(_context.Customers.Where(c => c.Buid == businessUnitId),
                     contact => contact.CustomerId,
                     customer => customer.Id,
@@ -41,8 +42,7 @@ namespace ERP_RFQ_Automation.Repositories
                         CustomerName = x.customer != null ? x.customer.Name : null,
                         SupplierName = supplier != null ? supplier.Name : null
                     })
-                .Where(x => x.Contact.CustomerId.HasValue && x.Contact.Customer.Buid == businessUnitId ||
-                            x.Contact.SupplierId.HasValue && x.Contact.Supplier.Buid == businessUnitId);  // Filter by BU via parent
+                .Where(x => x.Contact.CustomerId.HasValue || x.Contact.SupplierId.HasValue);
 
             // Apply filters
             if (id.HasValue)
@@ -100,18 +100,15 @@ namespace ERP_RFQ_Automation.Repositories
                 .AsNoTracking()
                 .Include(c => c.Customer)
                 .Include(c => c.Supplier)
-                .FirstOrDefaultAsync(c => c.Id == id &&
-                    (c.Customer != null && c.Customer.Buid == businessUnitId ||
-                     c.Supplier != null && c.Supplier.Buid == businessUnitId));
+                .FirstOrDefaultAsync(c => c.Id == id && c.BusinessUnitId == businessUnitId);
 
             return contact ?? throw new KeyNotFoundException($"Contact with ID {id} not found in Business Unit {businessUnitId}.");
         }
 
         public async Task AddAsync(Contact contact)
         {
-            // Validate at least one parent (Customer or Supplier)
-            if (!contact.CustomerId.HasValue && !contact.SupplierId.HasValue)
-                throw new ArgumentException("Contact must be associated with at least one Customer or Supplier.");
+            if (contact.CustomerId.HasValue == contact.SupplierId.HasValue)
+                throw new ArgumentException("Contact must be associated with exactly one Customer or Supplier.");
 
             // Validate foreign keys
             long? buId = null;
@@ -132,6 +129,10 @@ namespace ERP_RFQ_Automation.Repositories
                 buId = supplier.Buid;
             }
 
+            if (!buId.HasValue || buId <= 0)
+                throw new ArgumentException("Contact must resolve to a tenant-owned Customer or Supplier.");
+            contact.BusinessUnitId = buId.Value;
+
             // Validate IsPrimary: Only one primary contact per parent
             if (contact.IsPrimary == true)
             {
@@ -151,12 +152,10 @@ namespace ERP_RFQ_Automation.Repositories
 
         public async Task UpdateAsync(Contact contact)
         {
-            // Validate at least one parent
-            if (!contact.CustomerId.HasValue && !contact.SupplierId.HasValue)
-                throw new ArgumentException("Contact must be associated with at least one Customer or Supplier.");
+            if (contact.CustomerId.HasValue == contact.SupplierId.HasValue)
+                throw new ArgumentException("Contact must be associated with exactly one Customer or Supplier.");
 
-            // Validate foreign keys using AsNoTracking to avoid tracking conflicts, and derive the
-            // owning Business Unit from the parent Customer/Supplier (Contact has no direct BU column).
+            // Resolve ownership from the selected parent records; the direct tenant column is authoritative.
             long? buId = null;
             if (contact.CustomerId.HasValue)
             {
@@ -175,13 +174,15 @@ namespace ERP_RFQ_Automation.Repositories
                 buId = supplier.Buid;
             }
 
-            // SEC-14: Contact is scoped to a tenant through its parent Customer/Supplier. Resolve the
-            // existing row only within the owning Business Unit so a write can never resolve (and then
-            // overwrite) another tenant's contact even if the controller's BU guard is bypassed.
+            if (!buId.HasValue || buId <= 0)
+                throw new ArgumentException("Contact must resolve to a tenant-owned Customer or Supplier.");
+            if (contact.BusinessUnitId != 0 && contact.BusinessUnitId != buId.Value)
+                throw new ArgumentException("Contact cannot be reassigned across Business Units.");
+            contact.BusinessUnitId = buId.Value;
+
+            // Resolve the existing row through its direct tenant key before applying reassignment.
             var existing = await _context.Contacts.AsNoTracking()
-                .FirstOrDefaultAsync(c => c.Id == contact.Id &&
-                    (c.Customer != null && c.Customer.Buid == buId ||
-                     c.Supplier != null && c.Supplier.Buid == buId));
+                .FirstOrDefaultAsync(c => c.Id == contact.Id && c.BusinessUnitId == buId);
             if (existing == null)
                 throw new KeyNotFoundException($"Contact with ID {contact.Id} not found.");
 

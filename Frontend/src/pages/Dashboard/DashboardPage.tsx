@@ -13,6 +13,7 @@ import {
   DialogTitle,
   IconButton,
   List,
+  ListItem,
   ListItemButton,
   ListItemText,
   Paper,
@@ -59,9 +60,7 @@ const drillDownRoute = (recordType: string, recordId: number): string | null => 
 const KpiCard = ({ kpi }: { kpi: Release01KpiDTO }) => {
   const navigate = useNavigate();
   const [drillDownOpen, setDrillDownOpen] = useState(false);
-  const drillDownRecords = kpi.drillDownIdentifiers.filter(
-    (record) => drillDownRoute(record.recordType, record.recordId) !== null,
-  );
+  const drillDownRecords = kpi.drillDownIdentifiers;
   const canDrillDown = kpi.state === 'available' && drillDownRecords.length > 0;
 
   return (
@@ -95,6 +94,11 @@ const KpiCard = ({ kpi }: { kpi: Release01KpiDTO }) => {
           {kpi.definition}
         </Typography>
       </Tooltip>
+      {kpi.state === 'insufficient_data' && kpi.insufficientDataReason && (
+        <Typography variant="caption" sx={{ mt: 1, color: 'text.secondary' }}>
+          {kpi.insufficientDataReason}
+        </Typography>
+      )}
       <Box sx={{ flexGrow: 1 }} />
       {canDrillDown && (
         <Button
@@ -115,18 +119,25 @@ const KpiCard = ({ kpi }: { kpi: Release01KpiDTO }) => {
         </DialogTitle>
         <DialogContent dividers>
           <List disablePadding>
-            {drillDownRecords.map((record) => (
-              <ListItemButton
-                key={`${record.recordType}-${record.recordId}`}
-                onClick={() => navigate(drillDownRoute(record.recordType, record.recordId)!)}
-              >
+            {drillDownRecords.map((record) => {
+              const route = drillDownRoute(record.recordType.toLowerCase(), record.recordId);
+              const content = (
                 <ListItemText
                   primary={record.nexoraSerial}
                   secondary={`${record.recordType.toUpperCase()} #${record.recordId}${record.classification ? ` | ${record.classification}` : ''}`}
                 />
-                <DrillDownIcon />
-              </ListItemButton>
-            ))}
+              );
+              return route ? (
+                <ListItemButton key={`${record.recordType}-${record.recordId}`} onClick={() => navigate(route)}>
+                  {content}<DrillDownIcon />
+                </ListItemButton>
+              ) : (
+                <ListItem key={`${record.recordType}-${record.recordId}`}>
+                  {content}
+                  <Chip size="small" label="No detail route" variant="outlined" />
+                </ListItem>
+              );
+            })}
           </List>
         </DialogContent>
       </Dialog>

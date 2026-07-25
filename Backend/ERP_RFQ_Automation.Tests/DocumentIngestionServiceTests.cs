@@ -34,13 +34,34 @@ public sealed class DocumentIngestionServiceTests
     }
 
     [Fact]
-    public void OccurrenceIdentity_GeneratesDistinctReceiptIdsWhenCallerHasNoIdentity()
+    public void OccurrenceIdentity_DistinguishesReceiptsWhenCallerOmitsBatchAndSourceIdentity()
     {
-        var batchId = Guid.NewGuid();
+        const long businessUnitId = 91;
+        const string fileName = "customer-rfq.csv";
+        const string contentHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-        var first = SourceOccurrenceIdentity.BuildKey(batchId, ExtractionSourceType.ManualUpload, null);
-        var second = SourceOccurrenceIdentity.BuildKey(batchId, ExtractionSourceType.ManualUpload, null);
+        var firstBatch = SourceOccurrenceIdentity.BuildFallbackBatchId(
+            businessUnitId, ExtractionSourceType.ManualUpload, fileName, contentHash, null);
+        var retryBatch = SourceOccurrenceIdentity.BuildFallbackBatchId(
+            businessUnitId, ExtractionSourceType.ManualUpload, fileName, contentHash, null);
+        var first = SourceOccurrenceIdentity.BuildKey(
+            firstBatch, ExtractionSourceType.ManualUpload, null);
+        var retry = SourceOccurrenceIdentity.BuildKey(
+            retryBatch, ExtractionSourceType.ManualUpload, null);
 
-        Assert.NotEqual(first, second);
+        Assert.NotEqual(firstBatch, retryBatch);
+        Assert.NotEqual(first, retry);
+    }
+
+    [Fact]
+    public void OccurrenceIdentity_ReusesFallbackBatchWhenCallerSuppliesSourceIdentity()
+    {
+        var metadata = new ExtractionJobMetadata { SourceOccurrenceId = "upload-request-42:file.csv" };
+        var first = SourceOccurrenceIdentity.BuildFallbackBatchId(91, ExtractionSourceType.ManualUpload,
+            "file.csv", new string('a', 64), metadata);
+        var retry = SourceOccurrenceIdentity.BuildFallbackBatchId(91, ExtractionSourceType.ManualUpload,
+            "file.csv", new string('a', 64), metadata);
+
+        Assert.Equal(first, retry);
     }
 }

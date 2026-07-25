@@ -211,6 +211,8 @@ export interface BatchReconciliationItemDTO {
   confidence: number;
   reasons: string[];
   matchCandidates: LeadMatchCandidateDTO[];
+  customerResolutionStatus: string;
+  assignedOpportunityOwner?: string | null;
 }
 
 export interface LeadMatchCandidateDTO {

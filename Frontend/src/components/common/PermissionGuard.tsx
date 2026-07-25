@@ -16,8 +16,7 @@ const PermissionGuard: React.FC<PermissionGuardProps> = ({
   moduleName, 
   action = 'view', 
   children, 
-  fallback, 
-  redirect = false 
+  fallback,
 }) => {
   const { token, hasPermission } = useAuth();
 
@@ -30,17 +29,13 @@ const PermissionGuard: React.FC<PermissionGuardProps> = ({
   const isAuthorized = hasPermission(moduleName, action);
 
   if (!isAuthorized) {
-    if (redirect) {
-      return <Navigate to="/login" replace />;
-    }
-
     if (fallback) {
       return <>{fallback}</>;
     }
 
     if (action === 'view') {
       return (
-        <Box sx={{ 
+        <Box role="alert" aria-live="polite" sx={{
           display: 'flex', 
           flexDirection: 'column', 
           alignItems: 'center', 

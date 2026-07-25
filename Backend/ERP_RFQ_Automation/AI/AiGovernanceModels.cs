@@ -43,6 +43,8 @@ public sealed class AiRequest
 {
     public Guid Id { get; set; }
     public long BusinessUnitId { get; set; }
+    public long? ExtractionJobId { get; set; }
+    public long? SourceDocumentOccurrenceId { get; set; }
     public string Operation { get; set; } = null!;
     public string IdempotencyKey { get; set; } = null!;
     public string PromptHash { get; set; } = null!;
@@ -60,6 +62,9 @@ public sealed class AiRequest
     public long ReservedTokens { get; set; }
     public long InputTokens { get; set; }
     public long OutputTokens { get; set; }
+    public decimal? EstimatedCost { get; set; }
+    public string? CostCurrency { get; set; }
+    public string CostStatus { get; set; } = "NotPriced";
     public string TokenSource { get; set; } = AiTokenSources.Estimated;
     public string? ErrorCode { get; set; }
     public DateTime CreatedOn { get; set; }

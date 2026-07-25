@@ -21,6 +21,7 @@ public enum EnqueueOutcome
 public sealed class EnqueueExtractionRequest
 {
     public long BusinessUnitId { get; init; }
+    public long? SourceDocumentOccurrenceId { get; init; }
     public ExtractionSourceType SourceType { get; init; }
 
     /// <summary>Path/URI of the already-persisted immutable file.</summary>
@@ -56,16 +57,16 @@ public sealed class EnqueueResult
 }
 
 /// <summary>
-/// Durable, DB-backed job queue with an atomic, race-safe claim. Idempotent by
-/// content hash. All transitions are single SQL statements so N workers take
+/// Durable, DB-backed job queue with an atomic, race-safe claim. Governed intake is
+/// idempotent by source occurrence; legacy callers fall back to content hash. All transitions are single SQL statements so N workers take
 /// disjoint jobs and a crashed worker's lease is reclaimable.
 /// </summary>
 public interface IExtractionQueue
 {
     /// <summary>
-    /// Idempotently enqueue one document. Computes SHA-256 (from Content when the hash
-    /// is not supplied) and inserts a Pending job; a duplicate (BusinessUnitId,
-    /// ContentHash) short-circuits to <see cref="EnqueueOutcome.Duplicate"/>.
+    /// Idempotently enqueue one receipt. Computes SHA-256 (from Content when the hash
+    /// is not supplied) and inserts a Pending job. Distinct receipts may have identical
+    /// content and must still reconcile independently.
     /// </summary>
     Task<EnqueueResult> EnqueueAsync(EnqueueExtractionRequest request, CancellationToken ct = default);
 
@@ -85,7 +86,7 @@ public interface IExtractionQueue
     Task<bool> SetStatusAsync(long jobId, string workerId, int leaseAttempt, ExtractionStatus status, CancellationToken ct = default);
 
     /// <summary>Complete the matching claim generation and clear its lease.</summary>
-    Task<bool> CompleteAsync(long jobId, string workerId, int leaseAttempt, long resultLeadId, CancellationToken ct = default);
+    Task<bool> CompleteAsync(long jobId, string workerId, int leaseAttempt, long? resultLeadId, CancellationToken ct = default);
 
     /// <summary>
     /// Record a failure. Reschedules the job to Pending with exponential backoff, or

@@ -331,6 +331,7 @@ namespace ERP_RFQ_Automation.Services
             var metadata = new ERP_RFQ_Automation.Extraction.ExtractionJobMetadata
             {
                 SourceOccurrenceId = $"email:{message.MessageId ?? ingest.Id.ToString()}:body",
+                LogicalGroupKey = $"email:{message.MessageId ?? ingest.Id.ToString()}",
                 EmailIngestId = ingest.Id,
                 FromEmail = message.From.Mailboxes.FirstOrDefault()?.Address,
                 Subject = message.Subject ?? "",
@@ -386,6 +387,7 @@ namespace ERP_RFQ_Automation.Services
                     var attMetadata = new ERP_RFQ_Automation.Extraction.ExtractionJobMetadata
                     {
                         SourceOccurrenceId = $"email:{message.MessageId ?? ingest.Id.ToString()}:attachment:{attachmentOrdinal}",
+                        LogicalGroupKey = metadata.LogicalGroupKey,
                         EmailIngestId = ingest.Id,
                         FromEmail = metadata.FromEmail,
                         Subject = metadata.Subject,

@@ -35,7 +35,7 @@ public sealed class ExtractionQueue : IExtractionQueue
 
     // All entity columns default to their property names (case-sensitive, quoted).
     private const string ReturningColumns =
-        "j.\"Id\", j.\"BatchId\", j.\"BusinessUnitId\", j.\"SourceType\", j.\"ContentHash\", " +
+        "j.\"Id\", j.\"SourceDocumentOccurrenceId\", j.\"BatchId\", j.\"BusinessUnitId\", j.\"SourceType\", j.\"ContentHash\", " +
         "j.\"StoragePath\", j.\"FileName\", j.\"FileType\", j.\"Status\", j.\"Priority\", " +
         "j.\"SchedulerTag\", j.\"Attempts\", j.\"MaxAttempts\", j.\"NextAttemptAt\", " +
         "j.\"LeasedBy\", j.\"LeaseExpiresAt\", j.\"LastError\", j.\"ResultLeadId\", " +
@@ -117,7 +117,10 @@ RETURNING {ReturningColumns};";
         for (var attempt = 0; attempt < 3; attempt++)
         {
             var existing = await jobs.AsNoTracking()
-                .Where(j => j.BusinessUnitId == request.BusinessUnitId && j.ContentHash == hash)
+                .Where(j => j.BusinessUnitId == request.BusinessUnitId
+                    && (request.SourceDocumentOccurrenceId.HasValue
+                        ? j.SourceDocumentOccurrenceId == request.SourceDocumentOccurrenceId
+                        : j.SourceDocumentOccurrenceId == null && j.ContentHash == hash))
                 .Select(j => new { j.Id, j.Status })
                 .FirstOrDefaultAsync(ct);
             if (existing is not null)
@@ -144,6 +147,7 @@ RETURNING {ReturningColumns};";
             var now = DateTime.UtcNow;
             var job = new ExtractionJob
             {
+                SourceDocumentOccurrenceId = request.SourceDocumentOccurrenceId,
                 BatchId = batchId,
                 BusinessUnitId = request.BusinessUnitId,
                 SourceType = request.SourceType,
@@ -177,7 +181,10 @@ RETURNING {ReturningColumns};";
 
         // Final resolution after exhausting retries: the row must exist by now.
         var settled = await jobs.AsNoTracking()
-            .Where(j => j.BusinessUnitId == request.BusinessUnitId && j.ContentHash == hash)
+            .Where(j => j.BusinessUnitId == request.BusinessUnitId
+                && (request.SourceDocumentOccurrenceId.HasValue
+                    ? j.SourceDocumentOccurrenceId == request.SourceDocumentOccurrenceId
+                    : j.SourceDocumentOccurrenceId == null && j.ContentHash == hash))
             .Select(j => new { j.Id, j.Status })
             .FirstOrDefaultAsync(ct);
         if (settled is null)
@@ -243,7 +250,7 @@ WHERE ""Id"" = @id AND ""LeasedBy"" = @worker AND ""Attempts"" = @attempt
     }
 
     public async Task<bool> CompleteAsync(
-        long jobId, string workerId, int leaseAttempt, long resultLeadId, CancellationToken ct = default)
+        long jobId, string workerId, int leaseAttempt, long? resultLeadId, CancellationToken ct = default)
     {
         const string sql = @"UPDATE ""ExtractionJobs""
 SET ""Status"" = 'Succeeded', ""ResultLeadId"" = @leadId, ""LeasedBy"" = NULL,
@@ -313,6 +320,7 @@ WHERE ""Id"" = @id AND ""LeasedBy"" = @worker AND ""Attempts"" = @attempt
         return new ExtractionJob
         {
             Id = r.GetInt64(r.GetOrdinal("Id")),
+            SourceDocumentOccurrenceId = GetNullableInt64(r, "SourceDocumentOccurrenceId"),
             BatchId = r.GetGuid(r.GetOrdinal("BatchId")),
             BusinessUnitId = r.GetInt64(r.GetOrdinal("BusinessUnitId")),
             SourceType = Enum.Parse<ExtractionSourceType>(r.GetString(r.GetOrdinal("SourceType"))),

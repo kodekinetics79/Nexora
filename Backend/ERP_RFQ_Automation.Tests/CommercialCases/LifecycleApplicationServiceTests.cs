@@ -276,6 +276,7 @@ public sealed class LifecycleApplicationServiceTests
         await using var context = db.ContextFor(821);
         var lead = Seed.Lead(context, 1121, 821);
         Seed.Customer(context, 9001, 821, "Lifecycle Customer");
+        Seed.Contact(context, 9002, 821, 9001);
         await context.SaveChangesAsync();
         lead.ResolveCommercialIdentity(9001, 9002, "CONFIRMED");
         Status(context, 5151, 821, "QuoteStatus", "DRAFT", "Draft");

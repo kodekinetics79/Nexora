@@ -297,7 +297,9 @@ public sealed class SourceDocumentOccurrence
             : EvidenceLedgerGuard.Positive(extractionJobId.Value, nameof(extractionJobId));
         IdempotencyKey = EvidenceLedgerGuard.Required(idempotencyKey, 256, nameof(idempotencyKey));
         SourceMetadataJson = EvidenceLedgerGuard.Json(sourceMetadataJson, nameof(sourceMetadataJson));
+        IntakeStatus = IntakeOccurrenceStatus.Accepted;
         ReceivedOn = receivedOn;
+        UpdatedOn = receivedOn;
     }
 
     public long Id { get; private set; }
@@ -307,6 +309,12 @@ public sealed class SourceDocumentOccurrence
     public long? ExtractionJobId { get; private set; }
     public string IdempotencyKey { get; private set; } = null!;
     public string SourceMetadataJson { get; private set; } = null!;
+    public string? LogicalGroupKey { get; private set; }
+    public IntakeOccurrenceStatus IntakeStatus { get; private set; }
+    public string? LastErrorCategory { get; private set; }
+    public string? LastErrorCode { get; private set; }
+    public string? LastErrorDetailsJson { get; private set; }
+    public DateTimeOffset UpdatedOn { get; private set; }
     public DateTimeOffset ReceivedOn { get; private set; }
     public SourceDocument SourceDocument { get; private set; } = null!;
     public DocumentCorpus Corpus { get; private set; } = null!;
@@ -317,14 +325,66 @@ public sealed class SourceDocumentOccurrence
         new(businessUnitId, sourceDocumentId, corpusId, extractionJobId, idempotencyKey,
             sourceMetadataJson, receivedOn ?? DateTimeOffset.UtcNow);
 
+    public void SetLogicalGroup(string? groupKey)
+    {
+        LogicalGroupKey = string.IsNullOrWhiteSpace(groupKey) ? null
+            : EvidenceLedgerGuard.Required(groupKey.Trim(), 256, nameof(groupKey));
+    }
+
     public void BindExtractionJob(long extractionJobId)
     {
         var id = EvidenceLedgerGuard.Positive(extractionJobId, nameof(extractionJobId));
         if (ExtractionJobId.HasValue && ExtractionJobId != id)
             throw new InvalidOperationException("The occurrence is already bound to another extraction job.");
         ExtractionJobId = id;
+        IntakeStatus = IntakeOccurrenceStatus.Queued;
+        UpdatedOn = DateTimeOffset.UtcNow;
+    }
+
+    public void MarkProcessing(DateTimeOffset? changedOn = null) => Transition(IntakeOccurrenceStatus.Processing, changedOn,
+        IntakeOccurrenceStatus.Queued, IntakeOccurrenceStatus.Retryable);
+
+    public void MarkRetryable(string errorCode, string? detailsJson = null, DateTimeOffset? changedOn = null)
+    {
+        LastErrorCategory = "Processing";
+        LastErrorCode = EvidenceLedgerGuard.Required(errorCode, 128, nameof(errorCode));
+        LastErrorDetailsJson = string.IsNullOrWhiteSpace(detailsJson) ? null
+            : EvidenceLedgerGuard.Json(detailsJson, nameof(detailsJson));
+        Transition(IntakeOccurrenceStatus.Retryable, changedOn, IntakeOccurrenceStatus.Processing);
+    }
+
+    public void MarkResolved(DateTimeOffset? changedOn = null) => Transition(IntakeOccurrenceStatus.Resolved, changedOn,
+        IntakeOccurrenceStatus.Processing, IntakeOccurrenceStatus.Retryable);
+
+    public void MarkReviewRequired(DateTimeOffset? changedOn = null) => Transition(IntakeOccurrenceStatus.ReviewRequired, changedOn,
+        IntakeOccurrenceStatus.Processing, IntakeOccurrenceStatus.Retryable);
+
+    public void MarkDeadLetter(string errorCode, string? detailsJson = null, DateTimeOffset? changedOn = null)
+    {
+        LastErrorCategory = "Processing";
+        LastErrorCode = EvidenceLedgerGuard.Required(errorCode, 128, nameof(errorCode));
+        LastErrorDetailsJson = string.IsNullOrWhiteSpace(detailsJson) ? null
+            : EvidenceLedgerGuard.Json(detailsJson, nameof(detailsJson));
+        Transition(IntakeOccurrenceStatus.DeadLetter, changedOn, IntakeOccurrenceStatus.Processing, IntakeOccurrenceStatus.Retryable);
+    }
+
+    public void MarkRejected(string category, string errorCode, string detailsJson, DateTimeOffset? changedOn = null)
+    {
+        LastErrorCategory = EvidenceLedgerGuard.Required(category, 64, nameof(category));
+        LastErrorCode = EvidenceLedgerGuard.Required(errorCode, 128, nameof(errorCode));
+        LastErrorDetailsJson = EvidenceLedgerGuard.Json(detailsJson, nameof(detailsJson));
+        Transition(IntakeOccurrenceStatus.Rejected, changedOn, IntakeOccurrenceStatus.Accepted);
+    }
+
+    private void Transition(IntakeOccurrenceStatus next, DateTimeOffset? changedOn, params IntakeOccurrenceStatus[] allowed)
+    {
+        EvidenceLedgerGuard.Transition(IntakeStatus, next, allowed);
+        IntakeStatus = next;
+        UpdatedOn = changedOn ?? DateTimeOffset.UtcNow;
     }
 }
+
+public enum IntakeOccurrenceStatus { Accepted, Queued, Processing, Retryable, Resolved, ReviewRequired, Rejected, DeadLetter }
 
 public sealed class ExtractionRun
 {
@@ -341,6 +401,8 @@ public sealed class ExtractionRun
         ParserVersion = EvidenceLedgerGuard.Required(parserVersion, 128, nameof(parserVersion));
         SchemaVersion = EvidenceLedgerGuard.Required(schemaVersion, 128, nameof(schemaVersion));
         Status = ExtractionRunStatus.Pending;
+        ProcessingCostStatus = "NotSettled";
+        OcrCostStatus = "NotRequired";
         CreatedOn = now;
         UpdatedOn = now;
     }
@@ -363,6 +425,10 @@ public sealed class ExtractionRun
     public int EvidenceCount { get; private set; }
     public int FindingCount { get; private set; }
     public string? FailureReason { get; private set; }
+    public decimal? ProcessingCostAmount { get; private set; }
+    public string? ProcessingCostCurrency { get; private set; }
+    public string ProcessingCostStatus { get; private set; } = null!;
+    public string OcrCostStatus { get; private set; } = null!;
     public DateTimeOffset CreatedOn { get; private set; }
     public DateTimeOffset UpdatedOn { get; private set; }
     public SourceDocument SourceDocument { get; private set; } = null!;
@@ -381,6 +447,20 @@ public sealed class ExtractionRun
         Status = ExtractionRunStatus.Processing;
         StartedOn = startedOn ?? DateTimeOffset.UtcNow;
         UpdatedOn = StartedOn.Value;
+    }
+
+    public void RecordCostStatus(string processingStatus, string ocrStatus,
+        decimal? amount = null, string? currency = null)
+    {
+        ProcessingCostStatus = EvidenceLedgerGuard.Required(processingStatus, 32, nameof(processingStatus));
+        OcrCostStatus = EvidenceLedgerGuard.Required(ocrStatus, 32, nameof(ocrStatus));
+        ProcessingCostAmount = amount;
+        ProcessingCostCurrency = string.IsNullOrWhiteSpace(currency) ? null
+            : EvidenceLedgerGuard.Required(currency.Trim().ToUpperInvariant(), 3, nameof(currency));
+        if (amount.HasValue && amount.Value < 0)
+            throw new ArgumentOutOfRangeException(nameof(amount));
+        if (amount.HasValue != (ProcessingCostCurrency is not null))
+            throw new ArgumentException("Cost amount and currency must be supplied together.");
     }
 
     public void Complete(int pageCount, int regionCount, int inquiryCount, int lineItemCount,

@@ -184,12 +184,13 @@ public sealed class ExtractionWorker : BackgroundService
             var extractor = scope.ServiceProvider.GetRequiredService<IChunkedExtractionService>();
             var persister = scope.ServiceProvider.GetRequiredService<ILeadPersister>();
 
-            var input = await reader.ReadAsync(job, workToken);
             if (!await queue.SetStatusAsync(job.Id, workerId, job.Attempts, ExtractionStatus.Extracting, workToken))
             {
                 LogLeaseLost(job.Id, workerId, "starting extraction");
                 return true;
             }
+            await MarkIntakeProcessingAsync(job, workToken);
+            var input = await reader.ReadAsync(job, workToken);
 
             ChunkedExtractionOutcome outcome;
             if (input.IsStructured && input.StructuredRows is { Count: > 0 })
@@ -218,6 +219,8 @@ public sealed class ExtractionWorker : BackgroundService
                         job.Id, workerId, job.Attempts,
                         outcome.ReviewReason ?? "Extraction produced no usable result.", workToken))
                     LogLeaseLost(job.Id, workerId, "recording extraction failure");
+                else
+                    await MarkIntakeFailureAsync(job, "extraction_failed", workToken);
                 return true;
             }
 
@@ -244,6 +247,7 @@ public sealed class ExtractionWorker : BackgroundService
                 LogLeaseLost(job.Id, workerId, "starting the atomic persistence transaction");
                 return true;
             }
+            await MarkIntakeFinalizedAsync(job, ct);
 
             _log.LogInformation(
                 "Job {JobId} succeeded: lead {LeadId}, {Extracted}/{Expected} items, status {Status}.",
@@ -282,6 +286,8 @@ public sealed class ExtractionWorker : BackgroundService
                 if (!await queue.FailAsync(job.Id, workerId, job.Attempts,
                         "Evidence integrity failure: " + ex.Message, CancellationToken.None))
                     LogLeaseLost(job.Id, workerId, "recording evidence integrity failure");
+                else
+                    await MarkIntakeFailureAsync(job, "evidence_integrity_failure", CancellationToken.None);
             }
             catch (Exception failEx)
             {
@@ -296,6 +302,8 @@ public sealed class ExtractionWorker : BackgroundService
             {
                 if (!await queue.FailAsync(job.Id, workerId, job.Attempts, ex.Message, CancellationToken.None))
                     LogLeaseLost(job.Id, workerId, "recording unexpected failure");
+                else
+                    await MarkIntakeFailureAsync(job, "unexpected_extraction_failure", CancellationToken.None);
             }
             catch (Exception failEx) { _log.LogError(failEx, "Also failed to record failure for job {JobId}.", job.Id); }
             return true;
@@ -397,6 +405,59 @@ public sealed class ExtractionWorker : BackgroundService
         }
     }
 
+    private async Task MarkIntakeProcessingAsync(ExtractionJob job, CancellationToken ct)
+    {
+        if (!job.SourceDocumentOccurrenceId.HasValue) return;
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        // PostgreSQL synchronizes the occurrence in the same statement transaction as
+        // the fenced job transition. The portable provider retains this explicit path.
+        if (db.Database.IsNpgsql()) return;
+        var occurrence = await db.Set<SourceDocumentOccurrence>()
+            .SingleAsync(x => x.BusinessUnitId == job.BusinessUnitId && x.Id == job.SourceDocumentOccurrenceId, ct);
+        if (occurrence.IntakeStatus is IntakeOccurrenceStatus.Queued or IntakeOccurrenceStatus.Retryable)
+        {
+            occurrence.MarkProcessing();
+            await db.SaveChangesAsync(ct);
+        }
+    }
+
+    private async Task MarkIntakeFailureAsync(ExtractionJob job, string errorCode, CancellationToken ct)
+    {
+        if (!job.SourceDocumentOccurrenceId.HasValue) return;
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        if (db.Database.IsNpgsql()) return;
+        var occurrence = await db.Set<SourceDocumentOccurrence>()
+            .SingleAsync(x => x.BusinessUnitId == job.BusinessUnitId && x.Id == job.SourceDocumentOccurrenceId, ct);
+        if (occurrence.IntakeStatus == IntakeOccurrenceStatus.Processing)
+        {
+            if (job.Attempts >= job.MaxAttempts) occurrence.MarkDeadLetter(errorCode);
+            else occurrence.MarkRetryable(errorCode);
+            await db.SaveChangesAsync(ct);
+        }
+    }
+
+    private async Task MarkIntakeFinalizedAsync(ExtractionJob job, CancellationToken ct)
+    {
+        if (!job.SourceDocumentOccurrenceId.HasValue) return;
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        if (db.Database.IsNpgsql()) return;
+        var occurrence = await db.Set<SourceDocumentOccurrence>()
+            .SingleAsync(x => x.BusinessUnitId == job.BusinessUnitId && x.Id == job.SourceDocumentOccurrenceId, ct);
+        if (occurrence.IntakeStatus is IntakeOccurrenceStatus.Processing or IntakeOccurrenceStatus.Retryable)
+        {
+            var awaitsReview = await db.Set<ERP_RFQ_Automation.LeadIdentity.LeadIngestionOccurrence>()
+                .AsNoTracking().AnyAsync(x => x.BusinessUnitId == job.BusinessUnitId
+                    && x.SourceDocumentOccurrenceId == occurrence.Id
+                    && x.Classification == ERP_RFQ_Automation.LeadIdentity.LeadOccurrenceClassification.PossibleMatchReviewRequired, ct);
+            if (awaitsReview) occurrence.MarkReviewRequired();
+            else occurrence.MarkResolved();
+            await db.SaveChangesAsync(ct);
+        }
+    }
+
     private static async Task ObserveHeartbeatAsync(Task heartbeat)
     {
         try { await heartbeat; }
@@ -463,6 +524,8 @@ public sealed class DefaultExtractionDocumentReader : IExtractionDocumentReader
                 {
                     BusinessUnitId = job.BusinessUnitId,
                     SourceId = $"{job.Id}:claim:{job.Attempts}",
+                    ExtractionJobId = job.Id,
+                    SourceDocumentOccurrenceId = job.SourceDocumentOccurrenceId,
                     SourceDocumentName = name,
                     IsStructured = true,
                     StructuredRows = rows,
@@ -483,6 +546,8 @@ public sealed class DefaultExtractionDocumentReader : IExtractionDocumentReader
         {
             BusinessUnitId = job.BusinessUnitId,
             SourceId = $"{job.Id}:claim:{job.Attempts}",
+            ExtractionJobId = job.Id,
+            SourceDocumentOccurrenceId = job.SourceDocumentOccurrenceId,
             SourceDocumentName = name,
             IsStructured = false,
             HeaderText = header,
@@ -641,10 +706,21 @@ public sealed class LeadPersister : ILeadPersister
         if (_leadIdentity is not null)
         {
             long? sourceDocumentId = null;
+            string? logicalGroupKey = null;
             if (_context.Model.FindEntityType(typeof(SourceDocument)) is not null)
+            {
                 sourceDocumentId = await _context.Set<SourceDocument>()
                     .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.ContentHash == job.ContentHash)
                     .Select(x => (long?)x.Id).SingleOrDefaultAsync(ct);
+                if (job.SourceDocumentOccurrenceId.HasValue)
+                    logicalGroupKey = await _context.Set<SourceDocumentOccurrence>()
+                        .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.Id == job.SourceDocumentOccurrenceId)
+                        .Select(x => x.LogicalGroupKey).SingleOrDefaultAsync(ct);
+            }
+            var attributedExternalCost = await _context.Set<ERP_RFQ_Automation.AI.AiRequest>()
+                .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.ExtractionJobId == job.Id
+                    && x.ProviderClass == ERP_RFQ_Automation.AI.AiProviderClass.External)
+                .SumAsync(x => x.EstimatedCost ?? 0m, ct);
             for (var i = 0; i < leads.Count; i++)
             {
                 var path = outcome.CanonicalImport is not null
@@ -661,7 +737,11 @@ public sealed class LeadPersister : ILeadPersister
                         null, job.SourceType.ToString(), metadata?.FromEmail,
                         metadata?.Subject, job.FileName, null, null, job.ContentHash, sourceDocumentId, job.Id,
                         metadata?.SourceReceivedAtUtc, DateTimeOffset.UtcNow, path, path == ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.ExternalModel,
-                        0m, "Service", "extraction-worker", $"extraction:{job.Id}"), ct));
+                        attributedExternalCost, "Service", "extraction-worker", $"extraction:{job.Id}")
+                    {
+                        SourceDocumentOccurrenceId = job.SourceDocumentOccurrenceId,
+                        LogicalGroupKey = logicalGroupKey ?? metadata?.LogicalGroupKey
+                    }, ct));
             }
             var canonicalIds = reconciliation.Where(x => x.LeadId > 0).Select(x => x.LeadId).Distinct().ToArray();
             leads = await _context.Leads.Include(x => x.LeadItems).Where(x => canonicalIds.Contains(x.Id)).ToListAsync(ct);
@@ -741,6 +821,11 @@ public sealed class LeadPersister : ILeadPersister
         source.StartExtraction();
         var run = ExtractionRun.Create(job.BusinessUnitId, source.Id, Guid.NewGuid(), job.Id,
             job.Attempts, "llm-unstructured/v1", "lead-extraction/v1");
+        run.RecordCostStatus(
+            outcome.AiProviderClass == ERP_RFQ_Automation.AI.AiProviderClass.External ? "RateUnavailable" : "LocalNoCharge",
+            "LocalNoCharge",
+            outcome.AiProviderClass == ERP_RFQ_Automation.AI.AiProviderClass.External ? null : 0m,
+            outcome.AiProviderClass == ERP_RFQ_Automation.AI.AiProviderClass.External ? null : "USD");
         run.Start();
         _context.Add(run);
         await _context.SaveChangesAsync(ct);
@@ -762,6 +847,37 @@ public sealed class LeadPersister : ILeadPersister
         TimeSpan leaseDuration,
         CancellationToken ct = default)
     {
+        var persisted = await _context.Database.CreateExecutionStrategy().ExecuteAsync(
+            () => PersistAndCompleteCoreAsync(job, outcome, queue, workerId, leaseAttempt, leaseDuration, ct));
+        if (persisted is null)
+            return null;
+
+        if (_leadIdentity is null)
+            await TryDetectDuplicatesAsync(job, persisted.Leads, ct);
+        if (_leadIdentity is null)
+            await TryRouteLeadsAsync(job, persisted.Leads, ct);
+        else
+        {
+            var newLeadIds = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadIngestionOccurrence>()
+                .AsNoTracking()
+                .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.ExtractionJobId == job.Id
+                    && x.Classification == ERP_RFQ_Automation.LeadIdentity.LeadOccurrenceClassification.New
+                    && x.LeadId != null)
+                .Select(x => x.LeadId!.Value).ToListAsync(ct);
+            await TryRouteLeadsAsync(job, persisted.Leads.Where(x => newLeadIds.Contains(x.Id)), ct);
+        }
+        return persisted.LeadId;
+    }
+
+    private async Task<PersistedExtraction?> PersistAndCompleteCoreAsync(
+        ExtractionJob job,
+        ChunkedExtractionOutcome outcome,
+        IExtractionQueue queue,
+        string workerId,
+        int leaseAttempt,
+        TimeSpan leaseDuration,
+        CancellationToken ct)
+    {
         await using var transaction = await _context.Database.BeginTransactionAsync(ct);
 
         // This conditional UPDATE both validates the fencing generation and holds the
@@ -782,26 +898,14 @@ public sealed class LeadPersister : ILeadPersister
             .Select(entry => entry.Entity)
             .DistinctBy(lead => lead.Id)
             .ToArray();
-        if (!await queue.CompleteAsync(job.Id, workerId, leaseAttempt, leadId, ct))
+        if (!await queue.CompleteAsync(job.Id, workerId, leaseAttempt, leadId > 0 ? leadId : null, ct))
             throw new InvalidOperationException($"Fenced completion failed for extraction job {job.Id}.");
 
         await transaction.CommitAsync(ct);
-        if (_leadIdentity is null)
-            await TryDetectDuplicatesAsync(job, persistedLeads, ct);
-        if (_leadIdentity is null)
-            await TryRouteLeadsAsync(job, persistedLeads, ct);
-        else
-        {
-            var newLeadIds = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadIngestionOccurrence>()
-                .AsNoTracking()
-                .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.ExtractionJobId == job.Id
-                    && x.Classification == ERP_RFQ_Automation.LeadIdentity.LeadOccurrenceClassification.New
-                    && x.LeadId != null)
-                .Select(x => x.LeadId!.Value).ToListAsync(ct);
-            await TryRouteLeadsAsync(job, persistedLeads.Where(x => newLeadIds.Contains(x.Id)), ct);
-        }
-        return leadId;
+        return new PersistedExtraction(leadId, persistedLeads);
     }
+
+    private sealed record PersistedExtraction(long LeadId, Lead[] Leads);
 
     private async Task TryDetectDuplicatesAsync(
         ExtractionJob job, IEnumerable<Lead> leads, CancellationToken ct)

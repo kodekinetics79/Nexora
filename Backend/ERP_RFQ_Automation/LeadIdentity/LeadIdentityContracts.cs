@@ -24,7 +24,11 @@ public sealed record LeadIntakeDescriptor(
     decimal ExternalCost,
     string ActorType,
     string ActorId,
-    string CorrelationId);
+    string CorrelationId)
+{
+    public long? SourceDocumentOccurrenceId { get; init; }
+    public string? LogicalGroupKey { get; init; }
+}
 
 public sealed record LeadReconciliationResult(
     long LeadId,
@@ -46,7 +50,8 @@ public sealed record LeadRevisionImpactDto(string AggregateType, long AggregateI
 public sealed record BatchReconciliationItemDto(long OccurrenceId, long? LeadId, string? NexoraSerial,
     string Classification, int? RevisionNumber, string? FileName, DateTimeOffset IngestedAtUtc,
     string ProcessingPath, bool ExternalAiUsed, decimal Confidence, IReadOnlyList<string> Reasons,
-    IReadOnlyList<LeadMatchCandidateDto> MatchCandidates);
+    IReadOnlyList<LeadMatchCandidateDto> MatchCandidates,
+    string CustomerResolutionStatus, string? AssignedOpportunityOwner);
 public sealed record LeadMatchCandidateDto(long CandidateId, long CandidateLeadId, string NexoraSerial,
     string? CustomerRfqReference, decimal Confidence, string MatchEvidenceJson, string DifferencesJson,
     string DownstreamImpactJson, string ReviewState, int Version);

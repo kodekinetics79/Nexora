@@ -30,6 +30,9 @@ public sealed class ExtractionJobMetadata
     /// </summary>
     public string? SourceOccurrenceId { get; set; }
 
+    /// <summary>Stable source-level grouping hint, such as an email message id.</summary>
+    public string? LogicalGroupKey { get; set; }
+
     /// <summary>Id of a PRE-CREATED EmailIngest row the produced lead(s) must link to.
     /// Null for doors that have no real ingest (manual upload, folder).</summary>
     public long? EmailIngestId { get; set; }

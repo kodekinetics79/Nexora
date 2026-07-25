@@ -1,7 +1,12 @@
+using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
+using ERP_RFQ_Automation.Extraction;
+using ERP_RFQ_Automation.LeadIdentity;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.DependencyInjection;
 using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.Models;
 using System;
@@ -16,16 +21,31 @@ namespace ERP_RFQ_Automation.Controllers
     public class FileController : ControllerBase
     {
         private readonly ErpRfqAutomationContext _context;
-        private readonly IFileStorage _storage;
+        private readonly IEvidenceObjectStorage _evidenceStorage;
+        private readonly IFileStorage? _legacyStorage;
         private readonly ILogger<FileController> _logger;
 
         public FileController(
             ErpRfqAutomationContext context,
-            IFileStorage storage,
+            IFileStorage legacyStorage,
             ILogger<FileController> logger)
         {
             _context = context;
-            _storage = storage;
+            _legacyStorage = legacyStorage;
+            _evidenceStorage = new LocalEvidenceObjectStorage(legacyStorage);
+            _logger = logger;
+        }
+
+        [ActivatorUtilitiesConstructor]
+        public FileController(
+            ErpRfqAutomationContext context,
+            IFileStorage legacyStorage,
+            IEvidenceObjectStorage evidenceStorage,
+            ILogger<FileController> logger)
+        {
+            _context = context;
+            _legacyStorage = null;
+            _evidenceStorage = evidenceStorage;
             _logger = logger;
         }
 
@@ -38,6 +58,7 @@ namespace ERP_RFQ_Automation.Controllers
             });
 
         [HttpGet("attachment/{attachmentId:long}")]
+        [RequireModulePermission("Leads", PermissionAction.View)]
         public async Task<IActionResult> DownloadAttachment(long attachmentId, CancellationToken ct)
         {
             var rawBusinessUnitId = User.FindFirst("businessUnitId")?.Value;
@@ -62,10 +83,50 @@ namespace ERP_RFQ_Automation.Controllers
                 if (!belongsToTenant)
                     return NotFound();
 
-                var stream = await _storage.OpenReadAsync(attachment.FilePath, ct);
-                var contentType = string.IsNullOrWhiteSpace(attachment.MimeType)
+                var sourceDocumentId = await _context.Set<LeadOccurrenceDocument>()
+                    .AsNoTracking()
+                    .Where(link => link.BusinessUnitId == businessUnitId
+                                   && link.Occurrence.LeadId == attachment.ParentId)
+                    .OrderBy(link => link.Ordinal)
+                    .ThenBy(link => link.Id)
+                    .Select(link => (long?)link.SourceDocumentId)
+                    .FirstOrDefaultAsync(ct);
+
+                var source = sourceDocumentId.HasValue
+                    ? await _context.Set<SourceDocument>().AsNoTracking()
+                        .SingleOrDefaultAsync(document => document.BusinessUnitId == businessUnitId
+                            && document.Id == sourceDocumentId.Value
+                            && document.OriginalFileName == attachment.FileName, ct)
+                    : null;
+                var job = source?.ExtractionJobId is { } extractionJobId
+                    ? await _context.Set<ExtractionJob>().AsNoTracking()
+                        .SingleOrDefaultAsync(candidate => candidate.BusinessUnitId == businessUnitId
+                            && candidate.Id == extractionJobId, ct)
+                    : null;
+
+                if (source is null || job is null)
+                {
+                    // Compatibility is limited to direct legacy construction. The application DI
+                    // path always supplies IEvidenceObjectStorage and therefore fails closed.
+                    if (_legacyStorage is null)
+                        return NotFound();
+                    var legacyStream = await _legacyStorage.OpenReadAsync(attachment.FilePath, ct);
+                    return File(legacyStream, attachment.MimeType ?? "application/octet-stream",
+                        attachment.FileName, enableRangeProcessing: true);
+                }
+
+                if (attachment.FileSize.HasValue && attachment.FileSize.Value != source.ByteSize)
+                {
+                    _logger.LogWarning("Attachment {AttachmentId} does not match authoritative evidence size.", attachmentId);
+                    return Problem(statusCode: StatusCodes.Status409Conflict,
+                        title: "The evidence object failed integrity verification.");
+                }
+
+                var stream = await _evidenceStorage.OpenVerifiedReadAsync(
+                    job.StoragePath, source.ContentHash, ct);
+                var contentType = string.IsNullOrWhiteSpace(source.DetectedMimeType)
                     ? "application/octet-stream"
-                    : attachment.MimeType;
+                    : source.DetectedMimeType;
                 return File(stream, contentType, attachment.FileName, enableRangeProcessing: true);
             }
             catch (FileNotFoundException)
@@ -76,6 +137,12 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 _logger.LogWarning(ex, "Rejected unsafe storage path for attachment {AttachmentId}.", attachmentId);
                 return NotFound();
+            }
+            catch (InvalidDataException ex)
+            {
+                _logger.LogWarning(ex, "Evidence integrity verification failed for attachment {AttachmentId}.", attachmentId);
+                return Problem(statusCode: StatusCodes.Status409Conflict,
+                    title: "The evidence object failed integrity verification.");
             }
             catch (Exception ex)
             {

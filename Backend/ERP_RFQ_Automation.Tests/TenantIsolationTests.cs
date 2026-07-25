@@ -122,7 +122,6 @@ public class TenantIsolationTests
         {
             Seed.Customer(seed, id: 1, buid: Bu1, name: "BU1 Customer");
             Seed.Customer(seed, id: 2, buid: Bu2, name: "BU2 Customer");
-            Seed.Customer(seed, id: 3, buid: null, name: "Shared Reference Customer");
             seed.SaveChanges();
         }
 
@@ -131,7 +130,6 @@ public class TenantIsolationTests
 
         Assert.Single(visible);
         Assert.Contains(visible, c => c.Id == 1);   // own tenant
-        Assert.DoesNotContain(visible, c => c.Id == 3); // legacy unowned customer hidden
         Assert.DoesNotContain(visible, c => c.Id == 2); // other tenant hidden
     }
 
@@ -143,11 +141,20 @@ public class TenantIsolationTests
         {
             Seed.Customer(seed, id: 1, buid: Bu1, name: "BU1 Customer");
             Seed.Customer(seed, id: 2, buid: Bu2, name: "BU2 Customer");
-            Seed.Customer(seed, id: 3, buid: null, name: "Shared");
             seed.SaveChanges();
         }
 
         using var worker = db.ContextFor(null);
-        Assert.Equal(3, worker.Customers.Count());
+        Assert.Equal(2, worker.Customers.Count());
+    }
+
+    [Fact]
+    public void Customer_without_tenant_is_rejected()
+    {
+        using var db = new TestDb();
+        using var seed = db.ContextFor(null);
+        Seed.Customer(seed, id: 3, buid: null, name: "Unowned");
+
+        Assert.Throws<InvalidOperationException>(() => seed.SaveChanges());
     }
 }

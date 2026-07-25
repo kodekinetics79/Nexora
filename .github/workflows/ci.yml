@@ -106,3 +106,53 @@ jobs:
 
       - name: Build (tsc + vite)
         run: npm run build
+
+      - name: List browser acceptance suite
+        run: npm run e2e:list
+
+      - name: Install Playwright Chromium
+        if: ${{ vars.E2E_ACCEPTANCE_ENABLED == 'true' }}
+        run: npm run e2e:install
+
+      - name: Run authenticated browser acceptance
+        if: ${{ vars.E2E_ACCEPTANCE_ENABLED == 'true' }}
+        run: npm run e2e:acceptance
+        env:
+          E2E_ACCEPTANCE_MODE: 'true'
+          E2E_FIXTURE_MODE: 'false'
+          E2E_SKIP_WEB_SERVER: 'true'
+          E2E_BASE_URL: ${{ vars.E2E_BASE_URL }}
+          E2E_MANAGER_EMAIL: ${{ secrets.E2E_MANAGER_EMAIL }}
+          E2E_MANAGER_PASSWORD: ${{ secrets.E2E_MANAGER_PASSWORD }}
+          E2E_MANAGER_BUSINESS_UNIT_ID: ${{ vars.E2E_MANAGER_BUSINESS_UNIT_ID }}
+          E2E_EDITOR_EMAIL: ${{ secrets.E2E_EDITOR_EMAIL }}
+          E2E_EDITOR_PASSWORD: ${{ secrets.E2E_EDITOR_PASSWORD }}
+          E2E_EDITOR_BUSINESS_UNIT_ID: ${{ vars.E2E_EDITOR_BUSINESS_UNIT_ID }}
+          E2E_DENIED_EMAIL: ${{ secrets.E2E_DENIED_EMAIL }}
+          E2E_DENIED_PASSWORD: ${{ secrets.E2E_DENIED_PASSWORD }}
+          E2E_DENIED_BUSINESS_UNIT_ID: ${{ vars.E2E_DENIED_BUSINESS_UNIT_ID }}
+          E2E_BATCH_ID: ${{ vars.E2E_BATCH_ID }}
+          E2E_UPLOAD_FILE: ${{ vars.E2E_UPLOAD_FILE }}
+          E2E_LEAD_ID: ${{ vars.E2E_LEAD_ID }}
+          E2E_REVISION_LEAD_ID: ${{ vars.E2E_REVISION_LEAD_ID }}
+          E2E_RFQ_ID: ${{ vars.E2E_RFQ_ID }}
+          E2E_QUOTE_ID: ${{ vars.E2E_QUOTE_ID }}
+          E2E_NEXORA_SERIAL: ${{ vars.E2E_NEXORA_SERIAL }}
+          E2E_CUSTOMER_NAME: ${{ vars.E2E_CUSTOMER_NAME }}
+          E2E_DASHBOARD_KPI_LABEL: ${{ vars.E2E_DASHBOARD_KPI_LABEL }}
+          E2E_DASHBOARD_KPI_VALUE: ${{ vars.E2E_DASHBOARD_KPI_VALUE }}
+          E2E_DASHBOARD_DRILLDOWN_COUNT: ${{ vars.E2E_DASHBOARD_DRILLDOWN_COUNT }}
+          E2E_EXPECTED_NEW_LEADS: ${{ vars.E2E_EXPECTED_NEW_LEADS }}
+          E2E_EXPECTED_EXACT_DUPLICATES: ${{ vars.E2E_EXPECTED_EXACT_DUPLICATES }}
+          E2E_EXPECTED_REVISIONS: ${{ vars.E2E_EXPECTED_REVISIONS }}
+          E2E_EXPECTED_POSSIBLE_MATCHES: ${{ vars.E2E_EXPECTED_POSSIBLE_MATCHES }}
+
+      - name: Upload Playwright artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-playwright
+          path: |
+            Frontend/playwright-report
+            Frontend/test-results/playwright
+          if-no-files-found: ignore

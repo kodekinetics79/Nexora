@@ -1,5 +1,8 @@
+using System.Security.Cryptography;
+using System.Text;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.AI;
+using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
@@ -554,6 +557,7 @@ public sealed class PostgreSqlProductionDialectTests
             WHERE schema_definition.nspname = 'public'
               AND table_definition.relkind IN ('r', 'p')
               AND NOT table_definition.relrowsecurity
+              AND table_definition.relname <> 'Module'
               AND (
                   has_table_privilege('nexora_tenant_app', table_definition.oid, 'SELECT')
                   OR has_table_privilege('nexora_tenant_app', table_definition.oid, 'INSERT')
@@ -561,6 +565,13 @@ public sealed class PostgreSqlProductionDialectTests
                   OR has_table_privilege('nexora_tenant_app', table_definition.oid, 'DELETE'));
             """;
         Assert.Null((await privilegeCommand.ExecuteScalarAsync()) as string);
+
+        await using var modulePrivilegeCommand = connection.CreateCommand();
+        modulePrivilegeCommand.CommandText = """
+            SELECT has_table_privilege('nexora_tenant_app', 'public."Module"', 'SELECT')
+               AND NOT has_table_privilege('nexora_tenant_app', 'public."Module"', 'INSERT, UPDATE, DELETE');
+            """;
+        Assert.True((bool)(await modulePrivilegeCommand.ExecuteScalarAsync())!);
 
         await using var deniedTableCommand = connection.CreateCommand();
         deniedTableCommand.CommandText = """
@@ -648,15 +659,7 @@ public sealed class PostgreSqlProductionDialectTests
             var queue = NewQueue(seed);
             for (var index = 0; index < 5; index++)
             {
-                var result = await queue.EnqueueAsync(new EnqueueExtractionRequest
-                {
-                    BusinessUnitId = businessUnitId,
-                    SourceType = ExtractionSourceType.ManualUpload,
-                    StoragePath = $"test://{marker}/{index}",
-                    ContentHash = $"{marker}{index}",
-                    FileName = $"rfq-{index}.pdf",
-                    FileType = "pdf"
-                });
+                var result = await EnqueueGovernedJobAsync(seed, queue, $"{marker}-{index}", businessUnitId, 5);
                 Assert.Equal(EnqueueOutcome.Enqueued, result.Outcome);
             }
         }
@@ -687,7 +690,7 @@ public sealed class PostgreSqlProductionDialectTests
         await using var context = _database.ContextFor(null);
         var queue = NewQueue(context);
 
-        var completedJobId = await EnqueueJobAsync(queue, marker + "-complete", businessUnitId, 3);
+        var completedJobId = (await EnqueueGovernedJobAsync(context, queue, marker + "-complete", businessUnitId, 3)).JobId;
         var completedClaim = await queue.ClaimAsync("worker-a", TimeSpan.FromMinutes(5), 4);
         Assert.Equal(completedJobId, completedClaim!.Id);
         Assert.False(await queue.RenewLeaseAsync(completedJobId, "worker-b", completedClaim.Attempts, TimeSpan.FromMinutes(5)));
@@ -701,7 +704,7 @@ public sealed class PostgreSqlProductionDialectTests
         Assert.False(await queue.SetStatusAsync(completedJobId, "worker-a", completedClaim.Attempts, ExtractionStatus.Extracting));
         Assert.True(await queue.CompleteAsync(completedJobId, "worker-a", completedClaim.Attempts, 77_001));
 
-        var expiredJobId = await EnqueueJobAsync(queue, marker + "-expired", businessUnitId, 2);
+        var expiredJobId = (await EnqueueGovernedJobAsync(context, queue, marker + "-expired", businessUnitId, 2)).JobId;
         var expiredClaim = await queue.ClaimAsync("worker-a", TimeSpan.FromMinutes(5), 4);
         Assert.Equal(expiredJobId, expiredClaim!.Id);
         await context.Database.ExecuteSqlInterpolatedAsync(
@@ -721,7 +724,7 @@ public sealed class PostgreSqlProductionDialectTests
         Assert.Equal("poison document", deadLetter.LastError);
         Assert.Null(deadLetter.LeasedBy);
 
-        var retryJobId = await EnqueueJobAsync(queue, marker + "-retry", businessUnitId, 3);
+        var retryJobId = (await EnqueueGovernedJobAsync(context, queue, marker + "-retry", businessUnitId, 3)).JobId;
         var retryClaim = await queue.ClaimAsync("worker-c", TimeSpan.FromMinutes(5), 4);
         Assert.Equal(retryJobId, retryClaim!.Id);
         var failedAt = DateTime.UtcNow;
@@ -731,7 +734,7 @@ public sealed class PostgreSqlProductionDialectTests
         Assert.True(retry.NextAttemptAt > failedAt);
         Assert.Null(await queue.ClaimAsync("worker-d", TimeSpan.FromMinutes(5), 4));
 
-        var crashedFinalJobId = await EnqueueJobAsync(queue, marker + "-crashed-final", businessUnitId, 1);
+        var crashedFinalJobId = (await EnqueueGovernedJobAsync(context, queue, marker + "-crashed-final", businessUnitId, 1)).JobId;
         var finalClaim = await queue.ClaimAsync("stable-worker-id", TimeSpan.FromMinutes(5), 4);
         Assert.Equal(crashedFinalJobId, finalClaim!.Id);
         await context.Database.ExecuteSqlInterpolatedAsync(
@@ -914,21 +917,36 @@ public sealed class PostgreSqlProductionDialectTests
         await seed.ExecuteNonQueryAsync();
     }
 
-    private static async Task<long> EnqueueJobAsync(
-        IExtractionQueue queue, string marker, long businessUnitId, int maxAttempts)
+    private static async Task<EnqueueResult> EnqueueGovernedJobAsync(
+        ErpRfqAutomationContext context, IExtractionQueue queue, string marker, long businessUnitId, int maxAttempts)
     {
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(marker))).ToLowerInvariant();
+        var corpus = DocumentCorpus.Create(businessUnitId, Guid.NewGuid(), CorpusSourceType.ManualUpload);
+        context.Set<DocumentCorpus>().Add(corpus);
+        await context.SaveChangesAsync();
+        var source = SourceDocument.Create(businessUnitId, corpus.Id, hash, marker + ".pdf", "application/pdf",
+            "acceptance", marker, "v1", 1);
+        context.Set<SourceDocument>().Add(source);
+        await context.SaveChangesAsync();
+        var occurrence = SourceDocumentOccurrence.Create(businessUnitId, source.Id, corpus.Id,
+            "queue-test:" + marker, "{}");
+        context.Set<SourceDocumentOccurrence>().Add(occurrence);
+        await context.SaveChangesAsync();
         var result = await queue.EnqueueAsync(new EnqueueExtractionRequest
         {
             BusinessUnitId = businessUnitId,
+            SourceDocumentOccurrenceId = occurrence.Id,
             SourceType = ExtractionSourceType.ManualUpload,
             StoragePath = "test://" + marker,
-            ContentHash = marker.PadRight(64, '0')[..64],
+            ContentHash = hash,
             FileName = marker + ".pdf",
             FileType = "pdf",
             MaxAttempts = maxAttempts
         });
         Assert.Equal(EnqueueOutcome.Enqueued, result.Outcome);
-        return result.JobId;
+        occurrence.BindExtractionJob(result.JobId);
+        await context.SaveChangesAsync();
+        return result;
     }
 
     private static ExtractionQueue NewQueue(ERP_RFQ_Automation.Models.ErpRfqAutomationContext context)

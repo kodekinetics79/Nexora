@@ -77,6 +77,7 @@ public class LeadController : ControllerBase
     }
 
     [HttpGet("email-configurations")]
+    [RequireModulePermission("Leads", PermissionAction.View)]
     public async Task<ActionResult<IEnumerable<EmailConfigurationDropdownDTO>>> GetEmailConfigurations(
         [FromQuery] long? businessUnitId = null)
     {
@@ -149,6 +150,7 @@ public class LeadController : ControllerBase
     }
 
     [HttpGet("rejection-reasons")]
+    [RequireModulePermission("Leads", PermissionAction.View)]
     public async Task<ActionResult<IEnumerable<RejectionReasonDTO>>> GetRejectionReasons()
     {
         try

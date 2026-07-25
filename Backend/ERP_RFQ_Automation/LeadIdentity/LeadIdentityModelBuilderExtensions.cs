@@ -20,6 +20,7 @@ public static class LeadIdentityModelBuilderExtensions
             e.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
             e.Property(x => x.SourceChannel).HasMaxLength(32); e.Property(x => x.IdempotencyKey).HasMaxLength(256);
             e.Property(x => x.ExternalSourceId).HasMaxLength(512); e.Property(x => x.EmailThreadId).HasMaxLength(512);
+            e.Property(x => x.LogicalGroupKey).HasMaxLength(256);
             e.Property(x => x.SourceSystem).HasMaxLength(128); e.Property(x => x.Sender).HasMaxLength(512);
             e.Property(x => x.Subject).HasMaxLength(1000); e.Property(x => x.OriginalFileName).HasMaxLength(512);
             e.Property(x => x.MimeType).HasMaxLength(255); e.Property(x => x.ContentHash).HasMaxLength(64).IsFixedLength();
@@ -34,6 +35,7 @@ public static class LeadIdentityModelBuilderExtensions
             e.HasIndex(x => new { x.BusinessUnitId, x.ContentHash, x.CustomerScopeKey });
             e.HasIndex(x => new { x.BusinessUnitId, x.LogicalInquiryFingerprint });
             e.HasIndex(x => new { x.BusinessUnitId, x.Classification, x.CreatedAtUtc });
+            e.HasIndex(x => new { x.BusinessUnitId, x.SourceDocumentOccurrenceId });
             e.HasOne(x => x.Batch).WithMany(x => x.Occurrences).HasForeignKey(x => new { x.BusinessUnitId, x.BatchId }).HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
             e.HasOne(x => x.Lead).WithMany(x => x.IngestionOccurrences).HasForeignKey(x => new { x.BusinessUnitId, x.LeadId }).HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
         });
@@ -100,6 +102,10 @@ public static class LeadIdentityModelBuilderExtensions
             e.Property(x => x.CurrentInquiryFingerprint).HasMaxLength(64).IsFixedLength(); e.Property(x => x.CurrentOccurrenceClassification).HasMaxLength(48);
             e.Property(x => x.IdentityVersion).IsConcurrencyToken(); e.HasIndex(x => new { x.BusinessUnitId, x.CurrentInquiryFingerprint });
             e.HasOne<LeadRevision>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.CurrentRevisionId }).HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<Models.Customer>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.CustomerId })
+                .HasPrincipalKey(x => new { BusinessUnitId = x.Buid, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<Models.Contact>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.ContactId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
         });
     }
 }

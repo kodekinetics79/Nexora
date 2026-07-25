@@ -127,6 +127,8 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         {
             BusinessUnitId = job.BusinessUnitId,
             SourceId = $"{job.Id}:claim:{job.Attempts}",
+            ExtractionJobId = job.Id,
+            SourceDocumentOccurrenceId = job.SourceDocumentOccurrenceId,
             SourceDocumentName = name,
             IsStructured = true,
             StructuredRows = rows,
@@ -153,6 +155,8 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         {
             BusinessUnitId = job.BusinessUnitId,
             SourceId = $"{job.Id}:claim:{job.Attempts}",
+            ExtractionJobId = job.Id,
+            SourceDocumentOccurrenceId = job.SourceDocumentOccurrenceId,
             SourceDocumentName = name,
             IsStructured = false,
             HeaderText = header,

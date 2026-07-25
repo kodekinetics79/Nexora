@@ -1,4 +1,5 @@
-﻿using ERP_RFQ_Automation.DTOs.Contact;
+﻿using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.DTOs.Contact;
 using ERP_RFQ_Automation.DTOs.CustomerDTOs;
 using ERP_RFQ_Automation.DTOs.SupplierDTOs;
 using ERP_RFQ_Automation.Interfaces;
@@ -27,6 +28,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // GET: api/Contact?pageNumber=1&pageSize=10&id=1&firstName=john&lastName=doe&email=john@example.com&customerId=1&supplierId=1&isPrimary=true&isActive=true&businessUnitId=1
         [HttpGet]
+        [RequireModulePermission("Customers", PermissionAction.View)]
         public async Task<ActionResult<DTOs.Contact.PaginatedResponseDTO<ContactResponseDTO>>> GetAll(
             [FromQuery] long? businessUnitId = null,
             [FromQuery] int pageNumber = 1,
@@ -67,14 +69,15 @@ namespace ERP_RFQ_Automation.Controllers
 
                 return Ok(response);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving data: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to retrieve contacts.");
             }
         }
 
         // GET: api/Contact/5
         [HttpGet("{id}")]
+        [RequireModulePermission("Customers", PermissionAction.View)]
         public async Task<ActionResult<ContactResponseDTO>> GetById(long id, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -88,18 +91,19 @@ namespace ERP_RFQ_Automation.Controllers
                 var contact = await _repository.GetByIdAsync(id, targetBUId);
                 return Ok(MapToResponse(contact));
             }
-            catch (KeyNotFoundException ex)
+            catch (KeyNotFoundException)
             {
-                return NotFound(ex.Message);
+                return NotFound("Contact not found.");
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving data: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to retrieve the contact.");
             }
         }
 
         // POST: api/Contact
         [HttpPost]
+        [RequireModulePermission("Customers", PermissionAction.Create)]
         public async Task<ActionResult<ContactResponseDTO>> Create([FromBody] ContactCreateRequestDTO request)
         {
             try
@@ -131,18 +135,19 @@ namespace ERP_RFQ_Automation.Controllers
                 long buId = contact.CustomerId.HasValue ? (await _context.Customers.FindAsync(contact.CustomerId.Value))?.Buid ?? 0 : (await _context.Suppliers.FindAsync(contact.SupplierId.Value))?.Buid ?? 0;
                 return CreatedAtAction(nameof(GetById), new { id = contact.Id, businessUnitId = buId }, response);
             }
-            catch (ArgumentException ex)
+            catch (ArgumentException)
             {
-                return BadRequest(ex.Message);
+                return BadRequest("The contact request is invalid.");
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error creating data: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to create the contact.");
             }
         }
 
         // PUT: api/Contact/5
         [HttpPut("{id}")]
+        [RequireModulePermission("Customers", PermissionAction.Edit)]
         public async Task<ActionResult> Update(long id, [FromBody] ContactUpdateRequestDTO request)
         {
             try
@@ -176,22 +181,23 @@ namespace ERP_RFQ_Automation.Controllers
 
                 return NoContent();
             }
-            catch (KeyNotFoundException ex)
+            catch (KeyNotFoundException)
             {
-                return NotFound(ex.Message);
+                return NotFound("Contact not found.");
             }
-            catch (ArgumentException ex)
+            catch (ArgumentException)
             {
-                return BadRequest(ex.Message);
+                return BadRequest("The contact request is invalid.");
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error updating data: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to update the contact.");
             }
         }
 
         // DELETE: api/Contact/5
         [HttpDelete("{id}")]
+        [RequireModulePermission("Customers", PermissionAction.Delete)]
         public async Task<ActionResult> Delete(long id, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -205,22 +211,23 @@ namespace ERP_RFQ_Automation.Controllers
                 await _repository.DeleteAsync(id, targetBUId);
                 return NoContent();
             }
-            catch (KeyNotFoundException ex)
+            catch (KeyNotFoundException)
             {
-                return NotFound(ex.Message);
+                return NotFound("Contact not found.");
             }
-            catch (InvalidOperationException ex)
+            catch (InvalidOperationException)
             {
-                return BadRequest(ex.Message);
+                return BadRequest("The contact cannot be deleted.");
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error deleting data: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to delete the contact.");
             }
         }
 
         // GET: api/Contact/Customers
         [HttpGet("Customers")]
+        [RequireModulePermission("Customers", PermissionAction.View)]
         public async Task<ActionResult<IEnumerable<CustomerDropdown>>> GetCustomers([FromQuery] long? businessUnitId = null)
         {
             try
@@ -234,14 +241,15 @@ namespace ERP_RFQ_Automation.Controllers
                 var customers = await _repository.GetCustomersAsync(targetBUId);
                 return Ok(customers);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving customers: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to retrieve customers.");
             }
         }
 
         // GET: api/Contact/Suppliers
         [HttpGet("Suppliers")]
+        [RequireModulePermission("Customers", PermissionAction.View)]
         public async Task<ActionResult<IEnumerable<SupplierDropDown>>> GetSuppliers([FromQuery] long? businessUnitId = null)
         {
             try
@@ -255,9 +263,9 @@ namespace ERP_RFQ_Automation.Controllers
                 var suppliers = await _repository.GetSuppliersAsync(targetBUId);
                 return Ok(suppliers);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving suppliers: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to retrieve suppliers.");
             }
         }
 

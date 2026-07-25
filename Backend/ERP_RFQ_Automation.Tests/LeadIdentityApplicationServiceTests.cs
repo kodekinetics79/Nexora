@@ -127,6 +127,88 @@ public sealed class LeadIdentityApplicationServiceTests
         Assert.Contains(differences, x => x.Scope == "Field" && x.ChangeType == LeadRevisionChangeType.Unchanged);
     }
 
+    [Fact]
+    public async Task Corroborated_logical_group_creates_revision_of_canonical_lead()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(75);
+        Seed.BusinessUnit(context, 75); Seed.EmailConfig(context, 7501, 75); Seed.EmailIngest(context, 7601, 7501, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var original = Candidate(75, 7601, null, "buyer@group.test", 10);
+        original.BidClosingDate = DateTime.UtcNow.AddDays(7);
+        var created = await service.ReconcileAsync(original,
+            Intake("group-original", "group-a", Guid.NewGuid(), "buyer@group.test") with { LogicalGroupKey = "email:group-75" });
+
+        context.ChangeTracker.Clear();
+        var changed = Candidate(75, 7601, null, "buyer@group.test", 10);
+        changed.BidClosingDate = DateTime.UtcNow.AddDays(14);
+        var revision = await service.ReconcileAsync(changed,
+            Intake("group-revision", "group-b", Guid.NewGuid(), "buyer@group.test") with { LogicalGroupKey = "email:group-75" });
+
+        Assert.Equal(LeadOccurrenceClassification.Revision, revision.Classification);
+        Assert.Equal(created.LeadId, revision.LeadId);
+        Assert.Equal(created.NexoraSerial, revision.NexoraSerial);
+        Assert.Contains("Corroborated logical document group", revision.Reasons.Single());
+    }
+
+    [Fact]
+    public async Task Ambiguous_logical_group_requires_possible_match_review()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(76);
+        Seed.BusinessUnit(context, 76); Seed.EmailConfig(context, 7601, 76); Seed.EmailIngest(context, 7701, 7601, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var original = Candidate(76, 7701, null, "known@group.test", 10);
+        original.BidClosingDate = DateTime.UtcNow.AddDays(7);
+        var created = await service.ReconcileAsync(original,
+            Intake("ambiguous-original", "ambiguous-a", Guid.NewGuid(), "known@group.test") with { LogicalGroupKey = "email:group-76" });
+
+        context.ChangeTracker.Clear();
+        var uncertain = Candidate(76, 7701, null, null, 10);
+        uncertain.BidClosingDate = DateTime.UtcNow.AddDays(14);
+        var review = await service.ReconcileAsync(uncertain,
+            Intake("ambiguous-copy", "ambiguous-b", Guid.NewGuid(), sender: null) with { LogicalGroupKey = "email:group-76" });
+
+        Assert.Equal(LeadOccurrenceClassification.PossibleMatchReviewRequired, review.Classification);
+        Assert.Equal(0, review.LeadId);
+        var candidate = Assert.Single(await context.Set<LeadMatchCandidate>()
+            .Where(x => x.OccurrenceId == review.OccurrenceId).ToListAsync());
+        Assert.Equal(created.LeadId, candidate.CandidateLeadId);
+        Assert.Equal(LeadMatchReviewState.Pending, candidate.ReviewState);
+        Assert.Contains("share a logical group", review.Reasons.Single());
+    }
+
+    [Fact]
+    public async Task Unrelated_documents_with_same_group_key_remain_separate_leads()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(77);
+        Seed.BusinessUnit(context, 77); Seed.EmailConfig(context, 7701, 77); Seed.EmailIngest(context, 7801, 7701, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var first = Candidate(77, 7801, "RFQ-GROUP-A", "a@group.test", 10);
+        var created = await service.ReconcileAsync(first,
+            Intake("unrelated-a", "unrelated-a", Guid.NewGuid(), "a@group.test") with { LogicalGroupKey = "email:group-77" });
+
+        context.ChangeTracker.Clear();
+        var unrelated = Candidate(77, 7801, "RFQ-GROUP-B", "b@group.test", 3);
+        var line = unrelated.LeadItems.Single();
+        line.ManufacturerPartNumber = "PN-UNRELATED";
+        line.ProductShortDescription = "Unrelated motor";
+        var separate = await service.ReconcileAsync(unrelated,
+            Intake("unrelated-b", "unrelated-b", Guid.NewGuid(), "b@group.test") with { LogicalGroupKey = "email:group-77" });
+
+        Assert.Equal(LeadOccurrenceClassification.New, separate.Classification);
+        Assert.NotEqual(created.LeadId, separate.LeadId);
+        Assert.Equal(2, await context.Leads.CountAsync());
+        Assert.Empty(await context.Set<LeadMatchCandidate>().ToListAsync());
+    }
+
     private static Lead Candidate(long bu, long ingestId, string? rfq, string? email, int quantity)
     {
         var lead = new Lead { Rfqno = rfq, BuyersName = email is null ? null : "Buyer", RecDate = DateTime.UtcNow,

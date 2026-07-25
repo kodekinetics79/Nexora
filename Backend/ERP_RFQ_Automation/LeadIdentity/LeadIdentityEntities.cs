@@ -44,11 +44,13 @@ public sealed class LeadIngestionOccurrence
     public long? LeadId { get; set; }
     public long? LeadRevisionId { get; set; }
     public long? SourceDocumentId { get; set; }
+    public long? SourceDocumentOccurrenceId { get; set; }
     public long? ExtractionJobId { get; set; }
     public string SourceChannel { get; set; } = null!;
     public string IdempotencyKey { get; set; } = null!;
     public string? ExternalSourceId { get; set; }
     public string? EmailThreadId { get; set; }
+    public string? LogicalGroupKey { get; set; }
     public string? SourceSystem { get; set; }
     public string? Sender { get; set; }
     public string? Subject { get; set; }

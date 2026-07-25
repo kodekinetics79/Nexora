@@ -27,6 +27,11 @@ const ManualUploadLeadsPage: React.FC = () => {
   const uploadMutation = useMutation({
     mutationFn: (fd: FormData) => leadService.uploadGoverned(fd),
     onSuccess: (result) => {
+      const accepted = result.jobs.filter((job) => job.outcome === 'Enqueued' || job.outcome === 'Duplicate');
+      if (accepted.length === 0) {
+        enqueueSnackbar('No documents were accepted. Review the file outcomes and try again.', { variant: 'error' });
+        return;
+      }
       enqueueSnackbar('Documents queued for governed ingestion and reconciliation.', { variant: 'success' });
       setFiles([]);
       if (result.batchId) {

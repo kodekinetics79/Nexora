@@ -5,6 +5,7 @@ using ERP_RFQ_Automation.Repositories;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using System.Security.Claims;
 
 namespace ERP_RFQ_Automation.Controllers
 {
@@ -14,8 +15,6 @@ namespace ERP_RFQ_Automation.Controllers
     public class RolePermissionController : ControllerBase
     {
         private readonly IRolePermissionRepository _repository;
-        private static readonly int[] AllowedPageSizes = { 5, 10, 25, 50 };
-
         public RolePermissionController(IRolePermissionRepository repository)
         {
             _repository = repository;
@@ -33,7 +32,8 @@ namespace ERP_RFQ_Automation.Controllers
         {
             try
             {
-                var targetBUId = 1; // Enforce global BUID 1 for RolePermissions
+                if (!TryTenant(out var targetBUId))
+                    return BadRequest("A valid businessUnitId claim is required.");
 
                 if (pageNumber < 1)
                     return BadRequest("Page number must be greater than or equal to 1.");
@@ -67,7 +67,8 @@ namespace ERP_RFQ_Automation.Controllers
         {
             try
             {
-                var targetBUId = 1; // Enforce global BUID 1 for RolePermissions
+                if (!TryTenant(out var targetBUId))
+                    return BadRequest("A valid businessUnitId claim is required.");
 
                 var rolePermission = await _repository.GetByIdAsync(id, targetBUId);
                 return Ok(MapToResponse(rolePermission));
@@ -91,10 +92,9 @@ namespace ERP_RFQ_Automation.Controllers
                 if (!ModelState.IsValid)
                     return BadRequest(ModelState);
 
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                if (claimBUId > 0) request.BusinessUnitId = claimBUId;
-
-                request.BusinessUnitId = 1;
+                if (!TryTenant(out var claimBUId))
+                    return BadRequest("A valid businessUnitId claim is required.");
+                request.BusinessUnitId = claimBUId;
 
                 var rolePermission = new RolePermission
                 {
@@ -132,10 +132,9 @@ namespace ERP_RFQ_Automation.Controllers
                 if (!ModelState.IsValid)
                     return BadRequest(ModelState);
 
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                if (claimBUId > 0) request.BusinessUnitId = claimBUId;
-
-                request.BusinessUnitId = 1;
+                if (!TryTenant(out var claimBUId))
+                    return BadRequest("A valid businessUnitId claim is required.");
+                request.BusinessUnitId = claimBUId;
 
                 var existing = await _repository.GetByIdAsync(id, request.BusinessUnitId);
 
@@ -171,7 +170,8 @@ namespace ERP_RFQ_Automation.Controllers
         {
             try
             {
-                var targetBUId = 1; // Enforce global BUID 1 for RolePermissions
+                if (!TryTenant(out var targetBUId))
+                    return BadRequest("A valid businessUnitId claim is required.");
 
                 await _repository.DeleteAsync(id, targetBUId);
                 return NoContent();
@@ -185,6 +185,9 @@ namespace ERP_RFQ_Automation.Controllers
                 return StatusCode(StatusCodes.Status500InternalServerError, $"Error deleting data: {ex.Message}");
             }
         }
+
+        private bool TryTenant(out long businessUnitId) =>
+            long.TryParse(User.FindFirstValue("businessUnitId"), out businessUnitId) && businessUnitId > 0;
 
         private RolePermissionResponseDTO MapToResponse(RolePermission rolePermission)
         {

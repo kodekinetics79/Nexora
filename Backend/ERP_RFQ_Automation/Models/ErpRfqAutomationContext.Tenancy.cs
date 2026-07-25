@@ -140,10 +140,7 @@ public partial class ErpRfqAutomationContext
             CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<EmailIngest>().HasQueryFilter(e =>
             CurrentTenantId == null || e.EmailConfiguration.BusinessUnitId == CurrentTenantId);
-        modelBuilder.Entity<Contact>().HasQueryFilter(e => CurrentTenantId == null ||
-            (e.CustomerId != null || e.SupplierId != null) &&
-            (e.CustomerId == null || e.Customer!.Buid == CurrentTenantId) &&
-            (e.SupplierId == null || e.Supplier!.Buid == null || e.Supplier.Buid == CurrentTenantId));
+        modelBuilder.Entity<Contact>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
 
         // LeadItem.ExtraFields (partial property in LeadItem.Extra.cs): verbatim
         // unrecognized customer-document columns, stored as jsonb.
@@ -196,10 +193,22 @@ public partial class ErpRfqAutomationContext
             modelBuilder.Entity<ERP_RFQ_Automation.Extraction.ExtractionJob>()
                 .HasAlternateKey(e => new { e.BusinessUnitId, e.Id })
                 .HasName("AK_ExtractionJobs_BusinessUnitId_Id");
+            modelBuilder.Entity<ERP_RFQ_Automation.Extraction.ExtractionJob>()
+                .HasOne<SourceDocumentOccurrence>()
+                .WithMany()
+                .HasForeignKey(e => new { e.BusinessUnitId, e.SourceDocumentOccurrenceId })
+                .HasPrincipalKey(e => new { e.BusinessUnitId, e.Id })
+                .OnDelete(DeleteBehavior.Restrict);
             modelBuilder.Entity<LeadIngestionOccurrence>()
                 .HasOne<SourceDocument>()
                 .WithMany()
                 .HasForeignKey(e => new { e.BusinessUnitId, e.SourceDocumentId })
+                .HasPrincipalKey(e => new { e.BusinessUnitId, e.Id })
+                .OnDelete(DeleteBehavior.Restrict);
+            modelBuilder.Entity<LeadIngestionOccurrence>()
+                .HasOne<SourceDocumentOccurrence>()
+                .WithMany()
+                .HasForeignKey(e => new { e.BusinessUnitId, e.SourceDocumentOccurrenceId })
                 .HasPrincipalKey(e => new { e.BusinessUnitId, e.Id })
                 .OnDelete(DeleteBehavior.Restrict);
             modelBuilder.Entity<LeadIngestionOccurrence>()
@@ -212,6 +221,18 @@ public partial class ErpRfqAutomationContext
                 .HasOne<SourceDocument>()
                 .WithMany()
                 .HasForeignKey(e => new { e.BusinessUnitId, e.SourceDocumentId })
+                .HasPrincipalKey(e => new { e.BusinessUnitId, e.Id })
+                .OnDelete(DeleteBehavior.Restrict);
+            modelBuilder.Entity<ERP_RFQ_Automation.AI.AiRequest>()
+                .HasOne<ERP_RFQ_Automation.Extraction.ExtractionJob>()
+                .WithMany()
+                .HasForeignKey(e => new { e.BusinessUnitId, e.ExtractionJobId })
+                .HasPrincipalKey(e => new { e.BusinessUnitId, e.Id })
+                .OnDelete(DeleteBehavior.Restrict);
+            modelBuilder.Entity<ERP_RFQ_Automation.AI.AiRequest>()
+                .HasOne<SourceDocumentOccurrence>()
+                .WithMany()
+                .HasForeignKey(e => new { e.BusinessUnitId, e.SourceDocumentOccurrenceId })
                 .HasPrincipalKey(e => new { e.BusinessUnitId, e.Id })
                 .OnDelete(DeleteBehavior.Restrict);
             modelBuilder.Entity<CanonicalInquiry>()
@@ -339,7 +360,10 @@ public partial class ErpRfqAutomationContext
             entity.Property(e => e.LastError).HasMaxLength(4000);
             entity.Property(e => e.CreatedOn).HasDefaultValueSql("now()");
             entity.Property(e => e.UpdatedOn).HasDefaultValueSql("now()");
-            entity.HasIndex(e => new { e.BusinessUnitId, e.ContentHash }).IsUnique().HasDatabaseName("UX_ExtractionJobs_BU_ContentHash");
+            entity.HasIndex(e => new { e.BusinessUnitId, e.ContentHash }).HasDatabaseName("IX_ExtractionJobs_BU_ContentHash");
+            entity.HasIndex(e => new { e.BusinessUnitId, e.SourceDocumentOccurrenceId }).IsUnique()
+                .HasFilter("\"SourceDocumentOccurrenceId\" IS NOT NULL")
+                .HasDatabaseName("UX_ExtractionJobs_BU_SourceOccurrence");
             entity.HasIndex(e => new { e.Status, e.NextAttemptAt, e.Priority, e.SchedulerTag }).HasDatabaseName("IX_ExtractionJobs_Claim");
             entity.HasIndex(e => new { e.BusinessUnitId, e.Status }).HasDatabaseName("IX_ExtractionJobs_BU_Status");
             entity.HasIndex(e => e.BatchId).HasDatabaseName("IX_ExtractionJobs_BatchId");

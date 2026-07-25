@@ -205,6 +205,15 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<DateTime?>("CompletedOn")
                         .HasColumnType("timestamp without time zone");
 
+                    b.Property<string>("CostCurrency")
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<string>("CostStatus")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
                     b.Property<DateTime>("CreatedOn")
                         .HasColumnType("timestamp without time zone");
 
@@ -212,7 +221,14 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
+                    b.Property<decimal?>("EstimatedCost")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("numeric(18,6)");
+
                     b.Property<long>("EstimatedInputTokens")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("ExtractionJobId")
                         .HasColumnType("bigint");
 
                     b.Property<string>("IdempotencyKey")
@@ -279,6 +295,9 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long>("ReservedTokens")
                         .HasColumnType("bigint");
 
+                    b.Property<long?>("SourceDocumentOccurrenceId")
+                        .HasColumnType("bigint");
+
                     b.Property<DateTime?>("StartedOn")
                         .HasColumnType("timestamp without time zone");
 
@@ -301,9 +320,13 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("BusinessUnitId", "CreatedOn")
                         .HasDatabaseName("IX_AiRequests_BU_CreatedOn");
 
+                    b.HasIndex("BusinessUnitId", "ExtractionJobId");
+
                     b.HasIndex("BusinessUnitId", "IdempotencyKey")
                         .IsUnique()
                         .HasDatabaseName("UX_AiRequests_BU_IdempotencyKey");
+
+                    b.HasIndex("BusinessUnitId", "SourceDocumentOccurrenceId");
 
                     b.HasIndex("BusinessUnitId", "ProviderClass", "CreatedOn");
 
@@ -5814,6 +5837,12 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("line_item_count");
 
+                    b.Property<string>("OcrCostStatus")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("ocr_cost_status");
+
                     b.Property<int>("PageCount")
                         .HasColumnType("integer")
                         .HasColumnName("page_count");
@@ -5823,6 +5852,23 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(128)
                         .HasColumnType("character varying(128)")
                         .HasColumnName("parser_version");
+
+                    b.Property<decimal?>("ProcessingCostAmount")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("numeric(18,6)")
+                        .HasColumnName("processing_cost_amount");
+
+                    b.Property<string>("ProcessingCostCurrency")
+                        .HasMaxLength(3)
+                        .HasColumnType("character(3)")
+                        .HasColumnName("processing_cost_currency")
+                        .IsFixedLength();
+
+                    b.Property<string>("ProcessingCostStatus")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("processing_cost_status");
 
                     b.Property<int>("RegionCount")
                         .HasColumnType("integer")
@@ -5886,6 +5932,8 @@ namespace ERP_RFQ_Automation.Migrations
                             t.HasCheckConstraint("ck_extraction_runs_business_unit", "business_unit_id > 0");
 
                             t.HasCheckConstraint("ck_extraction_runs_completion", "(status IN ('Completed', 'Failed') AND completed_on IS NOT NULL) OR (status NOT IN ('Completed', 'Failed') AND completed_on IS NULL)");
+
+                            t.HasCheckConstraint("ck_extraction_runs_cost", "(processing_cost_amount IS NULL AND processing_cost_currency IS NULL) OR (processing_cost_amount >= 0 AND processing_cost_currency ~ '^[A-Z]{3}$')");
 
                             t.HasCheckConstraint("ck_extraction_runs_counts", "page_count >= 0 AND region_count >= 0 AND inquiry_count >= 0 AND line_item_count >= 0 AND evidence_count >= 0 AND finding_count >= 0");
 
@@ -6158,6 +6206,31 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(256)")
                         .HasColumnName("idempotency_key");
 
+                    b.Property<string>("IntakeStatus")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("intake_status");
+
+                    b.Property<string>("LastErrorCategory")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("last_error_category");
+
+                    b.Property<string>("LastErrorCode")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasColumnName("last_error_code");
+
+                    b.Property<string>("LastErrorDetailsJson")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("last_error_details");
+
+                    b.Property<string>("LogicalGroupKey")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)")
+                        .HasColumnName("logical_group_key");
+
                     b.Property<DateTimeOffset>("ReceivedOn")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("received_on");
@@ -6170,6 +6243,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsRequired()
                         .HasColumnType("jsonb")
                         .HasColumnName("source_metadata");
+
+                    b.Property<DateTimeOffset>("UpdatedOn")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_on");
 
                     b.HasKey("Id");
 
@@ -6184,6 +6261,9 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("BusinessUnitId", "IdempotencyKey")
                         .IsUnique()
                         .HasDatabaseName("ux_source_document_occurrences_tenant_idempotency");
+
+                    b.HasIndex("BusinessUnitId", "LogicalGroupKey", "ReceivedOn")
+                        .HasDatabaseName("ix_source_document_occurrences_tenant_group");
 
                     b.HasIndex("BusinessUnitId", "SourceDocumentId", "ReceivedOn")
                         .HasDatabaseName("ix_source_document_occurrences_tenant_document");
@@ -6328,6 +6408,9 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<double>("SchedulerTag")
                         .HasColumnType("double precision");
 
+                    b.Property<long?>("SourceDocumentOccurrenceId")
+                        .HasColumnType("bigint");
+
                     b.Property<string>("SourceType")
                         .IsRequired()
                         .HasMaxLength(30)
@@ -6357,8 +6440,12 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasDatabaseName("IX_ExtractionJobs_BatchId");
 
                     b.HasIndex("BusinessUnitId", "ContentHash")
+                        .HasDatabaseName("IX_ExtractionJobs_BU_ContentHash");
+
+                    b.HasIndex("BusinessUnitId", "SourceDocumentOccurrenceId")
                         .IsUnique()
-                        .HasDatabaseName("UX_ExtractionJobs_BU_ContentHash");
+                        .HasDatabaseName("UX_ExtractionJobs_BU_SourceOccurrence")
+                        .HasFilter("\"SourceDocumentOccurrenceId\" IS NOT NULL");
 
                     b.HasIndex("BusinessUnitId", "Status")
                         .HasDatabaseName("IX_ExtractionJobs_BU_Status");
@@ -7153,6 +7240,10 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long?>("LeadRevisionId")
                         .HasColumnType("bigint");
 
+                    b.Property<string>("LogicalGroupKey")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
                     b.Property<string>("LogicalInquiryFingerprint")
                         .IsRequired()
                         .HasMaxLength(64)
@@ -7189,6 +7280,9 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long?>("SourceDocumentId")
                         .HasColumnType("bigint");
 
+                    b.Property<long?>("SourceDocumentOccurrenceId")
+                        .HasColumnType("bigint");
+
                     b.Property<DateTimeOffset?>("SourceReceivedAtUtc")
                         .HasColumnType("timestamp with time zone");
 
@@ -7218,6 +7312,8 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("BusinessUnitId", "LogicalInquiryFingerprint");
 
                     b.HasIndex("BusinessUnitId", "SourceDocumentId");
+
+                    b.HasIndex("BusinessUnitId", "SourceDocumentOccurrenceId");
 
                     b.HasIndex("BusinessUnitId", "Classification", "CreatedAtUtc");
 
@@ -7731,6 +7827,10 @@ namespace ERP_RFQ_Automation.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
 
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("BusinessUnitID");
+
                     b.Property<string>("CreatedBy")
                         .IsRequired()
                         .HasMaxLength(255)
@@ -7796,16 +7896,27 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasKey("Id")
                         .HasName("PK__Contacts__3214EC274B89BAF3");
 
-                    b.HasIndex(new[] { "CustomerId" }, "IX_Contacts_CustomerID");
+                    b.HasAlternateKey("BusinessUnitId", "Id")
+                        .HasName("AK_Contacts_BusinessUnitID_ID");
 
-                    b.HasIndex(new[] { "Email" }, "IX_Contacts_Email");
+                    b.HasIndex("BusinessUnitId", "CustomerId");
+
+                    b.HasIndex("SupplierId", "BusinessUnitId");
+
+                    b.HasIndex(new[] { "BusinessUnitId", "Email" }, "IX_Contacts_BusinessUnitID_Email");
+
+                    b.HasIndex(new[] { "CustomerId" }, "IX_Contacts_CustomerID");
 
                     b.HasIndex(new[] { "SupplierId" }, "IX_Contacts_SupplierID");
 
-                    b.HasIndex(new[] { "Email" }, "UQ__Contacts__A9D10534C4FF61F8")
-                        .IsUnique();
+                    b.HasIndex(new[] { "BusinessUnitId", "Email" }, "UQ_Contacts_BusinessUnitID_Email")
+                        .IsUnique()
+                        .HasFilter("\"Email\" IS NOT NULL");
 
-                    b.ToTable("Contacts");
+                    b.ToTable("Contacts", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_Contacts_ExactlyOneParent", "(\"CustomerID\" IS NULL) <> (\"SupplierID\" IS NULL)");
+                        });
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Models.Currency", b =>
@@ -7904,7 +8015,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
-                    b.Property<long?>("Buid")
+                    b.Property<long>("Buid")
                         .HasColumnType("bigint")
                         .HasColumnName("BUID");
 
@@ -7974,12 +8085,14 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasKey("Id")
                         .HasName("PK__Customer__3214EC27D6DB6FD1");
 
-                    b.HasIndex("Buid");
+                    b.HasAlternateKey("Buid", "Id")
+                        .HasName("AK_Customers_BUID_ID");
 
                     b.HasIndex(new[] { "Name" }, "IX_Customers_Name");
 
-                    b.HasIndex(new[] { "ContactEmail" }, "UQ__Customer__FFA796CD4707A72F")
-                        .IsUnique();
+                    b.HasIndex(new[] { "Buid", "ContactEmail" }, "UQ_Customers_BUID_ContactEmail")
+                        .IsUnique()
+                        .HasFilter("\"ContactEmail\" IS NOT NULL");
 
                     b.ToTable("Customers");
                 });
@@ -10685,7 +10798,7 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<int?>("AvgResponseTime")
                         .HasColumnType("integer");
 
-                    b.Property<long?>("Buid")
+                    b.Property<long>("Buid")
                         .HasColumnType("bigint")
                         .HasColumnName("BUID");
 
@@ -10759,6 +10872,9 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasKey("Id")
                         .HasName("PK__Supplier__3214EC2782495266");
+
+                    b.HasAlternateKey("Id", "Buid")
+                        .HasName("AK_Suppliers_ID_BUID");
 
                     b.HasIndex("Buid");
 
@@ -12131,6 +12247,18 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasForeignKey("BusinessUnitId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Extraction.ExtractionJob", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "ExtractionJobId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.DocumentIntelligence.Persistence.SourceDocumentOccurrence", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "SourceDocumentOccurrenceId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.BankReconciliation.BankAccount", b =>
@@ -13282,6 +13410,15 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Navigation("Region");
                 });
 
+            modelBuilder.Entity("ERP_RFQ_Automation.Extraction.ExtractionJob", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.DocumentIntelligence.Persistence.SourceDocumentOccurrence", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "SourceDocumentOccurrenceId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
+                });
+
             modelBuilder.Entity("ERP_RFQ_Automation.GeneralLedger.JournalEntry", b =>
                 {
                     b.HasOne("ERP_RFQ_Automation.Models.Currency", null)
@@ -13397,6 +13534,12 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasOne("ERP_RFQ_Automation.DocumentIntelligence.Persistence.SourceDocument", null)
                         .WithMany()
                         .HasForeignKey("BusinessUnitId", "SourceDocumentId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.DocumentIntelligence.Persistence.SourceDocumentOccurrence", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "SourceDocumentOccurrenceId")
                         .HasPrincipalKey("BusinessUnitId", "Id")
                         .OnDelete(DeleteBehavior.Restrict);
 
@@ -13522,13 +13665,17 @@ namespace ERP_RFQ_Automation.Migrations
                 {
                     b.HasOne("ERP_RFQ_Automation.Models.Customer", "Customer")
                         .WithMany("Contacts")
-                        .HasForeignKey("CustomerId")
+                        .HasForeignKey("BusinessUnitId", "CustomerId")
+                        .HasPrincipalKey("Buid", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
                         .HasConstraintName("FK__Contacts__Custom__17F790F9");
 
                     b.HasOne("ERP_RFQ_Automation.Models.Supplier", "Supplier")
                         .WithMany("Contacts")
-                        .HasForeignKey("SupplierId")
-                        .HasConstraintName("FK__Contacts__Suppli__18EBB532");
+                        .HasForeignKey("SupplierId", "BusinessUnitId")
+                        .HasPrincipalKey("Id", "Buid")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("FK_Contacts_Suppliers_SupplierID_BusinessUnitID");
 
                     b.Navigation("Customer");
 
@@ -13551,6 +13698,8 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasOne("ERP_RFQ_Automation.Models.BusinessUnit", "Bu")
                         .WithMany("Customers")
                         .HasForeignKey("Buid")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
                         .HasConstraintName("FK__Customers__BUID__0D7A0286");
 
                     b.Navigation("Bu");
@@ -13613,10 +13762,22 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasForeignKey("LeadStatusId")
                         .HasConstraintName("FK_Leads_Setup_Master");
 
+                    b.HasOne("ERP_RFQ_Automation.Models.Contact", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "ContactId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("ERP_RFQ_Automation.LeadIdentity.LeadRevision", null)
                         .WithMany()
                         .HasForeignKey("BusinessUnitId", "CurrentRevisionId")
                         .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.Models.Customer", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "CustomerId")
+                        .HasPrincipalKey("Buid", "Id")
                         .OnDelete(DeleteBehavior.Restrict);
 
                     b.Navigation("AssignToNavigation");
@@ -14297,6 +14458,8 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasOne("ERP_RFQ_Automation.Models.BusinessUnit", "Bu")
                         .WithMany("Suppliers")
                         .HasForeignKey("Buid")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
                         .HasConstraintName("FK__Suppliers__BUID__1332DBDC");
 
                     b.HasOne("ERP_RFQ_Automation.Models.SetCity", "City")

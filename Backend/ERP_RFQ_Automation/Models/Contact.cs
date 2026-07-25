@@ -7,6 +7,8 @@ public partial class Contact
 {
     public long Id { get; set; }
 
+    public long BusinessUnitId { get; set; }
+
     public long? CustomerId { get; set; }
 
     public long? SupplierId { get; set; }

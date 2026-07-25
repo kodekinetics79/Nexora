@@ -35,11 +35,19 @@ public static class EvidenceLedgerModelBuilderExtensions
             entity.Property(x => x.ExtractionJobId).HasColumnName("extraction_job_id");
             entity.Property(x => x.IdempotencyKey).HasColumnName("idempotency_key").HasMaxLength(256);
             entity.Property(x => x.SourceMetadataJson).HasColumnName("source_metadata").HasColumnType("jsonb");
+            entity.Property(x => x.LogicalGroupKey).HasColumnName("logical_group_key").HasMaxLength(256);
+            entity.Property(x => x.IntakeStatus).HasColumnName("intake_status").HasConversion<string>().HasMaxLength(32);
+            entity.Property(x => x.LastErrorCategory).HasColumnName("last_error_category").HasMaxLength(64);
+            entity.Property(x => x.LastErrorCode).HasColumnName("last_error_code").HasMaxLength(128);
+            entity.Property(x => x.LastErrorDetailsJson).HasColumnName("last_error_details").HasColumnType("jsonb");
             entity.Property(x => x.ReceivedOn).HasColumnName("received_on").HasColumnType("timestamp with time zone");
+            entity.Property(x => x.UpdatedOn).HasColumnName("updated_on").HasColumnType("timestamp with time zone");
             entity.HasIndex(x => new { x.BusinessUnitId, x.IdempotencyKey }).IsUnique()
                 .HasDatabaseName("ux_source_document_occurrences_tenant_idempotency");
             entity.HasIndex(x => new { x.BusinessUnitId, x.SourceDocumentId, x.ReceivedOn })
                 .HasDatabaseName("ix_source_document_occurrences_tenant_document");
+            entity.HasIndex(x => new { x.BusinessUnitId, x.LogicalGroupKey, x.ReceivedOn })
+                .HasDatabaseName("ix_source_document_occurrences_tenant_group");
             entity.HasIndex(x => x.ExtractionJobId)
                 .HasDatabaseName("ix_source_document_occurrences_extraction_job");
             entity.HasOne(x => x.SourceDocument).WithMany(x => x.Occurrences)
@@ -66,6 +74,8 @@ public static class EvidenceLedgerModelBuilderExtensions
                     "(status IN ('Completed', 'Failed') AND completed_on IS NOT NULL) OR (status NOT IN ('Completed', 'Failed') AND completed_on IS NULL)");
                 table.HasCheckConstraint("ck_extraction_runs_failure",
                     "(status = 'Failed' AND failure_reason IS NOT NULL) OR (status <> 'Failed' AND failure_reason IS NULL)");
+                table.HasCheckConstraint("ck_extraction_runs_cost",
+                    "(processing_cost_amount IS NULL AND processing_cost_currency IS NULL) OR (processing_cost_amount >= 0 AND processing_cost_currency ~ '^[A-Z]{3}$')");
             });
             entity.HasKey(x => x.Id);
             entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id })
@@ -91,6 +101,10 @@ public static class EvidenceLedgerModelBuilderExtensions
             entity.Property(x => x.EvidenceCount).HasColumnName("evidence_count");
             entity.Property(x => x.FindingCount).HasColumnName("finding_count");
             entity.Property(x => x.FailureReason).HasColumnName("failure_reason").HasMaxLength(4_000);
+            entity.Property(x => x.ProcessingCostAmount).HasColumnName("processing_cost_amount").HasPrecision(18, 6);
+            entity.Property(x => x.ProcessingCostCurrency).HasColumnName("processing_cost_currency").HasMaxLength(3).IsFixedLength();
+            entity.Property(x => x.ProcessingCostStatus).HasColumnName("processing_cost_status").HasMaxLength(32);
+            entity.Property(x => x.OcrCostStatus).HasColumnName("ocr_cost_status").HasMaxLength(32);
             entity.Property(x => x.CreatedOn).HasColumnName("created_on").HasColumnType("timestamp with time zone");
             entity.Property(x => x.UpdatedOn).HasColumnName("updated_on").HasColumnType("timestamp with time zone");
             entity.HasIndex(x => new { x.BusinessUnitId, x.ExtractionJobId, x.AttemptNumber }).IsUnique()

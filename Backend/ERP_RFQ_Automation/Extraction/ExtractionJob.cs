@@ -49,6 +49,9 @@ public sealed class ExtractionJob
 {
     public long Id { get; set; }
 
+    /// <summary>The immutable Stage 1 receipt that owns this retryable unit of work.</summary>
+    public long? SourceDocumentOccurrenceId { get; set; }
+
     /// <summary>Groups all jobs fanned out from one upload / poll batch (for progress + reporting).</summary>
     public Guid BatchId { get; set; }
 

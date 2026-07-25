@@ -180,17 +180,24 @@ public partial class ErpRfqAutomationContext : DbContext
 
         modelBuilder.Entity<Contact>(entity =>
         {
+            entity.ToTable("Contacts", table => table.HasCheckConstraint(
+                "CK_Contacts_ExactlyOneParent",
+                "(\"CustomerID\" IS NULL) <> (\"SupplierID\" IS NULL)"));
             entity.HasKey(e => e.Id).HasName("PK__Contacts__3214EC274B89BAF3");
+            entity.HasAlternateKey(e => new { e.BusinessUnitId, e.Id }).HasName("AK_Contacts_BusinessUnitID_ID");
 
             entity.HasIndex(e => e.CustomerId, "IX_Contacts_CustomerID");
 
-            entity.HasIndex(e => e.Email, "IX_Contacts_Email");
+            entity.HasIndex(e => new { e.BusinessUnitId, e.Email }, "IX_Contacts_BusinessUnitID_Email");
 
             entity.HasIndex(e => e.SupplierId, "IX_Contacts_SupplierID");
 
-            entity.HasIndex(e => e.Email, "UQ__Contacts__A9D10534C4FF61F8").IsUnique();
+            entity.HasIndex(e => new { e.BusinessUnitId, e.Email }, "UQ_Contacts_BusinessUnitID_Email")
+                .IsUnique()
+                .HasFilter("\"Email\" IS NOT NULL");
 
             entity.Property(e => e.Id).HasColumnName("ID");
+            entity.Property(e => e.BusinessUnitId).HasColumnName("BusinessUnitID");
             entity.Property(e => e.CreatedBy).HasMaxLength(255);
             entity.Property(e => e.CustomerId).HasColumnName("CustomerID");
             entity.Property(e => e.Email).HasColumnType("citext"); // case-insensitive unique email
@@ -206,12 +213,16 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.SupplierId).HasColumnName("SupplierID");
 
             entity.HasOne(d => d.Customer).WithMany(p => p.Contacts)
-                .HasForeignKey(d => d.CustomerId)
+                .HasForeignKey(d => new { d.BusinessUnitId, d.CustomerId })
+                .HasPrincipalKey(d => new { BusinessUnitId = d.Buid, d.Id })
+                .OnDelete(DeleteBehavior.Restrict)
                 .HasConstraintName("FK__Contacts__Custom__17F790F9");
 
             entity.HasOne(d => d.Supplier).WithMany(p => p.Contacts)
-                .HasForeignKey(d => d.SupplierId)
-                .HasConstraintName("FK__Contacts__Suppli__18EBB532");
+                .HasForeignKey(d => new { d.SupplierId, d.BusinessUnitId })
+                .HasPrincipalKey(d => new { d.Id, BusinessUnitId = d.Buid })
+                .OnDelete(DeleteBehavior.Restrict)
+                .HasConstraintName("FK_Contacts_Suppliers_SupplierID_BusinessUnitID");
         });
 
         modelBuilder.Entity<Currency>(entity =>
@@ -242,10 +253,14 @@ public partial class ErpRfqAutomationContext : DbContext
         modelBuilder.Entity<Customer>(entity =>
         {
             entity.HasKey(e => e.Id).HasName("PK__Customer__3214EC27D6DB6FD1");
+            entity.Property(e => e.Buid).IsRequired();
+            entity.HasAlternateKey(e => new { e.Buid, e.Id }).HasName("AK_Customers_BUID_ID");
 
             entity.HasIndex(e => e.Name, "IX_Customers_Name");
 
-            entity.HasIndex(e => e.ContactEmail, "UQ__Customer__FFA796CD4707A72F").IsUnique();
+            entity.HasIndex(e => new { e.Buid, e.ContactEmail }, "UQ_Customers_BUID_ContactEmail")
+                .IsUnique()
+                .HasFilter("\"ContactEmail\" IS NOT NULL");
 
             entity.Property(e => e.Id).HasColumnName("ID");
             entity.Property(e => e.BillingAddressLine1).HasMaxLength(255);
@@ -1329,6 +1344,7 @@ public partial class ErpRfqAutomationContext : DbContext
         modelBuilder.Entity<Supplier>(entity =>
         {
             entity.HasKey(e => e.Id).HasName("PK__Supplier__3214EC2782495266");
+            entity.HasAlternateKey(e => new { e.Id, e.Buid }).HasName("AK_Suppliers_ID_BUID");
 
             entity.HasIndex(e => e.ContactEmail, "IX_Suppliers_ContactEmail");
 

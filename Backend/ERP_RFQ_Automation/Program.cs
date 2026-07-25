@@ -331,9 +331,9 @@ builder.Services.AddEndpointsApiExplorer();
 // Async extraction pipeline (ADR-0003): durable job queue + bounded worker pool.
 builder.Services.AddSingleton(new ExtractionWorkerOptions
 {
-    WorkerCount = 4,
-    MaxConcurrentLlmCalls = 8,
-    PerTenantConcurrencyCap = 4,
+    WorkerCount = Math.Max(1, builder.Configuration.GetValue("Extraction:WorkerCount", 4)),
+    MaxConcurrentLlmCalls = Math.Max(1, builder.Configuration.GetValue("Extraction:MaxConcurrentLlmCalls", 8)),
+    PerTenantConcurrencyCap = Math.Max(1, builder.Configuration.GetValue("Extraction:PerTenantConcurrencyCap", 4)),
     LeaseDuration = TimeSpan.FromMinutes(5),
     IdlePollDelay = TimeSpan.FromSeconds(2)
 });
@@ -523,3 +523,5 @@ app.MapHealthChecks("/ready", new Microsoft.AspNetCore.Diagnostics.HealthChecks.
     Predicate = registration => registration.Tags.Contains("ready")
 });
 app.Run();
+
+public partial class Program;

@@ -54,6 +54,7 @@ public sealed class StructuredEvidenceLedgerPersister
         source.StartExtraction();
         var run = ExtractionRun.Create(job.BusinessUnitId, source.Id, runId, job.Id, job.Attempts,
             ParserVersion, import.Documents[0].SchemaVersion);
+        run.RecordCostStatus("LocalNoCharge", "NotRequired", 0m, "USD");
         run.Start();
         _context.Add(run);
         await _context.SaveChangesAsync(ct);
@@ -62,13 +63,16 @@ public sealed class StructuredEvidenceLedgerPersister
         var inquiryByDocument = new Dictionary<CanonicalRfqDocument, CanonicalInquiry>();
         var lineByCanonical = new Dictionary<CanonicalRfqLineItem, CanonicalLineItem>();
         var leadItemOffsets = leads.ToDictionary(x => x.Id, _ => 0);
+        var firstInquiryNumber = await ReserveInquiryNumbersAsync(
+            source.CorpusId, import.Documents.Count, ct);
 
         for (var documentIndex = 0; documentIndex < import.Documents.Count; documentIndex++)
         {
             var document = import.Documents[documentIndex];
             var lead = leads.Count == import.Documents.Count ? leads[documentIndex] : leads[0];
             var leadItemOffset = leadItemOffsets[lead.Id];
-            var inquiry = CanonicalInquiry.Create(job.BusinessUnitId, source.CorpusId, documentIndex + 1);
+            var inquiry = CanonicalInquiry.Create(
+                job.BusinessUnitId, source.CorpusId, firstInquiryNumber + documentIndex);
             inquiry.PopulateHeader(document.RfqNo.Value, document.BuyerName.Value,
                 ToOffset(document.ReceivedDate.Value), ToOffset(document.BidClosingDate.Value));
             inquiry.BindLead(lead.Id);
@@ -203,6 +207,27 @@ public sealed class StructuredEvidenceLedgerPersister
         run.Complete(pages.Count, regions.Count, import.Documents.Count,
             import.Documents.Sum(x => x.LineItems.Count), pendingFields.Count, findingCount);
         await _context.SaveChangesAsync(ct);
+    }
+
+    private async Task<int> ReserveInquiryNumbersAsync(
+        long corpusId,
+        int inquiryCount,
+        CancellationToken ct)
+    {
+        if (inquiryCount <= 0)
+            throw new ArgumentOutOfRangeException(nameof(inquiryCount));
+
+        // Extraction persistence already runs in a transaction. Serializing on the
+        // corpus keeps independent workers from allocating the same inquiry range.
+        if (_context.Database.IsNpgsql())
+            await _context.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT pg_advisory_xact_lock({corpusId})", ct);
+
+        var currentMaximum = await _context.Set<CanonicalInquiry>()
+            .Where(x => x.CorpusId == corpusId)
+            .Select(x => (int?)x.InquiryNumber)
+            .MaxAsync(ct) ?? 0;
+        return checked(currentMaximum + 1);
     }
 
     private static IEnumerable<SourceEvidence> LineEvidence(CanonicalRfqLineItem line) =>

@@ -42,12 +42,17 @@ public partial class ErpRfqAutomationContext
             entity.Property(e => e.InputHash).HasMaxLength(64).IsFixedLength();
             entity.Property(e => e.OutputHash).HasMaxLength(64).IsFixedLength();
             entity.Property(e => e.TokenSource).HasMaxLength(30).IsRequired();
+            entity.Property(e => e.EstimatedCost).HasPrecision(18, 6);
+            entity.Property(e => e.CostCurrency).HasMaxLength(3);
+            entity.Property(e => e.CostStatus).HasMaxLength(32).IsRequired();
             entity.Property(e => e.ErrorCode).HasMaxLength(100);
             entity.HasIndex(e => new { e.BusinessUnitId, e.IdempotencyKey }).IsUnique()
                 .HasDatabaseName("UX_AiRequests_BU_IdempotencyKey");
             entity.HasIndex(e => new { e.BusinessUnitId, e.CreatedOn })
                 .HasDatabaseName("IX_AiRequests_BU_CreatedOn");
             entity.HasIndex(e => new { e.BusinessUnitId, e.ProviderClass, e.CreatedOn });
+            entity.HasIndex(e => new { e.BusinessUnitId, e.ExtractionJobId });
+            entity.HasIndex(e => new { e.BusinessUnitId, e.SourceDocumentOccurrenceId });
             entity.HasIndex(e => e.CreatedOn)
                 .HasDatabaseName("IX_AiRequests_Unresolved_CreatedOn")
                 .HasFilter("\"CompletedOn\" IS NULL AND \"Status\" IN ('Reserved', 'Running')");

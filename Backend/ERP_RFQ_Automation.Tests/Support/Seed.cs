@@ -151,4 +151,23 @@ public static class Seed
         ctx.Customers.Add(c);
         return c;
     }
+
+    public static Contact Contact(ErpRfqAutomationContext ctx, long id, long businessUnitId, long customerId,
+        string email = "buyer@customer.test")
+    {
+        var contact = new Contact
+        {
+            Id = id,
+            BusinessUnitId = businessUnitId,
+            CustomerId = customerId,
+            FirstName = "Test",
+            LastName = "Buyer",
+            Email = email,
+            IsActive = true,
+            CreatedBy = "seed",
+            CreatedOn = Now
+        };
+        ctx.Contacts.Add(contact);
+        return contact;
+    }
 }

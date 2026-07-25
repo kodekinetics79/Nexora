@@ -143,7 +143,7 @@ public sealed class ExtractionWorkerLeaseTests
         public Task<EnqueueResult> EnqueueAsync(EnqueueExtractionRequest request, CancellationToken ct = default)
             => throw new NotSupportedException();
 
-        public Task<bool> CompleteAsync(long jobId, string workerId, int leaseAttempt, long resultLeadId, CancellationToken ct = default)
+        public Task<bool> CompleteAsync(long jobId, string workerId, int leaseAttempt, long? resultLeadId, CancellationToken ct = default)
             => throw new NotSupportedException();
     }
 
@@ -253,7 +253,7 @@ public sealed class ExtractionWorkerLeaseTests
             => Task.FromResult(true);
         public Task<EnqueueResult> EnqueueAsync(EnqueueExtractionRequest request, CancellationToken ct = default)
             => throw new NotSupportedException();
-        public Task<bool> CompleteAsync(long jobId, string workerId, int leaseAttempt, long resultLeadId, CancellationToken ct = default)
+        public Task<bool> CompleteAsync(long jobId, string workerId, int leaseAttempt, long? resultLeadId, CancellationToken ct = default)
             => throw new NotSupportedException();
     }
 }

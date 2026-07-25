@@ -121,6 +121,35 @@ public sealed class EvidenceLedgerModelTests
     }
 
     [Fact]
+    public void ExtractionRun_MapsExplicitProcessingAndOcrCostStatus()
+    {
+        var entity = BuildModel().FindEntityType(typeof(ExtractionRun))!;
+
+        Assert.Equal("processing_cost_amount",
+            entity.FindProperty(nameof(ExtractionRun.ProcessingCostAmount))!.GetColumnName());
+        Assert.Equal("processing_cost_currency",
+            entity.FindProperty(nameof(ExtractionRun.ProcessingCostCurrency))!.GetColumnName());
+        Assert.Equal(3,
+            entity.FindProperty(nameof(ExtractionRun.ProcessingCostCurrency))!.GetMaxLength());
+        Assert.Equal("processing_cost_status",
+            entity.FindProperty(nameof(ExtractionRun.ProcessingCostStatus))!.GetColumnName());
+        Assert.Equal(32,
+            entity.FindProperty(nameof(ExtractionRun.ProcessingCostStatus))!.GetMaxLength());
+        Assert.Equal("ocr_cost_status",
+            entity.FindProperty(nameof(ExtractionRun.OcrCostStatus))!.GetColumnName());
+
+        var run = ExtractionRun.Create(1, 2, Guid.NewGuid(), 3, 1, "parser/v1", "schema/v1");
+        Assert.Equal("NotSettled", run.ProcessingCostStatus);
+        Assert.Equal("NotRequired", run.OcrCostStatus);
+
+        run.RecordCostStatus("LocalNoCharge", "Completed", 0m, "usd");
+        Assert.Equal("LocalNoCharge", run.ProcessingCostStatus);
+        Assert.Equal("Completed", run.OcrCostStatus);
+        Assert.Equal(0m, run.ProcessingCostAmount);
+        Assert.Equal("USD", run.ProcessingCostCurrency);
+    }
+
+    [Fact]
     public void SpreadsheetEvidence_MapsCoordinatesAndDeterministicEvidenceKey()
     {
         var model = BuildModel();

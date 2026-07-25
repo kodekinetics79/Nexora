@@ -20,7 +20,9 @@ public sealed record AiCallContext(
     string IdempotencyKey,
     string PromptVersion,
     bool InjectionDetected = false,
-    AiProviderClass ProviderClass = AiProviderClass.External);
+    AiProviderClass ProviderClass = AiProviderClass.External,
+    long? ExtractionJobId = null,
+    long? SourceDocumentOccurrenceId = null);
 
 public sealed record AiReservation(
     Guid RequestId,
@@ -270,6 +272,8 @@ public sealed class AiGovernanceService : IAiGovernanceService
         {
             Id = Guid.NewGuid(),
             BusinessUnitId = context.BusinessUnitId,
+            ExtractionJobId = context.ExtractionJobId,
+            SourceDocumentOccurrenceId = context.SourceDocumentOccurrenceId,
             Operation = context.Purpose,
             IdempotencyKey = context.IdempotencyKey,
             PromptHash = inputHash,
@@ -283,6 +287,7 @@ public sealed class AiGovernanceService : IAiGovernanceService
             InjectionDetected = context.InjectionDetected,
             EstimatedInputTokens = estimatedInput,
             ReservedTokens = reserved,
+            CostStatus = context.ProviderClass == AiProviderClass.Local ? "LocalUnpriced" : "RateUnavailable",
             ErrorCode = errorCode,
             CreatedOn = now,
             CompletedOn = status == AiCallStatuses.Denied ? now : null

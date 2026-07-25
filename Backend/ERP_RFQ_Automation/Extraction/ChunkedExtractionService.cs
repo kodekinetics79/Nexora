@@ -35,6 +35,8 @@ public sealed class DocumentExtractionInput
     public long BusinessUnitId { get; init; }
     public string SourceDocumentName { get; init; } = "RFQ document";
     public string SourceId { get; init; } = Guid.NewGuid().ToString("N");
+    public long? ExtractionJobId { get; init; }
+    public long? SourceDocumentOccurrenceId { get; init; }
 
     /// <summary>Header/context text extracted once (buyer, RFQ no, dates, terms).</summary>
     public string HeaderText { get; init; } = "";
@@ -145,7 +147,9 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             var single = await _llm.ExtractLeadDataAsync(
                 Clip(input.HeaderText, MaxChunkChars),
                 new AiCallContext(input.BusinessUnitId, AiPurposes.RfqExtraction,
-                    $"extraction:{input.SourceId}:whole", "rfq-extraction-v1"), ct);
+                    $"extraction:{input.SourceId}:whole", "rfq-extraction-v1",
+                    ExtractionJobId: input.ExtractionJobId,
+                    SourceDocumentOccurrenceId: input.SourceDocumentOccurrenceId), ct);
             if (single is null)
                 return Failed(0, "LLM returned no result for the document.");
             var items0 = single.Items ?? new List<LeadItemData>();
@@ -195,7 +199,9 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             {
                 chunkResult = await _llm.ExtractLeadDataAsync(prompt,
                     new AiCallContext(input.BusinessUnitId, AiPurposes.RfqExtraction,
-                        $"extraction:{input.SourceId}:chunk:{i + 1}", "rfq-extraction-v1"), ct);
+                        $"extraction:{input.SourceId}:chunk:{i + 1}", "rfq-extraction-v1",
+                        ExtractionJobId: input.ExtractionJobId,
+                        SourceDocumentOccurrenceId: input.SourceDocumentOccurrenceId), ct);
             }
             catch (Exception ex)
             {

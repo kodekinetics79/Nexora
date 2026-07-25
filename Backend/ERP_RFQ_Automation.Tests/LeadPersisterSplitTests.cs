@@ -128,6 +128,17 @@ public class LeadPersisterSplitTests : IDisposable
     }
 
     [Fact]
+    public void One_source_receipt_can_link_to_multiple_logical_lead_occurrences()
+    {
+        using var context = _db.ContextFor(1);
+        var entity = context.Model.FindEntityType(typeof(LeadIngestionOccurrence))!;
+        var sourceBridge = entity.GetIndexes().Single(index => index.Properties.Select(property => property.Name)
+            .SequenceEqual([nameof(LeadIngestionOccurrence.BusinessUnitId), nameof(LeadIngestionOccurrence.SourceDocumentOccurrenceId)]));
+
+        Assert.False(sourceBridge.IsUnique);
+    }
+
+    [Fact]
     public async Task SingleOutcome_StillPersistsOneLead_WithInquiryType()
     {
         await using (var seedCtx = _db.ContextFor(null))
@@ -253,7 +264,7 @@ public class LeadPersisterSplitTests : IDisposable
         public Task<bool> RenewLeaseAsync(long jobId, string workerId, int leaseAttempt, TimeSpan leaseDuration, CancellationToken ct = default)
             => Task.FromResult(true);
 
-        public Task<bool> CompleteAsync(long jobId, string workerId, int leaseAttempt, long resultLeadId, CancellationToken ct = default)
+        public Task<bool> CompleteAsync(long jobId, string workerId, int leaseAttempt, long? resultLeadId, CancellationToken ct = default)
             => Task.FromResult(false);
 
         public Task<EnqueueResult> EnqueueAsync(EnqueueExtractionRequest request, CancellationToken ct = default)

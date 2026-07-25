@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using Microsoft.Extensions.Logging;
 using ERP_RFQ_Automation.Infrastructure.Storage;
+using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Security.DocumentInspection;
 using Microsoft.EntityFrameworkCore;
@@ -17,6 +18,7 @@ namespace ERP_RFQ_Automation.Extraction;
 public sealed class IngestedDocument
 {
     public long JobId { get; init; }
+    public long SourceDocumentOccurrenceId { get; init; }
     public Guid BatchId { get; init; }
     public string ContentHash { get; init; } = null!;
     public string StoragePath { get; init; } = null!;
@@ -76,7 +78,7 @@ public sealed class DocumentIngestionService : IDocumentIngestion
         _context = context;
     }
 
-    public async Task<IngestedDocument> IngestAsync(
+    public Task<IngestedDocument> IngestAsync(
         byte[] bytes,
         string fileName,
         long businessUnitId,
@@ -86,13 +88,28 @@ public sealed class DocumentIngestionService : IDocumentIngestion
         ExtractionJobMetadata? metadata = null,
         CancellationToken ct = default)
     {
+        return _context.Database.CreateExecutionStrategy().ExecuteAsync(
+            () => IngestCoreAsync(bytes, fileName, businessUnitId, sourceType, batchId, priority, metadata, ct));
+    }
+
+    private async Task<IngestedDocument> IngestCoreAsync(
+        byte[] bytes,
+        string fileName,
+        long businessUnitId,
+        ExtractionSourceType sourceType,
+        Guid? batchId,
+        int priority,
+        ExtractionJobMetadata? metadata,
+        CancellationToken ct)
+    {
         if (bytes is null || bytes.Length == 0)
             throw new ArgumentException("Cannot ingest an empty document.", nameof(bytes));
         if (businessUnitId <= 0)
             throw new ArgumentException("A valid businessUnitId is required.", nameof(businessUnitId));
 
-        var actualBatchId = batchId ?? Guid.NewGuid();
         var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        var actualBatchId = batchId ?? SourceOccurrenceIdentity.BuildFallbackBatchId(
+            businessUnitId, sourceType, fileName, hash, metadata);
         var suppliedExtension = Path.GetExtension(fileName).ToLowerInvariant();
         var quarantineObject = await _storage.WriteImmutableAsync(
             businessUnitId, "quarantine", hash, suppliedExtension, bytes, ct);
@@ -121,6 +138,15 @@ public sealed class DocumentIngestionService : IDocumentIngestion
         {
             corpus = DocumentCorpus.Create(businessUnitId, actualBatchId, MapSourceType(sourceType));
             _context.Add(corpus);
+            _context.Add(new LeadIngestionBatch
+            {
+                Id = actualBatchId,
+                BusinessUnitId = businessUnitId,
+                SourceChannel = sourceType.ToString(),
+                CreatedBy = "document-ingestion",
+                CreatedAtUtc = DateTimeOffset.UtcNow,
+                UpdatedAtUtc = DateTimeOffset.UtcNow
+            });
             await _context.SaveChangesAsync(ct);
         }
 
@@ -155,6 +181,7 @@ public sealed class DocumentIngestionService : IDocumentIngestion
                 occurrenceKey,
                 BuildSourceMetadata(fileName, sourceType, metadata, inspection,
                     quarantineObject, selectedObject));
+            occurrence.SetLogicalGroup(metadata?.LogicalGroupKey);
             _context.Add(occurrence);
             await _context.SaveChangesAsync(ct);
         }
@@ -163,9 +190,7 @@ public sealed class DocumentIngestionService : IDocumentIngestion
         if (!inspection.IsCleared || !sourceIsCleared)
         {
             corpus.RequireReview();
-            await _context.SaveChangesAsync(ct);
-            await transaction.CommitAsync(ct);
-            throw new DocumentInspectionException(sourceIsCleared || !inspection.IsCleared
+            var rejectedInspection = sourceIsCleared || !inspection.IsCleared
                 ? inspection
                 : new FileInspectionResult(
                     source.SecurityStatus == DocumentSecurityStatus.Rejected
@@ -175,13 +200,27 @@ public sealed class DocumentIngestionService : IDocumentIngestion
                     source.ByteSize,
                     "The authoritative source document has not passed security inspection.",
                     "evidence-ledger",
-                    null));
+                    null);
+            occurrence.MarkRejected(
+                "SecurityInspection",
+                rejectedInspection.Status == FileInspectionStatus.Rejected ? "document_rejected" : "document_quarantined",
+                JsonSerializer.Serialize(new
+                {
+                    status = rejectedInspection.Status.ToString(),
+                    reason = rejectedInspection.Reason,
+                    scanner = rejectedInspection.ScannerEngine,
+                    signature = rejectedInspection.ScannerSignature
+                }));
+            await _context.SaveChangesAsync(ct);
+            await transaction.CommitAsync(ct);
+            throw new DocumentInspectionException(rejectedInspection);
         }
 
         var fileType = ExtensionForMime(inspection.DetectedContentType, suppliedExtension);
         var enqueue = await _queue.EnqueueAsync(new EnqueueExtractionRequest
         {
             BusinessUnitId = businessUnitId,
+            SourceDocumentOccurrenceId = occurrence.Id,
             SourceType = sourceType,
             StoragePath = selectedObject.StorageUri,
             FileName = fileName,
@@ -206,6 +245,7 @@ public sealed class DocumentIngestionService : IDocumentIngestion
         return new IngestedDocument
         {
             JobId = enqueue.JobId,
+            SourceDocumentOccurrenceId = occurrence.Id,
             BatchId = enqueue.BatchId,
             ContentHash = enqueue.ContentHash,
             StoragePath = selectedObject.StorageUri,
@@ -292,11 +332,22 @@ public static class SourceOccurrenceIdentity
         ExtractionSourceType sourceType,
         ExtractionJobMetadata? metadata)
     {
-        var occurrenceIdentity = string.IsNullOrWhiteSpace(metadata?.SourceOccurrenceId)
-            ? Guid.NewGuid().ToString("N")
-            : Convert.ToHexString(SHA256.HashData(
-                System.Text.Encoding.UTF8.GetBytes(metadata.SourceOccurrenceId.Trim())))
-                .ToLowerInvariant();
+        var stableIdentity = string.IsNullOrWhiteSpace(metadata?.SourceOccurrenceId)
+            ? $"fallback:{metadata?.EmailIngestId}:{metadata?.LogicalGroupKey}"
+            : metadata.SourceOccurrenceId.Trim();
+        var occurrenceIdentity = Convert.ToHexString(SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(stableIdentity))).ToLowerInvariant();
         return $"{batchId:D}:{sourceType}:{occurrenceIdentity}";
+    }
+
+    public static Guid BuildFallbackBatchId(long businessUnitId, ExtractionSourceType sourceType,
+        string fileName, string contentHash, ExtractionJobMetadata? metadata)
+    {
+        if (string.IsNullOrWhiteSpace(metadata?.SourceOccurrenceId))
+            return Guid.NewGuid();
+
+        var stableReceipt = $"{businessUnitId}:{sourceType}:{metadata.SourceOccurrenceId.Trim()}";
+        var bytes = SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(stableReceipt));
+        return new Guid(bytes.AsSpan(0, 16));
     }
 }

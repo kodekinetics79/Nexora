@@ -41,6 +41,8 @@ dist-ssr/
 *.tsbuildinfo
 npm-debug.log*
 yarn-error.log*
+Frontend/playwright-report*/
+Frontend/test-results/
 
 # === OS / editor cruft ===
 .DS_Store

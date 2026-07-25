@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Chip, Grid,
-  CircularProgress, Stack, Table, TableHead,
+  CircularProgress, Stack, Table, TableHead, TableContainer,
   TableRow, TableCell, TableBody, IconButton,
   Breadcrumbs, Link, Dialog, DialogTitle, DialogContent,
   DialogActions, Alert, AlertTitle,
@@ -128,7 +128,7 @@ const LeadDetailPage: React.FC = () => {
   const aiConfidence = (lead.aiconfidence || 0) * 100;
 
   return (
-    <Box sx={{ p: 3, maxWidth: 1800, mx: 'auto' }}>
+    <Box sx={{ p: { xs: 1, sm: 2, md: 3 }, maxWidth: 1800, mx: 'auto', minWidth: 0 }}>
       {/* Breadcrumb Header */}
       <Breadcrumbs separator={<NextIcon sx={{ fontSize: 14 }} />} sx={{ mb: 2 }}>
         <Link component="button" variant="caption" onClick={() => navigate('/dashboard')} sx={{ color: 'text.secondary', fontWeight: 700, textDecoration: 'none', textTransform: 'uppercase' }}>
@@ -142,10 +142,10 @@ const LeadDetailPage: React.FC = () => {
         </Typography>
       </Breadcrumbs>
 
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 3 }}>
-        <Box>
-          <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', mb: 0.5 }}>
-            <Typography variant="h5" sx={{ fontWeight: 950, color: 'text.primary', letterSpacing: '-0.02em' }}>
+      <Box sx={{ display: 'flex', flexDirection: { xs: 'column', md: 'row' }, gap: 2, justifyContent: 'space-between', alignItems: { xs: 'stretch', md: 'flex-start' }, mb: 3 }}>
+        <Box sx={{ minWidth: 0 }}>
+          <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', mb: 0.5, flexWrap: 'wrap' }}>
+            <Typography variant="h5" sx={{ fontWeight: 950, color: 'text.primary', overflowWrap: 'anywhere' }}>
               {lead.rfqno}
             </Typography>
             <DeadlineChip bidClosingDate={lead.bidClosingDate} />
@@ -169,7 +169,7 @@ const LeadDetailPage: React.FC = () => {
             </Stack>
           )}
         </Box>
-        <Stack direction="row" spacing={1.5}>
+        <Stack direction="row" spacing={1.5} sx={{ flexWrap: 'wrap', gap: 1, justifyContent: { xs: 'flex-start', md: 'flex-end' } }}>
           {lead.commercialCaseId && (
             <Button
               variant="outlined"
@@ -328,7 +328,8 @@ const LeadDetailPage: React.FC = () => {
           <Box sx={{ mt: 2 }}>
             <SectionTitle title={t('extracted_line_items') || 'Extracted Line Items'} count={lead.leadItems?.length || 0} />
             <Paper sx={{ borderRadius: 3, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>
-              <Table size="small">
+              <TableContainer sx={{ overflowX: 'auto' }}>
+              <Table size="small" sx={{ minWidth: 760 }}>
                 <TableHead>
                   <TableRow sx={{ bgcolor: 'action.hover' }}>
                     <TableCell sx={{ fontWeight: 900, color: 'text.secondary', fontSize: '0.7rem', py: 1.5 }}>PRODUCT INTELLIGENCE</TableCell>
@@ -398,6 +399,7 @@ const LeadDetailPage: React.FC = () => {
                   ))}
                 </TableBody>
               </Table>
+              </TableContainer>
             </Paper>
           </Box>
         </Grid>
