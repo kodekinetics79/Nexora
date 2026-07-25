@@ -1,0 +1,186 @@
+namespace ERP_RFQ_Automation.ProductIntelligence;
+
+public sealed class DeterministicProductItemResolver : IProductItemResolver
+{
+    public const string CurrentRuleVersion = "product-resolution/v1";
+    private const decimal FuzzyCandidateFloor = 0.25m;
+    private const decimal AmbiguityMargin = 0.05m;
+    private const int MaximumCandidates = 5;
+
+    private readonly IProductResolutionCatalog _catalog;
+    private readonly IApprovedProductReferenceSource _references;
+
+    public DeterministicProductItemResolver(
+        IProductResolutionCatalog catalog,
+        IApprovedProductReferenceSource references)
+    {
+        _catalog = catalog;
+        _references = references;
+    }
+
+    public async Task<ProductResolutionResult> ResolveAsync(
+        ProductResolutionRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.BusinessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(request.BusinessUnitId));
+        if (request.SourceLeadRevisionId <= 0) throw new ArgumentOutOfRangeException(nameof(request.SourceLeadRevisionId));
+        if (request.SourceLeadItemRevisionId <= 0) throw new ArgumentOutOfRangeException(nameof(request.SourceLeadItemRevisionId));
+
+        var normalizedPart = ProductIdentityNormalizer.NormalizePartNumber(request.OriginalPartNumber);
+        var normalizedManufacturer = ProductIdentityNormalizer.NormalizeManufacturer(request.OriginalManufacturer);
+        var products = (await _catalog.GetActiveProductsAsync(request.BusinessUnitId, cancellationToken))
+            .Where(product => product.BusinessUnitId == request.BusinessUnitId)
+            .GroupBy(product => product.ProductId)
+            .Select(group => group.First())
+            .ToArray();
+        var references = (await _references.GetApprovedReferencesAsync(request.BusinessUnitId, cancellationToken))
+            .Where(reference => reference.BusinessUnitId == request.BusinessUnitId)
+            .ToArray();
+
+        var ranked = ExactMatches(products, normalizedPart, normalizedManufacturer).ToList();
+        if (ranked.Count == 0)
+            ranked.AddRange(ReferenceMatches(products, references, normalizedPart, normalizedManufacturer));
+        if (ranked.Count == 0)
+            ranked.AddRange(SimilarityMatches(products, request, normalizedManufacturer));
+
+        ranked = ranked
+            .OrderByDescending(candidate => candidate.Confidence)
+            .ThenBy(candidate => candidate.ProductId)
+            .Take(MaximumCandidates)
+            .ToList();
+
+        var confidence = ranked.FirstOrDefault()?.Confidence ?? 0m;
+        var margin = ranked.Count switch
+        {
+            0 => 0m,
+            1 => confidence,
+            _ => Math.Max(0m, confidence - ranked[1].Confidence)
+        };
+        var top = ranked.FirstOrDefault();
+        var isDeterministicMethod = top?.Method is ProductResolutionMethods.ExactPartNumber
+            or ProductResolutionMethods.ExactInternalCode
+            or ProductResolutionMethods.ApprovedAlias
+            or ProductResolutionMethods.ApprovedSupersession;
+        var ambiguous = ranked.Count > 1 && margin < AmbiguityMargin;
+        var autoLink = top is not null && isDeterministicMethod && !ambiguous;
+        var decision = autoLink
+            ? ProductResolutionDecisionState.AutoLinked
+            : ranked.Count > 0
+                ? ProductResolutionDecisionState.ReviewRequired
+                : ProductResolutionDecisionState.Unresolved;
+
+        return new ProductResolutionResult(
+            request.BusinessUnitId,
+            request.SourceLeadRevisionId,
+            request.SourceLeadItemRevisionId,
+            request.OriginalPartNumber,
+            normalizedPart,
+            request.OriginalManufacturer,
+            normalizedManufacturer,
+            ranked,
+            confidence,
+            margin,
+            top?.Method,
+            CurrentRuleVersion,
+            request.Evidence ?? Array.Empty<ProductResolutionEvidence>(),
+            decision,
+            autoLink ? top!.ProductId : null,
+            ambiguous,
+            false);
+    }
+
+    private static IEnumerable<RankedProductCandidate> ExactMatches(
+        IEnumerable<ProductIdentityCandidate> products,
+        string? normalizedPart,
+        string? normalizedManufacturer)
+    {
+        if (normalizedPart is null) yield break;
+
+        foreach (var product in products)
+        {
+            var productPart = ProductIdentityNormalizer.NormalizePartNumber(product.PartNumber);
+            var internalCode = ProductIdentityNormalizer.NormalizePartNumber(product.InternalCode);
+            var method = productPart == normalizedPart
+                ? ProductResolutionMethods.ExactPartNumber
+                : internalCode == normalizedPart
+                    ? ProductResolutionMethods.ExactInternalCode
+                    : null;
+            if (method is null) continue;
+
+            yield return Candidate(product, method == ProductResolutionMethods.ExactPartNumber ? 1m : 0.99m,
+                method, "Exact normalized catalog identity", normalizedPart, normalizedManufacturer);
+        }
+    }
+
+    private static IEnumerable<RankedProductCandidate> ReferenceMatches(
+        IReadOnlyCollection<ProductIdentityCandidate> products,
+        IEnumerable<ApprovedProductReference> references,
+        string? normalizedPart,
+        string? normalizedManufacturer)
+    {
+        if (normalizedPart is null) yield break;
+
+        foreach (var reference in references.Where(reference =>
+                     ProductIdentityNormalizer.NormalizePartNumber(reference.ReferenceValue) == normalizedPart))
+        {
+            var referenceManufacturer = ProductIdentityNormalizer.NormalizeManufacturer(reference.Manufacturer);
+            if (normalizedManufacturer is not null && referenceManufacturer is not null
+                && normalizedManufacturer != referenceManufacturer) continue;
+
+            var product = products.SingleOrDefault(candidate => candidate.ProductId == reference.ProductId);
+            if (product is null) continue;
+            var method = reference.Kind == ProductReferenceKind.Alias
+                ? ProductResolutionMethods.ApprovedAlias
+                : ProductResolutionMethods.ApprovedSupersession;
+            var confidence = reference.Kind == ProductReferenceKind.Alias ? 0.98m : 0.97m;
+            var evidence = new ProductResolutionEvidence("approved-reference", reference.ApprovalReference,
+                reference.ReferenceValue, $"Approved {reference.Kind} at {reference.ApprovedAtUtc:O}");
+            yield return Candidate(product, confidence, method, $"Matched approved {reference.Kind}",
+                normalizedPart, normalizedManufacturer, evidence);
+        }
+    }
+
+    private static IEnumerable<RankedProductCandidate> SimilarityMatches(
+        IEnumerable<ProductIdentityCandidate> products,
+        ProductResolutionRequest request,
+        string? normalizedManufacturer)
+    {
+        var sourceTokens = ProductIdentityNormalizer.Tokens(request.OriginalPartNumber, request.Description);
+        if (sourceTokens.Count == 0) yield break;
+
+        foreach (var product in products)
+        {
+            var candidateTokens = ProductIdentityNormalizer.Tokens(
+                product.PartNumber, product.InternalCode, product.ProductName, product.Description);
+            if (candidateTokens.Count == 0) continue;
+            var overlap = (decimal)sourceTokens.Intersect(candidateTokens).Count()
+                / sourceTokens.Union(candidateTokens).Count();
+            if (overlap < FuzzyCandidateFloor) continue;
+
+            var manufacturer = ProductIdentityNormalizer.NormalizeManufacturer(product.Manufacturer);
+            var manufacturerMatches = normalizedManufacturer is not null && manufacturer == normalizedManufacturer;
+            var confidence = Math.Min(0.89m, 0.35m + (0.45m * overlap) + (manufacturerMatches ? 0.09m : 0m));
+            yield return Candidate(product, Math.Round(confidence, 4), ProductResolutionMethods.LocalSimilarity,
+                $"Local token similarity {Math.Round(overlap * 100m, 1)}%", null, normalizedManufacturer);
+        }
+    }
+
+    private static RankedProductCandidate Candidate(
+        ProductIdentityCandidate product,
+        decimal confidence,
+        string method,
+        string reason,
+        string? matchedValue,
+        string? normalizedManufacturer,
+        params ProductResolutionEvidence[] evidence)
+    {
+        var details = new List<ProductResolutionEvidence>(evidence)
+        {
+            new("catalog-product", product.ProductId.ToString(), matchedValue,
+                $"Part={product.PartNumber}; InternalCode={product.InternalCode}; Manufacturer={normalizedManufacturer}")
+        };
+        return new RankedProductCandidate(product.ProductId, product.PartNumber, product.InternalCode,
+            product.Manufacturer, product.ProductName, confidence, method, reason, details);
+    }
+}

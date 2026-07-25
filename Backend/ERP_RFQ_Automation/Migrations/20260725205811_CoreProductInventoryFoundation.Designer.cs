@@ -3,6 +3,7 @@ using System;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace ERP_RFQ_Automation.Migrations
 {
     [DbContext(typeof(ErpRfqAutomationContext))]
-    partial class ErpRfqAutomationContextModelSnapshot : ModelSnapshot
+    [Migration("20260725205811_CoreProductInventoryFoundation")]
+    partial class CoreProductInventoryFoundation
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -7437,8 +7440,6 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("InventoryId");
-
                     b.HasIndex("ProductId");
 
                     b.HasIndex("WarehouseId");
@@ -9087,7 +9088,7 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("Buid", "ProductId", "WarehouseId")
                         .IsUnique()
                         .HasDatabaseName("UX_Inventory_BU_Product_Warehouse")
-                        .HasFilter("\"ProductId\" IS NOT NULL AND \"WarehouseId\" IS NOT NULL");
+                        .HasFilter("\"ProductId\" IS NOT NULL AND \"WarehouseID\" IS NOT NULL");
 
                     b.ToTable("Inventory", (string)null);
                 });
@@ -14239,11 +14240,6 @@ namespace ERP_RFQ_Automation.Migrations
 
             modelBuilder.Entity("ERP_RFQ_Automation.Inventory.Commercial.IncomingInventory", b =>
                 {
-                    b.HasOne("ERP_RFQ_Automation.Models.Inventory", null)
-                        .WithMany()
-                        .HasForeignKey("InventoryId")
-                        .OnDelete(DeleteBehavior.Restrict);
-
                     b.HasOne("ERP_RFQ_Automation.Models.Product", null)
                         .WithMany()
                         .HasForeignKey("ProductId")

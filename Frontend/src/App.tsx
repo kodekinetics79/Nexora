@@ -20,6 +20,14 @@ const ProductsPage = lazy(() => import('./pages/Inventory/ProductsPage'));
 const ProductDetailPage = lazy(() => import('./pages/Inventory/ProductDetailPage'));
 const ProductCategoryPage = lazy(() => import('./pages/Inventory/ProductCategoryPage'));
 const ProductSubCategoryPage = lazy(() => import('./pages/Inventory/ProductSubCategoryPage'));
+const InventoryOverviewPage = lazy(() => import('./pages/Inventory/Commercial/InventoryOverviewPage'));
+const AvailabilityPage = lazy(() => import('./pages/Inventory/Commercial/AvailabilityPage'));
+const WarehousesPage = lazy(() => import('./pages/Inventory/Commercial/WarehousesPage'));
+const ReservationsPage = lazy(() => import('./pages/Inventory/Commercial/ReservationsPage'));
+const IncomingPage = lazy(() => import('./pages/Inventory/Commercial/IncomingPage'));
+const MovementsPage = lazy(() => import('./pages/Inventory/Commercial/MovementsPage'));
+const DemandPage = lazy(() => import('./pages/Inventory/Commercial/DemandPage'));
+const RelatedResourcesPage = lazy(() => import('./pages/Inventory/Commercial/RelatedResourcesPage'));
 const SuppliersPage = lazy(() => import('./pages/Suppliers/SuppliersPage'));
 const SupplierDetailPage = lazy(() => import('./pages/Suppliers/SupplierDetailPage'));
 const QuotedItemsPage = lazy(() => import('./pages/Suppliers/QuotedItemsPage'));
@@ -169,6 +177,14 @@ function App() {
       <Route path="/security/roles" element={<MainLayout><PermissionGuard moduleName="Roles & Permissions" redirect><RolesPermissionsPage /></PermissionGuard></MainLayout>} />
 
       {/* Inventory Routes */}
+      <Route path="/inventory/overview" element={<MainLayout><PermissionGuard moduleName="Products" redirect><InventoryOverviewPage /></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/availability" element={<MainLayout><PermissionGuard moduleName="Products" redirect><AvailabilityPage /></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/warehouses" element={<MainLayout><PermissionGuard moduleName="Products" redirect><WarehousesPage /></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/reservations" element={<MainLayout><PermissionGuard moduleName="Products" redirect><ReservationsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/incoming" element={<MainLayout><PermissionGuard moduleName="Products" redirect><IncomingPage /></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/movements" element={<MainLayout><PermissionGuard moduleName="Products" redirect><MovementsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/demand" element={<MainLayout><PermissionGuard moduleName="Products" redirect><DemandPage /></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/resources" element={<MainLayout><PermissionGuard moduleName="Products" redirect><RelatedResourcesPage /></PermissionGuard></MainLayout>} />
       <Route path="/inventory/products" element={<MainLayout><PermissionGuard moduleName="Products" redirect><ProductsPage /></PermissionGuard></MainLayout>} />
       <Route path="/inventory/products/:id" element={<MainLayout><PermissionGuard moduleName="Products" redirect><ProductDetailPage /></PermissionGuard></MainLayout>} />
       <Route path="/inventory/categories" element={<MainLayout><PermissionGuard moduleName="Product Categories" redirect><ProductCategoryPage /></PermissionGuard></MainLayout>} />

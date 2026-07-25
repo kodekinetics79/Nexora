@@ -1,0 +1,10 @@
+import { useQuery } from '@tanstack/react-query';
+import { Table, TableBody, TableCell, TableHead, TableRow, Typography } from '@mui/material';
+import commercialIntelligenceService from '../../../api/services/commercialIntelligenceService';
+import { PageShell, QueryState, ResponsiveTable, StatusChip } from '../../SalesManagement/CommercialPagePrimitives';
+
+export default function WarehousesPage() {
+  const query = useQuery({ queryKey: ['inventory-intelligence', 'warehouses'], queryFn: commercialIntelligenceService.getWarehouses });
+  const rows = query.data ?? [];
+  return <PageShell title="Warehouses" subtitle="Stock position and unresolved exceptions by persisted warehouse."><QueryState loading={query.isLoading} error={query.isError} empty={!rows.length} onRetry={() => void query.refetch()} emptyText="No warehouses are configured for this business unit."><ResponsiveTable label="Warehouse inventory"><Table size="small"><TableHead><TableRow><TableCell>Warehouse</TableCell><TableCell>Location</TableCell><TableCell>Status</TableCell><TableCell align="right">SKUs</TableCell><TableCell align="right">On hand</TableCell><TableCell align="right">Reserved</TableCell><TableCell align="right">Available</TableCell><TableCell align="right">Exceptions</TableCell></TableRow></TableHead><TableBody>{rows.map(row => <TableRow hover key={row.warehouseId}><TableCell><Typography sx={{ fontWeight: 700 }}>{row.name}</Typography><Typography variant="caption" color="text.secondary">{row.code}</Typography></TableCell><TableCell>{row.location || 'Not recorded'}</TableCell><TableCell><StatusChip value={row.active ? 'Active' : 'Inactive'} /></TableCell><TableCell align="right">{row.skuCount}</TableCell><TableCell align="right">{row.onHandUnits}</TableCell><TableCell align="right">{row.reservedUnits}</TableCell><TableCell align="right">{row.availableUnits}</TableCell><TableCell align="right">{row.exceptionCount}</TableCell></TableRow>)}</TableBody></Table></ResponsiveTable></QueryState></PageShell>;
+}

@@ -65,7 +65,7 @@ public sealed class OrderStockReservationService(
         foreach (var line in lines)
         {
             var partNo = await _db.Set<Product>()
-                .Where(p => p.Id == line.ProductId && (p.Buid == null || p.Buid == businessUnitId))
+                .Where(p => p.Id == line.ProductId && p.Buid == businessUnitId)
                 .Select(p => p.PartNo)
                 .FirstOrDefaultAsync(ct);
 
@@ -80,7 +80,7 @@ public sealed class OrderStockReservationService(
             // Ranking is done client-side because the row count per part is tiny (one per warehouse)
             // and decimal ORDER BY is not portable to the SQLite test provider.
             var matches = await _db.Set<Models.Inventory>()
-                .Where(i => i.PartNo == partNo && (i.Buid == null || i.Buid == businessUnitId)
+                .Where(i => (i.ProductId == line.ProductId || i.PartNo == partNo) && i.Buid == businessUnitId
                             && (line.WarehouseId == null || i.WarehouseId == line.WarehouseId))
                 .Select(i => new { i.Id, i.QtyOnHand })
                 .ToListAsync(ct);

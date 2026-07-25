@@ -188,6 +188,11 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.IInventoryAvailabilitySe
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialIntelligence.Sales.ISalesPersistence, ERP_RFQ_Automation.CommercialIntelligence.Sales.EfSalesPersistence>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialIntelligence.Sales.ISalesApplicationService, ERP_RFQ_Automation.CommercialIntelligence.Sales.SalesApplicationService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.IOrderStockReservationService, ERP_RFQ_Automation.Inventory.OrderStockReservationService>();
+builder.Services.AddSingleton<ERP_RFQ_Automation.Inventory.Commercial.IProductIdentityResolver, ERP_RFQ_Automation.Inventory.Commercial.ProductIdentityResolver>();
+builder.Services.AddSingleton<ERP_RFQ_Automation.Inventory.Commercial.IFulfilmentRouteService, ERP_RFQ_Automation.Inventory.Commercial.FulfilmentRouteService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.ProductIntelligence.IProductResolutionCatalog, ERP_RFQ_Automation.ProductIntelligence.EfProductResolutionCatalog>();
+builder.Services.AddSingleton<ERP_RFQ_Automation.ProductIntelligence.IApprovedProductReferenceSource, ERP_RFQ_Automation.ProductIntelligence.EmptyApprovedProductReferenceSource>();
+builder.Services.AddScoped<ERP_RFQ_Automation.ProductIntelligence.IProductItemResolver, ERP_RFQ_Automation.ProductIntelligence.DeterministicProductItemResolver>();
 builder.Services.AddScoped<ILifecycleApplicationService, LifecycleApplicationService>();
 builder.Services.AddScoped<ILifecycleOutboxStore, LifecycleOutboxStore>();
 builder.Services.AddCommercialFinanceOutboxDispatcher(builder.Configuration);

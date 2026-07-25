@@ -1,5 +1,6 @@
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
+using System.Data;
 
 namespace ERP_RFQ_Automation.Inventory;
 
@@ -57,7 +58,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
     public async Task<StockAvailability> GetAvailabilityAsync(long businessUnitId, long inventoryId, CancellationToken ct = default)
     {
         var onHand = await _db.Set<Models.Inventory>()
-            .Where(i => i.Id == inventoryId && (i.Buid == null || i.Buid == businessUnitId))
+            .Where(i => i.Id == inventoryId && i.Buid == businessUnitId)
             .Select(i => i.QtyOnHand)
             .FirstOrDefaultAsync(ct);
 
@@ -74,7 +75,14 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         if (string.IsNullOrWhiteSpace(idempotencyKey))
             throw new ArgumentException("An idempotency key is required.", nameof(idempotencyKey));
 
-        // Idempotent replay: return the existing hold rather than double-reserving.
+        await using var transaction = _db.Database.CurrentTransaction == null
+            ? await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct)
+            : null;
+        if (_db.Database.IsNpgsql())
+            await _db.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT pg_advisory_xact_lock({businessUnitId}, {inventoryId})", ct);
+
+        // The lock and replay check share one transaction, fencing concurrent holds.
         var existing = await _db.Set<StockReservation>()
             .FirstOrDefaultAsync(r => r.BusinessUnitId == businessUnitId && r.IdempotencyKey == idempotencyKey, ct);
         if (existing != null)
@@ -98,6 +106,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         };
         _db.Set<StockReservation>().Add(reservation);
         await _db.SaveChangesAsync(ct);
+        if (transaction != null) await transaction.CommitAsync(ct);
         return reservation;
     }
 
@@ -131,7 +140,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
             throw new InvalidOperationException($"Reservation {reservationId} was released and cannot be consumed.");
 
         var inventory = await _db.Set<Models.Inventory>()
-            .FirstOrDefaultAsync(i => i.Id == reservation.InventoryId && (i.Buid == null || i.Buid == businessUnitId), ct)
+            .FirstOrDefaultAsync(i => i.Id == reservation.InventoryId && i.Buid == businessUnitId, ct)
             ?? throw new InvalidOperationException($"Inventory {reservation.InventoryId} was not found.");
 
         // Physical stock leaves the building only here, on an authorised goods issue.
