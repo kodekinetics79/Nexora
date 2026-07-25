@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Chip, IconButton,
@@ -22,17 +22,20 @@ import { useAuth } from '../../../context/AuthContext';
 const AllRFQsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const readiness = searchParams.get('state') || undefined;
   const { userData, hasPermission } = useAuth();
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
   const [search, setSearch] = useState('');
 
   const { data, isLoading, isError, refetch } = useQuery({
-    queryKey: ['rfqs', paginationModel, search],
+    queryKey: ['rfqs', paginationModel, search, readiness],
     queryFn: () => rfqService.getAll({
       pageNumber: paginationModel.page + 1,
       pageSize: paginationModel.pageSize,
       search: search || undefined,
       businessUnitId: userData?.businessUnitId || undefined,
+      readiness,
     }),
   });
 
@@ -104,8 +107,8 @@ const AllRFQsPage: React.FC = () => {
     },
     {
       field: 'noOfLineItems',
-      headerName: t('invoice_items'),
-      width: 80,
+      headerName: 'RFQ Lines',
+      width: 130,
       renderCell: (p) => (
         <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', height: '100%' }}>
           <ItemsIcon sx={{ fontSize: 14, color: 'text.secondary' }} />
@@ -155,15 +158,9 @@ const AllRFQsPage: React.FC = () => {
       width: 80,
       renderCell: (p) => (
         <Box sx={{ display: 'flex', alignItems: 'center', height: '100%' }}>
-          <Tooltip title="View Details">
-            <IconButton
-              size="small"
-              sx={{ color: 'primary.main', bgcolor: 'primary.lighter', '&:hover': { bgcolor: 'primary.light', color: 'white' } }}
-              onClick={() => navigate(`/procurement/rfqs/view/${p.row.id}`)}
-            >
-              <ViewIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
+          <Button size="small" startIcon={<ViewIcon />} onClick={() => navigate(`/procurement/rfqs/view/${p.row.id}`)}>
+            Open RFQ
+          </Button>
         </Box>
       )
     },

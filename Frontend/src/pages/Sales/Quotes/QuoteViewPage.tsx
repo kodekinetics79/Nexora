@@ -109,6 +109,15 @@ const QuoteViewPage: React.FC = () => {
     onError: () => toast.error('Failed to mark as responded')
   });
 
+  const resolveImpactMutation = useMutation({
+    mutationFn: () => quoteService.resolveRevisionImpact(Number(id)),
+    onSuccess: () => {
+      toast.success('Revision review marked complete');
+      queryClient.invalidateQueries({ queryKey: ['quote-detail', id] });
+    },
+    onError: () => toast.error('The revision review could not be completed')
+  });
+
   const [awardOpen, setAwardOpen] = React.useState(false);
 
   if (isLoading) return <Box sx={{ p: 4, display: 'flex', justifyContent: 'center' }}><CircularProgress /></Box>;
@@ -141,16 +150,19 @@ const QuoteViewPage: React.FC = () => {
         })),
       }
     : null;
+  const isUnpricedDraft = (quote.statusCode || quote.statusValue || '').toUpperCase() === 'DRAFT'
+    && !quote.currencyId
+    && quote.quoteItems.every((item) => Number(item.unitPrice || 0) === 0);
 
   return (
-    <Box sx={{ p: 3, bgcolor: 'background.default', minHeight: '100vh' }}>
-      <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-        <Box>
-          <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 1 }}>
+    <Box sx={{ p: { xs: 1.5, md: 3 }, bgcolor: 'background.default', minHeight: '100vh', minWidth: 0, overflowX: 'hidden' }}>
+      <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} sx={{ justifyContent: 'space-between', alignItems: { xs: 'stretch', md: 'center' }, mb: 3, minWidth: 0 }}>
+        <Box sx={{ minWidth: 0 }}>
+          <Stack direction="row" useFlexGap spacing={1} sx={{ alignItems: 'center', mb: 1, flexWrap: 'wrap', minWidth: 0, maxWidth: '100%' }}>
             <IconButton onClick={() => navigate('/sales/quotes')} size="small"><BackIcon /></IconButton>
-            <Typography variant="h4" sx={{ fontWeight: 900, letterSpacing: '-0.02em' }}>Quote: {quote.quoteNo}</Typography>
+            <Typography variant="h4" sx={{ fontWeight: 900, overflowWrap: 'anywhere', minWidth: 0, flex: '1 1 220px', lineHeight: 1.15 }}>Quote: {quote.quoteNo}</Typography>
             {(quote.nexoraSerial || quote.commercialCaseReference) && (
-              <Chip label={`Nexora Serial: ${quote.nexoraSerial || quote.commercialCaseReference}`} variant="outlined" sx={{ fontWeight: 900, fontFamily: 'monospace' }} />
+              <Chip label={`Nexora Serial: ${quote.nexoraSerial || quote.commercialCaseReference}`} variant="outlined" sx={{ fontWeight: 900, fontFamily: 'monospace', maxWidth: '100%' }} />
             )}
             <Chip label={quote.statusValue} color={quote.statusValue === 'Sent' ? 'success' : quote.statusValue === 'Accepted' ? 'primary' : 'default'} sx={{ fontWeight: 900, height: 28, borderRadius: 1.5 }} />
             {revisionInfo && revisionInfo.revisionNo > 1 && revisionInfo.revisionOfQuoteNo && (
@@ -198,8 +210,12 @@ const QuoteViewPage: React.FC = () => {
             )}
           </Stack>
           <Typography variant="body2" color="text.secondary">Created on {dayjs(quote.createdDate).format('DD MMM YYYY')} by {quote.createdBy}</Typography>
+          <Stack direction="row" useFlexGap spacing={1} sx={{ mt: 1, flexWrap: 'wrap', minWidth: 0, maxWidth: '100%' }}>
+            {quote.rfqId && <Button size="small" variant="outlined" onClick={() => navigate(`/procurement/rfqs/view/${quote.rfqId}`)}>Open Source RFQ</Button>}
+            {quote.rfqId && <Button size="small" variant="text" onClick={() => navigate(`/procurement/rfqs/view/${quote.rfqId}`)}>RFQ {quote.rfqNo}</Button>}
+          </Stack>
         </Box>
-        <Stack direction="row" spacing={1}>
+        <Stack direction={{ xs: 'column', sm: 'row' }} useFlexGap spacing={1} sx={{ flexWrap: 'wrap', width: { xs: '100%', md: 'auto' }, minWidth: 0, '& > button': { maxWidth: '100%' } }}>
           {hasPermission('Quotations', 'edit') && <Button
             variant="outlined" 
             startIcon={<EditIcon />} 
@@ -213,7 +229,7 @@ const QuoteViewPage: React.FC = () => {
             variant="outlined" 
             startIcon={<PdfIcon />} 
             onClick={() => pdfMutation.mutate()}
-            disabled={pdfMutation.isPending}
+            disabled={pdfMutation.isPending || isUnpricedDraft}
             sx={{ borderRadius: 2 }}
           >
             Export PDF
@@ -243,7 +259,7 @@ const QuoteViewPage: React.FC = () => {
             </Tooltip>
           )}
 
-          {hasPermission('Quotations', 'edit') && quote.statusValue === 'Draft' && <Button variant="contained" startIcon={<SendIcon />} onClick={() => statusMutation.mutate('Sent')} sx={{ borderRadius: 2 }}>Finalize</Button>}
+          {hasPermission('Quotations', 'edit') && quote.statusValue === 'Draft' && <Button variant="contained" startIcon={<SendIcon />} onClick={() => statusMutation.mutate('Sent')} disabled={isUnpricedDraft} sx={{ borderRadius: 2 }}>Ready to Send</Button>}
 
           {hasPermission('Quotations', 'edit') && quote.statusValue === 'Sent' && (
             <>
@@ -285,6 +301,32 @@ const QuoteViewPage: React.FC = () => {
         </Stack>
       </Stack>
 
+      {isUnpricedDraft && (
+        <Alert severity="warning" sx={{ mb: 3 }}>
+          <Typography sx={{ fontWeight: 800 }}>Commercial Review Required</Typography>
+          Pricing Pending · Inventory Pending · Lead Time Pending · Tax, freight and commercial validity are not yet set.
+        </Alert>
+      )}
+      {quote.revisionImpact && (
+        <Alert
+          severity="error"
+          sx={{ mb: 3 }}
+          action={hasPermission('Quotations', 'edit') ? (
+            <Button
+              color="inherit"
+              size="small"
+              disabled={resolveImpactMutation.isPending}
+              onClick={() => resolveImpactMutation.mutate()}
+            >
+              Mark review complete
+            </Button>
+          ) : undefined}
+        >
+          <Typography sx={{ fontWeight: 800 }}>Customer Revision Received</Typography>
+          This Quote Draft is stale and must be reviewed against Lead Revision {quote.sourceLeadRevision}. The customer-issued document has not been overwritten.
+        </Alert>
+      )}
+
       {holdInfo !== null && (
         <Alert
           severity="info"
@@ -309,8 +351,12 @@ const QuoteViewPage: React.FC = () => {
               <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Customer Name</Typography><Typography sx={{ fontWeight: 700 }}>{quote.customerName || 'Customer unresolved'}</Typography></Grid>
               <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Contact</Typography><Typography sx={{ fontWeight: 700 }}>{quote.contactName || quote.customerEmail || 'Contact unresolved'}</Typography></Grid>
               <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Email</Typography><Typography sx={{ fontWeight: 700 }}>{quote.customerEmail || 'N/A'}</Typography></Grid>
-              <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Reference RFQ</Typography><Typography sx={{ fontWeight: 700, color: 'primary.main' }}>{quote.rfqNo || 'None'}</Typography></Grid>
-              <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Validity</Typography><Typography sx={{ fontWeight: 700 }}>Until {dayjs(quote.validUntil).format('DD MMM YYYY')}</Typography></Grid>
+              <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Source RFQ</Typography><Button size="small" sx={{ px: 0 }} onClick={() => quote.rfqId && navigate(`/procurement/rfqs/view/${quote.rfqId}`)}>{quote.rfqNo || 'None'}</Button></Grid>
+              <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Validity</Typography><Typography sx={{ fontWeight: 700 }}>{quote.validUntil ? `Until ${dayjs(quote.validUntil).format('DD MMM YYYY')}` : 'Commercial validity pending'}</Typography></Grid>
+              <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Opportunity Owner</Typography><Typography sx={{ fontWeight: 700 }}>{quote.createdBy}</Typography></Grid>
+              <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Lineage</Typography><Typography sx={{ fontWeight: 700 }}>{quote.nexoraSerial || quote.commercialCaseReference}</Typography></Grid>
+              <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Source Revisions</Typography><Typography sx={{ fontWeight: 700 }}>{quote.sourceLeadRevision > 0 && quote.sourceRfqRevision > 0 ? `Lead Rev ${quote.sourceLeadRevision} · RFQ Rev ${quote.sourceRfqRevision}` : 'Legacy source revision unverified'}</Typography></Grid>
+              {quote.leadId && <Grid size={{ xs: 12, sm: 6 }}><Button size="small" variant="outlined" onClick={() => navigate(`/procurement/leads/view/${quote.leadId}`)}>Open Canonical Lead</Button></Grid>}
               {(quote.discountValue || 0) > 0 && (
                 <Grid size={{ xs: 12, sm: 6 }}>
                   <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Header Discount</Typography>
@@ -323,7 +369,7 @@ const QuoteViewPage: React.FC = () => {
             {quote.headerRemarks && <Box sx={{ mt: 3, p: 2, bgcolor: 'grey.50', borderRadius: 1, borderLeft: '4px solid', borderColor: 'primary.main' }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 800 }}>REMARKS</Typography><Typography variant="body2">{quote.headerRemarks}</Typography></Box>}
           </Paper>
 
-          <Paper sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none', overflow: 'hidden' }}>
+          <Paper sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none', overflowX: 'auto', maxWidth: '100%' }}>
             <Box sx={{ p: 2, borderBottom: '1px solid', borderColor: 'divider', bgcolor: 'grey.50' }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Quoted Items</Typography></Box>
             <Table size="small">
               <TableHead><TableRow sx={{ bgcolor: 'grey.50' }}><TableCell sx={{ fontWeight: 800 }}>#</TableCell><TableCell sx={{ fontWeight: 800 }}>Description</TableCell><TableCell sx={{ fontWeight: 800 }} align="center">Qty</TableCell><TableCell sx={{ fontWeight: 800 }} align="right">Unit Price</TableCell><TableCell sx={{ fontWeight: 800 }} align="right">Discount</TableCell><TableCell sx={{ fontWeight: 800 }} align="right">Total</TableCell></TableRow></TableHead>
@@ -333,7 +379,7 @@ const QuoteViewPage: React.FC = () => {
                     <TableCell>{idx + 1}</TableCell>
                     <TableCell><Typography sx={{ fontWeight: 700, fontSize: '0.85rem' }}>{item.productName || 'Item'}</Typography><Typography variant="caption" color="text.secondary">{item.itemDescription}</Typography></TableCell>
                     <TableCell align="center">{item.quantity}</TableCell>
-                    <TableCell align="right">$ {item.unitPrice?.toLocaleString()}</TableCell>
+                    <TableCell align="right">{Number(item.unitPrice || 0) === 0 ? <Chip size="small" label="Pricing Pending" color="warning" variant="outlined" /> : `$ ${item.unitPrice?.toLocaleString()}`}</TableCell>
                     <TableCell align="right">
                       {item.discount > 0 ? (
                         <Typography variant="caption" color="error.main" sx={{ fontWeight: 700 }}>
@@ -343,7 +389,7 @@ const QuoteViewPage: React.FC = () => {
                         </Typography>
                       ) : '-'}
                     </TableCell>
-                    <TableCell align="right" sx={{ fontWeight: 700 }}>$ {item.totalAmount?.toLocaleString()}</TableCell>
+                    <TableCell align="right" sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pricing Pending' : `$ ${item.totalAmount?.toLocaleString()}`}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -356,11 +402,11 @@ const QuoteViewPage: React.FC = () => {
             <CardContent sx={{ p: 3 }}>
               <Typography variant="h6" sx={{ fontWeight: 800, mb: 3 }}>Financial Summary</Typography>
               <Stack spacing={2}>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography color="text.secondary">Gross Subtotal</Typography><Typography sx={{ fontWeight: 700 }}>$ {itemsSubtotal.toLocaleString()}</Typography></Box>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography color="text.secondary">Item Discounts</Typography><Typography sx={{ fontWeight: 700, color: 'error.main' }}>- $ {itemsDiscounts.toLocaleString()}</Typography></Box>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Gross Subtotal</Typography><Typography sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pricing Pending' : `$ ${itemsSubtotal.toLocaleString()}`}</Typography></Box>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Item Discounts</Typography><Typography sx={{ fontWeight: 700, color: 'error.main' }}>{isUnpricedDraft ? 'Pending' : `- $ ${itemsDiscounts.toLocaleString()}`}</Typography></Box>
                 {headerDiscount > 0 && <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography color="text.secondary">Header Discount</Typography><Typography sx={{ fontWeight: 700, color: 'error.main' }}>- $ {headerDiscount.toLocaleString()}</Typography></Box>}
                 <Divider />
-                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="h5" sx={{ fontWeight: 900 }}>Grand Total</Typography><Typography variant="h5" sx={{ fontWeight: 900, color: 'primary.main' }}>$ {quote.totalAmount?.toLocaleString()}</Typography></Box>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography variant="h5" sx={{ fontWeight: 900 }}>Grand Total</Typography><Typography variant="h5" sx={{ fontWeight: 900, color: isUnpricedDraft ? 'warning.main' : 'primary.main' }}>{isUnpricedDraft ? 'Pricing Pending' : `$ ${quote.totalAmount?.toLocaleString()}`}</Typography></Box>
               </Stack>
             </CardContent>
           </Card>

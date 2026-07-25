@@ -42,7 +42,8 @@ public class LeadController : ControllerBase
         [FromQuery] DateTime? startDate = null,
         [FromQuery] DateTime? endDate = null,
         [FromQuery] string? emailSource = null,
-        [FromQuery] string? clientemail = null)
+        [FromQuery] string? clientemail = null,
+        [FromQuery] string? view = null)
     {
         try
         {
@@ -59,7 +60,7 @@ public class LeadController : ControllerBase
                 return BadRequest("Page size must be between 1 and 1000.");
 
             // Use explicit types for deconstruction to avoid inference errors
-            (IEnumerable<LeadResponseDTO> leads, int totalCount) = await _repository.GetLeadListAsync(pageNumber, pageSize, id, rfqno, buyersName, leadSource, targetBUId, startDate, endDate, emailSource, clientemail);
+            (IEnumerable<LeadResponseDTO> leads, int totalCount) = await _repository.GetLeadListAsync(pageNumber, pageSize, id, rfqno, buyersName, leadSource, targetBUId, startDate, endDate, emailSource, clientemail, view);
 
             var response = new PaginatedResponseDTO<LeadResponseDTO>
             {

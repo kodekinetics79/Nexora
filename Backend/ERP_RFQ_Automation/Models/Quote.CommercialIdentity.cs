@@ -6,6 +6,8 @@ public partial class Quote
     public string? NexoraSerial { get; private set; }
     public long? ContactId { get; private set; }
     public int LifecycleVersion { get; set; } = 1;
+    public int SourceLeadRevision { get; private set; }
+    public int SourceRfqRevision { get; private set; }
 
     public void InheritCommercialIdentity(Rfq rfq)
     {
@@ -27,6 +29,10 @@ public partial class Quote
         NexoraSerial = rfq.NexoraSerial;
         CustomerId = rfq.CustomerId;
         ContactId = rfq.ContactId;
+        if (SourceLeadRevision <= 0)
+            SourceLeadRevision = rfq.Lead?.CurrentRevisionNumber ?? 1;
+        if (SourceRfqRevision <= 0)
+            SourceRfqRevision = rfq.LifecycleVersion;
     }
 
     public void InheritCommercialIdentity(Quote predecessor)
@@ -40,5 +46,7 @@ public partial class Quote
         NexoraSerial = predecessor.NexoraSerial;
         CustomerId = predecessor.CustomerId;
         ContactId = predecessor.ContactId;
+        SourceLeadRevision = predecessor.SourceLeadRevision;
+        SourceRfqRevision = predecessor.SourceRfqRevision;
     }
 }

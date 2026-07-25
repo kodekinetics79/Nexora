@@ -90,12 +90,31 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
 
     public async Task<long> ConvertAsync(long leadId, long businessUnitId, ConvertRequest request, CancellationToken ct)
     {
+        var strategy = _db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(() => ConvertCoreAsync(leadId, businessUnitId, request, ct));
+    }
+
+    private async Task<long> ConvertCoreAsync(long leadId, long businessUnitId, ConvertRequest request, CancellationToken ct)
+    {
+        _db.ChangeTracker.Clear();
+        await using var tx = await _db.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
         var lead = await _db.Leads
             .Include(l => l.LeadItems)
             .Include(l => l.LeadStatus)
             .FirstOrDefaultAsync(l => l.Id == leadId && l.BusinessUnitId == businessUnitId, ct);
         if (lead == null)
             throw new KeyNotFoundException($"Lead with ID {leadId} not found in Business Unit {businessUnitId}.");
+
+        var already = await _db.Rfqs
+            .FirstOrDefaultAsync(r => r.LeadId == leadId && r.BusinessUnitId == businessUnitId, ct);
+        if (already != null)
+        {
+            already.InheritCommercialIdentity(lead);
+            await _db.SaveChangesAsync(ct);
+            await CompleteConversionLifecycleInCurrentTransactionAsync(lead, already.Id, request.ActingUser, ct);
+            await tx.CommitAsync(ct);
+            return already.Id;
+        }
 
         // Legacy gates, replicated verbatim: only accepted leads convert, and a
         // lead is only ever converted once.
@@ -111,13 +130,9 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             throw new InvalidOperationException(
                 "AI-extracted commercial facts must be approved in extraction review before RFQ conversion.");
 
-        var already = await _db.Rfqs
-            .FirstOrDefaultAsync(r => r.LeadId == leadId && r.BusinessUnitId == businessUnitId, ct);
-        if (already != null)
-        {
-            await CompleteConversionLifecycleAsync(lead, already.Id, request.ActingUser, ct);
-            return already.Id;
-        }
+        var blockers = FindConversionBlockers(lead);
+        if (blockers.Count > 0)
+            throw new InvalidOperationException($"Review these required inquiry fields before creating the RFQ: {string.Join("; ", blockers)}.");
 
         // Per-line choices. Reject ids that don't belong to this lead (never trust
         // caller-supplied identifiers across the tenant boundary).
@@ -270,24 +285,44 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         };
         rfq.InheritCommercialIdentity(lead);
 
-        await using var tx = await _db.Database.BeginTransactionAsync(ct);
         _db.Rfqs.Add(rfq);
         await _db.SaveChangesAsync(ct);
+        await CompleteConversionLifecycleInCurrentTransactionAsync(lead, rfq.Id, createdBy, ct);
         await tx.CommitAsync(ct);
-        await tx.DisposeAsync();
-        await CompleteConversionLifecycleAsync(lead, rfq.Id, createdBy, ct);
         return rfq.Id;
     }
 
-    private async Task CompleteConversionLifecycleAsync(Lead lead, long rfqId, string? createdBy, CancellationToken ct)
+    private async Task CompleteConversionLifecycleInCurrentTransactionAsync(Lead lead, long rfqId, string? createdBy, CancellationToken ct)
     {
         if (LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue) != "QUALIFIED") return;
         var actor = string.IsNullOrWhiteSpace(createdBy) ? "System" : createdBy.Trim();
-        await new LifecycleApplicationService(_db).TransitionLeadAsync(
+        await new LifecycleApplicationService(_db).TransitionLeadInCurrentTransactionAsync(
             lead.BusinessUnitId, lead.Id, new LifecycleActor(actor, "LeadConversion"),
             new LifecycleTransitionCommand("CONVERTED_TO_RFQ", lead.LifecycleVersion, null, null,
                 "Api", $"conversion-{lead.Id}", $"rfq-{rfqId}", $"lead-conversion:{lead.BusinessUnitId}:{lead.Id}"),
             false, ct);
+    }
+
+    private static List<string> FindConversionBlockers(Lead lead)
+    {
+        var blockers = new List<string>();
+        if (!lead.CustomerId.HasValue) blockers.Add("customer");
+        if (!lead.BidClosingDate.HasValue) blockers.Add("customer deadline");
+        if (lead.LeadItems.Count == 0) blockers.Add("at least one requested item");
+
+        foreach (var line in lead.LeadItems.OrderBy(item => item.Id))
+        {
+            var label = string.IsNullOrWhiteSpace(line.LineItemNo) ? $"line {line.Id}" : $"line {line.LineItemNo}";
+            if (string.IsNullOrWhiteSpace(line.ItemMaterialCode)
+                && string.IsNullOrWhiteSpace(line.ManufacturerPartNumber)
+                && string.IsNullOrWhiteSpace(line.ProductShortDescription))
+                blockers.Add($"{label} part number or description");
+            if (line.Quantity <= 0) blockers.Add($"{label} quantity");
+            if (string.IsNullOrWhiteSpace(line.UnitOfMeasure)) blockers.Add($"{label} unit");
+            if (string.IsNullOrWhiteSpace(line.Currency)) blockers.Add($"{label} currency");
+        }
+
+        return blockers;
     }
 
     // ====================================================== Resolution engine

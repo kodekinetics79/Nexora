@@ -26,6 +26,14 @@ public sealed class LeadIngestionController : ControllerBase
         return result is null ? NotFound() : Ok(result);
     }
 
+    [HttpGet("match-reviews")]
+    [RequireModulePermission("Leads", PermissionAction.View)]
+    public async Task<IActionResult> PossibleMatches(CancellationToken ct)
+    {
+        if (!TryTenant(out var bu)) return BadRequest(new { message = "A valid businessUnitId claim is required." });
+        return Ok(await _service.GetPossibleMatchesAsync(bu, ct));
+    }
+
     [HttpGet("leads/{leadId:long}/revisions")]
     [RequireModulePermission("Leads", PermissionAction.View)]
     public async Task<IActionResult> Revisions(long leadId, CancellationToken ct)

@@ -20,7 +20,7 @@ namespace ERP_RFQ_Automation.Repositories
             _context = context;
         }
 
-        public async Task<(IEnumerable<RfqResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null, long? assignedToId = null, string? createdBy = null, long? rfqStatusId = null, string? rfqStatusCode = null)
+        public async Task<(IEnumerable<RfqResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null, long? assignedToId = null, string? createdBy = null, long? rfqStatusId = null, string? rfqStatusCode = null, string? readiness = null)
         {
             IQueryable<Rfq> query = _context.Rfqs
                 .AsNoTracking()
@@ -41,6 +41,16 @@ namespace ERP_RFQ_Automation.Repositories
                 query = query.Where(r => r.Rfqstatus != null &&
                     (r.Rfqstatus.SetupCode != null && r.Rfqstatus.SetupCode.ToUpper() == code ||
                      r.Rfqstatus.SetupValue.ToUpper() == code));
+            }
+            if (string.Equals(readiness, "ready-for-quote", StringComparison.OrdinalIgnoreCase))
+            {
+                query = query.Where(r => r.CustomerId != null && r.LeadId != null
+                    && r.Rfqitems.Any()
+                    && !r.Rfqitems.Any(item => item.Quantity <= 0
+                        || item.UnitOfMeasure == null || item.UnitOfMeasure == ""
+                        || (item.ItemMaterialCode == null || item.ItemMaterialCode == "")
+                           && (item.ManufacturerPartNumber == null || item.ManufacturerPartNumber == "")
+                           && (item.ProductShortDescription == null || item.ProductShortDescription == "")));
             }
 
             if (assignedToId.HasValue || !string.IsNullOrWhiteSpace(createdBy))
@@ -95,6 +105,7 @@ namespace ERP_RFQ_Automation.Repositories
                 RfqtypeId = r.RfqtypeId,
                 DurationAgreement = r.DurationAgreement,
                 LeadId = r.LeadId,
+                ActiveLeadRevision = r.Lead?.CurrentRevisionNumber ?? 1,
                 CreatedBy = r.CreatedBy,
                 CreatedDate = r.CreatedDate,
                 ModifiedBy = r.ModifiedBy,
@@ -155,6 +166,7 @@ namespace ERP_RFQ_Automation.Repositories
                 RfqtypeId = rfq.RfqtypeId,
                 DurationAgreement = rfq.DurationAgreement,
                 LeadId = rfq.LeadId,
+                ActiveLeadRevision = rfq.Lead?.CurrentRevisionNumber ?? 1,
                 CreatedBy = rfq.CreatedBy,
                 CreatedDate = rfq.CreatedDate,
                 ModifiedBy = rfq.ModifiedBy,

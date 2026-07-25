@@ -1,5 +1,6 @@
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Services;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
@@ -182,5 +183,57 @@ public sealed class Release01ALeadIdentityPostgreSqlTests
         await using var verify = _database.ContextFor(tenant);
         Assert.Equal(1, await verify.Leads.CountAsync(x => x.Rfqno == "RACE-RFQ"));
         Assert.Equal(2, await verify.Set<LeadIngestionOccurrence>().CountAsync(x => x.BatchId == batch));
+    }
+
+    [Fact]
+    public async Task Concurrent_quote_impact_resolution_appends_one_event_per_impact_and_is_idempotent()
+    {
+        const long tenant = 99141;
+        long quoteId;
+        await using (var seed = _database.ContextFor(tenant))
+        {
+            Seed.BusinessUnit(seed, tenant); Seed.EmailConfig(seed, 99141, tenant); Seed.EmailIngest(seed, 99141, 99141, "NeedsReview");
+            await seed.SaveChangesAsync();
+            var lead = new Lead
+            {
+                Rfqno = "IMPACT-RFQ", Clientemail = "impact@customer.test", RecDate = DateTime.UtcNow,
+                LeadSource = "Test", CreatedBy = "tests", CreatedDate = DateTime.UtcNow,
+                BusinessUnitId = tenant, EmailIngestsId = 99141
+            };
+            lead.LeadItems.Add(new LeadItem { LineItemNo = "1", ManufacturerPartNumber = "IMPACT-PART", Quantity = 2, UnitOfMeasure = "EA" });
+            var reconciliation = await new LeadIdentityApplicationService(seed).ReconcileAsync(lead,
+                new LeadIntakeDescriptor(Guid.NewGuid(), "API", "impact-seed", null, null, "test", lead.Clientemail, null,
+                    "impact.json", "application/json", 100, new string('d', 64), null, null, null, DateTimeOffset.UtcNow,
+                    LeadProcessingPath.Deterministic, false, 0, "Test", "tests", "impact-seed"));
+            var revisionId = await seed.Set<LeadRevision>().Where(x => x.LeadId == reconciliation.LeadId).Select(x => x.Id).SingleAsync();
+            var quote = new Quote
+            {
+                QuoteNo = "QT-IMPACT-99141", BusinessUnitId = tenant,
+                CreatedBy = "tests", CreatedDate = DateTime.UtcNow
+            };
+            seed.Quotes.Add(quote);
+            await seed.SaveChangesAsync();
+            quoteId = quote.Id;
+            seed.AddRange(
+                new LeadRevisionImpact { BusinessUnitId = tenant, LeadId = reconciliation.LeadId, LeadRevisionId = revisionId, AggregateType = "QUOTE", AggregateId = quoteId, ImpactType = "STALE_A", Status = "OPEN", DetailsJson = "{}" },
+                new LeadRevisionImpact { BusinessUnitId = tenant, LeadId = reconciliation.LeadId, LeadRevisionId = revisionId, AggregateType = "QUOTE", AggregateId = quoteId, ImpactType = "STALE_B", Status = "OPEN", DetailsJson = "{}" });
+            await seed.SaveChangesAsync();
+        }
+
+        async Task Resolve(string key)
+        {
+            await using var context = _database.ContextFor(tenant);
+            await new QuoteService(context, null!, null!).ResolveRevisionImpactAsync(quoteId, tenant, "reviewer", key);
+        }
+
+        await Task.WhenAll(Resolve("impact-resolution-a"), Resolve("impact-resolution-b"));
+        await Resolve("impact-resolution-a");
+
+        await using var verify = _database.ContextFor(tenant);
+        var events = await verify.Set<LeadIdentityAuditEvent>()
+            .Where(x => x.EventType == "REVISION_IMPACT_RESOLVED" && x.CorrelationId.StartsWith("quote-impact:"))
+            .ToListAsync();
+        Assert.Equal(2, events.Count);
+        Assert.Equal(2, events.Select(x => x.CorrelationId).Distinct().Count());
     }
 }

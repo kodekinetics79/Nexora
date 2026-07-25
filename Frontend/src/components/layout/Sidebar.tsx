@@ -60,6 +60,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
     'dashboard': location.pathname.startsWith('/dashboard'),
     'rfq_mgmt': location.pathname.includes('/rfqs'),
+    'quote_mgmt': location.pathname.includes('/quotes'),
     'setup': location.pathname.includes('/setup'),
     'security': location.pathname.includes('/security'),
     'inventory': location.pathname.includes('/inventory'),
@@ -115,12 +116,13 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
         icon: <LeadIcon />,
         moduleName: 'Leads',
         children: [
-          { key: 'leads-all', label: t('leads'), path: '/procurement/leads/all', moduleName: 'Leads', activePrefixes: ['/procurement/leads/view', '/leads/view'] },
-          { key: 'leads-review', label: t('review_queue', 'Review Queue'), path: '/procurement/extraction/review', moduleName: 'Leads', activePrefixes: ['/procurement/extraction/review'] },
-          { key: 'leads-outstanding', label: t('outstanding_leads'), path: '/procurement/leads/outstanding', moduleName: 'Leads' },
-          { key: 'leads-assigned', label: t('assigned_leads'), path: '/procurement/leads/assigned', moduleName: 'Leads' },
-          { key: 'leads-manual', label: t('manual_upload'), path: '/procurement/leads/manual-upload', moduleName: 'Leads' },
-          { key: 'commercial-workspace', label: 'Commercial Workspace', path: '/commercial-cases', moduleName: 'Leads', activePrefixes: ['/commercial-cases/'] },
+          { key: 'lead-intelligence', label: 'Lead Intelligence', path: '/procurement/leads/intelligence', moduleName: 'Leads' },
+          { key: 'leads-all', label: 'All Inquiries', path: '/procurement/leads/all', moduleName: 'Leads', activePrefixes: ['/procurement/leads/view', '/leads/view'] },
+          { key: 'leads-review', label: 'Needs Review', path: '/procurement/extraction/review', moduleName: 'Leads', activePrefixes: ['/procurement/extraction/review'] },
+          { key: 'leads-bulk', label: 'Bulk Uploads', path: '/procurement/leads/manual-upload', moduleName: 'Leads', activePrefixes: ['/procurement/leads/ingestion'] },
+          { key: 'leads-duplicates', label: 'Duplicates', path: '/procurement/leads/all?view=duplicates', moduleName: 'Leads' },
+          { key: 'leads-revisions', label: 'Revisions', path: '/procurement/leads/all?view=revisions', moduleName: 'Leads' },
+          { key: 'leads-matches', label: 'Possible Matches', path: '/procurement/leads/possible-matches', moduleName: 'Leads' },
         ]
       },
       {
@@ -130,11 +132,22 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
         moduleName: 'RFQ Management',
         children: [
           { key: 'rfqs-all', label: t('all_rfqs'), path: '/procurement/rfqs/all', moduleName: 'RFQ Management', activePrefixes: ['/procurement/rfqs/process', '/procurement/rfqs/view', '/rfqs/view', '/rfqs/process'] },
-          { key: 'rfqs-draft', label: t('draft_rfqs'), path: '/procurement/rfqs/draft', moduleName: 'RFQ Management' },
-          { key: 'rfqs-outstanding', label: t('outstanding_rfqs'), path: '/procurement/rfqs/outstanding', moduleName: 'RFQ Management' },
+          { key: 'rfqs-draft', label: 'Draft / Needs Review', path: '/procurement/rfqs/draft', moduleName: 'RFQ Management' },
+          { key: 'rfqs-ready', label: 'Ready for Quote', path: '/procurement/rfqs/all?state=ready-for-quote', moduleName: 'RFQ Management' },
         ]
       },
-      { key: 'quotes', label: t('quotations'), icon: <QuotationIcon />, path: '/sales/quotes', moduleName: 'Quotations', activePrefixes: ['/sales/quotes'] },
+      {
+        key: 'quote_mgmt',
+        label: 'Quote Management',
+        icon: <QuotationIcon />,
+        moduleName: 'Quotations',
+        children: [
+          { key: 'quotes-draft', label: 'Draft Quotes', path: '/sales/quotes?state=draft', moduleName: 'Quotations', activePrefixes: ['/sales/quotes/view', '/sales/quotes/edit'] },
+          { key: 'quotes-sent', label: 'Sent Quotes', path: '/sales/quotes?state=sent', moduleName: 'Quotations' },
+          { key: 'quotes-follow-up', label: 'Follow-up Due', path: '/sales/quotes?state=follow-up', moduleName: 'Quotations' },
+          { key: 'quotes-outcomes', label: 'Won / Lost', path: '/sales/quotes?state=outcomes', moduleName: 'Quotations' },
+        ],
+      },
       // Service BOQs live next to Quotations — a BOQ is priced quote material for
       // service work, so it shares the Quotations module permission.
       { key: 'service-boqs', label: t('service_boqs', 'Service BOQs'), icon: <BoqIcon />, path: '/services/boq', moduleName: 'Quotations', activePrefixes: ['/services/boq'] },

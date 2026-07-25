@@ -48,14 +48,16 @@ namespace ERP_RFQ_Automation.Repositories
             _metrics = metrics;
         }
 
-        public async Task<(IEnumerable<LeadResponseDTO>, int TotalCount)> GetLeadListAsync(int pageNumber, int pageSize, long? id, string? rfqno, string? buyersName, string? leadSource, long businessUnitId, DateTime? startDate = null, DateTime? endDate = null, string? emailSource = null, string? clientemail = null)
+        public async Task<(IEnumerable<LeadResponseDTO>, int TotalCount)> GetLeadListAsync(int pageNumber, int pageSize, long? id, string? rfqno, string? buyersName, string? leadSource, long businessUnitId, DateTime? startDate = null, DateTime? endDate = null, string? emailSource = null, string? clientemail = null, string? view = null)
         {
             var query = _context.Leads
                 .AsNoTracking()
                 .Include(l => l.BusinessUnit)
                 .Include(l => l.EmailIngests)
-                .Where(l => l.BusinessUnitId == businessUnitId)
-                .Where(l => l.LeadStatusId == null);  // Added filter to show only leads with LeadStatusId = null
+                .Where(l => l.BusinessUnitId == businessUnitId);
+
+            if (!string.Equals(view, "revisions", StringComparison.OrdinalIgnoreCase))
+                query = query.Where(l => l.LeadStatusId == null);
 
             // Apply filters
             if (id.HasValue)
@@ -74,6 +76,14 @@ namespace ERP_RFQ_Automation.Repositories
                 query = query.Where(l => l.RecDate >= startDate.Value);
             if (endDate.HasValue)
                 query = query.Where(l => l.RecDate <= endDate.Value);
+            if (string.Equals(view, "duplicates", StringComparison.OrdinalIgnoreCase))
+                query = query.Where(l => l.DuplicateStatus == "suspected" || l.DuplicateStatus == "confirmed");
+            else if (string.Equals(view, "revisions", StringComparison.OrdinalIgnoreCase))
+                query = query.Where(l => l.CurrentRevisionNumber > 1);
+            else if (string.Equals(view, "ready-for-rfq", StringComparison.OrdinalIgnoreCase))
+                query = query.Where(l => l.CommercialFactsVerified && !l.RequiresCommercialReview
+                    && l.CustomerId != null && l.BidClosingDate != null && l.LeadItems.Any()
+                    && !l.Rfqs.Any());
 
             // Get total count before pagination
             var totalCount = await query.CountAsync();
@@ -671,6 +681,8 @@ namespace ERP_RFQ_Automation.Repositories
                 ReviewVersion = lead.ReviewVersion,
                 RequiresCommercialReview = lead.RequiresCommercialReview,
                 CommercialFactsVerified = lead.CommercialFactsVerified,
+                CurrentRevisionNumber = lead.CurrentRevisionNumber,
+                IngestedAtUtc = lead.IngestedAtUtc,
 
                 // WP-BOQ: service/mixed badge
                 InquiryType = lead.InquiryType,

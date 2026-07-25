@@ -818,7 +818,9 @@ public sealed class LeadPersister : ILeadPersister
         if (existing)
             return;
 
-        source.StartExtraction();
+        var ownsSourceLifecycle = source.ProcessingStatus == DocumentProcessingStatus.Received;
+        if (ownsSourceLifecycle)
+            source.StartExtraction();
         var run = ExtractionRun.Create(job.BusinessUnitId, source.Id, Guid.NewGuid(), job.Id,
             job.Attempts, "llm-unstructured/v1", "lead-extraction/v1");
         run.RecordCostStatus(
@@ -830,8 +832,11 @@ public sealed class LeadPersister : ILeadPersister
         _context.Add(run);
         await _context.SaveChangesAsync(ct);
 
-        source.StartNormalization();
-        source.RequireReview(0);
+        if (ownsSourceLifecycle)
+        {
+            source.StartNormalization();
+            source.RequireReview(0);
+        }
         if (source.Corpus.Status == CorpusStatus.Processing)
             source.Corpus.RequireReview();
         run.Complete(0, 0, 0, 0, 0, 0);

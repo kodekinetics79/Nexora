@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Chip, IconButton,
@@ -79,6 +79,8 @@ const QuoteStatusCell: React.FC<{ quote: QuoteDTO }> = ({ quote }) => {
 const QuotesPage: React.FC = () => {
   const { t: _t } = useTranslation();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const state = searchParams.get('state') || undefined;
   const { userData, hasPermission } = useAuth();
   const queryClient = useQueryClient();
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
@@ -91,11 +93,12 @@ const QuotesPage: React.FC = () => {
   const [outcomeTarget, setOutcomeTarget] = useState<{ id: number; quoteNo: string } | null>(null);
 
   const { data, isLoading, isError, refetch } = useQuery({
-    queryKey: ['quotes', paginationModel, search],
+    queryKey: ['quotes', paginationModel, search, state],
     queryFn: () => quoteService.getAll({
       pageNumber: paginationModel.page + 1,
       pageSize: paginationModel.pageSize,
       search: search || undefined,
+      state,
       businessUnitId: userData?.businessUnitId || undefined,
     }),
   });
@@ -179,9 +182,11 @@ const QuotesPage: React.FC = () => {
       headerName: 'Total Amount',
       width: 150,
       renderCell: (p) => (
-        <Typography sx={{ fontWeight: 800, color: 'text.primary', fontSize: '0.9rem' }}>
-          {p.row.currencyCode || '$'} {p.value?.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-        </Typography>
+        p.row.statusCode?.toUpperCase() === 'DRAFT' && !p.row.currencyId && Number(p.value || 0) === 0
+          ? <Chip size="small" label="Pricing Pending" color="warning" variant="outlined" />
+          : <Typography sx={{ fontWeight: 800, color: 'text.primary', fontSize: '0.9rem' }}>
+              {p.row.currencyCode || ''} {p.value?.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+            </Typography>
       )
     },
     {
@@ -207,11 +212,9 @@ const QuotesPage: React.FC = () => {
       sortable: false,
       renderCell: (p) => (
         <Stack direction="row" spacing={1} sx={{ alignItems: 'center', height: '100%' }}>
-          <Tooltip title="View">
-            <IconButton size="small" onClick={() => navigate(`/sales/quotes/view/${p.row.id}`)}>
-              <ViewIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
+          <Button size="small" startIcon={<ViewIcon />} onClick={() => navigate(`/sales/quotes/view/${p.row.id}`)}>
+            Open
+          </Button>
           {hasPermission('Quotations', 'edit') && (p.row.statusCode || p.row.statusValue)?.toUpperCase() === 'SENT' && (
             <Tooltip title="Record outcome (won / lost / expired)">
               <IconButton size="small" color="warning" onClick={() => setOutcomeTarget({ id: p.row.id, quoteNo: p.row.quoteNo })}>

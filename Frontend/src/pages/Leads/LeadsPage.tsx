@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Chip, IconButton,
@@ -213,6 +213,8 @@ const ConfidenceCell: React.FC<{ score: number | null | undefined }> = ({ score 
 const LeadsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const view = searchParams.get('view') || searchParams.get('state') || undefined;
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
   const { hasPermission } = useAuth();
@@ -263,13 +265,14 @@ const LeadsPage: React.FC = () => {
   });
 
   const { data, isLoading, isError, refetch } = useQuery({
-    queryKey: ['leads', paginationModel, search, leadSource],
+    queryKey: ['leads', paginationModel, search, leadSource, view],
     queryFn: () => leadService.getAll({
       pageNumber: paginationModel.page + 1,
       pageSize: paginationModel.pageSize,
       rfqno: search || undefined,
       search: search || undefined,
       leadSource: leadSource === 'all' ? undefined : leadSource,
+      view,
     }),
   });
 

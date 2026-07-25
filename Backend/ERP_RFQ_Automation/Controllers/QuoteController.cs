@@ -58,7 +58,8 @@ namespace ERP_RFQ_Automation.Controllers
             [FromQuery] long? businessUnitId = null,
             [FromQuery] int pageNumber = 1,
             [FromQuery] int pageSize = 10,
-            [FromQuery] string? search = null)
+            [FromQuery] string? search = null,
+            [FromQuery] string? state = null)
         {
             try
             {
@@ -75,7 +76,7 @@ namespace ERP_RFQ_Automation.Controllers
                 if (pageSize < 1 || pageSize > 1000)
                     return BadRequest("Page size must be between 1 and 1000.");
 
-                var (items, totalItems) = await _repository.GetAllAsync(targetBUId, pageNumber, pageSize, search);
+                var (items, totalItems) = await _repository.GetAllAsync(targetBUId, pageNumber, pageSize, search, state);
                 Response.Headers.Append("X-Total-Count", totalItems.ToString());
                 return Ok(new { items, totalItems });
             }
@@ -235,6 +236,28 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 return NotFound();
             }
+            catch (InvalidOperationException ex)
+            {
+                return Conflict(new { message = ex.Message });
+            }
+        }
+
+        [HttpPost("{id}/revision-impact/resolve")]
+        [RequireModulePermission("Quotations", PermissionAction.Edit)]
+        public async Task<IActionResult> ResolveRevisionImpact(long id,
+            [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey, CancellationToken ct)
+        {
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId <= 0) return BadRequest(new { message = "A valid businessUnitId claim is required." });
+            try
+            {
+                var actor = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+                    ?? User.Identity?.Name ?? "authenticated-user";
+                await _quoteService.ResolveRevisionImpactAsync(id, businessUnitId, actor,
+                    string.IsNullOrWhiteSpace(idempotencyKey) ? Guid.NewGuid().ToString("N") : idempotencyKey, ct);
+                return NoContent();
+            }
+            catch (KeyNotFoundException) { return NotFound(); }
         }
 
         [HttpPost("{id}/email")]

@@ -18,7 +18,7 @@ namespace ERP_RFQ_Automation.Repositories
             _context = context;
         }
 
-        public async Task<(IEnumerable<QuoteResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber, int pageSize, string? search = null)
+        public async Task<(IEnumerable<QuoteResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber, int pageSize, string? search = null, string? state = null)
         {
             IQueryable<Quote> query = _context.Quotes
                 .AsNoTracking()
@@ -30,6 +30,21 @@ namespace ERP_RFQ_Automation.Repositories
                 .Include(q => q.Currency)
                 .Include(q => q.BusinessUnit)
                 .Include(q => q.DiscountType);
+
+            var normalizedState = state?.Trim().ToLowerInvariant();
+            if (normalizedState == "draft")
+                query = query.Where(q => q.Status.SetupCode == "DRAFT" || q.Status.SetupValue.ToUpper() == "DRAFT");
+            else if (normalizedState == "sent")
+                query = query.Where(q => q.Status.SetupCode == "SENT" || q.Status.SetupValue.ToUpper() == "SENT");
+            else if (normalizedState == "follow-up")
+            {
+                var followUpStaleDays = await GetStaleQuoteDaysAsync(businessUnitId);
+                var cutoff = DateTime.UtcNow.AddDays(-followUpStaleDays);
+                query = query.Where(q => (q.Status.SetupCode == "SENT" || q.Status.SetupValue.ToUpper() == "SENT")
+                    && q.SentOn != null && q.SentOn <= cutoff && q.RespondedOn == null && q.OutcomeOn == null);
+            }
+            else if (normalizedState == "outcomes")
+                query = query.Where(q => q.Status.SetupCode == "ACCEPTED" || q.Status.SetupCode == "REJECTED" || q.Status.SetupCode == "EXPIRED");
 
             if (!string.IsNullOrWhiteSpace(search))
             {
@@ -107,7 +122,19 @@ namespace ERP_RFQ_Automation.Repositories
             var reasonNames = await LoadReasonNamesAsync(new[] { quote });
             var staleDays = await GetStaleQuoteDaysAsync(businessUnitId);
 
-            return MapToDTO(quote, -1, reasonNames, staleDays); // -1 indicates detail view, load all items
+            var dto = MapToDTO(quote, -1, reasonNames, staleDays); // -1 indicates detail view, load all items
+            dto.RevisionImpact = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpact>()
+                .AsNoTracking()
+                .Where(impact => impact.BusinessUnitId == businessUnitId && impact.AggregateType == "QUOTE" && impact.AggregateId == id)
+                .Where(impact => impact.Status == "OPEN" && impact.ResolvedAtUtc == null)
+                .Where(impact => !_context.Set<ERP_RFQ_Automation.LeadIdentity.LeadIdentityAuditEvent>()
+                    .Any(audit => audit.BusinessUnitId == businessUnitId
+                        && audit.EventType == "REVISION_IMPACT_RESOLVED"
+                        && audit.CorrelationId == "quote-impact:" + impact.Id))
+                .OrderByDescending(impact => impact.Id)
+                .Select(impact => impact.ImpactType)
+                .FirstOrDefaultAsync();
+            return dto;
         }
 
         // ... methods AddAsync, UpdateAsync, DeleteAsync skipped (unchanged) ...
@@ -120,6 +147,9 @@ namespace ERP_RFQ_Automation.Repositories
                 QuoteNo = q.QuoteNo,
                 RfqId = q.Rfqid,
                 RfqNo = q.Rfq?.Rfqno,
+                LeadId = q.Rfq?.LeadId,
+                SourceLeadRevision = q.SourceLeadRevision,
+                SourceRfqRevision = q.SourceRfqRevision,
                 CommercialCaseId = q.CommercialCaseId ?? q.Rfq?.CommercialCaseId ?? q.Rfq?.Lead?.CommercialCaseId,
                 NexoraSerial = q.NexoraSerial ?? q.Rfq?.NexoraSerial ?? q.Rfq?.Lead?.CommercialCaseReference,
                 ContactId = q.ContactId ?? q.Rfq?.ContactId,

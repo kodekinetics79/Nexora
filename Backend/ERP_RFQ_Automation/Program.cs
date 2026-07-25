@@ -264,6 +264,9 @@ var corsOrigins = configuredCorsOrigins
         "http://localhost:5173",
         "http://localhost:4173",
         "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:4173",
+        "http://127.0.0.1:3000",
         "https://nexora1-ai.vercel.app"
     ])
     .Where(origin => !string.IsNullOrWhiteSpace(origin))

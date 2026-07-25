@@ -190,7 +190,7 @@ const LeadConvertPage: React.FC = () => {
           {preview.header.rfqno || `Lead #${preview.leadId}`}
         </Link>
         <Typography variant="caption" sx={{ color: 'primary.main', fontWeight: 900, textTransform: 'uppercase' }}>
-          Convert to RFQ
+          Review & Create RFQ
         </Typography>
       </Breadcrumbs>
 
@@ -198,10 +198,10 @@ const LeadConvertPage: React.FC = () => {
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 3, gap: 2, flexWrap: 'wrap' }}>
         <Box>
           <Typography variant="h5" sx={{ fontWeight: 950, letterSpacing: '-0.02em', mb: 0.5 }}>
-            Here's how I'd turn this lead into an RFQ
+            Review inquiry and create RFQ
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>
-            Check the matches below, fix anything that looks off, then create the RFQ.
+            Confirm the requested lines and required customer data, then create one traceable RFQ.
           </Typography>
         </Box>
         <ConfidenceChip score={preview.overallConfidence} />

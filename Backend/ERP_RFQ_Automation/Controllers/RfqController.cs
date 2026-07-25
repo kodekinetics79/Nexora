@@ -43,7 +43,8 @@ namespace ERP_RFQ_Automation.Controllers
             [FromQuery] long? assignedToId = null,
             [FromQuery] string? createdBy = null,
             [FromQuery] long? rfqStatusId = null,
-            [FromQuery] string? rfqStatusCode = null)
+            [FromQuery] string? rfqStatusCode = null,
+            [FromQuery] string? readiness = null)
         {
             try
             {
@@ -60,7 +61,7 @@ namespace ERP_RFQ_Automation.Controllers
                 if (pageSize < 1 || pageSize > 1000)
                     return BadRequest("Page size must be between 1 and 1000.");
 
-                var (items, totalItems) = await _repository.GetAllAsync(targetBUId, pageNumber, pageSize, search, isActive, assignedToId, createdBy, rfqStatusId, rfqStatusCode);
+                var (items, totalItems) = await _repository.GetAllAsync(targetBUId, pageNumber, pageSize, search, isActive, assignedToId, createdBy, rfqStatusId, rfqStatusCode, readiness);
                 
                 return Ok(new PaginatedRfqResponseDTO
                 {
@@ -92,9 +93,38 @@ namespace ERP_RFQ_Automation.Controllers
                 var rfq = await _repository.GetByIdAsync(id, targetBUId);
                 return Ok(rfq);
             }
+            catch (KeyNotFoundException)
+            {
+                return NotFound();
+            }
             catch (Exception ex)
             {
                 return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving rfq: {ex.Message}");
+            }
+        }
+
+        [HttpPost("{id}/prepare-quote-draft")]
+        [RequireModulePermission("RFQ Management", PermissionAction.View)]
+        [RequireModulePermission("Quotations", PermissionAction.Create)]
+        public async Task<ActionResult> PrepareQuoteDraft(long id, CancellationToken ct)
+        {
+            try
+            {
+                var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+                if (businessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+                var actor = User.FindFirst(ClaimTypes.Email)?.Value ?? User.Identity?.Name;
+                if (string.IsNullOrWhiteSpace(actor)) return Unauthorized();
+
+                var quote = await _quoteService.PrepareDraftFromRfqAsync(id, businessUnitId, actor, ct);
+                return Ok(quote);
+            }
+            catch (KeyNotFoundException)
+            {
+                return NotFound();
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Conflict(new { message = ex.Message });
             }
         }
 

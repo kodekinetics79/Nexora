@@ -39,6 +39,8 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         public long ReviewVersion { get; set; }
         public bool RequiresCommercialReview { get; set; }
         public bool CommercialFactsVerified { get; set; }
+        public int CurrentRevisionNumber { get; set; }
+        public DateTimeOffset? IngestedAtUtc { get; set; }
 
         // WP-BOQ foundation: "product" | "service" | "mixed" | null (unclassified).
         public string? InquiryType { get; set; }

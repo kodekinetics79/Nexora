@@ -181,14 +181,14 @@ const LeadDetailPage: React.FC = () => {
               Workspace
             </Button>
           )}
-          {hasPermission('Leads', 'edit') && <Button
+          {hasPermission('Leads', 'create') && hasPermission('RFQ Management', 'create') && <Button
             variant="contained"
             startIcon={<SparkleIcon />}
             size="small"
             onClick={() => navigate(`/procurement/leads/${lead.id}/convert`)}
             sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
           >
-            Prepare RFQ
+            Review & Create RFQ
           </Button>}
         {hasPermission('Leads', 'edit') && <LifecycleActions aggregate="leads" id={lead.id} onChanged={() => queryClient.invalidateQueries({ queryKey: ['lead-detail', Number(id)] })} />}
         </Stack>
@@ -252,13 +252,17 @@ const LeadDetailPage: React.FC = () => {
           <Paper sx={{ p: 3, borderRadius: 3, border: '1px solid', borderColor: 'divider', height: '100%' }}>
             <SectionTitle title={t('general_information') || 'General Information'} />
             <Grid container spacing={2} component="div">
-              <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="RFQ #" value={lead.rfqno} /></Grid>
+              <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Customer RFQ Reference" value={lead.rfqno} /></Grid>
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Buyer Name" value={lead.buyersName} /></Grid>
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Client Email" value={lead.clientemail} /></Grid>
 
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Received" value={formatDate(lead.recDate)} /></Grid>
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Bid Close" value={formatDate(lead.bidClosingDate)} /></Grid>
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Source" value={lead.leadSource} /></Grid>
+
+              <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Nexora Ingestion Date" value={formatDate(lead.ingestedAtUtc || lead.createdDate || null)} /></Grid>
+              <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Current Revision" value={`Revision ${lead.currentRevisionNumber || 1}`} /></Grid>
+              <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Opportunity Owner" value={lead.assignedToFullName || 'Unassigned'} /></Grid>
 
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="RFQ Type" value={lead.rfqtype ?? 'N/A'} /></Grid>
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Opportunity No" value={lead.opportunityNo ?? 'N/A'} /></Grid>

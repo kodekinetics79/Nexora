@@ -22,6 +22,7 @@ export interface RfqResponseDTO {
     rfqtypeId?: number;
     durationAgreement?: string;
     leadId?: number;
+    activeLeadRevision: number;
     createdBy: string;
     createdDate: string;
     modifiedBy?: string;
@@ -35,6 +36,7 @@ export interface RfqResponseDTO {
     customerEmail?: string;
     leadEmail?: string;
     rfqitems: RfqitemResponseDTO[];
+    readiness: string;
 }
 
 export interface RfqitemResponseDTO {
@@ -99,6 +101,7 @@ export interface RfqFilterParams {
     createdBy?: string;
     rfqStatusId?: number;
     rfqStatusCode?: string;
+    readiness?: string;
 }
 
 const rfqService = {
@@ -122,7 +125,11 @@ const rfqService = {
     create: async (data: any) => {
         const response = await axiosInstance.post("/api/Rfq", data);
         return response.data;
-    }
+    },
+    prepareQuoteDraft: async (id: number) => {
+        const response = await axiosInstance.post(`/api/Rfq/${id}/prepare-quote-draft`);
+        return response.data;
+    },
 };
 
 export default rfqService;

@@ -86,6 +86,10 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
           flexGrow: 1, 
           p: 1.5, 
           width: { sm: `calc(100% - ${currentWidth}px)` },
+          minWidth: 0,
+          maxWidth: '100%',
+          boxSizing: 'border-box',
+          overflowX: 'hidden',
           minHeight: '100vh',
           backgroundColor: 'background.default',
           transition: (theme) => theme.transitions.create(['width', 'margin'], {

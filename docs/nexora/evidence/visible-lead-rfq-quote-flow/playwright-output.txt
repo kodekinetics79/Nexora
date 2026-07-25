@@ -1,0 +1,24 @@
+
+Running 16 tests using 1 worker
+
+(node:91350) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 e2e/visible-lead-rfq-quote-flow.spec.ts:41:3 › Visible Lead Intelligence to Quote Draft journey › 01 Dashboard exposes Lead Intelligence and RFQ entry points (2.9s)
+  ✓   2 e2e/visible-lead-rfq-quote-flow.spec.ts:53:3 › Visible Lead Intelligence to Quote Draft journey › 02 Bulk upload navigates to persisted reconciliation summary (6.7s)
+  ✓   3 e2e/visible-lead-rfq-quote-flow.spec.ts:64:3 › Visible Lead Intelligence to Quote Draft journey › 03 New canonical Lead visibly creates one RFQ (5.3s)
+  ✓   4 e2e/visible-lead-rfq-quote-flow.spec.ts:82:3 › Visible Lead Intelligence to Quote Draft journey › 04 Created RFQ appears once in All RFQs (3.9s)
+  ✓   5 e2e/visible-lead-rfq-quote-flow.spec.ts:90:3 › Visible Lead Intelligence to Quote Draft journey › 05 RFQ links to canonical Lead with the same Nexora Serial (3.8s)
+  ✓   6 e2e/visible-lead-rfq-quote-flow.spec.ts:99:3 › Visible Lead Intelligence to Quote Draft journey › 06 Exact duplicate does not create another RFQ or Quote (6.4s)
+  ✓   7 e2e/visible-lead-rfq-quote-flow.spec.ts:115:3 › Visible Lead Intelligence to Quote Draft journey › 07 Active Lead revision is visible with RFQ impact (9.9s)
+  ✓   8 e2e/visible-lead-rfq-quote-flow.spec.ts:130:3 › Visible Lead Intelligence to Quote Draft journey › 08 Revised inquiry marks an existing Quote Draft stale (10.8s)
+  ✓   9 e2e/visible-lead-rfq-quote-flow.spec.ts:144:3 › Visible Lead Intelligence to Quote Draft journey › 09 Possible Match decision offers Treat as Revision (8.1s)
+  ✓  10 e2e/visible-lead-rfq-quote-flow.spec.ts:163:3 › Visible Lead Intelligence to Quote Draft journey › 10 Possible Match Create New Lead persists a canonical Lead with RFQ review (4.9s)
+  ✓  11 e2e/visible-lead-rfq-quote-flow.spec.ts:178:3 › Visible Lead Intelligence to Quote Draft journey › 11 RFQ Prepare Quote Draft is idempotent (4.0s)
+  ✓  12 e2e/visible-lead-rfq-quote-flow.spec.ts:186:3 › Visible Lead Intelligence to Quote Draft journey › 12 Quote Draft preserves full commercial lineage (4.2s)
+  ✓  13 e2e/visible-lead-rfq-quote-flow.spec.ts:202:3 › Visible Lead Intelligence to Quote Draft journey › 13 Restricted role cannot prepare a Quote Draft (2.0s)
+  ✓  14 e2e/visible-lead-rfq-quote-flow.spec.ts:210:3 › Visible Lead Intelligence to Quote Draft journey › 14 Cross-tenant RFQ and Quote requests are non-disclosing (2.1s)
+  ✓  15 e2e/visible-lead-rfq-quote-flow.spec.ts:217:3 › Visible Lead Intelligence to Quote Draft journey › 15 Dashboard retains reconciled drill-downs after the journey (2.2s)
+  ✓  16 e2e/visible-lead-rfq-quote-flow.spec.ts:224:3 › Visible Lead Intelligence to Quote Draft journey › 16 Mobile navigation and key pages remain usable (3.8s)
+
+  16 passed (1.4m)
+PLAYWRIGHT_EXIT=0

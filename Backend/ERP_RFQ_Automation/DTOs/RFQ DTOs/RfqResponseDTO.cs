@@ -22,6 +22,7 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public long? RfqtypeId { get; set; }
         public string? DurationAgreement { get; set; }
         public long? LeadId { get; set; }
+        public int ActiveLeadRevision { get; set; }
         public string CreatedBy { get; set; } = null!;
         public DateTime CreatedDate { get; set; }
         public string? ModifiedBy { get; set; }
@@ -38,6 +39,7 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public string? CustomerEmail { get; set; }
         public string? LeadEmail { get; set; }
         public int ItemCount { get; set; } // Optimized: Item count for list views
+        public string Readiness => CustomerId.HasValue && LeadId.HasValue && ItemCount > 0 ? "Ready for Quote" : "Review Required";
         public List<RfqitemResponseDTO> Rfqitems { get; set; } = new List<RfqitemResponseDTO>();
     }
 

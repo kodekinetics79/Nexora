@@ -146,6 +146,7 @@ const KpiCard = ({ kpi }: { kpi: Release01KpiDTO }) => {
 };
 
 export default function DashboardPage() {
+  const navigate = useNavigate();
   const initialTo = useMemo(() => dayjs().startOf('day').format('YYYY-MM-DD'), []);
   const initialFrom = useMemo(() => dayjs(initialTo).subtract(30, 'day').format('YYYY-MM-DD'), [initialTo]);
   const [from, setFrom] = useState(initialFrom);
@@ -226,9 +227,27 @@ export default function DashboardPage() {
       {dashboard.isLoading ? (
         <Box sx={{ minHeight: 320, display: 'grid', placeItems: 'center' }}><CircularProgress /></Box>
       ) : data?.kpis.length ? (
-        <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', lg: 'repeat(4, 1fr)' }, gap: 2 }}>
-          {data.kpis.map((kpi) => <KpiCard key={kpi.key} kpi={kpi} />)}
-        </Box>
+        <>
+          <Typography variant="h6" sx={{ fontWeight: 900, mb: 1.5 }}>Commercial Attention</Typography>
+          <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', lg: 'repeat(3, 1fr)' }, gap: 1.5, mb: 3 }}>
+            {[
+              ['New inquiries', '/procurement/leads/all'],
+              ['Inquiries needing review', '/procurement/extraction/review'],
+              ['Leads ready for RFQ', '/procurement/leads/all?state=ready-for-rfq'],
+              ['RFQs requiring review', '/procurement/rfqs/draft'],
+              ['RFQs ready for Quote', '/procurement/rfqs/all?state=ready-for-quote'],
+              ['Quote Drafts awaiting action', '/sales/quotes?state=draft'],
+            ].map(([label, route]) => (
+              <Button key={label} variant="outlined" endIcon={<DrillDownIcon />} onClick={() => navigate(route)} sx={{ minHeight: 56, justifyContent: 'space-between', textAlign: 'left' }}>
+                {label}
+              </Button>
+            ))}
+          </Box>
+          <Typography variant="h6" sx={{ fontWeight: 900, mb: 1.5 }}>Verified Performance</Typography>
+          <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', lg: 'repeat(4, 1fr)' }, gap: 2 }}>
+            {data.kpis.map((kpi) => <KpiCard key={kpi.key} kpi={kpi} />)}
+          </Box>
+        </>
       ) : !dashboard.isError ? (
         <Alert severity="info">No KPI definitions are available for this period and role scope.</Alert>
       ) : null}

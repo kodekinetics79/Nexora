@@ -10,6 +10,10 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public string QuoteNo { get; set; } = null!;
         public long? RfqId { get; set; }
         public string? RfqNo { get; set; }
+        public long? LeadId { get; set; }
+        public int SourceLeadRevision { get; set; }
+        public int SourceRfqRevision { get; set; }
+        public string? RevisionImpact { get; set; }
         public long? CommercialCaseId { get; set; }
         public string? NexoraSerial { get; set; }
         public long? ContactId { get; set; }

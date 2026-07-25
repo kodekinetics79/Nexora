@@ -43,6 +43,13 @@ public sealed class StructuredEvidenceLedgerPersister
                                        && x.ContentHash == job.ContentHash, ct)
             ?? throw new InvalidOperationException(
                 $"Extraction job {job.Id} has no authoritative source-document record.");
+        if (_context.Database.IsNpgsql())
+        {
+            await _context.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT pg_advisory_xact_lock(hashtextextended({"evidence-source:" + source.Id}, 0))", ct);
+            await _context.Entry(source).ReloadAsync(ct);
+            await _context.Entry(source).Reference(x => x.Corpus).LoadAsync(ct);
+        }
         if (source.SecurityStatus != DocumentSecurityStatus.Cleared)
             throw new InvalidOperationException($"Source document {source.Id} has not passed security inspection.");
 
@@ -51,7 +58,35 @@ public sealed class StructuredEvidenceLedgerPersister
                 x => x.BusinessUnitId == job.BusinessUnitId && x.RunId == runId, ct))
             return;
 
-        source.StartExtraction();
+        // A content-addressed source can have many authorized receipt occurrences.
+        // Its document lifecycle describes the immutable content, so a later run
+        // must not rewind a source that was already completed or sent to review.
+        var ownsSourceLifecycle = source.ProcessingStatus == DocumentProcessingStatus.Received;
+        if (!ownsSourceLifecycle)
+        {
+            var priorRun = await _context.Set<ExtractionRun>()
+                .AsNoTracking()
+                .Where(x => x.BusinessUnitId == job.BusinessUnitId
+                            && x.SourceDocumentId == source.Id
+                            && x.Status == ExtractionRunStatus.Completed)
+                .OrderByDescending(x => x.CreatedOn)
+                .FirstOrDefaultAsync(ct);
+            if (priorRun is null)
+                throw new InvalidOperationException(
+                    $"Source document {source.Id} is terminal but has no reusable completed evidence run.");
+
+            var replayRun = ExtractionRun.Create(job.BusinessUnitId, source.Id, runId, job.Id, job.Attempts,
+                ParserVersion, import.Documents[0].SchemaVersion);
+            replayRun.RecordCostStatus("LocalNoCharge", "NotRequired", 0m, "USD");
+            replayRun.Start();
+            replayRun.Complete(0, 0, 0, 0, 0, 0);
+            _context.Add(replayRun);
+            await _context.SaveChangesAsync(ct);
+            return;
+        }
+
+        if (ownsSourceLifecycle)
+            source.StartExtraction();
         var run = ExtractionRun.Create(job.BusinessUnitId, source.Id, runId, job.Id, job.Attempts,
             ParserVersion, import.Documents[0].SchemaVersion);
         run.RecordCostStatus("LocalNoCharge", "NotRequired", 0m, "USD");
@@ -189,18 +224,21 @@ public sealed class StructuredEvidenceLedgerPersister
             }
         }
 
-        source.StartNormalization();
+        if (ownsSourceLifecycle)
+            source.StartNormalization();
         var requiresReview = outcome.Status != ExtractionOutcomeStatus.Ok
                              || import.Documents.Any(x => x.ValidationStatus != CanonicalDtos.ValidationStatus.Valid);
         if (requiresReview)
         {
-            source.RequireReview(pages.Count);
+            if (ownsSourceLifecycle)
+                source.RequireReview(pages.Count);
             if (source.Corpus.Status == CorpusStatus.Processing)
                 source.Corpus.RequireReview();
         }
         else
         {
-            source.Complete(pages.Count);
+            if (ownsSourceLifecycle)
+                source.Complete(pages.Count);
             if (source.Corpus.Status == CorpusStatus.Processing)
                 source.Corpus.Complete();
         }

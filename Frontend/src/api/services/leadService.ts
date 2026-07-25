@@ -13,6 +13,7 @@ export interface LeadFilters {
   emailSource?: string;
   clientemail?: string;
   search?: string;
+  view?: string;
 }
 
 export interface LeadResponseDTO {
@@ -38,6 +39,8 @@ export interface LeadResponseDTO {
   reviewVersion: number;
   requiresCommercialReview: boolean;
   commercialFactsVerified: boolean;
+  currentRevisionNumber: number;
+  ingestedAtUtc?: string | null;
   headerRemarks?: string;
   opportunityNo?: string;
   biddingDecision?: string;
@@ -242,6 +245,15 @@ export interface BatchReconciliationDTO {
   items: BatchReconciliationItemDTO[];
 }
 
+export interface PossibleMatchQueueItemDTO {
+  batchId: string;
+  occurrenceId: number;
+  fileName?: string | null;
+  ingestedAtUtc: string;
+  confidence: number;
+  matchCandidates: LeadMatchCandidateDTO[];
+}
+
 export interface LeadRevisionDifferenceDTO {
   changeType: 'Added' | 'Removed' | 'Modified' | 'Unchanged' | string;
   scope: string;
@@ -305,6 +317,11 @@ const leadService = {
 
   getIngestionBatch: async (batchId: string): Promise<BatchReconciliationDTO> => {
     const r = await axiosInstance.get<BatchReconciliationDTO>(`/api/LeadIngestion/batches/${encodeURIComponent(batchId)}`);
+    return r.data;
+  },
+
+  getPossibleMatches: async (): Promise<PossibleMatchQueueItemDTO[]> => {
+    const r = await axiosInstance.get<PossibleMatchQueueItemDTO[]>('/api/LeadIngestion/match-reviews');
     return r.data;
   },
 

@@ -61,13 +61,41 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
                 var rows = new NativeSpreadsheetParser().ParseCsv(bytes, "customer-rfq.csv");
                 var extractor = new ChunkedExtractionService(
                     new StubLlm(), new CanonicalRfqNormalizer(), new NoopLogger<ChunkedExtractionService>());
-                var outcome = await extractor.ExtractStructuredAsync(rows, tenantId, "customer-rfq.csv");
+                var extracted = await extractor.ExtractStructuredAsync(rows, tenantId, "customer-rfq.csv");
+                var outcome = new ChunkedExtractionOutcome
+                {
+                    Status = extracted.Status,
+                    Result = extracted.Result,
+                    ExpectedItemCount = extracted.ExpectedItemCount,
+                    ExtractedItemCount = extracted.ExtractedItemCount,
+                    ReviewReason = extracted.ReviewReason,
+                    Diagnostics = extracted.Diagnostics,
+                    SplitResults = extracted.SplitResults,
+                    CanonicalImport = extracted.CanonicalImport,
+                    AiProviderClass = ERP_RFQ_Automation.AI.AiProviderClass.Local
+                };
                 Assert.Equal(ExtractionOutcomeStatus.Ok, outcome.Status);
 
-                var persister = new LeadPersister(context, new NoopLogger<LeadPersister>());
+                var leadIdentity = new LeadIdentityApplicationService(context);
+                var persister = new LeadPersister(context, new NoopLogger<LeadPersister>(),
+                    leadIdentity: leadIdentity);
                 var leadId = await persister.PersistAndCompleteAsync(job, outcome, queue,
                     "evidence-sit", job.Attempts, TimeSpan.FromMinutes(2));
                 Assert.NotNull(leadId);
+
+                context.ChangeTracker.Clear();
+                var repeated = await ingestion.IngestAsync(bytes, "customer-rfq-copy.csv", tenantId,
+                    ExtractionSourceType.ManualUpload, priority: int.MaxValue);
+                var repeatedJob = (await queue.ClaimAsync("evidence-repeat", TimeSpan.FromMinutes(2), 1))!;
+                Assert.Equal(repeated.JobId, repeatedJob.Id);
+                Assert.True(await queue.SetStatusAsync(repeatedJob.Id, "evidence-repeat", repeatedJob.Attempts,
+                    ExtractionStatus.Extracting));
+                Assert.True(await queue.SetStatusAsync(repeatedJob.Id, "evidence-repeat", repeatedJob.Attempts,
+                    ExtractionStatus.Persisting));
+                Assert.NotNull(await new LeadPersister(context, new NoopLogger<LeadPersister>(),
+                        leadIdentity: leadIdentity)
+                    .PersistAndCompleteAsync(repeatedJob, outcome, queue, "evidence-repeat",
+                        repeatedJob.Attempts, TimeSpan.FromMinutes(2)));
             }
 
             long fieldEvidenceId;
@@ -88,6 +116,8 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
                 var run = await context.Set<ExtractionRun>()
                     .SingleAsync(x => x.BusinessUnitId == tenantId && x.ExtractionJobId == jobId);
                 Assert.Equal(ExtractionRunStatus.Completed, run.Status);
+                Assert.Equal(2, await context.Set<ExtractionRun>()
+                    .CountAsync(x => x.BusinessUnitId == tenantId && x.Status == ExtractionRunStatus.Completed));
                 Assert.Equal(1, run.PageCount);
                 Assert.Equal(2, run.LineItemCount);
                 Assert.True(run.EvidenceCount >= 20);
@@ -267,13 +297,31 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
                     Status = ExtractionOutcomeStatus.Ok,
                     Result = Ext.Result(Ext.Items(1, 0.95), 0.95) with { Rfqno = "RFQ-UNSTRUCTURED" },
                     ExpectedItemCount = 1,
-                    ExtractedItemCount = 1
+                    ExtractedItemCount = 1,
+                    AiProviderClass = ERP_RFQ_Automation.AI.AiProviderClass.Local
                 };
 
-                var leadId = await new LeadPersister(context, new NoopLogger<LeadPersister>())
+                var leadIdentity = new LeadIdentityApplicationService(context);
+                var leadId = await new LeadPersister(context, new NoopLogger<LeadPersister>(),
+                        leadIdentity: leadIdentity)
                     .PersistAndCompleteAsync(job, outcome, queue, "unstructured-sit", job.Attempts,
                         TimeSpan.FromMinutes(2));
                 Assert.NotNull(leadId);
+
+                context.ChangeTracker.Clear();
+                var repeated = await NewIngestion(context, queue, root, ClearedInspection()).IngestAsync(
+                    bytes, "unstructured-copy.txt", tenantId, ExtractionSourceType.ManualUpload,
+                    priority: int.MaxValue);
+                var repeatedJob = (await queue.ClaimAsync("unstructured-repeat", TimeSpan.FromMinutes(2), 1))!;
+                Assert.Equal(repeated.JobId, repeatedJob.Id);
+                Assert.True(await queue.SetStatusAsync(repeatedJob.Id, "unstructured-repeat", repeatedJob.Attempts,
+                    ExtractionStatus.Extracting));
+                Assert.True(await queue.SetStatusAsync(repeatedJob.Id, "unstructured-repeat", repeatedJob.Attempts,
+                    ExtractionStatus.Persisting));
+                Assert.NotNull(await new LeadPersister(context, new NoopLogger<LeadPersister>(),
+                        leadIdentity: leadIdentity)
+                    .PersistAndCompleteAsync(repeatedJob, outcome, queue, "unstructured-repeat",
+                        repeatedJob.Attempts, TimeSpan.FromMinutes(2)));
             }
 
             await using var verify = _database.ContextFor(null);
@@ -286,6 +334,8 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
             Assert.Equal(CorpusStatus.ReviewRequired, source.Corpus.Status);
             Assert.Equal(ExtractionRunStatus.Completed, run.Status);
             Assert.Equal("llm-unstructured/v1", run.ParserVersion);
+            Assert.Equal(2, await verify.Set<ExtractionRun>()
+                .CountAsync(x => x.BusinessUnitId == tenantId && x.Status == ExtractionRunStatus.Completed));
             Assert.Equal(ExtractionStatus.Succeeded, jobState.Status);
             Assert.NotNull(jobState.ResultLeadId);
         }
@@ -332,6 +382,7 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
             Assert.Equal(2, occurrences.Count);
             Assert.All(occurrences, x => Assert.Equal(IntakeOccurrenceStatus.Queued, x.IntakeStatus));
             Assert.Equal(2, occurrences.Select(x => x.ExtractionJobId).Distinct().Count());
+
         }
         finally
         {

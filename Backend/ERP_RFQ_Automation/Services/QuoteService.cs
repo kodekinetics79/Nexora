@@ -28,6 +28,7 @@ namespace ERP_RFQ_Automation.Services
         /// </summary>
         Task<QuoteSendResult> SendQuoteEmailAsync(long quoteId, string recipientEmail, string? customSubject = null, string? customBody = null, QuoteSendOptions? options = null);
         Task<QuoteResponseDTO> CreateQuoteAsync(QuoteCreateRequestDTO request);
+        Task<QuoteResponseDTO> PrepareDraftFromRfqAsync(long rfqId, long businessUnitId, string actor, CancellationToken ct = default);
         Task<QuoteResponseDTO> UpdateQuoteAsync(long id, QuoteUpdateRequestDTO request);
         Task<QuoteResponseDTO> TransitionStatusAsync(long id, string statusCode, string modifiedBy);
         Task<QuoteResponseDTO> GetQuoteAsync(long id);
@@ -42,6 +43,8 @@ namespace ERP_RFQ_Automation.Services
 
         /// <summary>Revision-chain facts for one quote (chip + Revise button state).</summary>
         Task<QuoteRevisionInfoDTO> GetRevisionInfoAsync(long quoteId, long businessUnitId);
+        Task ResolveRevisionImpactAsync(long quoteId, long businessUnitId, string actor,
+            string idempotencyKey, CancellationToken ct = default);
     }
 
     public class QuoteService : IQuoteService
@@ -156,6 +159,92 @@ namespace ERP_RFQ_Automation.Services
             await _context.SaveChangesAsync();
 
             return await GetQuoteByIdAsync(quote.Id);
+        }
+
+        public async Task<QuoteResponseDTO> PrepareDraftFromRfqAsync(
+            long rfqId, long businessUnitId, string actor, CancellationToken ct = default)
+        {
+            if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
+            if (string.IsNullOrWhiteSpace(actor)) throw new ArgumentException("Authenticated actor is required.", nameof(actor));
+
+            var strategy = _context.Database.CreateExecutionStrategy();
+            var quoteId = await strategy.ExecuteAsync(async () =>
+            {
+                _context.ChangeTracker.Clear();
+                await using var transaction = await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+                var rfq = await _context.Rfqs
+                    .Include(item => item.Lead)
+                    .Include(item => item.Rfqitems)
+                    .SingleOrDefaultAsync(item => item.Id == rfqId && item.BusinessUnitId == businessUnitId, ct)
+                    ?? throw new KeyNotFoundException("The RFQ was not found in this tenant.");
+
+                if (rfq.Lead == null) throw new InvalidOperationException("The RFQ is not linked to its canonical Lead.");
+                rfq.InheritCommercialIdentity(rfq.Lead);
+                if (!rfq.CustomerId.HasValue) throw new InvalidOperationException("Resolve the RFQ customer before preparing a Quote Draft.");
+                if (rfq.Rfqitems.Count == 0) throw new InvalidOperationException("Add at least one verified RFQ line before preparing a Quote Draft.");
+
+                var invalidLines = rfq.Rfqitems
+                    .Where(item => item.Quantity <= 0
+                        || string.IsNullOrWhiteSpace(item.UnitOfMeasure)
+                        || string.IsNullOrWhiteSpace(item.ItemMaterialCode)
+                           && string.IsNullOrWhiteSpace(item.ManufacturerPartNumber)
+                           && string.IsNullOrWhiteSpace(item.ProductShortDescription))
+                    .Select(item => string.IsNullOrWhiteSpace(item.LineItemNo) ? $"line {item.Id}" : $"line {item.LineItemNo}")
+                    .ToArray();
+                if (invalidLines.Length > 0)
+                    throw new InvalidOperationException($"Review required request data for {string.Join(", ", invalidLines)} before preparing a Quote Draft.");
+
+                var existing = await _context.Quotes
+                    .Include(item => item.Status)
+                    .SingleOrDefaultAsync(item => item.Rfqid == rfqId && item.BusinessUnitId == businessUnitId, ct);
+                if (existing != null)
+                {
+                    var existingCode = LifecyclePolicy.Canonicalize("Quote", existing.Status?.SetupCode, existing.Status?.SetupValue);
+                    if (existingCode != "DRAFT")
+                        throw new InvalidOperationException("This RFQ already has a customer-issued Quote. Use the governed Quote revision action.");
+                    existing.InheritCommercialIdentity(rfq);
+                    await _context.SaveChangesAsync(ct);
+                    await transaction.CommitAsync(ct);
+                    return existing.Id;
+                }
+
+                var now = DateTime.UtcNow;
+                var quote = new Quote
+                {
+                    QuoteNo = await GenerateNextQuoteNumber(),
+                    Rfqid = rfq.Id,
+                    CustomerId = rfq.CustomerId,
+                    BusinessUnitId = businessUnitId,
+                    QuoteDate = now,
+                    ValidUntil = null,
+                    StatusId = await ResolveQuoteStatusIdAsync("DRAFT", businessUnitId),
+                    CurrencyId = null,
+                    TotalAmount = 0m,
+                    HeaderRemarks = "Commercial Review Required: pricing, inventory, lead time, tax, freight and validity remain pending.",
+                    CreatedBy = actor.Trim(),
+                    CreatedDate = now,
+                    QuoteItems = rfq.Rfqitems.OrderBy(item => item.Id).Select(item => new QuoteItem
+                    {
+                        RfqitemId = item.Id,
+                        ProductId = item.ProductId,
+                        ItemDescription = item.ProductShortDescription ?? item.ProductShortName ?? item.ItemText ?? item.ItemMaterialCode,
+                        Quantity = item.Quantity,
+                        UnitPrice = 0m,
+                        TotalAmount = 0m,
+                        TaxAmount = null,
+                        DeliveryLeadTime = null,
+                        CreatedBy = actor.Trim(),
+                        CreatedDate = now
+                    }).ToList()
+                };
+                quote.InheritCommercialIdentity(rfq);
+                _context.Quotes.Add(quote);
+                await _context.SaveChangesAsync(ct);
+                await transaction.CommitAsync(ct);
+                return quote.Id;
+            });
+
+            return await GetQuoteByIdAsync(quoteId);
         }
 
         private async Task<string> GenerateNextQuoteNumber()
@@ -513,6 +602,13 @@ namespace ERP_RFQ_Automation.Services
 
             if (quote == null)
                 throw new KeyNotFoundException($"Quote with ID {quoteId} not found.");
+
+            var isDraft = string.Equals(quote.Status?.SetupCode, "DRAFT", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(quote.Status?.SetupValue, "Draft", StringComparison.OrdinalIgnoreCase);
+            if (isDraft && (!quote.CurrencyId.HasValue || !quote.ValidUntil.HasValue
+                || quote.QuoteItems.Count == 0 || quote.QuoteItems.Any(item => item.UnitPrice <= 0)))
+                throw new InvalidOperationException(
+                    "Commercial Review Required: pricing, currency, validity, and every line price must be complete before PDF export.");
 
             // Fetch dynamic configurations from the new QuoteConfiguration table
             var config = await _quoteConfigRepository.GetByBusinessUnitIdAsync(quote.BusinessUnitId);
@@ -1114,6 +1210,69 @@ namespace ERP_RFQ_Automation.Services
             await _context.SaveChangesAsync();
 
             return await GetQuoteByIdAsync(id);
+        }
+
+        public async Task ResolveRevisionImpactAsync(long quoteId, long businessUnitId, string actor,
+            string idempotencyKey, CancellationToken ct = default)
+        {
+            await using var transaction = _context.Database.IsNpgsql() && _context.Database.CurrentTransaction is null
+                ? await _context.Database.BeginTransactionAsync(ct)
+                : null;
+
+            if (_context.Database.IsNpgsql())
+            {
+                var lockKey = $"quote-impact-resolution:{businessUnitId}:{quoteId}";
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock(hashtextextended({lockKey}, 0))", ct);
+            }
+
+            if (!await _context.Quotes.AsNoTracking()
+                .AnyAsync(x => x.Id == quoteId && x.BusinessUnitId == businessUnitId, ct))
+                throw new KeyNotFoundException();
+
+            var impacts = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadRevisionImpact>()
+                .AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.AggregateType == "QUOTE"
+                    && x.AggregateId == quoteId && x.Status == "OPEN")
+                .Where(impact => !_context.Set<ERP_RFQ_Automation.LeadIdentity.LeadIdentityAuditEvent>()
+                    .Any(audit => audit.BusinessUnitId == businessUnitId
+                        && audit.EventType == "REVISION_IMPACT_RESOLVED"
+                        && audit.CorrelationId == "quote-impact:" + impact.Id))
+                .OrderBy(x => x.Id)
+                .Select(impact => new
+                {
+                    Impact = impact,
+                    OccurrenceId = _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadRevision>()
+                        .Where(revision => revision.BusinessUnitId == businessUnitId && revision.Id == impact.LeadRevisionId)
+                        .Select(revision => revision.EstablishedByOccurrenceId)
+                        .Single()
+                })
+                .ToListAsync(ct);
+            if (impacts.Count == 0)
+            {
+                if (transaction is not null) await transaction.CommitAsync(ct);
+                return;
+            }
+
+            foreach (var row in impacts)
+            {
+                var impact = row.Impact;
+                _context.Add(new ERP_RFQ_Automation.LeadIdentity.LeadIdentityAuditEvent
+                {
+                    BusinessUnitId = businessUnitId,
+                    LeadId = impact.LeadId,
+                    OccurrenceId = row.OccurrenceId,
+                    EventType = "REVISION_IMPACT_RESOLVED",
+                    PayloadJson = System.Text.Json.JsonSerializer.Serialize(new { impactId = impact.Id, quoteId }),
+                    ActorType = "User",
+                    ActorId = actor,
+                    CorrelationId = $"quote-impact:{impact.Id}",
+                    IdempotencyKey = $"{idempotencyKey}:{impact.Id}",
+                    OccurredAtUtc = DateTimeOffset.UtcNow
+                });
+            }
+            await _context.SaveChangesAsync(ct);
+            if (transaction is not null) await transaction.CommitAsync(ct);
         }
 
         public Task<QuoteResponseDTO> GetQuoteAsync(long id) => GetQuoteByIdAsync(id);

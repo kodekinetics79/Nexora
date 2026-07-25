@@ -11,10 +11,10 @@ import {
   ArrowBack as BackIcon,
   Edit as EditIcon,
   CheckCircle as ApproveIcon,
+  RequestQuote as QuoteDraftIcon,
   Download as ExportIcon,
   NavigateNext as NextIcon,
   Schedule as HistoryIcon,
-  AutoAwesome as SparkleIcon,
   OpenInNew as WorkspaceIcon,
 } from '@mui/icons-material';
 import rfqService from '../../../api/services/rfqService';
@@ -67,6 +67,18 @@ const ViewRFQPage: React.FC = () => {
     onError: () => enqueueSnackbar('Failed to approve RFQ', { variant: 'error' }),
   });
 
+  const quoteDraftMutation = useMutation({
+    mutationFn: () => rfqService.prepareQuoteDraft(Number(id)),
+    onSuccess: (quote) => {
+      enqueueSnackbar('Quote Draft prepared with pricing and commercial terms pending.', { variant: 'success' });
+      navigate(`/sales/quotes/view/${quote.id}`);
+    },
+    onError: (error: any) => enqueueSnackbar(
+      error?.response?.data?.message || 'The RFQ still has fields that require review.',
+      { variant: 'error' },
+    ),
+  });
+
   const formatDate = (dateStr: string | null) => {
     if (!dateStr) return '—';
     const d = new Date(dateStr);
@@ -78,7 +90,7 @@ const ViewRFQPage: React.FC = () => {
   if (!rfq) return <Box sx={{ p: 4 }}><Typography>RFQ not found.</Typography></Box>;
 
   const isDraft = lifecycle?.currentStatusCode === 'DRAFT';
-  const canSendQuote = lifecycle?.currentStatusCode === 'QUOTE_PREPARATION';
+  const canPrepareQuote = Boolean(rfq.customerId && rfq.leadId && rfq.rfqitems.length > 0);
 
   return (
     <Box sx={{ p: 3, maxWidth: 1800, mx: 'auto' }}>
@@ -133,14 +145,6 @@ const ViewRFQPage: React.FC = () => {
             >
               Back
             </Button>
-            {hasPermission('RFQ Management', 'edit') && <Button
-              variant="contained"
-              startIcon={<SparkleIcon />}
-              onClick={() => navigate(`/procurement/rfqs/${rfq.id}/pricing`)}
-              sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
-            >
-              Smart Pricing
-            </Button>}
             {isDraft && hasPermission('RFQ Management', 'edit') && (
               <>
                 <Button
@@ -153,9 +157,10 @@ const ViewRFQPage: React.FC = () => {
                 </Button>
               </>
             )}
-            {canSendQuote && hasPermission('Quotations', 'create') && <Button variant="contained" color="success" startIcon={<ApproveIcon />}
-              onClick={() => setApprovalDialogOpen(true)} sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}>
-              Generate & Send Quote
+            {hasPermission('Quotations', 'create') && <Button variant="contained" color="success" startIcon={<QuoteDraftIcon />}
+              onClick={() => quoteDraftMutation.mutate()} disabled={!canPrepareQuote || quoteDraftMutation.isPending}
+              sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}>
+              Prepare Quote Draft
             </Button>}
             <Button
               variant="outlined"
@@ -181,6 +186,11 @@ const ViewRFQPage: React.FC = () => {
               </Box>
               <Grid container spacing={2}>
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="RFQ #" value={rfq.rfqno} /></Grid>
+                <Grid size={{ xs: 12, md: 4 }}><DataField label="Active Lead Revision" value={`Revision ${rfq.activeLeadRevision || 1}`} /></Grid>
+                <Grid size={{ xs: 12, md: 4 }}><DataField label="Readiness" value={rfq.readiness} /></Grid>
+                <Grid size={{ xs: 12, md: 4 }}>
+                  <Button size="small" variant="outlined" onClick={() => navigate(`/procurement/leads/view/${rfq.leadId}`)}>Open Canonical Lead</Button>
+                </Grid>
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="Customer / Buyer" value={rfq.buyersName || rfq.customerName || 'N/A'} /></Grid>
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="Customer Email" value={rfq.customerEmail || rfq.leadEmail || 'N/A'} /></Grid>
                 
@@ -205,7 +215,7 @@ const ViewRFQPage: React.FC = () => {
             <Paper sx={{ borderRadius: 3, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>
               <Box sx={{ p: 2.5, bgcolor: '#fafafa', borderBottom: '1px solid', borderColor: 'divider' }}>
                 <Typography sx={{ fontWeight: 950, fontSize: '0.9rem', color: 'text.primary', textTransform: 'uppercase' }}>
-                  {t('invoice_items')} ({rfq.rfqitems.length})
+                  RFQ Lines ({rfq.rfqitems.length})
                 </Typography>
               </Box>
               <Table size="small">
@@ -215,8 +225,8 @@ const ViewRFQPage: React.FC = () => {
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Product / Description</TableCell>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Manufacturer / Part #</TableCell>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }} align="center">Qty</TableCell>
-                    <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }} align="right">Unit Price</TableCell>
-                    <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }} align="right">Total</TableCell>
+                    <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Resolution</TableCell>
+                    <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Next Action</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
@@ -242,12 +252,8 @@ const ViewRFQPage: React.FC = () => {
                       <TableCell align="center" sx={{ fontSize: '0.85rem', fontWeight: 900 }}>
                         {item.quantity} {item.unitOfMeasure || 'EA'}
                       </TableCell>
-                      <TableCell align="right" sx={{ fontSize: '0.8rem', fontWeight: 800 }}>
-                        {item.currency || '$'} {(item.unitPrice || 0).toFixed(2)}
-                      </TableCell>
-                      <TableCell align="right" sx={{ fontSize: '0.85rem', fontWeight: 950, color: 'primary.main' }}>
-                        {item.currency || '$'} {((item.quantity || 0) * (item.unitPrice || 0)).toFixed(2)}
-                      </TableCell>
+                      <TableCell><Chip size="small" label={item.productId ? 'Request data verified' : 'Item Resolution Pending'} color={item.productId ? 'success' : 'warning'} variant="outlined" /></TableCell>
+                      <TableCell><Typography variant="caption" color="text.secondary">Inventory Check Pending · Pricing Pending</Typography></TableCell>
                     </TableRow>
                   ))}
                   {rfq.rfqitems.length === 0 && (
@@ -265,12 +271,7 @@ const ViewRFQPage: React.FC = () => {
                       <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase' }}>Total Items</Typography>
                       <Typography sx={{ fontWeight: 900, fontSize: '1.1rem' }}>{rfq.rfqitems.length}</Typography>
                    </Box>
-                   <Box sx={{ textAlign: 'right' }}>
-                      <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase' }}>Grand Total</Typography>
-                      <Typography sx={{ fontWeight: 950, fontSize: '1.2rem', color: 'success.main' }}>
-                        $ {rfq.rfqitems.reduce((sum, item) => sum + (item.quantity * (item.unitPrice || 0)), 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                      </Typography>
-                   </Box>
+                   <Chip label="Commercial Review Required" color="warning" variant="outlined" />
                 </Stack>
               </Box>
             </Paper>

@@ -58,6 +58,8 @@ public sealed record LeadMatchCandidateDto(long CandidateId, long CandidateLeadI
 public sealed record BatchReconciliationDto(Guid BatchId, int FilesReceived, int LogicalInquiries,
     int NewLeads, int ExactDuplicates, int Revisions, int PossibleMatches, int Rejected,
     int ExternalOccurrences, decimal ExternalCost, IReadOnlyList<BatchReconciliationItemDto> Items);
+public sealed record PossibleMatchQueueItemDto(Guid BatchId, long OccurrenceId, string? FileName,
+    DateTimeOffset IngestedAtUtc, decimal Confidence, IReadOnlyList<LeadMatchCandidateDto> MatchCandidates);
 
 public sealed record MatchDecisionRequest(string Action, long? CandidateLeadId, int ExpectedVersion,
     string Reason, string IdempotencyKey);

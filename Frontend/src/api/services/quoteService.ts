@@ -5,6 +5,10 @@ export interface QuoteDTO {
   quoteNo: string;
   rfqId?: number;
   rfqNo?: string;
+  leadId?: number;
+  sourceLeadRevision: number;
+  sourceRfqRevision: number;
+  revisionImpact?: string | null;
   commercialCaseId?: number;
   commercialCaseReference?: string | null;
   nexoraSerial?: string | null;
@@ -86,6 +90,7 @@ export interface QuoteParams {
   pageNumber?: number;
   pageSize?: number;
   search?: string;
+  state?: string;
 }
 
 const quoteService = {
@@ -149,6 +154,12 @@ const quoteService = {
   getRevisionInfo: async (id: number): Promise<QuoteRevisionInfoDTO> => {
     const { data } = await axiosInstance.get(`/api/Quote/${id}/revisions`);
     return data;
+  },
+
+  resolveRevisionImpact: async (id: number): Promise<void> => {
+    await axiosInstance.post(`/api/Quote/${id}/revision-impact/resolve`, null, {
+      headers: { 'Idempotency-Key': crypto.randomUUID() },
+    });
   },
 
   transitionStatus: async (id: number, status: string, expectedVersion: number): Promise<unknown> => {

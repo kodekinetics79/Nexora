@@ -13,6 +13,7 @@ public interface ILeadIdentityApplicationService
 {
     Task<LeadReconciliationResult> ReconcileAsync(Lead candidate, LeadIntakeDescriptor intake, CancellationToken ct = default);
     Task<BatchReconciliationDto?> GetBatchAsync(long businessUnitId, Guid batchId, CancellationToken ct = default);
+    Task<IReadOnlyList<PossibleMatchQueueItemDto>> GetPossibleMatchesAsync(long businessUnitId, CancellationToken ct = default);
     Task<IReadOnlyList<LeadRevisionDto>> GetRevisionsAsync(long businessUnitId, long leadId, CancellationToken ct = default);
     Task<LeadReconciliationResult> DecideMatchAsync(long businessUnitId, long occurrenceId, MatchDecisionRequest request, string actorId, CancellationToken ct = default);
     Task<LeadIdentityAnalyticsDto> GetAnalyticsAsync(long businessUnitId, DateTimeOffset from, DateTimeOffset to, CancellationToken ct = default);
@@ -238,6 +239,25 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             Count(LeadOccurrenceClassification.PossibleMatchReviewRequired), Count(LeadOccurrenceClassification.RejectedOrUnprocessable),
             rows.Count(x => x.ExternalAiUsed), rows.Sum(x => x.ExternalCost), items);
         int Count(LeadOccurrenceClassification c) => rows.Count(x => x.Classification == c);
+    }
+
+    public async Task<IReadOnlyList<PossibleMatchQueueItemDto>> GetPossibleMatchesAsync(
+        long bu, CancellationToken ct = default)
+    {
+        var rows = await _db.Set<LeadIngestionOccurrence>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == bu
+                && x.Classification == LeadOccurrenceClassification.PossibleMatchReviewRequired)
+            .Where(x => x.MatchCandidates.Any(candidate => candidate.ReviewState == LeadMatchReviewState.Pending))
+            .Include(x => x.MatchCandidates).ThenInclude(x => x.CandidateLead)
+            .OrderByDescending(x => x.IngestedAtUtc).Take(100).ToListAsync(ct);
+        return rows.Select(x => new PossibleMatchQueueItemDto(x.BatchId, x.Id, x.OriginalFileName,
+            x.IngestedAtUtc, x.Confidence, x.MatchCandidates
+                .Where(candidate => candidate.ReviewState == LeadMatchReviewState.Pending)
+                .Select(candidate => new LeadMatchCandidateDto(candidate.Id, candidate.CandidateLeadId,
+                    candidate.CandidateLead.CommercialCaseReference, candidate.CandidateLead.Rfqno,
+                    candidate.Confidence, candidate.MatchEvidenceJson, candidate.DifferencesJson,
+                    candidate.DownstreamImpactJson, candidate.ReviewState.ToString(), candidate.Version))
+                .ToArray())).ToArray();
     }
 
     public async Task<IReadOnlyList<LeadRevisionDto>> GetRevisionsAsync(long bu, long leadId, CancellationToken ct = default)

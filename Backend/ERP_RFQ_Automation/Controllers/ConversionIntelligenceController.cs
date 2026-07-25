@@ -48,6 +48,7 @@ public class ConversionIntelligenceController : ControllerBase
     /// <summary>Convert the lead into an RFQ applying the request's per-line choices.</summary>
     [HttpPost("{id}/convert")]
     [RequireModulePermission("Leads", PermissionAction.Create)]
+    [RequireModulePermission("RFQ Management", PermissionAction.Create)]
     public async Task<ActionResult> Convert(long id, [FromBody] ConvertRequest request, CancellationToken ct)
     {
         try
