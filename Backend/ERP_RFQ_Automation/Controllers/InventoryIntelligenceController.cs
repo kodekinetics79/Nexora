@@ -11,8 +11,42 @@ namespace ERP_RFQ_Automation.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/inventory-intelligence")]
-public sealed class InventoryIntelligenceController(ErpRfqAutomationContext db) : ControllerBase
+public sealed class InventoryIntelligenceController(
+    ErpRfqAutomationContext db,
+    ICommercialLineResolutionApplicationService lineResolution) : ControllerBase
 {
+    [HttpPost("leads/{leadId:long}/resolve")]
+    [RequireModulePermission("Leads", PermissionAction.Edit)]
+    public async Task<ActionResult> ResolveLead(long leadId, [FromQuery] int limit = 10, CancellationToken ct = default)
+        => Ok((await lineResolution.ResolveLeadAsync(TenantId(), leadId, limit, ct)).Select(ResolutionRow));
+
+    [HttpGet("leads/{leadId:long}/resolutions")]
+    [RequireModulePermission("Leads", PermissionAction.View)]
+    public async Task<ActionResult> LeadResolutions(long leadId, CancellationToken ct)
+        => Ok((await db.Set<LeadLineCommercialResolution>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == TenantId() && x.LeadId == leadId)
+            .OrderBy(x => x.LeadLineId).ToListAsync(ct)).Select(ResolutionRow));
+
+    [HttpGet("rfqs/{rfqId:long}/resolutions")]
+    [RequireModulePermission("RFQ", PermissionAction.View)]
+    public async Task<ActionResult> RfqResolutions(long rfqId, CancellationToken ct)
+        => Ok((await db.Set<LeadLineCommercialResolution>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == TenantId() && x.RfqId == rfqId)
+            .OrderBy(x => x.LeadLineId).ToListAsync(ct)).Select(ResolutionRow));
+
+    [HttpGet("quotes/{quoteId:long}/resolutions")]
+    [RequireModulePermission("Quotation", PermissionAction.View)]
+    public async Task<ActionResult> QuoteResolutions(long quoteId, CancellationToken ct)
+    {
+        var tenant = TenantId();
+        var rfqId = await db.Quotes.AsNoTracking().Where(x => x.BusinessUnitId == tenant && x.Id == quoteId)
+            .Select(x => x.Rfqid).SingleOrDefaultAsync(ct);
+        if (!rfqId.HasValue) return NotFound();
+        return Ok((await db.Set<LeadLineCommercialResolution>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == tenant && x.RfqId == rfqId.Value)
+            .OrderBy(x => x.LeadLineId).ToListAsync(ct)).Select(ResolutionRow));
+    }
+
     [HttpGet("overview")]
     [RequireModulePermission("Products", PermissionAction.View)]
     public async Task<ActionResult> Overview(CancellationToken ct)
@@ -174,6 +208,16 @@ public sealed class InventoryIntelligenceController(ErpRfqAutomationContext db) 
     private string RequiredIdempotencyKey() => Request.Headers.TryGetValue("Idempotency-Key", out var value) && !string.IsNullOrWhiteSpace(value) ? value.ToString() : throw new ArgumentException("Idempotency-Key header is required.");
     private static object Metric(string key, string label, decimal value) => new { key, label, value, unit = "count" };
     private static object Resource(string key, string label, string description, int count, string route) => new { key, label, description, recordCount = count, route, requiredModule = "Products" };
+    private static object ResolutionRow(LeadLineCommercialResolution x) => new {
+        x.Id, x.LeadId, x.LeadRevisionId, x.LeadLineId, x.RfqId, x.ProductId,
+        x.RequestedPartNumber, x.RequestedQuantity, classification = x.Classification.ToString(),
+        x.AvailableToPromise, x.IncomingAvailable,
+        fulfilment = System.Text.Json.JsonSerializer.Deserialize<object>(x.FulfilmentJson),
+        relatedResources = System.Text.Json.JsonSerializer.Deserialize<object>(x.RelatedResourcesJson),
+        productResolution = System.Text.Json.JsonSerializer.Deserialize<object>(x.ProductResolutionJson),
+        x.ResolutionMethod, x.EvidenceReference, x.InventoryAsOfUtc, x.ResolvedOn,
+        externalDiscoveryUsed = false
+    };
 }
 
 public sealed record VersionRequest(uint ExpectedVersion);

@@ -2,6 +2,7 @@ using System.Text.RegularExpressions;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using Microsoft.EntityFrameworkCore;
+using ERP_RFQ_Automation.Inventory.Commercial;
 
 namespace ERP_RFQ_Automation.Intelligence.Conversion;
 
@@ -24,13 +25,19 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
 {
     // Below this top score a line needs human attention; also the threshold for
     // auto-assigning a ProductId when the convert request leaves it unspecified.
-    private const decimal ConfidenceFloor = 0.70m;
+    private const decimal ConfidenceFloor = 0.90m;
     private const int MaxMatchesPerLine = 3;
     private const int MaxNameCandidatesPerLine = 40;
 
     private readonly ErpRfqAutomationContext _db;
+    private readonly ICommercialLineResolutionApplicationService? _lineResolution;
 
-    public LeadConversionIntelligence(ErpRfqAutomationContext db) => _db = db;
+    public LeadConversionIntelligence(ErpRfqAutomationContext db,
+        ICommercialLineResolutionApplicationService? lineResolution = null)
+    {
+        _db = db;
+        _lineResolution = lineResolution;
+    }
 
     // ================================================================ Preview
 
@@ -111,6 +118,11 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         {
             already.InheritCommercialIdentity(lead);
             await _db.SaveChangesAsync(ct);
+            if (_lineResolution is not null)
+            {
+                await _lineResolution.ResolveLeadAsync(businessUnitId, lead.Id, 10, ct);
+                await _lineResolution.LinkRfqAsync(businessUnitId, lead.Id, already.Id, ct);
+            }
             await CompleteConversionLifecycleInCurrentTransactionAsync(lead, already.Id, request.ActingUser, ct);
             await tx.CommitAsync(ct);
             return already.Id;
@@ -287,6 +299,11 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
 
         _db.Rfqs.Add(rfq);
         await _db.SaveChangesAsync(ct);
+        if (_lineResolution is not null)
+        {
+            await _lineResolution.ResolveLeadAsync(businessUnitId, lead.Id, 10, ct);
+            await _lineResolution.LinkRfqAsync(businessUnitId, lead.Id, rfq.Id, ct);
+        }
         await CompleteConversionLifecycleInCurrentTransactionAsync(lead, rfq.Id, createdBy, ct);
         await tx.CommitAsync(ct);
         return rfq.Id;

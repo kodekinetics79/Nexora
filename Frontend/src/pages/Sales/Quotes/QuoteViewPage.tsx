@@ -24,6 +24,7 @@ import { CustomerAwardDialog, type CustomerAwardQuote } from './customer-awards'
 import { useAuth } from '../../../context/AuthContext';
 import dayjs from 'dayjs';
 import { toast } from 'react-hot-toast';
+import CommercialLineIntelligence from '../../../components/common/CommercialLineIntelligence';
 
 const QuoteViewPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -368,6 +369,8 @@ const QuoteViewPage: React.FC = () => {
             </Grid>
             {quote.headerRemarks && <Box sx={{ mt: 3, p: 2, bgcolor: 'grey.50', borderRadius: 1, borderLeft: '4px solid', borderColor: 'primary.main' }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 800 }}>REMARKS</Typography><Typography variant="body2">{quote.headerRemarks}</Typography></Box>}
           </Paper>
+
+          <CommercialLineIntelligence stage="quote" recordId={quote.id} />
 
           <Paper sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none', overflowX: 'auto', maxWidth: '100%' }}>
             <Box sx={{ p: 2, borderBottom: '1px solid', borderColor: 'divider', bgcolor: 'grey.50' }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Quoted Items</Typography></Box>

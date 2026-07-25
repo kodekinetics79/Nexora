@@ -23,6 +23,7 @@ import EmailPromptDialog from '../../../components/common/EmailPromptDialog';
 import { useSnackbar } from 'notistack';
 import LifecycleActions from '../../../components/common/LifecycleActions';
 import lifecycleService from '../../../api/services/commercialLifecycleService';
+import CommercialLineIntelligence from '../../../components/common/CommercialLineIntelligence';
 
 const DataField: React.FC<{ label: string; value: string | number | null; bold?: boolean; color?: string }> = ({ label, value, bold = true, color = 'text.primary' }) => (
   <Box sx={{ mb: 1.5 }}>
@@ -210,6 +211,8 @@ const ViewRFQPage: React.FC = () => {
                 </Box>
               )}
             </Paper>
+
+            <Box sx={{ mb: 2 }}><CommercialLineIntelligence stage="rfq" recordId={rfq.id} /></Box>
 
             {/* Line Items */}
             <Paper sx={{ borderRadius: 3, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>

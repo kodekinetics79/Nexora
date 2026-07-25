@@ -10,6 +10,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using System.Data;
 using System.Text.Json;
+using ERP_RFQ_Automation.Inventory.Commercial;
 
 namespace ERP_RFQ_Automation.Repositories
 {
@@ -30,6 +31,7 @@ namespace ERP_RFQ_Automation.Repositories
         private readonly ILeadDuplicateDetector? _duplicateDetector;
         private readonly ILogger<LeadRepository>? _logger;
         private readonly ERP_RFQ_Automation.Metrics.IMetricRecorder? _metrics;
+        private readonly ICommercialLineResolutionApplicationService? _lineResolution;
 
         // Optional dependencies keep existing constructions (tests, pre-wiring DI)
         // compiling and running: duplicate detection / metrics
@@ -39,13 +41,15 @@ namespace ERP_RFQ_Automation.Repositories
             ISlaPolicyReader? slaPolicy = null,
             ILeadDuplicateDetector? duplicateDetector = null,
             ILogger<LeadRepository>? logger = null,
-            ERP_RFQ_Automation.Metrics.IMetricRecorder? metrics = null)
+            ERP_RFQ_Automation.Metrics.IMetricRecorder? metrics = null,
+            ICommercialLineResolutionApplicationService? lineResolution = null)
         {
             _context = context;
             _slaPolicy = slaPolicy ?? new DefaultSlaPolicyReader();
             _duplicateDetector = duplicateDetector;
             _logger = logger;
             _metrics = metrics;
+            _lineResolution = lineResolution;
         }
 
         public async Task<(IEnumerable<LeadResponseDTO>, int TotalCount)> GetLeadListAsync(int pageNumber, int pageSize, long? id, string? rfqno, string? buyersName, string? leadSource, long businessUnitId, DateTime? startDate = null, DateTime? endDate = null, string? emailSource = null, string? clientemail = null, string? view = null)
@@ -220,6 +224,11 @@ namespace ERP_RFQ_Automation.Repositories
                 {
                     already.InheritCommercialIdentity(lead);
                     await _context.SaveChangesAsync();
+                    if (_lineResolution is not null)
+                    {
+                        await _lineResolution.ResolveLeadAsync(businessUnitId, lead.Id, 10);
+                        await _lineResolution.LinkRfqAsync(businessUnitId, lead.Id, already.Id);
+                    }
                     await transaction.CommitAsync();
                     return (already.Id, already.Rfqno);
                 }
@@ -234,6 +243,9 @@ namespace ERP_RFQ_Automation.Repositories
                 if (!lead.CustomerId.HasValue)
                     throw new InvalidOperationException("Resolve the lead customer before creating an RFQ.");
 
+                if (_lineResolution is not null)
+                    await _lineResolution.ResolveLeadAsync(businessUnitId, lead.Id, 10);
+
                 var rfq = already ?? await CreateRfqFromLeadAsync(lead, businessUnitId, createdBy);
                 if (already == null)
                 {
@@ -245,6 +257,9 @@ namespace ERP_RFQ_Automation.Repositories
                     rfq.InheritCommercialIdentity(lead);
                     await _context.SaveChangesAsync();
                 }
+
+                if (_lineResolution is not null)
+                    await _lineResolution.LinkRfqAsync(businessUnitId, lead.Id, rfq.Id);
 
                 await new LifecycleApplicationService(_context).TransitionLeadInCurrentTransactionAsync(
                     lead.BusinessUnitId, lead.Id, new LifecycleActor(createdBy.Trim(), "AuthenticatedUser"),

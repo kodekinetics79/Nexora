@@ -211,6 +211,27 @@ export interface InventoryResourceDTO {
   requiredModule?: string | null;
 }
 
+export interface CommercialLineResolutionDTO {
+  id: number;
+  leadId: number;
+  leadRevisionId: number;
+  leadLineId: number;
+  rfqId?: number | null;
+  productId?: number | null;
+  requestedPartNumber: string;
+  requestedQuantity: number;
+  classification: 'KnownInStock' | 'KnownIncoming' | 'KnownShortage' | 'UnknownProduct' | 'PossibleMatchReview';
+  availableToPromise: number;
+  incomingAvailable: number;
+  fulfilment: { classification?: string; allocatedQuantity?: number; shortageQuantity?: number };
+  relatedResources: Array<{ resourceId: string; displayName: string; matchReason: string; score: number; evidenceReference: string }>;
+  productResolution: { confidence?: number; method?: string; decisionState?: string };
+  evidenceReference?: string | null;
+  inventoryAsOfUtc: string;
+  resolvedOn: string;
+  externalDiscoveryUsed: boolean;
+}
+
 export interface ListParams {
   search?: string;
   status?: string;
@@ -268,6 +289,14 @@ const commercialIntelligenceService = {
     (await axiosInstance.get<DemandDTO[]>(`${inventoryRoot}/demand`, { params })).data,
   getRelatedResources: async (): Promise<InventoryResourceDTO[]> =>
     (await axiosInstance.get<InventoryResourceDTO[]>(`${inventoryRoot}/related-resources`)).data,
+  resolveLeadLines: async (leadId: number, limit: 10 | 20 | 50): Promise<CommercialLineResolutionDTO[]> =>
+    (await axiosInstance.post<CommercialLineResolutionDTO[]>(`${inventoryRoot}/leads/${leadId}/resolve`, undefined, { params: { limit } })).data,
+  getLeadLineResolutions: async (leadId: number): Promise<CommercialLineResolutionDTO[]> =>
+    (await axiosInstance.get<CommercialLineResolutionDTO[]>(`${inventoryRoot}/leads/${leadId}/resolutions`)).data,
+  getRfqLineResolutions: async (rfqId: number): Promise<CommercialLineResolutionDTO[]> =>
+    (await axiosInstance.get<CommercialLineResolutionDTO[]>(`${inventoryRoot}/rfqs/${rfqId}/resolutions`)).data,
+  getQuoteLineResolutions: async (quoteId: number): Promise<CommercialLineResolutionDTO[]> =>
+    (await axiosInstance.get<CommercialLineResolutionDTO[]>(`${inventoryRoot}/quotes/${quoteId}/resolutions`)).data,
 };
 
 export default commercialIntelligenceService;

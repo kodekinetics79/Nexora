@@ -155,24 +155,29 @@ public enum CommercialResolutionClassification
     PossibleMatchReview,
 }
 
-public sealed record LeadLineCommercialResolution
+public sealed class LeadLineCommercialResolution
 {
-    public long Id { get; init; }
-    public long BusinessUnitId { get; init; }
-    public long LeadId { get; init; }
-    public long LeadRevisionId { get; init; }
-    public long LeadLineId { get; init; }
-    public long? ProductId { get; init; }
-    public required string RequestedPartNumber { get; init; }
-    public decimal RequestedQuantity { get; init; }
-    public CommercialResolutionClassification Classification { get; init; }
-    public decimal AvailableToPromise { get; init; }
-    public decimal IncomingAvailable { get; init; }
-    public required FulfilmentRoute Fulfilment { get; init; }
-    public IReadOnlyList<RelatedResource> RelatedResources { get; init; } = [];
-    public required string ResolutionMethod { get; init; }
-    public string? EvidenceReference { get; init; }
-    public DateTime ResolvedOn { get; init; }
+    public long Id { get; set; }
+    public long BusinessUnitId { get; set; }
+    public long LeadId { get; set; }
+    public long LeadRevisionId { get; set; }
+    public long LeadLineId { get; set; }
+    public long? RfqId { get; set; }
+    public long? ProductId { get; set; }
+    public string RequestedPartNumber { get; set; } = string.Empty;
+    public decimal RequestedQuantity { get; set; }
+    public CommercialResolutionClassification Classification { get; set; }
+    public decimal AvailableToPromise { get; set; }
+    public decimal IncomingAvailable { get; set; }
+    public string FulfilmentJson { get; set; } = "{}";
+    public string RelatedResourcesJson { get; set; } = "[]";
+    public string ProductResolutionJson { get; set; } = "{}";
+    public string ResolutionMethod { get; set; } = string.Empty;
+    public string? EvidenceReference { get; set; }
+    public DateTime InventoryAsOfUtc { get; set; }
+    public DateTime ResolvedOn { get; set; }
+    public FulfilmentRoute Fulfilment { get; set; } = new();
+    public IReadOnlyList<RelatedResource> RelatedResources { get; set; } = [];
 }
 
 public enum RelatedResourceKind

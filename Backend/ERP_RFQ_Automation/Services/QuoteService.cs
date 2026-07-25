@@ -12,6 +12,8 @@ using System.Data;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Services.Interfaces;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
+using ERP_RFQ_Automation.CommercialIntelligence.Sales;
+using ERP_RFQ_Automation.Sla;
 
 namespace ERP_RFQ_Automation.Services
 {
@@ -54,6 +56,7 @@ namespace ERP_RFQ_Automation.Services
         private readonly IQuoteConfigurationRepository _quoteConfigRepository;
         private readonly ERP_RFQ_Automation.Intelligence.Pricing.IBelowFloorGuard? _belowFloorGuard;
         private readonly ILifecycleApplicationService? _lifecycle;
+        private readonly ISalesApplicationService? _sales;
 
         // The below-floor guard is optional (defaults to null) so existing direct
         // constructions (tests, pre-wiring DI) keep working; without it the send
@@ -63,13 +66,15 @@ namespace ERP_RFQ_Automation.Services
             IEmailService emailService,
             IQuoteConfigurationRepository quoteConfigRepository,
             ERP_RFQ_Automation.Intelligence.Pricing.IBelowFloorGuard? belowFloorGuard = null,
-            ILifecycleApplicationService? lifecycle = null)
+            ILifecycleApplicationService? lifecycle = null,
+            ISalesApplicationService? sales = null)
         {
             _context = context;
             _emailService = emailService;
             _quoteConfigRepository = quoteConfigRepository;
             _belowFloorGuard = belowFloorGuard;
             _lifecycle = lifecycle;
+            _sales = sales;
         }
 
         // Legacy QuoteStatus id map, used ONLY when no matching SetupMaster row is
@@ -932,7 +937,7 @@ namespace ERP_RFQ_Automation.Services
 
             // Mark SENT (resolved via SetupMaster; legacy id 43 fallback) and stamp
             // SentOn so the SLA engine can compute staleness / auto-expiry (WP-A4).
-            quote.SentOn = DateTime.UtcNow;
+            quote.SentOn ??= DateTime.UtcNow;
             quote.ModifiedDate = DateTime.UtcNow;
             if (_lifecycle is not null)
             {
@@ -952,15 +957,36 @@ namespace ERP_RFQ_Automation.Services
                         $"quote-send:{quote.Id}:v{quote.LifecycleVersion}"),
                     false,
                     CancellationToken.None);
+                await RecordQuoteSentWorkAsync(quote, options, CancellationToken.None);
                 await transaction.CommitAsync();
             }
             else
             {
                 quote.StatusId = await ResolveQuoteStatusIdAsync("SENT", quote.BusinessUnitId);
                 await _context.SaveChangesAsync();
+                await RecordQuoteSentWorkAsync(quote, options, CancellationToken.None);
             }
 
             return QuoteSendResult.Sent();
+        }
+
+        private async Task RecordQuoteSentWorkAsync(Quote quote, QuoteSendOptions options, CancellationToken ct)
+        {
+            var lead = quote.Rfq?.Lead;
+            if (_sales is null || lead?.AssignTo is not > 0 || !quote.SentOn.HasValue) return;
+            var actor = string.IsNullOrWhiteSpace(options.RequestedBy) ? "system:quote-send" : options.RequestedBy.Trim();
+            var correlation = $"quote-send:{quote.Id}";
+            await _sales.AppendActivityAsync(quote.BusinessUnitId, new AppendCommercialActivityCommand(
+                lead.AssignTo.Value, CommercialActivityType.QuoteSent, "Quote", quote.Id,
+                lead.CustomerId, null, quote.SentOn.Value, "SENT", $"quote:{quote.Id}:sent",
+                actor, correlation, $"quote:{quote.Id}:sent-activity"), ct);
+            var staleDays = await _context.Set<SlaPolicy>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == quote.BusinessUnitId).Select(x => (int?)x.StaleQuoteDays)
+                .SingleOrDefaultAsync(ct) ?? SlaPolicy.Default(quote.BusinessUnitId).StaleQuoteDays;
+            await _sales.CreateFollowUpAsync(quote.BusinessUnitId, new CreateFollowUpTaskCommand(
+                lead.AssignTo.Value, "Quote", quote.Id, lead.CustomerId,
+                quote.SentOn.Value.AddDays(staleDays), 2, "QUOTE_RESPONSE",
+                actor, correlation, $"quote:{quote.Id}:sent-follow-up"), ct);
         }
 
         // ==================================================================

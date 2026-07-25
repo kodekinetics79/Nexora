@@ -72,6 +72,29 @@ public static class CommercialInventoryModelBuilderExtensions
             entity.HasOne<Warehouse>().WithMany().HasForeignKey(x => x.WarehouseId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne<Models.Inventory>().WithMany().HasForeignKey(x => x.InventoryId).OnDelete(DeleteBehavior.Restrict);
         });
+        modelBuilder.Entity<LeadLineCommercialResolution>(entity =>
+        {
+            entity.ToTable("lead_line_commercial_resolutions"); entity.HasKey(x => x.Id);
+            entity.Property(x => x.Classification).HasConversion<string>().HasMaxLength(40);
+            entity.Property(x => x.RequestedPartNumber).HasMaxLength(200).IsRequired();
+            entity.Property(x => x.RequestedQuantity).HasPrecision(18, 4);
+            entity.Property(x => x.AvailableToPromise).HasPrecision(18, 4);
+            entity.Property(x => x.IncomingAvailable).HasPrecision(18, 4);
+            entity.Property(x => x.FulfilmentJson).HasColumnType("jsonb");
+            entity.Property(x => x.RelatedResourcesJson).HasColumnType("jsonb");
+            entity.Property(x => x.ProductResolutionJson).HasColumnType("jsonb");
+            entity.Property(x => x.ResolutionMethod).HasMaxLength(80).IsRequired();
+            entity.Property(x => x.EvidenceReference).HasMaxLength(500);
+            entity.Ignore(x => x.Fulfilment); entity.Ignore(x => x.RelatedResources);
+            entity.HasIndex(x => new { x.BusinessUnitId, x.LeadRevisionId, x.LeadLineId }).IsUnique();
+            entity.HasIndex(x => new { x.BusinessUnitId, x.RfqId });
+            entity.HasOne<ERP_RFQ_Automation.LeadIdentity.LeadRevision>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.LeadRevisionId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<ERP_RFQ_Automation.LeadIdentity.LeadItemRevision>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.LeadLineId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+        });
         return modelBuilder;
     }
 }

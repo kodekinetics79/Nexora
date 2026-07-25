@@ -15,6 +15,7 @@ import { useSnackbar } from 'notistack';
 import intelligenceService from '../../api/services/intelligenceService';
 import type { ConversionPreviewItem } from '../../api/services/intelligenceService';
 import { ConfidenceChip, parseUserNumber } from './common';
+import CommercialLineIntelligence from '../../components/common/CommercialLineIntelligence';
 
 /** Sentinel for "None of these — leave unmatched" in the product dropdown. */
 const NO_MATCH = 'none';
@@ -69,7 +70,7 @@ const LeadConvertPage: React.FC = () => {
         const qty = item.normalizedQuantity ?? item.quantity;
         next[item.leadItemId] = {
           include: true,
-          productId: item.bestMatchProductId,
+          productId: item.needsAttention ? null : item.bestMatchProductId,
           quantity: qty != null ? String(qty) : '',
           unitOfMeasure: item.normalizedUom ?? item.unitOfMeasure ?? '',
         };
@@ -225,6 +226,8 @@ const LeadConvertPage: React.FC = () => {
             : `${attentionCount} lines need a quick look — they’re at the top.`}
         </Alert>
       )}
+
+      <Box sx={{ mb: 2 }}><CommercialLineIntelligence stage="lead" recordId={leadId} /></Box>
 
       {/* Line cards */}
       <Stack spacing={2} sx={{ mb: 3 }}>

@@ -191,8 +191,12 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.IOrderStockReservationSe
 builder.Services.AddSingleton<ERP_RFQ_Automation.Inventory.Commercial.IProductIdentityResolver, ERP_RFQ_Automation.Inventory.Commercial.ProductIdentityResolver>();
 builder.Services.AddSingleton<ERP_RFQ_Automation.Inventory.Commercial.IFulfilmentRouteService, ERP_RFQ_Automation.Inventory.Commercial.FulfilmentRouteService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.ProductIntelligence.IProductResolutionCatalog, ERP_RFQ_Automation.ProductIntelligence.EfProductResolutionCatalog>();
-builder.Services.AddSingleton<ERP_RFQ_Automation.ProductIntelligence.IApprovedProductReferenceSource, ERP_RFQ_Automation.ProductIntelligence.EmptyApprovedProductReferenceSource>();
+builder.Services.AddScoped<ERP_RFQ_Automation.ProductIntelligence.IApprovedProductReferenceSource, ERP_RFQ_Automation.ProductIntelligence.EfApprovedProductReferenceSource>();
 builder.Services.AddScoped<ERP_RFQ_Automation.ProductIntelligence.IProductItemResolver, ERP_RFQ_Automation.ProductIntelligence.DeterministicProductItemResolver>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.Commercial.ILocalRelatedResourceRepository, ERP_RFQ_Automation.Inventory.Commercial.EfLocalRelatedResourceRepository>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.Commercial.ILocalRelatedResourceSearch, ERP_RFQ_Automation.Inventory.Commercial.LocalRelatedResourceSearch>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.Commercial.ILeadLineCommercialResolutionService, ERP_RFQ_Automation.Inventory.Commercial.LeadLineCommercialResolutionService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.Commercial.ICommercialLineResolutionApplicationService, ERP_RFQ_Automation.Inventory.Commercial.CommercialLineResolutionApplicationService>();
 builder.Services.AddScoped<ILifecycleApplicationService, LifecycleApplicationService>();
 builder.Services.AddScoped<ILifecycleOutboxStore, LifecycleOutboxStore>();
 builder.Services.AddCommercialFinanceOutboxDispatcher(builder.Configuration);
