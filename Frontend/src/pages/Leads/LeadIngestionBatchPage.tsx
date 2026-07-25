@@ -52,14 +52,62 @@ const classificationMeta = (classification: string): { label: string; color: Chi
 
 const confidenceLabel = (confidence: number): string => `${Math.round(confidence * 100)}% confidence`;
 
-const evidenceText = (value: string): string => {
+const evidenceObject = (value: string): Record<string, unknown> | null => {
   try {
     const parsed = JSON.parse(value) as unknown;
-    return JSON.stringify(parsed, null, 2);
+    return typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : null;
   } catch {
-    return value;
+    return null;
   }
 };
+
+const itemLabels = (value: unknown): string[] => !Array.isArray(value) ? [] : value.map((item) => {
+  if (typeof item !== 'object' || item === null) return 'Unlabelled line item';
+  const row = item as Record<string, unknown>;
+  const part = String(row.part || row.description || 'Unlabelled item');
+  const quantity = Number(row.Quantity ?? row.quantity);
+  return Number.isFinite(quantity) ? `${part} (quantity ${quantity})` : part;
+});
+
+const matchEvidenceLines = (value: string): string[] => {
+  const evidence = evidenceObject(value);
+  if (!evidence) return [value || 'Match evidence is unavailable.'];
+  const overlap = Number(evidence.lineOverlap);
+  return Number.isFinite(overlap)
+    ? [`${Math.round(overlap * 100)}% of line items overlap with this candidate.`]
+    : ['Customer and RFQ evidence indicate a credible possible match.'];
+};
+
+const differenceLines = (value: string): string[] => {
+  const evidence = evidenceObject(value);
+  if (!evidence) return [value || 'Material differences are unavailable.'];
+  const current = evidence.current as Record<string, unknown> | undefined;
+  const previous = evidence.previous as Record<string, unknown> | undefined;
+  const currentItems = itemLabels(current?.items);
+  const previousItems = itemLabels(previous?.items);
+  const added = currentItems.filter((item) => !previousItems.includes(item));
+  const removed = previousItems.filter((item) => !currentItems.includes(item));
+  const lines: string[] = [];
+  if (added.length) lines.push(`Added or changed: ${added.join(', ')}.`);
+  if (removed.length) lines.push(`Removed or changed: ${removed.join(', ')}.`);
+  return lines.length ? lines : ['No material line-item differences were detected.'];
+};
+
+const impactLines = (value: string): string[] => {
+  const impact = evidenceObject(value);
+  if (!impact) return [value || 'Downstream impact is unavailable.'];
+  const rfqCount = Number(impact.rfqCount || 0);
+  const orderCount = Number(impact.orderCount || 0);
+  if (rfqCount === 0 && orderCount === 0)
+    return ['No downstream RFQs or orders would be changed by this decision.'];
+  return [`Review ${rfqCount} downstream RFQ${rfqCount === 1 ? '' : 's'} and ${orderCount} order${orderCount === 1 ? '' : 's'} before merging.`];
+};
+
+const EvidenceLines = ({ lines }: { lines: string[] }) => (
+  <Stack spacing={0.5} sx={{ mt: 0.25 }}>
+    {lines.map((line) => <Typography key={line} variant="body2">{line}</Typography>)}
+  </Stack>
+);
 
 const responseStatus = (error: unknown): number | undefined => {
   if (typeof error !== 'object' || error === null || !('response' in error)) return undefined;
@@ -98,9 +146,9 @@ const MatchReviewPanel = ({ occurrenceId, candidate }: { occurrenceId: number; c
         {candidate.customerRfqReference || 'Customer RFQ reference unavailable'} | {confidenceLabel(candidate.confidence)}
       </Typography>
       <Stack spacing={1} sx={{ mt: 1 }}>
-        <Box><Typography variant="caption" sx={{ fontWeight: 800 }}>Match reasons and line-item overlap</Typography><Typography variant="body2" component="pre" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', m: 0 }}>{evidenceText(candidate.matchEvidenceJson)}</Typography></Box>
-        <Box><Typography variant="caption" sx={{ fontWeight: 800 }}>Material differences</Typography><Typography variant="body2" component="pre" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', m: 0 }}>{evidenceText(candidate.differencesJson)}</Typography></Box>
-        <Box><Typography variant="caption" sx={{ fontWeight: 800 }}>Downstream commercial impact</Typography><Typography variant="body2" component="pre" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', m: 0 }}>{evidenceText(candidate.downstreamImpactJson)}</Typography></Box>
+        <Box><Typography variant="caption" sx={{ fontWeight: 800 }}>Match reasons and line-item overlap</Typography><EvidenceLines lines={matchEvidenceLines(candidate.matchEvidenceJson)} /></Box>
+        <Box><Typography variant="caption" sx={{ fontWeight: 800 }}>Material differences</Typography><EvidenceLines lines={differenceLines(candidate.differencesJson)} /></Box>
+        <Box><Typography variant="caption" sx={{ fontWeight: 800 }}>Downstream commercial impact</Typography><EvidenceLines lines={impactLines(candidate.downstreamImpactJson)} /></Box>
       </Stack>
       {candidate.reviewState === 'Pending' && (
         <Stack direction="row" spacing={1} sx={{ mt: 1.5, flexWrap: 'wrap', gap: 1 }}>

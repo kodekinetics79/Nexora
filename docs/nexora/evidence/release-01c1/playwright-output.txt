@@ -1,8 +1,8 @@
 
 Running 1 test using 1 worker
 
-(node:38913) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(node:52270) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
 (Use `node --trace-warnings ...` to show where the warning was created)
-  ✓  1 e2e/release-01c1-visible-journey.spec.ts:65:1 › authenticated four-inquiry bulk reconciliation is visible, governed, and tenant-safe (18.1s)
+  ✓  1 e2e/release-01c1-visible-journey.spec.ts:65:1 › authenticated four-inquiry bulk reconciliation is visible, governed, and tenant-safe (17.4s)
 
-  1 passed (18.7s)
+  1 passed (17.9s)
