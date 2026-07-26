@@ -5,7 +5,8 @@ import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Grid, Stack, Chip,
   Table, TableHead, TableRow, TableCell, TableBody,
-  CircularProgress, Divider, Breadcrumbs, Link, Alert,
+  CircularProgress, Divider, Breadcrumbs, Link, Alert, ButtonBase,
+  Drawer, IconButton, LinearProgress, Tooltip,
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
@@ -17,6 +18,11 @@ import {
   Schedule as HistoryIcon,
   OpenInNew as WorkspaceIcon,
   TravelExplore as SourcingIcon,
+  Close as CloseIcon,
+  Inventory2 as InventoryIcon,
+  PriceCheck as PricingIcon,
+  WarningAmber as BlockerIcon,
+  Description as EvidenceIcon,
 } from '@mui/icons-material';
 import rfqService from '../../../api/services/rfqService';
 import { useAuth } from '../../../context/AuthContext';
@@ -47,6 +53,8 @@ const ViewRFQPage: React.FC = () => {
   const queryClient = useQueryClient();
 
   const [approvalDialogOpen, setApprovalDialogOpen] = React.useState(false);
+  const [lineFilter, setLineFilter] = React.useState('all');
+  const [evidenceItemId, setEvidenceItemId] = React.useState<number | null>(null);
 
   const { data: rfq, isLoading, isError, refetch } = useQuery({
     queryKey: ['rfq-detail', Number(id)],
@@ -110,6 +118,44 @@ const ViewRFQPage: React.FC = () => {
   const isDraft = lifecycle?.currentStatusCode === 'DRAFT';
   const canPrepareQuote = Boolean(rfq.customerId && rfq.leadId && rfq.rfqitems.length > 0);
   const sourcingLines = new Map((sourcingQuery.data?.lines ?? []).map((line) => [line.id, line]));
+  const offersByLine = new Map<number, number>();
+  for (const offer of sourcingQuery.data?.offers ?? []) {
+    offersByLine.set(offer.rfqItemId, (offersByLine.get(offer.rfqItemId) ?? 0) + 1);
+  }
+  const awardedLines = new Set((sourcingQuery.data?.awards ?? []).map((award) => award.rfqItemId));
+  const lineMatches = (itemId: number, filter: string) => {
+    const line = sourcingLines.get(itemId);
+    const quoteCount = offersByLine.get(itemId) ?? 0;
+    const sourcingRequired = Boolean(line && line.shortfallQuantity > 0 && line.resolution !== 'INCOMING');
+    const ready = Boolean(line && (line.shortfallQuantity <= 0 || awardedLines.has(itemId)));
+    if (filter === 'stock') return line?.resolution === 'IN_STOCK';
+    if (filter === 'partial') return line?.resolution === 'PARTIAL';
+    if (filter === 'sourcing') return sourcingRequired;
+    if (filter === 'quoted') return quoteCount > 0;
+    if (filter === 'unresolved') return line?.resolution === 'UNKNOWN' || line?.resolution === 'POSSIBLE_MATCH';
+    if (filter === 'pricing') return sourcingRequired && !awardedLines.has(itemId);
+    if (filter === 'ready') return ready;
+    return true;
+  };
+  const visibleItems = rfq.rfqitems.filter((item) => lineMatches(item.id, lineFilter));
+  const summary = [
+    { key: 'all', label: 'Total lines', value: rfq.rfqitems.length, icon: <EvidenceIcon fontSize="small" /> },
+    { key: 'stock', label: 'Ready from stock', value: rfq.rfqitems.filter((x) => lineMatches(x.id, 'stock')).length, icon: <InventoryIcon fontSize="small" /> },
+    { key: 'partial', label: 'Partially available', value: rfq.rfqitems.filter((x) => lineMatches(x.id, 'partial')).length, icon: <BlockerIcon fontSize="small" /> },
+    { key: 'sourcing', label: 'Sourcing required', value: rfq.rfqitems.filter((x) => lineMatches(x.id, 'sourcing')).length, icon: <SourcingIcon fontSize="small" /> },
+    { key: 'quoted', label: 'Supplier Quotes', value: sourcingQuery.data?.offers.length ?? 0, icon: <QuoteDraftIcon fontSize="small" /> },
+    { key: 'unresolved', label: 'Unresolved matches', value: rfq.rfqitems.filter((x) => lineMatches(x.id, 'unresolved')).length, icon: <BlockerIcon fontSize="small" /> },
+    { key: 'pricing', label: 'Pricing pending', value: rfq.rfqitems.filter((x) => lineMatches(x.id, 'pricing')).length, icon: <PricingIcon fontSize="small" /> },
+    { key: 'ready', label: 'Ready for quote', value: rfq.rfqitems.filter((x) => lineMatches(x.id, 'ready')).length, icon: <ApproveIcon fontSize="small" /> },
+  ];
+  const readyCount = summary.find((item) => item.key === 'ready')?.value ?? 0;
+  const readinessPercent = rfq.rfqitems.length ? Math.round((readyCount / rfq.rfqitems.length) * 100) : 0;
+  const primaryBlocker = summary.find((item) => item.key === 'unresolved' && item.value > 0)
+    ? 'Resolve uncertain item matches'
+    : summary.find((item) => item.key === 'pricing' && item.value > 0)
+      ? 'Select verified supplier costs'
+      : null;
+  const evidenceItem = rfq.rfqitems.find((item) => item.id === evidenceItemId);
 
   return (
     <Box sx={{ p: 3, maxWidth: 1800, mx: 'auto' }}>
@@ -124,7 +170,7 @@ const ViewRFQPage: React.FC = () => {
           </Typography>
         </Breadcrumbs>
 
-        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: { xs: 'flex-start', md: 'center' }, gap: 2, flexDirection: { xs: 'column', md: 'row' } }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
             <Typography variant="h4" sx={{ fontWeight: 950, color: 'text.primary', letterSpacing: '-0.02em' }}>
               {rfq.rfqno}
@@ -144,7 +190,7 @@ const ViewRFQPage: React.FC = () => {
               sx={{ fontWeight: 900, fontSize: '0.65rem', textTransform: 'uppercase' }}
             />
           </Box>
-          <Stack direction="row" spacing={1.5}>
+          <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap', position: { md: 'sticky' }, top: 8, zIndex: 2 }}>
             {rfq.commercialCaseId && (
               <Button
                 variant="outlined"
@@ -190,7 +236,33 @@ const ViewRFQPage: React.FC = () => {
             </Button>
           </Stack>
         </Box>
+        <Paper sx={{ mt: 2, p: 2, borderRadius: 1, border: '1px solid', borderColor: 'divider', bgcolor: 'background.paper' }}>
+          <Grid container spacing={2} sx={{ alignItems: 'center' }}>
+            <Grid size={{ xs: 12, md: 3 }}><DataField label="Customer / contact" value={`${rfq.customerName || rfq.buyersName || 'Unresolved'}${rfq.contactName ? ` · ${rfq.contactName}` : ''}`} /></Grid>
+            <Grid size={{ xs: 6, md: 2 }}><DataField label="Account Owner" value={rfq.accountOwnerName || 'Unassigned'} /></Grid>
+            <Grid size={{ xs: 6, md: 2 }}><DataField label="Opportunity Owner" value={rfq.opportunityOwnerName || 'Unassigned'} /></Grid>
+            <Grid size={{ xs: 6, md: 2 }}><DataField label="Customer deadline" value={formatDate(rfq.bidClosingDate || null)} color={rfq.bidClosingDate && new Date(rfq.bidClosingDate) < new Date() ? 'error.main' : 'text.primary'} /></Grid>
+            <Grid size={{ xs: 6, md: 3 }}>
+              <Typography variant="caption" color="text.secondary">Commercial readiness</Typography>
+              <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}><LinearProgress variant="determinate" value={readinessPercent} sx={{ flex: 1, height: 8, borderRadius: 1 }} /><Typography sx={{ fontWeight: 800 }}>{readinessPercent}%</Typography></Stack>
+              <Typography variant="caption" color={primaryBlocker ? 'warning.main' : 'success.main'}>{primaryBlocker || 'Ready to prepare Customer Quote'}</Typography>
+            </Grid>
+          </Grid>
+        </Paper>
       </Box>
+
+      <Grid container spacing={1.5} sx={{ mb: 3 }}>
+        {summary.map((item) => (
+          <Grid key={item.key} size={{ xs: 6, sm: 4, md: 3, xl: 1.5 }}>
+            <ButtonBase onClick={() => setLineFilter(item.key)} sx={{ width: '100%', textAlign: 'left', borderRadius: 1 }} aria-pressed={lineFilter === item.key}>
+              <Paper sx={{ width: '100%', minHeight: 88, p: 1.5, borderRadius: 1, border: '1px solid', borderColor: lineFilter === item.key ? 'primary.main' : 'divider', bgcolor: lineFilter === item.key ? 'action.selected' : 'background.paper' }}>
+                <Stack direction="row" sx={{ justifyContent: 'space-between', color: 'text.secondary' }}>{item.icon}<Typography variant="h6" sx={{ fontWeight: 900 }}>{item.value}</Typography></Stack>
+                <Typography variant="caption" sx={{ fontWeight: 700 }}>{item.label}</Typography>
+              </Paper>
+            </ButtonBase>
+          </Grid>
+        ))}
+      </Grid>
 
       <Grid container spacing={3}>
         {/* RFQ Details */}
@@ -233,13 +305,13 @@ const ViewRFQPage: React.FC = () => {
             <Box sx={{ mb: 2 }}><CommercialLineIntelligence stage="rfq" recordId={rfq.id} /></Box>
 
             {/* Line Items */}
-            <Paper sx={{ borderRadius: 3, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>
+            <Paper sx={{ borderRadius: 1, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>
               <Box sx={{ p: 2.5, bgcolor: '#fafafa', borderBottom: '1px solid', borderColor: 'divider' }}>
                 <Typography sx={{ fontWeight: 950, fontSize: '0.9rem', color: 'text.primary', textTransform: 'uppercase' }}>
                   RFQ Lines ({rfq.rfqitems.length})
                 </Typography>
               </Box>
-              <Table size="small">
+              <Box sx={{ overflowX: 'auto' }}><Table size="small" sx={{ minWidth: 1100 }}>
                 <TableHead sx={{ bgcolor: '#fcfcfc' }}>
                   <TableRow>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>#</TableCell>
@@ -247,11 +319,13 @@ const ViewRFQPage: React.FC = () => {
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Manufacturer / Part #</TableCell>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }} align="center">Qty</TableCell>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Resolution</TableCell>
+                    <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Inventory</TableCell>
+                    <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Supplier Quotes</TableCell>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Next Action</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {rfq.rfqitems.map((item, idx) => (
+                  {visibleItems.map((item, idx) => (
                     <TableRow key={item.id} hover sx={{ '&:last-child td': { border: 0 } }}>
                       <TableCell sx={{ fontSize: '0.8rem', fontWeight: 700, color: 'text.secondary' }}>{idx + 1}</TableCell>
                       <TableCell>
@@ -275,6 +349,11 @@ const ViewRFQPage: React.FC = () => {
                       </TableCell>
                       <TableCell><Chip size="small" label={item.productId ? 'Request data verified' : 'Item Resolution Pending'} color={item.productId ? 'success' : 'warning'} variant="outlined" /></TableCell>
                       <TableCell>
+                        <Typography variant="caption" sx={{ fontWeight: 700 }}>{sourcingLines.get(item.id)?.resolution.replaceAll('_', ' ') || 'Checking'}</Typography>
+                        <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>ATP {sourcingLines.get(item.id)?.availableQuantity ?? '—'} · Short {sourcingLines.get(item.id)?.shortfallQuantity ?? '—'}</Typography>
+                      </TableCell>
+                      <TableCell><Chip size="small" label={offersByLine.get(item.id) ?? 0} color={(offersByLine.get(item.id) ?? 0) > 0 ? 'info' : 'default'} /></TableCell>
+                      <TableCell>
                         {(() => {
                           const sourcingLine = sourcingLines.get(item.id);
                           if (sourcingQuery.isLoading) {
@@ -287,7 +366,7 @@ const ViewRFQPage: React.FC = () => {
                             return <Chip size="small" color="success" variant="outlined" label="Use company inventory" />;
                           }
                           return (
-                            <Stack spacing={0.5} sx={{ alignItems: 'flex-start' }}>
+                            <Stack spacing={0.75} sx={{ alignItems: 'flex-start' }}>
                               <Typography variant="caption" color="error.main" sx={{ fontWeight: 700 }}>
                                 {sourcingLine.shortfallQuantity} to source · {sourcingLine.resolution.replaceAll('_', ' ')}
                               </Typography>
@@ -302,6 +381,7 @@ const ViewRFQPage: React.FC = () => {
                                   {sourcingLine.sourcingCaseId ? 'Open Sourcing Case' : 'Create / Open Sourcing Case'}
                                 </Button>
                               )}
+                              <Tooltip title="Inspect persisted source and normalization evidence"><Button size="small" variant="text" startIcon={<EvidenceIcon />} onClick={() => setEvidenceItemId(item.id)}>Evidence</Button></Tooltip>
                             </Stack>
                           );
                         })()}
@@ -310,13 +390,13 @@ const ViewRFQPage: React.FC = () => {
                   ))}
                   {rfq.rfqitems.length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={6} sx={{ py: 4, textAlign: 'center', color: 'text.disabled' }}>
-                        No items found in this RFQ.
+                      <TableCell colSpan={8} sx={{ py: 4, textAlign: 'center', color: 'text.disabled' }}>
+                        No RFQ lines match this filter.
                       </TableCell>
                     </TableRow>
                   )}
                 </TableBody>
-              </Table>
+              </Table></Box>
               <Box sx={{ p: 2, display: 'flex', justifyContent: 'flex-end', bgcolor: '#fafafa' }}>
                 <Stack direction="row" spacing={4}>
                    <Box sx={{ textAlign: 'right' }}>
@@ -403,6 +483,20 @@ const ViewRFQPage: React.FC = () => {
           }}
         />
       )}
+      <Drawer anchor="right" open={Boolean(evidenceItem)} onClose={() => setEvidenceItemId(null)} slotProps={{ paper: { sx: { width: { xs: '100%', sm: 440 }, p: 3 } } }}>
+        <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+          <Box><Typography variant="overline">Source evidence</Typography><Typography variant="h6" sx={{ fontWeight: 900 }}>{evidenceItem?.manufacturerPartNumber || evidenceItem?.itemMaterialCode || `Line ${evidenceItem?.lineItemNo || ''}`}</Typography></Box>
+          <IconButton aria-label="Close evidence" onClick={() => setEvidenceItemId(null)}><CloseIcon /></IconButton>
+        </Stack>
+        <Alert severity={evidenceItem?.aiconfidence != null && evidenceItem.aiconfidence < 0.8 ? 'warning' : 'info'} sx={{ mb: 2 }}>
+          Confidence {evidenceItem?.aiconfidence == null ? 'not recorded' : `${Math.round(evidenceItem.aiconfidence * 100)}%`}. Uncertain values require review.
+        </Alert>
+        <DataField label="Original customer value" value={evidenceItem?.itemText || evidenceItem?.materialPotext || evidenceItem?.productShortDescription || 'Source text not linked'} bold={false} />
+        <DataField label="Normalized part" value={evidenceItem?.manufacturerPartNumber || evidenceItem?.itemMaterialCode || 'Unresolved'} />
+        <DataField label="Normalized quantity / UOM" value={evidenceItem ? `${evidenceItem.quantity} ${evidenceItem.unitOfMeasure || 'EA'}` : null} />
+        <DataField label="Extraction location" value="Open Canonical Lead to inspect document, page, sheet, row, or bounding-box evidence." bold={false} />
+        {Boolean(rfq.leadId) && <Button variant="outlined" startIcon={<EvidenceIcon />} onClick={() => navigate(`/procurement/leads/view/${rfq.leadId}`)}>Open Canonical Lead evidence</Button>}
+      </Drawer>
     </Box>
   );
 };

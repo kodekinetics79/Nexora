@@ -8,6 +8,8 @@ export interface RfqResponseDTO {
     nexoraSerial?: string | null;
     contactId?: number | null;
     contactName?: string | null;
+    accountOwnerName?: string | null;
+    opportunityOwnerName?: string | null;
     rfqno: string;
     buyersName?: string;
     recDate: string;

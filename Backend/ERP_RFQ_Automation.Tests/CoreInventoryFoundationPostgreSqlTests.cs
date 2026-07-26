@@ -57,6 +57,13 @@ public sealed class CoreInventoryFoundationPostgreSqlTests
                     ("Id", "ProductName", "PartNo", "QtyOnHand", "ReorderPoint", "WarehouseId", "CreatedBy", "CreatedOn", "Buid")
                 VALUES (95801, 'Ambiguous stock', 'DUP 100', 5, 0, 95801, 'tests', now(), 95801),
                        (95803, 'Unique stock', 'SAFE200', 7, 0, 95801, 'tests', now(), 95801);
+
+                INSERT INTO public."Customers"
+                    ("ID", "Name", "ImageURL", "BUID", "IsActive", "CreatedBy", "CreatedOn")
+                VALUES (95801, 'Imported customer', '', 95801, true, 'tests', now());
+                INSERT INTO public."Contacts"
+                    ("ID", "BusinessUnitID", "CustomerID", "FirstName", "LastName", "Email", "CreatedBy", "CreatedOn")
+                VALUES (95801, 95801, 95801, 'Imported', 'Contact', 'imported-contact@example.test', 'tests', now());
                 """);
 
             await migrator.MigrateAsync("20260725205811_CoreProductInventoryFoundation");
@@ -109,6 +116,10 @@ public sealed class CoreInventoryFoundationPostgreSqlTests
                 """).SingleAsync();
             Assert.Contains("public.\"RFQ\"", triggerDefinition, StringComparison.Ordinal);
             Assert.DoesNotContain("public.\"RFQs\"", triggerDefinition, StringComparison.Ordinal);
+            var nextContactId = await context.Database.SqlQueryRaw<long>("""
+                SELECT nextval(pg_get_serial_sequence('public."Contacts"', 'ID')) AS "Value"
+                """).SingleAsync();
+            Assert.True(nextContactId > 95801);
 
             await context.Database.ExecuteSqlRawAsync("""
                 INSERT INTO public."BusinessUnits"

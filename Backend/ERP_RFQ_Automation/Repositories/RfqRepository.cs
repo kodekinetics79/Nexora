@@ -1,5 +1,6 @@
 ﻿using ERP_RFQ_Automation.DTOs.LookupDTOs;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
+using ERP_RFQ_Automation.CommercialRouting;
 using ERP_RFQ_Automation.DTOs.RfqDTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
@@ -146,6 +147,28 @@ namespace ERP_RFQ_Automation.Repositories
             if (rfq == null)
                 throw new KeyNotFoundException($"RFQ with ID {id} not found in Business Unit {businessUnitId}.");
 
+            var contactName = rfq.ContactId.HasValue
+                ? await _context.Contacts.AsNoTracking()
+                    .Where(x => x.BusinessUnitId == businessUnitId && x.Id == rfq.ContactId.Value)
+                    .Select(x => (x.FirstName + " " + x.LastName).Trim())
+                    .SingleOrDefaultAsync()
+                : null;
+            var accountOwnerName = rfq.CustomerId.HasValue
+                ? await (from ownership in _context.Set<CustomerOwnership>().AsNoTracking()
+                         join user in _context.Users.AsNoTracking() on ownership.PrimaryUserId equals user.Id
+                         where ownership.BusinessUnitId == businessUnitId
+                               && ownership.CustomerId == rfq.CustomerId.Value
+                               && ownership.IsActive && ownership.EffectiveTo == null
+                         orderby ownership.Priority descending, ownership.EffectiveFrom descending
+                         select (user.FirstName + " " + user.LastName).Trim()).FirstOrDefaultAsync()
+                : null;
+            var opportunityOwnerName = rfq.Lead?.AssignTo is long ownerId
+                ? await _context.Users.AsNoTracking()
+                    .Where(x => x.Buid == businessUnitId && x.Id == ownerId)
+                    .Select(x => (x.FirstName + " " + x.LastName).Trim())
+                    .SingleOrDefaultAsync()
+                : null;
+
             return new RfqResponseDTO
             {
                 Id = rfq.Id,
@@ -179,9 +202,12 @@ namespace ERP_RFQ_Automation.Repositories
                 LifecycleVersion = rfq.LifecycleVersion,
                 CustomerId = rfq.CustomerId,
                 ContactId = rfq.ContactId,
+                ContactName = contactName,
                 CustomerName = rfq.Customer != null ? rfq.Customer.Name : null,
                 CustomerEmail = rfq.Customer != null ? rfq.Customer.ContactEmail : null,
                 LeadEmail = rfq.Lead != null ? rfq.Lead.Clientemail : null,
+                AccountOwnerName = accountOwnerName,
+                OpportunityOwnerName = opportunityOwnerName,
                 Rfqitems = rfq.Rfqitems.Select(i => new RfqitemResponseDTO
                 {
                     Id = i.Id,

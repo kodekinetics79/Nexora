@@ -58,7 +58,7 @@ var originalLead = await EnsureIdentityLeadAsync(
     Guid.Parse("01c10000-0000-0000-0000-000000000000"), "fixture-original", "02-duplicate.csv",
     ("2", "VALVE-A", "Control valve", 14),
     ("3", "ACTUATOR-ADDED", "Electric actuator", 2));
-originalLead.ResolveCommercialIdentity(northstar.Id, null, "MATCHED");
+EnsureCommercialIdentity(originalLead, northstar.Id, null, "MATCHED");
 await db.SaveChangesAsync();
 
 var salesRole = await EnsureRoleAsync(tenantId, "CORE_SALES_REP", "Core Sales Representative");
@@ -100,7 +100,7 @@ var sixLineLead = await EnsureIdentityLeadAsync(
     ("4", "CORE-INCOMING-400", "Known controller with confirmed incoming inventory", 15),
     ("5", "X-UNKNOWN-900", "Unknown industrial component requiring related-resource search", 5),
     ("6", "FIELD-SERVICE", "On-site commissioning service, non-inventory", 1));
-sixLineLead.ResolveCommercialIdentity(abc.Id, abcContact.Id, "MATCHED");
+EnsureCommercialIdentity(sixLineLead, abc.Id, abcContact.Id, "MATCHED");
 sixLineLead.AssignTo = sarah.Id;
 sixLineLead.AssignOn ??= now.AddMinutes(-30);
 sixLineLead.AssignComment = "Confirmed ABC Engineering account owner available within capacity.";
@@ -109,7 +109,7 @@ var backupLead = await EnsureIdentityLeadAsync(
     "ABC-ENG-BACKUP-001", "Amira Cole", "procurement@abc-engineering.local", ahmed.Id,
     Guid.Parse("c0e00000-0000-0000-0000-000000000007"), "core-backup-case", "abc-engineering-owner-leave.csv",
     ("1", "CORE-ATP-100", "Urgent replacement required while account owner is on leave", 2));
-backupLead.ResolveCommercialIdentity(abc.Id, abcContact.Id, "MATCHED");
+EnsureCommercialIdentity(backupLead, abc.Id, abcContact.Id, "MATCHED");
 backupLead.AssignTo = ahmed.Id;
 backupLead.AssignOn ??= now.AddMinutes(-20);
 backupLead.AssignComment = "Sarah Malik remains Account Owner; Ahmed Khan selected as backup while Sarah is on leave.";
@@ -170,7 +170,7 @@ var revisedSixLineLead = await EnsureReconciledOccurrenceAsync(
     ("4", "CORE-INCOMING-400", "Known controller with confirmed incoming inventory", 15),
     ("5", "X-UNKNOWN-900", "Unknown industrial component requiring related-resource search", 5),
     ("6", "FIELD-SERVICE", "On-site commissioning service, non-inventory", 1));
-revisedSixLineLead.ResolveCommercialIdentity(abc.Id, abcContact.Id, "MATCHED");
+EnsureCommercialIdentity(revisedSixLineLead, abc.Id, abcContact.Id, "MATCHED");
 revisedSixLineLead.AssignTo = sarah.Id;
 revisedSixLineLead.AssignComment = "Confirmed account ownership and deterministic product expertise match.";
 await db.SaveChangesAsync();
@@ -189,7 +189,7 @@ var ambiguousLead = await EnsureIdentityLeadAsync(
     "CORE-AMBIGUOUS-001", "ABC Procurement", "shared-buying@acceptance.local", sarah.Id,
     Guid.Parse("c0e00000-0000-0000-0000-000000000301"), "core-ambiguous-customer",
     "ambiguous-customer.csv", ("1", "CORE-ATP-100", "Customer identity requires review", 1));
-ambiguousLead.ResolveCommercialIdentity(abc.Id, null, "AMBIGUOUS");
+EnsureCommercialIdentity(ambiguousLead, abc.Id, null, "AMBIGUOUS");
 ambiguousLead.RequiresCommercialReview = true;
 ambiguousLead.AssignComment = "Customer Resolution Required: multiple local identity signals require manager review.";
 
@@ -213,7 +213,7 @@ var reassignedLead = await EnsureIdentityLeadAsync(
     "CORE-REASSIGNED-001", "Reassignment Buyer", "reassignment@abc-engineering.local", ahmed.Id,
     Guid.Parse("c0e00000-0000-0000-0000-000000000304"), "core-reassigned",
     "reassigned-opportunity.csv", ("1", "CORE-PARTIAL-200", "Opportunity reassigned with history", 2));
-reassignedLead.ResolveCommercialIdentity(abc.Id, abcContact.Id, "MATCHED");
+EnsureCommercialIdentity(reassignedLead, abc.Id, abcContact.Id, "MATCHED");
 reassignedLead.AssignTo = ahmed.Id;
 reassignedLead.AssignComment = "Reassigned from Sarah Malik to Ahmed Khan for temporary backup coverage.";
 
@@ -231,7 +231,7 @@ var inventoryFailureLead = await EnsureIdentityLeadAsync(
     "CORE-INVENTORY-CHECK-FAIL", "Inventory Failure Buyer", "procurement@abc-engineering.local", sarah.Id,
     Guid.Parse("c0e00000-0000-0000-0000-000000000403"), "core-inventory-failure",
     "inventory-check-unavailable.csv", ("1", "CHECK-UNAVAILABLE-001", "Inventory check unavailable acceptance case", 1));
-inventoryFailureLead.ResolveCommercialIdentity(abc.Id, abcContact.Id, "MATCHED");
+EnsureCommercialIdentity(inventoryFailureLead, abc.Id, abcContact.Id, "MATCHED");
 await db.SaveChangesAsync();
 await EnsureSetupAsync("RFQStatus", "DRAFT", "Draft");
 await EnsureSetupAsync("LeadStatus", "CONVERTED_TO_RFQ", "Converted to RFQ");
@@ -627,12 +627,29 @@ async Task<Lead> EnsureSixLineCopyAsync(string rfqNumber, string key, Guid batch
     await db.Entry(lead).Collection(x => x.LeadItems).LoadAsync();
     foreach (var item in lead.LeadItems)
         item.Currency ??= "USD";
-    lead.ResolveCommercialIdentity(abc.Id, abcContact.Id, "MATCHED");
+    EnsureCommercialIdentity(lead, abc.Id, abcContact.Id, "MATCHED");
     lead.AssignTo = sarah.Id;
     lead.AssignOn ??= now;
     lead.AssignComment = "Confirmed ABC Engineering account owner available within capacity.";
     await db.SaveChangesAsync();
     return lead;
+}
+
+void EnsureCommercialIdentity(Lead lead, long customerId, long? contactId, string matchStatus)
+{
+    if (lead.CustomerId is null)
+    {
+        lead.ResolveCommercialIdentity(customerId, contactId, matchStatus);
+        return;
+    }
+
+    if (lead.CustomerId != customerId || (contactId.HasValue && lead.ContactId != contactId))
+    {
+        throw new InvalidOperationException(
+            $"Acceptance fixture identity conflict for Lead {lead.Id}: expected customer {customerId}" +
+            $" and contact {contactId?.ToString() ?? "(preserved)"}, found customer {lead.CustomerId}" +
+            $" and contact {lead.ContactId?.ToString() ?? "(none)"}.");
+    }
 }
 
 async Task EnsureReassignmentHistoryAsync(long leadId, long customerId, long ownershipId,

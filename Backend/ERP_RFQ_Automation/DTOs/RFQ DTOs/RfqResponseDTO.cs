@@ -35,9 +35,12 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public int LifecycleVersion { get; set; }
         public long? CustomerId { get; set; }
         public long? ContactId { get; set; }
+        public string? ContactName { get; set; }
         public string? CustomerName { get; set; }
         public string? CustomerEmail { get; set; }
         public string? LeadEmail { get; set; }
+        public string? AccountOwnerName { get; set; }
+        public string? OpportunityOwnerName { get; set; }
         public int ItemCount { get; set; } // Optimized: Item count for list views
         public string Readiness => CustomerId.HasValue && LeadId.HasValue && ItemCount > 0 ? "Ready for Quote" : "Review Required";
         public List<RfqitemResponseDTO> Rfqitems { get; set; } = new List<RfqitemResponseDTO>();
