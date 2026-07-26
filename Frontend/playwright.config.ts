@@ -6,6 +6,7 @@ import contract from './e2e/support/fixture-contract.json' with { type: 'json' }
 const fixtureMode = process.env.E2E_FIXTURE_MODE !== 'false';
 const baseURL = process.env.E2E_BASE_URL || contract.baseUrl;
 const apiURL = process.env.E2E_API_URL || contract.apiUrl;
+const webPort = new URL(baseURL).port || (new URL(baseURL).protocol === 'https:' ? '443' : '80');
 const startWebServer = process.env.E2E_SKIP_WEB_SERVER !== 'true';
 const authDir = 'node_modules/.cache/nexora-e2e';
 
@@ -125,7 +126,7 @@ export default defineConfig({
       timeout: 30_000,
     }] : []),
     {
-      command: 'npm run dev -- --host 127.0.0.1 --port 4173',
+      command: `npm run dev -- --host 127.0.0.1 --port ${webPort}`,
       url: baseURL,
       reuseExistingServer: !process.env.CI,
       timeout: 120_000,

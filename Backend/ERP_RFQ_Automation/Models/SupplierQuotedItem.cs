@@ -23,6 +23,38 @@ public partial class SupplierQuotedItem
 
     public string? QuoteReference { get; set; }
 
+    public long? SupplierSolicitationId { get; set; }
+
+    public long? RfqId { get; set; }
+
+    public long? RfqItemId { get; set; }
+
+    public long? ProductId { get; set; }
+
+    public int? LeadTimeDays { get; set; }
+
+    public decimal? AvailableQuantity { get; set; }
+
+    public decimal FreightCost { get; set; }
+
+    public decimal DutyCost { get; set; }
+
+    public decimal OtherCost { get; set; }
+
+    public decimal? MinimumOrderQuantity { get; set; }
+
+    public decimal? ReliabilitySnapshot { get; set; }
+
+    public decimal? LandedUnitCost { get; set; }
+
+    public int QuoteRevision { get; set; } = 1;
+
+    public string? ResponseIdempotencyKey { get; set; }
+
+    public string? RequestHash { get; set; }
+
+    public long Version { get; set; } = 1;
+
     public DateTime? QuoteDate { get; set; }
 
     public DateTime? ValidUntil { get; set; }
@@ -41,7 +73,7 @@ public partial class SupplierQuotedItem
 
     public bool IsActive { get; set; }
 
-    public long? BusinessUnitId { get; set; }
+    public long BusinessUnitId { get; set; }
 
     public virtual BusinessUnit? BusinessUnit { get; set; }
 

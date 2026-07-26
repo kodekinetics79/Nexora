@@ -100,13 +100,23 @@ public partial class ErpRfqAutomationContext
         {
             e.ToTable("SupplierSolicitations");
             e.HasKey(x => x.Id);
+            e.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
             e.Property(x => x.Status).HasConversion<string>().HasMaxLength(20).IsRequired();
             e.Property(x => x.Channel).HasMaxLength(40).IsRequired();
             e.Property(x => x.Notes).HasMaxLength(1000);
+            e.Property(x => x.IdempotencyKey).HasMaxLength(160).IsRequired();
+            e.Property(x => x.RequestHash).HasMaxLength(64).IsRequired();
+            e.Property(x => x.RequestedRfqItemIdsJson).HasColumnType("jsonb").HasDefaultValue("[]").IsRequired();
+            e.Property(x => x.Version).HasDefaultValue(1).IsConcurrencyToken();
             e.Property(x => x.CreatedOn).HasDefaultValueSql("now()");
             e.Property(x => x.UpdatedOn).HasDefaultValueSql("now()");
             e.HasIndex(x => new { x.BusinessUnitId, x.RfqId }).HasDatabaseName("IX_SupplierSolicitations_BU_Rfq");
+            e.HasIndex(x => new { x.BusinessUnitId, x.IdempotencyKey }).IsUnique();
             e.HasIndex(x => new { x.BusinessUnitId, x.RfqId, x.SupplierId }).HasDatabaseName("IX_SupplierSolicitations_BU_Rfq_Supplier");
+            e.HasOne<Rfq>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.RfqId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<Supplier>().WithMany().HasForeignKey(x => new { x.SupplierId, x.BusinessUnitId })
+                .HasPrincipalKey(x => new { x.Id, x.Buid }).OnDelete(DeleteBehavior.Restrict);
             e.HasQueryFilter(x => CurrentTenantId == null || x.BusinessUnitId == CurrentTenantId);
         });
 
@@ -114,12 +124,31 @@ public partial class ErpRfqAutomationContext
         {
             e.ToTable("SourcingAwards");
             e.HasKey(x => x.Id);
+            e.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
             e.Property(x => x.UnitPrice).HasColumnType("numeric(18,2)");
             e.Property(x => x.Quantity).HasColumnType("numeric(18,2)");
             e.Property(x => x.TotalValue).HasColumnType("numeric(18,2)");
+            e.Property(x => x.LandedUnitCost).HasColumnType("numeric(18,4)");
+            e.Property(x => x.Status).HasMaxLength(24).HasDefaultValue("APPROVED").IsRequired();
+            e.Property(x => x.IdempotencyKey).HasMaxLength(160);
+            e.Property(x => x.RequestHash).HasMaxLength(64);
+            e.Property(x => x.Version).HasDefaultValue(1).IsConcurrencyToken();
             e.Property(x => x.Rationale).HasMaxLength(2000);
             e.Property(x => x.CreatedOn).HasDefaultValueSql("now()");
             e.HasIndex(x => new { x.BusinessUnitId, x.RfqId }).HasDatabaseName("IX_SourcingAwards_BU_Rfq");
+            e.HasIndex(x => new { x.BusinessUnitId, x.IdempotencyKey }).IsUnique()
+                .HasFilter("\"IdempotencyKey\" IS NOT NULL");
+            e.HasIndex(x => new { x.BusinessUnitId, x.RfqItemId })
+                .HasFilter("\"RfqItemId\" IS NOT NULL AND \"Status\" IN ('PROPOSED','APPROVED')");
+            e.HasOne<Rfq>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.RfqId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<Rfqitem>().WithMany().HasForeignKey(x => new { x.RfqItemId, x.RfqId })
+                .HasPrincipalKey(x => new { x.Id, x.Rfqid }).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<Supplier>().WithMany().HasForeignKey(x => new { x.SupplierId, x.BusinessUnitId })
+                .HasPrincipalKey(x => new { x.Id, x.Buid }).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<SupplierQuotedItem>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.SupplierQuotedItemId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
             e.HasQueryFilter(x => CurrentTenantId == null || x.BusinessUnitId == CurrentTenantId);
         });
     }

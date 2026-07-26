@@ -24,6 +24,15 @@
         public long? Buid { get; set; }
         public string? BusinessUnitName { get; set; }
         public bool? IsActive { get; set; }
+        public string GovernanceStatus { get; set; } = null!;
+        public string VerificationStatus { get; set; } = null!;
+        public string ComplianceStatus { get; set; } = null!;
+        public string RiskStatus { get; set; } = null!;
+        public string ReadinessStatus { get; set; } = null!;
+        public DateTime? EffectiveFrom { get; set; }
+        public string? GovernanceReviewedBy { get; set; }
+        public DateTime? GovernanceReviewedOn { get; set; }
+        public Guid? ConcurrencyToken { get; set; }
         public string CreatedBy { get; set; } = null!;
         public DateTime CreatedOn { get; set; }
         public string? ModifiedBy { get; set; }

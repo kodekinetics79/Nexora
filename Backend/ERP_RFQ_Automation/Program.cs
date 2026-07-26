@@ -36,6 +36,9 @@ using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.QuoteDelivery;
 using ERP_RFQ_Automation.Security;
 using ERP_RFQ_Automation.Security.DocumentInspection;
+using ERP_RFQ_Automation.Procurement;
+using ERP_RFQ_Automation.CommercialDocuments;
+using ERP_RFQ_Automation.SupplierGovernance;
 using System.Text.Json.Serialization;
 using Npgsql;
 
@@ -138,11 +141,13 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Services.IPlatformAuditSe
 // Readiness/liveness health checks (DATA-05)
 builder.Services.AddSingleton<ERP_RFQ_Automation.HealthChecks.IExtractionWorkerHeartbeat,
     ERP_RFQ_Automation.HealthChecks.ExtractionWorkerHeartbeat>();
+builder.Services.AddSingleton<IProcurementDispatchHeartbeat, ProcurementDispatchHeartbeat>();
 builder.Services.AddHealthChecks()
     .AddCheck<ERP_RFQ_Automation.HealthChecks.DatabaseHealthCheck>("database", tags: new[] { "live", "ready" })
     .AddCheck<ERP_RFQ_Automation.HealthChecks.EvidenceStorageHealthCheck>("evidence-storage", tags: new[] { "ready" })
     .AddCheck<ERP_RFQ_Automation.HealthChecks.MalwareScannerHealthCheck>("malware-scanner", tags: new[] { "ready" })
-    .AddCheck<ERP_RFQ_Automation.HealthChecks.ExtractionWorkerHealthCheck>("extraction-worker", tags: new[] { "ready" });
+    .AddCheck<ERP_RFQ_Automation.HealthChecks.ExtractionWorkerHealthCheck>("extraction-worker", tags: new[] { "ready" })
+    .AddCheck<ProcurementDispatchHealthCheck>("procurement-dispatch-worker", tags: new[] { "ready" });
 // Register repositories
 builder.Services.AddScoped<ISetupMasterRepository, SetupMasterRepository>();
 builder.Services.AddScoped<ICurrencyRepository, CurrencyRepository>();
@@ -171,6 +176,11 @@ builder.Services.AddScoped<IRfqRepository, RfqRepository>();
 builder.Services.AddScoped<IQuoteRepository, QuoteRepository>();
 builder.Services.AddScoped<ISupplierPurchaseHistoryRepository, SupplierPurchaseHistoryRepository>();
 builder.Services.AddScoped<ISupplierQuotedItemRepository, SupplierQuotedItemRepository>();
+builder.Services.AddScoped<IProcurementApplicationService, ProcurementApplicationService>();
+builder.Services.AddHostedService<ProcurementDispatchWorker>();
+builder.Services.AddSingleton<ICommercialDocumentClassifier, DeterministicCommercialDocumentClassifier>();
+builder.Services.AddScoped<CommercialDocumentClassificationService>();
+builder.Services.AddScoped<SupplierGovernanceService>();
 builder.Services.AddScoped<IQuoteService, QuoteService>();
 builder.Services.AddScoped<IQuoteDeliveryStore, QuoteDeliveryStore>();
 builder.Services.AddScoped<IQuoteDeliverySender, QuoteDeliverySender>();

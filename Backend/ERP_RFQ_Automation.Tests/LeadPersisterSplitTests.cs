@@ -3,6 +3,8 @@ using ERP_RFQ_Automation.Services.Interfaces;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.Tests.Support;
+using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
+using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Tests;
@@ -29,7 +31,8 @@ public class LeadPersisterSplitTests : IDisposable
         ContentHash = new string('a', 64),
         StoragePath = storagePath ?? "/nonexistent/extraction/doc.pdf",
         FileName = "doc.pdf",
-        FileType = "pdf"
+        FileType = "pdf",
+        Attempts = 1
     };
 
     private static LeadExtractionResult Group(string rfq, int itemCount, string? inquiryType = null)
@@ -44,6 +47,18 @@ public class LeadPersisterSplitTests : IDisposable
         ExtractedItemCount = groups.Sum(g => g.Items.Count)
     };
 
+    private static async Task SeedAuthoritativeSourceAsync(ErpRfqAutomationContext context, ExtractionJob job)
+    {
+        var corpus = DocumentCorpus.Create(job.BusinessUnitId, job.BatchId, CorpusSourceType.ManualUpload);
+        context.Add(corpus);
+        await context.SaveChangesAsync();
+        var source = SourceDocument.Create(job.BusinessUnitId, corpus.Id, job.ContentHash,
+            job.FileName ?? "document", "application/pdf", "test", $"lead-persister/{job.Id}", "v1", 1);
+        source.MarkSecurityStatus(DocumentSecurityStatus.Cleared);
+        context.Add(source);
+        await context.SaveChangesAsync();
+    }
+
     [Fact]
     public async Task SplitOutcome_PersistsOneLeadPerGroup_SharingOneIngest()
     {
@@ -52,6 +67,7 @@ public class LeadPersisterSplitTests : IDisposable
             Seed.BusinessUnit(seedCtx, 1);
             Seed.EmailConfig(seedCtx, 100, 1);
             await seedCtx.SaveChangesAsync();
+            await SeedAuthoritativeSourceAsync(seedCtx, Job());
         }
 
         long firstLeadId;
@@ -101,7 +117,10 @@ public class LeadPersisterSplitTests : IDisposable
     public async Task Governed_split_uses_distinct_logical_source_keys_and_keeps_both_inquiries()
     {
         await using (var seed = _db.ContextFor(1))
-        { Seed.BusinessUnit(seed, 1); Seed.EmailConfig(seed, 100, 1); await seed.SaveChangesAsync(); }
+        {
+            Seed.BusinessUnit(seed, 1); Seed.EmailConfig(seed, 100, 1); await seed.SaveChangesAsync();
+            await SeedAuthoritativeSourceAsync(seed, Job());
+        }
         var storagePath = Path.Combine(Path.GetTempPath(), $"split-identity-{Guid.NewGuid():N}.txt");
         await File.WriteAllTextAsync(storagePath, "two inquiries");
         var job = Job(storagePath: storagePath);
@@ -146,6 +165,7 @@ public class LeadPersisterSplitTests : IDisposable
             Seed.BusinessUnit(seedCtx, 1);
             Seed.EmailConfig(seedCtx, 100, 1);
             await seedCtx.SaveChangesAsync();
+            await SeedAuthoritativeSourceAsync(seedCtx, Job());
         }
 
         await using var ctx = _db.ContextFor(null);
@@ -177,6 +197,7 @@ public class LeadPersisterSplitTests : IDisposable
             Seed.EmailConfig(seedCtx, 100, 1);
             var ingest = Seed.EmailIngest(seedCtx, 500, 100, "Queued");
             await seedCtx.SaveChangesAsync();
+            await SeedAuthoritativeSourceAsync(seedCtx, Job());
             ingestId = ingest.Id;
         }
 
@@ -240,6 +261,7 @@ public class LeadPersisterSplitTests : IDisposable
             Seed.BusinessUnit(seedCtx, 1);
             Seed.EmailConfig(seedCtx, 100, 1);
             await seedCtx.SaveChangesAsync();
+            await SeedAuthoritativeSourceAsync(seedCtx, Job());
         }
 
         await using (var context = _db.ContextFor(null))

@@ -131,12 +131,18 @@ public static class AgentSeed
         long supplierId,
         SolicitationStatus status = SolicitationStatus.Sent)
     {
+        if (!ctx.Rfqs.Local.Any(x => x.Id == rfqId) && !ctx.Rfqs.Any(x => x.Id == rfqId))
+            Rfq(ctx, rfqId, businessUnitId);
+        if (!ctx.Suppliers.Local.Any(x => x.Id == supplierId) && !ctx.Suppliers.Any(x => x.Id == supplierId))
+            Supplier(ctx, supplierId, businessUnitId, $"Supplier {supplierId}");
         var s = new SupplierSolicitation
         {
             Id = id,
             BusinessUnitId = businessUnitId,
             RfqId = rfqId,
             SupplierId = supplierId,
+            IdempotencyKey = $"test-solicitation:{businessUnitId}:{id}",
+            RequestHash = new string('0', 64),
             Status = status,
             SentOn = Now,
             Channel = "Email",
@@ -156,12 +162,19 @@ public static class AgentSeed
         decimal unitPrice,
         decimal? quantity = null)
     {
+        if (!ctx.Rfqs.Local.Any(x => x.Id == rfqId) && !ctx.Rfqs.Any(x => x.Id == rfqId))
+            Rfq(ctx, rfqId, businessUnitId);
+        if (!ctx.Suppliers.Local.Any(x => x.Id == supplierId) && !ctx.Suppliers.Any(x => x.Id == supplierId))
+            Supplier(ctx, supplierId, businessUnitId, $"Supplier {supplierId}");
         var a = new SourcingAward
         {
             Id = id,
             BusinessUnitId = businessUnitId,
             RfqId = rfqId,
             SupplierId = supplierId,
+            Status = "APPROVED",
+            IdempotencyKey = $"test-award:{businessUnitId}:{id}",
+            RequestHash = new string('0', 64),
             UnitPrice = unitPrice,
             Quantity = quantity,
             TotalValue = unitPrice * (quantity ?? 1m),

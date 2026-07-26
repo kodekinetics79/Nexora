@@ -1016,12 +1016,23 @@ public sealed class LeadPersister : ILeadPersister
         string? json = null;
         if (_context.Model.FindEntityType(typeof(SourceDocumentOccurrence)) is not null)
         {
-            json = await _context.Set<SourceDocumentOccurrence>()
+            var occurrences = _context.Set<SourceDocumentOccurrence>()
                 .AsNoTracking()
-                .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.ExtractionJobId == job.Id)
-                .OrderBy(x => x.ReceivedOn)
-                .Select(x => x.SourceMetadataJson)
-                .FirstOrDefaultAsync(ct);
+                .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.ExtractionJobId == job.Id);
+            if (_context.Database.ProviderName?.Contains("Sqlite", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                json = (await occurrences.Select(x => new { x.ReceivedOn, x.SourceMetadataJson })
+                        .ToListAsync(ct))
+                    .OrderBy(x => x.ReceivedOn)
+                    .Select(x => x.SourceMetadataJson)
+                    .FirstOrDefault();
+            }
+            else
+            {
+                json = await occurrences.OrderBy(x => x.ReceivedOn)
+                    .Select(x => x.SourceMetadataJson)
+                    .FirstOrDefaultAsync(ct);
+            }
         }
         if (!string.IsNullOrWhiteSpace(json))
         {

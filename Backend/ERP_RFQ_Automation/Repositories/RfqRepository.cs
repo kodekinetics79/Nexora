@@ -230,11 +230,6 @@ namespace ERP_RFQ_Automation.Repositories
 
         public async Task AddAsync(Rfq rfq)
         {
-            // Validate uniqueness of Rfqno within BusinessUnit
-            var rfqNoExists = await _context.Rfqs.AnyAsync(r => r.Rfqno == rfq.Rfqno && r.BusinessUnitId == rfq.BusinessUnitId);
-            if (rfqNoExists)
-                throw new ArgumentException($"RFQ number {rfq.Rfqno} already exists in this Business Unit.");
-
             // Validate FKs
             var buExists = await _context.BusinessUnits.AnyAsync(b => b.Id == rfq.BusinessUnitId);
             if (!buExists)
@@ -259,6 +254,10 @@ namespace ERP_RFQ_Automation.Repositories
             rfq.RfqstatusId = await LifecycleStatusCatalog.ResolveIdAsync(
                 _context, rfq.BusinessUnitId, "Rfq", "DRAFT");
 
+            var sequence = await _context.Database.SqlQueryRaw<long>(
+                "SELECT nextval('public.nexora_rfq_number_seq') AS \"Value\"").SingleAsync();
+            rfq.Rfqno = $"NXR-RFQ-{rfq.BusinessUnitId}-{DateTime.UtcNow:yyyy}-{sequence:D8}";
+
             rfq.CreatedDate = DateTime.UtcNow;
 
             _context.Rfqs.Add(rfq);
@@ -275,13 +274,7 @@ namespace ERP_RFQ_Automation.Repositories
             if (existing.BusinessUnitId != rfq.BusinessUnitId)
                 throw new ArgumentException("Cannot change the Business Unit of an RFQ.");
 
-            // Uniqueness check for Rfqno (exclude self)
-            var rfqNoExists = await _context.Rfqs.AnyAsync(r => r.Rfqno == rfq.Rfqno && r.BusinessUnitId == rfq.BusinessUnitId && r.Id != rfq.Id);
-            if (rfqNoExists)
-                throw new ArgumentException($"RFQ number {rfq.Rfqno} already exists in this Business Unit.");
-
             // Update fields
-            existing.Rfqno = rfq.Rfqno;
             existing.BuyersName = rfq.BuyersName;
             existing.RecDate = rfq.RecDate;
             existing.BidClosingDate = rfq.BidClosingDate;

@@ -172,6 +172,9 @@ public partial class ErpRfqAutomationContext
         // Stock reservation ledger (portable relational model; enabled for the SQLite suite).
         modelBuilder.ApplyInventoryReservationModel();
         modelBuilder.ApplyCommercialInventoryModel();
+        ConfigureProcurementModel(modelBuilder);
+        ConfigureCommercialDocumentsModel(modelBuilder);
+        ConfigureSupplierGovernanceModel(modelBuilder);
         modelBuilder.Entity<ERP_RFQ_Automation.Inventory.StockReservation>()
             .HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CustomerIdentifier>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);

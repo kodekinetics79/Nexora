@@ -49,6 +49,8 @@ const DraftRFQsPage = lazy(() => import('./pages/Procurement/RFQs/DraftRFQsPage'
 const OutstandingRFQsPage = lazy(() => import('./pages/Procurement/RFQs/OutstandingRFQsPage'));
 const ProcessRFQPage = lazy(() => import('./pages/Procurement/RFQs/ProcessRFQPage'));
 const ViewRFQPage = lazy(() => import('./pages/Procurement/RFQs/ViewRFQPage'));
+const SourcingWorkbenchPage = lazy(() => import('./pages/Procurement/Sourcing/SourcingWorkbenchPage'));
+const SourcingCasePage = lazy(() => import('./pages/Procurement/Sourcing/SourcingCasePage'));
 const DashboardPage = lazy(() => import('./pages/Dashboard/DashboardPage'));
 const TeamWorkloadPage = lazy(() => import('./pages/Dashboard/TeamWorkloadPage'));
 const QuotesPage = lazy(() => import('./pages/Sales/Quotes/QuotesPage'));
@@ -156,6 +158,10 @@ function App() {
       <Route path="/procurement/rfqs/process/:id" element={<MainLayout><PermissionGuard moduleName="RFQ Management" action="edit" redirect><ProcessRFQPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/rfqs/view/:id" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><ViewRFQPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/rfqs/:id/pricing" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><RfqPricingPage /></PermissionGuard></MainLayout>} />
+      <Route path="/procurement/rfqs/:rfqId/sourcing" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><SourcingWorkbenchPage /></PermissionGuard></MainLayout>} />
+      <Route path="/procurement/sourcing" element={<Navigate to="/procurement/sourcing-cases" replace />} />
+      <Route path="/procurement/sourcing-cases" element={<Navigate to="/procurement/rfqs/all?state=requires-sourcing" replace />} />
+      <Route path="/procurement/sourcing-cases/:caseId" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><SourcingCasePage /></PermissionGuard></MainLayout>} />
       <Route path="/rfqs/view/:id" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><ViewRFQPage /></PermissionGuard></MainLayout>} />
       <Route path="/rfqs" element={<Navigate to="/procurement/rfqs/all" replace />} />
       

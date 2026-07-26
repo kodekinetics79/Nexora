@@ -1,67 +1,35 @@
-using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using ERP_RFQ_Automation.Agent.Guardrails;
 using ERP_RFQ_Automation.Agent.Models;
 using ERP_RFQ_Automation.Agent.Sourcing;
 using ERP_RFQ_Automation.Models;
-using ERP_RFQ_Automation.Notifications;
+using ERP_RFQ_Automation.Procurement;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Agent.Tools;
 
 /// <summary>
-/// Encodes/decodes the RFQ linkage we stash in <see cref="SupplierQuotedItem.QuoteReference"/>.
-/// The existing SupplierQuotedItem model has no RfqId/RfqItemId/LeadTime columns and
-/// must not be modified, so captured quotes carry that context in the reference string
-/// (format: <c>rfq={id};item={id};lead={days}</c>). See SOURCING-WIRING.md.
-/// </summary>
-internal static class QuoteRef
-{
-    public static string Build(long rfqId, long rfqItemId, int? leadDays) =>
-        $"rfq={rfqId};item={rfqItemId};lead={(leadDays?.ToString(CultureInfo.InvariantCulture) ?? "")}";
-
-    public static (long? rfqId, long? rfqItemId, int? lead) Parse(string? reference)
-    {
-        if (string.IsNullOrWhiteSpace(reference)) return (null, null, null);
-        long? rfq = null, item = null; int? lead = null;
-        foreach (var part in reference.Split(';', StringSplitOptions.RemoveEmptyEntries))
-        {
-            var kv = part.Split('=', 2);
-            if (kv.Length != 2) continue;
-            var val = kv[1].Trim();
-            switch (kv[0].Trim().ToLowerInvariant())
-            {
-                case "rfq": if (long.TryParse(val, out var r)) rfq = r; break;
-                case "item": if (long.TryParse(val, out var i)) item = i; break;
-                case "lead": if (int.TryParse(val, out var l)) lead = l; break;
-            }
-        }
-        return (rfq, item, lead);
-    }
-}
-
-/// <summary>
-/// Dispatch an RFQ to MANY suppliers at once, recording a tracked
-/// <see cref="SupplierSolicitation"/> per supplier and emailing each via the
-/// notifications module. Supersedes the single-supplier <c>dispatch_rfq_to_supplier</c>
-/// for real, auditable multi-supplier sourcing. Mutation — guarded by
-/// RequireApprovalForSupplierEmails.
+/// Queue an RFQ for governed supplier dispatch. The procurement application service
+/// atomically records the solicitation, event, and outbox message; only the outbox
+/// worker is allowed to perform the external delivery.
 /// </summary>
 public sealed class SendRfqToSuppliersTool : IAgentTool
 {
     private readonly ErpRfqAutomationContext _db;
-    private readonly INotificationService _notifications;
+    private readonly IProcurementApplicationService _procurement;
 
-    public SendRfqToSuppliersTool(ErpRfqAutomationContext db, INotificationService notifications)
+    public SendRfqToSuppliersTool(ErpRfqAutomationContext db, IProcurementApplicationService procurement)
     {
         _db = db;
-        _notifications = notifications;
+        _procurement = procurement;
     }
 
     public string Name => AgentToolNames.SendRfqToSuppliers;
     public string Description =>
-        "Send an RFQ invitation to multiple suppliers at once. Records a tracked solicitation per supplier " +
-        "and emails each one. Use this to actually put an RFQ out to the market.";
+        "Queue an RFQ invitation to multiple suppliers. Each invitation is recorded with an auditable " +
+        "outbox message before the delivery worker contacts the supplier.";
     public string InputJsonSchema =>
         "{\"type\":\"object\",\"properties\":{" +
         "\"rfqId\":{\"type\":\"integer\"}," +
@@ -81,19 +49,22 @@ public sealed class SendRfqToSuppliersTool : IAgentTool
         // Rfq set IS tenant-filtered — this both loads context and enforces ownership.
         var rfq = await _db.Set<Rfq>().AsNoTracking()
             .Where(r => r.Id == rfqId.Value)
-            .Select(r => new { r.Id, r.Rfqno, r.BuyersName, r.BidClosingDate, r.NoOfLineItems })
+            .Select(r => new { r.Id, r.Rfqno, r.BidClosingDate })
             .FirstOrDefaultAsync(ct);
         if (rfq is null) return AgentToolResult.Fail($"RFQ {rfqId} not found.");
+
+        var rfqItemIds = await _db.Set<Rfqitem>().AsNoTracking()
+            .Where(item => item.Rfqid == rfq.Id)
+            .OrderBy(item => item.Id)
+            .Select(item => item.Id)
+            .ToArrayAsync(ct);
+        if (rfqItemIds.Length == 0) return AgentToolResult.Fail("The RFQ has no lines to solicit.");
 
         var suppliers = await _db.Set<Supplier>().AsNoTracking()
             .Where(s => supplierIds.Contains(s.Id))
             .Select(s => new { s.Id, s.Name, s.ContactEmail })
             .ToListAsync(ct);
         var byId = suppliers.ToDictionary(s => s.Id);
-
-        var message = input.GetStringOrNull("message") ?? "Please submit your best pricing and lead times.";
-        var dueDate = rfq.BidClosingDate?.ToString("yyyy-MM-dd") ?? "As soon as possible";
-        var now = DateTime.UtcNow;
 
         var results = new List<object>();
         var solicitedCount = 0;
@@ -105,45 +76,46 @@ public sealed class SendRfqToSuppliersTool : IAgentTool
                 continue;
             }
 
-            var notified = false;
-            string? note = null;
-            if (string.IsNullOrWhiteSpace(supplier.ContactEmail))
+            var semanticHash = SemanticHash($"rfq={rfq.Id}|supplier={sid}|lines={string.Join(',', rfqItemIds)}|due={rfq.BidClosingDate:O}");
+            var idempotencyKey = $"agent-solicit:{semanticHash}";
+            try
             {
-                note = "no contact email on file; solicitation recorded but not emailed";
-            }
-            else
-            {
-                notified = await _notifications.SendRfqToSupplierAsync(new RfqToSupplierNotification
+                var result = await _procurement.CreateSolicitationAsync(new CreateSolicitationCommand(
+                    ctx.BusinessUnitId,
+                    rfq.Id,
+                    supplier.Id,
+                    rfqItemIds,
+                    rfq.BidClosingDate,
+                    idempotencyKey,
+                    Actor(ctx),
+                    $"agent-solicit:{semanticHash}"), ct);
+
+                results.Add(new
                 {
-                    ToEmail = supplier.ContactEmail!,
-                    ToName = supplier.Name,
-                    BusinessUnitId = ctx.BusinessUnitId.ToString(),
-                    SupplierName = supplier.Name,
-                    RfqNumber = rfq.Rfqno,
-                    RfqTitle = rfq.BuyersName ?? rfq.Rfqno,
-                    ItemSummary = rfq.NoOfLineItems.HasValue ? $"{rfq.NoOfLineItems} line item(s)" : "See RFQ details",
-                    DueDate = dueDate,
-                    Message = message
-                }, ct);
-                if (!notified) note = "email dispatch failed; solicitation still recorded";
+                    supplierId = sid,
+                    supplierName = supplier.Name,
+                    solicited = true,
+                    queued = true,
+                    notified = false,
+                    replayed = result.Replayed,
+                    solicitationId = result.Id,
+                    status = result.Status
+                });
+                solicitedCount++;
             }
-
-            var solicitation = new SupplierSolicitation
+            catch (Exception exception) when (exception is ProcurementValidationException or ProcurementConflictException)
             {
-                BusinessUnitId = ctx.BusinessUnitId,
-                RfqId = rfq.Id,
-                SupplierId = supplier.Id,
-                Status = SolicitationStatus.Sent,
-                SentOn = now,
-                Channel = "Email",
-                Notes = note
-            };
-            _db.Set<SupplierSolicitation>().Add(solicitation);
-            solicitedCount++;
-            results.Add(new { supplierId = supplier.Id, supplierName = supplier.Name, email = supplier.ContactEmail, solicited = true, notified, reason = note });
+                results.Add(new
+                {
+                    supplierId = sid,
+                    supplierName = supplier.Name,
+                    solicited = false,
+                    queued = false,
+                    notified = false,
+                    reason = exception.Message
+                });
+            }
         }
-
-        await _db.SaveChangesAsync(ct);
 
         return AgentToolResult.Ok(new
         {
@@ -154,6 +126,12 @@ public sealed class SendRfqToSuppliersTool : IAgentTool
             recipients = results
         });
     }
+
+    private static string Actor(AgentToolContext ctx) =>
+        string.IsNullOrWhiteSpace(ctx.UserName) ? $"agent:{ctx.UserId?.ToString() ?? "system"}" : ctx.UserName.Trim();
+
+    private static string SemanticHash(string canonical) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
 
     private static List<long> ReadLongArray(JsonElement input, string prop)
     {
@@ -221,133 +199,58 @@ public sealed class ListSolicitationsTool : IAgentTool
 }
 
 /// <summary>
-/// Capture a supplier's returned quote as <see cref="SupplierQuotedItem"/> rows and
-/// mark the matching solicitation Responded. Lets a demo close the loop without inbound
-/// email parsing. Mutation — data entry; allowed at Act, approval at Suggest.
+/// Supplier quote capture remains unavailable to agents until the platform can verify
+/// a non-forgeable approval token against immutable stored evidence.
 /// </summary>
 public sealed class CaptureSupplierQuoteTool : IAgentTool
 {
-    private readonly ErpRfqAutomationContext _db;
-    public CaptureSupplierQuoteTool(ErpRfqAutomationContext db) => _db = db;
+    public CaptureSupplierQuoteTool(ErpRfqAutomationContext db, IProcurementApplicationService procurement)
+    {
+        _ = db;
+        _ = procurement;
+    }
 
     public string Name => AgentToolNames.CaptureSupplierQuote;
     public string Description =>
-        "Record a supplier's quote against an RFQ (one or more priced lines). Persists supplier-quoted items " +
-        "and marks that supplier's solicitation as Responded.";
+        "Supplier quote capture is disabled for agents. Use the authenticated procurement workflow " +
+        "until stored evidence and a non-forgeable approval token can be verified.";
     public string InputJsonSchema =>
         "{\"type\":\"object\",\"properties\":{" +
         "\"rfqId\":{\"type\":\"integer\"}," +
         "\"supplierId\":{\"type\":\"integer\"}," +
+        "\"supplierQuoteReference\":{\"type\":\"string\"}," +
+        "\"evidenceReference\":{\"type\":\"string\",\"pattern\":\"^sha256:[A-Fa-f0-9]{64}$\"}," +
+        "\"humanAuthorized\":{\"type\":\"boolean\",\"const\":true}," +
+        "\"revision\":{\"type\":\"integer\",\"minimum\":1}," +
         "\"lines\":{\"type\":\"array\",\"minItems\":1,\"items\":{\"type\":\"object\",\"properties\":{" +
         "\"rfqItemId\":{\"type\":\"integer\"}," +
         "\"unitPrice\":{\"type\":\"number\"}," +
         "\"quantity\":{\"type\":\"number\"}," +
         "\"leadTimeDays\":{\"type\":\"integer\"}," +
-        "\"currency\":{\"type\":\"string\"}}," +
+        "\"currency\":{\"type\":\"integer\"}," +
+        "\"availableQuantity\":{\"type\":\"number\"}," +
+        "\"freightCost\":{\"type\":\"number\"}," +
+        "\"dutyCost\":{\"type\":\"number\"}," +
+        "\"otherCost\":{\"type\":\"number\"}," +
+        "\"taxAmount\":{\"type\":\"number\"}," +
+        "\"discountAmount\":{\"type\":\"number\"}," +
+        "\"minimumOrderQuantity\":{\"type\":\"number\"}," +
+        "\"reliabilitySnapshot\":{\"type\":\"number\"}}," +
         "\"required\":[\"rfqItemId\",\"unitPrice\"]}}," +
         "\"validUntil\":{\"type\":\"string\"}}," +
-        "\"required\":[\"rfqId\",\"supplierId\",\"lines\"]}";
+        "\"required\":[\"rfqId\",\"supplierId\",\"supplierQuoteReference\",\"evidenceReference\",\"humanAuthorized\",\"validUntil\",\"lines\"]}";
     public bool IsMutation => true;
 
-    public async Task<AgentToolResult> ExecuteAsync(JsonElement input, AgentToolContext ctx, CancellationToken ct)
-    {
-        var rfqId = input.GetInt64OrNull("rfqId");
-        var supplierId = input.GetInt64OrNull("supplierId");
-        if (rfqId is null || supplierId is null)
-            return AgentToolResult.Fail("rfqId and supplierId are required.");
-
-        // Ownership check via tenant-filtered Rfq + Supplier sets.
-        var rfqExists = await _db.Set<Rfq>().AsNoTracking().AnyAsync(r => r.Id == rfqId.Value, ct);
-        if (!rfqExists) return AgentToolResult.Fail($"RFQ {rfqId} not found.");
-        var supplierExists = await _db.Set<Supplier>().AsNoTracking().AnyAsync(s => s.Id == supplierId.Value, ct);
-        if (!supplierExists) return AgentToolResult.Fail($"Supplier {supplierId} not found.");
-
-        if (input.ValueKind != JsonValueKind.Object || !input.TryGetProperty("lines", out var lines) || lines.ValueKind != JsonValueKind.Array || lines.GetArrayLength() == 0)
-            return AgentToolResult.Fail("lines must contain at least one quoted line.");
-
-        // RFQ line items provide fallback name/quantity. Rfqitem is not tenant-filtered,
-        // so constrain to this RFQ (already ownership-checked above).
-        var rfqItems = await _db.Set<Rfqitem>().AsNoTracking()
-            .Where(i => i.Rfqid == rfqId.Value)
-            .Select(i => new { i.Id, i.ProductShortName, i.Quantity, i.UomId, i.CurrencyId })
-            .ToListAsync(ct);
-        var rfqItemById = rfqItems.ToDictionary(i => i.Id);
-
-        var validUntil = ParseDate(input.GetStringOrNull("validUntil"));
-        var now = DateTime.UtcNow;
-        var createdBy = ctx.UserName ?? "agent";
-
-        var created = new List<SupplierQuotedItem>();
-        foreach (var line in lines.EnumerateArray())
-        {
-            var rfqItemId = line.GetInt64OrNull("rfqItemId");
-            var unitPrice = line.GetDecimalOrNull("unitPrice");
-            if (rfqItemId is null || unitPrice is null)
-                return AgentToolResult.Fail("each line requires rfqItemId and unitPrice.");
-
-            rfqItemById.TryGetValue(rfqItemId.Value, out var refItem);
-            var qty = line.GetDecimalOrNull("quantity") ?? (refItem is not null ? refItem.Quantity : 1m);
-            var leadDays = (int?)line.GetInt64OrNull("leadTimeDays");
-            // currency accepted as a numeric CurrencyId; a currency *code* string is not
-            // persisted (SupplierQuotedItem has only CurrencyId). See SOURCING-WIRING.md.
-            var currencyId = line.GetInt64OrNull("currency") ?? refItem?.CurrencyId;
-
-            var sqi = new SupplierQuotedItem
-            {
-                SupplierId = supplierId.Value,
-                ItemName = refItem?.ProductShortName,
-                Quantity = qty,
-                UnitPrice = unitPrice,
-                CurrencyId = currencyId,
-                UomId = refItem?.UomId,
-                QuoteReference = QuoteRef.Build(rfqId.Value, rfqItemId.Value, leadDays),
-                QuoteDate = now,
-                ValidUntil = validUntil,
-                CreatedBy = createdBy,
-                CreatedDate = now,
-                IsActive = true,
-                BusinessUnitId = ctx.BusinessUnitId
-            };
-            _db.Set<SupplierQuotedItem>().Add(sqi);
-            created.Add(sqi);
-        }
-
-        // Mark the matching Sent solicitation as Responded.
-        var solicitation = await _db.Set<SupplierSolicitation>()
-            .Where(s => s.RfqId == rfqId.Value && s.SupplierId == supplierId.Value && s.Status == SolicitationStatus.Sent)
-            .OrderByDescending(s => s.SentOn)
-            .FirstOrDefaultAsync(ct);
-        var solicitationUpdated = false;
-        if (solicitation is not null)
-        {
-            solicitation.Status = SolicitationStatus.Responded;
-            solicitation.RespondedOn = now;
-            solicitation.UpdatedOn = now;
-            solicitationUpdated = true;
-        }
-
-        await _db.SaveChangesAsync(ct);
-
-        return AgentToolResult.Ok(new
-        {
-            rfqId = rfqId.Value,
-            supplierId = supplierId.Value,
-            linesCaptured = created.Count,
-            supplierQuotedItemIds = created.Select(c => c.Id),
-            solicitationUpdated
-        });
-    }
-
-    private static DateTime? ParseDate(string? s) =>
-        DateTime.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var d)
-            ? d
-            : null;
+    public Task<AgentToolResult> ExecuteAsync(JsonElement input, AgentToolContext ctx, CancellationToken ct)
+        => Task.FromResult(AgentToolResult.Fail(
+            "Agent supplier quote capture is disabled until a non-forgeable approval token can be " +
+            "verified against immutable stored evidence. Use the authenticated procurement workflow."));
 }
 
 /// <summary>
 /// Read-only per-line comparison matrix of captured supplier quotes for an RFQ, with a
 /// shared multi-criteria score per supplier per line and an overall recommendation.
-/// Reads the quotes captured via <c>capture_supplier_quote</c> (SupplierQuotedItem).
+/// Reads authoritative quotes captured through the authenticated procurement workflow.
 /// </summary>
 public sealed class CompareSupplierQuotesTool : IAgentTool
 {
@@ -356,8 +259,8 @@ public sealed class CompareSupplierQuotesTool : IAgentTool
 
     public string Name => AgentToolNames.CompareSupplierQuotes;
     public string Description =>
-        "Compare captured supplier quotes for an RFQ line-by-line, scoring each supplier on price, lead time " +
-        "and success rate, and highlighting the best option per line plus an overall recommendation.";
+        "Compare commercially eligible supplier quotes for an RFQ line-by-line, scoring authoritative landed cost, " +
+        "lead time and success rate, and highlighting the best option per line plus an overall recommendation.";
     public string InputJsonSchema =>
         "{\"type\":\"object\",\"properties\":{\"rfqId\":{\"type\":\"integer\"}},\"required\":[\"rfqId\"]}";
     public bool IsMutation => false;
@@ -370,18 +273,58 @@ public sealed class CompareSupplierQuotesTool : IAgentTool
         var rfqExists = await _db.Set<Rfq>().AsNoTracking().AnyAsync(r => r.Id == rfqId.Value, ct);
         if (!rfqExists) return AgentToolResult.Fail($"RFQ {rfqId} not found.");
 
-        // SupplierQuotedItem is NOT globally tenant-filtered — scope explicitly.
-        var reference = $"rfq={rfqId.Value};";
-        var quoted = await _db.Set<SupplierQuotedItem>().AsNoTracking()
+        // Keep the security and commercial lineage explicit. QuoteReference is the
+        // supplier's own document reference and is never an ownership boundary.
+        var now = DateTime.UtcNow;
+        var candidates = await _db.Set<SupplierQuotedItem>().AsNoTracking()
             .Where(q => q.BusinessUnitId == ctx.BusinessUnitId
                         && q.IsActive
-                        && q.QuoteReference != null
-                        && q.QuoteReference.StartsWith(reference))
-            .Select(q => new { q.Id, q.SupplierId, q.UnitPrice, q.Quantity, q.QuoteReference, q.ItemName })
+                        && q.RfqId == rfqId.Value
+                        && q.RfqItemId != null)
+            .Select(q => new
+            {
+                q.Id,
+                q.SupplierId,
+                q.UnitPrice,
+                q.LandedUnitCost,
+                q.CurrencyId,
+                q.Quantity,
+                q.AvailableQuantity,
+                q.MinimumOrderQuantity,
+                q.RfqItemId,
+                q.LeadTimeDays,
+                q.ValidUntil,
+                q.ItemName
+            })
             .ToListAsync(ct);
 
+        if (candidates.Count == 0)
+            return AgentToolResult.Fail($"No supplier quotes were found for RFQ {rfqId}.");
+
+        var requestedByLine = await _db.Set<Rfqitem>().AsNoTracking()
+            .Where(line => line.Rfqid == rfqId.Value)
+            .Select(line => new { line.Id, line.Quantity })
+            .ToDictionaryAsync(line => line.Id, line => (decimal)line.Quantity, ct);
+
+        var quoted = candidates.Where(q =>
+        {
+            if (q.ValidUntil is not null && q.ValidUntil <= now) return false;
+            if (q.LandedUnitCost is null or <= 0m) return false;
+            if (q.LeadTimeDays is null or < 0) return false;
+            if (!requestedByLine.TryGetValue(q.RfqItemId!.Value, out var requested) || requested <= 0m) return false;
+            if (q.Quantity < requested || q.AvailableQuantity is null || q.AvailableQuantity < requested) return false;
+            if (q.MinimumOrderQuantity is > 0m && requested < q.MinimumOrderQuantity) return false;
+            return true;
+        }).ToList();
+
         if (quoted.Count == 0)
-            return AgentToolResult.Fail($"No captured supplier quotes found for RFQ {rfqId}. Capture supplier quotes first.");
+            return AgentToolResult.Fail(
+                $"No eligible supplier quotes were found for RFQ {rfqId}. Quotes require current validity, " +
+                "landed cost, lead time, sufficient quoted/available quantity, and a satisfied minimum order quantity.");
+
+        var currencies = quoted.Select(q => q.CurrencyId).Distinct().ToArray();
+        if (currencies.Length != 1 || currencies[0] is null)
+            return AgentToolResult.Fail("Supplier quote comparison requires one common currency. Normalize mixed or missing currencies before comparison.");
 
         var supplierIds = quoted.Select(q => q.SupplierId).Distinct().ToList();
         var suppliers = await _db.Set<Supplier>().AsNoTracking()
@@ -395,22 +338,23 @@ public sealed class CompareSupplierQuotesTool : IAgentTool
         var lineNames = new Dictionary<long, string?>();
         foreach (var q in quoted)
         {
-            var (_, itemId, lead) = QuoteRef.Parse(q.QuoteReference);
-            if (itemId is null) continue;
+            var itemId = q.RfqItemId!.Value;
+            var requestedQuantity = requestedByLine[itemId];
             supById.TryGetValue(q.SupplierId, out var sup);
             var bid = new LineBid
             {
                 SupplierId = q.SupplierId,
                 SupplierName = sup?.Name ?? $"Supplier {q.SupplierId}",
-                Price = (q.UnitPrice ?? 0m) * q.Quantity,
+                Price = q.LandedUnitCost!.Value * requestedQuantity,
                 UnitPrice = q.UnitPrice ?? 0m,
-                Quantity = q.Quantity,
-                LeadTime = lead ?? 0,
+                LandedUnitCost = q.LandedUnitCost.Value,
+                Quantity = requestedQuantity,
+                LeadTime = q.LeadTimeDays!.Value,
                 SuccessRate = (double)(sup?.SuccessRate ?? 0m)
             };
-            if (!byLine.TryGetValue(itemId.Value, out var list)) { list = new(); byLine[itemId.Value] = list; }
+            if (!byLine.TryGetValue(itemId, out var list)) { list = new(); byLine[itemId] = list; }
             list.Add(bid);
-            lineNames[itemId.Value] = q.ItemName;
+            lineNames[itemId] = q.ItemName;
         }
 
         var lineWins = new Dictionary<long, int>();
@@ -433,6 +377,7 @@ public sealed class CompareSupplierQuotesTool : IAgentTool
                     b.SupplierId,
                     b.SupplierName,
                     b.UnitPrice,
+                    b.LandedUnitCost,
                     b.Quantity,
                     lineTotal = b.Price,
                     leadTimeDays = b.LeadTime,
@@ -446,7 +391,8 @@ public sealed class CompareSupplierQuotesTool : IAgentTool
         // Overall: supplier winning most lines, tiebreak by lowest aggregate priced total.
         var totalsBySupplier = quoted
             .GroupBy(q => q.SupplierId)
-            .ToDictionary(g => g.Key, g => g.Sum(x => (x.UnitPrice ?? 0m) * x.Quantity));
+            .ToDictionary(g => g.Key, g => g.Sum(x =>
+                x.LandedUnitCost!.Value * requestedByLine[x.RfqItemId!.Value]));
         var overall = lineWins
             .OrderByDescending(kv => kv.Value)
             .ThenBy(kv => totalsBySupplier.GetValueOrDefault(kv.Key))
@@ -471,6 +417,7 @@ public sealed class CompareSupplierQuotesTool : IAgentTool
         public string SupplierName { get; set; } = string.Empty;
         public decimal Price { get; set; }
         public decimal UnitPrice { get; set; }
+        public decimal LandedUnitCost { get; set; }
         public decimal Quantity { get; set; }
         public double LeadTime { get; set; }
         public double SuccessRate { get; set; }
@@ -479,30 +426,34 @@ public sealed class CompareSupplierQuotesTool : IAgentTool
 }
 
 /// <summary>
-/// Record the sourcing award decision as <see cref="SourcingAward"/> rows. Mutation —
-/// guarded by RequireApprovalForAwards and the MaxAutoAwardValue cap (checked against
-/// the award total).
+/// Records one quote-backed sourcing award only when tenant policy explicitly permits
+/// autonomous awards. Human-required decisions remain in the authenticated workflow.
 /// </summary>
 public sealed class AwardRfqTool : IAgentTool
 {
     private readonly ErpRfqAutomationContext _db;
-    public AwardRfqTool(ErpRfqAutomationContext db) => _db = db;
+    private readonly IProcurementApplicationService _procurement;
+
+    public AwardRfqTool(ErpRfqAutomationContext db, IProcurementApplicationService procurement)
+    {
+        _db = db;
+        _procurement = procurement;
+    }
 
     public string Name => AgentToolNames.AwardRfq;
     public string Description =>
-        "Record the award decision for an RFQ: one or more line/supplier awards at agreed unit prices. " +
-        "This is the sourcing decision — subject to the award value cap and approval policy.";
+        "Approve one authoritative supplier-quote line for an RFQ. Requires the persisted quote id and " +
+        "current quote version; the tenant award cap is enforced against persisted landed cost.";
     public string InputJsonSchema =>
         "{\"type\":\"object\",\"properties\":{" +
         "\"rfqId\":{\"type\":\"integer\"}," +
-        "\"awards\":{\"type\":\"array\",\"minItems\":1,\"items\":{\"type\":\"object\",\"properties\":{" +
+        "\"awards\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":1,\"items\":{\"type\":\"object\",\"properties\":{" +
+        "\"supplierQuotedItemId\":{\"type\":\"integer\"}," +
+        "\"expectedQuoteVersion\":{\"type\":\"integer\"}," +
         "\"rfqItemId\":{\"type\":\"integer\"}," +
-        "\"supplierId\":{\"type\":\"integer\"}," +
-        "\"unitPrice\":{\"type\":\"number\"}," +
         "\"quantity\":{\"type\":\"number\"}}," +
-        "\"required\":[\"supplierId\",\"unitPrice\"]}}," +
-        "\"rationale\":{\"type\":\"string\"}," +
-        "\"totalValue\":{\"type\":\"number\",\"description\":\"Optional award total hint for guardrail checks; defaults to sum(unitPrice*quantity)\"}}," +
+        "\"required\":[\"supplierQuotedItemId\",\"expectedQuoteVersion\",\"quantity\"]}}," +
+        "\"rationale\":{\"type\":\"string\"}}," +
         "\"required\":[\"rfqId\",\"awards\"]}";
     public bool IsMutation => true;
 
@@ -517,57 +468,76 @@ public sealed class AwardRfqTool : IAgentTool
         if (input.ValueKind != JsonValueKind.Object || !input.TryGetProperty("awards", out var awards) || awards.ValueKind != JsonValueKind.Array || awards.GetArrayLength() == 0)
             return AgentToolResult.Fail("awards must contain at least one award.");
 
-        var rationale = input.GetStringOrNull("rationale");
-        var now = DateTime.UtcNow;
-        var actedByAgent = ctx.UserId is null; // no acting user => autonomous agent action
+        if (awards.GetArrayLength() != 1)
+            return AgentToolResult.Fail("Exactly one quote-backed award is supported per invocation.");
 
-        var created = new List<SourcingAward>();
-        decimal grandTotal = 0m;
-        foreach (var a in awards.EnumerateArray())
+        var requested = awards.EnumerateArray().Single();
+        var quoteId = requested.GetInt64OrNull("supplierQuotedItemId");
+        var expectedVersion = requested.GetInt64OrNull("expectedQuoteVersion");
+        var quantity = requested.GetDecimalOrNull("quantity");
+        if (quoteId is null || expectedVersion is null || quantity is null)
+            return AgentToolResult.Fail("supplierQuotedItemId, expectedQuoteVersion, and quantity are required.");
+
+        var quote = await _db.Set<SupplierQuotedItem>().AsNoTracking()
+            .SingleOrDefaultAsync(row => row.Id == quoteId.Value && row.BusinessUnitId == ctx.BusinessUnitId
+                && row.RfqId == rfqId.Value && row.IsActive, ct);
+        if (quote is null)
+            return AgentToolResult.Fail("The authoritative supplier quote was not found for this RFQ and tenant.");
+        if (quantity.Value <= 0m)
+            return AgentToolResult.Fail("Award quantity must be positive.");
+        if (quote.LandedUnitCost is null or <= 0m)
+            return AgentToolResult.Fail("The authoritative supplier quote has no valid landed unit cost.");
+
+        var policy = await _db.Set<AgentPolicy>().AsNoTracking()
+            .SingleOrDefaultAsync(row => row.BusinessUnitId == ctx.BusinessUnitId, ct)
+            ?? AgentPolicy.Default(ctx.BusinessUnitId);
+        if (policy.AutonomyLevel != AgentAutonomyLevel.Act || policy.RequireApprovalForAwards)
+            return AgentToolResult.Fail(
+                "This supplier award requires human approval. Complete it in the authenticated procurement workflow.");
+
+        var authoritativeTotal = quote.LandedUnitCost.Value * quantity.Value;
+        if (authoritativeTotal > policy.MaxAutoAwardValue)
+            return AgentToolResult.Fail(
+                $"Authoritative award value {authoritativeTotal:0.##} exceeds the tenant agent cap " +
+                $"{policy.MaxAutoAwardValue:0.##}. Complete this award in the authenticated procurement workflow.");
+
+        var semanticHash = SemanticHash(JsonSerializer.Serialize(new
         {
-            var supplierId = a.GetInt64OrNull("supplierId");
-            var unitPrice = a.GetDecimalOrNull("unitPrice");
-            if (supplierId is null || unitPrice is null)
-                return AgentToolResult.Fail("each award requires supplierId and unitPrice.");
-
-            var qty = a.GetDecimalOrNull("quantity");
-            var total = unitPrice.Value * (qty ?? 1m);
-            grandTotal += total;
-
-            var award = new SourcingAward
+            QuoteId = quoteId.Value,
+            ExpectedVersion = expectedVersion.Value,
+            Quantity = quantity.Value,
+            Rationale = input.GetStringOrNull("rationale")?.Trim()
+        }));
+        try
+        {
+            var result = await _procurement.ApproveAwardAsync(new ApproveAwardCommand(
+                ctx.BusinessUnitId,
+                quoteId.Value,
+                quantity.Value,
+                expectedVersion.Value,
+                $"agent-award:{semanticHash}",
+                Actor(ctx),
+                $"agent-award:{semanticHash}",
+                ctx.UserId,
+                input.GetStringOrNull("rationale")), ct);
+            return AgentToolResult.Ok(new
             {
-                BusinessUnitId = ctx.BusinessUnitId,
-                RfqId = rfqId.Value,
-                RfqItemId = a.GetInt64OrNull("rfqItemId"),
-                SupplierId = supplierId.Value,
-                UnitPrice = unitPrice.Value,
-                Quantity = qty,
-                TotalValue = total,
-                Rationale = rationale,
-                AwardedByUserId = ctx.UserId,
-                AwardedByAgent = actedByAgent
-            };
-            _db.Set<SourcingAward>().Add(award);
-            created.Add(award);
+                rfqId = rfqId.Value,
+                awardsRecorded = 1,
+                totalValue = authoritativeTotal,
+                replayed = result.Replayed,
+                awards = new[] { new { result.Id, supplierQuotedItemId = quoteId.Value, quantity = quantity.Value, result.Status } }
+            });
         }
-
-        await _db.SaveChangesAsync(ct);
-
-        return AgentToolResult.Ok(new
+        catch (Exception exception) when (exception is ProcurementValidationException or ProcurementConflictException)
         {
-            rfqId = rfqId.Value,
-            awardsRecorded = created.Count,
-            totalValue = grandTotal,
-            awards = created.Select(c => new
-            {
-                c.Id,
-                c.RfqItemId,
-                c.SupplierId,
-                c.UnitPrice,
-                c.Quantity,
-                c.TotalValue,
-                c.AwardedByAgent
-            })
-        });
+            return AgentToolResult.Fail(exception.Message);
+        }
     }
+
+    private static string Actor(AgentToolContext ctx) =>
+        string.IsNullOrWhiteSpace(ctx.UserName) ? $"agent:{ctx.UserId?.ToString() ?? "system"}" : ctx.UserName.Trim();
+
+    private static string SemanticHash(string canonical) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
 }

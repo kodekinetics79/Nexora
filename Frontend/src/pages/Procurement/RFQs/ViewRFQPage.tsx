@@ -16,6 +16,7 @@ import {
   NavigateNext as NextIcon,
   Schedule as HistoryIcon,
   OpenInNew as WorkspaceIcon,
+  TravelExplore as SourcingIcon,
 } from '@mui/icons-material';
 import rfqService from '../../../api/services/rfqService';
 import { useAuth } from '../../../context/AuthContext';
@@ -24,6 +25,7 @@ import { useSnackbar } from 'notistack';
 import LifecycleActions from '../../../components/common/LifecycleActions';
 import lifecycleService from '../../../api/services/commercialLifecycleService';
 import CommercialLineIntelligence from '../../../components/common/CommercialLineIntelligence';
+import procurementService from '../../../api/services/procurementService';
 
 const DataField: React.FC<{ label: string; value: string | number | null; bold?: boolean; color?: string }> = ({ label, value, bold = true, color = 'text.primary' }) => (
   <Box sx={{ mb: 1.5 }}>
@@ -56,6 +58,12 @@ const ViewRFQPage: React.FC = () => {
     queryFn: () => lifecycleService.getState('rfqs', Number(id)),
     enabled: !!id,
   });
+  const sourcingQuery = useQuery({
+    queryKey: ['procurement-sourcing-workbench', Number(id)],
+    queryFn: () => procurementService.getWorkbench(Number(id)),
+    enabled: !!id && hasPermission('RFQ Management'),
+    retry: 1,
+  });
 
   const approveMutation = useMutation({
     mutationFn: (payload: { id: number; approvedBy: string; email?: string; subject?: string; body?: string; customerId?: number }) =>
@@ -80,6 +88,15 @@ const ViewRFQPage: React.FC = () => {
     ),
   });
 
+  const sourcingCaseMutation = useMutation({
+    mutationFn: (rfqItemId: number) => procurementService.createOrOpenSourcingCase(Number(id), rfqItemId, 10),
+    onSuccess: (sourcingCase) => navigate(`/procurement/sourcing-cases/${sourcingCase.id}`),
+    onError: (error: any) => enqueueSnackbar(
+      error?.response?.data?.detail || error?.response?.data?.message || 'The Sourcing Case could not be created.',
+      { variant: 'error' },
+    ),
+  });
+
   const formatDate = (dateStr: string | null) => {
     if (!dateStr) return '—';
     const d = new Date(dateStr);
@@ -92,6 +109,7 @@ const ViewRFQPage: React.FC = () => {
 
   const isDraft = lifecycle?.currentStatusCode === 'DRAFT';
   const canPrepareQuote = Boolean(rfq.customerId && rfq.leadId && rfq.rfqitems.length > 0);
+  const sourcingLines = new Map((sourcingQuery.data?.lines ?? []).map((line) => [line.id, line]));
 
   return (
     <Box sx={{ p: 3, maxWidth: 1800, mx: 'auto' }}>
@@ -256,7 +274,38 @@ const ViewRFQPage: React.FC = () => {
                         {item.quantity} {item.unitOfMeasure || 'EA'}
                       </TableCell>
                       <TableCell><Chip size="small" label={item.productId ? 'Request data verified' : 'Item Resolution Pending'} color={item.productId ? 'success' : 'warning'} variant="outlined" /></TableCell>
-                      <TableCell><Typography variant="caption" color="text.secondary">Inventory Check Pending · Pricing Pending</Typography></TableCell>
+                      <TableCell>
+                        {(() => {
+                          const sourcingLine = sourcingLines.get(item.id);
+                          if (sourcingQuery.isLoading) {
+                            return <Typography variant="caption" color="text.secondary">Checking company availability…</Typography>;
+                          }
+                          if (sourcingQuery.isError || !sourcingLine) {
+                            return <Typography variant="caption" color="error.main">Inventory check unavailable</Typography>;
+                          }
+                          if (sourcingLine.shortfallQuantity <= 0 || sourcingLine.resolution === 'IN_STOCK') {
+                            return <Chip size="small" color="success" variant="outlined" label="Use company inventory" />;
+                          }
+                          return (
+                            <Stack spacing={0.5} sx={{ alignItems: 'flex-start' }}>
+                              <Typography variant="caption" color="error.main" sx={{ fontWeight: 700 }}>
+                                {sourcingLine.shortfallQuantity} to source · {sourcingLine.resolution.replaceAll('_', ' ')}
+                              </Typography>
+                              {hasPermission('RFQ Management', 'edit') && (
+                                <Button
+                                  size="small"
+                                  variant="contained"
+                                  startIcon={<SourcingIcon />}
+                                  disabled={sourcingCaseMutation.isPending}
+                                  onClick={() => sourcingCaseMutation.mutate(item.id)}
+                                >
+                                  {sourcingLine.sourcingCaseId ? 'Open Sourcing Case' : 'Create / Open Sourcing Case'}
+                                </Button>
+                              )}
+                            </Stack>
+                          );
+                        })()}
+                      </TableCell>
                     </TableRow>
                   ))}
                   {rfq.rfqitems.length === 0 && (

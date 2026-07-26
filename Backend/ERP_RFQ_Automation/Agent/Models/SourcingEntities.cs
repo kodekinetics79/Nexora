@@ -5,7 +5,10 @@ namespace ERP_RFQ_Automation.Agent.Models;
 /// <summary>Delivery/response state of an RFQ solicitation sent to one supplier.</summary>
 public enum SolicitationStatus
 {
+    PendingDispatch,
+    Dispatching,
     Sent,
+    DeliveryFailed,
     Responded,
     Declined,
     Expired
@@ -26,7 +29,12 @@ public sealed class SupplierSolicitation
     public long RfqId { get; set; }
     public long SupplierId { get; set; }
 
-    public SolicitationStatus Status { get; set; } = SolicitationStatus.Sent;
+    public string IdempotencyKey { get; set; } = null!;
+    public string RequestHash { get; set; } = null!;
+    public string RequestedRfqItemIdsJson { get; set; } = "[]";
+    public long Version { get; set; } = 1;
+
+    public SolicitationStatus Status { get; set; } = SolicitationStatus.PendingDispatch;
 
     public DateTime SentOn { get; set; }
     public DateTime? RespondedOn { get; set; }
@@ -57,11 +65,20 @@ public sealed class SourcingAward
 
     public long SupplierId { get; set; }
 
+    public long? SupplierQuotedItemId { get; set; }
+    public long? CurrencyId { get; set; }
+    public string Status { get; set; } = "APPROVED";
+    public string? IdempotencyKey { get; set; }
+    public string? RequestHash { get; set; }
+    public long Version { get; set; } = 1;
+
     public decimal UnitPrice { get; set; }
     public decimal? Quantity { get; set; }
 
     /// <summary>UnitPrice × Quantity (Quantity defaults to 1 when absent).</summary>
     public decimal TotalValue { get; set; }
+
+    public decimal? LandedUnitCost { get; set; }
 
     public string? Rationale { get; set; }
 

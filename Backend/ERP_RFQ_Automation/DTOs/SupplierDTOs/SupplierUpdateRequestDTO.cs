@@ -15,16 +15,11 @@ namespace ERP_RFQ_Automation.DTOs.SupplierDTOs
         public int? CityId { get; set; }
         public int? CountryId { get; set; }
         public string? PostalCode { get; set; }
-        public decimal? SuccessRate { get; set; }
-        public int? AvgResponseTime { get; set; }
         public string? Tags { get; set; }
         public string? Comments { get; set; }
         public long? CurrencyId { get; set; }
-        [Required]
-        public long Buid { get; set; }
         public bool? IsActive { get; set; }
-        [Required]
-        public string ModifiedBy { get; set; } = null!;
+        public Guid? ConcurrencyToken { get; set; }
         public IFormFile? ImageFile { get; set; }
     }
 }

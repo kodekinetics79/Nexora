@@ -604,7 +604,7 @@ public sealed class PostgreSqlProductionDialectTests
             JOIN pg_namespace schema_definition ON schema_definition.oid = sequence_definition.relnamespace
             WHERE schema_definition.nspname = 'public'
               AND sequence_definition.relkind = 'S'
-              AND sequence_definition.relname <> 'CommercialCaseReferenceSequence'
+              AND sequence_definition.relname NOT IN ('CommercialCaseReferenceSequence', 'nexora_rfq_number_seq')
               AND CASE WHEN sequence_definition.relkind = 'S' THEN has_sequence_privilege(
                       'nexora_tenant_app',
                       format('%I.%I', schema_definition.nspname, sequence_definition.relname),
@@ -635,6 +635,18 @@ public sealed class PostgreSqlProductionDialectTests
                   ELSE false END;
             """;
         Assert.Null((await mutableSequenceCommand.ExecuteScalarAsync()) as string);
+
+        await using (var rfqSequenceTransaction = await connection.BeginTransactionAsync())
+        {
+            await using var rfqSequenceCommand = connection.CreateCommand();
+            rfqSequenceCommand.Transaction = rfqSequenceTransaction;
+            rfqSequenceCommand.CommandText = """
+                SET LOCAL ROLE nexora_tenant_app;
+                SELECT nextval('public.nexora_rfq_number_seq');
+                """;
+            Assert.True(Convert.ToInt64(await rfqSequenceCommand.ExecuteScalarAsync()) > 0);
+            await rfqSequenceTransaction.RollbackAsync();
+        }
 
         await using var futureSequenceCommand = connection.CreateCommand();
         futureSequenceCommand.CommandText = """

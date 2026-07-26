@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
 
 namespace ERP_RFQ_Automation.Models;
 
@@ -37,6 +38,25 @@ public partial class Supplier
 
     public bool? IsActive { get; set; }
 
+    public string GovernanceStatus { get; set; } = SupplierGovernanceStatuses.Unverified;
+
+    public string VerificationStatus { get; set; } = SupplierGovernanceUnknown.Unknown;
+
+    public string ComplianceStatus { get; set; } = SupplierGovernanceUnknown.Unknown;
+
+    public string RiskStatus { get; set; } = SupplierGovernanceUnknown.Unknown;
+
+    public string ReadinessStatus { get; set; } = SupplierReadinessStatuses.ReviewRequired;
+
+    public DateTime? EffectiveFrom { get; set; }
+
+    public string? GovernanceReviewedBy { get; set; }
+
+    public DateTime? GovernanceReviewedOn { get; set; }
+
+    [ConcurrencyCheck]
+    public Guid? ConcurrencyToken { get; set; }
+
     public string CreatedBy { get; set; } = null!;
 
     public DateTime CreatedOn { get; set; }
@@ -66,4 +86,55 @@ public partial class Supplier
     public virtual ICollection<SupplierPurchaseHistory> SupplierPurchaseHistories { get; set; } = new List<SupplierPurchaseHistory>();
 
     public virtual ICollection<SupplierQuotedItem> SupplierQuotedItems { get; set; } = new List<SupplierQuotedItem>();
+}
+
+public static class SupplierGovernanceStatuses
+{
+    public const string Discovered = "DISCOVERED";
+    public const string Unverified = "UNVERIFIED";
+    public const string ReviewRequired = "REVIEW_REQUIRED";
+    public const string Provisional = "PROVISIONAL";
+    public const string Approved = "APPROVED";
+    public const string Preferred = "PREFERRED";
+    public const string Restricted = "RESTRICTED";
+    public const string Blocked = "BLOCKED";
+    public const string Inactive = "INACTIVE";
+}
+
+public static class SupplierReadinessStatuses
+{
+    public const string ReviewRequired = "REVIEW_REQUIRED";
+    public const string Ready = "READY";
+    public const string Restricted = "RESTRICTED";
+    public const string Blocked = "BLOCKED";
+}
+
+public static class SupplierGovernanceUnknown
+{
+    public const string Unknown = "UNKNOWN";
+}
+
+public static class SupplierVerificationStatuses
+{
+    public const string Pending = "PENDING";
+    public const string Verified = "VERIFIED";
+    public const string Failed = "FAILED";
+    public const string Expired = "EXPIRED";
+}
+
+public static class SupplierComplianceStatuses
+{
+    public const string Pending = "PENDING";
+    public const string Cleared = "CLEARED";
+    public const string Restricted = "RESTRICTED";
+    public const string Blocked = "BLOCKED";
+    public const string Failed = "FAILED";
+}
+
+public static class SupplierRiskStatuses
+{
+    public const string Low = "LOW";
+    public const string Medium = "MEDIUM";
+    public const string High = "HIGH";
+    public const string Blocked = "BLOCKED";
 }

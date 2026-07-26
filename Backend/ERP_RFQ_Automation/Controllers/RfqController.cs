@@ -23,19 +23,20 @@ namespace ERP_RFQ_Automation.Controllers
         private readonly Services.IQuoteService _quoteService;
         private readonly ErpRfqAutomationContext _context;
         private readonly ILifecycleApplicationService _lifecycle;
+        private readonly ILogger<RfqController>? _logger;
 
-        public RfqController(IRfqRepository repository, Services.IQuoteService quoteService, ErpRfqAutomationContext context, ILifecycleApplicationService lifecycle)
+        public RfqController(IRfqRepository repository, Services.IQuoteService quoteService, ErpRfqAutomationContext context, ILifecycleApplicationService lifecycle, ILogger<RfqController>? logger = null)
         {
             _repository = repository;
             _quoteService = quoteService;
             _context = context;
             _lifecycle = lifecycle;
+            _logger = logger;
         }
 
         [HttpGet]
         [RequireModulePermission("RFQ Management", PermissionAction.View)]
         public async Task<ActionResult<PaginatedRfqResponseDTO>> GetAll(
-            [FromQuery] long? businessUnitId = null,
             [FromQuery] int pageNumber = 1,
             [FromQuery] int pageSize = 10,
             [FromQuery] string? search = null,
@@ -48,11 +49,8 @@ namespace ERP_RFQ_Automation.Controllers
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-                if (targetBUId <= 0)
-                    return BadRequest("Business Unit ID is required.");
+                if (!TryGetAuthenticatedBusinessUnitId(out var businessUnitId))
+                    return Unauthorized();
 
                 if (pageNumber < 1)
                     return BadRequest("Page number must be greater than or equal to 1.");
@@ -61,7 +59,7 @@ namespace ERP_RFQ_Automation.Controllers
                 if (pageSize < 1 || pageSize > 1000)
                     return BadRequest("Page size must be between 1 and 1000.");
 
-                var (items, totalItems) = await _repository.GetAllAsync(targetBUId, pageNumber, pageSize, search, isActive, assignedToId, createdBy, rfqStatusId, rfqStatusCode, readiness);
+                var (items, totalItems) = await _repository.GetAllAsync(businessUnitId, pageNumber, pageSize, search, isActive, assignedToId, createdBy, rfqStatusId, rfqStatusCode, readiness);
                 
                 return Ok(new PaginatedRfqResponseDTO
                 {
@@ -74,23 +72,20 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving data: {ex.Message}");
+                return InternalError(ex, "RFQ list retrieval failed.");
             }
         }
 
         [HttpGet("{id}")]
         [RequireModulePermission("RFQ Management", PermissionAction.View)]
-        public async Task<ActionResult<RfqResponseDTO>> GetById(long id, [FromQuery] long? businessUnitId = null)
+        public async Task<ActionResult<RfqResponseDTO>> GetById(long id)
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
+                if (!TryGetAuthenticatedBusinessUnitId(out var businessUnitId))
+                    return Unauthorized();
 
-                if (targetBUId <= 0)
-                    return BadRequest("Business Unit ID is required.");
-
-                var rfq = await _repository.GetByIdAsync(id, targetBUId);
+                var rfq = await _repository.GetByIdAsync(id, businessUnitId);
                 return Ok(rfq);
             }
             catch (KeyNotFoundException)
@@ -99,7 +94,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving rfq: {ex.Message}");
+                return InternalError(ex, "RFQ retrieval failed.");
             }
         }
 
@@ -136,15 +131,15 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 if (!ModelState.IsValid) return BadRequest(ModelState);
 
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                if (claimBUId > 0) request.BusinessUnitId = claimBUId;
-
-                if (request.BusinessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+                if (!long.TryParse(User.FindFirst("businessUnitId")?.Value, out var claimBUId) || claimBUId <= 0)
+                    return Unauthorized();
                 if (!request.LeadId.HasValue) return BadRequest("A tenant-owned lead is required so the RFQ belongs to a commercial case.");
+                var actor = User.FindFirst(ClaimTypes.Email)?.Value ?? User.Identity?.Name;
+                if (string.IsNullOrWhiteSpace(actor)) return Unauthorized();
 
             var rfq = new Rfq
             {
-                Rfqno = request.Rfqno,
+                Rfqno = string.Empty,
                 BuyersName = request.BuyersName,
                 RecDate = request.RecDate,
                 BidClosingDate = request.BidClosingDate,
@@ -158,10 +153,9 @@ namespace ERP_RFQ_Automation.Controllers
                 DurationAgreement = request.DurationAgreement,
                 LeadId = request.LeadId,
                 CustomerId = request.CustomerId,
-                CreatedBy = User.FindFirst(ClaimTypes.Email)?.Value ?? User.Identity?.Name ?? "System",
+                CreatedBy = actor,
                 CreatedDate = DateTime.UtcNow,
-                BusinessUnitId = request.BusinessUnitId,
-                RfqstatusId = request.RfqstatusId,
+                BusinessUnitId = claimBUId,
                 NoOfLineItems = request.Rfqitems?.Count ?? 0,
                 Rfqitems = request.Rfqitems.Select(i => new Rfqitem
                 {
@@ -195,7 +189,7 @@ namespace ERP_RFQ_Automation.Controllers
                     RequiredDesiredDate = i.RequiredDesiredDate,
                     ReceivedDate = i.ReceivedDate,
                     BidClosingDateLine = i.BidClosingDateLine,
-                    CreatedBy = request.CreatedBy,
+                    CreatedBy = actor,
                     CreatedDate = DateTime.UtcNow,
                     Aiconfidence = i.Aiconfidence
                 }).ToList()
@@ -205,7 +199,7 @@ namespace ERP_RFQ_Automation.Controllers
 
             var response = await _repository.GetByIdAsync(rfq.Id, rfq.BusinessUnitId);
 
-            return CreatedAtAction(nameof(GetById), new { id = rfq.Id, businessUnitId = rfq.BusinessUnitId }, response);
+            return CreatedAtAction(nameof(GetById), new { id = rfq.Id }, response);
             }
             catch (InvalidOperationException ex)
             {
@@ -213,7 +207,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error: {ex.Message}");
+                return InternalError(ex, "RFQ creation failed.");
             }
         }
 
@@ -225,15 +219,15 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 if (!ModelState.IsValid) return BadRequest(ModelState);
 
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                if (claimBUId > 0) request.BusinessUnitId = claimBUId;
-
-                if (request.BusinessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+                if (!TryGetAuthenticatedBusinessUnitId(out var businessUnitId))
+                    return Unauthorized();
+                var actor = User.FindFirst(ClaimTypes.Email)?.Value ?? User.Identity?.Name;
+                if (string.IsNullOrWhiteSpace(actor))
+                    return Unauthorized();
 
             var rfq = new Rfq
             {
                 Id = id,
-                Rfqno = request.Rfqno,
                 BuyersName = request.BuyersName,
                 RecDate = request.RecDate,
                 BidClosingDate = request.BidClosingDate,
@@ -247,9 +241,9 @@ namespace ERP_RFQ_Automation.Controllers
                 DurationAgreement = request.DurationAgreement,
                 LeadId = request.LeadId,
                 CustomerId = request.CustomerId,
-                ModifiedBy = request.ModifiedBy,
+                ModifiedBy = actor,
                 ModifiedDate = DateTime.UtcNow,
-                BusinessUnitId = request.BusinessUnitId,
+                BusinessUnitId = businessUnitId,
                 RfqstatusId = request.RfqstatusId,
                 NoOfLineItems = request.Rfqitems?.Count ?? 0,
                 Rfqitems = request.Rfqitems.Select(i => new Rfqitem
@@ -285,7 +279,7 @@ namespace ERP_RFQ_Automation.Controllers
                     RequiredDesiredDate = i.RequiredDesiredDate,
                     ReceivedDate = i.ReceivedDate,
                     BidClosingDateLine = i.BidClosingDateLine,
-                    ModifiedBy = request.ModifiedBy,
+                    ModifiedBy = actor,
                     ModifiedDate = DateTime.UtcNow,
                     Aiconfidence = i.Aiconfidence
                 }).ToList()
@@ -301,7 +295,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error: {ex.Message}");
+                return InternalError(ex, "RFQ update failed.");
             }
         }
 
@@ -309,10 +303,7 @@ namespace ERP_RFQ_Automation.Controllers
         [RequireModulePermission("RFQ Management", PermissionAction.Edit)]
         public async Task<ActionResult> Approve(
             long id,
-            [FromQuery] string? recipientEmail = null,
-            [FromQuery] string? emailSubject = null,
-            [FromQuery] string? emailBody = null,
-            [FromQuery] long? customerId = null)
+            [FromBody] ApproveRfqRequest? request = null)
         {
             // SEC-07: the business unit and the approver identity come from the token,
             // never from client input (was a spoofable ?approvedBy= query param).
@@ -324,7 +315,7 @@ namespace ERP_RFQ_Automation.Controllers
             var quoteDelivered = false;
             try
             {
-                var quoteId = await _repository.ApproveAsync(id, approvedBy, businessUnitId, customerId);
+                var quoteId = await _repository.ApproveAsync(id, approvedBy, businessUnitId, request?.CustomerId);
 
                 // ARCH-10: the quote is generated and committed regardless of whether the
                 // notification email can be sent. A missing/failed email must NOT discard
@@ -334,9 +325,13 @@ namespace ERP_RFQ_Automation.Controllers
                     .Include(q => q.Customer)
                     .FirstOrDefaultAsync(q => q.Id == quoteId);
 
-                string selectedEmail = (!string.IsNullOrEmpty(recipientEmail)
-                    ? recipientEmail
-                    : (quote?.Customer?.ContactEmail ?? quote?.Rfq?.Lead?.Clientemail ?? "")).Trim();
+                string selectedEmail = (quote?.Customer?.ContactEmail ?? quote?.Rfq?.Lead?.Clientemail ?? "").Trim();
+                if (!string.IsNullOrWhiteSpace(request?.RecipientEmail)
+                    && !string.Equals(request.RecipientEmail.Trim(), selectedEmail, StringComparison.OrdinalIgnoreCase))
+                {
+                    await transaction.RollbackAsync();
+                    return BadRequest(new { error = "The recipient must match the verified customer contact for this RFQ." });
+                }
 
                 string? emailWarning = null;
                 if (!string.IsNullOrWhiteSpace(selectedEmail) && selectedEmail.Contains("@"))
@@ -346,7 +341,7 @@ namespace ERP_RFQ_Automation.Controllers
                         // WP-B3: the send can come back "held" (below-floor pricing) —
                         // the quote exists but the email is parked in the Approvals inbox.
                         var sendResult = await _quoteService.SendQuoteEmailAsync(
-                            quoteId, businessUnitId, selectedEmail, emailSubject, emailBody,
+                            quoteId, businessUnitId, selectedEmail, request?.EmailSubject, request?.EmailBody,
                             new ERP_RFQ_Automation.DTOs.QuoteDTOs.QuoteSendOptions
                             {
                                 RequestedByUserId = long.TryParse(
@@ -375,7 +370,8 @@ namespace ERP_RFQ_Automation.Controllers
                     }
                     catch (Exception emailEx)
                     {
-                        emailWarning = $"Quote generated, but the notification email could not be sent: {emailEx.Message}";
+                        _logger?.LogError(emailEx, "Quote delivery enqueue failed for quote {QuoteId}; trace {TraceId}.", quoteId, HttpContext.TraceIdentifier);
+                        emailWarning = "Quote generated, but delivery could not be queued. An operator must review it.";
                     }
                 }
                 else
@@ -409,7 +405,7 @@ namespace ERP_RFQ_Automation.Controllers
             catch (Exception ex)
             {
                 try { await transaction.RollbackAsync(); } catch { /* already rolled back */ }
-                return StatusCode(500, $"Internal server error: {ex.Message}");
+                return InternalError(ex, "RFQ approval failed.");
             }
         }
 
@@ -427,7 +423,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(500, $"Internal server error: {ex.Message}");
+                return InternalError(ex, "RFQ statistics retrieval failed.");
             }
         }
 
@@ -435,24 +431,39 @@ namespace ERP_RFQ_Automation.Controllers
         // Was [Authorize(Policy = "CanDeleteRFQ")] — that legacy policy checks module
         // "RFQ", which does not match the Modules row / frontend name "RFQ Management".
         [RequireModulePermission("RFQ Management", PermissionAction.Delete)]
-        public async Task<ActionResult> Delete(long id, [FromQuery] long? businessUnitId = null)
+        public async Task<ActionResult> Delete(long id)
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
+                if (!TryGetAuthenticatedBusinessUnitId(out var businessUnitId))
+                    return Unauthorized();
 
-                if (targetBUId <= 0)
-                    return BadRequest("Business Unit ID is required.");
-
-                await _repository.DeleteAsync(id, targetBUId);
+                await _repository.DeleteAsync(id, businessUnitId);
                 return NoContent();
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error deleting rfq: {ex.Message}");
+                return InternalError(ex, "RFQ deletion failed.");
             }
         }
+
+        private ObjectResult InternalError(Exception exception, string operation)
+        {
+            _logger?.LogError(exception, "{Operation} Trace {TraceId}.", operation, HttpContext.TraceIdentifier);
+            var problem = new ProblemDetails
+            {
+                Status = StatusCodes.Status500InternalServerError,
+                Title = "The request could not be completed."
+            };
+            problem.Extensions["traceId"] = HttpContext.TraceIdentifier;
+            return StatusCode(StatusCodes.Status500InternalServerError, problem);
+        }
+
+        public sealed record ApproveRfqRequest(
+            string? RecipientEmail,
+            string? EmailSubject,
+            string? EmailBody,
+            long? CustomerId);
 
 
         [HttpGet("lookups/RFQType")]
@@ -460,5 +471,9 @@ namespace ERP_RFQ_Automation.Controllers
         {
             return Ok(await _repository.GetRFQTypeAsync());
         }
+
+        private bool TryGetAuthenticatedBusinessUnitId(out long businessUnitId) =>
+            long.TryParse(User.FindFirst("businessUnitId")?.Value, out businessUnitId)
+            && businessUnitId > 0;
     }
 }

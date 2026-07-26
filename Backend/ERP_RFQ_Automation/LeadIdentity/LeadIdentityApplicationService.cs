@@ -320,6 +320,18 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
                 intakeOccurrenceIds = cohort.Select(x => x.Id).Distinct().ToArray();
                 rows = cohort.Where(x => x.Reconciliation is not null).Select(x => x.Reconciliation!).ToList();
             }
+
+            // Rows created before durable source occurrences were introduced retain their
+            // reconciliation-time cohort until a controlled backfill links them.
+            var legacyRows = _db.Database.ProviderName?.Contains("Sqlite", StringComparison.OrdinalIgnoreCase) == true
+                ? (await source.Where(x => !x.SourceDocumentOccurrenceId.HasValue).ToListAsync(ct))
+                    .Where(x => x.CreatedAtUtc >= windowStart && x.CreatedAtUtc < to && x.CreatedAtUtc <= asOf)
+                    .ToList()
+                : await source.Where(x => !x.SourceDocumentOccurrenceId.HasValue
+                        && x.CreatedAtUtc >= windowStart && x.CreatedAtUtc < to && x.CreatedAtUtc <= asOf)
+                    .ToListAsync(ct);
+            rows.AddRange(legacyRows);
+            intakeOccurrenceIds = intakeOccurrenceIds.Concat(legacyRows.Select(x => x.Id)).Distinct().ToArray();
         }
         else
         {
@@ -332,8 +344,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         }
         var total = intakeOccurrenceIds.Length;
         long[] CohortOccurrenceIds(IEnumerable<LeadIngestionOccurrence> selected) => hasDurableIntake
-            ? selected.Where(x => x.SourceDocumentOccurrenceId.HasValue)
-                .Select(x => x.SourceDocumentOccurrenceId!.Value).Distinct().ToArray()
+            ? selected.Select(x => x.SourceDocumentOccurrenceId ?? x.Id).Distinct().ToArray()
             : selected.Select(x => x.Id).Distinct().ToArray();
         LeadIdentityMetricDto CountMetric(string key, LeadOccurrenceClassification classification, bool canonical = false)
         {

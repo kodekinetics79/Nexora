@@ -7,7 +7,9 @@ using ERP_RFQ_Automation.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using System.IO;
+using System.Security.Claims;
 
 namespace ERP_RFQ_Automation.Controllers
 {
@@ -30,7 +32,6 @@ namespace ERP_RFQ_Automation.Controllers
         [HttpGet]
         [RequireModulePermission("Suppliers", PermissionAction.View)]
         public async Task<ActionResult<DTOs.SupplierDTOs.PaginatedResponseDTO<SupplierResponseDTO>>> GetAll(
-            [FromQuery] long? businessUnitId = null,
             [FromQuery] int pageNumber = 1,
             [FromQuery] int pageSize = 10,
             [FromQuery] long? id = null,
@@ -42,11 +43,8 @@ namespace ERP_RFQ_Automation.Controllers
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-                if (targetBUId <= 0)
-                    return BadRequest("Business Unit ID is required.");
+                if (!TryGetAuthenticatedTenant(out var businessUnitId))
+                    return Forbid();
                 
                 if (pageNumber < 1)
                     return BadRequest("Page number must be greater than or equal to 1.");
@@ -55,7 +53,7 @@ namespace ERP_RFQ_Automation.Controllers
                 if (pageSize < 1 || pageSize > 1000)
                     return BadRequest("Page size must be between 1 and 1000.");
 
-                var (suppliers, totalCount) = await _repository.GetAllAsync(pageNumber, pageSize, id, name, contactEmail, currencyId, isActive, docId, targetBUId);
+                var (suppliers, totalCount) = await _repository.GetAllAsync(pageNumber, pageSize, id, name, contactEmail, currencyId, isActive, docId, businessUnitId);
 
                 var response = new DTOs.SupplierDTOs.PaginatedResponseDTO<SupplierResponseDTO>
                 {
@@ -67,35 +65,32 @@ namespace ERP_RFQ_Automation.Controllers
 
                 return Ok(response);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving data: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to retrieve suppliers.");
             }
         }
 
         // GET: api/Supplier/5
         [HttpGet("{id}")]
         [RequireModulePermission("Suppliers", PermissionAction.View)]
-        public async Task<ActionResult<SupplierResponseDTO>> GetById(long id, [FromQuery] long? businessUnitId = null)
+        public async Task<ActionResult<SupplierResponseDTO>> GetById(long id)
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
+                if (!TryGetAuthenticatedTenant(out var businessUnitId))
+                    return Forbid();
 
-                if (targetBUId <= 0)
-                    return BadRequest("Business Unit ID is required.");
-
-                var supplier = await _repository.GetByIdAsync(id, targetBUId);
+                var supplier = await _repository.GetByIdAsync(id, businessUnitId);
                 return Ok(MapToResponse(supplier));
             }
             catch (KeyNotFoundException ex)
             {
                 return NotFound(ex.Message);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving data: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to retrieve the supplier.");
             }
         }
 
@@ -109,10 +104,10 @@ namespace ERP_RFQ_Automation.Controllers
                 if (!ModelState.IsValid)
                     return BadRequest(ModelState);
 
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                if (claimBUId > 0) request.Buid = claimBUId;
+                if (!TryGetAuthenticatedTenant(out var businessUnitId))
+                    return Forbid();
 
-                if (request.Buid <= 0) return BadRequest("Business Unit ID is required.");
+                var actor = GetAuthenticatedActor();
 
                 string? imagePath = null;
                 if (request.ImageFile != null)
@@ -141,53 +136,45 @@ namespace ERP_RFQ_Automation.Controllers
                     CityId = request.CityId,
                     CountryId = request.CountryId,
                     PostalCode = request.PostalCode,
-                    SuccessRate = request.SuccessRate,
-                    AvgResponseTime = request.AvgResponseTime,
                     Tags = request.Tags,
                     Comments = request.Comments,
                     CurrencyId = request.CurrencyId,
-                    Buid = request.Buid,
+                    Buid = businessUnitId,
                     IsActive = request.IsActive ?? true,
-                    CreatedBy = request.CreatedBy,
+                    CreatedBy = actor,
                     CreatedOn = DateTime.UtcNow
                 };
 
                 await _repository.AddAsync(supplier);
 
                 var response = MapToResponse(supplier);
-                return CreatedAtAction(nameof(GetById), new { id = supplier.Id, businessUnitId = supplier.Buid }, response);
+                return CreatedAtAction(nameof(GetById), new { id = supplier.Id }, response);
             }
             catch (ArgumentException ex)
             {
                 return BadRequest(ex.Message);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error creating data: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to create the supplier.");
             }
         }
 
         [HttpPut("{id}")]
         [RequireModulePermission("Suppliers", PermissionAction.Edit)]
-        public async Task<ActionResult> Update(long id, [FromQuery] long? businessUnitId, [FromForm] SupplierUpdateRequestDTO request)
+        public async Task<ActionResult> Update(long id, [FromForm] SupplierUpdateRequestDTO request)
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                if (claimBUId > 0) request.Buid = claimBUId;
-
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? request.Buid);
-
-                if (targetBUId <= 0)
-                    return BadRequest("Business Unit ID is required.");
-
-                if (targetBUId != request.Buid)
-                    return BadRequest("Business Unit ID mismatch between context and request.");
+                if (!TryGetAuthenticatedTenant(out var businessUnitId))
+                    return Forbid();
 
                 if (!ModelState.IsValid)
                     return BadRequest(ModelState);
 
-                var existing = await _repository.GetByIdAsync(id, targetBUId);
+                var existing = await _repository.GetByIdAsync(id, businessUnitId);
+                if (existing.ConcurrencyToken.HasValue && request.ConcurrencyToken != existing.ConcurrencyToken)
+                    return Conflict("The supplier changed since it was loaded. Refresh and retry.");
 
                 string? imagePath = existing.ImageUrl;
                 if (request.ImageFile != null)
@@ -214,17 +201,14 @@ namespace ERP_RFQ_Automation.Controllers
                 existing.CityId = request.CityId;
                 existing.CountryId = request.CountryId;
                 existing.PostalCode = request.PostalCode;
-                existing.SuccessRate = request.SuccessRate;
-                existing.AvgResponseTime = request.AvgResponseTime;
                 existing.Tags = request.Tags;
                 existing.Comments = request.Comments;
                 existing.CurrencyId = request.CurrencyId;
-                existing.Buid = request.Buid;
                 existing.IsActive = request.IsActive ?? true;
-                existing.ModifiedBy = request.ModifiedBy;
+                existing.ModifiedBy = GetAuthenticatedActor();
                 existing.ModifiedOn = DateTime.UtcNow;
 
-                await _repository.UpdateAsync(existing, targetBUId);
+                await _repository.UpdateAsync(existing, businessUnitId);
 
                 return NoContent();
             }
@@ -236,26 +220,27 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 return BadRequest(ex.Message);
             }
-            catch (Exception ex)
+            catch (DbUpdateConcurrencyException)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error updating data: {ex.Message}");
+                return Conflict("The supplier changed since it was loaded. Refresh and retry.");
+            }
+            catch (Exception)
+            {
+                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to update the supplier.");
             }
         }
 
         // DELETE: api/Supplier/5
         [HttpDelete("{id}")]
         [RequireModulePermission("Suppliers", PermissionAction.Delete)]
-        public async Task<ActionResult> Delete(long id, [FromQuery] long? businessUnitId = null)
+        public async Task<ActionResult> Delete(long id)
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
+                if (!TryGetAuthenticatedTenant(out var businessUnitId))
+                    return Forbid();
 
-                if (targetBUId <= 0)
-                    return BadRequest("Business Unit ID is required.");
-
-                await _repository.DeleteAsync(id, targetBUId);
+                await _repository.DeleteAsync(id, businessUnitId);
                 return NoContent();
             }
             catch (KeyNotFoundException ex)
@@ -266,9 +251,9 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 return BadRequest(ex.Message);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error deleting data: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to delete the supplier.");
             }
         }
 
@@ -299,6 +284,15 @@ namespace ERP_RFQ_Automation.Controllers
                 Buid = supplier.Buid,
                 BusinessUnitName = supplier.Bu != null ? supplier.Bu.BusinessUnitName : null,
                 IsActive = supplier.IsActive,
+                GovernanceStatus = supplier.GovernanceStatus,
+                VerificationStatus = supplier.VerificationStatus,
+                ComplianceStatus = supplier.ComplianceStatus,
+                RiskStatus = supplier.RiskStatus,
+                ReadinessStatus = supplier.ReadinessStatus,
+                EffectiveFrom = supplier.EffectiveFrom,
+                GovernanceReviewedBy = supplier.GovernanceReviewedBy,
+                GovernanceReviewedOn = supplier.GovernanceReviewedOn,
+                ConcurrencyToken = supplier.ConcurrencyToken,
                 CreatedBy = supplier.CreatedBy,
                 CreatedOn = supplier.CreatedOn,
                 ModifiedBy = supplier.ModifiedBy,
@@ -307,63 +301,65 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet("search")]
+        [RequireModulePermission("Suppliers", PermissionAction.View)]
         public async Task<ActionResult<List<SupplierSearchResultDTO>>> Search(
             [FromQuery] string? searchTerm,
-            [FromQuery] string? productCategory,
-            [FromQuery] long? businessUnitId = null)
+            [FromQuery] string? productCategory)
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
+                if (!TryGetAuthenticatedTenant(out var businessUnitId))
+                    return Forbid();
 
-                if (targetBUId <= 0)
-                    return BadRequest("Business Unit ID is required.");
-
-                var suppliers = await _repository.SearchSuppliersAsync(searchTerm, productCategory, targetBUId);
+                var suppliers = await _repository.SearchSuppliersAsync(searchTerm, productCategory, businessUnitId);
                 return Ok(suppliers);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error searching suppliers: {ex.Message}");
+                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to search suppliers.");
             }
         }
 
-        // External Web Search Endpoint
-        // SEC-15: was [AllowAnonymous] (unauthenticated outbound-search / SSRF surface).
-        // Now requires authentication like the rest of the controller.
         [HttpGet("web-search")]
-        public async Task<ActionResult<List<SupplierSearchResultDTO>>> WebSearch([FromQuery] string query)
+        [RequireModulePermission("Suppliers", PermissionAction.View)]
+        public ActionResult<List<SupplierSearchResultDTO>> WebSearch([FromQuery] string query)
         {
-            try
-            {
-                if (string.IsNullOrWhiteSpace(query))
-                    return BadRequest("Search query is required.");
+            if (!TryGetAuthenticatedTenant(out _))
+                return Forbid();
+            if (string.IsNullOrWhiteSpace(query))
+                return BadRequest("Search query is required.");
 
-                var results = await _repository.SearchWebSuppliersAsync(query);
-                return Ok(results);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error performing web search: {ex.Message}");
-            }
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                "External supplier discovery is disabled until a governed, tenant-authorized provider is configured.");
         }
 
         // Compose Quote Email
         [HttpPost("compose-quote-email")]
-        public ActionResult<QuoteEmailTemplateDTO> ComposeQuoteEmail([FromBody] BatchQuoteRequestDTO request)
+        [RequireModulePermission("Suppliers", PermissionAction.Create)]
+        public async Task<ActionResult<QuoteEmailTemplateDTO>> ComposeQuoteEmail([FromBody] BatchQuoteRequestDTO request)
         {
             try
             {
                 if (!ModelState.IsValid)
                     return BadRequest(ModelState);
 
+                if (!TryGetAuthenticatedTenant(out var businessUnitId))
+                    return Forbid();
+
+                var supplier = await _repository.GetByIdAsync(request.SupplierId, businessUnitId);
+                request.SupplierName = supplier.Name;
+                request.SupplierEmail = supplier.ContactEmail ?? string.Empty;
+
                 var template = GenerateQuoteEmailTemplate(request);
                 return Ok(template);
             }
-            catch (Exception ex)
+            catch (KeyNotFoundException)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error composing email: {ex.Message}");
+                return NotFound("Supplier not found.");
+            }
+            catch (Exception)
+            {
+                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to compose the Supplier RFQ email.");
             }
         }
 
@@ -414,6 +410,20 @@ namespace ERP_RFQ_Automation.Controllers
                 ToEmail = request.SupplierEmail,
                 Items = request.Items
             };
+        }
+
+        private bool TryGetAuthenticatedTenant(out long businessUnitId)
+        {
+            return long.TryParse(User.FindFirst("businessUnitId")?.Value, out businessUnitId)
+                && businessUnitId > 0;
+        }
+
+        private string GetAuthenticatedActor()
+        {
+            return User.FindFirstValue(ClaimTypes.NameIdentifier)
+                ?? User.FindFirstValue(ClaimTypes.Email)
+                ?? User.Identity?.Name
+                ?? "authenticated-user";
         }
     }
 }

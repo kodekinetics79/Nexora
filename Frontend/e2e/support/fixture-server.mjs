@@ -2,7 +2,9 @@
 import http from 'node:http';
 import contract from './fixture-contract.json' with { type: 'json' };
 
-const port = Number(new URL(contract.apiUrl).port);
+const apiUrl = process.env.E2E_API_URL || contract.apiUrl;
+const baseUrl = process.env.E2E_BASE_URL || contract.baseUrl;
+const port = Number(new URL(apiUrl).port);
 const now = '2026-07-24T12:00:00Z';
 
 const roles = {
@@ -94,7 +96,7 @@ const dashboard = {
 };
 
 const json = (res, status, body) => {
-  res.writeHead(status, { 'content-type': 'application/json', 'access-control-allow-origin': contract.baseUrl, 'access-control-allow-credentials': 'true', 'access-control-allow-headers': 'authorization,content-type,idempotency-key', 'access-control-allow-methods': 'GET,POST,PUT,DELETE,OPTIONS' });
+  res.writeHead(status, { 'content-type': 'application/json', 'access-control-allow-origin': baseUrl, 'access-control-allow-credentials': 'true', 'access-control-allow-headers': 'authorization,content-type,idempotency-key', 'access-control-allow-methods': 'GET,POST,PUT,DELETE,OPTIONS' });
   res.end(JSON.stringify(body));
 };
 
@@ -107,7 +109,7 @@ const readJson = async (req) => {
 
 const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') return json(res, 204, {});
-  const url = new URL(req.url ?? '/', contract.apiUrl);
+  const url = new URL(req.url ?? '/', apiUrl);
   const path = url.pathname.toLowerCase();
 
   if (req.method === 'GET' && path === '/health') return json(res, 200, { status: 'ready' });
@@ -134,11 +136,31 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && path === '/api/extraction/upload') return json(res, 200, { batchId: contract.batchId, jobs: [{ jobId: 7001, fileName: 'release-01c-inquiry.csv', outcome: 'AlreadyQueued' }] });
   if (req.method === 'GET' && path === '/api/lead') return json(res, 200, { items: [lead], totalCount: 1, pageNumber: 1, pageSize: 25 });
   if (req.method === 'POST' && path === '/api/intelligence/leads/decision-summaries') return json(res, 200, { summaries: {} });
+  if (req.method === 'GET' && path === '/api/procurement/purchase-orders') {
+    const search = (url.searchParams.get('search') ?? '').toLowerCase();
+    const orders = [{
+      id: 1301, purchaseOrderNumber: 'PO-SIT-001', rfqId: Number(contract.rfqId),
+      rfqNumber: rfq.rfqno, nexoraSerial: contract.nexoraSerial, supplierId: 901,
+      supplierName: 'Certified Components Inc.', currencyCode: 'USD', status: 'DRAFT',
+      totalValue: 132, expectedOn: '2026-08-15T00:00:00Z', createdOn: now,
+      lineCount: 1, openQuantity: 6,
+    }].filter(order => !search || JSON.stringify(order).toLowerCase().includes(search));
+    return json(res, 200, orders);
+  }
+  if (req.method === 'POST' && path === '/api/procurement/purchase-orders/1301/issue') {
+    const body = await readJson(req);
+    if (body.expectedVersion !== 1 || !String(body.deliveryEvidenceReference ?? '').trim()) {
+      return json(res, 400, { message: 'Issue evidence and the expected version are required.' });
+    }
+    return json(res, 200, {
+      id: 1301, purchaseOrderNumber: 'PO-SIT-001', status: 'ISSUED', replayed: false,
+    });
+  }
 
   return json(res, 404, { message: `Fixture route not implemented: ${req.method} ${url.pathname}` });
 });
 
-server.listen(port, '127.0.0.1', () => console.log(`Release 01C fixture API listening on ${contract.apiUrl}`));
+server.listen(port, '127.0.0.1', () => console.log(`Release 01C fixture API listening on ${apiUrl}`));
 
 const shutdown = () => server.close(() => process.exit(0));
 process.on('SIGTERM', shutdown);

@@ -305,6 +305,8 @@ const SuppliersPage: React.FC = () => {
     { field: 'countryName', headerName: t('country'), width: 120, renderCell: (p) => p.value ?? '—' },
     { field: 'currencyName', headerName: t('currency'), width: 100, renderCell: (p) => p.value ?? '—' },
     { field: 'paymentTerms', headerName: t('payment_terms'), width: 140, renderCell: (p) => p.value ?? '—' },
+    { field: 'governanceStatus', headerName: 'Approval', width: 145, renderCell: (p) => <Chip label={(p.value || 'UNVERIFIED').replaceAll('_', ' ')} size="small" variant="outlined" /> },
+    { field: 'readinessStatus', headerName: 'RFQ readiness', width: 145, renderCell: (p) => <Chip label={(p.value || 'REVIEW_REQUIRED').replaceAll('_', ' ')} size="small" variant="outlined" /> },
     { field: 'isActive', headerName: t('status'), width: 100, renderCell: (p) => <Chip label={p.value ? 'Active' : 'Inactive'} color={p.value ? 'success' : 'error'} size="small" variant="outlined" /> },
     { 
       field: 'actions', 

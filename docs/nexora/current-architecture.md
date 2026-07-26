@@ -46,6 +46,7 @@ Lead, RFQ, and Quote additionally carry `LifecycleVersion`; Order status version
 
 - Lead: received, verified, review, qualified, disqualified, converted.
 - RFQ: requirements validation, inventory resolution, sourcing, pricing readiness.
+- Procurement: net-shortage resolution -> tenant-scoped supplier solicitation/outbox -> structured supplier quote revisions -> evidence-based comparison -> split award -> draft supplier PO -> controlled evidence-reference issue/incoming supply -> partial/final goods receipt -> immutable inventory movement.
 - Quote: draft, approved, sent, follow-up, revision, won, lost, partial, expired, no-quote.
 - Order and Invoice remain separate domains; Order stores inherited identity and Invoice reads it from Order without inventing another serial.
 - Commercial Case state is a projection of append-only events, not another freely mutable workflow.
@@ -72,4 +73,4 @@ Routing is deterministic and explainable. Candidate scoring uses measured open a
 
 ## Deployment Boundaries
 
-Production secrets remain environment-only. Render `/ready` validates database, durable object-store write/read capability, malware scanner reachability, and extraction-worker freshness. This release task does not deploy or mutate live data.
+Production secrets remain environment-only. Render `/ready` validates database, durable object-store write/read capability, malware scanner reachability, extraction-worker freshness, and procurement-dispatch-worker freshness. This release task does not deploy or mutate live data.

@@ -21,6 +21,11 @@ namespace ERP_RFQ_Automation.DTOs.SupplierDTOs
         public decimal? SuccessRate { get; set; }
         public int? AvgResponseTime { get; set; }
         public string? Tags { get; set; }
+        public string GovernanceStatus { get; set; } = null!;
+        public string VerificationStatus { get; set; } = null!;
+        public string ComplianceStatus { get; set; } = null!;
+        public string RiskStatus { get; set; } = null!;
+        public string ReadinessStatus { get; set; } = null!;
     }
 
     // Batch quote request DTO

@@ -609,6 +609,16 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("timestamp without time zone")
                         .HasDefaultValueSql("now()");
 
+                    b.Property<long?>("CurrencyId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("IdempotencyKey")
+                        .HasMaxLength(160)
+                        .HasColumnType("character varying(160)");
+
+                    b.Property<decimal?>("LandedUnitCost")
+                        .HasColumnType("numeric(18,4)");
+
                     b.Property<decimal?>("Quantity")
                         .HasColumnType("numeric(18,2)");
 
@@ -616,13 +626,27 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(2000)
                         .HasColumnType("character varying(2000)");
 
+                    b.Property<string>("RequestHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
                     b.Property<long>("RfqId")
                         .HasColumnType("bigint");
 
                     b.Property<long?>("RfqItemId")
                         .HasColumnType("bigint");
 
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(24)
+                        .HasColumnType("character varying(24)")
+                        .HasDefaultValue("APPROVED");
+
                     b.Property<long>("SupplierId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("SupplierQuotedItemId")
                         .HasColumnType("bigint");
 
                     b.Property<decimal>("TotalValue")
@@ -631,10 +655,31 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<decimal>("UnitPrice")
                         .HasColumnType("numeric(18,2)");
 
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L);
+
                     b.HasKey("Id");
+
+                    b.HasIndex("BusinessUnitId", "CurrencyId");
+
+                    b.HasIndex("BusinessUnitId", "IdempotencyKey")
+                        .IsUnique()
+                        .HasFilter("\"IdempotencyKey\" IS NOT NULL");
 
                     b.HasIndex("BusinessUnitId", "RfqId")
                         .HasDatabaseName("IX_SourcingAwards_BU_Rfq");
+
+                    b.HasIndex("BusinessUnitId", "RfqItemId")
+                        .HasFilter("\"RfqItemId\" IS NOT NULL AND \"Status\" IN ('PROPOSED','APPROVED')");
+
+                    b.HasIndex("BusinessUnitId", "SupplierQuotedItemId");
+
+                    b.HasIndex("RfqItemId", "RfqId");
+
+                    b.HasIndex("SupplierId", "BusinessUnitId");
 
                     b.ToTable("SourcingAwards", (string)null);
                 });
@@ -660,9 +705,25 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("timestamp without time zone")
                         .HasDefaultValueSql("now()");
 
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("character varying(160)");
+
                     b.Property<string>("Notes")
                         .HasMaxLength(1000)
                         .HasColumnType("character varying(1000)");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("RequestedRfqItemIdsJson")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("jsonb")
+                        .HasDefaultValue("[]");
 
                     b.Property<DateTime?>("RespondedOn")
                         .HasColumnType("timestamp without time zone");
@@ -686,10 +747,21 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("timestamp without time zone")
                         .HasDefaultValueSql("now()");
 
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L);
+
                     b.HasKey("Id");
+
+                    b.HasIndex("BusinessUnitId", "IdempotencyKey")
+                        .IsUnique();
 
                     b.HasIndex("BusinessUnitId", "RfqId")
                         .HasDatabaseName("IX_SupplierSolicitations_BU_Rfq");
+
+                    b.HasIndex("SupplierId", "BusinessUnitId");
 
                     b.HasIndex("BusinessUnitId", "RfqId", "SupplierId")
                         .HasDatabaseName("IX_SupplierSolicitations_BU_Rfq_Supplier");
@@ -2198,6 +2270,155 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasFilter("\"ProcessedOn\" IS NULL AND \"DeadLetteredOn\" IS NULL");
 
                     b.ToTable("lifecycle_outbox_messages", (string)null);
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.CommercialDocuments.CommercialDocumentClassification", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("business_unit_id");
+
+                    b.Property<string>("ClassificationMethod")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasColumnName("classification_method");
+
+                    b.Property<decimal>("Confidence")
+                        .HasPrecision(5, 4)
+                        .HasColumnType("numeric(5,4)")
+                        .HasColumnName("confidence");
+
+                    b.Property<DateTimeOffset>("CreatedOn")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_on");
+
+                    b.Property<long?>("CustomerRfqId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("customer_rfq_id");
+
+                    b.Property<string>("DocumentType")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("document_type");
+
+                    b.Property<string>("EvidenceJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("evidence");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)")
+                        .HasColumnName("idempotency_key");
+
+                    b.Property<long?>("PurchaseOrderId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("purchase_order_id");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .HasColumnName("request_hash")
+                        .IsFixedLength();
+
+                    b.Property<string>("ReviewReason")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("review_reason");
+
+                    b.Property<string>("ReviewStatus")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("review_status");
+
+                    b.Property<string>("ReviewedBy")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("reviewed_by");
+
+                    b.Property<DateTimeOffset?>("ReviewedOn")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("reviewed_on");
+
+                    b.Property<string>("SourceDocumentContentHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .HasColumnName("source_document_content_hash")
+                        .IsFixedLength();
+
+                    b.Property<long>("SourceDocumentId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("source_document_id");
+
+                    b.Property<string>("SourceObjectVersion")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("source_object_version");
+
+                    b.Property<long?>("SourcingCaseId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("sourcing_case_id");
+
+                    b.Property<long?>("SupplierInvoiceId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("supplier_invoice_id");
+
+                    b.Property<long?>("SupplierQuoteId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("supplier_quote_id");
+
+                    b.Property<long?>("SupplierRfqId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("supplier_rfq_id");
+
+                    b.Property<DateTimeOffset>("UpdatedOn")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_on");
+
+                    b.Property<int>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("version");
+
+                    b.HasKey("Id");
+
+                    b.HasAlternateKey("BusinessUnitId", "Id")
+                        .HasName("ak_commercial_document_classifications_tenant_id");
+
+                    b.HasIndex("BusinessUnitId", "IdempotencyKey")
+                        .IsUnique()
+                        .HasDatabaseName("ux_commercial_document_classifications_tenant_idempotency");
+
+                    b.HasIndex("BusinessUnitId", "SourceDocumentId")
+                        .IsUnique()
+                        .HasDatabaseName("ux_commercial_document_classifications_tenant_document");
+
+                    b.HasIndex("BusinessUnitId", "ReviewStatus", "CreatedOn")
+                        .HasDatabaseName("ix_commercial_document_classifications_review_queue");
+
+                    b.ToTable("commercial_document_classifications", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_commercial_document_classifications_business_unit", "business_unit_id > 0");
+
+                            t.HasCheckConstraint("ck_commercial_document_classifications_confidence", "confidence >= 0 AND confidence <= 1");
+
+                            t.HasCheckConstraint("ck_commercial_document_classifications_unknown_review", "document_type <> 'Unknown' OR review_status IN ('ReviewRequired', 'Rejected')");
+
+                            t.HasCheckConstraint("ck_commercial_document_classifications_version", "version > 0");
+                        });
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.CommercialFinance.CollectionControl", b =>
@@ -8660,7 +8881,15 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasAlternateKey("BusinessUnitId", "Id")
                         .HasName("AK_Contacts_BusinessUnitID_ID");
 
-                    b.HasIndex("BusinessUnitId", "CustomerId");
+                    b.HasIndex("BusinessUnitId", "CustomerId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_Contacts_BU_Customer_Primary")
+                        .HasFilter("\"IsPrimary\" = TRUE AND \"CustomerID\" IS NOT NULL");
+
+                    b.HasIndex("BusinessUnitId", "SupplierId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_Contacts_BU_Supplier_Primary")
+                        .HasFilter("\"IsPrimary\" = TRUE AND \"SupplierID\" IS NOT NULL");
 
                     b.HasIndex("SupplierId", "BusinessUnitId");
 
@@ -11606,6 +11835,17 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<string>("Comments")
                         .HasColumnType("text");
 
+                    b.Property<string>("ComplianceStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasDefaultValue("UNKNOWN");
+
+                    b.Property<Guid?>("ConcurrencyToken")
+                        .IsConcurrencyToken()
+                        .HasColumnType("uuid");
+
                     b.Property<string>("ContactEmail")
                         .HasColumnType("citext");
 
@@ -11629,6 +11869,23 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(10)
                         .IsUnicode(false)
                         .HasColumnType("character varying(10)");
+
+                    b.Property<DateTime?>("EffectiveFrom")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("GovernanceReviewedBy")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTime?>("GovernanceReviewedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("GovernanceStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasDefaultValue("UNVERIFIED");
 
                     b.Property<string>("ImageUrl")
                         .IsRequired()
@@ -11661,11 +11918,32 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(20)
                         .HasColumnType("character varying(20)");
 
+                    b.Property<string>("ReadinessStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasDefaultValue("REVIEW_REQUIRED");
+
+                    b.Property<string>("RiskStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasDefaultValue("UNKNOWN");
+
                     b.Property<decimal?>("SuccessRate")
                         .HasColumnType("decimal(5, 2)");
 
                     b.Property<string>("Tags")
                         .HasColumnType("text");
+
+                    b.Property<string>("VerificationStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasDefaultValue("UNKNOWN");
 
                     b.HasKey("Id")
                         .HasName("PK__Supplier__3214EC2782495266");
@@ -11673,22 +11951,43 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasAlternateKey("Id", "Buid")
                         .HasName("AK_Suppliers_ID_BUID");
 
-                    b.HasIndex("Buid");
-
                     b.HasIndex("CityId");
 
                     b.HasIndex("CountryId");
 
                     b.HasIndex("CurrencyId");
 
+                    b.HasIndex("Buid", "ContactEmail")
+                        .IsUnique()
+                        .HasDatabaseName("UX_Suppliers_BU_ContactEmail")
+                        .HasFilter("\"ContactEmail\" IS NOT NULL AND \"BUID\" IS NOT NULL");
+
+                    b.HasIndex("Buid", "DocId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_Suppliers_BU_DocId")
+                        .HasFilter("\"DocId\" IS NOT NULL");
+
+                    b.HasIndex("Buid", "GovernanceStatus", "ReadinessStatus")
+                        .HasDatabaseName("IX_Suppliers_BU_Governance_Readiness");
+
                     b.HasIndex(new[] { "ContactEmail" }, "IX_Suppliers_ContactEmail");
 
                     b.HasIndex(new[] { "Name" }, "IX_Suppliers_Name");
 
-                    b.HasIndex(new[] { "ContactEmail" }, "UQ__Supplier__FFA796CDFB352BC7")
-                        .IsUnique();
+                    b.HasIndex(new[] { "ContactEmail" }, "UQ__Supplier__FFA796CDFB352BC7");
 
-                    b.ToTable("Suppliers");
+                    b.ToTable("Suppliers", t =>
+                        {
+                            t.HasCheckConstraint("CK_Suppliers_ComplianceStatus", "\"ComplianceStatus\" IN ('UNKNOWN','PENDING','CLEARED','RESTRICTED','BLOCKED','FAILED')");
+
+                            t.HasCheckConstraint("CK_Suppliers_GovernanceStatus", "\"GovernanceStatus\" IN ('DISCOVERED','UNVERIFIED','REVIEW_REQUIRED','PROVISIONAL','APPROVED','PREFERRED','RESTRICTED','BLOCKED','INACTIVE')");
+
+                            t.HasCheckConstraint("CK_Suppliers_ReadinessStatus", "\"ReadinessStatus\" IN ('REVIEW_REQUIRED','READY','RESTRICTED','BLOCKED')");
+
+                            t.HasCheckConstraint("CK_Suppliers_RiskStatus", "\"RiskStatus\" IN ('UNKNOWN','LOW','MEDIUM','HIGH','BLOCKED')");
+
+                            t.HasCheckConstraint("CK_Suppliers_VerificationStatus", "\"VerificationStatus\" IN ('UNKNOWN','PENDING','VERIFIED','FAILED','EXPIRED')");
+                        });
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Models.SupplierPurchaseHistory", b =>
@@ -11758,7 +12057,11 @@ namespace ERP_RFQ_Automation.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
 
-                    b.Property<long?>("BusinessUnitId")
+                    b.Property<decimal?>("AvailableQuantity")
+                        .HasPrecision(18, 4)
+                        .HasColumnType("numeric(18,4)");
+
+                    b.Property<long>("BusinessUnitId")
                         .HasColumnType("bigint");
 
                     b.Property<string>("CreatedBy")
@@ -11780,6 +12083,14 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<decimal?>("DiscountAmount")
                         .HasColumnType("decimal(18, 2)");
 
+                    b.Property<decimal>("DutyCost")
+                        .HasPrecision(18, 4)
+                        .HasColumnType("numeric(18,4)");
+
+                    b.Property<decimal>("FreightCost")
+                        .HasPrecision(18, 4)
+                        .HasColumnType("numeric(18,4)");
+
                     b.Property<bool>("IsActive")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("boolean")
@@ -11789,12 +12100,30 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
 
+                    b.Property<decimal?>("LandedUnitCost")
+                        .HasPrecision(18, 4)
+                        .HasColumnType("numeric(18,4)");
+
+                    b.Property<int?>("LeadTimeDays")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal?>("MinimumOrderQuantity")
+                        .HasPrecision(18, 4)
+                        .HasColumnType("numeric(18,4)");
+
                     b.Property<string>("ModifiedBy")
                         .HasMaxLength(256)
                         .HasColumnType("character varying(256)");
 
                     b.Property<DateTime?>("ModifiedDate")
                         .HasColumnType("timestamp without time zone");
+
+                    b.Property<decimal>("OtherCost")
+                        .HasPrecision(18, 4)
+                        .HasColumnType("numeric(18,4)");
+
+                    b.Property<long?>("ProductId")
+                        .HasColumnType("bigint");
 
                     b.Property<decimal>("Quantity")
                         .HasColumnType("decimal(18, 2)");
@@ -11806,7 +12135,33 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
+                    b.Property<int>("QuoteRevision")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1);
+
+                    b.Property<decimal?>("ReliabilitySnapshot")
+                        .HasPrecision(5, 2)
+                        .HasColumnType("numeric(5,2)");
+
+                    b.Property<string>("RequestHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("ResponseIdempotencyKey")
+                        .HasMaxLength(160)
+                        .HasColumnType("character varying(160)");
+
+                    b.Property<long?>("RfqId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("RfqItemId")
+                        .HasColumnType("bigint");
+
                     b.Property<long>("SupplierId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("SupplierSolicitationId")
                         .HasColumnType("bigint");
 
                     b.Property<decimal?>("TaxAmount")
@@ -11821,17 +12176,37 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<DateTime?>("ValidUntil")
                         .HasColumnType("timestamp without time zone");
 
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L);
+
                     b.HasKey("Id");
 
-                    b.HasIndex("BusinessUnitId");
-
-                    b.HasIndex("CurrencyId");
-
-                    b.HasIndex("SupplierId");
+                    b.HasIndex("ProductId");
 
                     b.HasIndex("UomId");
 
-                    b.ToTable("SupplierQuotedItems");
+                    b.HasIndex("BusinessUnitId", "CurrencyId");
+
+                    b.HasIndex("BusinessUnitId", "ResponseIdempotencyKey")
+                        .IsUnique()
+                        .HasDatabaseName("UX_SupplierQuotedItems_BU_ResponseKey")
+                        .HasFilter("\"ResponseIdempotencyKey\" IS NOT NULL");
+
+                    b.HasIndex("BusinessUnitId", "SupplierSolicitationId");
+
+                    b.HasIndex("RfqItemId", "RfqId");
+
+                    b.HasIndex("SupplierId", "BusinessUnitId");
+
+                    b.HasIndex("BusinessUnitId", "RfqId", "RfqItemId");
+
+                    b.ToTable("SupplierQuotedItems", t =>
+                        {
+                            t.HasCheckConstraint("CK_SupplierQuotedItems_ProcurementValues", "(\"UnitPrice\" IS NULL OR \"UnitPrice\" >= 0) AND \"Quantity\" > 0 AND (\"LeadTimeDays\" IS NULL OR \"LeadTimeDays\" >= 0) AND (\"AvailableQuantity\" IS NULL OR \"AvailableQuantity\" >= 0) AND \"FreightCost\" >= 0 AND \"DutyCost\" >= 0 AND \"OtherCost\" >= 0 AND (\"ReliabilitySnapshot\" IS NULL OR (\"ReliabilitySnapshot\" >= 0 AND \"ReliabilitySnapshot\" <= 100))");
+                        });
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Models.Taxis", b =>
@@ -12252,8 +12627,6 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasKey("Id")
                         .HasName("PK__Warehous__3214EC27E9A0A7EE");
-
-                    b.HasIndex("BusinessUnitId");
 
                     b.HasIndex(new[] { "WarehouseCode", "BusinessUnitId" }, "UQ_Warehouses_Code_BU")
                         .IsUnique();
@@ -12919,6 +13292,689 @@ namespace ERP_RFQ_Automation.Migrations
                     b.ToTable("Tenants", "platform");
                 });
 
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.CommercialDemandLine", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTime>("CreatedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("IdentityKey")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("character varying(160)");
+
+                    b.Property<string>("NexoraSerial")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<long>("RfqId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("RfqItemId")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BusinessUnitId", "IdentityKey")
+                        .IsUnique();
+
+                    b.HasIndex("BusinessUnitId", "RfqId");
+
+                    b.HasIndex("BusinessUnitId", "RfqItemId")
+                        .IsUnique();
+
+                    b.HasIndex("RfqItemId", "RfqId");
+
+                    b.ToTable("commercial_demand_lines", (string)null);
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.GoodsReceipt", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTime>("CreatedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("character varying(160)");
+
+                    b.Property<string>("ReceiptNumber")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
+                    b.Property<DateTime>("ReceivedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(24)
+                        .HasColumnType("character varying(24)");
+
+                    b.Property<long>("SupplierPurchaseOrderId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L);
+
+                    b.Property<long>("WarehouseId")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BusinessUnitId", "IdempotencyKey")
+                        .IsUnique();
+
+                    b.HasIndex("BusinessUnitId", "ReceiptNumber")
+                        .IsUnique();
+
+                    b.HasIndex("BusinessUnitId", "SupplierPurchaseOrderId");
+
+                    b.HasIndex("BusinessUnitId", "WarehouseId");
+
+                    b.ToTable("goods_receipts", (string)null);
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.GoodsReceiptLine", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("GoodsReceiptId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("InventoryId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("InventoryMovementId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("ProductId")
+                        .HasColumnType("bigint");
+
+                    b.Property<decimal>("ReceivedQuantity")
+                        .HasPrecision(18, 4)
+                        .HasColumnType("numeric(18,4)");
+
+                    b.Property<long>("SupplierPurchaseOrderLineId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("WarehouseId")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("InventoryMovementId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_goods_receipt_lines_InventoryMovementId");
+
+                    b.HasIndex("BusinessUnitId", "GoodsReceiptId");
+
+                    b.HasIndex("BusinessUnitId", "SupplierPurchaseOrderLineId", "ProductId", "WarehouseId");
+
+                    b.HasIndex("BusinessUnitId", "InventoryMovementId", "ProductId", "InventoryId", "WarehouseId");
+
+                    b.ToTable("goods_receipt_lines", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_goods_receipt_lines_Quantity", "\"ReceivedQuantity\" > 0");
+                        });
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.ProcurementEvent", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("Actor")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<long>("AggregateId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("AggregateType")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
+                    b.Property<long>("AggregateVersion")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("CorrelationId")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("character varying(160)");
+
+                    b.Property<string>("EventType")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("character varying(160)");
+
+                    b.Property<DateTime>("OccurredOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("PayloadJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BusinessUnitId", "EventType", "IdempotencyKey")
+                        .IsUnique();
+
+                    b.HasIndex("BusinessUnitId", "AggregateType", "AggregateId", "OccurredOn");
+
+                    b.ToTable("procurement_events", (string)null);
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.ProcurementOutboxMessage", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<int>("AttemptCount")
+                        .HasColumnType("integer");
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime>("CreatedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("LastErrorCode")
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)");
+
+                    b.Property<string>("MessageType")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
+                    b.Property<DateTime>("NextAttemptOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("PayloadJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("ProviderReference")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTime?>("SentOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(24)
+                        .HasColumnType("character varying(24)");
+
+                    b.Property<long>("SupplierSolicitationId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime>("UpdatedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BusinessUnitId", "SupplierSolicitationId")
+                        .IsUnique();
+
+                    b.HasIndex("Status", "NextAttemptOn");
+
+                    b.ToTable("procurement_outbox", (string)null);
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.SourcingCase", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("CommercialDemandLineId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTime>("CreatedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<long?>("CustomerId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("DeliveryLocation")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<string>("Description")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("character varying(160)");
+
+                    b.Property<long?>("LeadId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Manufacturer")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("NexoraSerial")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("NextAction")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("Priority")
+                        .IsRequired()
+                        .HasMaxLength(24)
+                        .HasColumnType("character varying(24)");
+
+                    b.Property<long?>("ProductId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("RequestedPartNumber")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<decimal>("RequestedQuantity")
+                        .HasPrecision(18, 4)
+                        .HasColumnType("numeric(18,4)");
+
+                    b.Property<DateTime?>("RequiredOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<long>("RfqId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("RfqItemId")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("SearchLimit")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ShortageDecisionKey")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<decimal>("StockQuantity")
+                        .HasPrecision(18, 4)
+                        .HasColumnType("numeric(18,4)");
+
+                    b.Property<decimal>("UnfulfilledQuantity")
+                        .HasPrecision(18, 4)
+                        .HasColumnType("numeric(18,4)");
+
+                    b.Property<string>("UnitOfMeasure")
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
+                    b.Property<string>("UpdatedBy")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTime>("UpdatedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L);
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BusinessUnitId", "IdempotencyKey")
+                        .IsUnique();
+
+                    b.HasIndex("BusinessUnitId", "RfqId");
+
+                    b.HasIndex("RfqItemId", "RfqId");
+
+                    b.HasIndex("BusinessUnitId", "CommercialDemandLineId", "ShortageDecisionKey")
+                        .IsUnique();
+
+                    b.ToTable("sourcing_cases", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_sourcing_cases_Quantities", "\"RequestedQuantity\" > 0 AND \"StockQuantity\" >= 0 AND \"UnfulfilledQuantity\" > 0 AND \"UnfulfilledQuantity\" <= \"RequestedQuantity\"");
+
+                            t.HasCheckConstraint("CK_sourcing_cases_SearchLimit", "\"SearchLimit\" IN (10,20,50)");
+
+                            t.HasCheckConstraint("CK_sourcing_cases_Status", "\"Status\" IN ('DRAFT','INTERNAL_SEARCH','DISCOVERY_REQUIRED','SUPPLIERS_SELECTED','OUTREACH_READY','OUTREACH_SENT','RESPONSES_PARTIAL','RESPONSES_COMPLETE','COMPARISON_READY','NEGOTIATION','AWARD_REVIEW','SUPPLIER_SELECTED','CUSTOMER_QUOTE_READY','CLOSED','CANCELLED')");
+                        });
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.SourcingCaseCandidate", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime>("CreatedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<DateTime?>("EvidenceFreshOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("EvidenceJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<decimal>("EvidenceScore")
+                        .HasPrecision(5, 2)
+                        .HasColumnType("numeric(5,2)");
+
+                    b.Property<string>("EvidenceType")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)");
+
+                    b.Property<int>("Rank")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("RecommendationReason")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<bool>("Selected")
+                        .HasColumnType("boolean");
+
+                    b.Property<long>("SourcingCaseId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("SupplierId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime>("UpdatedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SupplierId", "BusinessUnitId");
+
+                    b.HasIndex("BusinessUnitId", "SourcingCaseId", "Rank");
+
+                    b.HasIndex("BusinessUnitId", "SourcingCaseId", "SupplierId")
+                        .IsUnique();
+
+                    b.ToTable("sourcing_case_candidates", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_sourcing_case_candidates_RankScore", "\"Rank\" > 0 AND \"EvidenceScore\" >= 0 AND \"EvidenceScore\" <= 100");
+                        });
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.SupplierPurchaseOrder", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTime>("CreatedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<long>("CurrencyId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateOnly?>("ExpectedOn")
+                        .HasColumnType("date");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("character varying(160)");
+
+                    b.Property<string>("ModifiedBy")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTime?>("ModifiedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("PurchaseOrderNumber")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<long>("RfqId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<long>("SupplierId")
+                        .HasColumnType("bigint");
+
+                    b.Property<decimal>("TotalValue")
+                        .HasPrecision(18, 4)
+                        .HasColumnType("numeric(18,4)");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L);
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BusinessUnitId", "CurrencyId");
+
+                    b.HasIndex("BusinessUnitId", "IdempotencyKey")
+                        .IsUnique();
+
+                    b.HasIndex("BusinessUnitId", "PurchaseOrderNumber")
+                        .IsUnique();
+
+                    b.HasIndex("BusinessUnitId", "RfqId");
+
+                    b.HasIndex("SupplierId", "BusinessUnitId");
+
+                    b.ToTable("supplier_purchase_orders", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_supplier_purchase_orders_Status", "\"Status\" IN ('DRAFT','ISSUED','PARTIALLY_RECEIVED','RECEIVED','CANCELLED')");
+
+                            t.HasCheckConstraint("CK_supplier_purchase_orders_TotalValue", "\"TotalValue\" >= 0");
+                        });
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.SupplierPurchaseOrderLine", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("IncomingInventoryId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("InventoryId")
+                        .HasColumnType("bigint");
+
+                    b.Property<decimal>("LandedUnitCost")
+                        .HasPrecision(18, 4)
+                        .HasColumnType("numeric(18,4)");
+
+                    b.Property<decimal>("OrderedQuantity")
+                        .HasPrecision(18, 4)
+                        .HasColumnType("numeric(18,4)");
+
+                    b.Property<long>("ProductId")
+                        .HasColumnType("bigint");
+
+                    b.Property<decimal>("ReceivedQuantity")
+                        .HasPrecision(18, 4)
+                        .HasColumnType("numeric(18,4)");
+
+                    b.Property<long>("RfqId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("RfqItemId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("SourcingAwardId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("SupplierPurchaseOrderId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("SupplierQuotedItemId")
+                        .HasColumnType("bigint");
+
+                    b.Property<decimal>("UnitCost")
+                        .HasPrecision(18, 4)
+                        .HasColumnType("numeric(18,4)");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L);
+
+                    b.Property<long>("WarehouseId")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Id");
+
+                    b.HasAlternateKey("BusinessUnitId", "Id");
+
+                    b.HasIndex("InventoryId");
+
+                    b.HasIndex("ProductId");
+
+                    b.HasIndex("BusinessUnitId", "IncomingInventoryId");
+
+                    b.HasIndex("BusinessUnitId", "RfqId");
+
+                    b.HasIndex("BusinessUnitId", "SourcingAwardId")
+                        .IsUnique();
+
+                    b.HasIndex("BusinessUnitId", "SupplierPurchaseOrderId");
+
+                    b.HasIndex("BusinessUnitId", "SupplierQuotedItemId");
+
+                    b.HasIndex("BusinessUnitId", "WarehouseId");
+
+                    b.HasIndex("RfqItemId", "RfqId");
+
+                    b.ToTable("supplier_purchase_order_lines", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_supplier_purchase_order_lines_Costs", "\"UnitCost\" >= 0 AND \"LandedUnitCost\" >= \"UnitCost\"");
+
+                            t.HasCheckConstraint("CK_supplier_purchase_order_lines_Quantities", "\"OrderedQuantity\" > 0 AND \"ReceivedQuantity\" >= 0 AND \"ReceivedQuantity\" <= \"OrderedQuantity\"");
+                        });
+                });
+
             modelBuilder.Entity("ERP_RFQ_Automation.QuoteDelivery.QuoteDeliveryRequest", b =>
                 {
                     b.Property<long>("Id")
@@ -13150,6 +14206,58 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasForeignKey("BusinessUnitId", "SourceDocumentOccurrenceId")
                         .HasPrincipalKey("BusinessUnitId", "Id")
                         .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Agent.Models.SourcingAward", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Models.Currency", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "CurrencyId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.Models.Rfq", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "RfqId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Models.SupplierQuotedItem", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "SupplierQuotedItemId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.Models.Rfqitem", null)
+                        .WithMany()
+                        .HasForeignKey("RfqItemId", "RfqId")
+                        .HasPrincipalKey("Id", "Rfqid")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.Models.Supplier", null)
+                        .WithMany()
+                        .HasForeignKey("SupplierId", "BusinessUnitId")
+                        .HasPrincipalKey("Id", "Buid")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Agent.Models.SupplierSolicitation", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Models.Rfq", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "RfqId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Models.Supplier", null)
+                        .WithMany()
+                        .HasForeignKey("SupplierId", "BusinessUnitId")
+                        .HasPrincipalKey("Id", "Buid")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.BankReconciliation.BankAccount", b =>
@@ -13473,6 +14581,18 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Navigation("BusinessUnit");
 
                     b.Navigation("LifecycleEvent");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.CommercialDocuments.CommercialDocumentClassification", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.DocumentIntelligence.Persistence.SourceDocument", "SourceDocument")
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "SourceDocumentId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("SourceDocument");
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.CommercialFinance.CollectionControl", b =>
@@ -15578,23 +16698,52 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasOne("ERP_RFQ_Automation.Models.BusinessUnit", "BusinessUnit")
                         .WithMany("SupplierQuotedItems")
                         .HasForeignKey("BusinessUnitId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
                         .HasConstraintName("FK_SupplierQuotedItems_BusinessUnits");
 
-                    b.HasOne("ERP_RFQ_Automation.Models.Currency", "Currency")
-                        .WithMany("SupplierQuotedItems")
-                        .HasForeignKey("CurrencyId")
-                        .HasConstraintName("FK_SupplierQuotedItems_Currency");
-
-                    b.HasOne("ERP_RFQ_Automation.Models.Supplier", "Supplier")
-                        .WithMany("SupplierQuotedItems")
-                        .HasForeignKey("SupplierId")
-                        .IsRequired()
-                        .HasConstraintName("FK_SupplierQuotedItems_Suppliers");
+                    b.HasOne("ERP_RFQ_Automation.Models.Product", null)
+                        .WithMany()
+                        .HasForeignKey("ProductId")
+                        .OnDelete(DeleteBehavior.Restrict);
 
                     b.HasOne("ERP_RFQ_Automation.Models.SetUom", "Uom")
                         .WithMany("SupplierQuotedItems")
                         .HasForeignKey("UomId")
                         .HasConstraintName("FK_SupplierQuotedItems_SetUoms");
+
+                    b.HasOne("ERP_RFQ_Automation.Models.Currency", "Currency")
+                        .WithMany("SupplierQuotedItems")
+                        .HasForeignKey("BusinessUnitId", "CurrencyId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("FK_SupplierQuotedItems_Currency");
+
+                    b.HasOne("ERP_RFQ_Automation.Models.Rfq", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "RfqId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.Agent.Models.SupplierSolicitation", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "SupplierSolicitationId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.Models.Rfqitem", null)
+                        .WithMany()
+                        .HasForeignKey("RfqItemId", "RfqId")
+                        .HasPrincipalKey("Id", "Rfqid")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.Models.Supplier", "Supplier")
+                        .WithMany("SupplierQuotedItems")
+                        .HasForeignKey("SupplierId", "BusinessUnitId")
+                        .HasPrincipalKey("Id", "Buid")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("FK_SupplierQuotedItems_Suppliers");
 
                     b.Navigation("BusinessUnit");
 
@@ -15880,6 +17029,210 @@ namespace ERP_RFQ_Automation.Migrations
                         .OnDelete(DeleteBehavior.SetNull);
 
                     b.Navigation("Plan");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.CommercialDemandLine", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Models.Rfq", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "RfqId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Models.Rfqitem", null)
+                        .WithMany()
+                        .HasForeignKey("RfqItemId", "RfqId")
+                        .HasPrincipalKey("Id", "Rfqid")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.GoodsReceipt", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Procurement.SupplierPurchaseOrder", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "SupplierPurchaseOrderId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Models.Warehouse", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "WarehouseId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.GoodsReceiptLine", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Procurement.GoodsReceipt", null)
+                        .WithMany("Lines")
+                        .HasForeignKey("BusinessUnitId", "GoodsReceiptId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Procurement.SupplierPurchaseOrderLine", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "SupplierPurchaseOrderLineId", "ProductId", "WarehouseId")
+                        .HasPrincipalKey("BusinessUnitId", "Id", "ProductId", "WarehouseId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Inventory.Commercial.InventoryMovement", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "InventoryMovementId", "ProductId", "InventoryId", "WarehouseId")
+                        .HasPrincipalKey("BusinessUnitId", "Id", "ProductId", "InventoryId", "WarehouseId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.ProcurementEvent", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Models.BusinessUnit", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.ProcurementOutboxMessage", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Agent.Models.SupplierSolicitation", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "SupplierSolicitationId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.SourcingCase", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Procurement.CommercialDemandLine", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "CommercialDemandLineId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Models.Rfq", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "RfqId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Models.Rfqitem", null)
+                        .WithMany()
+                        .HasForeignKey("RfqItemId", "RfqId")
+                        .HasPrincipalKey("Id", "Rfqid")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.SourcingCaseCandidate", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Procurement.SourcingCase", null)
+                        .WithMany("Candidates")
+                        .HasForeignKey("BusinessUnitId", "SourcingCaseId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Models.Supplier", null)
+                        .WithMany()
+                        .HasForeignKey("SupplierId", "BusinessUnitId")
+                        .HasPrincipalKey("Id", "Buid")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.SupplierPurchaseOrder", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Models.Currency", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "CurrencyId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Models.Rfq", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "RfqId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Models.Supplier", null)
+                        .WithMany()
+                        .HasForeignKey("SupplierId", "BusinessUnitId")
+                        .HasPrincipalKey("Id", "Buid")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.SupplierPurchaseOrderLine", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Models.Inventory", null)
+                        .WithMany()
+                        .HasForeignKey("InventoryId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.Models.Product", null)
+                        .WithMany()
+                        .HasForeignKey("ProductId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Inventory.Commercial.IncomingInventory", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "IncomingInventoryId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.Models.Rfq", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "RfqId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Agent.Models.SourcingAward", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "SourcingAwardId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Procurement.SupplierPurchaseOrder", null)
+                        .WithMany("Lines")
+                        .HasForeignKey("BusinessUnitId", "SupplierPurchaseOrderId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Models.SupplierQuotedItem", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "SupplierQuotedItemId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Models.Warehouse", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "WarehouseId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Models.Rfqitem", null)
+                        .WithMany()
+                        .HasForeignKey("RfqItemId", "RfqId")
+                        .HasPrincipalKey("Id", "Rfqid")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.QuoteDelivery.QuoteDeliveryRequest", b =>
@@ -16412,6 +17765,21 @@ namespace ERP_RFQ_Automation.Migrations
             modelBuilder.Entity("ERP_RFQ_Automation.OrderToCash.CustomerPurchaseOrderLine", b =>
                 {
                     b.Navigation("AwardAllocations");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.GoodsReceipt", b =>
+                {
+                    b.Navigation("Lines");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.SourcingCase", b =>
+                {
+                    b.Navigation("Candidates");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Procurement.SupplierPurchaseOrder", b =>
+                {
+                    b.Navigation("Lines");
                 });
 #pragma warning restore 612, 618
         }

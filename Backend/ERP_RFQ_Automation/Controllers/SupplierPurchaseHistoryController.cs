@@ -1,209 +1,97 @@
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DTOs.SupplierPurchaseHistory;
 using ERP_RFQ_Automation.Interfaces;
-using ERP_RFQ_Automation.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Logging;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
 
+namespace ERP_RFQ_Automation.Controllers;
 
-namespace ERP_RFQ_Automation.Controllers
+[ApiController]
+[Route("api/[controller]")]
+[Authorize]
+public sealed class SupplierPurchaseHistoryController(
+    ISupplierPurchaseHistoryRepository repository,
+    ILogger<SupplierPurchaseHistoryController> logger) : ControllerBase
 {
-    [Route("api/[controller]")]
-    [ApiController]
-    [Authorize]
-    public class SupplierPurchaseHistoryController : ControllerBase
+    [HttpGet]
+    [RequireModulePermission("Supplier History", PermissionAction.View)]
+    public Task<IActionResult> GetAll([FromQuery] long? businessUnitId = null)
+        => ExecuteReadAsync(async () => Ok(await repository.GetAllAsync(TenantId())));
+
+    [HttpGet("product/{productId:long}")]
+    [RequireModulePermission("Supplier History", PermissionAction.View)]
+    public Task<IActionResult> GetByProductId(long productId, [FromQuery] long? businessUnitId = null)
+        => ExecuteReadAsync(async () => Ok(await repository.GetByProductIdAsync(productId, TenantId())));
+
+    [HttpGet("{id:long}")]
+    [RequireModulePermission("Supplier History", PermissionAction.View)]
+    public Task<IActionResult> GetById(long id, [FromQuery] long? businessUnitId = null)
+        => ExecuteReadAsync(async () =>
+        {
+            var result = await repository.GetByIdAsync(id, TenantId());
+            return result is null
+                ? NotFound(Problem(StatusCodes.Status404NotFound, "Purchase history record not found",
+                    "The requested purchase history record was not found."))
+                : Ok(result);
+        });
+
+    [HttpPost]
+    [RequireModulePermission("Supplier History", PermissionAction.Create)]
+    public IActionResult Create([FromBody] SupplierPurchaseHistoryCreateDTO request) => MutationRetired();
+
+    [HttpPost("batch")]
+    [RequireModulePermission("Supplier History", PermissionAction.Create)]
+    public IActionResult CreateBatch([FromBody] SupplierPurchaseHistoryBatchCreateDTO request) => MutationRetired();
+
+    [HttpPut("{id:long}")]
+    [RequireModulePermission("Supplier History", PermissionAction.Edit)]
+    public IActionResult Update(long id, [FromBody] SupplierPurchaseHistoryUpdateDTO request) => MutationRetired();
+
+    [HttpDelete("{id:long}")]
+    [RequireModulePermission("Supplier History", PermissionAction.Delete)]
+    public IActionResult Delete(long id, [FromQuery] long? businessUnitId = null) => MutationRetired();
+
+    [HttpDelete("po/{poDocId}")]
+    [RequireModulePermission("Supplier History", PermissionAction.Delete)]
+    public IActionResult DeleteByPoNumber(string poDocId, [FromQuery] long? businessUnitId = null) => MutationRetired();
+
+    private IActionResult MutationRetired()
+        => StatusCode(StatusCodes.Status410Gone, Problem(
+            StatusCodes.Status410Gone,
+            "Purchase history mutation retired",
+            "Purchase history is read-only. Use the governed procurement purchase-order and goods-receipt endpoints."));
+
+    private async Task<IActionResult> ExecuteReadAsync(Func<Task<IActionResult>> action)
     {
-        private readonly ISupplierPurchaseHistoryRepository _repository;
-        private readonly ILogger<SupplierPurchaseHistoryController> _logger;
-
-        public SupplierPurchaseHistoryController(ISupplierPurchaseHistoryRepository repository, ILogger<SupplierPurchaseHistoryController> logger)
+        try
         {
-            _repository = repository;
-            _logger = logger;
+            return await action();
         }
-
-
-        [HttpGet]
-        public async Task<ActionResult<IEnumerable<SupplierPurchaseHistoryResponseDTO>>> GetAll([FromQuery] long? businessUnitId = null)
+        catch (ArgumentException exception)
         {
-            try
-            {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-                if (targetBUId <= 0)
-                    return BadRequest("Business Unit ID is required.");
-
-                var result = await _repository.GetAllAsync(targetBUId);
-                return Ok(result);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error: {ex.Message}");
-            }
+            return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid purchase history request", exception.Message));
         }
-
-        [HttpGet("product/{productId}")]
-        public async Task<ActionResult<IEnumerable<SupplierPurchaseHistoryResponseDTO>>> GetByProductId(long productId, [FromQuery] long? businessUnitId = null)
+        catch (Exception exception)
         {
-            try
-            {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-                if (targetBUId <= 0)
-                    return BadRequest("Business Unit ID is required.");
-
-                var result = await _repository.GetByProductIdAsync(productId, targetBUId);
-                return Ok(result);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error: {ex.Message}");
-            }
-        }
-
-        [HttpGet("{id}")]
-        public async Task<ActionResult<SupplierPurchaseHistoryResponseDTO>> GetById(long id, [FromQuery] long? businessUnitId = null)
-        {
-            try
-            {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-                if (targetBUId <= 0)
-                    return BadRequest("Business Unit ID is required.");
-
-                var result = await _repository.GetByIdAsync(id, targetBUId);
-                if (result == null) return NotFound();
-                return Ok(result);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error: {ex.Message}");
-            }
-        }
-
-        [HttpPost]
-        public async Task<ActionResult<SupplierPurchaseHistoryResponseDTO>> Create([FromBody] SupplierPurchaseHistoryCreateDTO request)
-        {
-            if (!ModelState.IsValid) return BadRequest(ModelState);
-
-            var history = new SupplierPurchaseHistory
-            {
-                ProductId = request.ProductId,
-                SupplierId = request.SupplierId,
-                PurchaseDate = request.PurchaseDate,
-                Quantity = request.Quantity,
-                UnitPrice = request.UnitPrice,
-                Currency = request.Currency,
-                BatchNo = request.BatchNo,
-                ExpiryDate = string.IsNullOrEmpty(request.ExpiryDate) ? null : DateOnly.Parse(request.ExpiryDate),
-                CreatedBy = request.CreatedBy,
-                CreatedOn = DateTime.UtcNow
-            };
-
-            await _repository.AddAsync(history);
-            return Ok(history);
-        }
-
-        [HttpPost("batch")]
-        public async Task<ActionResult<string>> CreateBatch([FromBody] SupplierPurchaseHistoryBatchCreateDTO request)
-        {
-            _logger.LogInformation("Creating batch purchase history. Item count: {Count}", request.Items?.Count ?? 0);
-            if (!ModelState.IsValid) return BadRequest(ModelState);
-
-            if (request.Items == null || !request.Items.Any()) return BadRequest("No items provided.");
-
-            var histories = request.Items.Select(item => new SupplierPurchaseHistory
-            {
-                ProductId = item.ProductId,
-                SupplierId = item.SupplierId,
-                PurchaseDate = item.PurchaseDate,
-                Quantity = item.Quantity,
-                UnitPrice = item.UnitPrice,
-                Currency = item.Currency,
-                BatchNo = item.BatchNo,
-                ExpiryDate = string.IsNullOrEmpty(item.ExpiryDate) ? null : DateOnly.Parse(item.ExpiryDate),
-                CreatedBy = item.CreatedBy,
-                CreatedOn = DateTime.UtcNow
-            }).ToList();
-
-            string poId = await _repository.AddBatchAsync(histories);
-            return Ok(new { PoDocId = poId });
-        }
-
-
-        [HttpPut("{id}")]
-        public async Task<IActionResult> Update(long id, [FromBody] SupplierPurchaseHistoryUpdateDTO request)
-        {
-            if (id != request.Id) return BadRequest("ID mismatch");
-            if (!ModelState.IsValid) return BadRequest(ModelState);
-
-            var existing = await _repository.GetByIdAsync(id, 0);
-            if (existing == null) return NotFound();
-
-            var history = new SupplierPurchaseHistory
-            {
-                Id = request.Id,
-                ProductId = request.ProductId,
-                SupplierId = request.SupplierId,
-                PurchaseDate = request.PurchaseDate,
-                Quantity = request.Quantity,
-                UnitPrice = request.UnitPrice,
-                Currency = request.Currency,
-                BatchNo = request.BatchNo,
-                ExpiryDate = request.ExpiryDate,
-                // Preserve CreatedBy/CreatedOn if repo/context allows
-            };
-
-            await _repository.UpdateAsync(history);
-            return NoContent();
-        }
-
-        [HttpDelete("{id}")]
-        public async Task<IActionResult> Delete(long id, [FromQuery] long? businessUnitId = null)
-        {
-            try
-            {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-                if (targetBUId <= 0)
-                    return BadRequest("Business Unit ID is required.");
-
-                await _repository.DeleteAsync(id, targetBUId);
-                return NoContent();
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error: {ex.Message}");
-            }
-        }
-
-        [HttpDelete("po/{poDocId}")]
-        public async Task<IActionResult> DeleteByPoNumber(string poDocId, [FromQuery] long? businessUnitId = null)
-        {
-            try
-            {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-                if (targetBUId <= 0)
-                    return BadRequest("Business Unit ID is required.");
-
-                await _repository.DeleteByPoDocIdAsync(poDocId, targetBUId);
-                return NoContent();
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error: {ex.Message}");
-            }
+            logger.LogError(exception,
+                "Supplier purchase history read failed. CorrelationId={CorrelationId}", CorrelationId());
+            return StatusCode(StatusCodes.Status500InternalServerError, Problem(
+                StatusCodes.Status500InternalServerError,
+                "Purchase history unavailable",
+                "The purchase history request could not be completed."));
         }
     }
-}
 
+    private static ProblemDetails Problem(int status, string title, string detail)
+        => new() { Status = status, Title = title, Detail = detail };
+
+    private long TenantId()
+        => long.TryParse(User.FindFirst("businessUnitId")?.Value, out var value) && value > 0
+            ? value
+            : throw new ArgumentException("A valid tenant claim is required.");
+
+    private string CorrelationId()
+        => Request.Headers.TryGetValue("X-Correlation-ID", out var value) && !string.IsNullOrWhiteSpace(value)
+            ? value.ToString().Trim()
+            : HttpContext.TraceIdentifier;
+}

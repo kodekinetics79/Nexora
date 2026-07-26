@@ -13,6 +13,21 @@ namespace ERP_RFQ_Automation.Interfaces
         Task UpdateAsync(Supplier supplier, long businessUnitId);
         Task DeleteAsync(long id, long businessUnitId);
         Task<List<SupplierSearchResultDTO>> SearchSuppliersAsync(string? searchTerm, string? productCategory, long businessUnitId);
-        Task<List<SupplierSearchResultDTO>> SearchWebSuppliersAsync(string query);
+    }
+
+    public interface ISupplierNumberGenerator
+    {
+        string Generate(long supplierId, long businessUnitId);
+    }
+
+    public sealed class DeterministicSupplierNumberGenerator : ISupplierNumberGenerator
+    {
+        public string Generate(long supplierId, long businessUnitId)
+        {
+            if (supplierId <= 0 || businessUnitId <= 0)
+                throw new ArgumentOutOfRangeException(nameof(supplierId), "Supplier and tenant identities must be persisted before numbering.");
+
+            return $"SU{supplierId:D8}";
+        }
     }
 }

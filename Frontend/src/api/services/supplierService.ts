@@ -27,6 +27,24 @@ export interface SupplierDTO {
   createdOn?: string;
   modifiedBy?: string;
   modifiedOn?: string;
+  governanceStatus: string;
+  verificationStatus: string;
+  complianceStatus: string;
+  riskStatus: string;
+  readinessStatus: string;
+  governanceReviewedBy?: string;
+  governanceReviewedOn?: string;
+  concurrencyToken?: string;
+}
+
+export interface GovernSupplierRequest {
+  governanceStatus: string;
+  verificationStatus: string;
+  complianceStatus: string;
+  riskStatus: string;
+  readinessStatus: string;
+  expectedConcurrencyToken: string;
+  reason: string;
 }
 
 export interface PaginatedSupplierResponse {
@@ -98,6 +116,16 @@ const supplierService = {
   searchWebSuppliers: async (query: string): Promise<any[]> => {
     const response = await axiosInstance.get<any[]>("/api/Supplier/web-search", {
       params: { query }
+    });
+    return response.data;
+  },
+
+  govern: async (id: number, request: GovernSupplierRequest): Promise<SupplierDTO> => {
+    const response = await axiosInstance.post(`/api/suppliers/${id}/governance`, request, {
+      headers: {
+        'Idempotency-Key': crypto.randomUUID(),
+        'X-Correlation-ID': crypto.randomUUID(),
+      },
     });
     return response.data;
   },

@@ -89,8 +89,7 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
 
     public class RfqCreateRequestDTO
     {
-        [Required]
-        public string Rfqno { get; set; } = null!;
+        public string? Rfqno { get; set; }
         public string? BuyersName { get; set; }
         [Required]
 
@@ -106,13 +105,11 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public long? RfqtypeId { get; set; }
         public string? DurationAgreement { get; set; }
         public long? LeadId { get; set; }
-        [Required]
         public long BusinessUnitId { get; set; }
         public long? RfqstatusId { get; set; }
         public long? CustomerId { get; set; }
         public long? ContactId { get; set; }
-        [Required]
-        public string CreatedBy { get; set; } = null!;
+        public string? CreatedBy { get; set; }
         public List<RfqitemCreateRequestDTO> Rfqitems { get; set; } = new List<RfqitemCreateRequestDTO>();
     }
 
@@ -149,16 +146,12 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public DateTime? RequiredDesiredDate { get; set; }
         public DateTime? ReceivedDate { get; set; }
         public DateTime? BidClosingDateLine { get; set; }
-        [Required]
-        public string CreatedBy { get; set; } = null!;
+        public string? CreatedBy { get; set; }
         public decimal? Aiconfidence { get; set; }
     }
 
     public class RfqUpdateRequestDTO
     {
-        [Required]
-        public string Rfqno { get; set; } = null!;
-
         public long Id { get; set; }
         public string? BuyersName { get; set; }
         [Required]
@@ -173,13 +166,9 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public long? RfqtypeId { get; set; }
         public string? DurationAgreement { get; set; }
         public long? LeadId { get; set; }
-        [Required]
-        public long BusinessUnitId { get; set; }
         public long? RfqstatusId { get; set; }
         public long? CustomerId { get; set; }
         public long? ContactId { get; set; }
-        [Required]
-        public string ModifiedBy { get; set; } = null!;
         public List<RfqitemUpdateRequestDTO> Rfqitems { get; set; } = new List<RfqitemUpdateRequestDTO>();
     }
 
@@ -215,7 +204,6 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public DateTime? RequiredDesiredDate { get; set; }
         public DateTime? ReceivedDate { get; set; }
         public DateTime BidClosingDateLine { get; set; }
-        public string? ModifiedBy { get; set; }
         public decimal? Aiconfidence { get; set; }
         public long Id { get; set; }
     }

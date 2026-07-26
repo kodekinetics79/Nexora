@@ -109,19 +109,23 @@ namespace ERP_RFQ_Automation.Repositories
         {
             if (contact.CustomerId.HasValue == contact.SupplierId.HasValue)
                 throw new ArgumentException("Contact must be associated with exactly one Customer or Supplier.");
+            if (contact.BusinessUnitId <= 0)
+                throw new ArgumentException("Contact must belong to an authenticated Business Unit.");
 
             // Validate foreign keys
             long? buId = null;
             if (contact.CustomerId.HasValue)
             {
-                var customer = await _context.Customers.FirstOrDefaultAsync(c => c.Id == contact.CustomerId.Value);
+                var customer = await _context.Customers.FirstOrDefaultAsync(c =>
+                    c.Id == contact.CustomerId.Value && c.Buid == contact.BusinessUnitId);
                 if (customer == null)
                     throw new ArgumentException($"Customer with ID {contact.CustomerId.Value} does not exist.");
                 buId = customer.Buid;
             }
             if (contact.SupplierId.HasValue)
             {
-                var supplier = await _context.Suppliers.FirstOrDefaultAsync(s => s.Id == contact.SupplierId.Value);
+                var supplier = await _context.Suppliers.FirstOrDefaultAsync(s =>
+                    s.Id == contact.SupplierId.Value && s.Buid == contact.BusinessUnitId);
                 if (supplier == null)
                     throw new ArgumentException($"Supplier with ID {contact.SupplierId.Value} does not exist.");
                 if (buId.HasValue && supplier.Buid != buId)
@@ -138,9 +142,9 @@ namespace ERP_RFQ_Automation.Repositories
             {
                 bool primaryExists = false;
                 if (contact.CustomerId.HasValue)
-                    primaryExists = await _context.Contacts.AnyAsync(c => c.CustomerId == contact.CustomerId.Value && c.IsPrimary == true);
+                    primaryExists = await _context.Contacts.AnyAsync(c => c.CustomerId == contact.CustomerId.Value && c.BusinessUnitId == contact.BusinessUnitId && c.IsPrimary == true);
                 else if (contact.SupplierId.HasValue)
-                    primaryExists = await _context.Contacts.AnyAsync(c => c.SupplierId == contact.SupplierId.Value && c.IsPrimary == true);
+                    primaryExists = await _context.Contacts.AnyAsync(c => c.SupplierId == contact.SupplierId.Value && c.BusinessUnitId == contact.BusinessUnitId && c.IsPrimary == true);
 
                 if (primaryExists)
                     throw new ArgumentException("A primary contact already exists for this parent. Only one primary contact is allowed.");
@@ -159,14 +163,16 @@ namespace ERP_RFQ_Automation.Repositories
             long? buId = null;
             if (contact.CustomerId.HasValue)
             {
-                var customer = await _context.Customers.AsNoTracking().FirstOrDefaultAsync(c => c.Id == contact.CustomerId.Value);
+                var customer = await _context.Customers.AsNoTracking().FirstOrDefaultAsync(c =>
+                    c.Id == contact.CustomerId.Value && c.Buid == contact.BusinessUnitId);
                 if (customer == null)
                     throw new ArgumentException($"Customer with ID {contact.CustomerId.Value} does not exist.");
                 buId = customer.Buid;
             }
             if (contact.SupplierId.HasValue)
             {
-                var supplier = await _context.Suppliers.AsNoTracking().FirstOrDefaultAsync(s => s.Id == contact.SupplierId.Value);
+                var supplier = await _context.Suppliers.AsNoTracking().FirstOrDefaultAsync(s =>
+                    s.Id == contact.SupplierId.Value && s.Buid == contact.BusinessUnitId);
                 if (supplier == null)
                     throw new ArgumentException($"Supplier with ID {contact.SupplierId.Value} does not exist.");
                 if (buId.HasValue && supplier.Buid != buId)
@@ -191,9 +197,9 @@ namespace ERP_RFQ_Automation.Repositories
             {
                 bool emailExists = false;
                 if (contact.CustomerId.HasValue)
-                    emailExists = await _context.Contacts.AnyAsync(con => con.Email == contact.Email && con.CustomerId == contact.CustomerId.Value && con.Id != contact.Id);
+                    emailExists = await _context.Contacts.AnyAsync(con => con.Email == contact.Email && con.CustomerId == contact.CustomerId.Value && con.BusinessUnitId == contact.BusinessUnitId && con.Id != contact.Id);
                 else if (contact.SupplierId.HasValue)
-                    emailExists = await _context.Contacts.AnyAsync(con => con.Email == contact.Email && con.SupplierId == contact.SupplierId.Value && con.Id != contact.Id);
+                    emailExists = await _context.Contacts.AnyAsync(con => con.Email == contact.Email && con.SupplierId == contact.SupplierId.Value && con.BusinessUnitId == contact.BusinessUnitId && con.Id != contact.Id);
                 if (emailExists)
                     throw new ArgumentException($"Email {contact.Email} already exists for this parent.");
             }
@@ -203,9 +209,9 @@ namespace ERP_RFQ_Automation.Repositories
             {
                 bool primaryExists = false;
                 if (contact.CustomerId.HasValue)
-                    primaryExists = await _context.Contacts.AnyAsync(c => c.CustomerId == contact.CustomerId.Value && c.IsPrimary == true && c.Id != contact.Id);
+                    primaryExists = await _context.Contacts.AnyAsync(c => c.CustomerId == contact.CustomerId.Value && c.BusinessUnitId == contact.BusinessUnitId && c.IsPrimary == true && c.Id != contact.Id);
                 else if (contact.SupplierId.HasValue)
-                    primaryExists = await _context.Contacts.AnyAsync(c => c.SupplierId == contact.SupplierId.Value && c.IsPrimary == true && c.Id != contact.Id);
+                    primaryExists = await _context.Contacts.AnyAsync(c => c.SupplierId == contact.SupplierId.Value && c.BusinessUnitId == contact.BusinessUnitId && c.IsPrimary == true && c.Id != contact.Id);
 
                 if (primaryExists)
                     throw new ArgumentException("A primary contact already exists for this parent. Only one primary contact is allowed.");

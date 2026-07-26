@@ -7,7 +7,7 @@ import {
   IconButton, TextField, Autocomplete, CircularProgress,
   MenuItem, Dialog, DialogTitle, DialogContent, DialogActions,
   Divider, Tabs, Tab, InputAdornment, List, ListItem, ListItemText,
-  ListItemAvatar, Avatar, Checkbox, TablePagination
+  ListItemAvatar, Avatar, Checkbox, TablePagination, Alert
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
@@ -319,7 +319,7 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
             {item.matchStatus === 'no-match' && (
               <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
                 <Chip
-                  label="New Item"
+                  label="Sourcing required"
                   size="small"
                   sx={{ height: 16, fontSize: '0.55rem', fontWeight: 900, bgcolor: '#fff3e0', color: '#ef6c00', borderRadius: 1 }}
                 />
@@ -375,7 +375,7 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
 
       {/* Selector */}
       <TableCell>
-        <Stack spacing={1} sx={{ width: 350 }}>
+        <Stack spacing={1} sx={{ width: { xs: 240, sm: 350 }, maxWidth: '100%' }}>
           <TextField
             select
             size="small"
@@ -585,8 +585,6 @@ We would like to request a quotation for the following items:
 |---|--------------|--------------|-------------|----------|-----|
 ${itemRows}
 
-Required Date: ${new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]}
-
 Please provide your best pricing and lead time for the items listed above.
 
 Thank you for your assistance.
@@ -595,22 +593,16 @@ Best regards`;
 
       setEmailData({
         to: supplier.email || '',
-        cc: 'manager@example.com',
+        cc: '',
         subject,
         body
       });
     }
   }, [supplier, items, rfqNo]);
 
-  const handleSend = async () => {
-    try {
-      // In a real app, this would call an API to send the actual email via SMTP/SendGrid
-      // For now, we simulate a successful send
-      toast.success(`Quote request sent to ${supplier.name} successfully!`);
-      onClose();
-    } catch (e) {
-      toast.error('Failed to send quote request');
-    }
+  const handleContinue = () => {
+    toast('Create the draft RFQ, then dispatch this request from the governed sourcing workbench.');
+    onClose();
   };
 
   return (
@@ -667,10 +659,10 @@ Best regards`;
         <Button 
           variant="contained" 
           startIcon={<SendIcon />} 
-          onClick={handleSend}
+          onClick={handleContinue}
           sx={{ borderRadius: 1.5, textTransform: 'none', fontWeight: 700, px: 3 }}
         >
-          Send Request
+          Continue with Draft RFQ
         </Button>
       </DialogActions>
     </Dialog>
@@ -992,7 +984,13 @@ const ProcessRFQPage: React.FC = () => {
 
   // ── Data fetching ──────────────────────────────────────────────────────────
 
-  const { data: lead, isLoading } = useQuery({
+  const {
+    data: lead,
+    isLoading,
+    isError: isLeadError,
+    error: leadError,
+    refetch: refetchLead,
+  } = useQuery({
     queryKey: ['accepted-lead', id],
     queryFn: () => leadService.getAcceptedLeadById(Number(id)),
     enabled: !!id,
@@ -1138,9 +1136,10 @@ const ProcessRFQPage: React.FC = () => {
 
   const createRfqMutation = useMutation({
     mutationFn: (payload: any) => rfqService.create(payload),
-    onSuccess: () => {
+    onSuccess: (createdRfq: any) => {
       toast.success('Draft RFQ created successfully');
-      navigate('/procurement/rfqs/draft');
+      const createdId = Number(createdRfq?.id ?? createdRfq?.rfqId);
+      navigate(createdId > 0 ? `/procurement/rfqs/${createdId}/sourcing` : '/procurement/rfqs/draft');
     },
     onError: (err: any) => {
       toast.error(err.response?.data?.message ?? 'Failed to create RFQ');
@@ -1154,35 +1153,60 @@ const ProcessRFQPage: React.FC = () => {
       return;
     }
 
-    const itemsWithoutProduct = includedItems.filter(i => !i.productId && !i.supplierQuotedItemId && !i.preferredSupplierName);
-    if (itemsWithoutProduct.length > 0) {
-      toast.error('Please match or source a product/supplier for all included items before creating a draft.');
-      return;
+    const sourcingRequired = includedItems.filter(i => !i.productId && !i.supplierQuotedItemId).length;
+    if (sourcingRequired > 0) {
+      toast(`${sourcingRequired} unresolved line${sourcingRequired === 1 ? '' : 's'} will be carried to governed supplier sourcing.`);
     }
 
     createRfqMutation.mutate({
-      ...lead,
-      rfqno: lead?.rfqno ?? `RFQ-${Date.now()}`,
+      buyersName: lead?.buyersName,
+      recDate: lead?.recDate,
+      bidClosingDate: lead?.bidClosingDate,
+      headerRemarks: lead?.headerRemarks,
+      opportunityNo: lead?.opportunityNo,
+      rfqtype: lead?.rfqtype,
       customerId: matchedCustomer?.id,
       leadId: lead?.id,
-      businessUnitId: userData?.businessUnitId,
-      rfqstatusId: 34,
-      createdBy: userData?.userName,
       rfqitems: includedItems.map(item => ({
-        ...item,
+        companyRef: item.companyRef,
+        customerAccountPortalId: item.customerAccountPortalId,
+        customerRfqno: item.customerRfqno,
+        lineItemNo: item.lineItemNo,
+        productShortName: item.productShortName,
         productId: item.selectionSource === 'product' ? item.productId : null,
         supplierQuotedItemId: item.selectionSource === 'quotedItem' ? item.supplierQuotedItemId : null,
         productShortDescription: item.productShortDescription || item.productShortName,
+        quantity: item.quantity,
+        unitPrice: item.unitPrice,
+        manufacturerName: item.manufacturerName,
+        manufacturerPartNumber: item.manufacturerPartNumber,
         bidClosingDateLine: item.bidClosingDateLine ?? lead?.bidClosingDate ?? new Date().toISOString(),
-        createdBy: userData?.userName,
       })),
     });
-  }, [items, lead, matchedCustomer, userData, createRfqMutation]);
+  }, [items, lead, matchedCustomer, createRfqMutation]);
 
   // ── Render guards ──────────────────────────────────────────────────────────
 
   if (isLoading) return <Box sx={{ p: 4, textAlign: 'center' }}><CircularProgress /></Box>;
-  if (!lead) return <Box sx={{ p: 4 }}><Typography>Lead not found</Typography></Box>;
+  if (isLeadError) {
+    const message = (leadError as any)?.response?.data?.message || (leadError as Error)?.message || 'The lead could not be loaded.';
+    return (
+      <Box sx={{ p: 4 }}>
+        <Alert severity="error" action={<Button onClick={() => refetchLead()}>Retry</Button>}>
+          {message}
+        </Alert>
+      </Box>
+    );
+  }
+  if (!lead) {
+    return (
+      <Box sx={{ p: 4 }}>
+        <Alert severity="warning" action={<Button onClick={() => refetchLead()}>Retry</Button>}>
+          Lead not found or no longer available.
+        </Alert>
+      </Box>
+    );
+  }
 
   const businessUnitId = userData?.businessUnitId ?? 0;
 
@@ -1200,11 +1224,11 @@ const ProcessRFQPage: React.FC = () => {
           <Typography sx={{ fontSize: '0.75rem', fontWeight: 600 }} color="text.primary">{t('process_lead') || 'Process Lead'}</Typography>
         </Breadcrumbs>
 
-        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-          <Typography variant="h5" sx={{ fontWeight: 950, letterSpacing: '-0.02em', color: '#1a237e' }}>
+        <Box sx={{ display: 'flex', flexDirection: { xs: 'column', md: 'row' }, gap: 1.5, justifyContent: 'space-between', alignItems: { xs: 'stretch', md: 'center' }, mb: 2 }}>
+          <Typography variant="h5" sx={{ fontWeight: 950, letterSpacing: 0, color: '#1a237e' }}>
             {t('process_lead_to_rfq') || 'Process Lead To RFQ'}
           </Typography>
-          <Stack direction="row" spacing={1.5}>
+          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ flexWrap: { sm: 'wrap' }, '& .MuiButton-root': { width: { xs: '100%', sm: 'auto' } } }}>
             <Button
               variant="outlined" size="small" startIcon={<BackIcon />}
               onClick={() => navigate(-1)}
@@ -1261,15 +1285,15 @@ const ProcessRFQPage: React.FC = () => {
           ].map(({ label, value, chip, confidence, border, bottom }) => (
             <Grid
               key={label}
-              size={{ xs: 6 }}
+              size={{ xs: 12, md: 6 }}
               sx={{
                 p: 1.5,
                 ...(bottom && { borderBottom: '1px solid #eee' }),
                 ...(border && { borderRight: '1px solid #eee' }),
               }}
             >
-              <Box sx={{ display: 'flex', alignItems: 'center' }}>
-                <Typography sx={{ width: 200, fontSize: '0.75rem', color: '#888', fontWeight: 500 }}>{label}</Typography>
+              <Box sx={{ display: 'flex', flexDirection: { xs: 'column', sm: 'row' }, gap: { xs: 0.5, sm: 1 }, alignItems: { xs: 'stretch', sm: 'center' } }}>
+                <Typography sx={{ width: { xs: 'auto', sm: 160, lg: 200 }, flexShrink: 0, fontSize: '0.75rem', color: '#888', fontWeight: 500 }}>{label}</Typography>
                 {chip ? (
                   <Autocomplete
                     size="small"
@@ -1282,12 +1306,14 @@ const ProcessRFQPage: React.FC = () => {
                         {...params}
                         placeholder="Select Customer..."
                         sx={{ 
-                          width: 250,
+                          width: '100%',
                           '& .MuiInputBase-root': { height: 28, fontSize: '0.7rem', fontWeight: 700, borderRadius: 1 }
                         }}
                       />
                     )}
                     sx={{
+                      width: '100%',
+                      minWidth: 0,
                       '& .MuiAutocomplete-input': { p: '0 !important' }
                     }}
                   />
@@ -1304,7 +1330,7 @@ const ProcessRFQPage: React.FC = () => {
             </Grid>
           ))}
           {/* Empty cell to balance last row */}
-          <Grid size={{ xs: 6 }} sx={{ p: 1.5 }} />
+          <Grid size={{ xs: 12, md: 6 }} sx={{ p: 1.5 }} />
         </Grid>
       </Paper>
 
@@ -1343,7 +1369,8 @@ const ProcessRFQPage: React.FC = () => {
           <Typography variant="caption" sx={{ fontWeight: 900, color: '#444' }}>Process Items</Typography>
         </Box>
 
-        <Table size="small">
+        <Box sx={{ overflowX: 'auto', width: '100%' }}>
+        <Table size="small" sx={{ minWidth: 900 }}>
           <TableHead sx={{ bgcolor: '#fafafa' }}>
             <TableRow>
               <TableCell padding="checkbox">
@@ -1383,6 +1410,7 @@ const ProcessRFQPage: React.FC = () => {
             })}
           </TableBody>
         </Table>
+        </Box>
 
         {/* Footer / Pagination */}
         <TablePagination

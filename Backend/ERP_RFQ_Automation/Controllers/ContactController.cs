@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Claims;
 
 namespace ERP_RFQ_Automation.Controllers
 {
@@ -30,7 +31,6 @@ namespace ERP_RFQ_Automation.Controllers
         [HttpGet]
         [RequireModulePermission("Customers", PermissionAction.View)]
         public async Task<ActionResult<DTOs.Contact.PaginatedResponseDTO<ContactResponseDTO>>> GetAll(
-            [FromQuery] long? businessUnitId = null,
             [FromQuery] int pageNumber = 1,
             [FromQuery] int pageSize = 10,
             [FromQuery] long? id = null,
@@ -44,11 +44,8 @@ namespace ERP_RFQ_Automation.Controllers
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-                if (targetBUId <= 0)
-                    return BadRequest("Business Unit ID is required.");
+                if (!TryGetAuthenticatedTenant(out var businessUnitId))
+                    return Forbid();
 
                 if (pageNumber < 1)
                     return BadRequest("Page number must be greater than or equal to 1.");
@@ -57,7 +54,7 @@ namespace ERP_RFQ_Automation.Controllers
                 if (pageSize < 1 || pageSize > 1000)
                     return BadRequest("Page size must be between 1 and 1000.");
 
-                var (contacts, totalCount) = await _repository.GetAllAsync(pageNumber, pageSize, id, firstName, lastName, email, customerId, supplierId, isPrimary, isActive, targetBUId);
+                var (contacts, totalCount) = await _repository.GetAllAsync(pageNumber, pageSize, id, firstName, lastName, email, customerId, supplierId, isPrimary, isActive, businessUnitId);
 
                 var response = new DTOs.Contact.PaginatedResponseDTO<ContactResponseDTO>
                 {
@@ -78,17 +75,14 @@ namespace ERP_RFQ_Automation.Controllers
         // GET: api/Contact/5
         [HttpGet("{id}")]
         [RequireModulePermission("Customers", PermissionAction.View)]
-        public async Task<ActionResult<ContactResponseDTO>> GetById(long id, [FromQuery] long? businessUnitId = null)
+        public async Task<ActionResult<ContactResponseDTO>> GetById(long id)
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
+                if (!TryGetAuthenticatedTenant(out var businessUnitId))
+                    return Forbid();
 
-                if (targetBUId <= 0)
-                    return BadRequest("Business Unit ID is required.");
-
-                var contact = await _repository.GetByIdAsync(id, targetBUId);
+                var contact = await _repository.GetByIdAsync(id, businessUnitId);
                 return Ok(MapToResponse(contact));
             }
             catch (KeyNotFoundException)
@@ -111,8 +105,15 @@ namespace ERP_RFQ_Automation.Controllers
                 if (!ModelState.IsValid)
                     return BadRequest(ModelState);
 
+                if (!TryGetAuthenticatedTenant(out var businessUnitId))
+                    return Forbid();
+
+                if (!await ParentBelongsToTenantAsync(request.CustomerId, request.SupplierId, businessUnitId))
+                    return BadRequest("The contact parent is invalid for the authenticated tenant.");
+
                 var contact = new Contact
                 {
+                    BusinessUnitId = businessUnitId,
                     CustomerId = request.CustomerId,
                     SupplierId = request.SupplierId,
                     FirstName = request.FirstName,
@@ -124,16 +125,14 @@ namespace ERP_RFQ_Automation.Controllers
                     Position = request.Position,
                     IsPrimary = request.IsPrimary,
                     IsActive = request.IsActive ?? true,
-                    CreatedBy = request.CreatedBy,
+                    CreatedBy = GetAuthenticatedActor(),
                     CreatedOn = DateTime.UtcNow
                 };
 
                 await _repository.AddAsync(contact);
 
                 var response = MapToResponse(contact);
-                // Determine BU ID for route (fetch from parent; assume from repo logic)
-                long buId = contact.CustomerId.HasValue ? (await _context.Customers.FindAsync(contact.CustomerId.Value))?.Buid ?? 0 : (await _context.Suppliers.FindAsync(contact.SupplierId.Value))?.Buid ?? 0;
-                return CreatedAtAction(nameof(GetById), new { id = contact.Id, businessUnitId = buId }, response);
+                return CreatedAtAction(nameof(GetById), new { id = contact.Id }, response);
             }
             catch (ArgumentException)
             {
@@ -155,14 +154,18 @@ namespace ERP_RFQ_Automation.Controllers
                 if (!ModelState.IsValid)
                     return BadRequest(ModelState);
 
-                // Fetch existing to get BU for GetByIdAsync
-                var existing = await _context.Contacts.AsNoTracking().FirstOrDefaultAsync(c => c.Id == id);
+                if (!TryGetAuthenticatedTenant(out var businessUnitId))
+                    return Forbid();
+
+                var existing = await _context.Contacts.AsNoTracking()
+                    .FirstOrDefaultAsync(c => c.Id == id && c.BusinessUnitId == businessUnitId);
                 if (existing == null)
                     return NotFound($"Contact with ID {id} not found.");
 
-                long buId = existing.CustomerId.HasValue ? (await _context.Customers.FindAsync(existing.CustomerId.Value))?.Buid ?? 0 : (await _context.Suppliers.FindAsync(existing.SupplierId.Value))?.Buid ?? 0;
+                if (!await ParentBelongsToTenantAsync(request.CustomerId, request.SupplierId, businessUnitId))
+                    return BadRequest("The contact parent is invalid for the authenticated tenant.");
 
-                var updated = await _repository.GetByIdAsync(id, buId);
+                var updated = await _repository.GetByIdAsync(id, businessUnitId);
                 updated.CustomerId = request.CustomerId;
                 updated.SupplierId = request.SupplierId;
                 updated.FirstName = request.FirstName;
@@ -174,7 +177,7 @@ namespace ERP_RFQ_Automation.Controllers
                 updated.Position = request.Position;
                 updated.IsPrimary = request.IsPrimary;
                 updated.IsActive = request.IsActive ?? true;
-                updated.ModifiedBy = request.ModifiedBy;
+                updated.ModifiedBy = GetAuthenticatedActor();
                 updated.ModifiedOn = DateTime.UtcNow;
 
                 await _repository.UpdateAsync(updated);
@@ -198,17 +201,14 @@ namespace ERP_RFQ_Automation.Controllers
         // DELETE: api/Contact/5
         [HttpDelete("{id}")]
         [RequireModulePermission("Customers", PermissionAction.Delete)]
-        public async Task<ActionResult> Delete(long id, [FromQuery] long? businessUnitId = null)
+        public async Task<ActionResult> Delete(long id)
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
+                if (!TryGetAuthenticatedTenant(out var businessUnitId))
+                    return Forbid();
 
-                if (targetBUId <= 0)
-                    return BadRequest("Business Unit ID is required.");
-
-                await _repository.DeleteAsync(id, targetBUId);
+                await _repository.DeleteAsync(id, businessUnitId);
                 return NoContent();
             }
             catch (KeyNotFoundException)
@@ -228,17 +228,14 @@ namespace ERP_RFQ_Automation.Controllers
         // GET: api/Contact/Customers
         [HttpGet("Customers")]
         [RequireModulePermission("Customers", PermissionAction.View)]
-        public async Task<ActionResult<IEnumerable<CustomerDropdown>>> GetCustomers([FromQuery] long? businessUnitId = null)
+        public async Task<ActionResult<IEnumerable<CustomerDropdown>>> GetCustomers()
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
+                if (!TryGetAuthenticatedTenant(out var businessUnitId))
+                    return Forbid();
 
-                if (targetBUId <= 0)
-                    return BadRequest("Business Unit ID is required.");
-
-                var customers = await _repository.GetCustomersAsync(targetBUId);
+                var customers = await _repository.GetCustomersAsync(businessUnitId);
                 return Ok(customers);
             }
             catch (Exception)
@@ -250,17 +247,14 @@ namespace ERP_RFQ_Automation.Controllers
         // GET: api/Contact/Suppliers
         [HttpGet("Suppliers")]
         [RequireModulePermission("Customers", PermissionAction.View)]
-        public async Task<ActionResult<IEnumerable<SupplierDropDown>>> GetSuppliers([FromQuery] long? businessUnitId = null)
+        public async Task<ActionResult<IEnumerable<SupplierDropDown>>> GetSuppliers()
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
+                if (!TryGetAuthenticatedTenant(out var businessUnitId))
+                    return Forbid();
 
-                if (targetBUId <= 0)
-                    return BadRequest("Business Unit ID is required.");
-
-                var suppliers = await _repository.GetSuppliersAsync(targetBUId);
+                var suppliers = await _repository.GetSuppliersAsync(businessUnitId);
                 return Ok(suppliers);
             }
             catch (Exception)
@@ -292,6 +286,36 @@ namespace ERP_RFQ_Automation.Controllers
                 ModifiedBy = contact.ModifiedBy,
                 ModifiedOn = contact.ModifiedOn
             };
+        }
+
+        private bool TryGetAuthenticatedTenant(out long businessUnitId)
+        {
+            return long.TryParse(User.FindFirst("businessUnitId")?.Value, out businessUnitId)
+                && businessUnitId > 0;
+        }
+
+        private string GetAuthenticatedActor()
+        {
+            return User.FindFirstValue(ClaimTypes.NameIdentifier)
+                ?? User.FindFirstValue(ClaimTypes.Email)
+                ?? User.Identity?.Name
+                ?? "authenticated-user";
+        }
+
+        private async Task<bool> ParentBelongsToTenantAsync(
+            long? customerId,
+            long? supplierId,
+            long businessUnitId)
+        {
+            if (customerId.HasValue == supplierId.HasValue)
+                return false;
+
+            if (customerId.HasValue)
+                return await _context.Customers.AsNoTracking()
+                    .AnyAsync(c => c.Id == customerId.Value && c.Buid == businessUnitId);
+
+            return await _context.Suppliers.AsNoTracking()
+                .AnyAsync(s => s.Id == supplierId!.Value && s.Buid == businessUnitId);
         }
     }
 }

@@ -1,0 +1,448 @@
+using System.Text.Json;
+using ERP_RFQ_Automation.Agent.Models;
+using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.MultiTenancy;
+using ERP_RFQ_Automation.Notifications;
+using ERP_RFQ_Automation.Platform.Models;
+using ERP_RFQ_Automation.Procurement;
+using ERP_RFQ_Automation.Tests.Support;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
+
+namespace ERP_RFQ_Automation.Tests;
+
+public sealed class ProcurementDispatchWorkerTests
+{
+    [Fact]
+    public async Task Successful_delivery_is_recorded_once()
+    {
+        using var fixture = new DispatchFixture();
+        fixture.SeedPending();
+
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+        Assert.False(await fixture.Worker.ProcessOneAsync(default));
+
+        var state = await fixture.StateAsync();
+        Assert.Equal(1, fixture.Notification.SendCount);
+        Assert.Equal(ProcurementOutboxStatuses.Sent, state.Message.Status);
+        Assert.NotNull(state.Message.SentOn);
+        Assert.StartsWith("legacy-notification-acceptance:", state.Message.ProviderReference);
+        Assert.Equal(SolicitationStatus.Sent, state.Solicitation.Status);
+        Assert.Equal($"/procurement/rfqs/{DispatchFixture.Rfq}/sourcing", fixture.Notification.LastRequest?.CtaPath);
+        Assert.Equal("SUPPLIER_SOLICITATION_SENT", Assert.Single(state.Events).EventType);
+    }
+
+    [Fact]
+    public async Task Provider_invoked_failure_is_terminal_uncertain_and_not_automatically_retried()
+    {
+        using var fixture = new DispatchFixture(new RecordingNotification { Result = false });
+        fixture.SeedPending();
+
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+
+        var state = await fixture.StateAsync();
+        Assert.Equal(1, fixture.Notification.SendCount);
+        Assert.Equal(ProcurementOutboxStatuses.Failed, state.Message.Status);
+        Assert.Equal(1, state.Message.AttemptCount);
+        Assert.Equal("DELIVERY_REJECTED_OR_UNCERTAIN", state.Message.LastErrorCode);
+        Assert.Equal(SolicitationStatus.DeliveryFailed, state.Solicitation.Status);
+        Assert.Equal("SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN", Assert.Single(state.Events).EventType);
+        Assert.False(await fixture.Worker.ProcessOneAsync(default));
+        Assert.Equal(1, fixture.Notification.SendCount);
+    }
+
+    [Fact]
+    public async Task Poison_payload_is_terminal_without_calling_provider()
+    {
+        using var fixture = new DispatchFixture();
+        fixture.SeedPending(payloadJson: "{not-json");
+
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+
+        var state = await fixture.StateAsync();
+        Assert.Equal(0, fixture.Notification.SendCount);
+        Assert.Equal(ProcurementOutboxStatuses.Failed, state.Message.Status);
+        Assert.Equal("INVALID_DISPATCH_PAYLOAD", state.Message.LastErrorCode);
+        Assert.Equal(SolicitationStatus.DeliveryFailed, state.Solicitation.Status);
+    }
+
+    [Fact]
+    public async Task Provider_exception_is_terminal_delivery_uncertain_and_is_not_retried()
+    {
+        using var fixture = new DispatchFixture(new RecordingNotification
+        {
+            Exception = new InvalidOperationException("Ambiguous provider outcome")
+        });
+        fixture.SeedPending();
+
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+        Assert.False(await fixture.Worker.ProcessOneAsync(default));
+
+        var state = await fixture.StateAsync();
+        Assert.Equal(1, fixture.Notification.SendCount);
+        Assert.Equal(ProcurementOutboxStatuses.Failed, state.Message.Status);
+        Assert.Equal("DELIVERY_UNCERTAIN", state.Message.LastErrorCode);
+        Assert.Equal("SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN", Assert.Single(state.Events).EventType);
+    }
+
+    [Fact]
+    public async Task Setup_failure_before_provider_invocation_is_retryable()
+    {
+        using var fixture = new DispatchFixture(registerNotification: false);
+        fixture.SeedPending();
+
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+
+        var state = await fixture.StateAsync();
+        Assert.Equal(ProcurementOutboxStatuses.Pending, state.Message.Status);
+        Assert.Equal("DISPATCH_SETUP_FAILED", state.Message.LastErrorCode);
+        Assert.Equal(SolicitationStatus.PendingDispatch, state.Solicitation.Status);
+        Assert.Equal("SUPPLIER_SOLICITATION_RETRY_SCHEDULED", Assert.Single(state.Events).EventType);
+    }
+
+    [Fact]
+    public async Task Stale_processing_claim_is_terminal_delivery_uncertain_without_resend()
+    {
+        using var fixture = new DispatchFixture();
+        fixture.SeedPending(
+            status: ProcurementOutboxStatuses.Processing,
+            attemptCount: 1,
+            updatedOn: DateTime.UtcNow.AddMinutes(-11));
+
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+        Assert.False(await fixture.Worker.ProcessOneAsync(default));
+
+        var state = await fixture.StateAsync();
+        Assert.Equal(0, fixture.Notification.SendCount);
+        Assert.Equal(ProcurementOutboxStatuses.Failed, state.Message.Status);
+        Assert.Equal("DELIVERY_UNCERTAIN", state.Message.LastErrorCode);
+        Assert.Equal(SolicitationStatus.DeliveryFailed, state.Solicitation.Status);
+        Assert.Equal("SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN", Assert.Single(state.Events).EventType);
+    }
+
+    [Fact]
+    public async Task Concurrent_worker_cannot_claim_message_while_delivery_is_in_flight()
+    {
+        var notification = new RecordingNotification { PauseDelivery = true };
+        using var fixture = new DispatchFixture(notification);
+        fixture.SeedPending();
+
+        var first = fixture.Worker.ProcessOneAsync(default);
+        await notification.SendStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.False(await fixture.Worker.ProcessOneAsync(default));
+        notification.ReleaseDelivery.TrySetResult();
+        Assert.True(await first);
+
+        var state = await fixture.StateAsync();
+        Assert.Equal(1, notification.SendCount);
+        Assert.Equal(ProcurementOutboxStatuses.Sent, state.Message.Status);
+        Assert.Equal(1, state.Message.AttemptCount);
+    }
+
+    [Fact]
+    public async Task Provider_timeout_is_terminal_delivery_uncertain_without_resend()
+    {
+        var notification = new RecordingNotification { PauseDelivery = true };
+        using var fixture = new DispatchFixture(notification, TimeSpan.FromMilliseconds(50));
+        fixture.SeedPending();
+
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+        Assert.False(await fixture.Worker.ProcessOneAsync(default));
+
+        var state = await fixture.StateAsync();
+        Assert.Equal(1, notification.SendCount);
+        Assert.Equal(ProcurementOutboxStatuses.Failed, state.Message.Status);
+        Assert.Equal("DELIVERY_TIMEOUT_UNCERTAIN", state.Message.LastErrorCode);
+        Assert.Equal("SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN", Assert.Single(state.Events).EventType);
+    }
+
+    [Fact]
+    public async Task Mutations_are_executed_inside_the_discovered_tenant_scope()
+    {
+        using var fixture = new DispatchFixture();
+        fixture.SeedPending();
+
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+
+        Assert.Contains((long?)null, fixture.ResolvedTenantScopes);
+        Assert.Contains(72_001, fixture.ResolvedTenantScopes);
+    }
+
+    [Fact]
+    public async Task Heartbeat_reports_worker_activity_and_success()
+    {
+        using var fixture = new DispatchFixture();
+        fixture.SeedPending();
+
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+
+        Assert.NotNull(fixture.Heartbeat.LastSeen);
+        Assert.NotNull(fixture.Heartbeat.LastSuccess);
+    }
+
+    [Fact]
+    public async Task Readiness_stays_healthy_during_permitted_provider_call()
+    {
+        var notification = new RecordingNotification { PauseDelivery = true };
+        using var fixture = new DispatchFixture(notification, TimeSpan.FromSeconds(5));
+        fixture.SeedPending();
+
+        var processing = fixture.Worker.ProcessOneAsync(default);
+        await notification.SendStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var health = await new ProcurementDispatchHealthCheck(fixture.Heartbeat)
+            .CheckHealthAsync(new Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckContext());
+
+        Assert.Equal(Microsoft.Extensions.Diagnostics.HealthChecks.HealthStatus.Healthy, health.Status);
+        Assert.NotNull(fixture.Heartbeat.ProviderCallDeadline);
+        notification.ReleaseDelivery.TrySetResult();
+        Assert.True(await processing);
+        Assert.Null(fixture.Heartbeat.ProviderCallDeadline);
+    }
+
+    [Fact]
+    public async Task Readiness_is_unhealthy_after_repeated_cycle_failures()
+    {
+        var heartbeat = new ProcurementDispatchHeartbeat();
+        heartbeat.RecordCycleFailure();
+        heartbeat.RecordCycleFailure();
+        heartbeat.RecordCycleFailure();
+
+        var health = await new ProcurementDispatchHealthCheck(heartbeat)
+            .CheckHealthAsync(new Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckContext());
+
+        Assert.Equal(Microsoft.Extensions.Diagnostics.HealthChecks.HealthStatus.Unhealthy, health.Status);
+        Assert.Equal(3, heartbeat.ConsecutiveCycleFailures);
+    }
+
+    [Fact]
+    public async Task Readiness_is_unhealthy_after_repeated_delivery_failures()
+    {
+        var heartbeat = new ProcurementDispatchHeartbeat();
+        heartbeat.RecordDeliveryFailure();
+        heartbeat.RecordDeliveryFailure();
+        heartbeat.RecordDeliveryFailure();
+        heartbeat.RecordCycleSuccess();
+
+        var health = await new ProcurementDispatchHealthCheck(heartbeat)
+            .CheckHealthAsync(new Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckContext());
+
+        Assert.Equal(Microsoft.Extensions.Diagnostics.HealthChecks.HealthStatus.Unhealthy, health.Status);
+        Assert.Equal(3, heartbeat.ConsecutiveDeliveryFailures);
+    }
+
+    private sealed class DispatchFixture : IDisposable
+    {
+        private const long Tenant = 72_001;
+        public const long Rfq = 72_010;
+        private const long Supplier = 72_020;
+        private const long Solicitation = 72_030;
+        private const long Message = 72_040;
+        private readonly TestDb _database = new();
+        private readonly ServiceProvider _provider;
+        private readonly TenantScopeAccessor _tenantScope = new();
+
+        public DispatchFixture(
+            RecordingNotification? notification = null,
+            TimeSpan? providerCallTimeout = null,
+            bool registerNotification = true)
+        {
+            Notification = notification ?? new RecordingNotification();
+            var services = new ServiceCollection()
+                .AddScoped(_ =>
+                {
+                    ResolvedTenantScopes.Add(_tenantScope.BusinessUnitId);
+                    return _database.ContextFor(_tenantScope.BusinessUnitId);
+                });
+            if (registerNotification)
+                services.AddSingleton<INotificationService>(Notification);
+            _provider = services.BuildServiceProvider();
+            Heartbeat = new ProcurementDispatchHeartbeat();
+            Worker = new ProcurementDispatchWorker(
+                _provider.GetRequiredService<IServiceScopeFactory>(),
+                NullLogger<ProcurementDispatchWorker>.Instance,
+                _tenantScope,
+                Heartbeat,
+                providerCallTimeout);
+        }
+
+        public RecordingNotification Notification { get; }
+        public ProcurementDispatchWorker Worker { get; }
+        public ProcurementDispatchHeartbeat Heartbeat { get; }
+        public List<long?> ResolvedTenantScopes { get; } = [];
+
+        public void SeedPending(
+            string? payloadJson = null,
+            string status = ProcurementOutboxStatuses.Pending,
+            int attemptCount = 0,
+            DateTime? updatedOn = null)
+        {
+            using var db = _database.ContextFor(null);
+            db.Set<Tenant>().Add(new Tenant
+            {
+                Id = Tenant,
+                Name = "Dispatch Tenant",
+                Slug = "dispatch-tenant",
+                Status = TenantStatus.Active,
+                PrimaryBusinessUnitId = Tenant
+            });
+            AgentSeed.Rfq(db, Rfq, Tenant, "RFQ-DISPATCH-1");
+            AgentSeed.Supplier(db, Supplier, Tenant, "Supplier One", "supplier@example.test");
+            AgentSeed.Solicitation(db, Solicitation, Tenant, Rfq, Supplier, SolicitationStatus.PendingDispatch);
+            var now = updatedOn ?? DateTime.UtcNow;
+            db.ProcurementOutboxMessages.Add(new ProcurementOutboxMessage
+            {
+                Id = Message,
+                BusinessUnitId = Tenant,
+                SupplierSolicitationId = Solicitation,
+                Status = status,
+                PayloadJson = payloadJson ?? JsonSerializer.Serialize(new
+                {
+                    SolicitationId = Solicitation,
+                    BusinessUnitId = Tenant,
+                    RfqId = Rfq,
+                    ToEmail = "supplier@example.test",
+                    SupplierName = "Supplier One",
+                    RfqNumber = "RFQ-DISPATCH-1",
+                    ItemSummary = "10 x NX-100",
+                    DueOn = DateTime.UtcNow.AddDays(3)
+                }),
+                AttemptCount = attemptCount,
+                NextAttemptOn = DateTime.UtcNow.AddMinutes(-1),
+                CreatedOn = now,
+                UpdatedOn = now
+            });
+            db.SaveChanges();
+        }
+
+        public async Task<(ProcurementOutboxMessage Message, SupplierSolicitation Solicitation, List<ProcurementEvent> Events)> StateAsync()
+        {
+            await using var db = _database.ContextFor(null);
+            return (
+                await db.ProcurementOutboxMessages.AsNoTracking().SingleAsync(),
+                await db.Set<SupplierSolicitation>().AsNoTracking().SingleAsync(),
+                await db.ProcurementEvents.AsNoTracking().ToListAsync());
+        }
+
+        public void Dispose()
+        {
+            _provider.Dispose();
+            _database.Dispose();
+        }
+    }
+
+    internal sealed class RecordingNotification : INotificationService
+    {
+        public bool Result { get; init; } = true;
+        public Exception? Exception { get; init; }
+        public bool PauseDelivery { get; init; }
+        public int SendCount { get; private set; }
+        public RfqToSupplierNotification? LastRequest { get; private set; }
+        public TaskCompletionSource SendStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseDelivery { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<bool> SendRfqToSupplierAsync(RfqToSupplierNotification request, CancellationToken ct = default)
+        {
+            SendCount++;
+            LastRequest = request;
+            SendStarted.TrySetResult();
+            if (PauseDelivery) await ReleaseDelivery.Task.WaitAsync(ct);
+            if (Exception is not null) throw Exception;
+            return Result;
+        }
+
+        public Task<bool> NotifyLeadNeedsReviewAsync(LeadNeedsReviewNotification request, CancellationToken ct = default) => Task.FromResult(true);
+        public Task<bool> SendQuoteToBuyerAsync(QuoteToBuyerNotification request, CancellationToken ct = default) => Task.FromResult(true);
+        public Task<bool> SendOrderConfirmationAsync(OrderConfirmationNotification request, CancellationToken ct = default) => Task.FromResult(true);
+        public Task<bool> NotifyLeadAssignedAsync(LeadAssignedNotification request, CancellationToken ct = default) => Task.FromResult(true);
+        public Task<bool> NotifyLeadReassignedAwayAsync(LeadReassignedAwayNotification request, CancellationToken ct = default) => Task.FromResult(true);
+        public Task<bool> NotifyDuplicateLeadAsync(DuplicateLeadNotification request, CancellationToken ct = default) => Task.FromResult(true);
+    }
+}
+
+[Collection(PostgreSqlIntegrationCollection.Name)]
+public sealed class ProcurementDispatchWorkerPostgreSqlTests(PostgreSqlTestDatabase database)
+{
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Explicit_transactions_run_with_retry_strategy_and_tenant_rls()
+    {
+        var suffix = Random.Shared.Next(100_000, 900_000);
+        var tenantId = 88_000_000L + suffix;
+        var rfqId = tenantId + 1;
+        var supplierId = tenantId + 2;
+        var solicitationId = tenantId + 3;
+        var messageId = tenantId + 4;
+        await using (var seed = database.ContextFor(null))
+        {
+            seed.Set<Tenant>().Add(new Tenant
+            {
+                Id = tenantId,
+                Name = "Dispatch retry tenant",
+                Slug = $"dispatch-retry-{suffix}",
+                Status = TenantStatus.Active,
+                PrimaryBusinessUnitId = tenantId
+            });
+            AgentSeed.Rfq(seed, rfqId, tenantId, $"RFQ-RETRY-{suffix}");
+            AgentSeed.Supplier(seed, supplierId, tenantId, "Retry Supplier", "retry@example.test");
+            AgentSeed.Solicitation(
+                seed, solicitationId, tenantId, rfqId, supplierId, SolicitationStatus.PendingDispatch);
+            seed.ProcurementOutboxMessages.Add(new ProcurementOutboxMessage
+            {
+                Id = messageId,
+                BusinessUnitId = tenantId,
+                SupplierSolicitationId = solicitationId,
+                Status = ProcurementOutboxStatuses.Pending,
+                PayloadJson = JsonSerializer.Serialize(new
+                {
+                    SolicitationId = solicitationId,
+                    BusinessUnitId = tenantId,
+                    RfqId = rfqId,
+                    ToEmail = "retry@example.test",
+                    SupplierName = "Retry Supplier",
+                    RfqNumber = $"RFQ-RETRY-{suffix}",
+                    ItemSummary = "1 x RETRY",
+                    DueOn = DateTime.UtcNow.AddDays(1)
+                }),
+                NextAttemptOn = DateTime.UtcNow.AddMinutes(-1),
+                CreatedOn = DateTime.UtcNow,
+                UpdatedOn = DateTime.UtcNow
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        var tenantScope = new TenantScopeAccessor();
+        var notification = new ProcurementDispatchWorkerTests.RecordingNotification();
+        await using var provider = new ServiceCollection()
+            .AddScoped(_ =>
+            {
+                var tenantContext = new ScopeBackedTenantContext(tenantScope);
+                var options = new DbContextOptionsBuilder<ErpRfqAutomationContext>()
+                    .UseNpgsql(database.ConnectionString, npgsql => npgsql.EnableRetryOnFailure())
+                    .AddInterceptors(new TenantRlsCommandInterceptor(tenantContext))
+                    .Options;
+                return new ErpRfqAutomationContext(options, tenantContext);
+            })
+            .AddSingleton<INotificationService>(notification)
+            .BuildServiceProvider();
+        var worker = new ProcurementDispatchWorker(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            NullLogger<ProcurementDispatchWorker>.Instance,
+            tenantScope,
+            new ProcurementDispatchHeartbeat());
+
+        Assert.True(await worker.ProcessOneAsync(default));
+
+        await using var verify = database.ContextFor(null);
+        var message = await verify.ProcurementOutboxMessages.AsNoTracking()
+            .SingleAsync(x => x.Id == messageId);
+        Assert.Equal(ProcurementOutboxStatuses.Sent, message.Status);
+        Assert.Equal(1, notification.SendCount);
+    }
+
+    private sealed class ScopeBackedTenantContext(ITenantScopeAccessor scope) : ITenantContext
+    {
+        public long? BusinessUnitId => scope.BusinessUnitId;
+    }
+}

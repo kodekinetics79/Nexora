@@ -114,8 +114,9 @@ const rfqService = {
         return response.data;
     },
     approve: async (id: number, approvedBy: string, recipientEmail?: string, emailSubject?: string, emailBody?: string, customerId?: number) => {
-        const response = await axiosInstance.post(`/api/Rfq/${id}/approve`, null, {
-            params: { approvedBy, recipientEmail, emailSubject, emailBody, customerId }
+        void approvedBy;
+        const response = await axiosInstance.post(`/api/Rfq/${id}/approve`, {
+            recipientEmail, emailSubject, emailBody, customerId,
         });
         return response.data;
     },

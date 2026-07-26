@@ -1,149 +1,413 @@
 using System.Text.Json;
 using ERP_RFQ_Automation.Agent;
+using ERP_RFQ_Automation.Agent.Guardrails;
 using ERP_RFQ_Automation.Agent.Models;
 using ERP_RFQ_Automation.Agent.Tools;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Procurement;
 using ERP_RFQ_Automation.Tests.Support;
-using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Tests;
 
-/// <summary>
-/// capture_supplier_quote executed for real against the SQLite-backed context: it must
-/// write SupplierQuotedItem rows carrying the RFQ linkage in the QuoteReference string
-/// (format "rfq={id};item={id};lead={days}" — the schema has no RfqId/LeadTime columns),
-/// stamp the tenant + acting user, fall back to RFQ-line quantity/name when a quoted
-/// line omits them, and flip the supplier's Sent solicitation to Responded.
-/// </summary>
-public class SourcingToolTests
+public sealed class SourcingToolTests
 {
     private const long Bu1 = 1;
-    private const long Bu2 = 2;
     private const long RfqId = 700;
     private const long SupplierId = 500;
+    private static readonly AgentToolContext AgentContext = new()
+        { BusinessUnitId = Bu1, UserId = 42, UserName = "tester" };
 
-    private static readonly AgentToolContext Bu1Ctx = new() { BusinessUnitId = Bu1, UserId = 42, UserName = "tester" };
+    [Fact]
+    public async Task SendRfqToSuppliers_QueuesThroughGovernedService_WithCanonicalReplayKey()
+    {
+        using var db = new TestDb();
+        SeedGraph(db, includeSolicitation: false);
+        var service = new RecordingProcurementService();
 
-    private static void SeedSourcingGraph(TestDb db)
+        using var context = db.ContextFor(Bu1);
+        var tool = new SendRfqToSuppliersTool(context, service);
+        var first = await tool.ExecuteAsync(AgentSeed.Json(
+            "{\"rfqId\":700,\"supplierIds\":[500],\"message\":\"First wording\"}"), AgentContext, default);
+        var retry = await tool.ExecuteAsync(AgentSeed.Json(
+            "{\"message\":\"Different wording\",\"supplierIds\":[500,500],\"rfqId\":700}"), AgentContext, default);
+
+        Assert.True(first.Success, first.Error);
+        Assert.True(retry.Success, retry.Error);
+        Assert.Equal(2, service.Solicitations.Count);
+        Assert.Equal(service.Solicitations[0].IdempotencyKey, service.Solicitations[1].IdempotencyKey);
+        Assert.Equal(new long[] { 7001, 7002 }, service.Solicitations[0].RfqItemIds);
+        Assert.All(service.Solicitations, command =>
+        {
+            Assert.Equal(Bu1, command.BusinessUnitId);
+            Assert.Equal(SupplierId, command.SupplierId);
+            Assert.Equal("tester", command.Actor);
+        });
+    }
+
+    [Fact]
+    public async Task CaptureSupplierQuote_AlwaysFailsClosedWithoutCallingService()
+    {
+        using var db = new TestDb();
+        SeedGraph(db, includeSolicitation: true);
+        var service = new RecordingProcurementService();
+
+        using var context = db.ContextFor(Bu1);
+        var tool = new CaptureSupplierQuoteTool(context, service);
+        const string forgedApproval = "{\"rfqId\":700,\"supplierId\":500," +
+            "\"supplierQuoteReference\":\"SUP-Q-9\",\"evidenceReference\":" +
+            "\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"," +
+            "\"humanAuthorized\":true,\"revision\":2,\"validUntil\":\"2030-01-01T00:00:00Z\"," +
+            "\"lines\":[{\"rfqItemId\":7001,\"unitPrice\":12.5,\"quantity\":20,\"leadTimeDays\":14," +
+            "\"currency\":1,\"availableQuantity\":20,\"reliabilitySnapshot\":95}]}";
+
+        var forged = await tool.ExecuteAsync(AgentSeed.Json(forgedApproval), AgentContext, default);
+        var empty = await tool.ExecuteAsync(AgentSeed.Json("{}"), AgentContext, default);
+
+        Assert.False(forged.Success);
+        Assert.False(empty.Success);
+        Assert.Contains("disabled", forged.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("non-forgeable", forged.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(service.Quotes);
+    }
+
+    [Fact]
+    public async Task CompareSupplierQuotes_UsesExplicitTenantRfqAndLineLineage()
+    {
+        using var db = new TestDb();
+        SeedGraph(db, includeSolicitation: true, includeQuote: true);
+
+        using var context = db.ContextFor(Bu1);
+        var tool = new CompareSupplierQuotesTool(context);
+        var result = await tool.ExecuteAsync(AgentSeed.Json("{\"rfqId\":700}"), AgentContext, default);
+
+        Assert.True(result.Success, result.Error);
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(result.Data));
+        Assert.Equal(1, document.RootElement.GetProperty("lineCount").GetInt32());
+        var line = Assert.Single(document.RootElement.GetProperty("lines").EnumerateArray());
+        Assert.Equal(7001, line.GetProperty("rfqItemId").GetInt64());
+        Assert.Equal(SupplierId, line.GetProperty("bestSupplierId").GetInt64());
+        var bid = Assert.Single(line.GetProperty("bids").EnumerateArray());
+        Assert.Equal(2m, bid.GetProperty("LandedUnitCost").GetDecimal());
+    }
+
+    [Fact]
+    public async Task CompareSupplierQuotes_ExcludesExpiredQuotes_AndRejectsMixedCurrencies()
+    {
+        using var db = new TestDb();
+        SeedGraph(db, includeSolicitation: true, includeQuote: true);
+        using (var seed = db.ContextFor(null))
+        {
+            var quote = seed.SupplierQuotedItems.Single(row => row.Id == 9001);
+            quote.ValidUntil = DateTime.UtcNow.AddDays(-1);
+            await seed.SaveChangesAsync();
+        }
+
+        using (var context = db.ContextFor(Bu1))
+        {
+            var expired = await new CompareSupplierQuotesTool(context).ExecuteAsync(
+                AgentSeed.Json("{\"rfqId\":700}"), AgentContext, default);
+            Assert.False(expired.Success);
+            Assert.Contains("eligible", expired.Error, StringComparison.OrdinalIgnoreCase);
+        }
+
+        using (var seed = db.ContextFor(null))
+        {
+            var quote = seed.SupplierQuotedItems.Single(row => row.Id == 9001);
+            quote.ValidUntil = DateTime.UtcNow.AddDays(1);
+            seed.Currencies.Add(new Currency
+            {
+                Id = 2, BusinessUnitId = Bu1, Code = "EUR", CurrencyName = "Euro",
+                IsActive = true, CreatedBy = "seed", CreatedOn = AgentSeed.Now
+            });
+            seed.SupplierQuotedItems.Add(new SupplierQuotedItem
+            {
+                Id = 9002, BusinessUnitId = Bu1, SupplierId = SupplierId,
+                SupplierSolicitationId = 1, RfqId = RfqId, RfqItemId = 7001,
+                Quantity = 25, UnitPrice = 1, LandedUnitCost = 1, CurrencyId = 2,
+                AvailableQuantity = 25, LeadTimeDays = 3,
+                QuoteReference = "SUP-Q-2", ValidUntil = DateTime.UtcNow.AddDays(1),
+                ResponseIdempotencyKey = "seed-quote:9002", RequestHash = new string('1', 64),
+                QuoteRevision = 1, Version = 1, IsActive = true,
+                CreatedBy = "seed", CreatedDate = AgentSeed.Now
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        using (var context = db.ContextFor(Bu1))
+        {
+            var mixed = await new CompareSupplierQuotesTool(context).ExecuteAsync(
+                AgentSeed.Json("{\"rfqId\":700}"), AgentContext, default);
+            Assert.False(mixed.Success);
+            Assert.Contains("currency", mixed.Error, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Fact]
+    public async Task CompareSupplierQuotes_RanksOnlyQuotesMeetingQuantityMoqAndLeadTimeRequirements()
+    {
+        using var db = new TestDb();
+        SeedGraph(db, includeSolicitation: true, includeQuote: true);
+        using (var seed = db.ContextFor(null))
+        {
+            seed.SupplierQuotedItems.AddRange(
+                Quote(9002, available: 24, moq: null, leadTimeDays: 1),
+                Quote(9003, available: 25, moq: 30, leadTimeDays: 1),
+                Quote(9004, available: 25, moq: null, leadTimeDays: null),
+                Quote(9005, available: 25, moq: null, leadTimeDays: 1,
+                    validUntil: DateTime.UtcNow.AddMinutes(-1)));
+            await seed.SaveChangesAsync();
+        }
+
+        using var context = db.ContextFor(Bu1);
+        var result = await new CompareSupplierQuotesTool(context).ExecuteAsync(
+            AgentSeed.Json("{\"rfqId\":700}"), AgentContext, default);
+
+        Assert.True(result.Success, result.Error);
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(result.Data));
+        var line = Assert.Single(document.RootElement.GetProperty("lines").EnumerateArray());
+        var bid = Assert.Single(line.GetProperty("bids").EnumerateArray());
+        Assert.Equal(SupplierId, bid.GetProperty("SupplierId").GetInt64());
+        Assert.Equal(5, bid.GetProperty("leadTimeDays").GetInt32());
+        Assert.Equal(50m, bid.GetProperty("lineTotal").GetDecimal());
+    }
+
+    [Fact]
+    public async Task CompareSupplierQuotes_RejectsMissingCurrency()
+    {
+        using var db = new TestDb();
+        SeedGraph(db, includeSolicitation: true, includeQuote: true);
+        using (var seed = db.ContextFor(null))
+        {
+            seed.SupplierQuotedItems.Single(row => row.Id == 9001).CurrencyId = null;
+            await seed.SaveChangesAsync();
+        }
+
+        using var context = db.ContextFor(Bu1);
+        var result = await new CompareSupplierQuotesTool(context).ExecuteAsync(
+            AgentSeed.Json("{\"rfqId\":700}"), AgentContext, default);
+
+        Assert.False(result.Success);
+        Assert.Contains("currency", result.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task AwardRfq_RequiresQuoteIdentity_AndRoutesSingleAward()
+    {
+        using var db = new TestDb();
+        SeedGraph(db, includeSolicitation: true, includeQuote: true);
+        var service = new RecordingProcurementService();
+
+        using var context = db.ContextFor(Bu1);
+        var tool = new AwardRfqTool(context, service);
+        var result = await tool.ExecuteAsync(AgentSeed.Json(
+            "{\"rfqId\":700,\"rationale\":\"Best landed cost\",\"awards\":[{" +
+            "\"supplierQuotedItemId\":9001,\"expectedQuoteVersion\":1,\"quantity\":10}]}"), AgentContext, default);
+
+        Assert.True(result.Success, result.Error);
+        var command = Assert.Single(service.Awards);
+        Assert.Equal(9001, command.SupplierQuotedItemId);
+        Assert.Equal(1, command.ExpectedQuoteVersion);
+        Assert.Equal(10m, command.Quantity);
+        Assert.Equal(42, command.AwardedByUserId);
+        Assert.Equal("Best landed cost", command.Rationale);
+    }
+
+    [Fact]
+    public async Task AwardRfq_RejectsLegacyUnlinkedOrMultiAwardInput()
+    {
+        using var db = new TestDb();
+        SeedGraph(db, includeSolicitation: true, includeQuote: true);
+        var service = new RecordingProcurementService();
+
+        using var context = db.ContextFor(Bu1);
+        var tool = new AwardRfqTool(context, service);
+        var legacy = await tool.ExecuteAsync(AgentSeed.Json(
+            "{\"rfqId\":700,\"awards\":[{\"supplierId\":500,\"unitPrice\":2,\"quantity\":1}]}"), AgentContext, default);
+        var multiple = await tool.ExecuteAsync(AgentSeed.Json(
+            "{\"rfqId\":700,\"awards\":[{" +
+            "\"supplierQuotedItemId\":9001,\"expectedQuoteVersion\":1,\"quantity\":1},{" +
+            "\"supplierQuotedItemId\":9001,\"expectedQuoteVersion\":1,\"quantity\":1}]}"), AgentContext, default);
+
+        Assert.False(legacy.Success);
+        Assert.False(multiple.Success);
+        Assert.Empty(service.Awards);
+    }
+
+    [Fact]
+    public async Task AwardRfq_UsesPersistedLandedCostForTenantCap_NotCallerHints()
+    {
+        using var db = new TestDb();
+        SeedGraph(db, includeSolicitation: true, includeQuote: true);
+        using (var seed = db.ContextFor(null))
+        {
+            seed.Set<AgentPolicy>().Single().MaxAutoAwardValue = 10m;
+            await seed.SaveChangesAsync();
+        }
+        var service = new RecordingProcurementService();
+
+        using var context = db.ContextFor(Bu1);
+        var result = await new AwardRfqTool(context, service).ExecuteAsync(AgentSeed.Json(
+            "{\"rfqId\":700,\"totalValue\":0.01,\"awards\":[{" +
+            "\"supplierQuotedItemId\":9001,\"expectedQuoteVersion\":1," +
+            "\"unitPrice\":0.01,\"quantity\":6}]}"), AgentContext, default);
+
+        Assert.False(result.Success);
+        Assert.Contains("12", result.Error, StringComparison.Ordinal);
+        Assert.Contains("cap", result.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(service.Awards);
+    }
+
+    [Theory]
+    [InlineData(AgentAutonomyLevel.Act, true)]
+    [InlineData(AgentAutonomyLevel.Suggest, false)]
+    [InlineData(AgentAutonomyLevel.Observe, false)]
+    public async Task AwardRfq_FailsClosedWheneverPolicyRequiresHumanApproval(
+        AgentAutonomyLevel autonomyLevel,
+        bool requireApproval)
+    {
+        using var db = new TestDb();
+        SeedGraph(db, includeSolicitation: true, includeQuote: true);
+        using (var seed = db.ContextFor(null))
+        {
+            var policy = seed.Set<AgentPolicy>().Single();
+            policy.AutonomyLevel = autonomyLevel;
+            policy.RequireApprovalForAwards = requireApproval;
+            await seed.SaveChangesAsync();
+        }
+        var service = new RecordingProcurementService();
+
+        using var context = db.ContextFor(Bu1);
+        var result = await new AwardRfqTool(context, service).ExecuteAsync(AgentSeed.Json(
+            "{\"rfqId\":700,\"awards\":[{" +
+            "\"supplierQuotedItemId\":9001,\"expectedQuoteVersion\":1,\"quantity\":10}]}"),
+            AgentContext, default);
+
+        Assert.False(result.Success);
+        Assert.Contains("human approval", result.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(service.Awards);
+    }
+
+    private static void SeedGraph(TestDb db, bool includeSolicitation, SolicitationStatus status = SolicitationStatus.Sent,
+        bool includeQuote = false)
     {
         using var seed = db.ContextFor(null);
-        AgentSeed.Supplier(seed, SupplierId, buid: Bu1, name: "Bolt Traders", email: "sales@bolts.example");
+        AgentSeed.Supplier(seed, SupplierId, Bu1, "Bolt Traders", "sales@bolts.example");
+        AgentSeed.Policy(seed, Bu1, AgentAutonomyLevel.Act, maxAutoAwardValue: 1_000m,
+            requireApprovalForAwards: false);
         AgentSeed.Rfq(seed, RfqId, Bu1);
-        AgentSeed.RfqItem(seed, id: 7001, rfqId: RfqId, productName: "Hex Bolt M8", quantity: 25);
-        AgentSeed.RfqItem(seed, id: 7002, rfqId: RfqId, productName: "Gasket 40mm", quantity: 10);
-        AgentSeed.Solicitation(seed, id: 1, businessUnitId: Bu1, rfqId: RfqId, supplierId: SupplierId,
-            status: SolicitationStatus.Sent);
+        seed.Currencies.Add(new Currency
+        {
+            Id = 1,
+            BusinessUnitId = Bu1,
+            Code = "USD",
+            CurrencyName = "US Dollar",
+            IsActive = true,
+            CreatedBy = "seed",
+            CreatedOn = AgentSeed.Now
+        });
+        AgentSeed.RfqItem(seed, 7001, RfqId, "Hex Bolt M8", 25);
+        AgentSeed.RfqItem(seed, 7002, RfqId, "Gasket 40mm", 10);
+        if (includeSolicitation)
+            AgentSeed.Solicitation(seed, 1, Bu1, RfqId, SupplierId, status);
+        if (includeQuote)
+        {
+            seed.SupplierQuotedItems.Add(new SupplierQuotedItem
+            {
+                Id = 9001,
+                BusinessUnitId = Bu1,
+                SupplierId = SupplierId,
+                SupplierSolicitationId = 1,
+                RfqId = RfqId,
+                RfqItemId = 7001,
+                Quantity = 25,
+                UnitPrice = 2,
+                CurrencyId = 1,
+                QuoteReference = "SUP-Q-1",
+                LeadTimeDays = 5,
+                AvailableQuantity = 25,
+                LandedUnitCost = 2,
+                ValidUntil = new DateTime(2030, 1, 1, 0, 0, 0, DateTimeKind.Utc),
+                ResponseIdempotencyKey = "seed-quote:9001",
+                RequestHash = new string('0', 64),
+                QuoteRevision = 1,
+                Version = 1,
+                IsActive = true,
+                CreatedBy = "seed",
+                CreatedDate = AgentSeed.Now
+            });
+        }
         seed.SaveChanges();
     }
 
-    [Fact]
-    public async Task CaptureSupplierQuote_WritesQuotedItems_AndFlipsSolicitationToResponded()
+    private static SupplierQuotedItem Quote(
+        long id,
+        decimal? available,
+        decimal? moq,
+        int? leadTimeDays,
+        DateTime? validUntil = null) => new()
     {
-        using var db = new TestDb();
-        SeedSourcingGraph(db);
+        Id = id,
+        BusinessUnitId = Bu1,
+        SupplierId = SupplierId,
+        SupplierSolicitationId = 1,
+        RfqId = RfqId,
+        RfqItemId = 7001,
+        Quantity = 25,
+        UnitPrice = 1,
+        LandedUnitCost = 1,
+        CurrencyId = 1,
+        QuoteReference = $"SUP-Q-{id}",
+        LeadTimeDays = leadTimeDays,
+        AvailableQuantity = available,
+        MinimumOrderQuantity = moq,
+        ValidUntil = validUntil ?? DateTime.UtcNow.AddDays(1),
+        ResponseIdempotencyKey = $"seed-quote:{id}",
+        RequestHash = id.ToString("x64"),
+        QuoteRevision = 1,
+        Version = 1,
+        IsActive = true,
+        CreatedBy = "seed",
+        CreatedDate = AgentSeed.Now
+    };
 
-        using (var ctx = db.ContextFor(Bu1))
+    private sealed class RecordingProcurementService : IProcurementApplicationService
+    {
+        public List<CreateSolicitationCommand> Solicitations { get; } = [];
+        public List<CaptureSupplierQuoteCommand> Quotes { get; } = [];
+        public List<ApproveAwardCommand> Awards { get; } = [];
+
+        public Task<SolicitationResult> CreateSolicitationAsync(CreateSolicitationCommand command, CancellationToken ct = default)
         {
-            var tool = new CaptureSupplierQuoteTool(ctx);
-            var input = AgentSeed.Json(
-                "{\"rfqId\":700,\"supplierId\":500,\"lines\":[" +
-                "{\"rfqItemId\":7001,\"unitPrice\":12.5,\"quantity\":20,\"leadTimeDays\":14}," +
-                "{\"rfqItemId\":7002,\"unitPrice\":3.75}]}");
-
-            var result = await tool.ExecuteAsync(input, Bu1Ctx, CancellationToken.None);
-
-            Assert.True(result.Success, result.Error);
-
-            // The anonymous result payload is contract too — assert via JSON round-trip.
-            var payload = JsonDocument.Parse(JsonSerializer.Serialize(result.Data)).RootElement;
-            Assert.Equal(2, payload.GetProperty("linesCaptured").GetInt32());
-            Assert.True(payload.GetProperty("solicitationUpdated").GetBoolean());
+            Solicitations.Add(command);
+            return Task.FromResult(new SolicitationResult(Solicitations.Count, "PendingDispatch", Solicitations.Count > 1));
         }
 
-        // Verify persisted state with a fresh, unfiltered context.
-        using var verify = db.ContextFor(null);
-        var items = verify.SupplierQuotedItems.AsNoTracking()
-            .Where(q => q.SupplierId == SupplierId)
-            .OrderBy(q => q.QuoteReference)
-            .ToList();
-
-        Assert.Equal(2, items.Count);
-
-        // QuoteReference carries the RFQ linkage in the documented encoding.
-        var line1 = Assert.Single(items, i => i.QuoteReference == "rfq=700;item=7001;lead=14");
-        Assert.Equal(12.5m, line1.UnitPrice);
-        Assert.Equal(20m, line1.Quantity);                    // explicit quantity wins
-        Assert.Equal("Hex Bolt M8", line1.ItemName);          // name from the RFQ line
-
-        var line2 = Assert.Single(items, i => i.QuoteReference == "rfq=700;item=7002;lead=");
-        Assert.Equal(3.75m, line2.UnitPrice);
-        Assert.Equal(10m, line2.Quantity);                    // falls back to RFQ-line quantity
-        Assert.Equal("Gasket 40mm", line2.ItemName);
-
-        Assert.All(items, i =>
+        public Task<SupplierQuoteResult> CaptureSupplierQuoteAsync(CaptureSupplierQuoteCommand command, CancellationToken ct = default)
         {
-            Assert.Equal(Bu1, i.BusinessUnitId);              // tenant stamped from ctx, not input
-            Assert.Equal("tester", i.CreatedBy);              // acting user from JWT-derived ctx
-            Assert.True(i.IsActive);
-        });
-
-        // The matching Sent solicitation is now Responded with a response timestamp.
-        var solicitation = verify.Set<SupplierSolicitation>().AsNoTracking().Single(s => s.Id == 1);
-        Assert.Equal(SolicitationStatus.Responded, solicitation.Status);
-        Assert.NotNull(solicitation.RespondedOn);
-    }
-
-    [Fact]
-    public async Task CaptureSupplierQuote_CrossTenantRfq_IsInvisibleAndRejected()
-    {
-        using var db = new TestDb();
-        using (var seed = db.ContextFor(null))
-        {
-            // RFQ + supplier belong to BU2; the tool runs as BU1.
-            AgentSeed.Supplier(seed, SupplierId, buid: Bu2, name: "Other Tenant Supplier");
-            AgentSeed.Rfq(seed, RfqId, Bu2);
-            seed.SaveChanges();
+            Quotes.Add(command);
+            return Task.FromResult(new SupplierQuoteResult([9000 + Quotes.Count], Quotes.Count > 1));
         }
 
-        using var ctx = db.ContextFor(Bu1);
-        var tool = new CaptureSupplierQuoteTool(ctx);
-        var input = AgentSeed.Json(
-            "{\"rfqId\":700,\"supplierId\":500,\"lines\":[{\"rfqItemId\":7001,\"unitPrice\":1}]}");
+        public Task<AwardResult> ApproveAwardAsync(ApproveAwardCommand command, CancellationToken ct = default)
+        {
+            Awards.Add(command);
+            return Task.FromResult(new AwardResult(8000 + Awards.Count, "APPROVED", 2m, Awards.Count > 1));
+        }
 
-        var result = await tool.ExecuteAsync(input, Bu1Ctx, CancellationToken.None);
-
-        // The tenant filter makes the foreign RFQ look nonexistent — request rejected...
-        Assert.False(result.Success);
-        Assert.Contains("not found", result.Error, StringComparison.OrdinalIgnoreCase);
-
-        // ...and nothing was written.
-        using var verify = db.ContextFor(null);
-        Assert.Equal(0, verify.SupplierQuotedItems.Count());
-    }
-
-    [Fact]
-    public async Task CaptureSupplierQuote_LineMissingUnitPrice_FailsWithoutPersistingAnything()
-    {
-        using var db = new TestDb();
-        SeedSourcingGraph(db);
-
-        using var ctx = db.ContextFor(Bu1);
-        var tool = new CaptureSupplierQuoteTool(ctx);
-        var input = AgentSeed.Json(
-            "{\"rfqId\":700,\"supplierId\":500,\"lines\":[" +
-            "{\"rfqItemId\":7001,\"unitPrice\":2.5}," +
-            "{\"rfqItemId\":7002}]}"); // second line has no unitPrice
-
-        var result = await tool.ExecuteAsync(input, Bu1Ctx, CancellationToken.None);
-
-        Assert.False(result.Success);
-        Assert.Contains("unitPrice", result.Error);
-
-        // All-or-nothing: the valid first line must not have been saved either,
-        // and the solicitation stays Sent.
-        using var verify = db.ContextFor(null);
-        Assert.Equal(0, verify.SupplierQuotedItems.Count());
-        Assert.Equal(SolicitationStatus.Sent,
-            verify.Set<SupplierSolicitation>().AsNoTracking().Single(s => s.Id == 1).Status);
+        public Task<ProcurementWorkbench> GetWorkbenchAsync(long businessUnitId, long rfqId, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<IReadOnlyCollection<SupplierPurchaseOrderSummary>> SearchPurchaseOrdersAsync(
+            long businessUnitId, string? search, int limit, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<SolicitationResult> RetrySolicitationAsync(RetrySolicitationCommand command, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<QuoteComparisonResult> CompareQuotesAsync(long businessUnitId, long rfqItemId, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<PurchaseOrderResult> CreatePurchaseOrderAsync(CreatePurchaseOrderCommand command, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<PurchaseOrderResult> IssuePurchaseOrderAsync(IssuePurchaseOrderCommand command, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<GoodsReceiptResult> PostGoodsReceiptAsync(PostGoodsReceiptCommand command, CancellationToken ct = default) =>
+            throw new NotSupportedException();
     }
 }

@@ -2,11 +2,13 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Cryptography;
 using System.Security.Claims;
 using System.Text;
+using ERP_RFQ_Automation.Agent.Models;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Procurement;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
@@ -40,6 +42,16 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
     public const long TenantAAttachmentId = 88_001;
     public const long TenantBAttachmentId = 88_002;
     public const long TenantAMatchOccurrenceId = 89_001;
+    public const long TenantAProcurementCurrencyId = 396_010;
+    public const long TenantAProcurementWarehouseId = 396_020;
+    public const long TenantAProcurementProductId = 396_030;
+    public const long TenantAProcurementSupplierId = 396_050;
+    public const long TenantAProcurementRfqId = 396_060;
+    public const long TenantAProcurementRfqItemId = 396_070;
+    public const long TenantBProcurementRfqId = 406_060;
+
+    private const long TenantAProcurementOffset = 300_000;
+    private const long TenantBProcurementOffset = 310_000;
 
     private const string Issuer = "nexora-release-01b-tests";
     private const string Audience = "nexora-release-01b-api";
@@ -142,6 +154,82 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         return (classification, auditCount);
     }
 
+    public async Task MarkSolicitationSentAsync(long solicitationId)
+    {
+        await using var db = Context();
+        var now = DateTime.UtcNow;
+        var solicitation = await db.Set<SupplierSolicitation>().SingleAsync(x =>
+            x.BusinessUnitId == TenantA && x.Id == solicitationId);
+        solicitation.Status = SolicitationStatus.Sent;
+        solicitation.SentOn = now;
+        solicitation.UpdatedOn = now;
+        solicitation.Version++;
+        var outbox = await db.ProcurementOutboxMessages.SingleAsync(x =>
+            x.BusinessUnitId == TenantA && x.SupplierSolicitationId == solicitationId);
+        outbox.Status = ProcurementOutboxStatuses.Sent;
+        outbox.ProviderReference = $"http-test-provider:{solicitationId}";
+        outbox.SentOn = now;
+        outbox.UpdatedOn = now;
+        await db.SaveChangesAsync();
+    }
+
+    public async Task<(long LineId, long Version)> IssuePurchaseOrderForHttpFlowAsync(long purchaseOrderId)
+    {
+        await using var db = Context();
+        var service = new ProcurementApplicationService(db);
+        var deliveredOn = DateTime.UtcNow;
+        var result = await service.IssuePurchaseOrderAsync(new IssuePurchaseOrderCommand(
+            TenantA,
+            purchaseOrderId,
+            1,
+            $"provider-receipt:http-test-{purchaseOrderId}",
+            $"http-issue-support-{purchaseOrderId}",
+            "release-01b-http-tests",
+            $"http-issue-support-{purchaseOrderId}",
+            new string('a', 64),
+            deliveredOn));
+        var lineId = await db.SupplierPurchaseOrderLines
+            .Where(x => x.BusinessUnitId == TenantA && x.SupplierPurchaseOrderId == purchaseOrderId)
+            .Select(x => x.Id)
+            .SingleAsync();
+        return (lineId, await db.SupplierPurchaseOrders
+            .Where(x => x.BusinessUnitId == TenantA && x.Id == result.Id)
+            .Select(x => x.Version)
+            .SingleAsync());
+    }
+
+    public async Task<(long LineId, long Version)> PurchaseOrderReceiptStateAsync(long purchaseOrderId)
+    {
+        await using var db = Context();
+        var lineId = await db.SupplierPurchaseOrderLines
+            .Where(x => x.BusinessUnitId == TenantA && x.SupplierPurchaseOrderId == purchaseOrderId)
+            .Select(x => x.Id)
+            .SingleAsync();
+        var version = await db.SupplierPurchaseOrders
+            .Where(x => x.BusinessUnitId == TenantA && x.Id == purchaseOrderId)
+            .Select(x => x.Version)
+            .SingleAsync();
+        return (lineId, version);
+    }
+
+    public async Task<(long SolicitationTenantId, long PurchaseOrderTenantId, long ReceiptTenantId)>
+        ProcurementOwnershipAsync(long solicitationId, long purchaseOrderId, long receiptId)
+    {
+        await using var db = Context();
+        return (
+            await db.Set<SupplierSolicitation>().IgnoreQueryFilters()
+                .Where(x => x.Id == solicitationId).Select(x => x.BusinessUnitId).SingleAsync(),
+            await db.SupplierPurchaseOrders.IgnoreQueryFilters()
+                .Where(x => x.Id == purchaseOrderId).Select(x => x.BusinessUnitId).SingleAsync(),
+            await db.GoodsReceipts.IgnoreQueryFilters()
+                .Where(x => x.Id == receiptId).Select(x => x.BusinessUnitId).SingleAsync());
+    }
+
+    private ErpRfqAutomationContext Context() => new(
+        new DbContextOptionsBuilder<ErpRfqAutomationContext>()
+            .UseNpgsql(_postgres.GetConnectionString())
+            .Options);
+
     private async Task SeedAsync(ErpRfqAutomationContext db)
     {
         var now = DateTimeOffset.UtcNow;
@@ -152,10 +240,18 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         const long leadsModuleId = 84_001;
         const long dashboardModuleId = 84_002;
         const long customersModuleId = 84_003;
+        const long rfqManagementModuleId = 84_004;
+        const long supplierHistoryModuleId = 84_005;
+        const long ordersModuleId = 84_006;
+        const long productsModuleId = 84_007;
         db.Modules.AddRange(
             Module(leadsModuleId, "Leads"),
             Module(dashboardModuleId, "Dashboard"),
-            Module(customersModuleId, "Customers"));
+            Module(customersModuleId, "Customers"),
+            Module(rfqManagementModuleId, "RFQ Management"),
+            Module(supplierHistoryModuleId, "Supplier History"),
+            Module(ordersModuleId, "Orders"),
+            Module(productsModuleId, "Products"));
 
         db.SetupMasters.AddRange(
             Role(AllowedRole, TenantA, "Release 01B Reader"),
@@ -164,7 +260,11 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         db.RolePermissions.AddRange(
             Permission(85_001, AllowedRole, leadsModuleId, TenantA, canEdit: true),
             Permission(85_002, AllowedRole, dashboardModuleId, TenantA),
-            Permission(85_003, AllowedRole, customersModuleId, TenantA));
+            Permission(85_003, AllowedRole, customersModuleId, TenantA),
+            Permission(85_004, AllowedRole, rfqManagementModuleId, TenantA, canCreate: true, canEdit: true),
+            Permission(85_005, AllowedRole, supplierHistoryModuleId, TenantA, canCreate: true, canEdit: true),
+            Permission(85_006, AllowedRole, ordersModuleId, TenantA, canCreate: true, canEdit: true),
+            Permission(85_007, AllowedRole, productsModuleId, TenantA, canCreate: true, canEdit: true));
 
         db.Customers.AddRange(
             Customer(TenantACustomerId, TenantA, "Tenant A Customer", "buyer-a@nexora.invalid"),
@@ -182,6 +282,9 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         db.Leads.AddRange(
             Lead(TenantALeadId, TenantA, 86_301, TenantACustomerId, "HTTP-A-RFQ"),
             Lead(TenantBLeadId, TenantB, 86_302, TenantBCustomerId, "HTTP-B-RFQ"));
+
+        ProcurementTestData.SeedGraph(db, TenantA, TenantAProcurementOffset);
+        ProcurementTestData.SeedGraph(db, TenantB, TenantBProcurementOffset);
 
         db.Set<LeadIngestionBatch>().AddRange(
             Batch(TenantABatchId, TenantA, now),
@@ -287,12 +390,14 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         CreatedOn = DateTime.UtcNow
     };
 
-    private static RolePermission Permission(long id, long roleId, long moduleId, long tenantId, bool canEdit = false) => new()
+    private static RolePermission Permission(long id, long roleId, long moduleId, long tenantId,
+        bool canCreate = false, bool canEdit = false) => new()
     {
         Id = id,
         RoleId = roleId,
         ModuleId = moduleId,
         BusinessUnitId = tenantId,
+        CanCreate = canCreate,
         CanEdit = canEdit,
         CreatedBy = "release-01b-tests",
         CreatedOn = DateTime.UtcNow
