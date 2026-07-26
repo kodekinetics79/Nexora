@@ -12,6 +12,18 @@ namespace ERP_RFQ_Automation.Controllers;
 [Authorize]
 public sealed class CustomerAwardsController(ICustomerAwardApplicationService service) : ControllerBase
 {
+    [HttpGet("purchase-orders")]
+    [RequireModulePermission("Customer Awards", PermissionAction.View)]
+    public Task<IActionResult> SearchPurchaseOrders([FromQuery] string? search = null, [FromQuery] int limit = 100)
+        => ExecuteAsync(async () => Ok(await service.SearchPurchaseOrdersAsync(TenantId(), search, limit,
+            HttpContext.RequestAborted)));
+
+    [HttpGet("purchase-orders/{purchaseOrderId:long}")]
+    [RequireModulePermission("Customer Awards", PermissionAction.View)]
+    public Task<IActionResult> GetPurchaseOrderMatch(long purchaseOrderId)
+        => ExecuteAsync(async () => Ok(await service.GetPurchaseOrderMatchAsync(TenantId(), purchaseOrderId,
+            HttpContext.RequestAborted)));
+
     [HttpGet("quote/{quoteId:long}")]
     [RequireModulePermission("Customer Awards", PermissionAction.View)]
     public Task<IActionResult> GetByQuote(long quoteId)

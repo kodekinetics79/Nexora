@@ -25,6 +25,28 @@ type SourcingCase = {
   candidates: Array<{ supplierId: number; supplierName: string }>;
 };
 
+type QuoteDetail = {
+  id: number;
+  commercialCaseId: number;
+  customerId: number;
+  currencyId: number;
+  version: number;
+  quoteItems: Array<{ id: number; productId: number; itemDescription: string; quantity: number; unitPrice: number }>;
+};
+
+type ClientPoMatch = {
+  header: {
+    id: number;
+    externalPoNumber: string;
+    nexoraSerial: string;
+    matchOutcome: string;
+    discrepancyCount: number;
+    customerOrderId?: number | null;
+    customerOrderNumber?: string | null;
+  };
+  lines: Array<{ matchStatus: string; differences: string[] }>;
+};
+
 const commandHeaders = (key: string) => ({
   'Idempotency-Key': key,
   'X-Correlation-ID': key,
@@ -121,6 +143,79 @@ async function captureAndProjectOffers(page: Parameters<typeof api>[0], token: s
     capturedIds.push(supplierQuoteId);
   }
   return capturedIds;
+}
+
+async function ensureClientPoAcceptance(
+  page: Parameters<typeof api>[0], token: string, kind: 'exact' | 'partial',
+): Promise<ClientPoMatch> {
+  const exact = kind === 'exact';
+  const quoteIdValue = requiredNumber(exact
+    ? 'E2E_V2_CLIENT_PO_EXACT_QUOTE_ID'
+    : 'E2E_V2_CLIENT_PO_PARTIAL_QUOTE_ID');
+  const poNumber = exact ? 'V2-CLIENT-PO-EXACT-001' : 'V2-CLIENT-PO-PARTIAL-001';
+  const existing = await jsonOk<Array<{ id: number; externalPoNumber: string }>>(
+    await api(page, token, 'get', `/api/customer-awards/purchase-orders?search=${poNumber}&limit=20`),
+  );
+  if (existing.length > 0) {
+    return jsonOk<ClientPoMatch>(await api(
+      page, token, 'get', `/api/customer-awards/purchase-orders/${existing[0].id}`,
+    ));
+  }
+
+  const quote = await jsonOk<QuoteDetail>(await api(page, token, 'get', `/api/Quote/${quoteIdValue}`));
+  const projection = await jsonOk<{ quoteVersion: number }>(
+    await api(page, token, 'get', `/api/customer-awards/quote/${quoteIdValue}`),
+  );
+  const quoteLine = quote.quoteItems[0];
+  const orderedQuantity = exact ? quoteLine.quantity : quoteLine.quantity / 2;
+  const poUnitPrice = exact ? quoteLine.unitPrice : quoteLine.unitPrice + 15;
+  const purchaseOrder = await jsonOk<{ id: number; version: number; lines: Array<{ id: number }> }>(await api(
+    page, token, 'post', '/api/customer-awards/purchase-orders', {
+      quoteId: quote.id,
+      commercialCaseId: quote.commercialCaseId,
+      customerId: quote.customerId,
+      currencyId: quote.currencyId,
+      externalPoNumber: poNumber,
+      poDate: new Date().toISOString(),
+      receivedOn: new Date().toISOString(),
+      expectedVersion: 0,
+      lines: [{
+        externalLineReference: '1',
+        productId: quoteLine.productId,
+        description: quoteLine.itemDescription,
+        orderedQuantity,
+        unitPrice: poUnitPrice,
+        lineAmount: orderedQuantity * poUnitPrice,
+      }],
+    }, commandHeaders(`commercial-v2-${kind}-create-po`),
+  ));
+  const award = await jsonOk<{ id: number; version: number }>(await api(
+    page, token, 'post', '/api/customer-awards', {
+      customerPurchaseOrderId: purchaseOrder.id,
+      quoteId: quote.id,
+      expectedVersion: 0,
+      customerPurchaseOrderExpectedVersion: purchaseOrder.version,
+      quoteExpectedVersion: projection.quoteVersion,
+      allocations: [{
+        customerPurchaseOrderLineId: purchaseOrder.lines[0].id,
+        quoteItemId: quoteLine.id,
+        awardedQuantity: orderedQuantity,
+      }],
+    }, commandHeaders(`commercial-v2-${kind}-create-award`),
+  ));
+  const confirmed = await jsonOk<{ id: number; version: number }>(await api(
+    page, token, 'post', `/api/customer-awards/${award.id}/confirm`, { expectedVersion: award.version },
+    commandHeaders(`commercial-v2-${kind}-confirm-award`),
+  ));
+  if (exact) {
+    await jsonOk(await api(
+      page, token, 'post', `/api/customer-awards/${award.id}/convert-to-order`,
+      { expectedVersion: confirmed.version }, commandHeaders('commercial-v2-exact-create-order'),
+    ));
+  }
+  return jsonOk<ClientPoMatch>(await api(
+    page, token, 'get', `/api/customer-awards/purchase-orders/${purchaseOrder.id}`,
+  ));
 }
 
 test.describe.configure({ mode: 'serial' });
@@ -278,6 +373,63 @@ test('11 approved Supplier offer prices the actual Customer Quote with cost evid
   await expect(page.getByText('Supplier validity does not support this Customer Quote')).toBeVisible();
   await fs.mkdir(evidenceDir, { recursive: true });
   await page.screenshot({ path: path.join(evidenceDir, 'supplier-offer-customer-pricing.png'), fullPage: true });
+});
+
+test('19 Client PO Inbox is visible in normal navigation with persisted lineage', async ({ page }) => {
+  const token = await loginAs(page, 'manager');
+  const match = await ensureClientPoAcceptance(page, token, 'exact');
+  await page.goto('/sales/client-pos');
+  await expect(page.getByRole('heading', { name: 'Client PO Inbox' })).toBeVisible();
+  await expect(page.getByText(match.header.externalPoNumber)).toBeVisible();
+  await expect(page.getByText(match.header.nexoraSerial, { exact: false }).first()).toBeVisible();
+});
+
+test('20 exact Client PO match reconciles to the selected Customer Quote revision', async ({ page }) => {
+  const token = await loginAs(page, 'manager');
+  const match = await ensureClientPoAcceptance(page, token, 'exact');
+  expect(match.header.matchOutcome).toBe('EXACT_ACCEPTANCE');
+  await page.goto(`/sales/client-pos/${match.header.id}`);
+  await expect(page.getByText('EXACT ACCEPTANCE')).toBeVisible();
+  await expect(page.getByText('EXACT MATCH')).toBeVisible();
+  await expect(page.getByText(/Every accepted Client PO line reconciles/i)).toBeVisible();
+});
+
+test('21 partial Client PO award remains distinct from the full quoted quantity', async ({ page }) => {
+  const token = await loginAs(page, 'manager');
+  const match = await ensureClientPoAcceptance(page, token, 'partial');
+  expect(match.lines[0].differences).toContain('PARTIAL_QUOTE_AWARD');
+  await page.goto(`/sales/client-pos/${match.header.id}`);
+  await expect(page.getByText('PARTIAL QUOTE AWARD')).toBeVisible();
+});
+
+test('22 Client PO price and quantity discrepancy matrix is evidence based', async ({ page }) => {
+  const token = await loginAs(page, 'manager');
+  const match = await ensureClientPoAcceptance(page, token, 'partial');
+  expect(match.lines[0].differences).toContain('PRICE_DISCREPANCY');
+  await page.goto(`/sales/client-pos/${match.header.id}`);
+  await expect(page.getByText('PRICE DISCREPANCY')).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'PO price' })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'Quote price' })).toBeVisible();
+  await fs.mkdir(evidenceDir, { recursive: true });
+  await page.screenshot({ path: path.join(evidenceDir, 'client-po-discrepancy-review.png'), fullPage: true });
+});
+
+test('23 exact Client PO acceptance creates a governed Customer Order', async ({ page }) => {
+  const token = await loginAs(page, 'manager');
+  const match = await ensureClientPoAcceptance(page, token, 'exact');
+  expect(match.header.customerOrderId).toBeTruthy();
+  expect(match.header.customerOrderNumber).toBeTruthy();
+  await page.goto(`/sales/client-pos/${match.header.id}`);
+  await expect(page.getByRole('button', { name: 'Customer Order' })).toBeVisible();
+});
+
+test('30 Client PO review remains usable on mobile', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 812 });
+  const token = await loginAs(page, 'manager');
+  const match = await ensureClientPoAcceptance(page, token, 'exact');
+  await page.goto(`/sales/client-pos/${match.header.id}`);
+  await expect(page.getByRole('heading', { name: match.header.externalPoNumber })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'Decision' })).toBeVisible();
 });
 
 test.afterEach(({ page }, testInfo) => {

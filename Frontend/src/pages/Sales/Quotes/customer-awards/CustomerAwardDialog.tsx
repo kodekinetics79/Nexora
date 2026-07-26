@@ -63,8 +63,8 @@ const CustomerAwardDialog: React.FC<CustomerAwardDialogProps> = ({
       aria-labelledby="customer-award-dialog-title"
     >
       <DialogTitle id="customer-award-dialog-title" sx={{ pr: 7, fontWeight: 800 }}>
-        Capture customer purchase order
-        <Tooltip title={busy ? 'Award submission in progress' : 'Close'}>
+        Capture and match Client PO
+        <Tooltip title={busy ? 'Client PO submission in progress' : 'Close'}>
           <span>
             <IconButton
               aria-label="Close customer award dialog"

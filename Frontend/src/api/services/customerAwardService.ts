@@ -73,6 +73,50 @@ export interface CustomerAwardOrder {
   version?: number;
 }
 
+export interface ClientPurchaseOrderInboxRow {
+  id: number;
+  internalNumber: string;
+  externalPoNumber: string;
+  customerName: string;
+  nexoraSerial: string;
+  receivedOn: string;
+  status: string;
+  quoteId?: number | null;
+  quoteNumber?: string | null;
+  matchOutcome: string;
+  discrepancyCount: number;
+  customerOrderId?: number | null;
+  customerOrderNumber?: string | null;
+}
+
+export interface ClientPurchaseOrderMatchLine {
+  customerPurchaseOrderLineId: number;
+  externalLineReference: string;
+  purchaseOrderDescription: string;
+  orderedQuantity: number;
+  purchaseOrderUnitPrice?: number | null;
+  quoteItemId?: number | null;
+  quoteDescription?: string | null;
+  quotedQuantity?: number | null;
+  quotedUnitPrice?: number | null;
+  acceptedQuantity?: number | null;
+  matchStatus: string;
+  differences: string[];
+}
+
+export interface ClientPurchaseOrderMatch {
+  header: ClientPurchaseOrderInboxRow;
+  customerId: number;
+  currencyId: number;
+  currencyCode: string;
+  poDate: string;
+  version: number;
+  awardId?: number | null;
+  awardNumber?: string | null;
+  awardStatus?: string | null;
+  lines: ClientPurchaseOrderMatchLine[];
+}
+
 export interface QuoteAwardBalanceLine {
   quoteItemId: number;
   productId?: number | null;
@@ -168,7 +212,15 @@ export const createCustomerAwardCommandIdentity = (command: string): CommandIden
   };
 };
 
+const unwrap = <T>(response: { data: T }): T => response.data;
+
 const customerAwardService = {
+  searchPurchaseOrders: async (search = "", limit = 100): Promise<ClientPurchaseOrderInboxRow[]> =>
+    unwrap(await axiosInstance.get<ClientPurchaseOrderInboxRow[]>("/api/customer-awards/purchase-orders", {
+      params: { search: search.trim() || undefined, limit },
+    })),
+  getPurchaseOrderMatch: async (id: number): Promise<ClientPurchaseOrderMatch> =>
+    unwrap(await axiosInstance.get<ClientPurchaseOrderMatch>(`/api/customer-awards/purchase-orders/${id}`)),
   getByQuote: async (quoteId: number): Promise<QuoteAwardProjection> =>
     (await axiosInstance.get<QuoteAwardProjection>(`/api/customer-awards/quote/${quoteId}`)).data,
 

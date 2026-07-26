@@ -85,11 +85,12 @@ interface CaptureLine {
   quoteItemId: number | '';
   orderedQuantity: string;
   awardedQuantity: string;
+  unitPrice: string;
 }
 
 interface ValidationResult {
   form?: string;
-  rows: Record<string, Partial<Record<'reference' | 'quoteItem' | 'ordered' | 'awarded', string>>>;
+  rows: Record<string, Partial<Record<'reference' | 'quoteItem' | 'ordered' | 'awarded' | 'unitPrice', string>>>;
 }
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -144,6 +145,7 @@ const createDefaultRows = (lines: QuoteAwardBalanceLine[]): CaptureLine[] =>
       quoteItemId: line.quoteItemId,
       orderedQuantity: String(line.remainingQuantity),
       awardedQuantity: String(line.remainingQuantity),
+      unitPrice: String(line.unitPrice),
     }));
 
 const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
@@ -235,6 +237,7 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
         quoteItemId: nextLine?.quoteItemId ?? '',
         orderedQuantity: nextLine ? String(nextLine.remainingQuantity) : '',
         awardedQuantity: nextLine ? String(nextLine.remainingQuantity) : '',
+        unitPrice: nextLine ? String(nextLine.unitPrice) : '',
       },
     ]);
   };
@@ -258,6 +261,9 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
       if (row.quoteItemId === '' || !balanceByItem.has(row.quoteItemId)) errors.quoteItem = 'Select a quote line';
       if (!validPositive(row.orderedQuantity)) errors.ordered = 'Must be greater than zero';
       if (!validPositive(row.awardedQuantity)) errors.awarded = 'Must be greater than zero';
+      if (!Number.isFinite(numberValue(row.unitPrice)) || numberValue(row.unitPrice) < 0) {
+        errors.unitPrice = 'Must be zero or greater';
+      }
 
       if (validPositive(row.orderedQuantity) && validPositive(row.awardedQuantity)
         && numberValue(row.awardedQuantity) - numberValue(row.orderedQuantity) > EPSILON) {
@@ -308,6 +314,8 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
             description: quoteLine.description,
             orderedQuantity: numberValue(row.orderedQuantity),
             uomId: quoteLine.uomId,
+            unitPrice: numberValue(row.unitPrice),
+            lineAmount: numberValue(row.unitPrice) * numberValue(row.orderedQuantity),
           };
         }),
       }, identities.current.purchaseOrder);
@@ -509,7 +517,7 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
         sx={{ justifyContent: 'space-between', alignItems: { sm: 'center' } }}
       >
         <Box>
-          <Typography variant="h6" sx={{ fontWeight: 800 }}>Customer PO award</Typography>
+          <Typography variant="h6" sx={{ fontWeight: 800 }}>Client PO matching</Typography>
           <Typography variant="body2" color="text.secondary">Quote {quote.quoteNo}</Typography>
         </Box>
         <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }}>
@@ -564,12 +572,13 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
       </Box>
 
       <TableContainer sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 1, overflowX: 'auto' }}>
-        <Table size="small" sx={{ minWidth: 880 }}>
+        <Table size="small" sx={{ minWidth: 1040 }}>
           <TableHead>
             <TableRow sx={{ bgcolor: 'action.hover' }}>
               <TableCell sx={{ fontWeight: 800, width: 150 }}>PO line</TableCell>
               <TableCell sx={{ fontWeight: 800, minWidth: 280 }}>Quote line</TableCell>
               <TableCell align="right" sx={{ fontWeight: 800, width: 130 }}>PO quantity</TableCell>
+              <TableCell align="right" sx={{ fontWeight: 800, width: 150 }}>PO unit price</TableCell>
               <TableCell align="right" sx={{ fontWeight: 800, width: 140 }}>Award quantity</TableCell>
               <TableCell align="right" sx={{ fontWeight: 800, width: 90 }}>Remaining</TableCell>
               <TableCell sx={{ width: 48 }} />
@@ -608,6 +617,7 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
                             quoteItemId,
                             orderedQuantity: line ? String(line.remainingQuantity) : row.orderedQuantity,
                             awardedQuantity: line ? String(line.remainingQuantity) : row.awardedQuantity,
+                            unitPrice: line ? String(line.unitPrice) : row.unitPrice,
                           });
                         }}
                         disabled={saveMutation.isPending}
@@ -633,6 +643,23 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
                       helperText={rowErrors.ordered}
                       disabled={saveMutation.isPending}
                       slotProps={{ htmlInput: { min: 0, step: 'any', 'aria-label': 'Customer PO quantity' } }}
+                    />
+                  </TableCell>
+                  <TableCell sx={{ verticalAlign: 'top' }}>
+                    <TextField
+                      required
+                      fullWidth
+                      size="small"
+                      type="number"
+                      value={row.unitPrice}
+                      onChange={(event) => updateRow(row.clientId, { unitPrice: event.target.value })}
+                      error={Boolean(rowErrors.unitPrice)}
+                      helperText={rowErrors.unitPrice
+                        || (selectedLine && numberValue(row.unitPrice) !== selectedLine.unitPrice
+                          ? `Quote: ${selectedLine.unitPrice}`
+                          : undefined)}
+                      disabled={saveMutation.isPending}
+                      slotProps={{ htmlInput: { min: 0, step: 'any', 'aria-label': 'Customer PO unit price' } }}
                     />
                   </TableCell>
                   <TableCell sx={{ verticalAlign: 'top' }}>

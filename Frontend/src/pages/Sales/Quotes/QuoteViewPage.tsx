@@ -321,7 +321,7 @@ const QuoteViewPage: React.FC = () => {
                 disabled={!awardQuote || quote.statusValue?.toUpperCase() === 'ORDERED'}
                 sx={{ borderRadius: 2, fontWeight: 800 }}
             >
-              Capture customer award
+              Capture Client PO
             </Button>
           )}
         </Stack>

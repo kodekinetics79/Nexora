@@ -10,6 +10,10 @@ namespace ERP_RFQ_Automation.OrderToCash;
 public interface ICustomerAwardApplicationService
 {
     Task<QuoteAwardProjection> GetByQuoteAsync(long businessUnitId, long quoteId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<ClientPurchaseOrderInboxRow>> SearchPurchaseOrdersAsync(long businessUnitId,
+        string? search, int limit, CancellationToken cancellationToken = default);
+    Task<ClientPurchaseOrderMatchView> GetPurchaseOrderMatchAsync(long businessUnitId,
+        long purchaseOrderId, CancellationToken cancellationToken = default);
     Task<CustomerPurchaseOrderView> CreatePurchaseOrderAsync(long businessUnitId, string idempotencyKey,
         string correlationId, CreateCustomerPurchaseOrderCommand command, string actor, CancellationToken cancellationToken = default);
     Task<CustomerAwardView> CreateAwardAsync(long businessUnitId, string idempotencyKey,
@@ -133,6 +137,47 @@ public sealed record QuoteAwardProjection(
     IReadOnlyList<QuoteAwardBalanceLineView> Lines,
     IReadOnlyList<CustomerAwardView> Awards);
 
+public sealed record ClientPurchaseOrderInboxRow(
+    long Id,
+    string InternalNumber,
+    string ExternalPoNumber,
+    string CustomerName,
+    string NexoraSerial,
+    DateTime ReceivedOn,
+    string Status,
+    long? QuoteId,
+    string? QuoteNumber,
+    string MatchOutcome,
+    int DiscrepancyCount,
+    long? CustomerOrderId,
+    string? CustomerOrderNumber);
+
+public sealed record ClientPurchaseOrderMatchLineView(
+    long CustomerPurchaseOrderLineId,
+    string ExternalLineReference,
+    string PurchaseOrderDescription,
+    decimal OrderedQuantity,
+    decimal? PurchaseOrderUnitPrice,
+    long? QuoteItemId,
+    string? QuoteDescription,
+    decimal? QuotedQuantity,
+    decimal? QuotedUnitPrice,
+    decimal? AcceptedQuantity,
+    string MatchStatus,
+    IReadOnlyList<string> Differences);
+
+public sealed record ClientPurchaseOrderMatchView(
+    ClientPurchaseOrderInboxRow Header,
+    long CustomerId,
+    long CurrencyId,
+    string CurrencyCode,
+    DateTime PoDate,
+    long Version,
+    long? AwardId,
+    string? AwardNumber,
+    string? AwardStatus,
+    IReadOnlyList<ClientPurchaseOrderMatchLineView> Lines);
+
 public sealed class CustomerAwardConflictException(string message) : InvalidOperationException(message);
 
 public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) : ICustomerAwardApplicationService
@@ -182,6 +227,123 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
         var outcome = confirmedTotal == 0m ? "UNAWARDED" : remaining == 0m ? "AWARDED" : "PARTIALLY_AWARDED";
         return new QuoteAwardProjection(quote.Id, quote.QuoteNo, quote.RevisionNo, outcome, quoted, confirmedTotal,
             remaining, lines, awards.Select(MapAward).ToList());
+    }
+
+    public async Task<IReadOnlyList<ClientPurchaseOrderInboxRow>> SearchPurchaseOrdersAsync(long businessUnitId,
+        string? search, int limit, CancellationToken cancellationToken = default)
+    {
+        EnsureTenant(businessUnitId);
+        if (limit is < 1 or > 200) throw new ArgumentException("Limit must be between 1 and 200.");
+        var term = search?.Trim();
+        var query = _db.CustomerPurchaseOrders.AsNoTracking()
+            .Include(x => x.Customer)
+            .Include(x => x.CommercialCase)
+            .Include(x => x.Lines).ThenInclude(x => x.AwardAllocations).ThenInclude(x => x.Award)
+            .Include(x => x.Lines).ThenInclude(x => x.AwardAllocations).ThenInclude(x => x.QuoteItem)
+            .Include(x => x.Awards).ThenInclude(x => x.Quote)
+            .Where(x => x.BusinessUnitId == businessUnitId);
+        if (!string.IsNullOrWhiteSpace(term))
+        {
+            var normalized = term.ToUpperInvariant();
+            query = query.Where(x => x.ExternalPoNumber.ToUpper().Contains(normalized)
+                || x.InternalNumber.ToUpper().Contains(normalized)
+                || x.Customer.Name.ToUpper().Contains(normalized)
+                || x.CommercialCase.MasterReference.ToUpper().Contains(normalized));
+        }
+
+        var purchaseOrders = await query.OrderByDescending(x => x.ReceivedOn).ThenByDescending(x => x.Id)
+            .Take(limit).ToListAsync(cancellationToken);
+        var awardIds = purchaseOrders.SelectMany(x => x.Awards)
+            .Where(x => x.Status != CustomerAwardStatuses.Cancelled).Select(x => x.Id).ToArray();
+        var orders = awardIds.Length == 0
+            ? []
+            : await _db.Orders.AsNoTracking().Where(x => x.BusinessUnitId == businessUnitId
+                    && x.CustomerAwardId.HasValue && awardIds.Contains(x.CustomerAwardId.Value))
+                .Select(x => new { x.Id, x.OrderNo, AwardId = x.CustomerAwardId!.Value })
+                .ToListAsync(cancellationToken);
+        return purchaseOrders.Select(purchaseOrder =>
+        {
+            var award = purchaseOrder.Awards.Where(x => x.Status != CustomerAwardStatuses.Cancelled)
+                .OrderByDescending(x => x.Id).FirstOrDefault();
+            var order = award is null ? null : orders.FirstOrDefault(x => x.AwardId == award.Id);
+            var discrepancyCount = purchaseOrder.Lines.Count(line =>
+            {
+                var allocation = line.AwardAllocations.FirstOrDefault(x =>
+                    x.Award.Status != CustomerAwardStatuses.Cancelled);
+                return allocation is null || !line.UnitPrice.HasValue
+                    || allocation.AwardedQuantity != line.OrderedQuantity
+                    || allocation.AwardedQuantity < allocation.QuoteItem.Quantity
+                    || (line.ProductId.HasValue && allocation.QuoteItem.ProductId != line.ProductId)
+                    || line.UnitPrice.Value != allocation.QuoteItem.UnitPrice;
+            });
+            var outcome = award is null ? "POSSIBLE_MATCH_REVIEW"
+                : purchaseOrder.Status == CustomerPurchaseOrderStatuses.PartiallyAwarded ? "PARTIAL_AWARD"
+                : discrepancyCount > 0 ? "ACCEPTED_WITH_DIFFERENCES" : "EXACT_ACCEPTANCE";
+            return new ClientPurchaseOrderInboxRow(purchaseOrder.Id, purchaseOrder.InternalNumber,
+                purchaseOrder.ExternalPoNumber, purchaseOrder.Customer.Name,
+                purchaseOrder.CommercialCase.MasterReference, purchaseOrder.ReceivedOn, purchaseOrder.Status,
+                award?.QuoteId, award?.Quote.QuoteNo, outcome, discrepancyCount,
+                order?.Id, order?.OrderNo);
+        }).ToList();
+    }
+
+    public async Task<ClientPurchaseOrderMatchView> GetPurchaseOrderMatchAsync(long businessUnitId,
+        long purchaseOrderId, CancellationToken cancellationToken = default)
+    {
+        EnsureTenant(businessUnitId);
+        var purchaseOrder = await _db.CustomerPurchaseOrders.AsNoTracking()
+            .Include(x => x.Customer).Include(x => x.Currency).Include(x => x.CommercialCase)
+            .Include(x => x.Lines).ThenInclude(x => x.Product)
+            .Include(x => x.Lines).ThenInclude(x => x.AwardAllocations)
+                .ThenInclude(x => x.QuoteItem)
+            .Include(x => x.Lines).ThenInclude(x => x.AwardAllocations)
+                .ThenInclude(x => x.Award).ThenInclude(x => x.Quote)
+            .Include(x => x.Awards).ThenInclude(x => x.Quote)
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == purchaseOrderId,
+                cancellationToken)
+            ?? throw new KeyNotFoundException("Client PO was not found in this tenant.");
+        var award = purchaseOrder.Awards.Where(x => x.Status != CustomerAwardStatuses.Cancelled)
+            .OrderByDescending(x => x.Id).FirstOrDefault();
+        var order = award is null ? null : await _db.Orders.AsNoTracking().Where(x =>
+                x.BusinessUnitId == businessUnitId && x.CustomerAwardId == award.Id)
+            .Select(x => new { x.Id, x.OrderNo }).SingleOrDefaultAsync(cancellationToken);
+        var lines = purchaseOrder.Lines.OrderBy(x => x.Id).Select(line =>
+        {
+            var allocation = line.AwardAllocations.Where(x => x.Award.Status != CustomerAwardStatuses.Cancelled)
+                .OrderByDescending(x => x.Id).FirstOrDefault();
+            var quoteLine = allocation?.QuoteItem;
+            var differences = new List<string>();
+            if (allocation is null) differences.Add("UNQUOTED_OR_UNMATCHED_LINE");
+            if (allocation is not null && allocation.AwardedQuantity != line.OrderedQuantity)
+                differences.Add("QUANTITY_DISCREPANCY");
+            if (quoteLine is not null && allocation is not null
+                && allocation.AwardedQuantity < quoteLine.Quantity)
+                differences.Add("PARTIAL_QUOTE_AWARD");
+            if (quoteLine is not null && line.ProductId.HasValue && quoteLine.ProductId != line.ProductId)
+                differences.Add("PART_DISCREPANCY");
+            if (!line.UnitPrice.HasValue) differences.Add("PO_PRICE_NOT_PROVIDED");
+            else if (quoteLine is not null && line.UnitPrice.Value != quoteLine.UnitPrice)
+                differences.Add("PRICE_DISCREPANCY");
+            var status = allocation is null ? "REVIEW_REQUIRED"
+                : differences.Count == 0 ? "EXACT_MATCH"
+                : differences.Count == 1 && differences[0] == "QUANTITY_DISCREPANCY" ? "PARTIAL_MATCH"
+                : "DISCREPANCY";
+            return new ClientPurchaseOrderMatchLineView(line.Id, line.ExternalLineReference,
+                line.Description, line.OrderedQuantity, line.UnitPrice, quoteLine?.Id,
+                quoteLine?.ItemDescription, quoteLine?.Quantity, quoteLine?.UnitPrice,
+                allocation?.AwardedQuantity, status, differences);
+        }).ToList();
+        var discrepancyCount = lines.Count(x => x.Differences.Count > 0);
+        var outcome = award is null ? "POSSIBLE_MATCH_REVIEW"
+            : purchaseOrder.Status == CustomerPurchaseOrderStatuses.PartiallyAwarded ? "PARTIAL_AWARD"
+            : discrepancyCount > 0 ? "ACCEPTED_WITH_DIFFERENCES" : "EXACT_ACCEPTANCE";
+        var header = new ClientPurchaseOrderInboxRow(purchaseOrder.Id, purchaseOrder.InternalNumber,
+            purchaseOrder.ExternalPoNumber, purchaseOrder.Customer.Name,
+            purchaseOrder.CommercialCase.MasterReference, purchaseOrder.ReceivedOn, purchaseOrder.Status,
+            award?.QuoteId, award?.Quote.QuoteNo, outcome, discrepancyCount, order?.Id, order?.OrderNo);
+        return new ClientPurchaseOrderMatchView(header, purchaseOrder.CustomerId, purchaseOrder.CurrencyId,
+            purchaseOrder.Currency.Code, purchaseOrder.PoDate, purchaseOrder.Version, award?.Id,
+            award?.AwardNumber, award?.Status, lines);
     }
 
     public Task<CustomerPurchaseOrderView> CreatePurchaseOrderAsync(long businessUnitId, string idempotencyKey,

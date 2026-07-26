@@ -60,6 +60,8 @@ const QuotesPage = lazy(() => import('./pages/Sales/Quotes/QuotesPage'));
 const CreateQuotePage = lazy(() => import('./pages/Sales/Quotes/CreateQuotePage'));
 const QuoteViewPage = lazy(() => import('./pages/Sales/Quotes/QuoteViewPage'));
 const EditQuotePage = lazy(() => import('./pages/Sales/Quotes/EditQuotePage'));
+const ClientPurchaseOrderInboxPage = lazy(() => import('./pages/Sales/ClientPurchaseOrders/ClientPurchaseOrderInboxPage'));
+const ClientPurchaseOrderReviewPage = lazy(() => import('./pages/Sales/ClientPurchaseOrders/ClientPurchaseOrderReviewPage'));
 const OrderListPage = lazy(() => import('./pages/Sales/Orders/OrderListPage'));
 const CreateOrderPage = lazy(() => import('./pages/Sales/Orders/CreateOrderPage'));
 const OrderViewPage = lazy(() => import('./pages/Sales/Orders/OrderViewPage'));
@@ -135,6 +137,8 @@ function App() {
       <Route path="/sales/quotes/create" element={<MainLayout><PermissionGuard moduleName="Quotations" action="create" redirect><CreateQuotePage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/quotes/view/:id" element={<MainLayout><PermissionGuard moduleName="Quotations" redirect><QuoteViewPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/quotes/edit/:id" element={<MainLayout><PermissionGuard moduleName="Quotations" action="edit" redirect><EditQuotePage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/client-pos" element={<MainLayout><PermissionGuard moduleName="Customer Awards" redirect><ClientPurchaseOrderInboxPage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/client-pos/:clientPoId" element={<MainLayout><PermissionGuard moduleName="Customer Awards" redirect><ClientPurchaseOrderReviewPage /></PermissionGuard></MainLayout>} />
       
       <Route path="/sales/orders" element={<MainLayout><PermissionGuard moduleName="Orders" redirect><OrderListPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/orders/create" element={<MainLayout><PermissionGuard moduleName="Orders" action="create" redirect><CreateOrderPage /></PermissionGuard></MainLayout>} />

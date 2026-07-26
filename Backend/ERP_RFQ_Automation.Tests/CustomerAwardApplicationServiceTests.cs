@@ -154,6 +154,60 @@ public sealed class CustomerAwardApplicationServiceTests
     }
 
     [Fact]
+    public async Task ClientPoInboxAndMatch_ExposeExactAcceptanceAndCustomerOrderLineage()
+    {
+        using var fixture = new CustomerAwardTestFixture();
+        var purchaseOrder = await fixture.CreatePurchaseOrderAsync("po-match-exact", 10m);
+        var award = await fixture.CreateAwardAsync(purchaseOrder, "award-match-exact", 10m);
+        var confirmed = await fixture.Service.ConfirmAwardAsync(fixture.BusinessUnitId, award.Id,
+            "confirm-match-exact", "corr-confirm-match-exact", new(award.Version), "tests");
+        var order = await fixture.Service.ConvertToOrderAsync(fixture.BusinessUnitId, award.Id,
+            "convert-match-exact", "corr-convert-match-exact", new(confirmed.Version), "tests");
+
+        fixture.Context.ChangeTracker.Clear();
+        var inbox = await fixture.Service.SearchPurchaseOrdersAsync(fixture.BusinessUnitId,
+            "PO-po-match-exact", 20);
+        var row = Assert.Single(inbox);
+        var match = await fixture.Service.GetPurchaseOrderMatchAsync(fixture.BusinessUnitId, purchaseOrder.Id);
+
+        Assert.Equal("EXACT_ACCEPTANCE", row.MatchOutcome);
+        Assert.Equal(0, row.DiscrepancyCount);
+        Assert.Equal(order.Id, row.CustomerOrderId);
+        Assert.Equal(fixture.QuoteId, row.QuoteId);
+        Assert.Equal("EXACT_MATCH", Assert.Single(match.Lines).MatchStatus);
+        Assert.Empty(match.Lines.Single().Differences);
+        Assert.Equal(100m, match.Lines.Single().PurchaseOrderUnitPrice);
+    }
+
+    [Fact]
+    public async Task ClientPoMatch_ClassifiesPartialAwardAndPriceDiscrepancy()
+    {
+        using var fixture = new CustomerAwardTestFixture();
+        var command = fixture.PurchaseOrderCommand("PO-MATCH-PARTIAL", 4m) with
+        {
+            Lines = [fixture.PurchaseOrderCommand("unused", 4m).Lines.Single() with
+            {
+                UnitPrice = 105m,
+                LineAmount = 420m
+            }]
+        };
+        var purchaseOrder = await fixture.Service.CreatePurchaseOrderAsync(fixture.BusinessUnitId,
+            "po-match-partial", "corr-po-match-partial", command, "tests");
+        var award = await fixture.CreateAwardAsync(purchaseOrder, "award-match-partial", 4m);
+        await fixture.Service.ConfirmAwardAsync(fixture.BusinessUnitId, award.Id,
+            "confirm-match-partial", "corr-confirm-match-partial", new(award.Version), "tests");
+
+        fixture.Context.ChangeTracker.Clear();
+        var match = await fixture.Service.GetPurchaseOrderMatchAsync(fixture.BusinessUnitId, purchaseOrder.Id);
+        var line = Assert.Single(match.Lines);
+
+        Assert.Equal("ACCEPTED_WITH_DIFFERENCES", match.Header.MatchOutcome);
+        Assert.Contains("PARTIAL_QUOTE_AWARD", line.Differences);
+        Assert.Contains("PRICE_DISCREPANCY", line.Differences);
+        Assert.Equal("DISCREPANCY", line.MatchStatus);
+    }
+
+    [Fact]
     public async Task TenantIsolation_HidesProjectionAndMutations()
     {
         using var fixture = new CustomerAwardTestFixture();
@@ -164,6 +218,9 @@ public sealed class CustomerAwardApplicationServiceTests
 
         await Assert.ThrowsAsync<KeyNotFoundException>(() =>
             otherService.GetByQuoteAsync(fixture.BusinessUnitId + 1, fixture.QuoteId));
+        Assert.Empty(await otherService.SearchPurchaseOrdersAsync(fixture.BusinessUnitId + 1, null, 20));
+        await Assert.ThrowsAsync<KeyNotFoundException>(() =>
+            otherService.GetPurchaseOrderMatchAsync(fixture.BusinessUnitId + 1, purchaseOrder.Id));
         await Assert.ThrowsAsync<KeyNotFoundException>(() =>
             otherService.ConfirmAwardAsync(fixture.BusinessUnitId + 1, award.Id, "other-confirm",
                 "corr-other-confirm", new(award.Version), "other-user"));

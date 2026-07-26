@@ -38,7 +38,7 @@ await EnsureUserAsync(otherTenantId, otherRole.SetupId, "other@release01c1.local
 var permissionModules = new[]
 {
     "Leads", "Dashboard", "Users", "Customers", "Products", "Product Categories",
-    "Supplier History", "RFQ Management", "Quotations", "Orders"
+    "Supplier History", "RFQ Management", "Quotations", "Orders", "Customer Awards"
 };
 foreach (var moduleName in permissionModules)
 {
@@ -113,6 +113,24 @@ EnsureCommercialIdentity(backupLead, abc.Id, abcContact.Id, "MATCHED");
 backupLead.AssignTo = ahmed.Id;
 backupLead.AssignOn ??= now.AddMinutes(-20);
 backupLead.AssignComment = "Sarah Malik remains Account Owner; Ahmed Khan selected as backup while Sarah is on leave.";
+var partialAwardLead = await EnsureIdentityLeadAsync(
+    "ABC-ENG-CLIENT-PO-PARTIAL-V2", "Amira Cole", "procurement@abc-engineering.local", sarah.Id,
+    Guid.Parse("c0e00000-0000-0000-0000-000000000010"), "core-client-po-partial-v2",
+    "abc-engineering-client-po-partial-v2.csv",
+    ("1", "CORE-ATP-100", "Valve actuator for partial Client PO acceptance", 4));
+EnsureCommercialIdentity(partialAwardLead, abc.Id, abcContact.Id, "MATCHED");
+partialAwardLead.AssignTo = sarah.Id;
+partialAwardLead.AssignOn ??= now.AddMinutes(-10);
+partialAwardLead.AssignComment = "Confirmed ABC Engineering account ownership for Client PO acceptance.";
+var exactAwardLead = await EnsureIdentityLeadAsync(
+    "ABC-ENG-CLIENT-PO-EXACT", "Amira Cole", "procurement@abc-engineering.local", sarah.Id,
+    Guid.Parse("c0e00000-0000-0000-0000-000000000009"), "core-client-po-exact",
+    "abc-engineering-client-po-exact.csv",
+    ("1", "CORE-ATP-100", "Valve actuator for exact Client PO acceptance", 2));
+EnsureCommercialIdentity(exactAwardLead, abc.Id, abcContact.Id, "MATCHED");
+exactAwardLead.AssignTo = sarah.Id;
+exactAwardLead.AssignOn ??= now.AddMinutes(-9);
+exactAwardLead.AssignComment = "Confirmed ABC Engineering account ownership for exact Client PO acceptance.";
 await db.SaveChangesAsync();
 
 await EnsureAssignmentAsync(sixLineLead.Id, abc.Id, ownership.Id, sarah.Id,
@@ -255,12 +273,22 @@ if (resolutionPersistenceAvailable)
 }
 
 var draftStatus = await EnsureSetupAsync("QuoteStatus", "DRAFT", "Draft");
-await EnsureSetupAsync("QuoteStatus", "SENT", "Sent");
+var sentStatus = await EnsureSetupAsync("QuoteStatus", "SENT", "Sent");
 var mainQuote = await EnsureQuoteAsync(mainRfq, draftStatus.SetupId, "CORE-QUOTE-006", sarah.Email!);
 await EnsureRevisionImpactAsync(sixLineLead, mainQuote);
 
 var sendRfq = await EnsureRfqAsync(backupLead, "CORE-RFQ-SEND-001");
 var sendQuote = await EnsureQuoteAsync(sendRfq, draftStatus.SetupId, "CORE-QUOTE-SEND-001", ahmed.Email!);
+var exactAwardRfq = await EnsureRfqAsync(exactAwardLead, "CORE-RFQ-CLIENT-PO-EXACT-V2");
+var exactAwardQuote = await EnsureQuoteAsync(exactAwardRfq, sentStatus.SetupId,
+    "CORE-QUOTE-CLIENT-PO-EXACT-V2", sarah.Email!);
+var partialAwardRfq = await EnsureRfqAsync(partialAwardLead, "CORE-RFQ-CLIENT-PO-PARTIAL-V2");
+var partialAwardQuote = await EnsureQuoteAsync(partialAwardRfq, sentStatus.SetupId,
+    "CORE-QUOTE-CLIENT-PO-PARTIAL-V2", sarah.Email!);
+PrepareClientPoQuote(exactAwardQuote, currency.Id, 525m);
+PrepareClientPoQuote(partialAwardQuote, currency.Id, 575m);
+await db.SaveChangesAsync();
+await EnsureSetupAsync("OrderStatus", "DRAFT", "Draft");
 var orderStatus = await EnsureSetupAsync("OrderStatus", "CONFIRMED", "Confirmed");
 var allocationOrder = await EnsureOrderAsync(mainQuote, mainRfq, sixLineLead, orderStatus.SetupId,
     sufficient, primaryWarehouse);
@@ -775,7 +803,8 @@ async Task EnsureLeadQualifiedAsync(long leadId)
 async Task<Rfq> EnsureRfqAsync(Lead lead, string rfqNumber)
 {
     var existing = await db.Rfqs.Include(x => x.Rfqitems).Include(x => x.Lead)
-        .SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId && x.Rfqno == rfqNumber);
+        .SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId
+            && (x.Rfqno == rfqNumber || x.LeadId == lead.Id));
     if (existing is not null) return existing;
     var products = await db.Products.Where(x => x.Buid == tenantId).ToDictionaryAsync(x => x.PartNo, x => x.Id);
     var draftStatus = await EnsureSetupAsync("RFQStatus", "DRAFT", "Draft");
@@ -847,7 +876,8 @@ async Task EnsureLineResolutionsAsync(Lead lead, Rfq rfq, Product full, Product 
 async Task<Quote> EnsureQuoteAsync(Rfq rfq, long statusId, string quoteNumber, string actorEmail)
 {
     var existing = await db.Quotes.Include(x => x.QuoteItems)
-        .SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId && x.QuoteNo == quoteNumber);
+        .SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId
+            && (x.QuoteNo == quoteNumber || x.Rfqid == rfq.Id));
     if (existing is not null) return existing;
     var quote = new Quote { QuoteNo = quoteNumber, Rfqid = rfq.Id, CustomerId = rfq.CustomerId,
         BusinessUnitId = tenantId, QuoteDate = now.AddDays(-1), ValidUntil = now.AddDays(30),
@@ -859,6 +889,20 @@ async Task<Quote> EnsureQuoteAsync(Rfq rfq, long statusId, string quoteNumber, s
             ItemDescription = line.ProductShortDescription ?? line.ItemText, Quantity = line.Quantity,
             UnitPrice = 0, TotalAmount = 0, CreatedBy = actorEmail, CreatedDate = now.AddDays(-1) });
     db.Add(quote); await db.SaveChangesAsync(); return quote;
+}
+
+void PrepareClientPoQuote(Quote quote, long currencyId, decimal unitPrice)
+{
+    quote.CurrencyId = currencyId;
+    quote.ValidUntil = now.AddDays(30);
+    quote.RevisionNo = Math.Max(1, quote.RevisionNo);
+    foreach (var line in quote.QuoteItems)
+    {
+        line.UnitPrice = unitPrice;
+        line.TotalAmount = line.Quantity * unitPrice;
+    }
+    quote.TotalAmount = quote.QuoteItems.Sum(x => x.TotalAmount);
+    quote.HeaderRemarks = "Accepted commercial terms available for Client PO matching.";
 }
 
 async Task EnsureRevisionImpactAsync(Lead lead, Quote quote)
@@ -997,6 +1041,14 @@ async Task PrintFixtureAsync()
     Console.WriteLine($"E2E_CORE_QUOTE_DRAFT_RFQ_ID={quoteDraftRfq.Id}");
     Console.WriteLine($"E2E_CORE_QUOTE_ID={mainQuote.Id}");
     Console.WriteLine($"E2E_CORE_SEND_QUOTE_ID={sendQuote.Id}");
+    Console.WriteLine($"E2E_V2_CLIENT_PO_EXACT_QUOTE_ID={exactAwardQuote.Id}");
+    Console.WriteLine($"E2E_V2_CLIENT_PO_EXACT_QUOTE_ITEM_ID={exactAwardQuote.QuoteItems.Single().Id}");
+    Console.WriteLine($"E2E_V2_CLIENT_PO_EXACT_PRODUCT_ID={exactAwardQuote.QuoteItems.Single().ProductId}");
+    Console.WriteLine($"E2E_V2_CLIENT_PO_EXACT_NEXORA_SERIAL={exactAwardQuote.NexoraSerial}");
+    Console.WriteLine($"E2E_V2_CLIENT_PO_PARTIAL_QUOTE_ID={partialAwardQuote.Id}");
+    Console.WriteLine($"E2E_V2_CLIENT_PO_PARTIAL_QUOTE_ITEM_ID={partialAwardQuote.QuoteItems.Single().Id}");
+    Console.WriteLine($"E2E_V2_CLIENT_PO_PARTIAL_PRODUCT_ID={partialAwardQuote.QuoteItems.Single().ProductId}");
+    Console.WriteLine($"E2E_V2_CLIENT_PO_PARTIAL_NEXORA_SERIAL={partialAwardQuote.NexoraSerial}");
     Console.WriteLine($"E2E_CORE_NEXORA_SERIAL={sixLineLead.CommercialCaseReference}");
     Console.WriteLine($"E2E_CORE_DUPLICATE_BATCH_ID={duplicateBatchId}");
     Console.WriteLine("E2E_CORE_REVISION_CHANGED_LINE_COUNT=1");

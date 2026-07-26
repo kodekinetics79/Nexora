@@ -168,7 +168,8 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
       // Service BOQs live next to Quotations — a BOQ is priced quote material for
       // service work, so it shares the Quotations module permission.
       { key: 'service-boqs', label: t('service_boqs', 'Service BOQs'), icon: <BoqIcon />, path: '/services/boq', moduleName: 'Quotations', activePrefixes: ['/services/boq'] },
-      { key: 'orders', label: t('orders'), icon: <OrderIcon />, path: '/sales/orders', moduleName: 'Orders', activePrefixes: ['/sales/orders'] },
+      { key: 'client-po-inbox', label: 'Client PO Inbox', icon: <QuotationIcon />, path: '/sales/client-pos', moduleName: 'Customer Awards', activePrefixes: ['/sales/client-pos/'] },
+      { key: 'orders', label: 'Customer Orders', icon: <OrderIcon />, path: '/sales/orders', moduleName: 'Orders', activePrefixes: ['/sales/orders'] },
       { key: 'accounts-receivable', label: 'Accounts Receivable', icon: <FinanceIcon />, path: '/sales/finance', moduleName: 'Accounts Receivable', activePrefixes: ['/sales/finance'] },
       { key: 'shipments', label: t('shipments'), icon: <ShipmentIcon />, path: '/sales/shipments', moduleName: 'Shipments', activePrefixes: ['/sales/shipments'] },
       {
