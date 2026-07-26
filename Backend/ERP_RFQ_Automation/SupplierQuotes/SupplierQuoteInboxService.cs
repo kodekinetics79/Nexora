@@ -183,7 +183,7 @@ public sealed class EfSupplierQuoteStore(ErpRfqAutomationContext context) : ISup
         }).ToArray();
         return new SupplierQuoteDetail(quote.Id, quote.SupplierId, supplierName,
             quote.SupplierSolicitationId, quote.SourcingCaseId, quote.RfqId, quote.NexoraSerial,
-            quote.SupplierQuoteReference, quote.CurrentRevisionNumber, quote.InboxStatus, revisions);
+            quote.SupplierQuoteReference, quote.CurrentRevisionNumber, quote.InboxStatus, quote.Version, revisions);
     }
 }
 

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowBack, FactCheck } from "@mui/icons-material";
+import { ArrowBack, CompareArrows, FactCheck } from "@mui/icons-material";
 import { Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, MenuItem, Paper, Stack, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TextField, Typography } from "@mui/material";
 import { toast } from "react-hot-toast";
 import supplierQuoteService, { type SupplierQuoteEvidence, type SupplierQuoteReviewStatus } from "../../../api/services/supplierQuoteService";
@@ -17,12 +17,15 @@ export default function SupplierQuoteReviewPage() {
   const query = useQuery({ queryKey: ["supplier-quote", id], queryFn: () => supplierQuoteService.getById(id), enabled: id > 0 });
   const mutation = useMutation({ mutationFn: () => supplierQuoteService.reviewEvidence(id, selected!.revisionId, selected!.evidence.id, { status, correctedValue: status === "CORRECTED" ? correctedValue : null, reason }),
     onSuccess: () => { toast.success("Review decision recorded"); setSelected(null); setReason(""); setCorrectedValue(""); void client.invalidateQueries({ queryKey: ["supplier-quote", id] }); void client.invalidateQueries({ queryKey: ["supplier-quote-inbox"] }); } });
+  const projection = useMutation({ mutationFn: () => supplierQuoteService.projectForComparison(id, query.data!.version),
+    onSuccess: () => { toast.success("Supplier Quote is available in offer comparison"); navigate(`/procurement/rfqs/${query.data!.rfqId}/sourcing`); },
+    onError: () => toast.error("Supplier Quote could not be added to comparison") });
   if (query.isLoading) return <Box sx={{ p: 5, textAlign: "center" }}><CircularProgress /></Box>;
   if (query.isError || !query.data) return <Box sx={{ p: 3 }}><Alert severity="error">Supplier Quote could not be loaded.</Alert></Box>;
   const quote = query.data;
   return <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1400, mx: "auto" }}>
     <Button startIcon={<ArrowBack />} onClick={() => navigate("/procurement/supplier-quotes")} sx={{ mb: 1 }}>Supplier Quote Inbox</Button>
-    <Stack direction={{ xs: "column", md: "row" }} sx={{ justifyContent: "space-between", gap: 2, mb: 3 }}><Box><Typography variant="h4" sx={{ fontWeight: 800 }}>{quote.supplierQuoteReference}</Typography><Typography color="text.secondary">{quote.supplierName} · {quote.nexoraSerial} · Sourcing Case {quote.sourcingCaseId}</Typography></Box><Chip color={quote.inboxStatus === "READY_FOR_COMPARISON" ? "success" : "warning"} label={quote.inboxStatus.replaceAll("_", " ")} /></Stack>
+    <Stack direction={{ xs: "column", md: "row" }} sx={{ justifyContent: "space-between", gap: 2, mb: 3 }}><Box><Typography variant="h4" sx={{ fontWeight: 800 }}>{quote.supplierQuoteReference}</Typography><Typography color="text.secondary">{quote.supplierName} · {quote.nexoraSerial} · Sourcing Case {quote.sourcingCaseId}</Typography></Box><Stack direction="row" spacing={1} sx={{ alignItems: "center" }}><Chip color={quote.inboxStatus === "READY_FOR_COMPARISON" ? "success" : "warning"} label={quote.inboxStatus.replaceAll("_", " ")} />{quote.inboxStatus === "READY_FOR_COMPARISON" && <Button variant="contained" startIcon={<CompareArrows />} disabled={projection.isPending} onClick={() => projection.mutate()}>Compare offer</Button>}</Stack></Stack>
     {quote.revisions.slice().reverse().map((revision) => <Paper variant="outlined" key={revision.revisionId} sx={{ mb: 2, p: 2 }}>
       <Stack direction="row" sx={{ justifyContent: "space-between", mb: 2 }}><Typography variant="h6">Revision {revision.revisionNumber}</Typography><Typography color="text.secondary">{revision.captureChannel.replaceAll("_", " ")} · {new Date(revision.capturedOn).toLocaleString()}</Typography></Stack>
       <Typography sx={{ fontWeight: 700, mb: 1 }}>Commercial lines</Typography>

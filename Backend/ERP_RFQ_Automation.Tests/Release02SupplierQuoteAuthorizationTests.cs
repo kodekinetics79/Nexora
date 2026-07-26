@@ -18,6 +18,14 @@ public sealed class Release02SupplierQuoteAuthorizationTests
         AssertPermission(nameof(SupplierQuoteInboxController.Capture), PermissionAction.Create);
         AssertPermission(nameof(SupplierQuoteInboxController.Upload), PermissionAction.Create);
         AssertPermission(nameof(SupplierQuoteInboxController.Review), PermissionAction.Edit);
+        AssertPermission(nameof(SupplierQuoteInboxController.Project), PermissionAction.Edit);
+
+        var pricing = typeof(SupplierQuoteInboxController)
+            .GetMethod(nameof(SupplierQuoteInboxController.ApplyCustomerPricing))!;
+        var permissions = pricing.GetCustomAttributes(typeof(RequireModulePermissionAttribute), true)
+            .Cast<RequireModulePermissionAttribute>().ToArray();
+        Assert.Contains(permissions, x => x.ModuleName == "Supplier History" && x.Action == PermissionAction.Edit);
+        Assert.Contains(permissions, x => x.ModuleName == "Quotations" && x.Action == PermissionAction.Edit);
     }
 
     private static void AssertPermission(string methodName, PermissionAction action)

@@ -48,6 +48,24 @@ public partial class ErpRfqAutomationContext
                 .HasFilter("\"ResponseIdempotencyKey\" IS NOT NULL")
                 .HasDatabaseName("UX_SupplierQuotedItems_BU_ResponseKey");
             entity.HasIndex(x => new { x.BusinessUnitId, x.RfqId, x.RfqItemId });
+            entity.HasIndex(x => new { x.BusinessUnitId, x.SourceSupplierQuoteLineId }).IsUnique()
+                .HasFilter("\"SourceSupplierQuoteLineId\" IS NOT NULL")
+                .HasDatabaseName("UX_SupplierQuotedItems_BU_SourceQuoteLine");
+            entity.HasOne<ERP_RFQ_Automation.SupplierQuotes.SupplierQuote>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.SourceSupplierQuoteId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<ERP_RFQ_Automation.SupplierQuotes.SupplierQuoteRevision>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.SourceSupplierQuoteRevisionId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<ERP_RFQ_Automation.SupplierQuotes.SupplierQuoteLine>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.SourceSupplierQuoteLineId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<CommercialDemandLine>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.CommercialDemandLineId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<SourcingCase>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.SourcingCaseId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne<SupplierSolicitation>().WithMany()
                 .HasForeignKey(x => new { x.BusinessUnitId, x.SupplierSolicitationId })
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);

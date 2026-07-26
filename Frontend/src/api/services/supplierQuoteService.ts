@@ -65,6 +65,7 @@ export interface SupplierQuoteDetail {
   supplierQuoteReference: string;
   currentRevisionNumber: number;
   inboxStatus: SupplierQuoteInboxStatus;
+  version: number;
   revisions: SupplierQuoteRevision[];
 }
 
@@ -164,6 +165,14 @@ const supplierQuoteService = {
       request,
       { headers: headers() },
     );
+  },
+  projectForComparison: async (supplierQuoteId: number, expectedVersion: number) => {
+    const response = await axiosInstance.post(
+      `/api/supplier-quote-inbox/${supplierQuoteId}/comparison-projections`,
+      { expectedVersion },
+      { headers: headers(crypto.randomUUID()) },
+    );
+    return response.data;
   },
 };
 

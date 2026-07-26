@@ -143,6 +143,45 @@ public static class SupplierQuoteModelConfiguration
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
         });
 
+        modelBuilder.Entity<CustomerQuoteSourcingDecision>(entity =>
+        {
+            entity.ToTable("customer_quote_sourcing_decisions");
+            entity.HasKey(x => x.Id);
+            entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
+            entity.Property(x => x.NexoraSerial).HasMaxLength(100).IsRequired();
+            entity.Property(x => x.Quantity).HasPrecision(18, 4);
+            entity.Property(x => x.SupplierLandedUnitCost).HasPrecision(18, 6);
+            entity.Property(x => x.TargetMarginPercent).HasPrecision(7, 4);
+            entity.Property(x => x.CustomerUnitPrice).HasPrecision(18, 6);
+            entity.Property(x => x.IdempotencyKey).HasMaxLength(160).IsRequired();
+            entity.Property(x => x.RequestHash).HasMaxLength(64).IsRequired();
+            entity.Property(x => x.Rationale).HasMaxLength(1000).IsRequired();
+            entity.Property(x => x.CreatedBy).HasMaxLength(255).IsRequired();
+            entity.Property(x => x.CorrelationId).HasMaxLength(160).IsRequired();
+            entity.HasCheckConstraint("CK_customer_quote_sourcing_decisions_Values",
+                "\"Quantity\" > 0 AND \"SupplierLandedUnitCost\" > 0 AND \"TargetMarginPercent\" >= 0 AND \"TargetMarginPercent\" < 95 AND \"CustomerUnitPrice\" > 0");
+            entity.HasIndex(x => new { x.BusinessUnitId, x.IdempotencyKey }).IsUnique();
+            entity.HasIndex(x => new { x.BusinessUnitId, x.QuoteItemId, x.CreatedOn });
+            entity.HasOne<Quote>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.QuoteId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<QuoteItem>().WithMany().HasForeignKey(x => new { x.QuoteItemId, x.QuoteId })
+                .HasPrincipalKey(x => new { x.Id, x.QuoteId }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<SupplierQuote>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.SupplierQuoteId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<SupplierQuoteRevision>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.SupplierQuoteRevisionId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<SupplierQuoteLine>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.SupplierQuoteLineId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<CommercialDemandLine>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.CommercialDemandLineId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<SourcingCase>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.SourcingCaseId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<SourcingAward>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.SourcingAwardId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<SupplierQuotedItem>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.SupplierQuotedItemId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+        });
+
         return modelBuilder;
     }
 }

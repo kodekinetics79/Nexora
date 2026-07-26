@@ -179,6 +179,7 @@ builder.Services.AddScoped<ISupplierPurchaseHistoryRepository, SupplierPurchaseH
 builder.Services.AddScoped<ISupplierQuotedItemRepository, SupplierQuotedItemRepository>();
 builder.Services.AddScoped<IProcurementApplicationService, ProcurementApplicationService>();
 builder.Services.AddScoped<SupplierQuoteInboxService>();
+builder.Services.AddScoped<SupplierQuoteCommercialService>();
 builder.Services.AddScoped<SupplierQuoteDocumentIntakeService>();
 builder.Services.AddHostedService<ProcurementDispatchWorker>();
 builder.Services.AddSingleton<ICommercialDocumentClassifier, DeterministicCommercialDocumentClassifier>();

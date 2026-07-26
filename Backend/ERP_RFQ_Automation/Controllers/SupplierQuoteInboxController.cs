@@ -12,6 +12,7 @@ namespace ERP_RFQ_Automation.Controllers;
 [Route("api/supplier-quote-inbox")]
 public sealed class SupplierQuoteInboxController(
     SupplierQuoteInboxService service,
+    SupplierQuoteCommercialService commercial,
     SupplierQuoteDocumentIntakeService documentIntake,
     ILogger<SupplierQuoteInboxController> logger) : ControllerBase
 {
@@ -70,6 +71,22 @@ public sealed class SupplierQuoteInboxController(
             RequiredHeader("X-Correlation-ID")), RequestAborted);
         return NoContent();
     });
+
+    [HttpPost("{supplierQuoteId:long}/comparison-projections")]
+    [RequireModulePermission("Supplier History", PermissionAction.Edit)]
+    public Task<IActionResult> Project(long supplierQuoteId, [FromBody] ProjectSupplierQuoteRequest request) =>
+        ExecuteAsync(async () => Ok(await commercial.ProjectAsync(new ProjectSupplierQuoteCommand(
+            TenantId(), supplierQuoteId, request.ExpectedVersion, RequiredHeader("Idempotency-Key"),
+            Actor(), RequiredHeader("X-Correlation-ID")), RequestAborted)));
+
+    [HttpPost("customer-quote-pricing")]
+    [RequireModulePermission("Supplier History", PermissionAction.Edit)]
+    [RequireModulePermission("Quotations", PermissionAction.Edit)]
+    public Task<IActionResult> ApplyCustomerPricing([FromBody] ApplyCustomerQuotePricingRequest request) =>
+        ExecuteAsync(async () => Ok(await commercial.ApplyPricingAsync(new ApplyCustomerQuotePricingCommand(
+            TenantId(), request.QuoteItemId, request.SourcingAwardId, request.TargetMarginPercent,
+            request.Rationale, RequiredHeader("Idempotency-Key"), Actor(),
+            RequiredHeader("X-Correlation-ID")), RequestAborted)));
 
     private CancellationToken RequestAborted => HttpContext.RequestAborted;
 
@@ -157,6 +174,10 @@ public sealed record CaptureSupplierQuoteInboxRequest(
     string? Notes,
     IReadOnlyCollection<CaptureSupplierQuoteLine> Lines,
     IReadOnlyCollection<CaptureSupplierQuoteEvidence> Evidence);
+
+public sealed record ProjectSupplierQuoteRequest(long ExpectedVersion);
+public sealed record ApplyCustomerQuotePricingRequest(long QuoteItemId, long SourcingAwardId,
+    decimal TargetMarginPercent, string Rationale);
 
 public sealed record ReviewSupplierQuoteFieldRequest(string Status, string? CorrectedValue, string Reason);
 

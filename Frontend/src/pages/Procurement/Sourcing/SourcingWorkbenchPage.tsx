@@ -40,6 +40,7 @@ import {
   Replay,
   Send,
   ShoppingCartCheckout,
+  PriceCheck,
 } from "@mui/icons-material";
 import { toast } from "react-hot-toast";
 import procurementService, {
@@ -133,6 +134,7 @@ function SourcingWorkbenchPage() {
   const [responseSolicitation, setResponseSolicitation] =
     useState<SupplierSolicitation | null>(null);
   const [awardOffer, setAwardOffer] = useState<SupplierOffer | null>(null);
+  const [pricingSelection, setPricingSelection] = useState<{ awardId: number; quoteItemId: number; landedUnitCost: number; currencyCode: string } | null>(null);
   const [poOpen, setPoOpen] = useState(false);
   const [issueOrder, setIssueOrder] =
     useState<SupplierPurchaseOrder | null>(null);
@@ -599,6 +601,8 @@ function SourcingWorkbenchPage() {
                 );
                 const isRecommended =
                   comparison?.recommendedSupplierQuotedItemId === offer.id;
+                const award = workbench.awards.find((item) => item.supplierQuotedItemId === offer.id);
+                const quoteLine = workbench.customerQuoteDraft?.lines.find((item) => item.rfqItemId === offer.rfqItemId);
                 return (
                   <TableRow key={offer.id}>
                   <TableCell>
@@ -681,6 +685,12 @@ function SourcingWorkbenchPage() {
                             ? "Award more"
                             : "Approve"}
                       </Button>
+                      {award && quoteLine && canAward && hasPermission("Quotations", "edit") && (
+                        <Button size="small" startIcon={<PriceCheck />} onClick={() => setPricingSelection({
+                          awardId: award.id, quoteItemId: quoteLine.quoteItemId,
+                          landedUnitCost: award.landedUnitCost, currencyCode: award.currencyCode,
+                        })}>Price customer quote</Button>
+                      )}
                     </Stack>
                   </TableCell>
                   </TableRow>
@@ -846,6 +856,10 @@ function SourcingWorkbenchPage() {
             refresh();
           }}
         />
+      )}
+      {pricingSelection && (
+        <CustomerPricingDialog selection={pricingSelection} onClose={() => setPricingSelection(null)}
+          onSaved={() => { setPricingSelection(null); refresh(); }} />
       )}
       {poOpen && rfqId && (
         <PurchaseOrderDialog
@@ -1478,6 +1492,47 @@ function AwardDialog({ offer, remainingQuantity, onClose, onSaved }: any) {
         >
           Approve award
         </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+function CustomerPricingDialog({ selection, onClose, onSaved }: any) {
+  const [margin, setMargin] = useState(20);
+  const [rationale, setRationale] = useState("Approved supplier award and target margin");
+  const [idempotencyKey] = useState(() => commandKey(`customer-pricing:${selection.awardId}`));
+  const sellingPrice = margin >= 95 ? 0 : selection.landedUnitCost / (1 - margin / 100);
+  const mutation = useMutation({
+    mutationFn: () => procurementService.applyCustomerQuotePricing({
+      quoteItemId: selection.quoteItemId,
+      sourcingAwardId: selection.awardId,
+      targetMarginPercent: margin,
+      rationale,
+      idempotencyKey,
+    }),
+    onSuccess: () => { toast.success("Customer Quote pricing updated with supplier lineage"); onSaved(); },
+    onError: (error) => toast.error(errorMessage(error, "Could not update Customer Quote pricing")),
+  });
+  return (
+    <Dialog open onClose={onClose} fullWidth maxWidth="sm">
+      <DialogTitle>Price Customer Quote line</DialogTitle>
+      <DialogContent>
+        <Stack spacing={2} sx={{ mt: 1 }}>
+          <Alert severity="info">Supplier cost remains confidential and is preserved separately from the customer selling price.</Alert>
+          <Typography>Approved landed cost: <strong>{money(selection.landedUnitCost, selection.currencyCode)}</strong></Typography>
+          <TextField type="number" label="Target margin (%)" value={margin}
+            onChange={(event) => setMargin(number(event.target.value))}
+            slotProps={{ htmlInput: { min: 0, max: 94.99, step: 0.25 } }}
+            error={margin < 0 || margin >= 95} />
+          <Typography>Calculated customer unit price: <strong>{money(sellingPrice, selection.currencyCode)}</strong></Typography>
+          <TextField multiline minRows={3} label="Pricing rationale" value={rationale}
+            onChange={(event) => setRationale(event.target.value)} />
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="contained" disabled={margin < 0 || margin >= 95 || !rationale.trim() || mutation.isPending}
+          onClick={() => mutation.mutate()}>Apply pricing</Button>
       </DialogActions>
     </Dialog>
   );

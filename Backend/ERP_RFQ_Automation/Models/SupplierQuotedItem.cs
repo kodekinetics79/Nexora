@@ -31,6 +31,16 @@ public partial class SupplierQuotedItem
 
     public long? ProductId { get; set; }
 
+    public long? SourceSupplierQuoteId { get; set; }
+
+    public long? SourceSupplierQuoteRevisionId { get; set; }
+
+    public long? SourceSupplierQuoteLineId { get; set; }
+
+    public long? CommercialDemandLineId { get; set; }
+
+    public long? SourcingCaseId { get; set; }
+
     public int? LeadTimeDays { get; set; }
 
     public decimal? AvailableQuantity { get; set; }

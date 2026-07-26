@@ -391,6 +391,10 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             .Where(x => x.BusinessUnitId == businessUnitId && x.RfqId == rfqId).OrderByDescending(x => x.CreatedOn).ToListAsync(ct);
         var purchaseOrders = await _db.SupplierPurchaseOrders.AsNoTracking().Include(x => x.Lines)
             .Where(x => x.BusinessUnitId == businessUnitId && x.RfqId == rfqId).OrderByDescending(x => x.CreatedOn).ToListAsync(ct);
+        var customerDraft = await _db.Quotes.AsNoTracking().Include(x => x.Status).Include(x => x.QuoteItems)
+            .Where(x => x.BusinessUnitId == businessUnitId && x.Rfqid == rfqId &&
+                (x.Status!.SetupCode == "DRAFT" || x.StatusId == 42))
+            .OrderByDescending(x => x.CreatedDate).ThenByDescending(x => x.Id).FirstOrDefaultAsync(ct);
         var supplierIds = solicitations.Select(x => x.SupplierId).Concat(quoteRows.Select(x => x.SupplierId))
             .Concat(purchaseOrders.Select(x => x.SupplierId)).Distinct().ToArray();
         var supplierNames = await _db.Suppliers.AsNoTracking().Where(x => x.Buid == businessUnitId && supplierIds.Contains(x.Id))
@@ -485,7 +489,11 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                     delivery?.AttemptCount ?? 0,
                     delivery?.ProviderReference, delivery?.LastErrorCode, x.SentOn == default ? null : x.SentOn,
                     x.RespondedOn, x.UpdatedOn, x.Version);
-            }).ToArray(), offerViews, awardViews, poViews);
+            }).ToArray(), offerViews, awardViews, poViews,
+            customerDraft is null ? null : new CustomerQuoteDraftView(customerDraft.Id, customerDraft.QuoteNo,
+                customerDraft.CurrencyId, customerDraft.QuoteItems.Where(x => x.RfqitemId.HasValue)
+                    .Select(x => new CustomerQuoteDraftLineView(x.Id, x.RfqitemId!.Value, x.Quantity,
+                        x.UnitPrice, x.TotalAmount)).ToArray()));
     }
 
     public async Task<SolicitationResult> CreateSolicitationAsync(CreateSolicitationCommand command, CancellationToken ct = default)

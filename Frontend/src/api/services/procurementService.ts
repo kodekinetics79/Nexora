@@ -175,6 +175,12 @@ export interface SourcingWorkbench {
   offers: SupplierOffer[];
   awards: SourcingAward[];
   purchaseOrders: SupplierPurchaseOrder[];
+  customerQuoteDraft?: {
+    quoteId: number;
+    quoteNumber: string;
+    currencyId?: number | null;
+    lines: Array<{ quoteItemId: number; rfqItemId: number; quantity: number; unitPrice: number; totalAmount: number }>;
+  } | null;
 }
 
 export interface SourcingCaseCandidate {
@@ -457,6 +463,19 @@ const procurementService = {
         headers: commandHeaders(request.idempotencyKey),
       }),
     ),
+
+  applyCustomerQuotePricing: async (request: {
+    quoteItemId: number;
+    sourcingAwardId: number;
+    targetMarginPercent: number;
+    rationale: string;
+    idempotencyKey: string;
+  }) => {
+    const { idempotencyKey, ...body } = request;
+    return unwrap(await axiosInstance.post("/api/supplier-quote-inbox/customer-quote-pricing", body, {
+      headers: commandHeaders(idempotencyKey),
+    }));
+  },
 
   createPurchaseOrder: async (
     rfqId: number,

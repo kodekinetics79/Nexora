@@ -96,6 +96,7 @@ public sealed record SupplierQuoteDetail(
     string SupplierQuoteReference,
     int CurrentRevisionNumber,
     string InboxStatus,
+    long Version,
     IReadOnlyCollection<SupplierQuoteRevisionDetail> Revisions);
 
 public sealed record SupplierQuoteRevisionDetail(
@@ -143,6 +144,40 @@ public sealed record ReviewSupplierQuoteFieldCommand(
     string Reason,
     string Actor,
     string CorrelationId);
+
+public sealed record ProjectSupplierQuoteCommand(
+    long BusinessUnitId,
+    long SupplierQuoteId,
+    long ExpectedVersion,
+    string IdempotencyKey,
+    string Actor,
+    string CorrelationId);
+
+public sealed record SupplierQuoteProjectionResult(
+    long SupplierQuoteId,
+    long RevisionId,
+    IReadOnlyCollection<long> SupplierQuotedItemIds,
+    bool Replayed);
+
+public sealed record ApplyCustomerQuotePricingCommand(
+    long BusinessUnitId,
+    long QuoteItemId,
+    long SourcingAwardId,
+    decimal TargetMarginPercent,
+    string Rationale,
+    string IdempotencyKey,
+    string Actor,
+    string CorrelationId);
+
+public sealed record CustomerQuotePricingResult(
+    long DecisionId,
+    long QuoteId,
+    long QuoteItemId,
+    decimal SupplierLandedUnitCost,
+    decimal TargetMarginPercent,
+    decimal CustomerUnitPrice,
+    string NexoraSerial,
+    bool Replayed);
 
 public sealed class SupplierQuoteValidationException(string message) : InvalidOperationException(message);
 public sealed class SupplierQuoteNotFoundException(string message) : InvalidOperationException(message);

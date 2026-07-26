@@ -13,7 +13,7 @@ const detail = {
   supplierQuoteId: quoteId, supplierId: 901, supplierName: inboxItem.supplierName,
   supplierSolicitationId: 12001, sourcingCaseId: 8801, rfqId: 77,
   nexoraSerial: inboxItem.nexoraSerial, supplierQuoteReference: inboxItem.supplierQuoteReference,
-  currentRevisionNumber: 2, inboxStatus: "REVIEW_REQUIRED",
+  currentRevisionNumber: 2, inboxStatus: "REVIEW_REQUIRED", version: 3,
   revisions: [{
     revisionId, revisionNumber: 2, captureChannel: "UPLOAD", currencyId: 1,
     validUntil: "2026-08-31T23:59:59Z", requiresReview: true,
@@ -97,4 +97,26 @@ test("field review appends an evidenced decision", async ({ page }) => {
   expect(api.review()!.postDataJSON()).toEqual({ status: "CORRECTED", correctedValue: "284.50",
     reason: "Verified against the immutable Supplier response" });
   expect(new URL(api.review()!.url()).pathname).toContain(`/${quoteId}/revisions/${revisionId}/evidence/${evidenceId}/reviews`);
+});
+
+test("reviewed Supplier Quote is promoted into the normal comparison workspace", async ({ page }) => {
+  let projection: Request | null = null;
+  const ready = { ...detail, inboxStatus: "READY_FOR_COMPARISON", version: 4,
+    revisions: detail.revisions.map((revision) => ({ ...revision, requiresReview: false,
+      evidence: revision.evidence.map((evidence) => ({ ...evidence, latestReviewStatus: "ACCEPTED" })) })) };
+  await page.route("**/api/supplier-quote-inbox/**", async (route) => {
+    const request = route.request();
+    if (request.method() === "POST" && request.url().endsWith("/comparison-projections")) {
+      projection = request;
+      return route.fulfill({ status: 200, contentType: "application/json",
+        body: JSON.stringify({ supplierQuoteId: quoteId, revisionId, supplierQuotedItemIds: [9901], replayed: false }) });
+    }
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(ready) });
+  });
+  await page.goto(`/procurement/supplier-quotes/${quoteId}`);
+  await page.getByRole("button", { name: "Compare offer" }).click();
+  await expect.poll(() => projection).not.toBeNull();
+  expect(projection!.postDataJSON()).toEqual({ expectedVersion: 4 });
+  expect(projection!.headers()["idempotency-key"]).toBeTruthy();
+  await expect(page).toHaveURL(/\/procurement\/rfqs\/77\/sourcing$/);
 });

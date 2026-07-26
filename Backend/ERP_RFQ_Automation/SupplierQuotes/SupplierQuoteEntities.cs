@@ -135,3 +135,33 @@ public sealed class SupplierQuoteReviewDecision
     public DateTime ReviewedOn { get; set; }
     public string CorrelationId { get; set; } = null!;
 }
+
+/// <summary>Immutable bridge from an approved supplier award to one customer Quote line.</summary>
+public sealed class CustomerQuoteSourcingDecision
+{
+    public long Id { get; set; }
+    public long BusinessUnitId { get; set; }
+    public long QuoteId { get; set; }
+    public long QuoteItemId { get; set; }
+    public long RfqId { get; set; }
+    public long RfqItemId { get; set; }
+    public long CommercialDemandLineId { get; set; }
+    public long SourcingCaseId { get; set; }
+    public long SourcingAwardId { get; set; }
+    public long SupplierQuotedItemId { get; set; }
+    public long SupplierQuoteId { get; set; }
+    public long SupplierQuoteRevisionId { get; set; }
+    public long SupplierQuoteLineId { get; set; }
+    public string NexoraSerial { get; set; } = null!;
+    public decimal Quantity { get; set; }
+    public decimal SupplierLandedUnitCost { get; set; }
+    public decimal TargetMarginPercent { get; set; }
+    public decimal CustomerUnitPrice { get; set; }
+    public long CurrencyId { get; set; }
+    public string IdempotencyKey { get; set; } = null!;
+    public string RequestHash { get; set; } = null!;
+    public string Rationale { get; set; } = null!;
+    public DateTime CreatedOn { get; set; }
+    public string CreatedBy { get; set; } = null!;
+    public string CorrelationId { get; set; } = null!;
+}

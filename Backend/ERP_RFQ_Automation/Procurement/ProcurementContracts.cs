@@ -207,7 +207,13 @@ public sealed record ProcurementWorkbench(
     IReadOnlyCollection<SolicitationView> Solicitations,
     IReadOnlyCollection<SupplierOfferView> Offers,
     IReadOnlyCollection<SourcingAwardView> Awards,
-    IReadOnlyCollection<SupplierPurchaseOrderView> PurchaseOrders);
+    IReadOnlyCollection<SupplierPurchaseOrderView> PurchaseOrders,
+    CustomerQuoteDraftView? CustomerQuoteDraft);
+
+public sealed record CustomerQuoteDraftView(long QuoteId, string QuoteNumber, long? CurrencyId,
+    IReadOnlyCollection<CustomerQuoteDraftLineView> Lines);
+public sealed record CustomerQuoteDraftLineView(long QuoteItemId, long RfqItemId, decimal Quantity,
+    decimal UnitPrice, decimal TotalAmount);
 
 public sealed record SourcingLineView(long Id, long RfqId, long? ProductId, string? PartNumber,
     string Description, decimal RequestedQuantity, decimal AvailableQuantity, decimal ReservedQuantity,

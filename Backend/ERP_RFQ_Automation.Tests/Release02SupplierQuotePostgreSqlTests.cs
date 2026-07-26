@@ -36,4 +36,31 @@ public sealed class Release02SupplierQuotePostgreSqlTests(PostgreSqlTestDatabase
         Assert.True(await reader.ReadAsync());
         for (var index = 0; index < 6; index++) Assert.True(reader.GetBoolean(index));
     }
+
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Pricing_bridge_schema_is_tenant_scoped_append_only_and_least_privilege()
+    {
+        await using var connection = await database.OpenConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT
+                (SELECT count(*) FROM "__EFMigrationsHistory"
+                 WHERE "MigrationId" = '20260726114748_Release02SupplierOfferPricingBridge') = 1,
+                (SELECT count(*) FROM pg_policies
+                 WHERE schemaname = 'public' AND policyname = 'nexora_tenant_isolation'
+                   AND tablename = 'customer_quote_sourcing_decisions') = 1,
+                has_table_privilege('nexora_tenant_app', 'public.customer_quote_sourcing_decisions', 'SELECT,INSERT')
+                    AND NOT has_table_privilege('nexora_tenant_app', 'public.customer_quote_sourcing_decisions', 'UPDATE,DELETE'),
+                (SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND tgname = ANY(ARRAY[
+                    'customer_quote_sourcing_decisions_append_only',
+                    'supplier_quoted_items_projected_lineage_immutable'])) = 2,
+                EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public'
+                    AND indexname = 'UX_SupplierQuotedItems_BU_SourceQuoteLine');
+            """;
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        for (var index = 0; index < 5; index++) Assert.True(reader.GetBoolean(index));
+    }
 }
