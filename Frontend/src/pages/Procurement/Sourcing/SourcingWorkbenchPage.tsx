@@ -41,6 +41,7 @@ import {
   Send,
   ShoppingCartCheckout,
   PriceCheck,
+  Insights,
 } from "@mui/icons-material";
 import { toast } from "react-hot-toast";
 import procurementService, {
@@ -57,6 +58,7 @@ import warehouseService, {
   type WarehouseDTO,
 } from "../../../api/services/warehouseService";
 import { useAuth } from "../../../context/AuthContext";
+import commercialLearningService from "../../../api/services/commercialLearningService";
 
 const commandKey = (prefix: string) => `${prefix}:${crypto.randomUUID()}`;
 const number = (value: unknown) => Number(value || 0);
@@ -135,6 +137,7 @@ function SourcingWorkbenchPage() {
     useState<SupplierSolicitation | null>(null);
   const [awardOffer, setAwardOffer] = useState<SupplierOffer | null>(null);
   const [pricingSelection, setPricingSelection] = useState<{ awardId: number; quoteItemId: number; landedUnitCost: number; currencyCode: string } | null>(null);
+  const [memoryLineId, setMemoryLineId] = useState<number | null>(null);
   const [poOpen, setPoOpen] = useState(false);
   const [issueOrder, setIssueOrder] =
     useState<SupplierPurchaseOrder | null>(null);
@@ -433,6 +436,7 @@ function SourcingWorkbenchPage() {
               <TableCell align="right">Still to source</TableCell>
               <TableCell>Resolution</TableCell>
               <TableCell>Checked</TableCell>
+              <TableCell align="right">Evidence</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
@@ -446,6 +450,7 @@ function SourcingWorkbenchPage() {
                     {line.description}
                   </Typography>
                 </TableCell>
+                <TableCell align="right"><Button size="small" startIcon={<Insights />} onClick={() => setMemoryLineId(line.id)}>Commercial memory</Button></TableCell>
                 <TableCell align="right">{line.requestedQuantity}</TableCell>
                 <TableCell align="right">{line.availableQuantity}</TableCell>
                 <TableCell align="right">{line.reservedQuantity}</TableCell>
@@ -861,6 +866,7 @@ function SourcingWorkbenchPage() {
         <CustomerPricingDialog selection={pricingSelection} onClose={() => setPricingSelection(null)}
           onSaved={() => { setPricingSelection(null); refresh(); }} />
       )}
+      {memoryLineId && <CommercialMemoryDialog rfqItemId={memoryLineId} onClose={() => setMemoryLineId(null)} />}
       {poOpen && rfqId && (
         <PurchaseOrderDialog
           rfqId={rfqId}
@@ -1536,6 +1542,22 @@ function CustomerPricingDialog({ selection, onClose, onSaved }: any) {
       </DialogActions>
     </Dialog>
   );
+}
+
+function CommercialMemoryDialog({ rfqItemId, onClose }: { rfqItemId: number; onClose: () => void }) {
+  const query = useQuery({ queryKey: ["commercial-memory-card", rfqItemId], queryFn: () => commercialLearningService.getLineCard(rfqItemId) });
+  const card = query.data;
+  return <Dialog open onClose={onClose} fullWidth maxWidth="md"><DialogTitle>Commercial memory</DialogTitle><DialogContent dividers>
+    {query.isLoading && <Box sx={{ display: "grid", placeItems: "center", p: 4 }}><CircularProgress /></Box>}
+    {query.isError && <Alert severity="error">Commercial evidence could not be loaded.</Alert>}
+    {card && <Stack spacing={2}>
+      <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}><Chip label={card.nexoraSerial} /><Typography color="text.secondary">RFQ line {card.rfqItemId}</Typography></Stack>
+      {card.product ? <Box><Typography sx={{ fontWeight: 800 }}>{card.product.partNumber} · {card.product.productName}</Typography><Typography>{card.product.timesRequested} requests · {card.product.timesQuoted} quoted · {card.product.decidedCount} decided · {card.product.wonCount} won · {card.product.pendingCount} pending</Typography><Typography color="text.secondary">Evidence period {new Date(card.product.periodFrom).toLocaleDateString()} to {new Date(card.product.periodTo).toLocaleDateString()}</Typography></Box> : <Alert severity="warning">Resolve the Product identity to unlock Product commercial memory.</Alert>}
+      {card.inventory && <Box><Typography sx={{ fontWeight: 700 }}>Demand evidence</Typography><Typography>Observed {card.inventory.observedDemand} · Quoted {card.inventory.quotedDemand} · Weighted {card.inventory.probabilityWeightedDemand} · Committed {card.inventory.committedDemand}</Typography><Typography color="text.secondary">{card.inventory.recommendation}</Typography></Box>}
+      <Box><Typography sx={{ fontWeight: 700 }}>Supplier contribution</Typography>{card.suppliers.length === 0 ? <Typography color="text.secondary">No canonical Supplier offers are linked yet.</Typography> : card.suppliers.map((supplier) => <Typography key={supplier.supplierId}>{supplier.supplierName}: {supplier.quoteRevisions} revisions, {supplier.selectedOfferCount} selected, {supplier.supportedWonCount} supported wins</Typography>)}</Box>
+      <Alert severity="info">{card.nextAction}</Alert>
+    </Stack>}
+  </DialogContent><DialogActions><Button onClick={onClose}>Close</Button></DialogActions></Dialog>;
 }
 
 function PurchaseOrderDialog({

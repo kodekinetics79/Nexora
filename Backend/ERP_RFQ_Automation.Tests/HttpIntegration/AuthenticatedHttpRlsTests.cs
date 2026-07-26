@@ -71,14 +71,19 @@ public sealed class AuthenticatedHttpRlsTests(Release01BHttpApplication app)
         var from = Uri.EscapeDataString(DateTimeOffset.UtcNow.AddDays(-1).ToString("O"));
         var to = Uri.EscapeDataString(DateTimeOffset.UtcNow.AddDays(1).ToString("O"));
 
-        var response = await client.GetAsync(
+        var ownResponse = await client.GetAsync($"/api/LeadIngestion/analytics?from={from}&to={to}");
+        var forgedResponse = await client.GetAsync(
             $"/api/LeadIngestion/analytics?from={from}&to={to}&businessUnitId={Release01BHttpApplication.TenantB}");
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var payload = await response.Content.ReadFromJsonAsync<AnalyticsPayload>();
-        var ingestionVolume = Assert.Single(payload!.Metrics, metric => metric.Key == "ingestion-volume");
-        Assert.Equal(1m, ingestionVolume.Value);
-        Assert.Single(ingestionVolume.OccurrenceIds);
+        Assert.Equal(HttpStatusCode.OK, ownResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, forgedResponse.StatusCode);
+        var ownPayload = await ownResponse.Content.ReadFromJsonAsync<AnalyticsPayload>();
+        var forgedPayload = await forgedResponse.Content.ReadFromJsonAsync<AnalyticsPayload>();
+        var ownVolume = Assert.Single(ownPayload!.Metrics, metric => metric.Key == "ingestion-volume");
+        var forgedVolume = Assert.Single(forgedPayload!.Metrics, metric => metric.Key == "ingestion-volume");
+        Assert.True(ownVolume.Value > 0);
+        Assert.Equal(ownVolume.Value, forgedVolume.Value);
+        Assert.Equal(ownVolume.OccurrenceIds.Order(), forgedVolume.OccurrenceIds.Order());
     }
 
     [Fact]

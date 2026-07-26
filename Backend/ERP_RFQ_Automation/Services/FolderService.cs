@@ -1441,7 +1441,14 @@ namespace ERP_RFQ_Automation.Services
                 var destination = Path.Combine(watchedFolder, name);
                 if (File.Exists(destination))
                     destination = Path.Combine(watchedFolder, $"{Guid.NewGuid():N}_{name}");
-                File.Move(path, destination, false);
+                try
+                {
+                    File.Move(path, destination, false);
+                }
+                catch (FileNotFoundException) when (!File.Exists(path))
+                {
+                    // Another worker recovered the same stale claim after enumeration.
+                }
             }
         }
 

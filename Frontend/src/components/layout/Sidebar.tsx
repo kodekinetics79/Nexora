@@ -124,6 +124,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
           { key: 'sales-routing', label: 'Routing Queue', path: '/sales/routing', moduleName: 'Leads' },
           { key: 'sales-follow-ups', label: 'Follow-ups', path: '/sales/follow-ups', moduleName: 'Quotations' },
           { key: 'sales-performance', label: 'Performance', path: '/sales/performance', moduleName: 'Dashboard' },
+          { key: 'commercial-memory', label: 'Commercial Memory', path: '/intelligence/commercial-memory', moduleName: 'Dashboard' },
         ],
       },
       {

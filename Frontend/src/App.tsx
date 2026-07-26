@@ -83,6 +83,7 @@ const PerformancePage = lazy(() => import('./pages/SalesManagement/PerformancePa
 // Intelligence surfaces — AI-assisted Lead→RFQ conversion and RFQ smart pricing.
 const LeadConvertPage = lazy(() => import('./pages/Intelligence/LeadConvertPage'));
 const RfqPricingPage = lazy(() => import('./pages/Intelligence/RfqPricingPage'));
+const CommercialMemoryPage = lazy(() => import('./pages/Intelligence/CommercialMemoryPage'));
 
 // Service RFQ → BOQ engine — drafted bills of quantities for service work.
 const BoqListPage = lazy(() => import('./pages/Boq/BoqListPage'));
@@ -110,6 +111,7 @@ function App() {
       <Route path="/" element={<Navigate to="/login" replace />} />
       <Route path="/dashboard" element={<MainLayout><PermissionGuard moduleName="Dashboard" redirect><DashboardPage /></PermissionGuard></MainLayout>} />
       <Route path="/dashboard/team" element={<MainLayout><PermissionGuard moduleName="Dashboard" redirect><TeamWorkloadPage /></PermissionGuard></MainLayout>} />
+      <Route path="/intelligence/commercial-memory" element={<MainLayout><PermissionGuard moduleName="Dashboard" redirect><PermissionGuard moduleName="Quotations"><CommercialMemoryPage /></PermissionGuard></PermissionGuard></MainLayout>} />
 
       {/* Sourcing Copilot Routes */}
       <Route path="/copilot" element={<MainLayout><PermissionGuard moduleName="Dashboard" redirect><CopilotPage /></PermissionGuard></MainLayout>} />

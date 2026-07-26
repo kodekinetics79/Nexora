@@ -180,6 +180,7 @@ builder.Services.AddScoped<ISupplierQuotedItemRepository, SupplierQuotedItemRepo
 builder.Services.AddScoped<IProcurementApplicationService, ProcurementApplicationService>();
 builder.Services.AddScoped<SupplierQuoteInboxService>();
 builder.Services.AddScoped<SupplierQuoteCommercialService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.CommercialLearning.CommercialLearningService>();
 builder.Services.AddScoped<SupplierQuoteDocumentIntakeService>();
 builder.Services.AddHostedService<ProcurementDispatchWorker>();
 builder.Services.AddSingleton<ICommercialDocumentClassifier, DeterministicCommercialDocumentClassifier>();
