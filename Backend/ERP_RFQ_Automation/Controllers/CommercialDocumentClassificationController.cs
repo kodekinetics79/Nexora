@@ -12,6 +12,21 @@ namespace ERP_RFQ_Automation.Controllers;
 public sealed class CommercialDocumentClassificationController(
     CommercialDocumentClassificationService service) : ControllerBase
 {
+    [HttpGet]
+    [RequireModulePermission("Supplier History", PermissionAction.View)]
+    public Task<IActionResult> Search([FromQuery] int page = 1, [FromQuery] int pageSize = 25,
+        [FromQuery] CommercialDocumentType? documentType = null,
+        [FromQuery] CommercialDocumentReviewStatus? reviewStatus = null,
+        [FromQuery] SupplierQuoteProjectionState? projectionState = null,
+        CancellationToken cancellationToken = default) => ExecuteReadAsync(async () => Ok(
+            await service.SearchInboxAsync(TenantId(), new CommercialDocumentInboxQuery(page, pageSize,
+                documentType, reviewStatus, projectionState), cancellationToken)));
+
+    [HttpGet("{id:guid}")]
+    [RequireModulePermission("Supplier History", PermissionAction.View)]
+    public Task<IActionResult> Detail(Guid id, CancellationToken cancellationToken) =>
+        ExecuteReadAsync(async () => Ok(await service.GetInboxDetailAsync(TenantId(), id, cancellationToken)));
+
     [HttpPost]
     [RequireModulePermission("Supplier History", PermissionAction.Create)]
     public async Task<IActionResult> Classify(
@@ -120,6 +135,23 @@ public sealed class CommercialDocumentClassificationController(
         if (string.IsNullOrWhiteSpace(value) || value.Length > 256)
             throw new ArgumentException($"{name} is required and must not exceed 256 characters.");
         return value;
+    }
+
+    private async Task<IActionResult> ExecuteReadAsync(Func<Task<IActionResult>> action)
+    {
+        try { return await action(); }
+        catch (CommercialDocumentNotFoundException)
+        {
+            return NotFound(Problem("The classification was not found.", StatusCodes.Status404NotFound));
+        }
+        catch (ArgumentException exception)
+        {
+            return BadRequest(Problem(exception.Message, StatusCodes.Status400BadRequest));
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return Unauthorized(Problem("A valid authenticated tenant is required.", StatusCodes.Status401Unauthorized));
+        }
     }
 
     private static ProblemDetails Problem(string detail, int status) => new()

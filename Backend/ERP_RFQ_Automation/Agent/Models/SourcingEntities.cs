@@ -28,6 +28,10 @@ public sealed class SupplierSolicitation
 
     public long RfqId { get; set; }
     public long SupplierId { get; set; }
+    public long? SourcingCaseId { get; set; }
+    public long? CommercialDemandLineId { get; set; }
+    public string? NexoraSerial { get; set; }
+    public string? SupplierRfqNumber { get; set; }
 
     public string IdempotencyKey { get; set; } = null!;
     public string RequestHash { get; set; } = null!;

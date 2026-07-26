@@ -203,10 +203,13 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             {
                 if (priorEvent.AggregateId != sourcingCase.Id || ExtractRequestHash(priorEvent.PayloadJson) != requestHash)
                     throw new ProcurementConflictException("The idempotency key was already used for a different candidate search.");
-                var replayCandidates = await ToCandidateViewsAsync(command.BusinessUnitId, sourcingCase.Candidates, ct);
+                var replaySnapshot = ExtractCandidateSearchSnapshot(priorEvent.PayloadJson)
+                    ?? throw new ProcurementConflictException("The candidate-search audit snapshot is unavailable.");
+                var replayCandidates = await ToCandidateViewsAsync(command.BusinessUnitId,
+                    replaySnapshot.Candidates.Select(ToCandidateEntity), ct);
                 await tx.CommitAsync(ct);
-                return new SourcingCandidateSearchResult(sourcingCase.Id, sourcingCase.SearchLimit,
-                    replayCandidates.Count, sourcingCase.Version, true, replayCandidates);
+                return new SourcingCandidateSearchResult(sourcingCase.Id, replaySnapshot.RequestedLimit,
+                    replayCandidates.Count, replaySnapshot.Version, true, replayCandidates);
             }
             if (sourcingCase.Version != command.ExpectedVersion)
                 throw new ProcurementConflictException("The Sourcing Case changed; refresh before searching again.");
@@ -214,6 +217,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 throw new ProcurementConflictException("A closed or cancelled Sourcing Case cannot be searched.");
 
             var now = DateTime.UtcNow;
+            var previousCandidates = sourcingCase.Candidates.Select(ToCandidateSnapshot).ToArray();
             _db.SourcingCaseCandidates.RemoveRange(sourcingCase.Candidates);
             sourcingCase.Candidates.Clear();
             await RefreshCandidatesAsync(sourcingCase, command.Limit, now, ct);
@@ -225,13 +229,17 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             sourcingCase.Version++;
             sourcingCase.UpdatedOn = now;
             sourcingCase.UpdatedBy = command.Actor.Trim();
+            await _db.SaveChangesAsync(ct);
             AddEvent(command.BusinessUnitId, "SourcingCase", sourcingCase.Id, sourcingCase.Version,
                 "SUPPLIER_DISCOVERY_STARTED", command.Actor, command.CorrelationId, command.IdempotencyKey,
                 JsonSerializer.Serialize(new
                 {
                     requestHash,
                     RequestedLimit = command.Limit,
-                    ResultCount = sourcingCase.Candidates.Count
+                    ResultCount = sourcingCase.Candidates.Count,
+                    Version = sourcingCase.Version,
+                    PreviousCandidates = previousCandidates,
+                    Candidates = sourcingCase.Candidates.Select(ToCandidateSnapshot).ToArray()
                 }), now);
             await _db.SaveChangesAsync(ct);
             var candidates = await ToCandidateViewsAsync(command.BusinessUnitId, sourcingCase.Candidates, ct);
@@ -279,6 +287,9 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 BusinessUnitId = command.BusinessUnitId,
                 RfqId = sourcingCase.RfqId,
                 SupplierId = command.SupplierId,
+                SourcingCaseId = sourcingCase.Id,
+                CommercialDemandLineId = sourcingCase.CommercialDemandLineId,
+                NexoraSerial = sourcingCase.NexoraSerial,
                 IdempotencyKey = solicitationKey,
                 RequestHash = hash,
                 RequestedRfqItemIdsJson = JsonSerializer.Serialize(new[] { sourcingCase.RfqItemId }),
@@ -291,9 +302,10 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             };
             _db.Add(solicitation);
             await _db.SaveChangesAsync(ct);
+            solicitation.SupplierRfqNumber = $"SRFQ-{command.BusinessUnitId:D4}-{solicitation.Id:D8}";
             var payload = JsonSerializer.Serialize(new SolicitationDispatchPayload(
                 solicitation.Id, command.BusinessUnitId, rfq.Id, supplier.ContactEmail!, supplier.Name,
-                rfq.Rfqno, $"{sourcingCase.RfqItemId}: {sourcingCase.UnfulfilledQuantity:0.####}", command.DueOn));
+                solicitation.SupplierRfqNumber, $"{sourcingCase.RfqItemId}: {sourcingCase.UnfulfilledQuantity:0.####}", command.DueOn));
             candidate.Selected = true;
             candidate.UpdatedOn = now;
             sourcingCase.Status = SourcingCaseStatuses.OutreachReady;
@@ -497,8 +509,10 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
 
             var rfq = await RequireRfqAsync(command.BusinessUnitId, command.RfqId, ct);
             var supplier = await RequireSupplierAsync(command.BusinessUnitId, command.SupplierId, ct);
-            if (string.IsNullOrWhiteSpace(supplier.ContactEmail))
-                throw new ProcurementValidationException("The selected supplier has no dispatch email address.");
+            var supplierBlockers = SupplierRfqBlockingReasons(supplier);
+            if (supplierBlockers.Count > 0)
+                throw new ProcurementValidationException(
+                    $"The selected Supplier is not eligible for RFQ outreach: {string.Join("; ", supplierBlockers)}.");
             var requestedLines = await _db.Rfqitems.Where(x => x.Rfqid == command.RfqId && command.RfqItemIds.Contains(x.Id))
                 .OrderBy(x => x.Id).ToListAsync(ct);
             if (requestedLines.Count != command.RfqItemIds.Count)
@@ -1262,6 +1276,49 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         {
             using var document = JsonDocument.Parse(payloadJson);
             return document.RootElement.TryGetProperty("requestHash", out var value) ? value.GetString() : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private sealed record CandidateSearchSnapshot(
+        int RequestedLimit, long Version, CandidateEvidenceSnapshot[] Candidates);
+
+    private sealed record CandidateEvidenceSnapshot(
+        long Id, long SourcingCaseId, long SupplierId, int Rank, string EvidenceType,
+        string RecommendationReason, string EvidenceJson, decimal EvidenceScore,
+        DateTime? EvidenceFreshOn, bool Selected, DateTime CreatedOn, DateTime UpdatedOn);
+
+    private static CandidateEvidenceSnapshot ToCandidateSnapshot(SourcingCaseCandidate candidate) => new(
+        candidate.Id, candidate.SourcingCaseId, candidate.SupplierId, candidate.Rank,
+        candidate.EvidenceType, candidate.RecommendationReason, candidate.EvidenceJson,
+        candidate.EvidenceScore, candidate.EvidenceFreshOn, candidate.Selected,
+        candidate.CreatedOn, candidate.UpdatedOn);
+
+    private static SourcingCaseCandidate ToCandidateEntity(CandidateEvidenceSnapshot candidate) => new()
+    {
+        Id = candidate.Id,
+        SourcingCaseId = candidate.SourcingCaseId,
+        SupplierId = candidate.SupplierId,
+        Rank = candidate.Rank,
+        EvidenceType = candidate.EvidenceType,
+        RecommendationReason = candidate.RecommendationReason,
+        EvidenceJson = candidate.EvidenceJson,
+        EvidenceScore = candidate.EvidenceScore,
+        EvidenceFreshOn = candidate.EvidenceFreshOn,
+        Selected = candidate.Selected,
+        CreatedOn = candidate.CreatedOn,
+        UpdatedOn = candidate.UpdatedOn
+    };
+
+    private static CandidateSearchSnapshot? ExtractCandidateSearchSnapshot(string payloadJson)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<CandidateSearchSnapshot>(payloadJson,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
         }
         catch (JsonException)
         {

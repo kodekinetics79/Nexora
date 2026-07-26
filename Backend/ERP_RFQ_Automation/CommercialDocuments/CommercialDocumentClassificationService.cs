@@ -1,8 +1,12 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using ERP_RFQ_Automation.Agent.Models;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.OrderToCash;
+using ERP_RFQ_Automation.Procurement;
+using ERP_RFQ_Automation.SupplierQuotes;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.CommercialDocuments;
@@ -12,6 +16,13 @@ public sealed record CommercialSourceDocumentIdentity(
     long BusinessUnitId,
     string ContentHash,
     string ObjectVersion);
+
+public sealed record CommercialDocumentInboxRecord(
+    CommercialDocumentClassification Classification,
+    string OriginalFileName,
+    string DetectedMimeType,
+    DocumentSecurityStatus SecurityStatus,
+    DocumentProcessingStatus ProcessingStatus);
 
 public interface ICommercialDocumentClassificationStore
 {
@@ -24,6 +35,12 @@ public interface ICommercialDocumentClassificationStore
         long sourceDocumentId, CancellationToken cancellationToken);
     Task<CommercialDocumentClassification?> FindAsync(long businessUnitId, Guid id,
         CancellationToken cancellationToken);
+    Task<CommercialDocumentInboxRecord?> FindInboxAsync(long businessUnitId, Guid id,
+        CancellationToken cancellationToken);
+    Task<(IReadOnlyList<CommercialDocumentInboxRecord> Rows, int TotalCount)> SearchInboxAsync(
+        long businessUnitId, CommercialDocumentInboxQuery query, CancellationToken cancellationToken);
+    Task<IReadOnlyList<string>> FindInvalidMatchReferencesAsync(long businessUnitId,
+        CommercialDocumentMatchReferences matches, CancellationToken cancellationToken);
     Task<CommercialDocumentClassification> AddAsync(CommercialDocumentClassification classification,
         CancellationToken cancellationToken);
     Task SaveAsync(CancellationToken cancellationToken);
@@ -56,6 +73,105 @@ public sealed class EfCommercialDocumentClassificationStore(ErpRfqAutomationCont
         CancellationToken cancellationToken) =>
         context.Set<CommercialDocumentClassification>().SingleOrDefaultAsync(row =>
             row.BusinessUnitId == businessUnitId && row.Id == id, cancellationToken);
+
+    public Task<CommercialDocumentInboxRecord?> FindInboxAsync(long businessUnitId, Guid id,
+        CancellationToken cancellationToken) =>
+        InboxQuery(businessUnitId).SingleOrDefaultAsync(row => row.Classification.Id == id, cancellationToken);
+
+    public async Task<(IReadOnlyList<CommercialDocumentInboxRecord> Rows, int TotalCount)> SearchInboxAsync(
+        long businessUnitId, CommercialDocumentInboxQuery query, CancellationToken cancellationToken)
+    {
+        var rows = InboxQuery(businessUnitId);
+        if (query.DocumentType.HasValue)
+            rows = rows.Where(row => row.Classification.DocumentType == query.DocumentType.Value);
+        if (query.ReviewStatus.HasValue)
+            rows = rows.Where(row => row.Classification.ReviewStatus == query.ReviewStatus.Value);
+        if (query.ProjectionState.HasValue)
+            rows = ApplyProjectionFilter(rows, query.ProjectionState.Value);
+
+        var totalCount = await rows.CountAsync(cancellationToken);
+        var page = await rows.OrderByDescending(row => row.Classification.UpdatedOn)
+            .ThenByDescending(row => row.Classification.CreatedOn)
+            .Skip((query.Page - 1) * query.PageSize)
+            .Take(query.PageSize)
+            .ToListAsync(cancellationToken);
+        return (page, totalCount);
+    }
+
+    public async Task<IReadOnlyList<string>> FindInvalidMatchReferencesAsync(long businessUnitId,
+        CommercialDocumentMatchReferences matches, CancellationToken cancellationToken)
+    {
+        var invalid = new List<string>();
+        if (matches.CustomerRfqId.HasValue && !await context.Set<Rfq>().AnyAsync(row =>
+                row.BusinessUnitId == businessUnitId && row.Id == matches.CustomerRfqId.Value, cancellationToken))
+            invalid.Add(nameof(matches.CustomerRfqId));
+        if (matches.SupplierRfqId.HasValue && !await context.Set<SupplierSolicitation>().AnyAsync(row =>
+                row.BusinessUnitId == businessUnitId && row.Id == matches.SupplierRfqId.Value, cancellationToken))
+            invalid.Add(nameof(matches.SupplierRfqId));
+        if (matches.SourcingCaseId.HasValue && !await context.Set<SourcingCase>().AnyAsync(row =>
+                row.BusinessUnitId == businessUnitId && row.Id == matches.SourcingCaseId.Value, cancellationToken))
+            invalid.Add(nameof(matches.SourcingCaseId));
+        if (matches.SupplierQuoteId.HasValue && !await context.Set<SupplierQuote>().AnyAsync(row =>
+                row.BusinessUnitId == businessUnitId && row.Id == matches.SupplierQuoteId.Value, cancellationToken))
+            invalid.Add(nameof(matches.SupplierQuoteId));
+        if (matches.PurchaseOrderId.HasValue && !await context.Set<CustomerPurchaseOrder>().AnyAsync(row =>
+                row.BusinessUnitId == businessUnitId && row.Id == matches.PurchaseOrderId.Value, cancellationToken))
+            invalid.Add(nameof(matches.PurchaseOrderId));
+
+        // No authoritative Supplier Invoice aggregate exists yet. Never trust a client-provided placeholder ID.
+        if (matches.SupplierInvoiceId.HasValue) invalid.Add(nameof(matches.SupplierInvoiceId));
+        return invalid;
+    }
+
+    private IQueryable<CommercialDocumentInboxRecord> InboxQuery(long businessUnitId) =>
+        context.Set<CommercialDocumentClassification>().AsNoTracking()
+            .Where(row => row.BusinessUnitId == businessUnitId)
+            .Select(row => new CommercialDocumentInboxRecord(row,
+                row.SourceDocument.OriginalFileName,
+                row.SourceDocument.DetectedMimeType,
+                row.SourceDocument.SecurityStatus,
+                row.SourceDocument.ProcessingStatus));
+
+    private static IQueryable<CommercialDocumentInboxRecord> ApplyProjectionFilter(
+        IQueryable<CommercialDocumentInboxRecord> rows, SupplierQuoteProjectionState state) => state switch
+    {
+        SupplierQuoteProjectionState.NotApplicable => rows.Where(row =>
+            row.Classification.DocumentType != CommercialDocumentType.SupplierQuote &&
+            row.Classification.DocumentType != CommercialDocumentType.SupplierQuoteRevision),
+        SupplierQuoteProjectionState.ReviewRequired => rows.Where(row =>
+            (row.Classification.DocumentType == CommercialDocumentType.SupplierQuote ||
+             row.Classification.DocumentType == CommercialDocumentType.SupplierQuoteRevision) &&
+            row.Classification.ReviewStatus == CommercialDocumentReviewStatus.ReviewRequired),
+        SupplierQuoteProjectionState.Rejected => rows.Where(row =>
+            (row.Classification.DocumentType == CommercialDocumentType.SupplierQuote ||
+             row.Classification.DocumentType == CommercialDocumentType.SupplierQuoteRevision) &&
+            row.Classification.ReviewStatus == CommercialDocumentReviewStatus.Rejected),
+        SupplierQuoteProjectionState.MissingSupplierRfqMatch => Projectable(rows).Where(row =>
+            row.Classification.SupplierRfqId == null),
+        SupplierQuoteProjectionState.MissingSourcingCaseMatch => Projectable(rows).Where(row =>
+            row.Classification.SupplierRfqId != null && row.Classification.SourcingCaseId == null),
+        SupplierQuoteProjectionState.MissingPriorSupplierQuoteMatch => Projectable(rows).Where(row =>
+            row.Classification.DocumentType == CommercialDocumentType.SupplierQuoteRevision &&
+            row.Classification.SupplierRfqId != null && row.Classification.SourcingCaseId != null &&
+            row.Classification.SupplierQuoteId == null),
+        SupplierQuoteProjectionState.AlreadyProjected => Projectable(rows).Where(row =>
+            row.Classification.DocumentType == CommercialDocumentType.SupplierQuote &&
+            row.Classification.SupplierQuoteId != null),
+        SupplierQuoteProjectionState.Ready => Projectable(rows).Where(row =>
+            row.Classification.SupplierRfqId != null && row.Classification.SourcingCaseId != null &&
+            ((row.Classification.DocumentType == CommercialDocumentType.SupplierQuote &&
+              row.Classification.SupplierQuoteId == null) ||
+             (row.Classification.DocumentType == CommercialDocumentType.SupplierQuoteRevision &&
+              row.Classification.SupplierQuoteId != null))),
+        _ => rows.Where(_ => false)
+    };
+
+    private static IQueryable<CommercialDocumentInboxRecord> Projectable(
+        IQueryable<CommercialDocumentInboxRecord> rows) => rows.Where(row =>
+        (row.Classification.DocumentType == CommercialDocumentType.SupplierQuote ||
+         row.Classification.DocumentType == CommercialDocumentType.SupplierQuoteRevision) &&
+        row.Classification.ReviewStatus != CommercialDocumentReviewStatus.ReviewRequired &&
+        row.Classification.ReviewStatus != CommercialDocumentReviewStatus.Rejected);
 
     public async Task<CommercialDocumentClassification> AddAsync(
         CommercialDocumentClassification classification, CancellationToken cancellationToken)
@@ -112,6 +228,7 @@ public sealed class CommercialDocumentClassificationService
         ArgumentNullException.ThrowIfNull(request);
         var idempotencyKey = Required(request.IdempotencyKey, 256, nameof(request.IdempotencyKey));
         var matches = request.Matches ?? new CommercialDocumentMatchReferences();
+        await ValidateMatchesAsync(businessUnitId, matches, cancellationToken);
         var requestHash = ComputeRequestHash(request.SourceDocumentId, request.Signals, matches);
         var replay = await _store.FindByIdempotencyKeyAsync(businessUnitId, idempotencyKey, cancellationToken);
         if (replay is not null)
@@ -142,7 +259,9 @@ public sealed class CommercialDocumentClassificationService
     {
         EnsureTenant(businessUnitId);
         var row = await FindAsync(businessUnitId, id, cancellationToken);
-        row.Confirm(expectedVersion, documentType, evidenceJson, actor, reason, matches);
+        var verifiedMatches = matches ?? MatchReferences(row);
+        await ValidateMatchesAsync(businessUnitId, verifiedMatches, cancellationToken);
+        row.Confirm(expectedVersion, documentType, evidenceJson, actor, reason, verifiedMatches);
         await _store.SaveAsync(cancellationToken);
         return row;
     }
@@ -157,10 +276,103 @@ public sealed class CommercialDocumentClassificationService
         return row;
     }
 
+    public async Task<CommercialDocumentClassification> LinkSupplierQuoteAsync(long businessUnitId,
+        Guid id, int expectedVersion, long supplierQuoteId,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureTenant(businessUnitId);
+        await ValidateMatchesAsync(businessUnitId,
+            new CommercialDocumentMatchReferences(SupplierQuoteId: supplierQuoteId), cancellationToken);
+        var row = await FindAsync(businessUnitId, id, cancellationToken);
+        row.LinkSupplierQuote(expectedVersion, supplierQuoteId);
+        await _store.SaveAsync(cancellationToken);
+        return row;
+    }
+
+    public async Task<CommercialDocumentInboxResult> SearchInboxAsync(long businessUnitId,
+        CommercialDocumentInboxQuery query, CancellationToken cancellationToken = default)
+    {
+        EnsureTenant(businessUnitId);
+        ArgumentNullException.ThrowIfNull(query);
+        if (query.Page < 1) throw new ArgumentOutOfRangeException(nameof(query.Page), "Page must be positive.");
+        if (query.PageSize is < 1 or > 100)
+            throw new ArgumentOutOfRangeException(nameof(query.PageSize), "Page size must be between 1 and 100.");
+
+        var result = await _store.SearchInboxAsync(businessUnitId, query, cancellationToken);
+        return new CommercialDocumentInboxResult(result.Rows.Select(ToItem).ToArray(), result.TotalCount,
+            query.Page, query.PageSize);
+    }
+
+    public async Task<CommercialDocumentInboxDetail> GetInboxDetailAsync(long businessUnitId, Guid id,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureTenant(businessUnitId);
+        var record = await _store.FindInboxAsync(businessUnitId, id, cancellationToken)
+            ?? throw new CommercialDocumentNotFoundException("The classification does not exist in this tenant.");
+        var row = record.Classification;
+        return new CommercialDocumentInboxDetail(ToItem(record), row.SourceDocumentContentHash,
+            row.SourceObjectVersion, row.EvidenceJson, row.ReviewedBy, row.ReviewReason, row.ReviewedOn);
+    }
+
+    public static SupplierQuoteProjectionReadiness ResolveSupplierQuoteProjection(
+        CommercialDocumentClassification row)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+        if (row.DocumentType is not (CommercialDocumentType.SupplierQuote or
+            CommercialDocumentType.SupplierQuoteRevision))
+            return Projection(SupplierQuoteProjectionState.NotApplicable, false,
+                "Document is not classified as a Supplier Quote.");
+        if (row.ReviewStatus == CommercialDocumentReviewStatus.ReviewRequired)
+            return Projection(SupplierQuoteProjectionState.ReviewRequired, false,
+                "Classification review must be completed before projection.");
+        if (row.ReviewStatus == CommercialDocumentReviewStatus.Rejected)
+            return Projection(SupplierQuoteProjectionState.Rejected, false,
+                "The commercial document classification was rejected.");
+        if (!row.SupplierRfqId.HasValue)
+            return Projection(SupplierQuoteProjectionState.MissingSupplierRfqMatch, false,
+                "A tenant-qualified Supplier RFQ match is required.");
+        if (!row.SourcingCaseId.HasValue)
+            return Projection(SupplierQuoteProjectionState.MissingSourcingCaseMatch, false,
+                "A tenant-qualified Sourcing Case match is required.");
+        if (row.DocumentType == CommercialDocumentType.SupplierQuoteRevision && !row.SupplierQuoteId.HasValue)
+            return Projection(SupplierQuoteProjectionState.MissingPriorSupplierQuoteMatch, false,
+                "A Supplier Quote revision must identify the prior Supplier Quote.");
+        if (row.DocumentType == CommercialDocumentType.SupplierQuote && row.SupplierQuoteId.HasValue)
+            return Projection(SupplierQuoteProjectionState.AlreadyProjected, false,
+                "This source document is already linked to a projected Supplier Quote.");
+        return Projection(SupplierQuoteProjectionState.Ready, true);
+    }
+
     private async Task<CommercialDocumentClassification> FindAsync(long businessUnitId, Guid id,
         CancellationToken cancellationToken) =>
         await _store.FindAsync(businessUnitId, id, cancellationToken)
         ?? throw new CommercialDocumentNotFoundException("The classification does not exist in this tenant.");
+
+    private async Task ValidateMatchesAsync(long businessUnitId, CommercialDocumentMatchReferences matches,
+        CancellationToken cancellationToken)
+    {
+        var invalid = await _store.FindInvalidMatchReferencesAsync(businessUnitId, matches, cancellationToken);
+        if (invalid.Count > 0)
+            throw new CommercialDocumentMatchValidationException(
+                $"Commercial match references are not valid for the authenticated tenant: {string.Join(", ", invalid)}.");
+    }
+
+    private static CommercialDocumentInboxItem ToItem(CommercialDocumentInboxRecord record)
+    {
+        var row = record.Classification;
+        return new CommercialDocumentInboxItem(row.Id, row.SourceDocumentId, record.OriginalFileName,
+            record.DetectedMimeType, record.SecurityStatus, record.ProcessingStatus, row.DocumentType,
+            row.ReviewStatus, row.Confidence, row.ClassificationMethod,
+            MatchReferences(row),
+            ResolveSupplierQuoteProjection(row), row.Version, row.CreatedOn, row.UpdatedOn);
+    }
+
+    private static CommercialDocumentMatchReferences MatchReferences(CommercialDocumentClassification row) =>
+        new(row.CustomerRfqId, row.SupplierRfqId, row.SourcingCaseId, row.SupplierQuoteId,
+            row.PurchaseOrderId, row.SupplierInvoiceId);
+
+    private static SupplierQuoteProjectionReadiness Projection(SupplierQuoteProjectionState state,
+        bool isReady, params string[] blockingReasons) => new(state, isReady, blockingReasons);
 
     private void EnsureTenant(long businessUnitId)
     {

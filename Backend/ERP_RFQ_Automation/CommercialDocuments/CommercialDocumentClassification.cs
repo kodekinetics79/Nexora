@@ -137,6 +137,22 @@ public sealed class CommercialDocumentClassification
         Version++;
     }
 
+    public void LinkSupplierQuote(int expectedVersion, long supplierQuoteId,
+        DateTimeOffset? linkedOn = null)
+    {
+        EnsureVersion(expectedVersion);
+        if (DocumentType is not (CommercialDocumentType.SupplierQuote or CommercialDocumentType.SupplierQuoteRevision))
+            throw new InvalidOperationException("Only a Supplier Quote classification can link a Supplier Quote.");
+        var verifiedId = Guard.Positive(supplierQuoteId, nameof(supplierQuoteId));
+        if (SupplierQuoteId.HasValue && SupplierQuoteId.Value != verifiedId)
+            throw new CommercialDocumentConflictException(
+                "The commercial document is already linked to another Supplier Quote.");
+        if (SupplierQuoteId == verifiedId) return;
+        SupplierQuoteId = verifiedId;
+        UpdatedOn = linkedOn ?? DateTimeOffset.UtcNow;
+        Version++;
+    }
+
     private void ApplyMatches(CommercialDocumentMatchReferences matches)
     {
         CustomerRfqId = Guard.OptionalPositive(matches.CustomerRfqId, nameof(matches.CustomerRfqId));
@@ -194,3 +210,4 @@ public sealed class CommercialDocumentClassification
 
 public sealed class CommercialDocumentConflictException(string message) : InvalidOperationException(message);
 public sealed class CommercialDocumentNotFoundException(string message) : InvalidOperationException(message);
+public sealed class CommercialDocumentMatchValidationException(string message) : ArgumentException(message);

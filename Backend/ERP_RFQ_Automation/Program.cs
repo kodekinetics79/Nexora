@@ -39,6 +39,7 @@ using ERP_RFQ_Automation.Security.DocumentInspection;
 using ERP_RFQ_Automation.Procurement;
 using ERP_RFQ_Automation.CommercialDocuments;
 using ERP_RFQ_Automation.SupplierGovernance;
+using ERP_RFQ_Automation.SupplierQuotes;
 using System.Text.Json.Serialization;
 using Npgsql;
 
@@ -177,6 +178,8 @@ builder.Services.AddScoped<IQuoteRepository, QuoteRepository>();
 builder.Services.AddScoped<ISupplierPurchaseHistoryRepository, SupplierPurchaseHistoryRepository>();
 builder.Services.AddScoped<ISupplierQuotedItemRepository, SupplierQuotedItemRepository>();
 builder.Services.AddScoped<IProcurementApplicationService, ProcurementApplicationService>();
+builder.Services.AddScoped<SupplierQuoteInboxService>();
+builder.Services.AddScoped<SupplierQuoteDocumentIntakeService>();
 builder.Services.AddHostedService<ProcurementDispatchWorker>();
 builder.Services.AddSingleton<ICommercialDocumentClassifier, DeterministicCommercialDocumentClassifier>();
 builder.Services.AddScoped<CommercialDocumentClassificationService>();

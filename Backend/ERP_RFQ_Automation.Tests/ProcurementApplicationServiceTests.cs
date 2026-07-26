@@ -1,4 +1,5 @@
 using System.Text.Json;
+using ERP_RFQ_Automation.Agent.Models;
 using ERP_RFQ_Automation.Inventory.Commercial;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Procurement;
@@ -9,6 +10,27 @@ namespace ERP_RFQ_Automation.Tests;
 
 public sealed class ProcurementApplicationServiceTests
 {
+    [Fact]
+    public async Task Legacy_solicitation_endpoint_cannot_bypass_supplier_governance()
+    {
+        using var fixture = new ProcurementScenario();
+        await using (var setup = fixture.Context())
+        {
+            var supplier = await setup.Suppliers.SingleAsync(x => x.Id == ProcurementTestData.Supplier);
+            supplier.GovernanceStatus = SupplierGovernanceStatuses.Blocked;
+            supplier.ReadinessStatus = SupplierReadinessStatuses.Blocked;
+            await setup.SaveChangesAsync();
+        }
+
+        var exception = await Assert.ThrowsAsync<ProcurementValidationException>(() =>
+            fixture.Execute(service => service.CreateSolicitationAsync(
+                fixture.Solicitation("blocked-governance"))));
+
+        Assert.Contains("not eligible", exception.Message, StringComparison.OrdinalIgnoreCase);
+        await using var assertContext = fixture.Context();
+        Assert.Empty(await assertContext.Set<SupplierSolicitation>().ToListAsync());
+    }
+
     [Fact]
     public async Task Solicitation_replays_same_request_and_rejects_changed_hash()
     {

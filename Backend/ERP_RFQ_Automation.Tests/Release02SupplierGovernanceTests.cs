@@ -122,6 +122,40 @@ public sealed class Release02SupplierGovernanceTests
         }
     }
 
+    [Fact]
+    public async Task Changing_dispatch_email_revokes_prior_governance_and_readiness()
+    {
+        var repository = new RecordingSupplierRepository();
+        repository.CurrentSupplier = new Supplier
+        {
+            Id = 9, Buid = 41, Name = "Approved Parts", ContactEmail = "old@supplier.test",
+            ImageUrl = string.Empty, IsActive = true, CreatedBy = "seed", CreatedOn = DateTime.UtcNow,
+            GovernanceStatus = SupplierGovernanceStatuses.Approved,
+            VerificationStatus = SupplierVerificationStatuses.Verified,
+            ComplianceStatus = SupplierComplianceStatuses.Cleared,
+            RiskStatus = SupplierRiskStatuses.Low,
+            ReadinessStatus = SupplierReadinessStatuses.Ready,
+            ConcurrencyToken = Guid.NewGuid(),
+            GovernanceReviewedBy = "manager",
+            GovernanceReviewedOn = DateTime.UtcNow
+        };
+        var controller = CreateSupplierController(repository, "41", "editor@supplier.test");
+
+        var result = await controller.Update(9, new SupplierUpdateRequestDTO
+        {
+            Name = "Approved Parts", ContactEmail = "new@supplier.test", IsActive = true,
+            ConcurrencyToken = repository.CurrentSupplier.ConcurrencyToken
+        });
+
+        Assert.IsType<NoContentResult>(result);
+        var updated = Assert.IsType<Supplier>(repository.Updated);
+        Assert.Equal(SupplierGovernanceStatuses.ReviewRequired, updated.GovernanceStatus);
+        Assert.Equal(SupplierVerificationStatuses.Pending, updated.VerificationStatus);
+        Assert.Equal(SupplierReadinessStatuses.ReviewRequired, updated.ReadinessStatus);
+        Assert.Null(updated.GovernanceReviewedBy);
+        Assert.Null(updated.GovernanceReviewedOn);
+    }
+
     [Theory]
     [InlineData(1, 1, "SU00000001")]
     [InlineData(99, 42, "SU00000099")]
@@ -241,6 +275,8 @@ public sealed class Release02SupplierGovernanceTests
     {
         public long? SearchTenant { get; private set; }
         public Supplier? Added { get; private set; }
+        public Supplier? CurrentSupplier { get; set; }
+        public Supplier? Updated { get; private set; }
 
         public Task<List<SupplierSearchResultDTO>> SearchSuppliersAsync(
             string? searchTerm,
@@ -265,7 +301,7 @@ public sealed class Release02SupplierGovernanceTests
             Task.FromResult<(IEnumerable<SupplierResponseDTO>, int)>(([], 0));
 
         public Task<Supplier> GetByIdAsync(long id, long businessUnitId) =>
-            Task.FromResult(new Supplier
+            Task.FromResult(CurrentSupplier ?? new Supplier
             {
                 Id = id,
                 Buid = businessUnitId,
@@ -275,7 +311,11 @@ public sealed class Release02SupplierGovernanceTests
                 CreatedOn = DateTime.UtcNow
             });
 
-        public Task UpdateAsync(Supplier supplier, long businessUnitId) => Task.CompletedTask;
+        public Task UpdateAsync(Supplier supplier, long businessUnitId)
+        {
+            Updated = supplier;
+            return Task.CompletedTask;
+        }
         public Task DeleteAsync(long id, long businessUnitId) => Task.CompletedTask;
     }
 

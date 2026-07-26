@@ -55,6 +55,17 @@ public sealed class ExtractionJobMetadata
     /// <summary>Overrides Lead.EmailSource (file-type label parity, e.g. "PDF, Excel").</summary>
     public string? EmailSource { get; set; }
 
+    /// <summary>
+    /// Explicit commercial intake intent set only by a governed authenticated door.
+    /// Non-customer documents are completed by the extraction worker without creating a Lead.
+    /// </summary>
+    public string? CommercialDocumentTypeHint { get; set; }
+
+    public static bool IsNonLeadCommercialType(string? value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        !value.Equals("CUSTOMER_RFQ", StringComparison.OrdinalIgnoreCase) &&
+        !value.Equals("CUSTOMER_RFQ_REVISION", StringComparison.OrdinalIgnoreCase);
+
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = false };
 
     public static string SidecarPath(string storagePath, long businessUnitId)

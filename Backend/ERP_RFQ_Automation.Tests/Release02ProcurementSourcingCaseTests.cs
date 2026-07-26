@@ -113,6 +113,13 @@ public sealed class Release02ProcurementSourcingCaseTests
         Assert.True(replay.Replayed);
         Assert.Equal(fifty.ResultCount, replay.ResultCount);
 
+        var earlierReplay = await fixture.Execute(service => service.SearchSourcingCandidatesAsync(new(
+            fixture.BusinessUnitId, created.Id, 20, created.Version, "search-20", "qa", "corr-search-20")));
+        Assert.True(earlierReplay.Replayed);
+        Assert.Equal(20, earlierReplay.RequestedLimit);
+        Assert.Equal(twenty.Version, earlierReplay.Version);
+        Assert.Equal(twenty.Candidates.Select(x => x.SupplierId), earlierReplay.Candidates.Select(x => x.SupplierId));
+
         await Assert.ThrowsAsync<ProcurementValidationException>(() => fixture.Execute(service =>
             service.SearchSourcingCandidatesAsync(new(fixture.BusinessUnitId, created.Id, 25,
                 fifty.Version, "search-invalid", "qa", "corr-search-invalid"))));

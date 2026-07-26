@@ -192,6 +192,8 @@ namespace ERP_RFQ_Automation.Controllers
                     imagePath = $"/SupplierImages/{uniqueFileName}";
                 }
 
+                var dispatchEmailChanged = !string.Equals(existing.ContactEmail?.Trim(),
+                    request.ContactEmail?.Trim(), StringComparison.OrdinalIgnoreCase);
                 existing.Name = request.Name;
                 existing.ContactEmail = request.ContactEmail;
                 existing.ImageUrl = imagePath ?? string.Empty;
@@ -207,6 +209,15 @@ namespace ERP_RFQ_Automation.Controllers
                 existing.IsActive = request.IsActive ?? true;
                 existing.ModifiedBy = GetAuthenticatedActor();
                 existing.ModifiedOn = DateTime.UtcNow;
+                if (dispatchEmailChanged)
+                {
+                    existing.GovernanceStatus = SupplierGovernanceStatuses.ReviewRequired;
+                    existing.VerificationStatus = SupplierVerificationStatuses.Pending;
+                    existing.ReadinessStatus = SupplierReadinessStatuses.ReviewRequired;
+                    existing.GovernanceReviewedBy = null;
+                    existing.GovernanceReviewedOn = null;
+                    existing.EffectiveFrom = existing.ModifiedOn;
+                }
 
                 await _repository.UpdateAsync(existing, businessUnitId);
 

@@ -64,7 +64,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
     'setup': location.pathname.includes('/setup'),
     'security': location.pathname.includes('/security'),
     'inventory': location.pathname.includes('/inventory'),
-    'supplier_mgmt': location.pathname.includes('/suppliers') || location.pathname.includes('/quoted-items') || location.pathname.includes('/purchase-orders') || location.pathname.includes('/sourcing-cases'),
+    'supplier_mgmt': location.pathname.includes('/suppliers') || location.pathname.includes('/supplier-quotes') || location.pathname.includes('/commercial-inbox') || location.pathname.includes('/quoted-items') || location.pathname.includes('/purchase-orders') || location.pathname.includes('/sourcing-cases'),
     'lead_mgmt': location.pathname.includes('/leads') || location.pathname.includes('/commercial-cases'),
     'copilot': location.pathname.includes('/copilot'),
   });
@@ -178,6 +178,8 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
         children: [
           { key: 'suppliers', label: t('suppliers'), path: '/suppliers', moduleName: 'Suppliers', activePrefixes: ['/suppliers/'] },
           { key: 'sourcing-cases', label: 'Sourcing Cases', path: '/procurement/rfqs/all?state=requires-sourcing', moduleName: 'RFQ Management', activePrefixes: ['/procurement/sourcing-cases'] },
+          { key: 'supplier-quote-inbox', label: 'Supplier Quote Inbox', path: '/procurement/supplier-quotes', moduleName: 'Supplier History', activePrefixes: ['/procurement/supplier-quotes/'] },
+          { key: 'commercial-inbox', label: 'Commercial Inbox', path: '/procurement/commercial-inbox', moduleName: 'Supplier History' },
           { key: 'quoted-items', label: t('quoted_items'), path: '/suppliers/quoted-items', moduleName: 'Supplier History' },
           { key: 'purchase-orders', label: t('purchase_orders'), path: '/suppliers/purchase-orders', moduleName: 'Orders' },
         ]

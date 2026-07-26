@@ -1,5 +1,6 @@
 using ERP_RFQ_Automation.Agent.Guardrails;
 using ERP_RFQ_Automation.Agent.Models;
+using ERP_RFQ_Automation.Procurement;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Models;
@@ -103,6 +104,8 @@ public partial class ErpRfqAutomationContext
             e.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
             e.Property(x => x.Status).HasConversion<string>().HasMaxLength(20).IsRequired();
             e.Property(x => x.Channel).HasMaxLength(40).IsRequired();
+            e.Property(x => x.NexoraSerial).HasMaxLength(100);
+            e.Property(x => x.SupplierRfqNumber).HasMaxLength(100);
             e.Property(x => x.Notes).HasMaxLength(1000);
             e.Property(x => x.IdempotencyKey).HasMaxLength(160).IsRequired();
             e.Property(x => x.RequestHash).HasMaxLength(64).IsRequired();
@@ -112,11 +115,18 @@ public partial class ErpRfqAutomationContext
             e.Property(x => x.UpdatedOn).HasDefaultValueSql("now()");
             e.HasIndex(x => new { x.BusinessUnitId, x.RfqId }).HasDatabaseName("IX_SupplierSolicitations_BU_Rfq");
             e.HasIndex(x => new { x.BusinessUnitId, x.IdempotencyKey }).IsUnique();
+            e.HasIndex(x => new { x.BusinessUnitId, x.SupplierRfqNumber }).IsUnique()
+                .HasFilter("\"SupplierRfqNumber\" IS NOT NULL");
             e.HasIndex(x => new { x.BusinessUnitId, x.RfqId, x.SupplierId }).HasDatabaseName("IX_SupplierSolicitations_BU_Rfq_Supplier");
             e.HasOne<Rfq>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.RfqId })
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
             e.HasOne<Supplier>().WithMany().HasForeignKey(x => new { x.SupplierId, x.BusinessUnitId })
                 .HasPrincipalKey(x => new { x.Id, x.Buid }).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<SourcingCase>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.SourcingCaseId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<CommercialDemandLine>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.CommercialDemandLineId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
             e.HasQueryFilter(x => CurrentTenantId == null || x.BusinessUnitId == CurrentTenantId);
         });
 

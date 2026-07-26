@@ -123,6 +123,25 @@ public sealed class Release02CommercialDocumentClassificationTests
         Assert.Equal(0, store.ReadCount);
     }
 
+    [Fact]
+    public async Task Successful_projection_links_canonical_Supplier_Quote_without_reclassifying_source()
+    {
+        var store = new MemoryStore(71, new CommercialSourceDocumentIdentity(9, 71, Hash, "object-v1"));
+        var service = new CommercialDocumentClassificationService(store,
+            new DeterministicCommercialDocumentClassifier());
+        var row = await service.ClassifyAsync(71, new ClassifyCommercialDocumentRequest(9, "document:9",
+            new CommercialDocumentClassificationSignals("supplier-quote.csv", "Supplier quotation",
+                "Supplier", "Unit price and validity", "supplier-rfq"),
+            new CommercialDocumentMatchReferences(SupplierRfqId: 82, SourcingCaseId: 83)));
+
+        var linked = await service.LinkSupplierQuoteAsync(71, row.Id, row.Version, 91);
+
+        Assert.Equal(91, linked.SupplierQuoteId);
+        Assert.Equal(2, linked.Version);
+        Assert.Equal(CommercialDocumentType.SupplierQuote, linked.DocumentType);
+        Assert.Throws<CommercialDocumentConflictException>(() => linked.LinkSupplierQuote(2, 92));
+    }
+
     private sealed class ModelContext(DbContextOptions<ModelContext> options) : DbContext(options)
     {
         protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -181,6 +200,33 @@ public sealed class Release02CommercialDocumentClassificationTests
             ReadCount++;
             return Task.FromResult(Rows.SingleOrDefault(row => row.BusinessUnitId == businessUnitId && row.Id == id));
         }
+
+        public Task<CommercialDocumentInboxRecord?> FindInboxAsync(long businessUnitId, Guid id,
+            CancellationToken cancellationToken)
+        {
+            ReadCount++;
+            var row = Rows.SingleOrDefault(row => row.BusinessUnitId == businessUnitId && row.Id == id);
+            return Task.FromResult(row is null ? null : Inbox(row));
+        }
+
+        public Task<(IReadOnlyList<CommercialDocumentInboxRecord> Rows, int TotalCount)> SearchInboxAsync(
+            long businessUnitId, CommercialDocumentInboxQuery query, CancellationToken cancellationToken)
+        {
+            ReadCount++;
+            var rows = Rows.Where(row => row.BusinessUnitId == businessUnitId).Select(Inbox).ToArray();
+            return Task.FromResult(((IReadOnlyList<CommercialDocumentInboxRecord>)rows, rows.Length));
+        }
+
+        public Task<IReadOnlyList<string>> FindInvalidMatchReferencesAsync(long businessUnitId,
+            CommercialDocumentMatchReferences matches, CancellationToken cancellationToken)
+        {
+            ReadCount++;
+            return Task.FromResult<IReadOnlyList<string>>([]);
+        }
+
+        private static CommercialDocumentInboxRecord Inbox(CommercialDocumentClassification row) =>
+            new(row, "document.pdf", "application/pdf", DocumentSecurityStatus.Cleared,
+                DocumentProcessingStatus.Completed);
 
         public Task<CommercialDocumentClassification> AddAsync(CommercialDocumentClassification classification,
             CancellationToken cancellationToken)

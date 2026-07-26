@@ -190,6 +190,27 @@ public sealed class ExtractionWorker : BackgroundService
                 return true;
             }
             await MarkIntakeProcessingAsync(job, workToken);
+            if (await IsNonLeadCommercialDocumentAsync(job, workToken))
+            {
+                if (!await queue.SetStatusAsync(job.Id, workerId, job.Attempts,
+                        ExtractionStatus.Persisting, workToken))
+                {
+                    LogLeaseLost(job.Id, workerId, "routing a commercial document away from Lead persistence");
+                    return true;
+                }
+                heartbeatCts.Cancel();
+                await ObserveHeartbeatAsync(heartbeatTask);
+                if (!await queue.CompleteAsync(job.Id, workerId, job.Attempts, null, ct))
+                {
+                    LogLeaseLost(job.Id, workerId, "completing non-Lead commercial intake");
+                    return true;
+                }
+                await MarkIntakeFinalizedAsync(job, ct);
+                _log.LogInformation(
+                    "Job {JobId} completed as a non-Lead commercial document for tenant {BusinessUnitId}.",
+                    job.Id, job.BusinessUnitId);
+                return true;
+            }
             var input = await reader.ReadAsync(job, workToken);
 
             ChunkedExtractionOutcome outcome;
@@ -419,6 +440,32 @@ public sealed class ExtractionWorker : BackgroundService
         {
             occurrence.MarkProcessing();
             await db.SaveChangesAsync(ct);
+        }
+    }
+
+    private async Task<bool> IsNonLeadCommercialDocumentAsync(ExtractionJob job, CancellationToken ct)
+    {
+        if (!job.SourceDocumentOccurrenceId.HasValue) return false;
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        var sourceMetadata = await db.Set<SourceDocumentOccurrence>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.Id == job.SourceDocumentOccurrenceId.Value)
+            .Select(x => x.SourceMetadataJson)
+            .SingleOrDefaultAsync(ct);
+        if (string.IsNullOrWhiteSpace(sourceMetadata)) return false;
+        try
+        {
+            using var document = JsonDocument.Parse(sourceMetadata);
+            if (!document.RootElement.TryGetProperty("metadata", out var metadata) ||
+                metadata.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined ||
+                !metadata.TryGetProperty(nameof(ExtractionJobMetadata.CommercialDocumentTypeHint), out var hint))
+                return false;
+            return ExtractionJobMetadata.IsNonLeadCommercialType(hint.GetString());
+        }
+        catch (JsonException exception)
+        {
+            _log.LogWarning(exception, "Commercial intake metadata for job {JobId} is invalid; failing closed.", job.Id);
+            return true;
         }
     }
 
