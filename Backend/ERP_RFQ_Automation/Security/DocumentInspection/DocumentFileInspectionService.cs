@@ -1,6 +1,8 @@
 using System.Buffers;
 using System.IO.Compression;
 using System.Text;
+using System.Xml;
+using System.Xml.Linq;
 
 namespace ERP_RFQ_Automation.Security.DocumentInspection;
 
@@ -299,8 +301,14 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
 
             if (names.Contains("xl/workbook.xml"))
             {
-                var macroEnabled = contentTypes.Contains("macroEnabled", StringComparison.OrdinalIgnoreCase) ||
-                                   names.Contains("xl/vbaProject.bin");
+                var manifest = XDocument.Parse(contentTypes, LoadOptions.None);
+                var workbookContentType = manifest.Descendants()
+                    .FirstOrDefault(element => element.Name.LocalName == "Override"
+                        && string.Equals((string?)element.Attribute("PartName"), "/xl/workbook.xml",
+                            StringComparison.OrdinalIgnoreCase))
+                    ?.Attribute("ContentType")?.Value;
+                var macroEnabled = workbookContentType?.Contains("macroEnabled",
+                    StringComparison.OrdinalIgnoreCase) == true || names.Contains("xl/vbaProject.bin");
                 return macroEnabled
                     ? new("application/vnd.ms-excel.sheet.macroenabled.12", [".xlsm"])
                     : new("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", [".xlsx"]);
@@ -312,7 +320,8 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
         {
             throw;
         }
-        catch (Exception exception) when (exception is InvalidDataException or IOException or DecoderFallbackException or OverflowException)
+        catch (Exception exception) when (exception is InvalidDataException or IOException or DecoderFallbackException
+            or OverflowException or XmlException)
         {
             throw new UnsafeArchiveException("The OOXML package is malformed or unreadable.");
         }

@@ -170,6 +170,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
       { key: 'service-boqs', label: t('service_boqs', 'Service BOQs'), icon: <BoqIcon />, path: '/services/boq', moduleName: 'Quotations', activePrefixes: ['/services/boq'] },
       { key: 'client-po-inbox', label: 'Client PO Inbox', icon: <QuotationIcon />, path: '/sales/client-pos', moduleName: 'Customer Awards', activePrefixes: ['/sales/client-pos/'] },
       { key: 'orders', label: 'Customer Orders', icon: <OrderIcon />, path: '/sales/orders', moduleName: 'Orders', activePrefixes: ['/sales/orders'] },
+      { key: 'procurement-handoffs', label: 'Procurement Handoffs', icon: <OrderIcon />, path: '/procurement/handoffs', moduleName: 'Orders' },
       { key: 'accounts-receivable', label: 'Accounts Receivable', icon: <FinanceIcon />, path: '/sales/finance', moduleName: 'Accounts Receivable', activePrefixes: ['/sales/finance'] },
       { key: 'shipments', label: t('shipments'), icon: <ShipmentIcon />, path: '/sales/shipments', moduleName: 'Shipments', activePrefixes: ['/sales/shipments'] },
       {

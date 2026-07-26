@@ -16,6 +16,7 @@ public partial class ErpRfqAutomationContext
     public DbSet<GoodsReceiptLine> GoodsReceiptLines => Set<GoodsReceiptLine>();
     public DbSet<ProcurementEvent> ProcurementEvents => Set<ProcurementEvent>();
     public DbSet<ProcurementOutboxMessage> ProcurementOutboxMessages => Set<ProcurementOutboxMessage>();
+    public DbSet<ProcurementHandoff> ProcurementHandoffs => Set<ProcurementHandoff>();
 
     partial void ConfigureProcurementModel(ModelBuilder modelBuilder);
 
@@ -92,6 +93,71 @@ public partial class ErpRfqAutomationContext
         ConfigurePurchaseOrders(modelBuilder);
         ConfigureReceipts(modelBuilder);
         ConfigureEventsAndOutbox(modelBuilder);
+        ConfigureProcurementHandoffs(modelBuilder);
+    }
+
+    private void ConfigureProcurementHandoffs(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<OrderItem>().HasAlternateKey(x => new { x.Id, x.OrderId });
+        modelBuilder.Entity<ProcurementHandoff>(entity =>
+        {
+            entity.ToTable("procurement_handoffs");
+            entity.HasKey(x => x.Id);
+            entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
+            entity.HasCheckConstraint("CK_procurement_handoffs_Values",
+                "\"RequiredQuantity\" > 0 AND \"SelectedUnitCost\" >= 0 AND (\"ExternalOrderedQuantity\" IS NULL OR \"ExternalOrderedQuantity\" > 0) AND (\"ExternalApprovedUnitCost\" IS NULL OR \"ExternalApprovedUnitCost\" >= 0)");
+            entity.HasCheckConstraint("CK_procurement_handoffs_Destination",
+                "\"DestinationType\" IN ('WAREHOUSE','DROP_SHIP') AND (\"DestinationType\" <> 'WAREHOUSE' OR \"WarehouseId\" IS NOT NULL)");
+            entity.HasCheckConstraint("CK_procurement_handoffs_Status",
+                "\"Status\" IN ('CREATED','EXTERNAL_PO_CREATED','SUPPLIER_CONFIRMED','PARTIALLY_RECEIVED','RECEIVED','CANCELLED')");
+            entity.Property(x => x.NexoraSerial).HasMaxLength(100).IsRequired();
+            entity.Property(x => x.DestinationType).HasMaxLength(24).IsRequired();
+            entity.Property(x => x.DeliveryLocation).HasMaxLength(500);
+            entity.Property(x => x.ExternalSystemTarget).HasMaxLength(100).IsRequired();
+            entity.Property(x => x.Status).HasMaxLength(32).IsRequired();
+            entity.Property(x => x.IdempotencyKey).HasMaxLength(160).IsRequired();
+            entity.Property(x => x.RequestHash).HasMaxLength(64).IsRequired();
+            entity.Property(x => x.ExternalSupplierPoNumber).HasMaxLength(160);
+            entity.Property(x => x.ExternalSupplierPoLineNumber).HasMaxLength(80);
+            entity.Property(x => x.ExternalStatus).HasMaxLength(80);
+            entity.Property(x => x.SourceOfTruth).HasMaxLength(100);
+            entity.Property(x => x.CreatedBy).HasMaxLength(255).IsRequired();
+            entity.Property(x => x.ModifiedBy).HasMaxLength(255);
+            entity.Property(x => x.RequiredQuantity).HasPrecision(18, 4);
+            entity.Property(x => x.SelectedUnitCost).HasPrecision(18, 4);
+            entity.Property(x => x.ExternalOrderedQuantity).HasPrecision(18, 4);
+            entity.Property(x => x.ExternalApprovedUnitCost).HasPrecision(18, 4);
+            entity.Property(x => x.Version).HasDefaultValue(1).IsConcurrencyToken();
+            entity.HasIndex(x => new { x.BusinessUnitId, x.CustomerOrderLineId }).IsUnique();
+            entity.HasIndex(x => new { x.BusinessUnitId, x.IdempotencyKey }).IsUnique();
+            entity.HasIndex(x => new { x.BusinessUnitId, x.ExternalSupplierPoNumber, x.ExternalSupplierPoLineNumber })
+                .IsUnique().HasFilter("\"ExternalSupplierPoNumber\" IS NOT NULL");
+            entity.HasOne<Order>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.CustomerOrderId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<OrderItem>().WithMany()
+                .HasForeignKey(x => new { x.CustomerOrderLineId, x.CustomerOrderId })
+                .HasPrincipalKey(x => new { x.Id, x.OrderId })
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<CommercialDemandLine>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.CommercialDemandLineId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<SourcingAward>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.SourcingAwardId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<SupplierQuotedItem>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.SupplierQuotedItemId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Supplier>().WithMany().HasForeignKey(x => new { x.SupplierId, x.BusinessUnitId })
+                .HasPrincipalKey(x => new { x.Id, x.Buid }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Currency>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.CurrencyId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Rfq>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.RfqId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Rfqitem>().WithMany().HasForeignKey(x => new { x.RfqItemId, x.RfqId })
+                .HasPrincipalKey(x => new { x.Id, x.Rfqid }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Warehouse>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.WarehouseId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasQueryFilter(x => CurrentTenantId == null || x.BusinessUnitId == CurrentTenantId);
+        });
     }
 
     private void ConfigureSourcingCases(ModelBuilder modelBuilder)

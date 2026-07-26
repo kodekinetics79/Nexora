@@ -3,6 +3,10 @@ import type { LoginCredentials } from './environment';
 
 export async function loginThroughUi(page: Page, credentials: LoginCredentials): Promise<void> {
   await page.goto('/login');
+  await page.evaluate(() => {
+    localStorage.removeItem('token');
+    localStorage.removeItem('userData');
+  });
   await page.getByLabel('Email Address').fill(credentials.email);
   await page.getByLabel('Password').fill(credentials.password);
   await page.getByRole('button', { name: 'LOGIN' }).click();

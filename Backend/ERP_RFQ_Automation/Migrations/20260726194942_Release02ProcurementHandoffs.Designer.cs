@@ -3,6 +3,7 @@ using System;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace ERP_RFQ_Automation.Migrations
 {
     [DbContext(typeof(ErpRfqAutomationContext))]
-    partial class ErpRfqAutomationContextModelSnapshot : ModelSnapshot
+    [Migration("20260726194942_Release02ProcurementHandoffs")]
+    partial class Release02ProcurementHandoffs
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -13727,8 +13730,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("BusinessUnitId", "IdempotencyKey")
                         .IsUnique();
 
-                    b.HasIndex("BusinessUnitId", "RfqId");
-
                     b.HasIndex("BusinessUnitId", "SourcingAwardId");
 
                     b.HasIndex("BusinessUnitId", "SupplierQuotedItemId");
@@ -13736,8 +13737,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("BusinessUnitId", "WarehouseId");
 
                     b.HasIndex("CustomerOrderLineId", "CustomerOrderId");
-
-                    b.HasIndex("RfqItemId", "RfqId");
 
                     b.HasIndex("SupplierId", "BusinessUnitId");
 
@@ -17944,13 +17943,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
-                    b.HasOne("ERP_RFQ_Automation.Models.Rfq", null)
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "RfqId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
                     b.HasOne("ERP_RFQ_Automation.Agent.Models.SourcingAward", null)
                         .WithMany()
                         .HasForeignKey("BusinessUnitId", "SourcingAwardId")
@@ -17975,13 +17967,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .WithMany()
                         .HasForeignKey("CustomerOrderLineId", "CustomerOrderId")
                         .HasPrincipalKey("Id", "OrderId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("ERP_RFQ_Automation.Models.Rfqitem", null)
-                        .WithMany()
-                        .HasForeignKey("RfqItemId", "RfqId")
-                        .HasPrincipalKey("Id", "Rfqid")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 

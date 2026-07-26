@@ -108,6 +108,9 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
             select new { solicitation.SentOn, solicitation.RespondedOn }).ToArrayAsync(cancellationToken);
         var responseDays = responseRows.Select(x => (decimal)(x.RespondedOn!.Value - x.SentOn).TotalDays).ToArray();
         var reliability = projected.Where(x => x.ReliabilitySnapshot.HasValue).Select(x => x.ReliabilitySnapshot!.Value).ToArray();
+        var handoffs = await context.ProcurementHandoffs.AsNoTracking().Where(x =>
+            x.BusinessUnitId == businessUnitId && x.SupplierId == supplierId)
+            .OrderByDescending(x => x.CreatedOn).Take(50).ToListAsync(cancellationToken);
         return new SupplierCommercialEvaluation(supplierId, supplier.Name, revisions.Count, awards.Count, wonSupport,
             projected.Count(x => x.IsActive && x.ValidUntil > DateTime.UtcNow),
             responseDays.Length == 0 ? null : decimal.Round(responseDays.Average(), 2),
@@ -116,17 +119,20 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
                 .Select(x => new ValuePoint(x.CurrencyId!.Value, x.LandedUnitCost!.Value,
                     x.QuoteDate ?? x.CreatedDate, x.Id)), currencies),
             awards.Select(x => new CommercialEvidenceLink("SourcingAward", x.Id, $"Award {x.Id}", x.CreatedOn,
-                wonSupport > 0 ? "SUPPORTED_WIN" : "SELECTED_OFFER")).Take(50).ToArray());
+                wonSupport > 0 ? "SUPPORTED_WIN" : "SELECTED_OFFER"))
+                .Concat(handoffs.Select(x => new CommercialEvidenceLink("ProcurementHandoff", x.Id,
+                    x.ExternalSupplierPoNumber ?? $"Handoff {x.Id}", x.LastSynchronizedOn ?? x.CreatedOn,
+                    x.Status))).Take(50).ToArray());
     }
 
     public async Task<IReadOnlyCollection<SupplierCommercialEvaluation>> GetSuppliersAsync(long businessUnitId,
         int limit, CancellationToken cancellationToken = default)
     {
         EnsureTenant(businessUnitId);
-        var supplierIds = await context.SupplierQuotes.AsNoTracking()
-            .Where(x => x.BusinessUnitId == businessUnitId)
-            .GroupBy(x => x.SupplierId).OrderByDescending(x => x.Count()).Take(Math.Clamp(limit, 1, 200))
-            .Select(x => x.Key).ToArrayAsync(cancellationToken);
+        var supplierIds = await context.SupplierQuotes.AsNoTracking().Where(x => x.BusinessUnitId == businessUnitId)
+            .Select(x => x.SupplierId).Union(context.ProcurementHandoffs.AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId).Select(x => x.SupplierId))
+            .Distinct().Take(Math.Clamp(limit, 1, 200)).ToArrayAsync(cancellationToken);
         var results = new List<SupplierCommercialEvaluation>(supplierIds.Length);
         foreach (var supplierId in supplierIds)
             results.Add(await GetSupplierAsync(businessUnitId, supplierId, cancellationToken));
@@ -171,9 +177,13 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
             x.CustomerId == customerId, cancellationToken);
         var quotes = await context.Quotes.AsNoTracking().Include(x => x.Status).Include(x => x.Currency)
             .Where(x => x.BusinessUnitId == businessUnitId && x.CustomerId == customerId).ToListAsync(cancellationToken);
-        var decided = quotes.Where(x => x.OutcomeOn.HasValue).ToArray();
-        var won = decided.Where(x => Outcome(x) == "WON").ToArray();
-        var lost = decided.Where(x => Outcome(x) is "LOST" or "EXPIRED").ToArray();
+        var orderWins = await context.Orders.AsNoTracking().Where(x => x.BusinessUnitId == businessUnitId
+                && x.CustomerId == customerId && x.SourceType == OrderSourceTypes.CustomerAward && x.QuoteId.HasValue)
+            .GroupBy(x => x.QuoteId!.Value).ToDictionaryAsync(x => x.Key,
+                x => x.Max(order => order.OrderDate), cancellationToken);
+        var decided = quotes.Where(x => x.OutcomeOn.HasValue || orderWins.ContainsKey(x.Id)).ToArray();
+        var won = decided.Where(x => orderWins.ContainsKey(x.Id) || Outcome(x) == "WON").ToArray();
+        var lost = decided.Where(x => !orderWins.ContainsKey(x.Id) && Outcome(x) is "LOST" or "EXPIRED").ToArray();
         var reasonIds = lost.Where(x => x.OutcomeReasonId.HasValue).Select(x => x.OutcomeReasonId!.Value).Distinct().ToArray();
         var reasons = await context.SetupMasters.AsNoTracking().Where(x => x.BusinessUnitId == businessUnitId &&
             reasonIds.Contains(x.SetupId)).ToDictionaryAsync(x => x.SetupId,
@@ -186,13 +196,16 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
         var currencyNames = quotes.Where(x => x.CurrencyId.HasValue).GroupBy(x => x.CurrencyId!.Value)
             .ToDictionary(x => x.Key, x => x.First().Currency?.Code ?? $"Currency {x.Key}");
         var values = won.Where(x => x.CurrencyId.HasValue && x.TotalAmount.HasValue)
-            .Select(x => new ValuePoint(x.CurrencyId!.Value, x.TotalAmount!.Value, x.OutcomeOn!.Value, x.Id));
+            .Select(x => new ValuePoint(x.CurrencyId!.Value, x.TotalAmount!.Value,
+                x.OutcomeOn ?? orderWins[x.Id], x.Id));
         return new CustomerCommercialMemory(customerId, customer.Name, inquiryCount, quotes.Count, decided.Length,
             won.Length, lost.Length, quotes.Count - decided.Length,
             decided.Length == 0 ? null : decimal.Round(100m * won.Length / decided.Length, 2),
             Summaries(values, currencyNames), reasonCounts,
-            decided.OrderByDescending(x => x.OutcomeOn).Take(50).Select(x => new CommercialEvidenceLink(
-                "CustomerQuote", x.Id, x.QuoteNo, x.OutcomeOn, Outcome(x) + "_OUTCOME")).ToArray());
+            decided.OrderByDescending(x => x.OutcomeOn ?? orderWins.GetValueOrDefault(x.Id)).Take(50)
+                .Select(x => new CommercialEvidenceLink("CustomerQuote", x.Id, x.QuoteNo,
+                    x.OutcomeOn ?? orderWins.GetValueOrDefault(x.Id),
+                    orderWins.ContainsKey(x.Id) ? "CUSTOMER_ORDER_WIN" : Outcome(x) + "_OUTCOME")).ToArray());
     }
 
     public async Task<IReadOnlyCollection<CustomerCommercialMemory>> GetCustomersAsync(long businessUnitId,
@@ -222,9 +235,15 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
             x.LeadId.HasValue && leadIds.Contains(x.LeadId.Value)).Select(x => x.Id).ToArrayAsync(cancellationToken);
         var quotes = await context.Quotes.AsNoTracking().Include(x => x.Status).Where(x => x.BusinessUnitId == businessUnitId &&
             x.Rfqid.HasValue && rfqIds.Contains(x.Rfqid.Value)).ToListAsync(cancellationToken);
-        var decided = quotes.Where(x => x.OutcomeOn.HasValue).ToArray();
-        var won = decided.Where(x => Outcome(x) == "WON").ToArray();
-        var lost = decided.Where(x => Outcome(x) is "LOST" or "EXPIRED").ToArray();
+        var quoteIds = quotes.Select(x => x.Id).ToArray();
+        var orderWins = await context.Orders.AsNoTracking().Where(x => x.BusinessUnitId == businessUnitId
+                && x.SourceType == OrderSourceTypes.CustomerAward && x.QuoteId.HasValue
+                && quoteIds.Contains(x.QuoteId.Value))
+            .GroupBy(x => x.QuoteId!.Value).ToDictionaryAsync(x => x.Key,
+                x => x.Max(order => order.OrderDate), cancellationToken);
+        var decided = quotes.Where(x => x.OutcomeOn.HasValue || orderWins.ContainsKey(x.Id)).ToArray();
+        var won = decided.Where(x => orderWins.ContainsKey(x.Id) || Outcome(x) == "WON").ToArray();
+        var lost = decided.Where(x => !orderWins.ContainsKey(x.Id) && Outcome(x) is "LOST" or "EXPIRED").ToArray();
         var reasonIds = lost.Where(x => x.OutcomeReasonId.HasValue).Select(x => x.OutcomeReasonId!.Value).Distinct().ToArray();
         var reasonCodes = await context.SetupMasters.AsNoTracking().Where(x => x.BusinessUnitId == businessUnitId &&
             reasonIds.Contains(x.SetupId)).ToDictionaryAsync(x => x.SetupId, x => x.SetupCode ?? "UNSPECIFIED", cancellationToken);
@@ -239,8 +258,10 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
             followUps.Count(x => x.Status is ERP_RFQ_Automation.CommercialIntelligence.Sales.FollowUpStatus.Open or ERP_RFQ_Automation.CommercialIntelligence.Sales.FollowUpStatus.InProgress),
             followUps.Count(x => x.Status == ERP_RFQ_Automation.CommercialIntelligence.Sales.FollowUpStatus.Completed),
             decided.Length == 0 ? null : decimal.Round(100m * won.Length / decided.Length, 2),
-            decided.OrderByDescending(x => x.OutcomeOn).Take(50).Select(x => new CommercialEvidenceLink(
-                "CustomerQuote", x.Id, x.QuoteNo, x.OutcomeOn, Outcome(x) + ":" + Reason(x))).ToArray());
+            decided.OrderByDescending(x => x.OutcomeOn ?? orderWins.GetValueOrDefault(x.Id)).Take(50)
+                .Select(x => new CommercialEvidenceLink("CustomerQuote", x.Id, x.QuoteNo,
+                    x.OutcomeOn ?? orderWins.GetValueOrDefault(x.Id),
+                    orderWins.ContainsKey(x.Id) ? "CUSTOMER_ORDER_WIN" : Outcome(x) + ":" + Reason(x))).ToArray());
     }
 
     public async Task<IReadOnlyCollection<SalesRepCommercialMemory>> GetSalesRepsAsync(long businessUnitId,

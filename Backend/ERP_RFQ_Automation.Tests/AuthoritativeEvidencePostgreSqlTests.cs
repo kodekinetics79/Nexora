@@ -245,8 +245,17 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
             var quarantined = NewIngestion(context, queue, root, new FileInspectionResult(
                 FileInspectionStatus.Quarantined, "text/csv", bytes.Length,
                 "Scanner unavailable.", "clamav", null));
+            var occurrence = new ExtractionJobMetadata { SourceOccurrenceId = "quarantined-retry" };
             await Assert.ThrowsAsync<DocumentInspectionException>(() => quarantined.IngestAsync(
-                bytes, "customer-rfq.csv", tenantId, ExtractionSourceType.ManualUpload));
+                bytes, "customer-rfq.csv", tenantId, ExtractionSourceType.ManualUpload, metadata: occurrence));
+
+            context.ChangeTracker.Clear();
+            var exactRetry = NewIngestion(context, queue, root, new FileInspectionResult(
+                FileInspectionStatus.Quarantined, "text/csv", bytes.Length,
+                "Scanner unavailable.", "clamav", null));
+            var retryError = await Assert.ThrowsAsync<DocumentInspectionException>(() => exactRetry.IngestAsync(
+                bytes, "customer-rfq.csv", tenantId, ExtractionSourceType.ManualUpload, metadata: occurrence));
+            Assert.Equal(FileInspectionStatus.Quarantined, retryError.Inspection.Status);
 
             context.ChangeTracker.Clear();
             var replay = NewIngestion(context, queue, root, ClearedInspection());

@@ -189,7 +189,8 @@ public sealed class DocumentIngestionService : IDocumentIngestion
         var sourceIsCleared = source.SecurityStatus == DocumentSecurityStatus.Cleared;
         if (!inspection.IsCleared || !sourceIsCleared)
         {
-            corpus.RequireReview();
+            if (corpus.Status is CorpusStatus.Received or CorpusStatus.Processing)
+                corpus.RequireReview();
             var rejectedInspection = sourceIsCleared || !inspection.IsCleared
                 ? inspection
                 : new FileInspectionResult(
@@ -201,16 +202,17 @@ public sealed class DocumentIngestionService : IDocumentIngestion
                     "The authoritative source document has not passed security inspection.",
                     "evidence-ledger",
                     null);
-            occurrence.MarkRejected(
-                "SecurityInspection",
-                rejectedInspection.Status == FileInspectionStatus.Rejected ? "document_rejected" : "document_quarantined",
-                JsonSerializer.Serialize(new
-                {
-                    status = rejectedInspection.Status.ToString(),
-                    reason = rejectedInspection.Reason,
-                    scanner = rejectedInspection.ScannerEngine,
-                    signature = rejectedInspection.ScannerSignature
-                }));
+            if (occurrence.IntakeStatus == IntakeOccurrenceStatus.Accepted)
+                occurrence.MarkRejected(
+                    "SecurityInspection",
+                    rejectedInspection.Status == FileInspectionStatus.Rejected ? "document_rejected" : "document_quarantined",
+                    JsonSerializer.Serialize(new
+                    {
+                        status = rejectedInspection.Status.ToString(),
+                        reason = rejectedInspection.Reason,
+                        scanner = rejectedInspection.ScannerEngine,
+                        signature = rejectedInspection.ScannerSignature
+                    }));
             await _context.SaveChangesAsync(ct);
             await transaction.CommitAsync(ct);
             throw new DocumentInspectionException(rejectedInspection);

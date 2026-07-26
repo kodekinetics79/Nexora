@@ -178,6 +178,7 @@ builder.Services.AddScoped<IQuoteRepository, QuoteRepository>();
 builder.Services.AddScoped<ISupplierPurchaseHistoryRepository, SupplierPurchaseHistoryRepository>();
 builder.Services.AddScoped<ISupplierQuotedItemRepository, SupplierQuotedItemRepository>();
 builder.Services.AddScoped<IProcurementApplicationService, ProcurementApplicationService>();
+builder.Services.AddScoped<IProcurementHandoffService, ProcurementHandoffService>();
 builder.Services.AddScoped<SupplierQuoteInboxService>();
 builder.Services.AddScoped<SupplierQuoteCommercialService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialLearning.CommercialLearningService>();

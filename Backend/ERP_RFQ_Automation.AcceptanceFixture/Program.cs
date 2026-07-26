@@ -7,6 +7,7 @@ using ERP_RFQ_Automation.Inventory;
 using ERP_RFQ_Automation.Inventory.Commercial;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.OrderToCash;
 using ERP_RFQ_Automation.ProductIntelligence;
 using Microsoft.EntityFrameworkCore;
 using Models = ERP_RFQ_Automation.Models;
@@ -48,6 +49,8 @@ foreach (var moduleName in permissionModules)
 }
 var otherLeadsModule = await EnsureModuleAsync("Leads");
 await EnsurePermissionAsync(otherTenantId, otherRole.SetupId, otherLeadsModule.Id, create: true, edit: true);
+var otherOrdersModule = await EnsureModuleAsync("Orders");
+await EnsurePermissionAsync(otherTenantId, otherRole.SetupId, otherOrdersModule.Id, create: false, edit: false);
 await db.SaveChangesAsync();
 
 var northstar = await EnsureCustomerAsync("Northstar Process Controls", "buyer@northstar.local");
@@ -292,6 +295,8 @@ await EnsureSetupAsync("OrderStatus", "DRAFT", "Draft");
 var orderStatus = await EnsureSetupAsync("OrderStatus", "CONFIRMED", "Confirmed");
 var allocationOrder = await EnsureOrderAsync(mainQuote, mainRfq, sixLineLead, orderStatus.SetupId,
     sufficient, primaryWarehouse);
+var sourcedCustomerOrderLineId = await EnsureSourcedCustomerOrderAsync(mainQuote, mainRfq, outOfStock,
+    currency.Id);
 
 var openFollowUp = await EnsureFollowUpRecordAsync(sarah.Id, mainQuote.Id, abc.Id, now.AddHours(8),
     80, "CORE_E2E_OPEN", "core-e2e-open-followup");
@@ -319,7 +324,17 @@ async Task<SetupMaster> EnsureRoleAsync(long bu, string code, string name)
 async Task<User> EnsureUserAsync(long bu, long role, string email, string first, string last)
 {
     var existing = await db.Users.SingleOrDefaultAsync(x => x.Buid == bu && x.Email == email);
-    if (existing is not null) return existing;
+    if (existing is not null)
+    {
+        existing.RoleId = role;
+        existing.FirstName = first;
+        existing.LastName = last;
+        existing.IsActive = true;
+        if (!BCrypt.Net.BCrypt.Verify(password, existing.PasswordHash))
+            existing.PasswordHash = BCrypt.Net.BCrypt.HashPassword(password);
+        await db.SaveChangesAsync();
+        return existing;
+    }
     var value = new User { Buid = bu, RoleId = role, Email = email, FirstName = first, LastName = last,
         PasswordHash = BCrypt.Net.BCrypt.HashPassword(password), ImageUrl = string.Empty, IsActive = true,
         CreatedBy = fixtureActor, CreatedOn = now, Timezone = "UTC", Region = "Acceptance" };
@@ -936,6 +951,101 @@ async Task<Order> EnsureOrderAsync(Quote quote, Rfq rfq, Lead lead, long statusI
     db.Add(order); await db.SaveChangesAsync(); return order;
 }
 
+async Task<long> EnsureSourcedCustomerOrderAsync(Quote quote, Rfq rfq, Product product, long currencyId)
+{
+    var existing = await db.Orders.Include(x => x.OrderItems).SingleOrDefaultAsync(x =>
+        x.BusinessUnitId == tenantId && x.OrderNo == "CORE-SOURCED-CUSTOMER-ORDER");
+    if (existing is not null) return existing.OrderItems.Single().Id;
+    var rfqLine = rfq.Rfqitems.Single(x => x.ProductId == product.Id);
+    var quoteLine = quote.QuoteItems.Single(x => x.RfqitemId == rfqLine.Id);
+    var po = await db.CustomerPurchaseOrders.Include(x => x.Lines).SingleOrDefaultAsync(x =>
+        x.BusinessUnitId == tenantId && x.CustomerId == abc.Id
+            && x.NormalizedExternalPoNumber == "ABC-PO-SOURCED-001");
+    if (po is null)
+    {
+        po = new CustomerPurchaseOrder
+        {
+            BusinessUnitId = tenantId, CommercialCaseId = quote.CommercialCaseId!.Value,
+            CustomerId = abc.Id, CurrencyId = currencyId, InternalNumber = "CPO-CORE-SOURCED-001",
+            ExternalPoNumber = "ABC-PO-SOURCED-001", NormalizedExternalPoNumber = "ABC-PO-SOURCED-001",
+            PoDate = now.Date, ReceivedOn = now, Status = CustomerPurchaseOrderStatuses.FullyAwarded,
+            Version = 2, CreatedOn = now, CreatedBy = fixtureActor
+        };
+        po.Lines.Add(new CustomerPurchaseOrderLine
+        {
+            BusinessUnitId = tenantId, ExternalLineReference = "3", ProductId = product.Id,
+            Description = quoteLine.ItemDescription ?? "Sourced Customer Order line",
+            OrderedQuantity = 12m, UnitPrice = quoteLine.UnitPrice, LineAmount = quoteLine.UnitPrice * 12m,
+            Version = 1
+        });
+        db.CustomerPurchaseOrders.Add(po);
+        await db.SaveChangesAsync();
+    }
+    var poLine = po.Lines.Single();
+    var award = await db.CustomerAwards.Include(x => x.LineAllocations).SingleOrDefaultAsync(x =>
+        x.BusinessUnitId == tenantId && x.AwardNumber == "AWD-CORE-SOURCED-001");
+    if (award is null)
+    {
+        award = new CustomerAward
+        {
+            BusinessUnitId = tenantId, AwardNumber = "AWD-CORE-SOURCED-001",
+            CustomerPurchaseOrderId = po.Id, QuoteId = quote.Id, CommercialCaseId = quote.CommercialCaseId!.Value,
+            CustomerId = abc.Id, CurrencyId = currencyId, Status = CustomerAwardStatuses.Draft,
+            Version = 1, CreatedOn = now, CreatedBy = fixtureActor, ModifiedOn = now, ModifiedBy = fixtureActor
+        };
+        award.LineAllocations.Add(new CustomerAwardLineAllocation
+        {
+            BusinessUnitId = tenantId, CustomerPurchaseOrderLineId = poLine.Id, QuoteItemId = quoteLine.Id,
+            AwardedQuantity = 12m, UnitPriceSnapshot = quoteLine.UnitPrice,
+            DiscountSnapshot = quoteLine.Discount ?? 0m, TaxSnapshot = quoteLine.TaxAmount ?? 0m,
+            TotalSnapshot = quoteLine.TotalAmount, Version = 1
+        });
+        db.CustomerAwards.Add(award);
+        await db.SaveChangesAsync();
+    }
+    if (award.Status == CustomerAwardStatuses.Draft)
+    {
+        award.Status = CustomerAwardStatuses.Confirmed;
+        award.ConfirmedOn = now;
+        award.ConfirmedBy = fixtureActor;
+        award.Version = 2;
+        award.ModifiedOn = now;
+        award.ModifiedBy = fixtureActor;
+        await db.SaveChangesAsync();
+    }
+    if (award.Status == CustomerAwardStatuses.Confirmed)
+    {
+        award.Status = CustomerAwardStatuses.Ordered;
+        award.Version = 3;
+        await db.SaveChangesAsync();
+    }
+    var allocation = award.LineAllocations.Single();
+    var orderStatusId = (await EnsureSetupAsync("OrderStatus", "DRAFT", "Draft")).SetupId;
+    var order = new Order
+    {
+        OrderNo = "CORE-SOURCED-CUSTOMER-ORDER", QuoteId = quote.Id, Rfqid = rfq.Id,
+        LeadId = rfq.LeadId, CustomerId = abc.Id, BusinessUnitId = tenantId,
+        StatusId = orderStatusId, CurrencyId = currencyId, SourceType = OrderSourceTypes.CustomerAward,
+        CustomerAwardId = award.Id, CommercialCaseId = quote.CommercialCaseId,
+        NexoraSerial = quote.NexoraSerial, ContactId = quote.ContactId, OrderDate = now,
+        SubTotal = allocation.AwardedQuantity * allocation.UnitPriceSnapshot,
+        DiscountAmount = allocation.DiscountSnapshot, TaxAmount = allocation.TaxSnapshot,
+        TotalAmount = allocation.TotalSnapshot, BalanceAmount = allocation.TotalSnapshot,
+        CreatedBy = fixtureActor, CreatedOn = now, IsActive = true
+    };
+    order.OrderItems.Add(new OrderItem
+    {
+        ProductId = product.Id, Description = poLine.Description, Quantity = allocation.AwardedQuantity,
+        UnitPrice = allocation.UnitPriceSnapshot, Discount = allocation.DiscountSnapshot,
+        TaxAmount = allocation.TaxSnapshot, TotalAmount = allocation.TotalSnapshot,
+        CustomerAwardLineAllocationId = allocation.Id, CreatedBy = fixtureActor,
+        CreatedDate = now, IsActive = true
+    });
+    db.Orders.Add(order);
+    await db.SaveChangesAsync();
+    return order.OrderItems.Single().Id;
+}
+
 async Task<FollowUpTask> EnsureFollowUpRecordAsync(long userId, long aggregateId, long customerId,
     DateTime dueAt, int priority, string purpose, string key)
 {
@@ -1034,6 +1144,7 @@ async Task PrintFixtureAsync()
     Console.WriteLine($"E2E_CORE_INVENTORY_FAILURE_LEAD_ID={inventoryFailureLead.Id}");
     Console.WriteLine($"E2E_CORE_RESERVATION_ID={reservation.Id}");
     Console.WriteLine($"E2E_CORE_DOUBLE_ALLOCATION_ORDER_ID={allocationOrder.Id}");
+    Console.WriteLine($"E2E_V2_SOURCED_CUSTOMER_ORDER_LINE_ID={sourcedCustomerOrderLineId}");
     Console.WriteLine($"E2E_CORE_STALE_QUOTE_ID={mainQuote.Id}");
     Console.WriteLine($"E2E_CORE_RFQ_CREATION_LEAD_ID={rfqCreationLead.Id}");
     Console.WriteLine($"E2E_CORE_RFQ_CREATION_NEXORA_SERIAL={rfqCreationLead.CommercialCaseReference}");

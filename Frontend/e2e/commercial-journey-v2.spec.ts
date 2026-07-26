@@ -1,7 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
-import { api, jsonOk, loginAs, required, requiredNumber } from './support/core-commercial';
+import * as XLSX from 'xlsx';
+import { api, apiUrl, jsonOk, loginAs, loginAsOtherTenant, required, requiredNumber } from './support/core-commercial';
 
 const evidenceDir = path.resolve('../docs/nexora/evidence/commercial-journey-v2');
 const rfqId = () => requiredNumber('E2E_CORE_RFQ_ID');
@@ -45,6 +46,41 @@ type ClientPoMatch = {
     customerOrderNumber?: string | null;
   };
   lines: Array<{ matchStatus: string; differences: string[] }>;
+};
+
+type ProcurementHandoff = {
+  id: number;
+  customerOrderId: number;
+  customerOrderNumber: string;
+  customerOrderLineId: number;
+  supplierId: number;
+  supplierName: string;
+  nexoraSerial: string;
+  requiredQuantity: number;
+  selectedUnitCost: number;
+  status: string;
+  externalSystemTarget: string;
+  externalSupplierPoNumber?: string | null;
+  sourceOfTruth?: string | null;
+  isAuthoritative: boolean;
+  version: number;
+};
+
+type SupplierQuoteDetail = {
+  supplierQuoteId: number;
+  version: number;
+  inboxStatus: string;
+  revisions: Array<{
+    revisionId: number;
+    captureChannel: string;
+    lines: Array<{ partNumber?: string | null; quantity: number; unitPrice: number }>;
+    evidence: Array<{
+      id: number;
+      confidence: number;
+      reviewRequired: boolean;
+      latestReviewStatus?: string | null;
+    }>;
+  }>;
 };
 
 const commandHeaders = (key: string) => ({
@@ -218,6 +254,28 @@ async function ensureClientPoAcceptance(
   ));
 }
 
+async function ensureProcurementHandoff(
+  page: Parameters<typeof api>[0], token: string,
+): Promise<ProcurementHandoff> {
+  const orderLineId = requiredNumber('E2E_V2_SOURCED_CUSTOMER_ORDER_LINE_ID');
+  const current = await jsonOk<ProcurementHandoff[]>(await api(
+    page, token, 'get', '/api/procurement-handoffs?limit=100',
+  ));
+  const existing = current.find((item) => item.customerOrderLineId === orderLineId);
+  if (existing) return existing;
+  await page.goto('/procurement/handoffs');
+  await page.getByRole('button', { name: 'Create handoff' }).click();
+  await page.getByLabel('Sourced Customer Order line').click();
+  await page.getByRole('option').filter({ hasText: required('E2E_CORE_NEXORA_SERIAL') }).click();
+  await page.getByLabel('Delivery location').fill('ABC Engineering authorized acceptance ship-to');
+  await page.getByRole('button', { name: 'Create handoff', exact: true }).last().click();
+  await expect(page.getByRole('dialog')).not.toBeVisible();
+  const refreshed = await jsonOk<ProcurementHandoff[]>(await api(
+    page, token, 'get', '/api/procurement-handoffs?limit=100',
+  ));
+  return refreshed.find((item) => item.customerOrderLineId === orderLineId)!;
+}
+
 test.describe.configure({ mode: 'serial' });
 
 test('01 RFQ Command Workspace opens through the normal authenticated route', async ({ page }) => {
@@ -254,12 +312,13 @@ test('03 RFQ line evidence opens without inventing unavailable provenance', asyn
   await page.screenshot({ path: path.join(evidenceDir, 'rfq-command-workspace.png'), fullPage: true });
 });
 
-test('04 RFQ Command Workspace remains usable on mobile', async ({ page }) => {
-  await page.setViewportSize({ width: 375, height: 812 });
+test('04 RFQ line outcomes use progressive disclosure for the next commercial action', async ({ page }) => {
   await loginAs(page, 'manager');
   await page.goto(`/procurement/rfqs/view/${requiredNumber('E2E_CORE_RFQ_ID')}`);
-  await expect(page.getByRole('button', { name: /Total lines/i })).toBeVisible();
-  await expect(page.locator('body')).not.toHaveCSS('overflow-x', 'scroll');
+  await page.getByRole('button', { name: /Sourcing required/i }).click();
+  const sourcingRow = page.getByRole('row').filter({ hasText: required('E2E_CORE_PARTIAL_ATP_PART') });
+  await expect(sourcingRow).toContainText(/to source/i);
+  await expect(sourcingRow.getByRole('button', { name: 'Create / Open Sourcing Case' })).toBeVisible();
 });
 
 test('05 out-of-stock RFQ line opens a real Sourcing Case with known Suppliers', async ({ page }) => {
@@ -375,6 +434,151 @@ test('11 approved Supplier offer prices the actual Customer Quote with cost evid
   await page.screenshot({ path: path.join(evidenceDir, 'supplier-offer-customer-pricing.png'), fullPage: true });
 });
 
+test('12 XLSX Supplier Quote extracts locally while PDF enters governed review', async ({ page }) => {
+  const token = await loginAs(page, 'manager');
+  const sourcingCase = await ensureOutOfStockCase(page, token);
+  const workbench = await getWorkbench(page, token);
+  const solicitation = workbench.solicitations.find((item) => item.supplierName === 'Atlas Automation Partners')!;
+  expect(solicitation).toBeTruthy();
+  const existing = await jsonOk<Array<{ supplierQuoteId: number; supplierQuoteReference: string }>>(
+    await api(page, token, 'get', '/api/supplier-quote-inbox?limit=200'),
+  );
+  let spreadsheetQuoteId = existing.find((item) => item.supplierQuoteReference === 'V2-XLSX-LOCAL-002')?.supplierQuoteId;
+  if (!spreadsheetQuoteId) {
+    const sheet = XLSX.utils.json_to_sheet([{
+      'Part number': required('E2E_CORE_OUT_OF_STOCK_PART'),
+      Description: 'Native spreadsheet supplier response', Quantity: 12,
+      'Unit price': 443, 'Lead time': 8, Revision: 'inspection-fix-2',
+    }]);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, sheet, 'Supplier Quote');
+    const upload = await page.request.post(`${apiUrl}/api/supplier-quote-inbox/documents`, {
+      headers: { Authorization: `Bearer ${token}`, ...commandHeaders('commercial-v2-xlsx-intake-2') },
+      multipart: {
+        File: { name: 'v2-supplier-quote.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', buffer: Buffer.from(XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' })) },
+        SupplierId: String(solicitation.supplierId), SupplierSolicitationId: String(solicitation.id),
+        SourcingCaseId: String(sourcingCase.id), NexoraSerial: sourcingCase.nexoraSerial,
+        SupplierQuoteReference: 'V2-XLSX-LOCAL-002', RevisionNumber: '1',
+        CurrencyId: String(requiredNumber('E2E_CORE_CURRENCY_ID')),
+        ValidUntil: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+        Incoterms: 'DAP', PaymentTerms: 'Net 30', Notes: 'Authorized local XLSX acceptance.',
+      },
+    });
+    const result = await jsonOk<{ supplierQuoteId: number; projectionStatus: string }>(upload);
+    spreadsheetQuoteId = result.supplierQuoteId;
+    expect(result.projectionStatus).toBe('REVIEW_REQUIRED');
+  }
+  const detail = await jsonOk<SupplierQuoteDetail>(await api(
+    page, token, 'get', `/api/supplier-quote-inbox/${spreadsheetQuoteId}`,
+  ));
+  expect(detail.revisions[0].captureChannel).toBe('UPLOAD');
+  expect(detail.revisions[0].lines).toContainEqual(expect.objectContaining({
+    partNumber: required('E2E_CORE_OUT_OF_STOCK_PART'), quantity: 12, unitPrice: 443,
+  }));
+
+  const pdf = await page.request.post(`${apiUrl}/api/supplier-quote-inbox/documents`, {
+    headers: { Authorization: `Bearer ${token}`, ...commandHeaders('commercial-v2-pdf-intake') },
+    multipart: {
+      File: { name: 'v2-supplier-quote.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\n%%EOF') },
+      SupplierId: String(solicitation.supplierId), SupplierSolicitationId: String(solicitation.id),
+      SourcingCaseId: String(sourcingCase.id), NexoraSerial: sourcingCase.nexoraSerial,
+      SupplierQuoteReference: 'V2-PDF-REVIEW-001', RevisionNumber: '1',
+      CurrencyId: String(requiredNumber('E2E_CORE_CURRENCY_ID')),
+    },
+  });
+  const pdfResult = await jsonOk<{ supplierQuoteId?: number | null; projectionStatus: string }>(pdf);
+  expect(pdfResult.supplierQuoteId).toBeNull();
+  expect(pdfResult.projectionStatus).toBe('REVIEW_REQUIRED');
+});
+
+test('13 low-confidence critical Supplier Quote evidence requires and records review', async ({ page }) => {
+  const token = await loginAs(page, 'manager');
+  const sourcingCase = await ensureOutOfStockCase(page, token);
+  const workbench = await getWorkbench(page, token);
+  const solicitation = workbench.solicitations.find((item) => item.supplierName === 'Meridian Process Equipment')!;
+  const inbox = await jsonOk<Array<{ supplierQuoteId: number; supplierQuoteReference: string }>>(
+    await api(page, token, 'get', '/api/supplier-quote-inbox?limit=200'),
+  );
+  let supplierQuoteId = inbox.find((item) => item.supplierQuoteReference === 'V2-LOW-CONFIDENCE-001')?.supplierQuoteId;
+  if (!supplierQuoteId) {
+    const captured = await jsonOk<{ supplierQuoteId: number }>(await api(page, token, 'post', '/api/supplier-quote-inbox', {
+      supplierId: solicitation.supplierId, supplierSolicitationId: solicitation.id,
+      sourcingCaseId: sourcingCase.id, nexoraSerial: sourcingCase.nexoraSerial,
+      supplierQuoteReference: 'V2-LOW-CONFIDENCE-001', revisionNumber: 1,
+      captureChannel: 'UPLOAD', sourceDocumentId: null, sourceIdentity: 'authorized-low-confidence-field',
+      sourceSha256: 'c'.repeat(64), currencyId: requiredNumber('E2E_CORE_CURRENCY_ID'),
+      validUntil: new Date(Date.now() + 20 * 86_400_000).toISOString(), incoterms: 'DAP',
+      freightAmount: 20, taxAmount: 0, paymentTerms: 'Net 30', notes: 'Review acceptance evidence.',
+      lines: [{ lineNumber: 1, rfqItemId: sourcingCase.rfqItemId,
+        commercialDemandLineId: sourcingCase.commercialDemandLineId,
+        partNumber: required('E2E_CORE_OUT_OF_STOCK_PART'), manufacturer: 'Nexora Acceptance Controls',
+        supplierPartNumber: 'MER-LOW-001', description: 'Low confidence supplier response',
+        quantity: 12, availableQuantity: 12, unitOfMeasure: 'EA', unitPrice: 447,
+        minimumOrderQuantity: 1, leadTimeDays: 10, availabilityType: 'AVAILABLE_TO_ORDER',
+        originCountry: 'US', warranty: '12 months', isAlternate: false, exceptions: null,
+        evidence: [{ fieldName: 'UnitPrice', originalValue: '$447?', normalizedValue: '447',
+          confidence: 0.61, method: 'LOCAL_OCR', modelOrRuleVersion: 'local-ocr/v1',
+          sourcePage: 1, sourceRegion: 'page:1:price', critical: true }] }], evidence: [],
+    }, commandHeaders('commercial-v2-low-confidence-capture')));
+    supplierQuoteId = captured.supplierQuoteId;
+  }
+  let detail = await jsonOk<SupplierQuoteDetail>(await api(page, token, 'get', `/api/supplier-quote-inbox/${supplierQuoteId}`));
+  const revision = detail.revisions[0];
+  const evidence = revision.evidence.find((item) => item.confidence === 0.61)!;
+  expect(evidence).toBeTruthy();
+  await page.goto(`/procurement/supplier-quotes/${supplierQuoteId}`);
+  await expect(page.getByText('61%')).toBeVisible();
+  if (!evidence.latestReviewStatus) {
+    const response = await api(page, token, 'post',
+      `/api/supplier-quote-inbox/${supplierQuoteId}/revisions/${revision.revisionId}/evidence/${evidence.id}/reviews`,
+      { status: 'ACCEPTED', correctedValue: null, reason: 'Verified against authorized source evidence.' },
+      { 'X-Correlation-ID': 'commercial-v2-low-confidence-review' });
+    expect(response.status()).toBe(204);
+    detail = await jsonOk<SupplierQuoteDetail>(await api(page, token, 'get', `/api/supplier-quote-inbox/${supplierQuoteId}`));
+  }
+  expect(detail.revisions[0].evidence.find((item) => item.id === evidence.id)?.latestReviewStatus).toBe('ACCEPTED');
+});
+
+test('14 offer comparison remains grounded in persisted landed cost and lead time', async ({ page }) => {
+  const token = await loginAs(page, 'manager');
+  await captureAndProjectOffers(page, token);
+  await page.goto(`/procurement/rfqs/${rfqId()}/sourcing`);
+  await page.getByRole('tab', { name: /Supplier offers/i }).click();
+  await expect(page.getByRole('row').filter({ hasText: 'V2-ATLAS-001' })).toContainText(/\$449\.00.*9 days/s);
+});
+
+test('15 Supplier selection is retained as the governed sourcing award', async ({ page }) => {
+  const token = await loginAs(page, 'manager');
+  const workbench = await getWorkbench(page, token);
+  const line = workbench.lines.find((item) => item.partNumber === required('E2E_CORE_OUT_OF_STOCK_PART'))!;
+  const award = workbench.awards.find((item) => item.rfqItemId === line.id);
+  expect(award?.supplierName).toBe('Atlas Automation Partners');
+});
+
+test('16 Customer Quote shows the selected Supplier cost source', async ({ page }) => {
+  await loginAs(page, 'manager');
+  await page.goto(`/sales/quotes/view/${quoteId()}`);
+  await expect(page.getByText('SELECTED SUPPLIER QUOTE')).toBeVisible();
+  await expect(page.getByText('Atlas Automation Partners', { exact: false })).toBeVisible();
+});
+
+test('17 Customer Quote blocks silent use of insufficient Supplier validity', async ({ page }) => {
+  await loginAs(page, 'manager');
+  await page.goto(`/sales/quotes/view/${quoteId()}`);
+  await expect(page.getByText('Supplier validity does not support this Customer Quote')).toBeVisible();
+});
+
+test('18 quote lifecycle preserves completed follow-up history', async ({ page }) => {
+  const token = await loginAs(page, 'manager');
+  const followUps = await jsonOk<Array<{ quoteId: number; nexoraSerial: string; status: string }>>(
+    await api(page, token, 'get', '/api/commercial-intelligence/follow-ups'),
+  );
+  expect(followUps.some((item) => item.quoteId === quoteId()
+    && item.nexoraSerial === required('E2E_CORE_NEXORA_SERIAL') && item.status === 'Completed')).toBe(true);
+  await page.goto('/sales/follow-ups');
+  await expect(page.getByRole('heading', { name: 'Follow-ups' })).toBeVisible();
+});
+
 test('19 Client PO Inbox is visible in normal navigation with persisted lineage', async ({ page }) => {
   const token = await loginAs(page, 'manager');
   const match = await ensureClientPoAcceptance(page, token, 'exact');
@@ -420,7 +624,102 @@ test('23 exact Client PO acceptance creates a governed Customer Order', async ({
   expect(match.header.customerOrderId).toBeTruthy();
   expect(match.header.customerOrderNumber).toBeTruthy();
   await page.goto(`/sales/client-pos/${match.header.id}`);
-  await expect(page.getByRole('button', { name: 'Customer Order' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Customer Order', exact: true })).toBeVisible();
+});
+
+test('24 sourced Customer Order line creates a lineage-complete procurement handoff', async ({ page }) => {
+  const token = await loginAs(page, 'manager');
+  const handoff = await ensureProcurementHandoff(page, token);
+  expect(handoff.customerOrderLineId).toBe(requiredNumber('E2E_V2_SOURCED_CUSTOMER_ORDER_LINE_ID'));
+  expect(handoff.nexoraSerial).toBe(required('E2E_CORE_NEXORA_SERIAL'));
+  await page.goto('/procurement/handoffs');
+  await expect(page.getByRole('heading', { name: 'Procurement Handoffs' })).toBeVisible();
+  await expect(page.getByText(handoff.customerOrderNumber)).toBeVisible();
+  await expect(page.getByText(handoff.nexoraSerial, { exact: true })).toBeVisible();
+  await expect(page.getByText(handoff.supplierName)).toBeVisible();
+  await fs.mkdir(evidenceDir, { recursive: true });
+  await page.screenshot({ path: path.join(evidenceDir, 'procurement-handoff-created.png'), fullPage: true });
+});
+
+test('25 external Supplier PO reference is linked through controlled UI and remains non-authoritative', async ({ page }) => {
+  const token = await loginAs(page, 'manager');
+  let handoff = await ensureProcurementHandoff(page, token);
+  await page.goto('/procurement/handoffs');
+  const row = page.getByRole('row').filter({ hasText: handoff.customerOrderNumber });
+  await row.getByRole('button', { name: /external reference|Update status/ }).click();
+  await page.getByLabel('External Supplier PO number').fill('EXT-V2-PO-9001');
+  await page.getByLabel('External Supplier PO line').fill('10');
+  await page.getByRole('button', { name: 'Save reference' }).click();
+  await expect(page.getByRole('dialog')).not.toBeVisible();
+  handoff = await jsonOk<ProcurementHandoff>(await api(page, token, 'get', `/api/procurement-handoffs/${handoff.id}`));
+  expect(handoff.externalSupplierPoNumber).toBe('EXT-V2-PO-9001');
+  expect(handoff.isAuthoritative).toBe(false);
+  expect(handoff.status).toBe('CREATED');
+  expect(handoff.externalStatus).toBe('EXTERNAL_PO_CREATED');
+  await page.goto('/procurement/handoffs');
+  await expect(page.getByText('EXT-V2-PO-9001')).toBeVisible();
+  await expect(page.getByText('Not authoritative')).toBeVisible();
+  await expect(page.getByText(/Authorized manual entry/)).toBeVisible();
+});
+
+test('26 Customer Order and procurement evidence update commercial memory', async ({ page }) => {
+  const token = await loginAs(page, 'manager');
+  const handoff = await ensureProcurementHandoff(page, token);
+  const suppliers = await jsonOk<Array<{ supplierId: number; evidence: Array<{ recordType: string; recordId: number }> }>>(
+    await api(page, token, 'get', '/api/commercial-learning/suppliers?limit=100'),
+  );
+  const supplier = suppliers.find((item) => item.supplierId === handoff.supplierId)!;
+  expect(supplier.evidence.some((item) => item.recordType === 'ProcurementHandoff' && item.recordId === handoff.id)).toBe(true);
+  const customers = await jsonOk<Array<{ wonCount: number; evidence: Array<{ role: string }> }>>(
+    await api(page, token, 'get', '/api/commercial-learning/customers?limit=100'),
+  );
+  expect(customers.some((item) => item.wonCount > 0
+    && item.evidence.some((evidence) => evidence.role === 'CUSTOMER_ORDER_WIN'))).toBe(true);
+  await page.goto('/intelligence/commercial-memory');
+  await page.getByRole('tab', { name: 'Supplier evaluation' }).click();
+  await expect(page.getByText(handoff.supplierName)).toBeVisible();
+});
+
+test('27 role without Orders access cannot read or mutate procurement handoffs', async ({ page }) => {
+  const token = await loginAs(page, 'denied');
+  const read = await api(page, token, 'get', '/api/procurement-handoffs?limit=10');
+  expect(read.status()).toBe(403);
+  const create = await api(page, token, 'post', '/api/procurement-handoffs', {
+    customerOrderLineId: requiredNumber('E2E_V2_SOURCED_CUSTOMER_ORDER_LINE_ID'),
+    destinationType: 'DROP_SHIP', deliveryLocation: 'Denied',
+  }, commandHeaders('commercial-v2-denied-handoff'));
+  expect(create.status()).toBe(403);
+  await page.goto('/procurement/handoffs');
+  await expect(page.getByRole('alert')).toContainText('Access Denied');
+  await expect(page.getByRole('button', { name: 'Create handoff' })).toHaveCount(0);
+});
+
+test('28 procurement handoff is non-disclosing across authenticated tenants', async ({ page }) => {
+  const managerToken = await loginAs(page, 'manager');
+  const handoff = await ensureProcurementHandoff(page, managerToken);
+  const otherToken = await loginAsOtherTenant(page);
+  const direct = await api(page, otherToken, 'get', `/api/procurement-handoffs/${handoff.id}`);
+  expect(direct.status()).toBe(404);
+  const search = await jsonOk<ProcurementHandoff[]>(await api(
+    page, otherToken, 'get', `/api/procurement-handoffs?search=${encodeURIComponent(handoff.nexoraSerial)}&limit=10`,
+  ));
+  expect(search).toHaveLength(0);
+});
+
+test('29 RFQ Command Workspace remains usable on mobile', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 812 });
+  await loginAs(page, 'manager');
+  await page.goto(`/procurement/rfqs/view/${requiredNumber('E2E_CORE_RFQ_ID')}`);
+  await expect(page.getByRole('button', { name: /Total lines/i })).toBeVisible();
+  await expect(page.locator('body')).not.toHaveCSS('overflow-x', 'scroll');
+  await page.goto('/procurement/handoffs');
+  await expect(page.getByRole('heading', { name: 'Procurement Handoffs' })).toBeVisible();
+  await expect(page.getByText(required('E2E_CORE_NEXORA_SERIAL'), { exact: true })).toBeVisible();
+  await expect(page.getByText('EXT-V2-PO-9001')).toBeVisible();
+  await expect(page.getByText(/DROP SHIP/)).toBeVisible();
+  await expect(page.getByText('Not authoritative')).toBeVisible();
+  await expect(page.getByText(/Authorized manual entry/)).toBeVisible();
+  await expect(page.locator('body')).not.toHaveCSS('overflow-x', 'scroll');
 });
 
 test('30 Client PO review remains usable on mobile', async ({ page }) => {

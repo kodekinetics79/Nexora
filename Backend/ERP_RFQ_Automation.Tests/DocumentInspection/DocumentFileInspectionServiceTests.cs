@@ -84,6 +84,24 @@ public sealed class DocumentFileInspectionServiceTests
     }
 
     [Fact]
+    public async Task InspectAsync_DoesNotTreatUnusedMacroEnabledBinDefaultAsXlsm()
+    {
+        var contentTypes = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" +
+                           "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">" +
+                           "<Default Extension=\"bin\" ContentType=\"application/vnd.ms-excel.sheet.binary.macroEnabled.main\"/>" +
+                           "<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>" +
+                           "</Types>";
+        var package = CreateZip(
+            ("[Content_Types].xml", Encoding.UTF8.GetBytes(contentTypes)),
+            ("xl/workbook.xml", "<root/>"u8.ToArray()));
+
+        var result = await InspectAsync(package, "rfq.xlsx");
+
+        Assert.Equal(FileInspectionStatus.Cleared, result.Status);
+        Assert.Equal("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", result.DetectedContentType);
+    }
+
+    [Fact]
     public async Task InspectAsync_RejectsSignatureExtensionMismatchBeforeScanning()
     {
         var scanner = new RecordingScanner();
