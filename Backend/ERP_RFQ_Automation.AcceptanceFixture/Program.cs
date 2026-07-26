@@ -130,7 +130,10 @@ await EnsureWorkloadLeadAsync("CORE-WORKLOAD-LENA-01", lena.Id, 4, now.AddDays(1
 await EnsureFollowUpAsync(ahmed.Id, backupLead.Id, abc.Id, now.AddHours(4), 90, "OWNER_LEAVE_COVERAGE");
 await EnsureFollowUpAsync(daniel.Id, sixLineLead.Id, abc.Id, now.AddHours(-2), 60, "WORKLOAD_EVIDENCE");
 
+var currency = await EnsureCurrencyAsync("USD", "US Dollar", "$");
 var supplier = await EnsureSupplierAsync("Precision Controls Supply", "quotes@precision-controls.local");
+var supplierTwo = await EnsureSupplierAsync("Atlas Automation Partners", "quotes@atlas-automation.local");
+var supplierThree = await EnsureSupplierAsync("Meridian Process Equipment", "rfq@meridian-process.local");
 var category = await EnsureProductCategoryAsync("Core Acceptance Components");
 var sufficient = await EnsureProductAsync("CORE-ATP-100", "Acceptance Valve Actuator", category.Id, 5, supplier.Id);
 var partial = await EnsureProductAsync("CORE-PARTIAL-200", "Acceptance Pressure Regulator", category.Id, 14, supplier.Id);
@@ -158,7 +161,11 @@ await EnsureReservationAsync(partialStock.Id, 1, "core-reservation-partial");
 await EnsureIncomingAsync(incomingProduct.Id, incomingStock.Id, transitWarehouse.Id, 30, 5, 3,
     DateOnly.FromDateTime(now.AddDays(7)), "CORE-PO-INCOMING-400");
 await EnsurePurchaseHistoryAsync(outOfStock.Id, supplier.Id, 25, 418.50m, "USD", "CPOOOS300");
+await EnsurePurchaseHistoryAsync(outOfStock.Id, supplierTwo.Id, 18, 431.75m, "USD", "CPOOOS301");
+await EnsurePurchaseHistoryAsync(outOfStock.Id, supplierThree.Id, 30, 425.25m, "USD", "CPOOOS302");
 await EnsureSupplierQuoteAsync(supplier.Id, "CORE-OOS-300", 12, 452m, "CORE-SQ-OOS-300");
+await EnsureSupplierQuoteAsync(supplierTwo.Id, "CORE-OOS-300", 12, 446m, "CORE-SQ-OOS-300-ATLAS");
+await EnsureSupplierQuoteAsync(supplierThree.Id, "CORE-OOS-300", 12, 449m, "CORE-SQ-OOS-300-MERIDIAN");
 await EnsureSupplierQuoteAsync(supplier.Id, "X-UNKNOWN-900", 5, 87.25m, "CORE-SQ-UNKNOWN-900");
 
 var revisedSixLineLead = await EnsureReconciledOccurrenceAsync(
@@ -473,10 +480,46 @@ async Task EnsureFollowUpAsync(long userId, long aggregateId, long customerId, D
 async Task<Supplier> EnsureSupplierAsync(string name, string email)
 {
     var existing = await db.Suppliers.SingleOrDefaultAsync(x => x.Buid == tenantId && x.Name == name);
-    if (existing is not null) return existing;
+    if (existing is not null)
+    {
+        existing.GovernanceStatus = SupplierGovernanceStatuses.Approved;
+        existing.VerificationStatus = SupplierVerificationStatuses.Verified;
+        existing.ComplianceStatus = SupplierComplianceStatuses.Cleared;
+        existing.RiskStatus = SupplierRiskStatuses.Low;
+        existing.ReadinessStatus = SupplierReadinessStatuses.Ready;
+        await db.SaveChangesAsync();
+        return existing;
+    }
     var value = new Supplier { Buid = tenantId, Name = name, ContactEmail = email, ImageUrl = string.Empty,
         PaymentTerms = "Net 30", SuccessRate = 94, AvgResponseTime = 8, IsActive = true, CreatedBy = fixtureActor, CreatedOn = now };
+    value.GovernanceStatus = SupplierGovernanceStatuses.Approved;
+    value.VerificationStatus = SupplierVerificationStatuses.Verified;
+    value.ComplianceStatus = SupplierComplianceStatuses.Cleared;
+    value.RiskStatus = SupplierRiskStatuses.Low;
+    value.ReadinessStatus = SupplierReadinessStatuses.Ready;
     db.Add(value); await db.SaveChangesAsync(); return value;
+}
+
+async Task<Currency> EnsureCurrencyAsync(string code, string name, string symbol)
+{
+    var existing = await db.Currencies.SingleOrDefaultAsync(x =>
+        x.BusinessUnitId == tenantId && x.Code == code);
+    if (existing is not null) return existing;
+    var value = new Currency
+    {
+        BusinessUnitId = tenantId,
+        Code = code,
+        CurrencyName = name,
+        Symbol = symbol,
+        ExchangeRate = 1,
+        IsBaseCurrency = true,
+        IsActive = true,
+        CreatedBy = fixtureActor,
+        CreatedOn = now
+    };
+    db.Add(value);
+    await db.SaveChangesAsync();
+    return value;
 }
 
 async Task<ProductCategory> EnsureProductCategoryAsync(string name)
@@ -761,13 +804,17 @@ async Task EnsureLineResolutionsAsync(Lead lead, Rfq rfq, Product full, Product 
     var revisionLines = await db.Set<LeadItemRevision>().AsNoTracking()
         .Where(x => x.BusinessUnitId == tenantId && x.LeadRevisionId == revision.Id)
         .OrderBy(x => x.LineNumber).ToArrayAsync();
-    if (await db.Set<LeadLineCommercialResolution>().CountAsync(x => x.BusinessUnitId == tenantId &&
-            x.LeadRevisionId == revision.Id) == revisionLines.Length) return;
+    var resolvedLineIds = await db.Set<LeadLineCommercialResolution>().AsNoTracking()
+        .Where(x => x.BusinessUnitId == tenantId && x.LeadRevisionId == revision.Id)
+        .Select(x => x.LeadLineId).Distinct().ToArrayAsync();
+    if (resolvedLineIds.Length == revisionLines.Length) return;
+    var resolvedLines = resolvedLineIds.ToHashSet();
     var lines = await db.LeadItems.AsNoTracking().Where(x => x.LeadId == lead.Id)
         .OrderBy(x => x.LineItemNo).ToArrayAsync();
     for (var index = 0; index < lines.Length; index++)
     {
         var item = lines[index];
+        if (resolvedLines.Contains(revisionLines[index].Id)) continue;
         var partNumber = item.ManufacturerPartNumber ?? $"LINE-{index + 1}";
         var (productId, classification, atp, incomingAvailable) = partNumber switch
         {
@@ -908,6 +955,7 @@ async Task PrintFixtureAsync()
     Console.WriteLine($"PRODUCT_IDS={sufficient.Id},{partial.Id},{outOfStock.Id},{incomingProduct.Id}");
     Console.WriteLine($"WAREHOUSE_IDS={primaryWarehouse.Id},{overflowWarehouse.Id},{transitWarehouse.Id}");
     Console.WriteLine($"INVENTORY_IDS={sufficientPrimary.Id},{sufficientOverflow.Id},{partialStock.Id},{zeroStock.Id},{incomingStock.Id}");
+    Console.WriteLine($"E2E_CORE_CURRENCY_ID={currency.Id}");
     Console.WriteLine($"E2E_CORE_LEAD_ID={sixLineLead.Id}");
     Console.WriteLine($"E2E_CORE_CUSTOMER_ID={abc.Id}");
     Console.WriteLine($"E2E_CORE_CONTACT_ID={abcContact.Id}");

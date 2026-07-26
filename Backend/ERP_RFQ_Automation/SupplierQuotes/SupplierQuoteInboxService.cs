@@ -70,13 +70,17 @@ public sealed class EfSupplierQuoteStore(ErpRfqAutomationContext context) : ISup
     public async Task<SupplierQuoteCaptureResult> PersistRevisionAsync(SupplierQuote quote,
         SupplierQuoteRevision revision, bool isNewQuote, CancellationToken cancellationToken)
     {
-        await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
-        if (isNewQuote) context.Add(quote);
-        quote.Revisions.Add(revision);
-        await context.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        return new SupplierQuoteCaptureResult(quote.Id, revision.Id, revision.RevisionNumber,
-            quote.InboxStatus, revision.Evidence.Count(x => x.ReviewRequired), false);
+        var strategy = context.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
+            if (isNewQuote && context.Entry(quote).State == EntityState.Detached) context.Add(quote);
+            if (!quote.Revisions.Contains(revision)) quote.Revisions.Add(revision);
+            await context.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return new SupplierQuoteCaptureResult(quote.Id, revision.Id, revision.RevisionNumber,
+                quote.InboxStatus, revision.Evidence.Count(x => x.ReviewRequired), false);
+        });
     }
 
     public async Task<IReadOnlyCollection<SupplierQuoteInboxRow>> SearchInboxAsync(long businessUnitId,
@@ -119,46 +123,50 @@ public sealed class EfSupplierQuoteStore(ErpRfqAutomationContext context) : ISup
 
     public async Task ReviewAsync(ReviewSupplierQuoteFieldCommand command, CancellationToken cancellationToken)
     {
-        await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
-        var quote = await context.Set<SupplierQuote>().SingleOrDefaultAsync(x =>
-            x.BusinessUnitId == command.BusinessUnitId && x.Id == command.SupplierQuoteId, cancellationToken)
-            ?? throw new SupplierQuoteNotFoundException("The Supplier Quote was not found in this tenant.");
-        var revision = await context.Set<SupplierQuoteRevision>().SingleOrDefaultAsync(x =>
-            x.BusinessUnitId == command.BusinessUnitId && x.Id == command.RevisionId &&
-            x.SupplierQuoteId == quote.Id, cancellationToken)
-            ?? throw new SupplierQuoteNotFoundException("The Supplier Quote revision was not found in this tenant.");
-        var evidence = await context.Set<SupplierQuoteFieldEvidence>().SingleOrDefaultAsync(x =>
-            x.BusinessUnitId == command.BusinessUnitId && x.Id == command.EvidenceId &&
-            x.SupplierQuoteRevisionId == revision.Id, cancellationToken)
-            ?? throw new SupplierQuoteNotFoundException("The field evidence was not found in this revision.");
-
-        context.Add(new SupplierQuoteReviewDecision
+        var strategy = context.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(async () =>
         {
-            BusinessUnitId = command.BusinessUnitId,
-            SupplierQuoteRevisionId = revision.Id,
-            SupplierQuoteFieldEvidenceId = evidence.Id,
-            Status = command.Status,
-            CorrectedValue = command.CorrectedValue,
-            Reason = command.Reason,
-            ReviewedBy = command.Actor,
-            ReviewedOn = DateTime.UtcNow,
-            CorrelationId = command.CorrelationId
-        });
-        await context.SaveChangesAsync(cancellationToken);
+            await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
+            var quote = await context.Set<SupplierQuote>().SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == command.BusinessUnitId && x.Id == command.SupplierQuoteId, cancellationToken)
+                ?? throw new SupplierQuoteNotFoundException("The Supplier Quote was not found in this tenant.");
+            var revision = await context.Set<SupplierQuoteRevision>().SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == command.BusinessUnitId && x.Id == command.RevisionId &&
+                x.SupplierQuoteId == quote.Id, cancellationToken)
+                ?? throw new SupplierQuoteNotFoundException("The Supplier Quote revision was not found in this tenant.");
+            var evidence = await context.Set<SupplierQuoteFieldEvidence>().SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == command.BusinessUnitId && x.Id == command.EvidenceId &&
+                x.SupplierQuoteRevisionId == revision.Id, cancellationToken)
+                ?? throw new SupplierQuoteNotFoundException("The field evidence was not found in this revision.");
 
-        var unresolved = await context.Set<SupplierQuoteFieldEvidence>().AnyAsync(x =>
-            x.BusinessUnitId == command.BusinessUnitId && x.SupplierQuoteRevisionId == revision.Id &&
-            x.ReviewRequired && !context.Set<SupplierQuoteReviewDecision>().Any(d =>
-                d.BusinessUnitId == command.BusinessUnitId && d.SupplierQuoteFieldEvidenceId == x.Id &&
-                (d.Status == SupplierQuoteReviewStatuses.Accepted ||
-                 d.Status == SupplierQuoteReviewStatuses.Corrected)), cancellationToken);
-        quote.InboxStatus = unresolved ? SupplierQuoteInboxStatuses.ReviewRequired
-            : SupplierQuoteInboxStatuses.ReadyForComparison;
-        quote.UpdatedOn = DateTime.UtcNow;
-        quote.UpdatedBy = command.Actor;
-        quote.Version++;
-        await context.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
+            context.Add(new SupplierQuoteReviewDecision
+            {
+                BusinessUnitId = command.BusinessUnitId,
+                SupplierQuoteRevisionId = revision.Id,
+                SupplierQuoteFieldEvidenceId = evidence.Id,
+                Status = command.Status,
+                CorrectedValue = command.CorrectedValue,
+                Reason = command.Reason,
+                ReviewedBy = command.Actor,
+                ReviewedOn = DateTime.UtcNow,
+                CorrelationId = command.CorrelationId
+            });
+            await context.SaveChangesAsync(cancellationToken);
+
+            var unresolved = await context.Set<SupplierQuoteFieldEvidence>().AnyAsync(x =>
+                x.BusinessUnitId == command.BusinessUnitId && x.SupplierQuoteRevisionId == revision.Id &&
+                x.ReviewRequired && !context.Set<SupplierQuoteReviewDecision>().Any(d =>
+                    d.BusinessUnitId == command.BusinessUnitId && d.SupplierQuoteFieldEvidenceId == x.Id &&
+                    (d.Status == SupplierQuoteReviewStatuses.Accepted ||
+                     d.Status == SupplierQuoteReviewStatuses.Corrected)), cancellationToken);
+            quote.InboxStatus = unresolved ? SupplierQuoteInboxStatuses.ReviewRequired
+                : SupplierQuoteInboxStatuses.ReadyForComparison;
+            quote.UpdatedOn = DateTime.UtcNow;
+            quote.UpdatedBy = command.Actor;
+            quote.Version++;
+            await context.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        });
     }
 
     private static SupplierQuoteDetail ToDetail(SupplierQuote quote, string supplierName)

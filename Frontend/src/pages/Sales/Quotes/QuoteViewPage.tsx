@@ -25,6 +25,7 @@ import { useAuth } from '../../../context/AuthContext';
 import dayjs from 'dayjs';
 import { toast } from 'react-hot-toast';
 import CommercialLineIntelligence from '../../../components/common/CommercialLineIntelligence';
+import procurementService from '../../../api/services/procurementService';
 
 const QuoteViewPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -37,6 +38,12 @@ const QuoteViewPage: React.FC = () => {
     queryKey: ['quote-detail', id],
     queryFn: () => quoteService.getById(Number(id), businessUnitId),
     enabled: !!id
+  });
+  const sourcingQuery = useQuery({
+    queryKey: ['procurement-sourcing-workbench', quote?.rfqId],
+    queryFn: () => procurementService.getWorkbench(Number(quote?.rfqId)),
+    enabled: Boolean(quote?.rfqId),
+    retry: 1,
   });
 
   const statusMutation = useMutation({
@@ -151,6 +158,22 @@ const QuoteViewPage: React.FC = () => {
         })),
       }
     : null;
+  const sourceFor = (item: any) => {
+    const rfqItemId = Number(item.rfqItemId || item.rfqitemId || 0);
+    const line = sourcingQuery.data?.lines.find((entry) => entry.id === rfqItemId);
+    const award = sourcingQuery.data?.awards.find((entry) => entry.rfqItemId === rfqItemId);
+    const offer = award ? sourcingQuery.data?.offers.find((entry) => entry.id === award.supplierQuotedItemId) : undefined;
+    const source = award && line?.resolution === 'PARTIAL' ? 'MIXED_INVENTORY_AND_SUPPLIER'
+      : award ? 'SELECTED_SUPPLIER_QUOTE'
+        : line?.resolution === 'IN_STOCK' ? 'INTERNAL_INVENTORY'
+          : line?.resolution === 'INCOMING' ? 'INCOMING_INVENTORY'
+            : 'COST_SOURCE_PENDING';
+    return { rfqItemId, line, award, offer, source };
+  };
+  const supplierValidityWarnings = quote.quoteItems.map(sourceFor).filter(({ offer }) => offer && (
+    !offer.validUntil || dayjs(offer.validUntil).isBefore(dayjs()) ||
+    Boolean(quote.validUntil && dayjs(offer.validUntil).isBefore(dayjs(quote.validUntil)))
+  ));
   const isUnpricedDraft = (quote.statusCode || quote.statusValue || '').toUpperCase() === 'DRAFT'
     && !quote.currencyId
     && quote.quoteItems.every((item) => Number(item.unitPrice || 0) === 0);
@@ -262,6 +285,8 @@ const QuoteViewPage: React.FC = () => {
 
           {hasPermission('Quotations', 'edit') && quote.statusValue === 'Draft' && <Button variant="contained" startIcon={<SendIcon />} onClick={() => statusMutation.mutate('Sent')} disabled={isUnpricedDraft} sx={{ borderRadius: 2 }}>Ready to Send</Button>}
 
+          {quote.rfqId && <Button variant="outlined" startIcon={<OutcomeIcon />} onClick={() => navigate(`/procurement/rfqs/${quote.rfqId}/sourcing`)}>Sourcing & offers</Button>}
+
           {hasPermission('Quotations', 'edit') && quote.statusValue === 'Sent' && (
             <>
               {!quote.respondedOn && (
@@ -306,6 +331,12 @@ const QuoteViewPage: React.FC = () => {
         <Alert severity="warning" sx={{ mb: 3 }}>
           <Typography sx={{ fontWeight: 800 }}>Commercial Review Required</Typography>
           Pricing Pending · Inventory Pending · Lead Time Pending · Tax, freight and commercial validity are not yet set.
+        </Alert>
+      )}
+      {supplierValidityWarnings.length > 0 && (
+        <Alert severity="error" sx={{ mb: 3 }}>
+          <Typography sx={{ fontWeight: 800 }}>Supplier validity does not support this Customer Quote</Typography>
+          {supplierValidityWarnings.length} priced line{supplierValidityWarnings.length === 1 ? '' : 's'} use an expired, unstated, or shorter Supplier Quote validity. Review the source offer before sending.
         </Alert>
       )}
       {quote.revisionImpact && (
@@ -375,13 +406,23 @@ const QuoteViewPage: React.FC = () => {
           <Paper sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none', overflowX: 'auto', maxWidth: '100%' }}>
             <Box sx={{ p: 2, borderBottom: '1px solid', borderColor: 'divider', bgcolor: 'grey.50' }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Quoted Items</Typography></Box>
             <Table size="small">
-              <TableHead><TableRow sx={{ bgcolor: 'grey.50' }}><TableCell sx={{ fontWeight: 800 }}>#</TableCell><TableCell sx={{ fontWeight: 800 }}>Description</TableCell><TableCell sx={{ fontWeight: 800 }} align="center">Qty</TableCell><TableCell sx={{ fontWeight: 800 }} align="right">Unit Price</TableCell><TableCell sx={{ fontWeight: 800 }} align="right">Discount</TableCell><TableCell sx={{ fontWeight: 800 }} align="right">Total</TableCell></TableRow></TableHead>
+              <TableHead><TableRow sx={{ bgcolor: 'grey.50' }}><TableCell sx={{ fontWeight: 800 }}>#</TableCell><TableCell sx={{ fontWeight: 800 }}>Description</TableCell><TableCell sx={{ fontWeight: 800 }} align="center">Qty</TableCell><TableCell sx={{ fontWeight: 800 }}>Cost source</TableCell><TableCell sx={{ fontWeight: 800 }} align="right">Unit Price</TableCell><TableCell sx={{ fontWeight: 800 }} align="right">Discount</TableCell><TableCell sx={{ fontWeight: 800 }} align="right">Total</TableCell></TableRow></TableHead>
               <TableBody>
                 {quote.quoteItems.map((item, idx) => (
                   <TableRow key={item.id}>
                     <TableCell>{idx + 1}</TableCell>
                     <TableCell><Typography sx={{ fontWeight: 700, fontSize: '0.85rem' }}>{item.productName || 'Item'}</Typography><Typography variant="caption" color="text.secondary">{item.itemDescription}</Typography></TableCell>
                     <TableCell align="center">{item.quantity}</TableCell>
+                    <TableCell>
+                      {(() => {
+                        const source = sourceFor(item);
+                        return <Stack spacing={0.5} sx={{ alignItems: 'flex-start' }}>
+                          <Chip size="small" color={source.source === 'COST_SOURCE_PENDING' ? 'warning' : 'info'} label={source.source.replaceAll('_', ' ')} />
+                          {source.offer && <Typography variant="caption" color="text.secondary">{source.offer.supplierName} · {source.offer.quoteReference || 'No supplier reference'} · valid {source.offer.validUntil ? dayjs(source.offer.validUntil).format('DD MMM YYYY') : 'not stated'}</Typography>}
+                          {quote.rfqId && source.rfqItemId > 0 && <Button size="small" sx={{ px: 0 }} onClick={() => navigate(`/procurement/rfqs/${quote.rfqId}/sourcing`)}>View cost evidence</Button>}
+                        </Stack>;
+                      })()}
+                    </TableCell>
                     <TableCell align="right">{Number(item.unitPrice || 0) === 0 ? <Chip size="small" label="Pricing Pending" color="warning" variant="outlined" /> : `$ ${item.unitPrice?.toLocaleString()}`}</TableCell>
                     <TableCell align="right">
                       {item.discount > 0 ? (
