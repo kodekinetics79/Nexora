@@ -9,6 +9,7 @@ using ERP_RFQ_Automation.OrderToCash;
 using ERP_RFQ_Automation.GeneralLedger;
 using ERP_RFQ_Automation.BankReconciliation;
 using ERP_RFQ_Automation.LeadIdentity;
+using ERP_RFQ_Automation.QuoteDelivery;
 using ERP_RFQ_Automation.CommercialIntelligence.Sales;
 using ERP_RFQ_Automation.Inventory.Commercial;
 using Microsoft.EntityFrameworkCore;
@@ -166,6 +167,7 @@ public partial class ErpRfqAutomationContext
         // expressions.
         modelBuilder.ApplyCommercialRoutingModel();
         modelBuilder.ApplyCommercialSalesModel();
+        modelBuilder.ApplyQuoteDeliveryModel();
 
         // Stock reservation ledger (portable relational model; enabled for the SQLite suite).
         modelBuilder.ApplyInventoryReservationModel();
@@ -183,6 +185,7 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<FollowUpTask>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<FollowUpTransitionEvent>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<SalesContribution>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<QuoteDeliveryRequest>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<ProductAlias>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<ProductSupersession>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<InventoryMovement>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);

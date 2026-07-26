@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { Alert, Box, Button, Chip, CircularProgress, Paper, Stack, Typography } from '@mui/material';
 import { Refresh as RefreshIcon } from '@mui/icons-material';
-import type { IntelligenceMetric } from '../../api/services/commercialIntelligenceService';
+import type { CurrencyAmountGroupDTO, CurrencyPipelineGroupDTO, IntelligenceMetric } from '../../api/services/commercialIntelligenceService';
 
 export const formatMetric = (metric: IntelligenceMetric) => {
   if (metric.unit === 'percentage') return `${metric.value.toLocaleString(undefined, { maximumFractionDigits: 1 })}%`;
@@ -13,6 +13,25 @@ export const formatMetric = (metric: IntelligenceMetric) => {
 export const formatDateTime = (value?: string | null) => value
   ? new Date(value).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
   : 'Not scheduled';
+
+export function PipelineGroups({ groups, weighted = true }: { groups: CurrencyPipelineGroupDTO[]; weighted?: boolean }) {
+  if (!groups.length) return <Typography component="span" color="text.secondary">No active value</Typography>;
+  return (
+    <Stack spacing={0.25} sx={{ alignItems: 'flex-end' }}>
+      {groups.map(group => (
+        <Typography component="span" variant="body2" key={`${group.currencyId ?? 'unassigned'}:${group.currencyCode ?? ''}`}>
+          {group.currencyCode || (group.currencyId == null ? 'Currency unassigned' : `Currency ${group.currencyId}`)}{' '}
+          {(weighted ? group.weightedPipeline : group.pipelineValue).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+        </Typography>
+      ))}
+    </Stack>
+  );
+}
+
+export function CurrencyAmounts({ groups }: { groups: CurrencyAmountGroupDTO[] }) {
+  if (!groups.length) return <Typography component="span" color="text.secondary">No recognized value</Typography>;
+  return <Stack spacing={0.25}>{groups.map(group => <Typography key={group.currencyCode}>{group.currencyCode} {group.value.toLocaleString(undefined, { maximumFractionDigits: 2 })}</Typography>)}</Stack>;
+}
 
 export function PageShell({ title, subtitle, actions, children }: { title: string; subtitle: string; actions?: ReactNode; children: ReactNode }) {
   return (

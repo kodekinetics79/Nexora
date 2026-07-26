@@ -85,7 +85,7 @@ namespace ERP_RFQ_Automation.Migrations
                         GRANT SELECT, INSERT, UPDATE ON public.lead_line_commercial_resolutions TO nexora_tenant_app;
                         SELECT pg_get_serial_sequence('public.lead_line_commercial_resolutions', 'Id') INTO resolution_sequence;
                         IF resolution_sequence IS NOT NULL THEN
-                            EXECUTE 'GRANT USAGE, SELECT ON SEQUENCE ' || resolution_sequence || ' TO nexora_tenant_app';
+                            EXECUTE 'GRANT USAGE ON SEQUENCE ' || resolution_sequence || ' TO nexora_tenant_app';
                         END IF;
                     END IF;
                 END $govern$;
@@ -101,7 +101,7 @@ namespace ERP_RFQ_Automation.Migrations
                         WHERE p."ID" = NEW."ProductId" AND p."BUID" = NEW."BusinessUnitId") THEN
                         RAISE EXCEPTION 'resolution product must belong to the same tenant';
                     END IF;
-                    IF NEW."RfqId" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public."RFQs" r
+                    IF NEW."RfqId" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public."RFQ" r
                         WHERE r."ID" = NEW."RfqId" AND r."BusinessUnitID" = NEW."BusinessUnitId"
                           AND r."LeadID" = NEW."LeadId") THEN
                         RAISE EXCEPTION 'resolution RFQ must belong to the same tenant and lead';

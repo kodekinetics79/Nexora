@@ -16,6 +16,7 @@ import intelligenceService from '../../api/services/intelligenceService';
 import type { ConversionPreviewItem } from '../../api/services/intelligenceService';
 import { ConfidenceChip, parseUserNumber } from './common';
 import CommercialLineIntelligence from '../../components/common/CommercialLineIntelligence';
+import leadService from '../../api/services/leadService';
 
 /** Sentinel for "None of these — leave unmatched" in the product dropdown. */
 const NO_MATCH = 'none';
@@ -54,6 +55,11 @@ const LeadConvertPage: React.FC = () => {
   const { data: preview, isLoading, isError, refetch } = useQuery({
     queryKey: ['lead-conversion-preview', leadId],
     queryFn: () => intelligenceService.getConversionPreview(leadId),
+    enabled: !!id && Number.isFinite(leadId),
+  });
+  const { data: lead } = useQuery({
+    queryKey: ['lead-detail', leadId],
+    queryFn: () => leadService.getById(leadId),
     enabled: !!id && Number.isFinite(leadId),
   });
 
@@ -213,6 +219,9 @@ const LeadConvertPage: React.FC = () => {
         <Stack direction="row" spacing={4} sx={{ flexWrap: 'wrap', rowGap: 2 }}>
           <HeaderField label="RFQ #" value={preview.header.rfqno} />
           <HeaderField label="Buyer" value={preview.header.buyersName} />
+          <HeaderField label="Customer" value={lead?.customerName ?? null} />
+          <HeaderField label="Account Owner" value={lead?.accountOwnerName ?? null} />
+          <HeaderField label="Opportunity Owner" value={lead?.assignedToFullName ?? null} />
           <HeaderField label="Received" value={formatDate(preview.header.recDate)} />
           <HeaderField label="Bid closing" value={formatDate(preview.header.bidClosingDate)} />
           <HeaderField label="Lines" value={String(preview.items.length)} />

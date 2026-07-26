@@ -146,6 +146,28 @@ public sealed class CoreInventoryCommercialTests
     }
 
     [Fact]
+    public async Task Resolution_counts_only_open_ordered_or_in_transit_inventory()
+    {
+        var service = new LeadLineCommercialResolutionService(
+            new FulfilmentRouteService(),
+            new LocalRelatedResourceSearch(new RecordingResourceRepository([])));
+        var incoming = new[]
+        {
+            Incoming(IncomingInventoryStatus.Planned, 100, "PLAN-1"),
+            Incoming(IncomingInventoryStatus.Ordered, 10, "PO-1"),
+            Incoming(IncomingInventoryStatus.InTransit, 20, "PO-2"),
+            Incoming(IncomingInventoryStatus.PartiallyReceived, 12, "PO-3", received: 2, allocated: 3),
+            Incoming(IncomingInventoryStatus.Received, 100, "PO-4"),
+            Incoming(IncomingInventoryStatus.Cancelled, 100, "PO-5"),
+        };
+
+        var result = await service.ResolveAsync(Request(productId: 7, inventory: [], incoming: incoming));
+
+        Assert.Equal(CommercialResolutionClassification.KnownIncoming, result.Classification);
+        Assert.Equal(37m, result.IncomingAvailable);
+    }
+
+    [Fact]
     public async Task Unknown_product_uses_local_evidence_without_inventing_suppliers()
     {
         var evidence = Resource(1, tenant: 1);
@@ -201,6 +223,15 @@ public sealed class CoreInventoryCommercialTests
         Type = InventoryMovementType.Receipt, Quantity = quantity, OccurredOn = DateTime.UtcNow,
         IdempotencyKey = key, SourceType = "Receipt", SourceId = "GRN-1",
         CreatedBy = "test", CreatedOn = DateTime.UtcNow,
+    };
+
+    private static IncomingInventory Incoming(IncomingInventoryStatus status, decimal ordered,
+        string sourceId, decimal received = 0m, decimal allocated = 0m) => new()
+    {
+        BusinessUnitId = 1, ProductId = 7, WarehouseId = 1,
+        OrderedQuantity = ordered, ReceivedQuantity = received, AllocatedQuantity = allocated,
+        ExpectedOn = new DateOnly(2026, 8, 1), Status = status,
+        SourceType = "PurchaseOrder", SourceId = sourceId,
     };
 
     private static RelatedResource Resource(int id, long tenant) => new()

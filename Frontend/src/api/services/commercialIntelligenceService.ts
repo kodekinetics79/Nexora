@@ -37,8 +37,20 @@ export interface RepSummaryDTO {
   openRfqs: number;
   draftQuotes: number;
   followUpsDue: number;
-  weightedPipeline: number;
+  pipelineGroups: CurrencyPipelineGroupDTO[];
+}
+
+export interface CurrencyPipelineGroupDTO {
+  currencyId?: number | null;
   currencyCode?: string | null;
+  quoteCount: number;
+  pipelineValue: number;
+  weightedPipeline: number;
+}
+
+export interface CurrencyAmountGroupDTO {
+  currencyCode: string;
+  value: number;
 }
 
 export interface TeamOverviewDTO {
@@ -49,7 +61,7 @@ export interface TeamOverviewDTO {
 
 export interface RepProfileDTO extends RepSummaryDTO {
   accountCount: number;
-  wonValue: number;
+  wonValueGroups: CurrencyAmountGroupDTO[];
   conversionRate?: number | null;
   recentActivity: CommercialAttentionItem[];
 }
@@ -61,8 +73,7 @@ export interface AccountOwnershipDTO {
   ownerName?: string | null;
   openLeads: number;
   openQuotes: number;
-  pipelineValue: number;
-  currencyCode?: string | null;
+  pipelineGroups: CurrencyPipelineGroupDTO[];
   lastActivityAt?: string | null;
   version: number;
 }
@@ -220,7 +231,7 @@ export interface CommercialLineResolutionDTO {
   productId?: number | null;
   requestedPartNumber: string;
   requestedQuantity: number;
-  classification: 'KnownInStock' | 'KnownIncoming' | 'KnownShortage' | 'UnknownProduct' | 'PossibleMatchReview';
+  classification: 'KnownInStock' | 'KnownIncoming' | 'KnownShortage' | 'UnknownProduct' | 'PossibleMatchReview' | 'NonInventoryService';
   availableToPromise: number;
   incomingAvailable: number;
   fulfilment: { classification?: string; allocatedQuantity?: number; shortageQuantity?: number };

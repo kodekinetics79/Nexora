@@ -42,6 +42,19 @@ public sealed class CoreSalesApplicationServiceTests
     }
 
     [Fact]
+    public async Task Sales_write_rejects_unsupported_or_unresolved_aggregate_reference()
+    {
+        var service = new SalesApplicationService(new MemorySalesPersistence(71, 7101));
+
+        var exception = await Assert.ThrowsAsync<SalesNotFoundException>(() =>
+            service.AppendActivityAsync(71, new AppendCommercialActivityCommand(
+                7101, CommercialActivityType.Call, "Opportunity", 501, null, null,
+                From.AddDays(1), "", "evidence:1", "rep", "corr-invalid", "activity-invalid"), default));
+
+        Assert.Contains("aggregate", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Follow_up_transition_is_versioned_append_only_and_terminal()
     {
         var store = new MemorySalesPersistence(71, 7101);
@@ -95,10 +108,35 @@ public sealed class CoreSalesApplicationServiceTests
         Assert.Equal(50m, result.WinRatePercent);
         Assert.Equal(6d, result.AverageResponseHours);
         Assert.Equal(1, result.FollowUpsCompleted);
+        Assert.Equal(1, result.FollowUpsCompletedOnTime);
         Assert.Equal(1, result.OverdueFollowUps);
         Assert.Collection(result.RevenueByCurrency,
             eur => { Assert.Equal("EUR", eur.CurrencyCode); Assert.Equal(50m, eur.WeightedRevenueAmount); },
             usd => { Assert.Equal("USD", usd.CurrencyCode); Assert.Equal(1500m, usd.RevenueAmount); Assert.Equal(1000m, usd.WeightedRevenueAmount); });
+    }
+
+    [Fact]
+    public async Task Performance_counts_period_completion_for_an_older_task_and_marks_late_completion_truthfully()
+    {
+        var store = new MemorySalesPersistence(71, 7101);
+        store.FollowUps.Add(new FollowUpTask
+        {
+            Id = 30, BusinessUnitId = 71, AssignedToUserId = 7101,
+            CreatedAtUtc = From.AddDays(-10), DueAtUtc = From.AddDays(1),
+            Status = FollowUpStatus.Completed,
+        });
+        store.Transitions.Add(new FollowUpTransitionEvent
+        {
+            Id = 31, BusinessUnitId = 71, FollowUpTaskId = 30,
+            ToStatus = FollowUpStatus.Completed, OccurredAtUtc = From.AddDays(3),
+        });
+
+        var result = Assert.Single(await new SalesApplicationService(store).GetPerformanceAsync(71,
+            new SalesPerformanceQuery(7101, From, From.AddMonths(1), From.AddDays(10)), default));
+
+        Assert.Equal(0, result.FollowUpsCreated);
+        Assert.Equal(1, result.FollowUpsCompleted);
+        Assert.Equal(0, result.FollowUpsCompletedOnTime);
     }
 
     [Fact]
@@ -139,6 +177,13 @@ public sealed class CoreSalesApplicationServiceTests
 
         public Task<bool> UserExistsAsync(long businessUnitId, long userId, CancellationToken ct) =>
             Task.FromResult(businessUnitId == tenant && _users.Contains(userId));
+        public Task<bool> CustomerExistsAsync(long businessUnitId, long customerId, CancellationToken ct) =>
+            Task.FromResult(businessUnitId == tenant);
+        public Task<bool> LeadAssignmentExistsAsync(long businessUnitId, long assignmentId, CancellationToken ct) =>
+            Task.FromResult(businessUnitId == tenant);
+        public Task<bool> AggregateExistsAsync(long businessUnitId, string aggregateType, long aggregateId, CancellationToken ct) =>
+            Task.FromResult(businessUnitId == tenant && aggregateType.Trim().ToUpperInvariant() is
+                "LEAD" or "RFQ" or "QUOTE" or "ORDER" or "CUSTOMER");
         public Task<SalesRepProfile?> GetProfileAsync(long businessUnitId, long userId, CancellationToken ct) => Task.FromResult(Profile);
         public Task<SalesRepProfile?> FindProfileMutationAsync(long businessUnitId, string idempotencyKey, CancellationToken ct) =>
             Task.FromResult(_profileMutations.GetValueOrDefault(idempotencyKey));
@@ -167,7 +212,10 @@ public sealed class CoreSalesApplicationServiceTests
         public Task<IReadOnlyList<CommercialActivity>> QueryActivitiesAsync(long businessUnitId, DateTime from, DateTime to, long? user, CancellationToken ct) =>
             Task.FromResult<IReadOnlyList<CommercialActivity>>(Activities.Where(x => x.OccurredAtUtc >= from && x.OccurredAtUtc < to && (!user.HasValue || x.SalesRepUserId == user)).ToArray());
         public Task<IReadOnlyList<FollowUpTask>> QueryFollowUpsAsync(long businessUnitId, DateTime from, DateTime to, long? user, CancellationToken ct) =>
-            Task.FromResult<IReadOnlyList<FollowUpTask>>(FollowUps.Where(x => x.CreatedAtUtc >= from && x.CreatedAtUtc < to && (!user.HasValue || x.AssignedToUserId == user)).ToArray());
+            Task.FromResult<IReadOnlyList<FollowUpTask>>(FollowUps.Where(x =>
+                (x.CreatedAtUtc >= from && x.CreatedAtUtc < to || Transitions.Any(t =>
+                    t.FollowUpTaskId == x.Id && t.OccurredAtUtc >= from && t.OccurredAtUtc < to))
+                && (!user.HasValue || x.AssignedToUserId == user)).ToArray());
         public Task<IReadOnlyList<FollowUpTransitionEvent>> QueryFollowUpTransitionsAsync(long businessUnitId, DateTime from, DateTime to, long? user, CancellationToken ct) =>
             Task.FromResult<IReadOnlyList<FollowUpTransitionEvent>>(Transitions.Where(x => x.OccurredAtUtc >= from && x.OccurredAtUtc < to).ToArray());
         public Task<IReadOnlyList<SalesContribution>> QueryContributionsAsync(long businessUnitId, DateTime from, DateTime to, long? user, CancellationToken ct) =>

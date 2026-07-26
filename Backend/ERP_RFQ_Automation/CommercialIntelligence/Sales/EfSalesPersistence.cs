@@ -7,6 +7,21 @@ public sealed class EfSalesPersistence(ErpRfqAutomationContext db) : ISalesPersi
 {
     public Task<bool> UserExistsAsync(long tenant, long userId, CancellationToken ct) =>
         db.Users.AnyAsync(x => x.Buid == tenant && x.Id == userId && x.IsActive != false, ct);
+    public Task<bool> CustomerExistsAsync(long tenant, long customerId, CancellationToken ct) =>
+        db.Customers.AnyAsync(x => x.Buid == tenant && x.Id == customerId, ct);
+    public Task<bool> LeadAssignmentExistsAsync(long tenant, long assignmentId, CancellationToken ct) =>
+        db.Set<CommercialRouting.LeadAssignment>().AnyAsync(
+            x => x.BusinessUnitId == tenant && x.Id == assignmentId, ct);
+    public Task<bool> AggregateExistsAsync(long tenant, string aggregateType, long aggregateId, CancellationToken ct) =>
+        aggregateType.Trim().ToUpperInvariant() switch
+        {
+            "LEAD" => db.Leads.AnyAsync(x => x.BusinessUnitId == tenant && x.Id == aggregateId, ct),
+            "RFQ" => db.Rfqs.AnyAsync(x => x.BusinessUnitId == tenant && x.Id == aggregateId, ct),
+            "QUOTE" => db.Quotes.AnyAsync(x => x.BusinessUnitId == tenant && x.Id == aggregateId, ct),
+            "ORDER" => db.Orders.AnyAsync(x => x.BusinessUnitId == tenant && x.Id == aggregateId, ct),
+            "CUSTOMER" => db.Customers.AnyAsync(x => x.Buid == tenant && x.Id == aggregateId, ct),
+            _ => Task.FromResult(false)
+        };
     public Task<SalesRepProfile?> GetProfileAsync(long tenant, long userId, CancellationToken ct) =>
         db.SalesRepProfiles.SingleOrDefaultAsync(x => x.BusinessUnitId == tenant && x.UserId == userId, ct);
     public Task<SalesRepProfile?> FindProfileMutationAsync(long tenant, string key, CancellationToken ct) =>
@@ -54,7 +69,12 @@ public sealed class EfSalesPersistence(ErpRfqAutomationContext db) : ISalesPersi
     public async Task<IReadOnlyList<CommercialActivity>> QueryActivitiesAsync(long tenant, DateTime from, DateTime to, long? userId, CancellationToken ct) =>
         await db.CommercialActivities.AsNoTracking().Where(x => x.BusinessUnitId == tenant && x.OccurredAtUtc >= from && x.OccurredAtUtc < to && (!userId.HasValue || x.SalesRepUserId == userId)).ToListAsync(ct);
     public async Task<IReadOnlyList<FollowUpTask>> QueryFollowUpsAsync(long tenant, DateTime from, DateTime to, long? userId, CancellationToken ct) =>
-        await db.FollowUpTasks.AsNoTracking().Where(x => x.BusinessUnitId == tenant && x.CreatedAtUtc >= from && x.CreatedAtUtc < to && (!userId.HasValue || x.AssignedToUserId == userId)).ToListAsync(ct);
+        await db.FollowUpTasks.AsNoTracking().Where(x => x.BusinessUnitId == tenant
+            && (!userId.HasValue || x.AssignedToUserId == userId)
+            && (x.CreatedAtUtc >= from && x.CreatedAtUtc < to
+                || db.FollowUpTransitionEvents.Any(t => t.BusinessUnitId == tenant
+                    && t.FollowUpTaskId == x.Id && t.OccurredAtUtc >= from && t.OccurredAtUtc < to)))
+            .ToListAsync(ct);
     public async Task<IReadOnlyList<FollowUpTransitionEvent>> QueryFollowUpTransitionsAsync(long tenant, DateTime from, DateTime to, long? userId, CancellationToken ct)
     {
         var taskIds = db.FollowUpTasks.Where(x => x.BusinessUnitId == tenant && (!userId.HasValue || x.AssignedToUserId == userId)).Select(x => x.Id);

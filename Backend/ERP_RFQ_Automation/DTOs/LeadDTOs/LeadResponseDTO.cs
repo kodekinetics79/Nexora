@@ -9,6 +9,8 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         public string? NexoraSerial => CommercialCaseReference;
         public long? CustomerId { get; set; }
         public long? ContactId { get; set; }
+        public string? CustomerName { get; set; }
+        public string? AccountOwnerName { get; set; }
         public string CustomerMatchStatus { get; set; } = "UNRESOLVED";
         public string? Rfqno { get; set; }
         public string? BuyersName { get; set; }
@@ -58,6 +60,7 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         public string? AssignedToFullName { get; set; }
         public DateTime? AssignedOn { get; set; }
         public string? AssignComment { get; set; }
+        public string? AssignmentReason => AssignComment;
 
         public int ItemCount { get; set; } // Optimized: Item count instead of loading all items
         public List<LeadItemResponseDTO> LeadItems { get; set; } = new List<LeadItemResponseDTO>();

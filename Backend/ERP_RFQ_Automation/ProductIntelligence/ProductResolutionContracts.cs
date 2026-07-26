@@ -17,6 +17,7 @@ public static class ProductResolutionMethods
 {
     public const string ExactPartNumber = "exact_part_number";
     public const string ExactInternalCode = "exact_internal_code";
+    public const string CanonicalCompactIdentity = "canonical_compact_identity";
     public const string ApprovedAlias = "approved_alias";
     public const string ApprovedSupersession = "approved_supersession";
     public const string LocalSimilarity = "local_similarity";

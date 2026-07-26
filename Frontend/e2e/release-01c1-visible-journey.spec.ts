@@ -160,8 +160,8 @@ test('authenticated four-inquiry bulk reconciliation is visible, governed, and t
     const row = page.locator('article').filter({ hasText: 'Revision' });
     await row.getByRole('button', { name: 'Open lead' }).click();
     await expect(page.getByRole('heading', { name: 'Revision history' })).toBeVisible();
-    await expect(page.getByText('Revision 2', { exact: true })).toBeVisible();
-    await expect(page.getByText('Revision 1', { exact: true })).toBeVisible();
+    await expect(page.getByText('Revision 2', { exact: true }).first()).toBeVisible();
+    await expect(page.getByText('Revision 1', { exact: true }).first()).toBeVisible();
     await expect(page.getByText(/Added|Modified|Unchanged/).first()).toBeVisible();
     await page.screenshot({ path: path.join(evidenceDir, 'revision-comparison.png'), fullPage: true });
     await page.goto(`/procurement/leads/ingestion/${batchId}`);

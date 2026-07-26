@@ -86,7 +86,8 @@ public static class CommercialInventoryModelBuilderExtensions
             entity.Property(x => x.ResolutionMethod).HasMaxLength(80).IsRequired();
             entity.Property(x => x.EvidenceReference).HasMaxLength(500);
             entity.Ignore(x => x.Fulfilment); entity.Ignore(x => x.RelatedResources);
-            entity.HasIndex(x => new { x.BusinessUnitId, x.LeadRevisionId, x.LeadLineId }).IsUnique();
+            entity.HasIndex(x => new { x.BusinessUnitId, x.LeadRevisionId, x.LeadLineId, x.ResolutionBatchId }).IsUnique();
+            entity.HasIndex(x => new { x.BusinessUnitId, x.LeadRevisionId, x.LeadLineId, x.ResolvedOn });
             entity.HasIndex(x => new { x.BusinessUnitId, x.RfqId });
             entity.HasOne<ERP_RFQ_Automation.LeadIdentity.LeadRevision>().WithMany()
                 .HasForeignKey(x => new { x.BusinessUnitId, x.LeadRevisionId })

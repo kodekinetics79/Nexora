@@ -283,6 +283,25 @@ public sealed class CommercialRoutingApplicationServiceTests
         };
     }
 
+    [Fact]
+    public async Task Ownership_creation_rejects_an_overlapping_active_customer_scope()
+    {
+        using var db = new TestDb();
+        await SeedRoutingGraphAsync(db, includeIdentifier: false, includeOwnership: false);
+        await using var context = db.ContextFor(71);
+        var service = Service(context);
+        var starts = DateTime.UtcNow.AddDays(-1);
+        var command = new CreateCustomerOwnershipCommand(
+            7201, 7101, 7102, OwnershipScope.GeneralCustomer, null, 100,
+            starts, null, "test", "primary account owner");
+
+        await service.CreateOwnershipAsync(71, command, CancellationToken.None);
+
+        await Assert.ThrowsAsync<RoutingConflictException>(() => service.CreateOwnershipAsync(
+            71, command with { PrimaryUserId = 7102, Reason = "competing owner" }, CancellationToken.None));
+        Assert.Single(await context.Set<CustomerOwnership>().ToListAsync());
+    }
+
     [Theory]
     [InlineData(CustomerIdentifierType.Email, " Buyer@Example.COM ", "buyer@example.com")]
     [InlineData(CustomerIdentifierType.Domain, "https://www.Example.com/path", "example.com")]

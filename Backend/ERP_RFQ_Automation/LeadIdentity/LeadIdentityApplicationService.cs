@@ -178,13 +178,21 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
     private async Task<LeadReconciliationResult> CreateRevisionAsync(Lead canonical, Lead incoming, LeadIntakeDescriptor intake,
         string fingerprint, string? scope, string[] reasons, Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction tx, bool ownsTransaction, CancellationToken ct)
     {
-        if (canonical.CurrentInquiryFingerprint == fingerprint)
+        var matchingRevision = await _db.Set<LeadRevision>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == canonical.BusinessUnitId && x.LeadId == canonical.Id
+                && x.LogicalInquiryFingerprint == fingerprint)
+            .OrderByDescending(x => x.RevisionNumber)
+            .Select(x => new { x.Id, x.RevisionNumber })
+            .FirstOrDefaultAsync(ct);
+        if (matchingRevision is not null)
         {
             var duplicate = NewOccurrence(canonical.BusinessUnitId, intake, fingerprint, scope, LeadOccurrenceClassification.ExactDuplicate, 1m,
-                ["Strong business identity and unchanged canonical content."], canonical.Id, canonical.CurrentRevisionId);
-            await EnsureBatchAsync(canonical.BusinessUnitId, intake, ct); _db.Add(duplicate); AddAudit(duplicate, canonical.Id, "INGESTION_DUPLICATE_RECORDED", intake, new { });
+                ["Strong business identity and content exactly matches an immutable canonical revision."], canonical.Id, matchingRevision.Id);
+            await EnsureBatchAsync(canonical.BusinessUnitId, intake, ct); _db.Add(duplicate);
+            AddAudit(duplicate, canonical.Id, "INGESTION_DUPLICATE_RECORDED", intake,
+                new { matchedRevision = matchingRevision.RevisionNumber, currentRevision = canonical.CurrentRevisionNumber });
             await _db.SaveChangesAsync(ct); if (ownsTransaction) await tx.CommitAsync(ct);
-            return new(canonical.Id, canonical.CommercialCaseReference, duplicate.Id, canonical.CurrentRevisionId, canonical.CurrentRevisionNumber,
+            return new(canonical.Id, canonical.CommercialCaseReference, duplicate.Id, matchingRevision.Id, canonical.CurrentRevisionNumber,
                 duplicate.Classification, duplicate.Confidence, duplicate.DecisionReasons(), false);
         }
         await EnsureBatchAsync(canonical.BusinessUnitId, intake, ct);
@@ -266,10 +274,16 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             .Include(x => x.Differences).OrderByDescending(x => x.RevisionNumber).ToListAsync(ct);
         var ids = revisions.Select(x => x.Id).ToArray();
         var impacts = await _db.Set<LeadRevisionImpact>().AsNoTracking().Where(x => x.BusinessUnitId == bu && ids.Contains(x.LeadRevisionId)).ToListAsync(ct);
-        return revisions.Select(x => new LeadRevisionDto(x.Id, x.RevisionNumber, x.CreatedAtUtc, x.LogicalInquiryFingerprint,
-            x.CustomerRfqReference, x.ProcessingPath.ToString(), x.ExternalAiUsed,
-            x.Differences.Select(d => new LeadRevisionDifferenceDto(d.ChangeType.ToString(), d.Scope, d.Path, d.PreviousValueJson, d.CurrentValueJson)).ToArray(),
-            impacts.Where(i => i.LeadRevisionId == x.Id).Select(i => new LeadRevisionImpactDto(i.AggregateType, i.AggregateId, i.ImpactType, i.Status, i.DetailsJson)).ToArray())).ToArray();
+        return revisions.Select(x =>
+        {
+            var lineDifferences = x.Differences.Where(d => d.Scope == "Line").ToArray();
+            return new LeadRevisionDto(x.Id, x.RevisionNumber, x.CreatedAtUtc, x.LogicalInquiryFingerprint,
+                x.CustomerRfqReference, x.ProcessingPath.ToString(), x.ExternalAiUsed,
+                x.Differences.Select(d => new LeadRevisionDifferenceDto(d.ChangeType.ToString(), d.Scope, d.Path, d.PreviousValueJson, d.CurrentValueJson)).ToArray(),
+                impacts.Where(i => i.LeadRevisionId == x.Id).Select(i => new LeadRevisionImpactDto(i.AggregateType, i.AggregateId, i.ImpactType, i.Status, i.DetailsJson)).ToArray(),
+                lineDifferences.Count(d => d.ChangeType != LeadRevisionChangeType.Unchanged),
+                lineDifferences.Count(d => d.ChangeType == LeadRevisionChangeType.Modified));
+        }).ToArray();
     }
 
     public async Task<LeadIdentityAnalyticsDto> GetAnalyticsAsync(long bu, DateTimeOffset from, DateTimeOffset to, CancellationToken ct = default)
@@ -540,6 +554,12 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
     private static ItemFingerprintSnapshot ItemSnapshot(LeadItem x) => new(Normalize(x.LineItemNo), Normalize(x.ManufacturerPartNumber ?? x.ItemMaterialCode),
         Normalize(x.ProductShortDescription ?? x.ItemText), x.Quantity, Normalize(x.UnitOfMeasure), x.BidClosingDateLine?.ToUniversalTime().ToString("O"));
     private static string LineFingerprint(LeadItem x) => Hash(JsonSerializer.Serialize(ItemSnapshot(x)));
+    private static string LineIdentityFingerprint(LeadItem x) => Hash(JsonSerializer.Serialize(new
+    {
+        part = Normalize(x.ManufacturerPartNumber ?? x.ItemMaterialCode),
+        description = Normalize(x.ProductShortDescription ?? x.ItemText),
+        uom = Normalize(x.UnitOfMeasure)
+    }));
     private static string? CustomerScope(Lead x, string? sender)
     {
         if (x.CustomerId.HasValue) return $"customer:{x.CustomerId}";
@@ -550,9 +570,13 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
     private static string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
     private static decimal Similarity(Lead a, Lead b)
     {
-        var left = a.LeadItems.Select(LineFingerprint).ToHashSet(); var right = b.LeadItems.Select(LineFingerprint).ToHashSet();
+        var left = a.LeadItems.Select(LineIdentityFingerprint).ToHashSet();
+        var right = b.LeadItems.Select(LineIdentityFingerprint).ToHashSet();
         if (left.Count == 0 || right.Count == 0) return Normalize(a.Rfqno) == Normalize(b.Rfqno) && Normalize(a.Rfqno) != null ? .8m : 0m;
-        return (decimal)left.Intersect(right).Count() / left.Union(right).Count();
+        var overlap = left.Intersect(right).Count();
+        var jaccard = (decimal)overlap / left.Union(right).Count();
+        var containment = (decimal)overlap / Math.Min(left.Count, right.Count);
+        return Math.Max(jaccard, containment * .75m);
     }
     private static string Diff(object previous, object current) => JsonSerializer.Serialize(new { previous, current });
     private static string ProposedSnapshot(string differencesJson)
@@ -598,7 +622,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             var hasCurrent = currentLines.TryGetValue(key, out var after);
             var change = !hasPrevious ? LeadRevisionChangeType.Added
                 : !hasCurrent ? LeadRevisionChangeType.Removed
-                : string.Equals(before, after, StringComparison.Ordinal) ? LeadRevisionChangeType.Unchanged
+                : JsonEquivalent(before!, after!) ? LeadRevisionChangeType.Unchanged
                 : LeadRevisionChangeType.Modified;
             differences.Add(new LeadRevisionDifference
             {
@@ -611,6 +635,13 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         }
 
         return differences;
+    }
+
+    private static bool JsonEquivalent(string left, string right)
+    {
+        using var leftDocument = JsonDocument.Parse(left);
+        using var rightDocument = JsonDocument.Parse(right);
+        return JsonElement.DeepEquals(leftDocument.RootElement, rightDocument.RootElement);
     }
 
     private static void PopulateRevisionItems(LeadRevision revision, string snapshotJson)

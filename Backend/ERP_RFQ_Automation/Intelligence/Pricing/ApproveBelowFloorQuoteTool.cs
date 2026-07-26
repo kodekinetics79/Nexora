@@ -139,6 +139,7 @@ public sealed class ApproveBelowFloorQuoteTool : IAgentTool
 
         var result = await _quotes.SendQuoteEmailAsync(
             quoteId.Value,
+            ctx.BusinessUnitId,
             recipientEmail!,
             input.GetStringOrNull("customSubject"),
             input.GetStringOrNull("customBody"),

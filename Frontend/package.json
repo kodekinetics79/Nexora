@@ -34,7 +34,7 @@
     "react-dom": "^19.2.5",
     "react-hot-toast": "^2.6.0",
     "react-i18next": "^17.0.6",
-    "react-router-dom": "^7.18.0",
+    "react-router-dom": "7.18.1",
     "recharts": "^3.8.1",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },

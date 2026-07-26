@@ -75,12 +75,34 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         if (string.IsNullOrWhiteSpace(idempotencyKey))
             throw new ArgumentException("An idempotency key is required.", nameof(idempotencyKey));
 
-        await using var transaction = _db.Database.CurrentTransaction == null
-            ? await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct)
-            : null;
+        if (_db.Database.CurrentTransaction is not null)
+            return await ReserveWithinTransactionAsync(businessUnitId, inventoryId, quantity,
+                idempotencyKey, orderId, orderItemId, actor, ct);
+
+        var strategy = _db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            // PostgreSQL's transaction-scoped advisory lock is the serialization boundary.
+            // READ COMMITTED refreshes the snapshot after a waiter acquires that lock.
+            var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
+            await using var transaction = await _db.Database.BeginTransactionAsync(isolation, ct);
+            var reserved = await ReserveWithinTransactionAsync(businessUnitId, inventoryId, quantity,
+                idempotencyKey, orderId, orderItemId, actor, ct);
+            await transaction.CommitAsync(ct);
+            return reserved;
+        });
+    }
+
+    private async Task<StockReservation> ReserveWithinTransactionAsync(
+        long businessUnitId, long inventoryId, decimal quantity, string idempotencyKey,
+        long? orderId, long? orderItemId, string? actor, CancellationToken ct)
+    {
         if (_db.Database.IsNpgsql())
+        {
+            var lockIdentity = $"{businessUnitId}:{inventoryId}";
             await _db.Database.ExecuteSqlInterpolatedAsync(
-                $"SELECT pg_advisory_xact_lock({businessUnitId}, {inventoryId})", ct);
+                $"SELECT pg_advisory_xact_lock(hashtextextended({lockIdentity}, 0))", ct);
+        }
 
         // The lock and replay check share one transaction, fencing concurrent holds.
         var existing = await _db.Set<StockReservation>()
@@ -106,7 +128,6 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         };
         _db.Set<StockReservation>().Add(reservation);
         await _db.SaveChangesAsync(ct);
-        if (transaction != null) await transaction.CommitAsync(ct);
         return reservation;
     }
 

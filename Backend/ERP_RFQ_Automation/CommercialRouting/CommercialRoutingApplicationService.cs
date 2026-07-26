@@ -327,31 +327,53 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
             && string.IsNullOrWhiteSpace(command.ScopeKey))
             throw new ArgumentException("ScopeKey is required for scoped ownership.");
 
-        var customerExists = await _db.Customers.AnyAsync(c => c.Id == command.CustomerId && c.Buid == businessUnitId, ct);
-        var users = new long?[] { command.PrimaryUserId, command.BackupUserId }.Where(x => x.HasValue).Select(x => x!.Value).Distinct().ToArray();
-        var validUsers = await _db.Users.CountAsync(u => u.Buid == businessUnitId && users.Contains(u.Id) && u.IsActive == true, ct);
-        if (!customerExists) throw new RoutingNotFoundException($"Customer {command.CustomerId} was not found.");
-        if (validUsers != users.Length) throw new RoutingConflictException("Every owner must be an active user in the same tenant.");
-
-        var ownership = new CustomerOwnership
+        try
         {
-            BusinessUnitId = businessUnitId,
-            CustomerId = command.CustomerId,
-            PrimaryUserId = command.PrimaryUserId,
-            BackupUserId = command.BackupUserId,
-            Scope = command.Scope,
-            ScopeKey = command.ScopeKey?.Trim(),
-            Priority = command.Priority,
-            EffectiveFrom = command.EffectiveFrom.ToUniversalTime(),
-            EffectiveTo = command.EffectiveTo?.ToUniversalTime(),
-            IsActive = true,
-            Source = command.Source.Trim(),
-            Reason = command.Reason?.Trim(),
-            Version = 1
-        };
-        _db.Add(ownership);
-        await _db.SaveChangesAsync(ct);
-        return ownership;
+            return await InTransactionAsync(async () =>
+            {
+                if (_db.Database.IsNpgsql())
+                    await _db.Database.ExecuteSqlInterpolatedAsync(
+                        $"SELECT pg_advisory_xact_lock(hashtextextended({$"customer-owner:{businessUnitId}:{command.CustomerId}:{command.Scope}:{command.ScopeKey?.Trim() ?? string.Empty}"}, 0))", ct);
+
+                var customerExists = await _db.Customers.AnyAsync(
+                    c => c.Id == command.CustomerId && c.Buid == businessUnitId, ct);
+                var users = new long?[] { command.PrimaryUserId, command.BackupUserId }
+                    .Where(x => x.HasValue).Select(x => x!.Value).Distinct().ToArray();
+                var validUsers = await _db.Users.CountAsync(
+                    u => u.Buid == businessUnitId && users.Contains(u.Id) && u.IsActive == true, ct);
+                if (!customerExists) throw new RoutingNotFoundException($"Customer {command.CustomerId} was not found.");
+                if (validUsers != users.Length)
+                    throw new RoutingConflictException("Every owner must be an active user in the same tenant.");
+
+                var scopeKey = command.ScopeKey?.Trim();
+                var starts = command.EffectiveFrom.ToUniversalTime();
+                var ends = command.EffectiveTo?.ToUniversalTime();
+                var overlaps = await _db.Set<CustomerOwnership>().AnyAsync(o =>
+                    o.BusinessUnitId == businessUnitId && o.CustomerId == command.CustomerId &&
+                    o.Scope == command.Scope && o.ScopeKey == scopeKey && o.IsActive &&
+                    (ends == null || o.EffectiveFrom < ends) &&
+                    (o.EffectiveTo == null || o.EffectiveTo > starts), ct);
+                if (overlaps)
+                    throw new RoutingConflictException("An effective owner already exists for this customer scope.");
+
+                var ownership = new CustomerOwnership
+                {
+                    BusinessUnitId = businessUnitId, CustomerId = command.CustomerId,
+                    PrimaryUserId = command.PrimaryUserId, BackupUserId = command.BackupUserId,
+                    Scope = command.Scope, ScopeKey = scopeKey, Priority = command.Priority,
+                    EffectiveFrom = starts, EffectiveTo = ends, IsActive = true,
+                    Source = command.Source.Trim(), Reason = command.Reason?.Trim(), Version = 1
+                };
+                _db.Add(ownership);
+                await _db.SaveChangesAsync(ct);
+                return ownership;
+            }, ct, IsolationLevel.ReadCommitted);
+        }
+        catch (DbUpdateException ex) when (ex.InnerException?.Message.Contains(
+            "UX_customer_ownerships_single_active", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            throw new RoutingConflictException("An effective owner already exists for this customer scope.");
+        }
     }
 
     public async Task<CustomerRoutingProfileResponse?> GetCustomerProfileAsync(
@@ -746,12 +768,13 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
         }
     }
 
-    private async Task<T> InTransactionAsync<T>(Func<Task<T>> operation, CancellationToken ct)
+    private async Task<T> InTransactionAsync<T>(Func<Task<T>> operation, CancellationToken ct,
+        IsolationLevel isolationLevel = IsolationLevel.Serializable)
     {
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
-            await using var transaction = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+            await using var transaction = await _db.Database.BeginTransactionAsync(isolationLevel, ct);
             var result = await operation();
             await transaction.CommitAsync(ct);
             return result;

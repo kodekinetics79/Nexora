@@ -67,12 +67,16 @@ public sealed record SalesRepPerformance(
     long SalesRepUserId, int ActivityCount, int OpportunityCount, int QuoteSentCount,
     int CustomerResponseCount, int WonCount, int LostCount, decimal? WinRatePercent,
     double? AverageResponseHours, int FollowUpsCreated, int FollowUpsCompleted,
+    int FollowUpsCompletedOnTime,
     int OpenFollowUps, int OverdueFollowUps,
     IReadOnlyList<CurrencyContributionPerformance> RevenueByCurrency);
 
 public interface ISalesPersistence
 {
     Task<bool> UserExistsAsync(long businessUnitId, long userId, CancellationToken ct);
+    Task<bool> CustomerExistsAsync(long businessUnitId, long customerId, CancellationToken ct);
+    Task<bool> LeadAssignmentExistsAsync(long businessUnitId, long assignmentId, CancellationToken ct);
+    Task<bool> AggregateExistsAsync(long businessUnitId, string aggregateType, long aggregateId, CancellationToken ct);
     Task<SalesRepProfile?> GetProfileAsync(long businessUnitId, long userId, CancellationToken ct);
     Task<SalesRepProfile?> FindProfileMutationAsync(long businessUnitId, string idempotencyKey, CancellationToken ct);
     Task<SalesRepProfile> SaveProfileAsync(SalesRepProfile profile, long expectedVersion,

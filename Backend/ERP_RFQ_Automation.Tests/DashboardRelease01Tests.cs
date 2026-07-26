@@ -82,6 +82,26 @@ public sealed class DashboardRelease01Tests
     }
 
     [Fact]
+    public async Task Release01Endpoint_DateOnlyTodayIncludesRecordsThroughGeneratedAt()
+    {
+        var repository = new CapturingDashboardRepository();
+        var today = DateTime.UtcNow.Date;
+        var controller = new DashboardController(repository, new StubRoleGate(true))
+        {
+            ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext
+            {
+                User = Principal(BusinessUnitId, roleId: 9, userId: 77)
+            }}
+        };
+
+        var result = await controller.GetRelease01(today.AddDays(-30), today, default);
+
+        Assert.IsType<OkObjectResult>(result.Result);
+        Assert.True(repository.To > today);
+        Assert.True(repository.To <= DateTime.UtcNow);
+    }
+
+    [Fact]
     public async Task Repository_ReconcilesQualificationKpisAndAppliesOwnerScope()
     {
         using var database = new TestDb();

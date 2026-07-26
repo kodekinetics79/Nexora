@@ -1,0 +1,35 @@
+NEXORA CORE SALES FORCE + INVENTORY REPRESENTATIVE BENCHMARK
+Observed at UTC: 2026-07-25T21:49:18Z
+Runtime: .NET 8.0.27; macOS/Unix 26.5.2; 12 processors
+Thresholds: none; these are observations on current local hardware.
+Process allocation delta: 1,093,732,552 bytes (process-wide, including PostgreSQL test infrastructure)
+External provider calls: 0
+External cost: 0
+
+customer_contact_matching
+operations=2000; p50_ms=0.0156; p95_ms=0.0226; evidence_candidates=2
+
+weighted_assignment_25_reps
+operations=2000; p50_ms=0.0273; p95_ms=0.0349; selected_user=624
+
+exact_normalized_product_lookup
+operations=2000; p50_ms=0.0488; p95_ms=0.0597; catalog_reference_calls=4000
+
+multi_warehouse_atp_3_warehouses
+operations=5000; p50_ms=0.0030; p95_ms=0.0032; warehouses=3
+
+sales_performance_read_aggregation
+operations=500; p50_ms=0.3401; p95_ms=0.3872; persistence_reads=2000; source_rows=215
+
+concurrent_postgresql_reservations
+operations=20; p50_ms=139.0805; p95_ms=169.4737; db_commands=92
+reserved=10; insufficient_stock=10; unexpected_contention_errors=0; final_atp=0
+
+local_classification_10000_requested_lines
+operations=10000; p50_ms=0.0489; p95_ms=0.3606; catalog_reference_calls=20000
+auto_linked=9000; unresolved=1000; duplicate_request_signatures=9900; external_calls=0
+
+Command:
+dotnet test Backend/ERP_RFQ_Automation.Tests/ERP_RFQ_Automation.Tests.csproj --filter 'FullyQualifiedName~CoreSalesForceInventoryPerformanceBenchmarkTests' --logger 'console;verbosity=detailed'
+
+Result: 1 passed, 0 failed, 0 skipped.

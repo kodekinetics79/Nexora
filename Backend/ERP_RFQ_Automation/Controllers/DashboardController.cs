@@ -36,7 +36,10 @@ namespace ERP_RFQ_Automation.Controllers
             if (businessUnitId <= 0 || roleId <= 0 || userId <= 0) return Forbid();
 
             var generatedAt = DateTime.UtcNow;
-            var effectiveTo = NormalizeUtc(to ?? generatedAt);
+            var requestedTo = NormalizeUtc(to ?? generatedAt);
+            var effectiveTo = to.HasValue && requestedTo.TimeOfDay == TimeSpan.Zero
+                ? (requestedTo.AddDays(1) < generatedAt ? requestedTo.AddDays(1) : generatedAt)
+                : requestedTo;
             var effectiveFrom = NormalizeUtc(from ?? effectiveTo.AddDays(-30));
             if (effectiveFrom >= effectiveTo)
                 return BadRequest("The dashboard 'from' value must be earlier than 'to'.");

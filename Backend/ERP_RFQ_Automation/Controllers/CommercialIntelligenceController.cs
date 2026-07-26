@@ -29,13 +29,32 @@ public sealed class CommercialIntelligenceController(
         var unassigned = await db.Set<UnassignedWorkItem>().AsNoTracking()
             .Where(x => x.BusinessUnitId == tenant && x.Status == WorkItemStatus.Open).CountAsync(ct);
         var overdue = followUps.Count(x => x.DueAtUtc < now);
+        var quoteIds = followUps.Where(x => x.AggregateType == "Quote").Select(x => x.AggregateId).Distinct().ToArray();
+        var leadIds = followUps.Where(x => x.AggregateType == "Lead").Select(x => x.AggregateId).Distinct().ToArray();
+        var quotes = await db.Quotes.AsNoTracking().Include(x => x.Customer).Include(x => x.Rfq).ThenInclude(x => x.Lead)
+            .Where(x => x.BusinessUnitId == tenant && quoteIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
+        var leads = await db.Leads.AsNoTracking()
+            .Where(x => x.BusinessUnitId == tenant && leadIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
+        var leadCustomerIds = leads.Values.Where(x => x.CustomerId.HasValue).Select(x => x.CustomerId!.Value)
+            .Distinct().ToArray();
+        var leadCustomers = await db.Customers.AsNoTracking()
+            .Where(x => x.Buid == tenant && leadCustomerIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
+        var users = await db.Users.AsNoTracking().Where(x => x.Buid == tenant).ToDictionaryAsync(x => x.Id, ct);
         var items = followUps.Select(x => new
         {
-            id = x.Id, recordType = x.AggregateType, recordId = x.AggregateId,
-            nexoraSerial = (string?)null, reference = $"{x.AggregateType} {x.AggregateId}",
-            customerName = (string?)null, ownerName = (string?)null,
-            reason = x.PurposeCode, dueAt = (DateTime?)x.DueAtUtc,
-            priority = x.DueAtUtc < now ? "Critical" : "Due"
+            quote = x.AggregateType == "Quote" && quotes.TryGetValue(x.AggregateId, out var value) ? value : null,
+            lead = x.AggregateType == "Lead" && leads.TryGetValue(x.AggregateId, out var lead) ? lead : null,
+            task = x
+        }).Select(x => new {
+            id = x.task.Id, recordType = x.task.AggregateType, recordId = x.task.AggregateId,
+            nexoraSerial = x.quote?.NexoraSerial ?? x.lead?.CommercialCaseReference,
+            reference = x.quote?.QuoteNo ?? x.lead?.Rfqno ?? $"{x.task.AggregateType} {x.task.AggregateId}",
+            customerName = x.quote?.Customer?.Name ??
+                (x.lead?.CustomerId is long customerId && leadCustomers.TryGetValue(customerId, out var customer)
+                    ? customer.Name : null),
+            ownerName = users.TryGetValue(x.task.AssignedToUserId, out var owner) ? Name(owner) : null,
+            reason = x.task.PurposeCode, dueAt = (DateTime?)x.task.DueAtUtc,
+            priority = x.task.DueAtUtc < now ? "Critical" : "Due"
         }).ToArray();
         return Ok(new { generatedAt = now, metrics = new[] {
             Metric("open-follow-ups", "Open follow-ups", followUps.Count),
@@ -79,8 +98,9 @@ public sealed class CommercialIntelligenceController(
         return Ok(new {
             summary.UserId, summary.Name, summary.Email, summary.RoleName, summary.ActiveLeads,
             summary.OverdueLeads, summary.OpenRfqs, summary.DraftQuotes, summary.FollowUpsDue,
-            summary.WeightedPipeline, summary.CurrencyCode, accountCount,
-            wonValue = performance?.RevenueByCurrency.Sum(x => x.WeightedRevenueAmount) ?? 0,
+            summary.PipelineGroups, accountCount,
+            wonValueGroups = performance?.RevenueByCurrency.Select(x => new CurrencyAmountGroup(x.CurrencyCode, x.WeightedRevenueAmount)).ToArray()
+                ?? Array.Empty<CurrencyAmountGroup>(),
             conversionRate = performance?.WinRatePercent, recentActivity = activity
         });
     }
@@ -98,16 +118,18 @@ public sealed class CommercialIntelligenceController(
             .Where(x => x.BusinessUnitId == tenant && ids.Contains(x.CustomerId) && x.IsActive && x.EffectiveTo == null)
             .OrderByDescending(x => x.Priority).ThenByDescending(x => x.EffectiveFrom).ToListAsync(ct);
         var users = await db.Users.AsNoTracking().Where(x => x.Buid == tenant).ToDictionaryAsync(x => x.Id, ct);
-        var leads = await db.Leads.AsNoTracking().Where(x => x.BusinessUnitId == tenant && x.CustomerId.HasValue && ids.Contains(x.CustomerId.Value)).GroupBy(x => x.CustomerId!.Value).Select(x => new { Id = x.Key, Count = x.Count() }).ToDictionaryAsync(x => x.Id, x => x.Count, ct);
-        var quotes = await db.Quotes.AsNoTracking().Where(x => x.BusinessUnitId == tenant && x.CustomerId.HasValue && ids.Contains(x.CustomerId.Value)).GroupBy(x => x.CustomerId!.Value).Select(x => new { Id = x.Key, Count = x.Count(), Value = x.Sum(q => q.TotalAmount ?? 0) }).ToDictionaryAsync(x => x.Id, ct);
+        var leadRows = await db.Leads.AsNoTracking().Include(x => x.LeadStatus).Where(x => x.BusinessUnitId == tenant && x.CustomerId.HasValue && ids.Contains(x.CustomerId.Value)).ToListAsync(ct);
+        var quoteRows = await db.Quotes.AsNoTracking().Include(x => x.Status).Include(x => x.Currency)
+            .Where(x => x.BusinessUnitId == tenant && x.CustomerId.HasValue && ids.Contains(x.CustomerId.Value)).ToListAsync(ct);
         return Ok(customers.Select(customer => {
             var owner = ownerships.FirstOrDefault(x => x.CustomerId == customer.Id);
             users.TryGetValue(owner?.PrimaryUserId ?? 0, out var user);
-            quotes.TryGetValue(customer.Id, out var quote);
+            var customerLeads = leadRows.Where(x => x.CustomerId == customer.Id && !TerminalLead(x.LeadStatus?.SetupCode, x.LeadStatus?.SetupValue)).ToArray();
+            var customerQuotes = quoteRows.Where(x => x.CustomerId == customer.Id && !TerminalQuote(x.Status?.SetupCode, x.Status?.SetupValue)).ToArray();
             return new { customerId = customer.Id, customerName = customer.Name,
                 ownerUserId = owner?.PrimaryUserId, ownerName = user == null ? null : Name(user),
-                openLeads = leads.GetValueOrDefault(customer.Id), openQuotes = quote?.Count ?? 0,
-                pipelineValue = quote?.Value ?? 0, currencyCode = (string?)null,
+                openLeads = customerLeads.Length, openQuotes = customerQuotes.Length,
+                pipelineGroups = PipelineGroups(customerQuotes),
                 lastActivityAt = customer.ModifiedOn ?? customer.CreatedOn, version = owner?.Version ?? 0 };
         }));
     }
@@ -118,18 +140,72 @@ public sealed class CommercialIntelligenceController(
     public async Task<ActionResult> AssignAccount(long customerId, AssignAccountRequest request, CancellationToken ct)
     {
         var tenant = TenantId();
+        var idempotencyKey = IdempotencyKey();
         if (!await db.Customers.AnyAsync(x => x.Buid == tenant && x.Id == customerId, ct) ||
             !await db.Users.AnyAsync(x => x.Buid == tenant && x.Id == request.OwnerUserId && x.IsActive != false, ct)) return NotFound();
-        await using var transaction = await db.Database.BeginTransactionAsync(ct);
-        var current = await db.Set<CustomerOwnership>().Where(x => x.BusinessUnitId == tenant && x.CustomerId == customerId && x.IsActive && x.EffectiveTo == null).ToListAsync(ct);
-        if (current.Count != 0 && current.Max(x => x.Version) != request.ExpectedVersion) return Conflict(new { error = "Account ownership changed. Refresh and retry." });
-        var now = DateTime.UtcNow;
-        foreach (var value in current) { value.IsActive = false; value.EffectiveTo = now; value.Version++; }
-        var created = new CustomerOwnership { BusinessUnitId = tenant, CustomerId = customerId, PrimaryUserId = request.OwnerUserId,
-            Scope = OwnershipScope.GeneralCustomer, Priority = 100, EffectiveFrom = now, IsActive = true,
-            Source = "MANUAL", Reason = "Assigned from sales management", Version = 1 };
-        db.Add(created); await db.SaveChangesAsync(ct); await transaction.CommitAsync(ct);
+        var strategy = db.Database.CreateExecutionStrategy();
+        (CustomerOwnership? Created, bool Conflict) outcome;
+        try
+        {
+            outcome = await strategy.ExecuteAsync(async () =>
+            {
+                await using var transaction = await db.Database.BeginTransactionAsync(ct);
+                if (db.Database.IsNpgsql())
+                    await db.Database.ExecuteSqlInterpolatedAsync(
+                        $"SELECT pg_advisory_xact_lock(hashtextextended({$"account-owner:{tenant}:{customerId}"}, 0))", ct);
+                var replay = await db.Set<CustomerOwnership>().AsNoTracking().SingleOrDefaultAsync(x =>
+                    x.BusinessUnitId == tenant && x.MutationIdempotencyKey == idempotencyKey, ct);
+                if (replay is not null)
+                {
+                    if (replay.CustomerId != customerId || replay.PrimaryUserId != request.OwnerUserId
+                        || replay.Scope != OwnershipScope.GeneralCustomer || replay.ScopeKey != null)
+                        throw new InvalidOperationException("The idempotency key was already used for a different ownership request.");
+                    await transaction.CommitAsync(ct);
+                    return (Created: replay, Conflict: false);
+                }
+                var current = await db.Set<CustomerOwnership>().Where(x => x.BusinessUnitId == tenant &&
+                    x.CustomerId == customerId && x.IsActive && x.EffectiveTo == null).ToListAsync(ct);
+                if (current.Count != 0 && current.Max(x => x.Version) != request.ExpectedVersion)
+                    return (Created: (CustomerOwnership?)null, Conflict: true);
+                var now = DateTime.UtcNow;
+                foreach (var value in current) { value.IsActive = false; value.EffectiveTo = now; value.Version++; }
+                if (current.Count != 0) await db.SaveChangesAsync(ct);
+                var replacement = new CustomerOwnership { BusinessUnitId = tenant, CustomerId = customerId,
+                    PrimaryUserId = request.OwnerUserId, Scope = OwnershipScope.GeneralCustomer, Priority = 100,
+                    EffectiveFrom = now, IsActive = true, Source = "MANUAL",
+                    Reason = "Assigned from sales management", MutationIdempotencyKey = idempotencyKey, Version = 1 };
+                db.Add(replacement); await db.SaveChangesAsync(ct); await transaction.CommitAsync(ct);
+                return (Created: (CustomerOwnership?)replacement, Conflict: false);
+            });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Conflict(new { error = ex.Message });
+        }
+        if (outcome.Conflict)
+            return Conflict(new { error = "Account ownership changed. Refresh and retry." });
+        var created = outcome.Created!;
         return Ok(new { customerId, ownerUserId = created.PrimaryUserId, version = created.Version });
+    }
+
+    [HttpGet("leads/{leadId:long}/assignment-history")]
+    [RequireModulePermission("Leads", PermissionAction.View)]
+    public async Task<ActionResult> AssignmentHistory(long leadId, CancellationToken ct)
+    {
+        var tenant = TenantId();
+        if (!await db.Leads.AsNoTracking().AnyAsync(x => x.BusinessUnitId == tenant && x.Id == leadId, ct))
+            return NotFound();
+        var users = await db.Users.AsNoTracking().Where(x => x.Buid == tenant).ToDictionaryAsync(x => x.Id, ct);
+        var rows = await db.Set<LeadAssignment>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == tenant && x.LeadId == leadId)
+            .OrderByDescending(x => x.EffectiveFrom).ThenByDescending(x => x.Id).ToListAsync(ct);
+        return Ok(rows.Select(x => new {
+            x.Id, x.LeadId, previousOwnerUserId = x.FromUserId, ownerUserId = x.ToUserId,
+            previousOwnerName = x.FromUserId.HasValue && users.TryGetValue(x.FromUserId.Value, out var previous) ? Name(previous) : null,
+            ownerName = users.TryGetValue(x.ToUserId, out var owner) ? Name(owner) : null,
+            scope = x.AssignmentScope.ToString(), x.ReasonCode, x.Comment, x.EffectiveFrom, x.EffectiveTo,
+            x.CorrelationId, x.IdempotencyKey
+        }));
     }
 
     [HttpGet("routing-queue")]
@@ -167,11 +243,14 @@ public sealed class CommercialIntelligenceController(
                 (string.IsNullOrWhiteSpace(status) || status != "open" || x.Status == FollowUpStatus.Open || x.Status == FollowUpStatus.InProgress))
             .OrderBy(x => x.DueAtUtc).Take(250).ToListAsync(ct);
         var users = await db.Users.AsNoTracking().Where(x => x.Buid == tenant).ToDictionaryAsync(x => x.Id, ct);
-        return Ok(rows.Select(x => new { x.Id, quoteId = x.AggregateType.Equals("Quote", StringComparison.OrdinalIgnoreCase) ? x.AggregateId : 0,
-            quoteNo = $"{x.AggregateType} {x.AggregateId}", customerName = "Customer", ownerUserId = (long?)x.AssignedToUserId,
+        var quoteIds = rows.Where(x => x.AggregateType == "Quote").Select(x => x.AggregateId).Distinct().ToArray();
+        var quotes = await db.Quotes.AsNoTracking().Include(x => x.Customer).Where(x => x.BusinessUnitId == tenant && quoteIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
+        return Ok(rows.Select(x => { quotes.TryGetValue(x.AggregateId, out var quote); return new { x.Id, quoteId = x.AggregateType.Equals("Quote", StringComparison.OrdinalIgnoreCase) ? x.AggregateId : 0,
+            quoteNo = quote?.QuoteNo ?? $"{x.AggregateType} {x.AggregateId}", nexoraSerial = quote?.NexoraSerial,
+            customerName = quote?.Customer?.Name ?? "Customer unresolved", ownerUserId = (long?)x.AssignedToUserId,
             ownerName = users.TryGetValue(x.AssignedToUserId, out var user) ? Name(user) : null,
             dueAt = x.DueAtUtc, status = x.Status.ToString(), reason = x.PurposeCode,
-            daysSinceContact = (int?)null, version = x.Version }));
+            daysSinceContact = quote?.SentOn == null ? (int?)null : Math.Max(0, (DateTime.UtcNow.Date - quote.SentOn.Value.Date).Days), version = x.Version }; }));
     }
 
     [HttpPost("follow-ups/{id:long}/complete")]
@@ -195,8 +274,13 @@ public sealed class CommercialIntelligenceController(
         var reps = await BuildRepSummaries(tenant, ct);
         var rows = from rep in reps join result in results on rep.UserId equals result.SalesRepUserId into resultRows from result in resultRows.DefaultIfEmpty()
             select new { rep.UserId, rep.Name, rep.Email, rep.RoleName, rep.ActiveLeads, rep.OverdueLeads, rep.OpenRfqs,
-                rep.DraftQuotes, rep.FollowUpsDue, rep.WeightedPipeline, rep.CurrencyCode,
-                wonQuotes = result?.WonCount ?? 0, lostQuotes = result?.LostCount ?? 0, conversionRate = result?.WinRatePercent };
+                rep.DraftQuotes, rep.FollowUpsDue, rep.PipelineGroups,
+                wonQuotes = result?.WonCount ?? 0, lostQuotes = result?.LostCount ?? 0,
+                followUpsCreated = result?.FollowUpsCreated ?? 0,
+                completedFollowUps = result?.FollowUpsCompleted ?? 0,
+                followUpsCompletedOnTime = result?.FollowUpsCompletedOnTime ?? 0,
+                openFollowUps = result?.OpenFollowUps ?? 0, overdueFollowUps = result?.OverdueFollowUps ?? 0,
+                conversionRate = result?.WinRatePercent };
         return Ok(new { generatedAt = DateTime.UtcNow, from = fromUtc, to = toUtc,
             metrics = new[] { Metric("won", "Won", results.Sum(x => x.WonCount)), Metric("lost", "Lost", results.Sum(x => x.LostCount)) }, representatives = rows });
     }
@@ -206,14 +290,42 @@ public sealed class CommercialIntelligenceController(
         var users = await db.Users.AsNoTracking().Where(x => x.Buid == tenant && x.IsActive != false).OrderBy(x => x.FirstName).ThenBy(x => x.LastName).ToListAsync(ct);
         var assignments = await db.Set<LeadAssignment>().AsNoTracking().Where(x => x.BusinessUnitId == tenant && x.EffectiveTo == null).ToListAsync(ct);
         var followUps = await db.FollowUpTasks.AsNoTracking().Where(x => x.BusinessUnitId == tenant && x.Status != FollowUpStatus.Completed && x.Status != FollowUpStatus.Cancelled).ToListAsync(ct);
-        return users.Select(user => new RepSummary(user.Id, Name(user), user.Email, null,
-            assignments.Count(x => x.ToUserId == user.Id), 0, 0, 0,
+        var leadIds = assignments.Select(x => x.LeadId).Distinct().ToArray();
+        var leads = await db.Leads.AsNoTracking().Include(x => x.LeadStatus).Where(x => x.BusinessUnitId == tenant && leadIds.Contains(x.Id)).ToListAsync(ct);
+        var rfqs = await db.Rfqs.AsNoTracking().Include(x => x.Rfqstatus).Where(x => x.BusinessUnitId == tenant && x.LeadId.HasValue && leadIds.Contains(x.LeadId.Value)).ToListAsync(ct);
+        var rfqIds = rfqs.Select(x => x.Id).ToArray();
+        var quotes = await db.Quotes.AsNoTracking().Include(x => x.Status).Include(x => x.Currency)
+            .Where(x => x.BusinessUnitId == tenant && x.Rfqid.HasValue && rfqIds.Contains(x.Rfqid.Value)).ToListAsync(ct);
+        return users.Select(user => { var ownedLeadIds = assignments.Where(x => x.ToUserId == user.Id).Select(x => x.LeadId).ToHashSet();
+            var activeLeads = leads.Where(x => ownedLeadIds.Contains(x.Id) && !TerminalLead(x.LeadStatus?.SetupCode, x.LeadStatus?.SetupValue)).ToArray();
+            var allOwnedRfqs = rfqs.Where(x => x.LeadId.HasValue && ownedLeadIds.Contains(x.LeadId.Value)).ToArray();
+            var openRfqs = allOwnedRfqs.Where(x => !TerminalRfq(x.Rfqstatus?.SetupCode, x.Rfqstatus?.SetupValue)).ToArray();
+            var allOwnedRfqIds = allOwnedRfqs.Select(x => x.Id).ToHashSet();
+            var ownedQuotes = quotes.Where(x => x.Rfqid.HasValue && allOwnedRfqIds.Contains(x.Rfqid.Value) && !TerminalQuote(x.Status?.SetupCode, x.Status?.SetupValue)).ToArray();
+            return new RepSummary(user.Id, Name(user), user.Email, user.Role?.SetupValue,
+            activeLeads.Length, activeLeads.Count(x => x.BidClosingDate.HasValue && x.BidClosingDate < DateTime.UtcNow), openRfqs.Length,
+            ownedQuotes.Count(x => Canonical(x.Status?.SetupCode, x.Status?.SetupValue) == "DRAFT"),
             followUps.Count(x => x.AssignedToUserId == user.Id && x.DueAtUtc <= DateTime.UtcNow.AddDays(1)),
-            0, null)).ToList();
+            PipelineGroups(ownedQuotes)); }).ToList();
     }
 
     private static object Metric(string key, string label, decimal value) => new { key, label, value, unit = "count" };
     private static string Name(User user) => $"{user.FirstName} {user.LastName}".Trim();
+    private static string Canonical(string? code, string? value) => ((string.IsNullOrWhiteSpace(code) ? value : code) ?? string.Empty).Trim().Replace(' ', '_').ToUpperInvariant();
+    private static bool TerminalLead(string? code, string? value) => Canonical(code, value) is "DISQUALIFIED" or "CONVERTED_TO_RFQ" or "LOST" or "CANCELLED" or "COMPLETED" or "DUPLICATED";
+    private static bool TerminalRfq(string? code, string? value) => Canonical(code, value) is "CANCELLED" or "CLOSED" or "QUOTE_SENT";
+    private static bool TerminalQuote(string? code, string? value) => Canonical(code, value) is "ACCEPTED" or "REJECTED" or "EXPIRED" or "ORDERED" or "CANCELLED";
+    private static IReadOnlyList<CurrencyPipelineGroup> PipelineGroups(IEnumerable<Quote> quotes) => quotes
+        .GroupBy(x => new { x.CurrencyId, CurrencyCode = x.Currency?.Code })
+        .Select(group => new CurrencyPipelineGroup(
+            group.Key.CurrencyId,
+            group.Key.CurrencyCode,
+            group.Count(),
+            group.Sum(x => x.TotalAmount ?? 0m),
+            group.Sum(x => (x.TotalAmount ?? 0m) * (x.RespondedOn.HasValue ? .5m : x.SentOn.HasValue ? .3m : 0m))))
+        .OrderBy(x => x.CurrencyCode ?? string.Empty, StringComparer.Ordinal)
+        .ThenBy(x => x.CurrencyId)
+        .ToArray();
     private long TenantId() => long.TryParse(User.FindFirst("businessUnitId")?.Value, out var id) && id > 0 ? id : throw new SalesConflictException("Business Unit ID is required.");
     private long? UserId() => long.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("sub")?.Value, out var id) ? id : null;
     private string IdempotencyKey() => Request.Headers.TryGetValue("Idempotency-Key", out var value) && !string.IsNullOrWhiteSpace(value) ? value.ToString() : throw new SalesValidationException("Idempotency-Key header is required.");
@@ -223,4 +335,7 @@ public sealed record AssignAccountRequest(long OwnerUserId, long ExpectedVersion
 public sealed record AssignRoutingRequest(long OwnerUserId, long ExpectedVersion);
 public sealed record CompleteFollowUpRequest(long ExpectedVersion);
 public sealed record RepSummary(long UserId, string Name, string? Email, string? RoleName, int ActiveLeads,
-    int OverdueLeads, int OpenRfqs, int DraftQuotes, int FollowUpsDue, decimal WeightedPipeline, string? CurrencyCode);
+    int OverdueLeads, int OpenRfqs, int DraftQuotes, int FollowUpsDue, IReadOnlyList<CurrencyPipelineGroup> PipelineGroups);
+public sealed record CurrencyPipelineGroup(long? CurrencyId, string? CurrencyCode, int QuoteCount,
+    decimal PipelineValue, decimal WeightedPipeline);
+public sealed record CurrencyAmountGroup(string CurrencyCode, decimal Value);

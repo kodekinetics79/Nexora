@@ -38,6 +38,30 @@ public sealed class CoreProductResolutionTests
     }
 
     [Fact]
+    public async Task CanonicalCompactPart_ResolvesUniqueSeparatedCatalogIdentity()
+    {
+        var resolver = Resolver(Product(5, 11, "CORE-ATP-100"));
+
+        var result = await resolver.ResolveAsync(Request(11, "coreatp100"));
+
+        Assert.Equal(ProductResolutionDecisionState.AutoLinked, result.DecisionState);
+        Assert.Equal(5, result.ResolvedProductId);
+        Assert.Equal(ProductResolutionMethods.CanonicalCompactIdentity, result.Method);
+    }
+
+    [Fact]
+    public async Task CanonicalCompactPart_DoesNotAutoLinkCollidingCatalogIdentities()
+    {
+        var resolver = Resolver(Product(5, 11, "CORE-ATP-100"), Product(6, 11, "COREA-TP100"));
+
+        var result = await resolver.ResolveAsync(Request(11, "coreatp100"));
+
+        Assert.True(result.IsAmbiguous);
+        Assert.Equal(ProductResolutionDecisionState.ReviewRequired, result.DecisionState);
+        Assert.Null(result.ResolvedProductId);
+    }
+
+    [Fact]
     public async Task LowConfidenceSimilarity_IsRankedButNeverAutoLinked()
     {
         var resolver = Resolver(Product(1, 11, "PUMP-900", "INT-1", "Acme", "Industrial pump assembly"));

@@ -43,7 +43,8 @@ public sealed record LeadReconciliationResult(
 
 public sealed record LeadRevisionDto(long Id, int RevisionNumber, DateTimeOffset CreatedAtUtc,
     string Fingerprint, string? CustomerRfqReference, string ProcessingPath, bool ExternalAiUsed,
-    IReadOnlyList<LeadRevisionDifferenceDto> Differences, IReadOnlyList<LeadRevisionImpactDto> Impacts);
+    IReadOnlyList<LeadRevisionDifferenceDto> Differences, IReadOnlyList<LeadRevisionImpactDto> Impacts,
+    int ChangedLineCount, int ModifiedLineCount);
 public sealed record LeadRevisionDifferenceDto(string ChangeType, string Scope, string Path, string? PreviousValueJson, string? CurrentValueJson);
 public sealed record LeadRevisionImpactDto(string AggregateType, long AggregateId, string ImpactType, string Status, string DetailsJson);
 

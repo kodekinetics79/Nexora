@@ -7,6 +7,8 @@ public static class SalesModelBuilderExtensions
 {
     public static ModelBuilder ApplyCommercialSalesModel(this ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<Team>().HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
+
         modelBuilder.Entity<SalesRepProfile>(entity =>
         {
             entity.ToTable("sales_rep_profiles");
@@ -29,6 +31,9 @@ public static class SalesModelBuilderExtensions
             entity.Property(x => x.Version).IsConcurrencyToken();
             entity.HasIndex(x => new { x.BusinessUnitId, x.UserId, x.TeamId, x.EffectiveToUtc });
             entity.HasOne<User>().WithMany().HasForeignKey(x => x.UserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Team>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.TeamId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<CommercialActivity>(entity =>
@@ -45,6 +50,12 @@ public static class SalesModelBuilderExtensions
             entity.HasIndex(x => new { x.BusinessUnitId, x.IdempotencyKey }).IsUnique();
             entity.HasIndex(x => new { x.BusinessUnitId, x.SalesRepUserId, x.OccurredAtUtc });
             entity.HasOne<User>().WithMany().HasForeignKey(x => x.SalesRepUserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Customer>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.CustomerId })
+                .HasPrincipalKey(x => new { x.Buid, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<CommercialRouting.LeadAssignment>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.LeadAssignmentId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<FollowUpTask>(entity =>
@@ -61,6 +72,10 @@ public static class SalesModelBuilderExtensions
             entity.HasIndex(x => new { x.BusinessUnitId, x.CreationIdempotencyKey }).IsUnique();
             entity.HasIndex(x => new { x.BusinessUnitId, x.AssignedToUserId, x.DueAtUtc });
             entity.HasOne<User>().WithMany().HasForeignKey(x => x.AssignedToUserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
+            entity.HasOne<Customer>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.CustomerId })
+                .HasPrincipalKey(x => new { x.Buid, x.Id }).OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<FollowUpTransitionEvent>(entity =>
@@ -74,7 +89,9 @@ public static class SalesModelBuilderExtensions
             entity.Property(x => x.CorrelationId).HasMaxLength(100).IsRequired();
             entity.Property(x => x.IdempotencyKey).HasMaxLength(160).IsRequired();
             entity.HasIndex(x => new { x.BusinessUnitId, x.IdempotencyKey }).IsUnique();
-            entity.HasOne<FollowUpTask>().WithMany().HasForeignKey(x => x.FollowUpTaskId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<FollowUpTask>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.FollowUpTaskId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<SalesContribution>(entity =>
@@ -93,6 +110,9 @@ public static class SalesModelBuilderExtensions
             entity.HasIndex(x => new { x.BusinessUnitId, x.IdempotencyKey }).IsUnique();
             entity.HasIndex(x => new { x.BusinessUnitId, x.SalesRepUserId, x.RecognizedAtUtc });
             entity.HasOne<User>().WithMany().HasForeignKey(x => x.SalesRepUserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Customer>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.CustomerId })
+                .HasPrincipalKey(x => new { x.Buid, x.Id }).OnDelete(DeleteBehavior.Restrict);
         });
 
         return modelBuilder;

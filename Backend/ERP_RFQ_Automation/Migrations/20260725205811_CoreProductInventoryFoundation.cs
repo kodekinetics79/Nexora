@@ -228,12 +228,24 @@ namespace ERP_RFQ_Automation.Migrations
                   AND product_match.tenant_id = inventory_match.tenant_id
                   AND product_match.normalized_part = inventory_match.normalized_part;
 
+                -- An alias is authoritative only when one tenant-local product owns the
+                -- normalized identity. Ambiguous legacy products stay unresolved instead
+                -- of aborting the populated upgrade at the tenant-identity unique index.
+                WITH normalized_products AS (
+                    SELECT "BUID" AS tenant_id,
+                           upper(regexp_replace("PartNo", '[^[:alnum:]]', '', 'g')) AS normalized_part,
+                           min("ID") AS product_id,
+                           min("PartNo") AS part_no
+                    FROM public."Products"
+                    WHERE "BUID" IS NOT NULL AND NULLIF(trim("PartNo"), '') IS NOT NULL
+                    GROUP BY "BUID", upper(regexp_replace("PartNo", '[^[:alnum:]]', '', 'g'))
+                    HAVING count(*) = 1
+                )
                 INSERT INTO public.product_aliases
                     ("BusinessUnitId", "ProductId", "Kind", "Value", "NormalizedValue", "AccountId", "IsActive", "CreatedOn", "CreatedBy")
-                SELECT "BUID", "ID", 'ManufacturerPartNumber', "PartNo",
-                       upper(regexp_replace("PartNo", '[^[:alnum:]]', '', 'g')), NULL, true, now(), 'migration'
-                FROM public."Products"
-                WHERE "BUID" IS NOT NULL AND NULLIF(trim("PartNo"), '') IS NOT NULL;
+                SELECT tenant_id, product_id, 'ManufacturerPartNumber', part_no,
+                       normalized_part, NULL, true, now(), 'migration'
+                FROM normalized_products;
                 """);
 
             migrationBuilder.CreateIndex(
@@ -341,6 +353,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                 DO $govern$
                 DECLARE governed_table text;
+                DECLARE governed_sequence text;
                 BEGIN
                     FOREACH governed_table IN ARRAY ARRAY[
                         'incoming_inventory', 'inventory_movements', 'product_aliases', 'product_supersessions'
@@ -350,6 +363,12 @@ namespace ERP_RFQ_Automation.Migrations
                             EXECUTE format('DROP POLICY IF EXISTS nexora_tenant_isolation ON public.%I', governed_table);
                             EXECUTE format('CREATE POLICY nexora_tenant_isolation ON public.%I TO nexora_tenant_app USING ("BusinessUnitId" = NULLIF(current_setting(''nexora.business_unit_id'', true), '''')::bigint) WITH CHECK ("BusinessUnitId" = NULLIF(current_setting(''nexora.business_unit_id'', true), '''')::bigint)', governed_table);
                             EXECUTE format('GRANT SELECT, INSERT, UPDATE ON public.%I TO nexora_tenant_app', governed_table);
+                            SELECT pg_get_serial_sequence(format('public.%I', governed_table), 'Id')
+                            INTO governed_sequence;
+                            IF governed_sequence IS NOT NULL THEN
+                                EXECUTE 'REVOKE ALL PRIVILEGES ON SEQUENCE ' || governed_sequence || ' FROM nexora_tenant_app';
+                                EXECUTE 'GRANT USAGE ON SEQUENCE ' || governed_sequence || ' TO nexora_tenant_app';
+                            END IF;
                         END IF;
                     END LOOP;
                 END $govern$;

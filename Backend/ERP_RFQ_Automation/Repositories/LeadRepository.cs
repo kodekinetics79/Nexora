@@ -11,6 +11,7 @@ using Microsoft.Extensions.Logging;
 using System.Data;
 using System.Text.Json;
 using ERP_RFQ_Automation.Inventory.Commercial;
+using ERP_RFQ_Automation.CommercialRouting;
 
 namespace ERP_RFQ_Automation.Repositories
 {
@@ -646,6 +647,19 @@ namespace ERP_RFQ_Automation.Repositories
 
             if (lead == null) return null;
 
+            var customerName = lead.CustomerId.HasValue
+                ? await _context.Customers.AsNoTracking().Where(x => x.Buid == businessUnitId && x.Id == lead.CustomerId.Value)
+                    .Select(x => x.Name).SingleOrDefaultAsync()
+                : null;
+            var accountOwnerName = lead.CustomerId.HasValue
+                ? await (from ownership in _context.Set<CustomerOwnership>().AsNoTracking()
+                         join owner in _context.Users.AsNoTracking() on ownership.PrimaryUserId equals owner.Id
+                         where ownership.BusinessUnitId == businessUnitId && ownership.CustomerId == lead.CustomerId.Value &&
+                               ownership.IsActive && ownership.EffectiveTo == null && owner.Buid == businessUnitId
+                         orderby ownership.Priority descending, ownership.EffectiveFrom descending
+                         select (owner.FirstName + " " + owner.LastName).Trim()).FirstOrDefaultAsync()
+                : null;
+
             var attachments = await _context.Attachments
                 .AsNoTracking()
                 .Where(a => a.ParentType == "Lead" && a.ParentId == id)
@@ -669,6 +683,8 @@ namespace ERP_RFQ_Automation.Repositories
                 CommercialCaseReference = lead.CommercialCaseReference,
                 CustomerId = lead.CustomerId,
                 ContactId = lead.ContactId,
+                CustomerName = customerName,
+                AccountOwnerName = accountOwnerName,
                 CustomerMatchStatus = lead.CustomerMatchStatus,
                 Rfqno = lead.Rfqno,
                 BuyersName = lead.BuyersName,

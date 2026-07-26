@@ -189,7 +189,14 @@ public sealed class LeadLineCommercialResolutionService(
             throw new ArgumentException("Commercial evidence must belong to the resolved product.");
 
         var route = fulfilment.Classify(request.RequestedQuantity, request.Inventory);
-        var incoming = request.Incoming.Sum(x => x.OpenQuantity);
+        // Planned supply is not yet a commercial commitment; completed and cancelled
+        // receipts cannot cover demand. Count only open ordered/in-transit supply.
+        var incoming = request.Incoming
+            .Where(x => x.Status is IncomingInventoryStatus.Ordered
+                or IncomingInventoryStatus.Confirmed
+                or IncomingInventoryStatus.InTransit
+                or IncomingInventoryStatus.PartiallyReceived)
+            .Sum(x => x.OpenQuantity);
         var related = Array.Empty<RelatedResource>();
         CommercialResolutionClassification classification;
 

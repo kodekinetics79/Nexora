@@ -1,8 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
-import { Alert, Table, TableBody, TableCell, TableHead, TableRow } from '@mui/material';
+import { Alert, Box, Table, TableBody, TableCell, TableHead, TableRow, Typography } from '@mui/material';
 import { useParams } from 'react-router-dom';
 import commercialIntelligenceService from '../../api/services/commercialIntelligenceService';
-import { MetricGrid, PageShell, QueryState, ResponsiveTable, formatDateTime } from './CommercialPagePrimitives';
+import { CurrencyAmounts, MetricGrid, PageShell, PipelineGroups, QueryState, ResponsiveTable, formatDateTime } from './CommercialPagePrimitives';
 
 export default function RepProfilePage() {
   const userId = Number(useParams<{ userId: string }>().userId);
@@ -14,7 +14,14 @@ export default function RepProfilePage() {
     { key: 'accounts', label: 'Owned accounts', value: rep.accountCount, unit: 'count' },
     { key: 'leads', label: 'Active leads', value: rep.activeLeads, unit: 'count' },
     { key: 'follow-ups', label: 'Follow-ups due', value: rep.followUpsDue, unit: 'count' },
-    { key: 'won', label: 'Won value', value: rep.wonValue, unit: 'currency', currencyCode: rep.currencyCode },
   ] : [];
-  return <PageShell title={rep?.name || 'Rep profile'} subtitle={rep?.email || 'Representative commercial workload.'}><MetricGrid metrics={metrics} /><QueryState loading={query.isLoading} error={query.isError} empty={!!rep && !activity.length} onRetry={() => void query.refetch()} emptyText="No recent commercial activity is recorded for this representative."><ResponsiveTable label="Representative activity"><Table size="small"><TableHead><TableRow><TableCell>Reference</TableCell><TableCell>Type</TableCell><TableCell>Customer</TableCell><TableCell>Reason</TableCell><TableCell>Due</TableCell></TableRow></TableHead><TableBody>{activity.map(item => <TableRow hover key={`${item.recordType}-${item.id}`}><TableCell>{item.nexoraSerial || item.reference}</TableCell><TableCell>{item.recordType}</TableCell><TableCell>{item.customerName || 'Unresolved'}</TableCell><TableCell>{item.reason}</TableCell><TableCell>{formatDateTime(item.dueAt)}</TableCell></TableRow>)}</TableBody></Table></ResponsiveTable></QueryState></PageShell>;
+  return (
+    <PageShell title={rep?.name || 'Rep profile'} subtitle={rep?.email || 'Representative commercial workload.'}>
+      <MetricGrid metrics={metrics} />
+      {rep && <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 2, mb: 2.5 }}><Box><Typography variant="caption" color="text.secondary">Weighted active pipeline</Typography><PipelineGroups groups={rep.pipelineGroups} /></Box><Box><Typography variant="caption" color="text.secondary">Won value</Typography><CurrencyAmounts groups={rep.wonValueGroups} /></Box></Box>}
+      <QueryState loading={query.isLoading} error={query.isError} empty={!!rep && !activity.length} onRetry={() => void query.refetch()} emptyText="No recent commercial activity is recorded for this representative.">
+        <ResponsiveTable label="Representative activity"><Table size="small"><TableHead><TableRow><TableCell>Reference</TableCell><TableCell>Type</TableCell><TableCell>Customer</TableCell><TableCell>Reason</TableCell><TableCell>Due</TableCell></TableRow></TableHead><TableBody>{activity.map(item => <TableRow hover key={`${item.recordType}-${item.id}`}><TableCell>{item.nexoraSerial || item.reference}</TableCell><TableCell>{item.recordType}</TableCell><TableCell>{item.customerName || 'Unresolved'}</TableCell><TableCell>{item.reason}</TableCell><TableCell>{formatDateTime(item.dueAt)}</TableCell></TableRow>)}</TableBody></Table></ResponsiveTable>
+      </QueryState>
+    </PageShell>
+  );
 }

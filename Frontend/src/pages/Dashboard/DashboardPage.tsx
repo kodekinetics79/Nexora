@@ -32,6 +32,7 @@ import dashboardService, {
   type Release01KpiDTO,
   type Release01KpiUnit,
 } from '../../api/services/dashboardService';
+import commercialIntelligenceService from '../../api/services/commercialIntelligenceService';
 
 const formatValue = (kpi: Release01KpiDTO): string => {
   if (kpi.state === 'insufficient_data' || kpi.value === null) {
@@ -160,6 +161,11 @@ export default function DashboardPage() {
     retry: 1,
     enabled: !invalidWindow,
   });
+  const salesToday = useQuery({
+    queryKey: ['commercial-intelligence', 'sales-today'],
+    queryFn: commercialIntelligenceService.getSalesToday,
+    retry: 1,
+  });
 
   const data = dashboard.data;
   const generatedAt = data?.generatedAt ? dayjs(data.generatedAt) : null;
@@ -223,6 +229,20 @@ export default function DashboardPage() {
           The verified Release 01 dashboard snapshot is unavailable. No legacy totals are shown in its place.
         </Alert>
       )}
+
+      {salesToday.data?.metrics.length ? (
+        <>
+          <Typography variant="h6" sx={{ fontWeight: 900, mb: 1.5 }}>Sales Control</Typography>
+          <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(3, 1fr)' }, gap: 1.5, mb: 3 }}>
+            {salesToday.data.metrics.map((metric) => (
+              <Paper key={metric.key} variant="outlined" sx={{ p: 2 }}>
+                <Typography variant="body2" color="text.secondary">{metric.label}</Typography>
+                <Typography variant="h5" sx={{ fontWeight: 900 }}>{metric.value}</Typography>
+              </Paper>
+            ))}
+          </Box>
+        </>
+      ) : null}
 
       {dashboard.isLoading ? (
         <Box sx={{ minHeight: 320, display: 'grid', placeItems: 'center' }}><CircularProgress /></Box>

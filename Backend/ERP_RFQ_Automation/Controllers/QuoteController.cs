@@ -229,7 +229,9 @@ namespace ERP_RFQ_Automation.Controllers
         {
             try
             {
-                var bytes = await _quoteService.GenerateQuotePdfAsync(id);
+                var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+                if (businessUnitId <= 0) return Forbid();
+                var bytes = await _quoteService.GenerateQuotePdfAsync(id, businessUnitId);
                 return File(bytes, "application/pdf", $"Quote_{id}.pdf");
             }
             catch (KeyNotFoundException)
@@ -267,9 +269,11 @@ namespace ERP_RFQ_Automation.Controllers
             if (string.IsNullOrEmpty(recipientEmail)) return BadRequest("Recipient email is required.");
             try
             {
+                var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+                if (businessUnitId <= 0) return BadRequest("Business Unit ID is required.");
                 // WP-B3: the send may be parked as a below-floor approval instead of
                 // being performed; 409 tells the caller it is queued, not failed.
-                var result = await _quoteService.SendQuoteEmailAsync(id, recipientEmail, options: new QuoteSendOptions
+                var result = await _quoteService.SendQuoteEmailAsync(id, businessUnitId, recipientEmail, options: new QuoteSendOptions
                 {
                     RequestedByUserId = ActorUserId(),
                     RequestedBy = ActorEmail()
@@ -286,7 +290,16 @@ namespace ERP_RFQ_Automation.Controllers
                     });
                 }
 
-                return Ok("Email sent successfully.");
+                if (result.FailedPermanently)
+                    return Conflict(new { message = "Quote delivery is in a failed terminal state and requires operator review.", errorCode = result.FailureCode });
+
+                return Accepted(new
+                {
+                    queuedForDelivery = result.QueuedForDelivery,
+                    delivered = result.Delivered,
+                    replayed = result.Replayed,
+                    message = result.Delivered ? "Quote delivery was already completed." : "Quote delivery queued."
+                });
             }
             catch (KeyNotFoundException)
             {
@@ -299,6 +312,10 @@ namespace ERP_RFQ_Automation.Controllers
             catch (LifecycleConflictException ex)
             {
                 return Conflict(ex.Message);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Conflict(new { message = ex.Message });
             }
         }
 

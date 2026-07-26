@@ -23,6 +23,8 @@ export interface LeadResponseDTO {
   nexoraSerial?: string | null;
   customerId?: number | null;
   contactId?: number | null;
+  customerName?: string | null;
+  accountOwnerName?: string | null;
   customerMatchStatus: string;
   rfqno: string;
   buyersName: string;
@@ -54,6 +56,8 @@ export interface LeadResponseDTO {
   businessUnitName?: string;
   lifecycleVersion: number;
   assignedToFullName?: string;
+  assignComment?: string | null;
+  assignmentReason?: string | null;
   // WP-A3 duplicate flag: null | 'suspected' | 'confirmed' | 'not_duplicate'.
   // Conversion is blocked while suspected/confirmed.
   duplicateStatus?: string | null;

@@ -25,17 +25,19 @@ public sealed class InventoryIntelligenceController(
     public async Task<ActionResult> LeadResolutions(long leadId, CancellationToken ct)
         => Ok((await db.Set<LeadLineCommercialResolution>().AsNoTracking()
             .Where(x => x.BusinessUnitId == TenantId() && x.LeadId == leadId)
-            .OrderBy(x => x.LeadLineId).ToListAsync(ct)).Select(ResolutionRow));
+            .OrderBy(x => x.LeadLineId).ThenByDescending(x => x.ResolvedOn).ToListAsync(ct))
+            .GroupBy(x => x.LeadLineId).Select(x => ResolutionRow(x.First())));
 
     [HttpGet("rfqs/{rfqId:long}/resolutions")]
-    [RequireModulePermission("RFQ", PermissionAction.View)]
+    [RequireModulePermission("RFQ Management", PermissionAction.View)]
     public async Task<ActionResult> RfqResolutions(long rfqId, CancellationToken ct)
         => Ok((await db.Set<LeadLineCommercialResolution>().AsNoTracking()
             .Where(x => x.BusinessUnitId == TenantId() && x.RfqId == rfqId)
-            .OrderBy(x => x.LeadLineId).ToListAsync(ct)).Select(ResolutionRow));
+            .OrderBy(x => x.LeadLineId).ThenByDescending(x => x.ResolvedOn).ToListAsync(ct))
+            .GroupBy(x => x.LeadLineId).Select(x => ResolutionRow(x.First())));
 
     [HttpGet("quotes/{quoteId:long}/resolutions")]
-    [RequireModulePermission("Quotation", PermissionAction.View)]
+    [RequireModulePermission("Quotations", PermissionAction.View)]
     public async Task<ActionResult> QuoteResolutions(long quoteId, CancellationToken ct)
     {
         var tenant = TenantId();
@@ -44,7 +46,8 @@ public sealed class InventoryIntelligenceController(
         if (!rfqId.HasValue) return NotFound();
         return Ok((await db.Set<LeadLineCommercialResolution>().AsNoTracking()
             .Where(x => x.BusinessUnitId == tenant && x.RfqId == rfqId.Value)
-            .OrderBy(x => x.LeadLineId).ToListAsync(ct)).Select(ResolutionRow));
+            .OrderBy(x => x.LeadLineId).ThenByDescending(x => x.ResolvedOn).ToListAsync(ct))
+            .GroupBy(x => x.LeadLineId).Select(x => ResolutionRow(x.First())));
     }
 
     [HttpGet("overview")]
@@ -132,7 +135,8 @@ public sealed class InventoryIntelligenceController(
         var query = from incoming in db.IncomingInventory.AsNoTracking()
             join product in db.Products.AsNoTracking() on incoming.ProductId equals product.Id
             join warehouse in db.Set<Warehouse>().AsNoTracking() on incoming.WarehouseId equals warehouse.Id
-            where incoming.BusinessUnitId == tenant && (string.IsNullOrWhiteSpace(status) || incoming.Status.ToString().ToLower() == status.ToLower())
+            where incoming.BusinessUnitId == tenant && product.Buid == tenant && warehouse.BusinessUnitId == tenant
+                && (string.IsNullOrWhiteSpace(status) || incoming.Status.ToString().ToLower() == status.ToLower())
             orderby incoming.ExpectedOn
             select new { incoming.Id, purchaseOrderId = (long?)null, purchaseOrderNumber = incoming.SourceId,
                 supplierName = "Not linked", partNumber = product.PartNo, productName = product.ProductName,
@@ -149,7 +153,8 @@ public sealed class InventoryIntelligenceController(
         var query = from movement in db.InventoryMovements.AsNoTracking()
             join product in db.Products.AsNoTracking() on movement.ProductId equals product.Id
             join warehouse in db.Set<Warehouse>().AsNoTracking() on movement.WarehouseId equals warehouse.Id
-            where movement.BusinessUnitId == tenant && (!fromUtc.HasValue || movement.OccurredOn >= fromUtc) && (!toUtc.HasValue || movement.OccurredOn < toUtc)
+            where movement.BusinessUnitId == tenant && product.Buid == tenant && warehouse.BusinessUnitId == tenant
+                && (!fromUtc.HasValue || movement.OccurredOn >= fromUtc) && (!toUtc.HasValue || movement.OccurredOn < toUtc)
             orderby movement.OccurredOn descending
             select new { movement.Id, occurredAt = movement.OccurredOn, movementType = movement.Type.ToString(),
                 partNumber = product.PartNo, productName = product.ProductName, warehouseName = warehouse.WarehouseName,
@@ -215,7 +220,7 @@ public sealed class InventoryIntelligenceController(
         fulfilment = System.Text.Json.JsonSerializer.Deserialize<object>(x.FulfilmentJson),
         relatedResources = System.Text.Json.JsonSerializer.Deserialize<object>(x.RelatedResourcesJson),
         productResolution = System.Text.Json.JsonSerializer.Deserialize<object>(x.ProductResolutionJson),
-        x.ResolutionMethod, x.EvidenceReference, x.InventoryAsOfUtc, x.ResolvedOn,
+        x.ResolutionBatchId, x.ResourceLimit, x.ResolutionMethod, x.EvidenceReference, x.InventoryAsOfUtc, x.ResolvedOn,
         externalDiscoveryUsed = false
     };
 }

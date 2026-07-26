@@ -78,6 +78,8 @@ public sealed class SalesApplicationService(
             : throw new SalesConflictException("Idempotency key was used for different activity content.");
         if (!await persistence.UserExistsAsync(businessUnitId, command.SalesRepUserId, ct))
             throw new SalesNotFoundException("Sales representative was not found in this tenant.");
+        await ValidateReferencesAsync(businessUnitId, command.AggregateType, command.AggregateId,
+            command.CustomerId, command.LeadAssignmentId, ct);
         return await persistence.AppendActivityAsync(new CommercialActivity
         {
             BusinessUnitId = businessUnitId, SalesRepUserId = command.SalesRepUserId,
@@ -104,6 +106,8 @@ public sealed class SalesApplicationService(
             : throw new SalesConflictException("Idempotency key was used for different follow-up content.");
         if (!await persistence.UserExistsAsync(businessUnitId, command.AssignedToUserId, ct))
             throw new SalesNotFoundException("Follow-up assignee was not found in this tenant.");
+        await ValidateReferencesAsync(businessUnitId, command.AggregateType, command.AggregateId,
+            command.CustomerId, null, ct);
         var now = DateTime.UtcNow;
         return await persistence.CreateFollowUpAsync(new FollowUpTask
         {
@@ -162,6 +166,8 @@ public sealed class SalesApplicationService(
             : throw new SalesConflictException("Idempotency key was used for different contribution content.");
         if (!await persistence.UserExistsAsync(businessUnitId, command.SalesRepUserId, ct))
             throw new SalesNotFoundException("Sales representative was not found in this tenant.");
+        await ValidateReferencesAsync(businessUnitId, command.AggregateType, command.AggregateId,
+            command.CustomerId, null, ct);
         return await persistence.AppendContributionAsync(new SalesContribution
         {
             BusinessUnitId = businessUnitId, SalesRepUserId = command.SalesRepUserId,
@@ -195,16 +201,22 @@ public sealed class SalesApplicationService(
             .Concat(contributions.Select(x => x.SalesRepUserId))
             .Concat(query.SalesRepUserId.HasValue ? [query.SalesRepUserId.Value] : [])
             .Distinct().Order().ToArray();
-        return users.Select(userId => Calculate(userId, activities, followUps, transitions, contributions, query.AsOfUtc)).ToArray();
+        return users.Select(userId => Calculate(userId, activities, followUps, transitions, contributions,
+            query.FromUtc, query.ToUtc, query.AsOfUtc)).ToArray();
     }
 
     private static SalesRepPerformance Calculate(long userId, IReadOnlyList<CommercialActivity> allActivities,
         IReadOnlyList<FollowUpTask> allFollowUps, IReadOnlyList<FollowUpTransitionEvent> transitions,
-        IReadOnlyList<SalesContribution> allContributions, DateTime asOfUtc)
+        IReadOnlyList<SalesContribution> allContributions, DateTime fromUtc, DateTime toUtc, DateTime asOfUtc)
     {
         var activities = allActivities.Where(x => x.SalesRepUserId == userId).ToArray();
         var followUps = allFollowUps.Where(x => x.AssignedToUserId == userId).ToArray();
         var taskIds = followUps.Select(x => x.Id).ToHashSet();
+        var completedTransitions = transitions
+            .Where(x => taskIds.Contains(x.FollowUpTaskId) && x.ToStatus == FollowUpStatus.Completed)
+            .GroupBy(x => x.FollowUpTaskId)
+            .Select(group => group.OrderBy(x => x.OccurredAtUtc).First())
+            .ToArray();
         FollowUpStatus StatusAt(FollowUpTask task) => transitions
             .Where(x => x.FollowUpTaskId == task.Id && x.OccurredAtUtc <= asOfUtc)
             .OrderByDescending(x => x.ToVersion).ThenByDescending(x => x.Id)
@@ -232,9 +244,11 @@ public sealed class SalesApplicationService(
             activities.Count(x => x.ActivityType == CommercialActivityType.QuoteSent),
             activities.Count(x => x.ActivityType == CommercialActivityType.CustomerResponded), won, lost,
             decisions == 0 ? null : decimal.Round(won * 100m / decisions, 2),
-            responseHours.Length == 0 ? null : responseHours.Average(), followUps.Length,
-            transitions.Where(x => taskIds.Contains(x.FollowUpTaskId) && x.ToStatus == FollowUpStatus.Completed)
-                .Select(x => x.FollowUpTaskId).Distinct().Count(),
+            responseHours.Length == 0 ? null : responseHours.Average(),
+            followUps.Count(x => x.CreatedAtUtc >= fromUtc && x.CreatedAtUtc < toUtc),
+            completedTransitions.Length,
+            completedTransitions.Count(completed => followUps.Any(task => task.Id == completed.FollowUpTaskId
+                && completed.OccurredAtUtc <= task.DueAtUtc)),
             followUps.Count(x => StatusAt(x) is FollowUpStatus.Open or FollowUpStatus.InProgress),
             followUps.Count(x => (StatusAt(x) is FollowUpStatus.Open or FollowUpStatus.InProgress) &&
                 x.DueAtUtc < asOfUtc), revenue);
@@ -246,6 +260,19 @@ public sealed class SalesApplicationService(
         (FollowUpStatus.InProgress, FollowUpStatus.Completed or FollowUpStatus.Cancelled) => true,
         _ => false
     };
+
+    private async Task ValidateReferencesAsync(long tenant, string aggregateType, long aggregateId,
+        long? customerId, long? leadAssignmentId, CancellationToken ct)
+    {
+        if (!await persistence.AggregateExistsAsync(tenant, aggregateType, aggregateId, ct))
+            throw new SalesNotFoundException("The referenced commercial aggregate was not found in this tenant.");
+        if (customerId.HasValue &&
+            !await persistence.CustomerExistsAsync(tenant, customerId.Value, ct))
+            throw new SalesNotFoundException("The referenced customer was not found in this tenant.");
+        if (leadAssignmentId.HasValue &&
+            !await persistence.LeadAssignmentExistsAsync(tenant, leadAssignmentId.Value, ct))
+            throw new SalesNotFoundException("The referenced lead assignment was not found in this tenant.");
+    }
 
     private static string[] NormalizeKeys(IEnumerable<string> values) => values
         .Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim().ToUpperInvariant())

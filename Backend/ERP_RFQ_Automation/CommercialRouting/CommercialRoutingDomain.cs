@@ -85,6 +85,7 @@ public sealed class CustomerOwnership
     public bool IsActive { get; set; } = true;
     public string Source { get; set; } = string.Empty;
     public string? Reason { get; set; }
+    public string? MutationIdempotencyKey { get; set; }
     public long Version { get; set; }
 }
 

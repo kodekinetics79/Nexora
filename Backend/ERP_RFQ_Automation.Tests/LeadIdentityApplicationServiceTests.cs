@@ -58,6 +58,63 @@ public sealed class LeadIdentityApplicationServiceTests
     }
 
     [Fact]
+    public async Task Resending_an_older_revision_is_an_exact_duplicate_without_reverting_current_projection()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(78);
+        Seed.BusinessUnit(context, 78); Seed.EmailConfig(context, 7801, 78); Seed.EmailIngest(context, 7901, 7801, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var created = await service.ReconcileAsync(Candidate(78, 7901, "RFQ-HISTORY", "buyer@history.test", 10),
+            Intake("history-original", "history-a", Guid.NewGuid(), "buyer@history.test"));
+        context.ChangeTracker.Clear();
+        var revised = await service.ReconcileAsync(Candidate(78, 7901, "RFQ-HISTORY", "buyer@history.test", 15),
+            Intake("history-revision", "history-b", Guid.NewGuid(), "buyer@history.test"));
+        context.ChangeTracker.Clear();
+        var resend = await service.ReconcileAsync(Candidate(78, 7901, "RFQ-HISTORY", "buyer@history.test", 10),
+            Intake("history-resend", "history-c", Guid.NewGuid(), "buyer@history.test"));
+
+        Assert.Equal(LeadOccurrenceClassification.ExactDuplicate, resend.Classification);
+        Assert.Equal(created.LeadId, resend.LeadId);
+        Assert.Equal(created.RevisionId, resend.RevisionId);
+        Assert.Equal(2, resend.RevisionNumber);
+        Assert.Equal(revised.NexoraSerial, resend.NexoraSerial);
+        Assert.Equal(2, await context.Set<LeadRevision>().CountAsync(x => x.LeadId == created.LeadId));
+        Assert.Equal(15, (await context.Leads.Include(x => x.LeadItems)
+            .SingleAsync(x => x.Id == created.LeadId)).LeadItems.Single().Quantity);
+    }
+
+    [Fact]
+    public async Task Unresolved_submission_with_part_overlap_requires_review_despite_quantity_changes_and_extra_lines()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(79);
+        Seed.BusinessUnit(context, 79); Seed.EmailConfig(context, 7901, 79); Seed.EmailIngest(context, 8001, 7901, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var original = Candidate(79, 8001, "RFQ-PARTS", "buyer@parts.test", 14);
+        original.LeadItems.Add(new LeadItem { LineItemNo = "2", ManufacturerPartNumber = "ACTUATOR", ProductShortDescription = "Actuator", Quantity = 2, UnitOfMeasure = "EA" });
+        var created = await service.ReconcileAsync(original,
+            Intake("parts-original", "parts-a", Guid.NewGuid(), "buyer@parts.test"));
+
+        context.ChangeTracker.Clear();
+        var unresolved = Candidate(79, 8001, null, null, 16);
+        unresolved.LeadItems.Add(new LeadItem { LineItemNo = "2", ManufacturerPartNumber = "ACTUATOR", ProductShortDescription = "Actuator", Quantity = 2, UnitOfMeasure = "EA" });
+        unresolved.LeadItems.Add(new LeadItem { LineItemNo = "3", ManufacturerPartNumber = "SENSOR", ProductShortDescription = "Sensor", Quantity = 1, UnitOfMeasure = "EA" });
+        unresolved.LeadItems.Add(new LeadItem { LineItemNo = "4", ManufacturerPartNumber = "EXTRA", ProductShortDescription = "Extra", Quantity = 1, UnitOfMeasure = "EA" });
+        var review = await service.ReconcileAsync(unresolved,
+            Intake("parts-possible", "parts-b", Guid.NewGuid(), sender: null));
+
+        Assert.Equal(LeadOccurrenceClassification.PossibleMatchReviewRequired, review.Classification);
+        var match = Assert.Single(await context.Set<LeadMatchCandidate>()
+            .Where(x => x.OccurrenceId == review.OccurrenceId).ToListAsync());
+        Assert.Equal(created.LeadId, match.CandidateLeadId);
+        Assert.True(match.Confidence >= .65m);
+    }
+
+    [Fact]
     public async Task Unresolved_similar_submission_requires_review_and_cross_customer_hash_does_not_merge()
     {
         using var db = new TestDb();

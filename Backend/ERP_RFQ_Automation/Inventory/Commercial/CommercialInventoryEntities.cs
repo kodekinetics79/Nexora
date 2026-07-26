@@ -153,6 +153,7 @@ public enum CommercialResolutionClassification
     KnownShortage,
     UnknownProduct,
     PossibleMatchReview,
+    NonInventoryService,
 }
 
 public sealed class LeadLineCommercialResolution
@@ -164,6 +165,8 @@ public sealed class LeadLineCommercialResolution
     public long LeadLineId { get; set; }
     public long? RfqId { get; set; }
     public long? ProductId { get; set; }
+    public Guid ResolutionBatchId { get; set; }
+    public int ResourceLimit { get; set; }
     public string RequestedPartNumber { get; set; } = string.Empty;
     public decimal RequestedQuantity { get; set; }
     public CommercialResolutionClassification Classification { get; set; }

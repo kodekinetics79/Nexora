@@ -10,7 +10,7 @@ namespace ERP_RFQ_Automation.Tests;
 public sealed class CommercialLineResolutionApplicationServiceTests
 {
     [Fact]
-    public async Task ResolveLead_is_idempotent_for_the_immutable_revision_line()
+    public async Task ResolveLead_reuses_sufficient_snapshot_and_appends_for_a_larger_resource_limit()
     {
         using var database = new TestDb();
         await SeedRevisionAsync(database, 1, 100, "KNOWN-1", 4);
@@ -18,13 +18,35 @@ public sealed class CommercialLineResolutionApplicationServiceTests
         var service = Service(context, ProductResolutionDecisionState.AutoLinked, 901);
 
         var first = await service.ResolveLeadAsync(1, 100, 10);
+        var expanded = await service.ResolveLeadAsync(1, 100, 50);
         var replay = await service.ResolveLeadAsync(1, 100, 50);
 
         Assert.Single(first);
+        Assert.Single(expanded);
         Assert.Single(replay);
-        Assert.Equal(first[0].Id, replay[0].Id);
+        Assert.NotEqual(first[0].Id, expanded[0].Id);
+        Assert.Equal(expanded[0].Id, replay[0].Id);
+        Assert.Equal(50, expanded[0].ResourceLimit);
         Assert.Equal(CommercialResolutionClassification.KnownShortage, first[0].Classification);
-        Assert.Equal(1, await context.Set<LeadLineCommercialResolution>().CountAsync());
+        Assert.Equal(2, await context.Set<LeadLineCommercialResolution>().CountAsync());
+    }
+
+    [Fact]
+    public async Task ResolveLead_force_refresh_appends_an_immutable_inventory_snapshot()
+    {
+        using var database = new TestDb();
+        await SeedRevisionAsync(database, 1, 103, "KNOWN-2", 4);
+        await using var context = database.ContextFor(1);
+        var service = Service(context, ProductResolutionDecisionState.AutoLinked, 904);
+
+        var first = Assert.Single(await service.ResolveLeadAsync(1, 103, 10));
+        await Task.Delay(2);
+        var refreshed = Assert.Single(await service.ResolveLeadAsync(1, 103, 10, forceRefresh: true));
+
+        Assert.NotEqual(first.Id, refreshed.Id);
+        Assert.NotEqual(first.ResolutionBatchId, refreshed.ResolutionBatchId);
+        Assert.True(refreshed.ResolvedOn > first.ResolvedOn);
+        Assert.Equal(2, await context.Set<LeadLineCommercialResolution>().CountAsync());
     }
 
     [Fact]
@@ -41,6 +63,23 @@ public sealed class CommercialLineResolutionApplicationServiceTests
         Assert.Equal(CommercialResolutionClassification.PossibleMatchReview, row.Classification);
         Assert.Equal(0m, row.AvailableToPromise);
         Assert.Contains("ReviewRequired", row.ProductResolutionJson);
+    }
+
+    [Fact]
+    public async Task Service_line_bypasses_product_and_inventory_resolution()
+    {
+        using var database = new TestDb();
+        await SeedRevisionAsync(database, 1, 102, "FIELD-SERVICE", 1);
+        await using var context = database.ContextFor(1);
+        var service = Service(context, ProductResolutionDecisionState.AutoLinked, 903);
+
+        var row = Assert.Single(await service.ResolveLeadAsync(1, 102, 10));
+
+        Assert.Equal(CommercialResolutionClassification.NonInventoryService, row.Classification);
+        Assert.Null(row.ProductId);
+        Assert.Equal(0m, row.AvailableToPromise);
+        Assert.Equal(0m, row.Fulfilment.ShortageQuantity);
+        Assert.Contains("LocalDeterministicServiceClassification", row.ProductResolutionJson);
     }
 
     private static CommercialLineResolutionApplicationService Service(

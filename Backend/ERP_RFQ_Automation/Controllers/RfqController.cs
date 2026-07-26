@@ -346,7 +346,7 @@ namespace ERP_RFQ_Automation.Controllers
                         // WP-B3: the send can come back "held" (below-floor pricing) —
                         // the quote exists but the email is parked in the Approvals inbox.
                         var sendResult = await _quoteService.SendQuoteEmailAsync(
-                            quoteId, selectedEmail, emailSubject, emailBody,
+                            quoteId, businessUnitId, selectedEmail, emailSubject, emailBody,
                             new ERP_RFQ_Automation.DTOs.QuoteDTOs.QuoteSendOptions
                             {
                                 RequestedByUserId = long.TryParse(
@@ -360,9 +360,17 @@ namespace ERP_RFQ_Automation.Controllers
                             emailWarning = "Quote generated, but sending is held for approval — pricing is below " +
                                            $"your floor ({sendResult.HoldSummary}). Track it in the Approvals inbox.";
                         }
-                        else
+                        else if (sendResult.FailedPermanently)
+                        {
+                            emailWarning = "Quote generated, but delivery requires operator review after repeated failures.";
+                        }
+                        else if (sendResult.Delivered)
                         {
                             quoteDelivered = true;
+                        }
+                        else
+                        {
+                            emailWarning = "Quote generated and delivery queued. Customer delivery is not yet confirmed.";
                         }
                     }
                     catch (Exception emailEx)

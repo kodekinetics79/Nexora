@@ -10,7 +10,8 @@ namespace ERP_RFQ_Automation.Inventory.Commercial;
 public interface ICommercialLineResolutionApplicationService
 {
     Task<IReadOnlyList<LeadLineCommercialResolution>> ResolveLeadAsync(
-        long businessUnitId, long leadId, int resourceLimit, CancellationToken ct = default);
+        long businessUnitId, long leadId, int resourceLimit, CancellationToken ct = default,
+        bool forceRefresh = false);
     Task LinkRfqAsync(long businessUnitId, long leadId, long rfqId, CancellationToken ct = default);
 }
 
@@ -23,15 +24,44 @@ public sealed class CommercialLineResolutionApplicationService(
     private static readonly HashSet<int> SupportedLimits = [10, 20, 50];
     private static readonly JsonSerializerOptions EvidenceJson = new()
     {
+        PropertyNameCaseInsensitive = true,
         Converters = { new JsonStringEnumConverter() }
     };
 
     public async Task<IReadOnlyList<LeadLineCommercialResolution>> ResolveLeadAsync(
-        long businessUnitId, long leadId, int resourceLimit, CancellationToken ct = default)
+        long businessUnitId, long leadId, int resourceLimit, CancellationToken ct = default,
+        bool forceRefresh = false)
     {
         if (businessUnitId <= 0 || leadId <= 0) throw new ArgumentOutOfRangeException(nameof(leadId));
         if (!SupportedLimits.Contains(resourceLimit))
             throw new ArgumentOutOfRangeException(nameof(resourceLimit), "Resource limit must be 10, 20, or 50.");
+
+        if (db.Database.CurrentTransaction is not null)
+        {
+            if (db.Database.IsNpgsql())
+                await db.Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock(hashtextextended({$"commercial-resolution:{businessUnitId}:{leadId}"}, 0))", ct);
+            return await ResolveLeadCoreAsync(businessUnitId, leadId, resourceLimit, forceRefresh, ct);
+        }
+
+        var strategy = db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            db.ChangeTracker.Clear();
+            await using var transaction = await db.Database.BeginTransactionAsync(
+                System.Data.IsolationLevel.Serializable, ct);
+            if (db.Database.IsNpgsql())
+                await db.Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock(hashtextextended({$"commercial-resolution:{businessUnitId}:{leadId}"}, 0))", ct);
+            var result = await ResolveLeadCoreAsync(businessUnitId, leadId, resourceLimit, forceRefresh, ct);
+            await transaction.CommitAsync(ct);
+            return result;
+        });
+    }
+
+    private async Task<IReadOnlyList<LeadLineCommercialResolution>> ResolveLeadCoreAsync(
+        long businessUnitId, long leadId, int resourceLimit, bool forceRefresh, CancellationToken ct)
+    {
 
         var lead = await db.Leads.AsNoTracking()
             .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == leadId, ct)
@@ -41,18 +71,59 @@ public sealed class CommercialLineResolutionApplicationService(
 
         var revision = await db.Set<LeadRevision>().AsNoTracking().Include(x => x.Items)
             .SingleAsync(x => x.BusinessUnitId == businessUnitId && x.Id == lead.CurrentRevisionId.Value, ct);
-        var existing = await db.Set<LeadLineCommercialResolution>()
+        var existing = await db.Set<LeadLineCommercialResolution>().AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && x.LeadRevisionId == revision.Id)
             .OrderBy(x => x.LeadLineId).ToListAsync(ct);
-        if (existing.Count == revision.Items.Count)
-            return existing.Select(Hydrate).ToArray();
+        var latest = Latest(existing);
+        if (!forceRefresh && latest.Count == revision.Items.Count && latest.All(x => x.ResourceLimit >= resourceLimit))
+            return latest.Select(Hydrate).ToArray();
+
+        var batchId = Guid.NewGuid();
 
         foreach (var line in revision.Items.OrderBy(x => x.LineNumber))
         {
-            if (existing.Any(x => x.LeadLineId == line.Id)) continue;
+            var prior = latest.FirstOrDefault(x => x.LeadLineId == line.Id);
+            if (!forceRefresh && prior is not null && prior.ResourceLimit >= resourceLimit) continue;
             var snapshot = ParseSnapshot(line.SnapshotJson);
             var requestedPart = First(snapshot.Part, snapshot.MaterialCode, snapshot.Description, $"LINE-{line.LineNumber}");
             var quantity = snapshot.Quantity > 0m ? snapshot.Quantity : 1m;
+            if (IsServiceLine(snapshot))
+            {
+                var serviceResolution = new LeadLineCommercialResolution
+                {
+                    BusinessUnitId = businessUnitId,
+                    LeadId = leadId,
+                    LeadRevisionId = revision.Id,
+                    LeadLineId = line.Id,
+                    ResolutionBatchId = batchId,
+                    ResourceLimit = resourceLimit,
+                    RequestedPartNumber = requestedPart,
+                    RequestedQuantity = quantity,
+                    Classification = CommercialResolutionClassification.NonInventoryService,
+                    AvailableToPromise = 0m,
+                    IncomingAvailable = 0m,
+                    Fulfilment = new FulfilmentRoute
+                    {
+                        Classification = FulfilmentRouteClassification.NoStock,
+                        RequestedQuantity = quantity,
+                        ShortageQuantity = 0m,
+                    },
+                    ProductResolutionJson = JsonSerializer.Serialize(new
+                    {
+                        decisionState = "NonInventoryService",
+                        method = "LocalDeterministicServiceClassification",
+                    }),
+                    RelatedResourcesJson = "[]",
+                    ResolutionMethod = "LocalDeterministicServiceClassification",
+                    EvidenceReference = $"lead-revision:{revision.Id}:line:{line.Id}",
+                    InventoryAsOfUtc = DateTime.UtcNow,
+                    ResolvedOn = DateTime.UtcNow,
+                };
+                serviceResolution.FulfilmentJson = JsonSerializer.Serialize(serviceResolution.Fulfilment, EvidenceJson);
+                db.Add(serviceResolution);
+                existing.Add(serviceResolution);
+                continue;
+            }
             var product = await productResolver.ResolveAsync(new ProductResolutionRequest(
                 businessUnitId, revision.Id, line.Id, requestedPart, snapshot.Manufacturer,
                 snapshot.Description, [new("lead_revision_line", $"lead-revision:{revision.Id}:line:{line.Id}", requestedPart)]), ct);
@@ -68,6 +139,8 @@ public sealed class CommercialLineResolutionApplicationService(
                 product.DecisionState == ProductResolutionDecisionState.ReviewRequired,
                 inventory, incoming, resourceLimit), ct);
             resolved.ProductResolutionJson = JsonSerializer.Serialize(product, EvidenceJson);
+            resolved.ResolutionBatchId = batchId;
+            resolved.ResourceLimit = resourceLimit;
             resolved.FulfilmentJson = JsonSerializer.Serialize(resolved.Fulfilment, EvidenceJson);
             resolved.RelatedResourcesJson = JsonSerializer.Serialize(resolved.RelatedResources, EvidenceJson);
             resolved.EvidenceReference = $"lead-revision:{revision.Id}:line:{line.Id}";
@@ -75,11 +148,14 @@ public sealed class CommercialLineResolutionApplicationService(
             db.Add(resolved); existing.Add(resolved);
         }
         await db.SaveChangesAsync(ct);
-        return existing.OrderBy(x => x.LeadLineId).Select(Hydrate).ToArray();
+        return Latest(existing).Select(Hydrate).ToArray();
     }
 
     public async Task LinkRfqAsync(long businessUnitId, long leadId, long rfqId, CancellationToken ct = default)
     {
+        var validRfq = await db.Rfqs.AsNoTracking().AnyAsync(x => x.BusinessUnitId == businessUnitId
+            && x.Id == rfqId && x.LeadId == leadId, ct);
+        if (!validRfq) throw new KeyNotFoundException("The RFQ does not belong to this tenant and lead.");
         var rows = await db.Set<LeadLineCommercialResolution>().Where(x => x.BusinessUnitId == businessUnitId
             && x.LeadId == leadId && x.RfqId == null).ToListAsync(ct);
         rows.ForEach(x => x.RfqId = rfqId);
@@ -119,6 +195,12 @@ public sealed class CommercialLineResolutionApplicationService(
         return row;
     }
 
+    private static List<LeadLineCommercialResolution> Latest(IEnumerable<LeadLineCommercialResolution> rows) => rows
+        .GroupBy(x => x.LeadLineId)
+        .Select(group => group.OrderByDescending(x => x.ResolvedOn).ThenByDescending(x => x.Id).First())
+        .OrderBy(x => x.LeadLineId)
+        .ToList();
+
     private static LineSnapshot ParseSnapshot(string json)
     {
         using var document = JsonDocument.Parse(json);
@@ -145,6 +227,16 @@ public sealed class CommercialLineResolutionApplicationService(
 
     private static string First(params string?[] values) =>
         values.First(x => !string.IsNullOrWhiteSpace(x))!.Trim();
+    private static bool IsServiceLine(LineSnapshot snapshot)
+    {
+        var identity = string.Join(' ', new[] { snapshot.Part, snapshot.MaterialCode, snapshot.Description }
+            .Where(value => !string.IsNullOrWhiteSpace(value))).ToUpperInvariant();
+        return identity.Contains("SERVICE", StringComparison.Ordinal)
+            || identity.Contains("LABOR", StringComparison.Ordinal)
+            || identity.Contains("LABOUR", StringComparison.Ordinal)
+            || identity.Contains("INSTALLATION", StringComparison.Ordinal)
+            || identity.Contains("NON-INVENTORY", StringComparison.Ordinal);
+    }
     private sealed record LineSnapshot(string? Part, string? MaterialCode, string? Manufacturer,
         string? Description, decimal Quantity);
 }

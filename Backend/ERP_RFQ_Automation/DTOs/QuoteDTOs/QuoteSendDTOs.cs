@@ -32,8 +32,24 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
 
         /// <summary>Plain-language hold summary ("Quote #Q-1042: 3 line(s) below floor by up to 12%").</summary>
         public string? HoldSummary { get; init; }
+        public bool QueuedForDelivery { get; init; }
+        public bool Delivered { get; init; }
+        public bool Replayed { get; init; }
+        public bool FailedPermanently { get; init; }
+        public string? FailureCode { get; init; }
 
-        public static QuoteSendResult Sent() => new();
+        public static QuoteSendResult Queued(bool delivered, bool replayed) => new()
+        {
+            QueuedForDelivery = !delivered,
+            Delivered = delivered,
+            Replayed = replayed
+        };
+
+        public static QuoteSendResult Failed(string failureCode) => new()
+        {
+            FailedPermanently = true,
+            FailureCode = failureCode
+        };
 
         public static QuoteSendResult HeldForApproval(Guid approvalId, string? summary) =>
             new() { Held = true, ApprovalId = approvalId, HoldSummary = summary };

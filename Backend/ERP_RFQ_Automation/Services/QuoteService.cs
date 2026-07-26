@@ -14,21 +14,24 @@ using ERP_RFQ_Automation.Services.Interfaces;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.CommercialIntelligence.Sales;
 using ERP_RFQ_Automation.Sla;
+using ERP_RFQ_Automation.QuoteDelivery;
+using ERP_RFQ_Automation.Inventory.Commercial;
 
 namespace ERP_RFQ_Automation.Services
 {
     public interface IQuoteService
     {
-        Task<byte[]> GenerateQuotePdfAsync(long quoteId);
+        Task<byte[]> GenerateQuotePdfAsync(long quoteId, long businessUnitId);
 
         /// <summary>
-        /// Emails the quote PDF and stamps SENT/SentOn — unless a line is priced
+        /// Transactionally queues durable PDF delivery — unless a line is priced
         /// below its pricing-engine floor (WP-B3), in which case NOTHING is sent:
         /// the send is parked as a pending approve_below_floor_quote approval and
         /// the result says so. options.BypassFloorHold (approved-hold execution
         /// only) skips the check.
         /// </summary>
-        Task<QuoteSendResult> SendQuoteEmailAsync(long quoteId, string recipientEmail, string? customSubject = null, string? customBody = null, QuoteSendOptions? options = null);
+        Task<QuoteSendResult> SendQuoteEmailAsync(long quoteId, long businessUnitId, string recipientEmail, string? customSubject = null, string? customBody = null, QuoteSendOptions? options = null);
+        Task FinalizeQuoteDeliveryAsync(long quoteId, long businessUnitId, CancellationToken ct = default);
         Task<QuoteResponseDTO> CreateQuoteAsync(QuoteCreateRequestDTO request);
         Task<QuoteResponseDTO> PrepareDraftFromRfqAsync(long rfqId, long businessUnitId, string actor, CancellationToken ct = default);
         Task<QuoteResponseDTO> UpdateQuoteAsync(long id, QuoteUpdateRequestDTO request);
@@ -57,17 +60,18 @@ namespace ERP_RFQ_Automation.Services
         private readonly ERP_RFQ_Automation.Intelligence.Pricing.IBelowFloorGuard? _belowFloorGuard;
         private readonly ILifecycleApplicationService? _lifecycle;
         private readonly ISalesApplicationService? _sales;
+        private readonly ICommercialLineResolutionApplicationService? _lineResolution;
 
-        // The below-floor guard is optional (defaults to null) so existing direct
-        // constructions (tests, pre-wiring DI) keep working; without it the send
-        // path simply performs no floor check (pre-WP-B3 behaviour).
+        // Optional collaborators preserve existing direct constructions used by focused
+        // tests; production DI supplies the lifecycle and sales services.
         public QuoteService(
             ErpRfqAutomationContext context,
             IEmailService emailService,
             IQuoteConfigurationRepository quoteConfigRepository,
             ERP_RFQ_Automation.Intelligence.Pricing.IBelowFloorGuard? belowFloorGuard = null,
             ILifecycleApplicationService? lifecycle = null,
-            ISalesApplicationService? sales = null)
+            ISalesApplicationService? sales = null,
+            ICommercialLineResolutionApplicationService? lineResolution = null)
         {
             _context = context;
             _emailService = emailService;
@@ -75,6 +79,7 @@ namespace ERP_RFQ_Automation.Services
             _belowFloorGuard = belowFloorGuard;
             _lifecycle = lifecycle;
             _sales = sales;
+            _lineResolution = lineResolution;
         }
 
         // Legacy QuoteStatus id map, used ONLY when no matching SetupMaster row is
@@ -171,6 +176,20 @@ namespace ERP_RFQ_Automation.Services
         {
             if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
             if (string.IsNullOrWhiteSpace(actor)) throw new ArgumentException("Authenticated actor is required.", nameof(actor));
+
+            var leadId = await _context.Rfqs.AsNoTracking()
+                .Where(item => item.Id == rfqId && item.BusinessUnitId == businessUnitId)
+                .Select(item => item.LeadId).SingleOrDefaultAsync(ct)
+                ?? throw new KeyNotFoundException("The RFQ was not found in this tenant.");
+            if (_lineResolution is not null)
+            {
+                var resourceLimit = await _context.Set<LeadLineCommercialResolution>().AsNoTracking()
+                    .Where(x => x.BusinessUnitId == businessUnitId && x.LeadId == leadId)
+                    .Select(x => (int?)x.ResourceLimit).MaxAsync(ct) ?? 10;
+                if (resourceLimit is not (10 or 20 or 50)) resourceLimit = 10;
+                await _lineResolution.ResolveLeadAsync(businessUnitId, leadId, resourceLimit, ct, forceRefresh: true);
+                await _lineResolution.LinkRfqAsync(businessUnitId, leadId, rfqId, ct);
+            }
 
             var strategy = _context.Database.CreateExecutionStrategy();
             var quoteId = await strategy.ExecuteAsync(async () =>
@@ -592,7 +611,7 @@ namespace ERP_RFQ_Automation.Services
             };
         }
 
-        public async Task<byte[]> GenerateQuotePdfAsync(long quoteId)
+        public async Task<byte[]> GenerateQuotePdfAsync(long quoteId, long businessUnitId)
         {
             var quote = await _context.Quotes
                 .Include(q => q.QuoteItems)
@@ -603,7 +622,7 @@ namespace ERP_RFQ_Automation.Services
                 .Include(q => q.Status)
                 .Include(q => q.Rfq)
                     .ThenInclude(r => r.Lead)
-                .FirstOrDefaultAsync(q => q.Id == quoteId);
+                .FirstOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId);
 
             if (quote == null)
                 throw new KeyNotFoundException($"Quote with ID {quoteId} not found.");
@@ -879,9 +898,17 @@ namespace ERP_RFQ_Automation.Services
             return document.GeneratePdf();
         }
 
-        public async Task<QuoteSendResult> SendQuoteEmailAsync(long quoteId, string recipientEmail, string? customSubject = null, string? customBody = null, QuoteSendOptions? options = null)
+        public async Task<QuoteSendResult> SendQuoteEmailAsync(long quoteId, long businessUnitId, string recipientEmail, string? customSubject = null, string? customBody = null, QuoteSendOptions? options = null)
         {
+            if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
             options ??= new QuoteSendOptions();
+
+            var quote = await _context.Quotes
+                .Include(q => q.BusinessUnit)
+                .Include(q => q.Rfq)
+                    .ThenInclude(r => r.Lead)
+                .FirstOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId)
+                ?? throw new KeyNotFoundException("Quote not found");
 
             // WP-B3 below-floor gate: recompute floors for the quote's RFQ and hold
             // the ENTIRE send when any current line price is under its floor. The
@@ -899,15 +926,6 @@ namespace ERP_RFQ_Automation.Services
                 }
             }
 
-            var pdfBytes = await GenerateQuotePdfAsync(quoteId);
-            var quote = await _context.Quotes
-                .Include(q => q.BusinessUnit)
-                .Include(q => q.Rfq)
-                    .ThenInclude(r => r.Lead)
-                .FirstOrDefaultAsync(q => q.Id == quoteId);
-
-            if (quote == null) throw new KeyNotFoundException("Quote not found");
-
             var subject = !string.IsNullOrEmpty(customSubject)
                 ? customSubject
                 : $"Quote #{quote.QuoteNo} from {quote.BusinessUnit?.BusinessUnitName ?? "Our Company"}";
@@ -923,51 +941,97 @@ namespace ERP_RFQ_Automation.Services
                 <p>{quote.BusinessUnit?.BusinessUnitName ?? "Sales Team"}</p>
             ";
 
-            await _emailService.SendEmailAsync(
-                to: recipientEmail,
-                subject: subject,
-                body: body,
-                attachments: new List<(string FileName, byte[] FileContent, string ContentType)>
+            var deliveryKey = $"quote:{quote.Id}:delivery:v1";
+            var strategy = _context.Database.CreateExecutionStrategy();
+            return await strategy.ExecuteAsync(async () =>
+            {
+                var ownsTransaction = _context.Database.CurrentTransaction is null;
+                await using var transaction = ownsTransaction
+                    ? await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable)
+                    : null;
+                try
                 {
-                    ($"Quote_{quote.QuoteNo}.pdf", pdfBytes, "application/pdf")
-                },
-                fromEmail: quote.Rfq?.Lead?.Clientemail ?? "",
-                businessUnitId: quote.BusinessUnitId
-            );
+                    if (_context.Database.IsNpgsql())
+                        await _context.Database.ExecuteSqlInterpolatedAsync(
+                            $"SELECT pg_advisory_xact_lock(hashtextextended({$"quote-delivery:{quote.BusinessUnitId}:{quote.Id}"}, 0))");
+                    var existingDelivery = await _context.QuoteDeliveryRequests.AsNoTracking()
+                        .SingleOrDefaultAsync(x => x.BusinessUnitId == quote.BusinessUnitId && x.IdempotencyKey == deliveryKey);
+                    if (existingDelivery is not null)
+                    {
+                        if (!string.Equals(existingDelivery.RecipientEmail, recipientEmail.Trim(), StringComparison.OrdinalIgnoreCase)
+                            || existingDelivery.Subject != subject || existingDelivery.Body != body)
+                            throw new InvalidOperationException("The quote delivery key was already used with different content.");
+                        if (transaction is not null) await transaction.CommitAsync();
+                        if (existingDelivery.DeadLetteredOn.HasValue)
+                            return QuoteSendResult.Failed(existingDelivery.LastErrorCode ?? "Delivery failed permanently.");
+                        return QuoteSendResult.Queued(existingDelivery.CompletedOn.HasValue, true);
+                    }
+                    _context.QuoteDeliveryRequests.Add(new QuoteDeliveryRequest
+                    {
+                        BusinessUnitId = quote.BusinessUnitId,
+                        QuoteId = quote.Id,
+                        IdempotencyKey = deliveryKey,
+                        RecipientEmail = recipientEmail.Trim(),
+                        Subject = subject,
+                        Body = body,
+                        FromEmail = quote.Rfq?.Lead?.Clientemail,
+                        AttachmentFileName = $"Quote_{quote.QuoteNo}.pdf",
+                        RequestedOn = DateTime.UtcNow,
+                        AvailableOn = DateTime.UtcNow,
+                        Version = 1
+                    });
+                    await _context.SaveChangesAsync();
+                    if (transaction is not null) await transaction.CommitAsync();
+                }
+                catch
+                {
+                    if (transaction is not null) await transaction.RollbackAsync();
+                    throw;
+                }
+                return QuoteSendResult.Queued(false, false);
+            });
+        }
 
-            // Mark SENT (resolved via SetupMaster; legacy id 43 fallback) and stamp
-            // SentOn so the SLA engine can compute staleness / auto-expiry (WP-A4).
-            quote.SentOn ??= DateTime.UtcNow;
-            quote.ModifiedDate = DateTime.UtcNow;
-            if (_lifecycle is not null)
+        public async Task FinalizeQuoteDeliveryAsync(long quoteId, long businessUnitId, CancellationToken ct = default)
+        {
+            var strategy = _context.Database.CreateExecutionStrategy();
+            await strategy.ExecuteAsync(async () =>
             {
-                await using var transaction = await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable);
-                await _lifecycle.TransitionQuoteInCurrentTransactionAsync(
-                    quote.BusinessUnitId,
-                    quote.Id,
-                    new LifecycleActor(options.RequestedBy ?? "system:quote-send", "quote-service"),
-                    new LifecycleTransitionCommand(
-                        "SENT",
-                        quote.LifecycleVersion,
-                        null,
-                        null,
-                        "quote-email",
-                        Guid.NewGuid().ToString("N"),
-                        $"quote:{quote.Id}:send",
-                        $"quote-send:{quote.Id}:v{quote.LifecycleVersion}"),
-                    false,
-                    CancellationToken.None);
-                await RecordQuoteSentWorkAsync(quote, options, CancellationToken.None);
-                await transaction.CommitAsync();
-            }
-            else
-            {
-                quote.StatusId = await ResolveQuoteStatusIdAsync("SENT", quote.BusinessUnitId);
-                await _context.SaveChangesAsync();
-                await RecordQuoteSentWorkAsync(quote, options, CancellationToken.None);
-            }
+                await using var transaction = await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+                var quote = await _context.Quotes
+                    .Include(q => q.Rfq).ThenInclude(r => r.Lead)
+                    .SingleOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId, ct)
+                    ?? throw new KeyNotFoundException("Quote not found");
+                if (quote.SentOn.HasValue)
+                {
+                    await transaction.CommitAsync(ct);
+                    return;
+                }
 
-            return QuoteSendResult.Sent();
+                quote.SentOn = DateTime.UtcNow;
+                quote.ModifiedDate = quote.SentOn;
+                if (_lifecycle is not null)
+                {
+                    await _lifecycle.TransitionQuoteInCurrentTransactionAsync(
+                        businessUnitId, quote.Id,
+                        new LifecycleActor("system:quote-delivery", "quote-delivery-worker"),
+                        new LifecycleTransitionCommand(
+                            "SENT", quote.LifecycleVersion, null, null, "quote-email-delivered",
+                            Guid.NewGuid().ToString("N"), $"quote:{quote.Id}:delivery",
+                            $"quote-delivered:{quote.Id}"),
+                        false, ct);
+                }
+                else
+                {
+                    quote.StatusId = await ResolveQuoteStatusIdAsync("SENT", businessUnitId);
+                    await _context.SaveChangesAsync(ct);
+                }
+                await RecordQuoteSentWorkAsync(quote, new QuoteSendOptions
+                {
+                    RequestedBy = "system:quote-delivery",
+                }, ct);
+                await transaction.CommitAsync(ct);
+            });
         }
 
         private async Task RecordQuoteSentWorkAsync(Quote quote, QuoteSendOptions options, CancellationToken ct)

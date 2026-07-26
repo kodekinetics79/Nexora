@@ -50,7 +50,7 @@ public sealed class QuoteDraftHandoffTests
             Assert.Null(item.DeliveryLeadTime);
         });
         Assert.Single(await context.Quotes.ToListAsync());
-        await Assert.ThrowsAsync<InvalidOperationException>(() => service.GenerateQuotePdfAsync(quote.Id));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.GenerateQuotePdfAsync(quote.Id, 9401));
 
         var sourceLeadRevision = quote.SourceLeadRevision;
         var sourceRfqRevision = quote.SourceRfqRevision;

@@ -60,6 +60,7 @@ public sealed class DeterministicProductItemResolver : IProductItemResolver
         var top = ranked.FirstOrDefault();
         var isDeterministicMethod = top?.Method is ProductResolutionMethods.ExactPartNumber
             or ProductResolutionMethods.ExactInternalCode
+            or ProductResolutionMethods.CanonicalCompactIdentity
             or ProductResolutionMethods.ApprovedAlias
             or ProductResolutionMethods.ApprovedSupersession;
         var ambiguous = ranked.Count > 1 && margin < AmbiguityMargin;
@@ -97,21 +98,45 @@ public sealed class DeterministicProductItemResolver : IProductItemResolver
     {
         if (normalizedPart is null) yield break;
 
-        foreach (var product in products)
+        var catalog = products.Select(product => new
         {
-            var productPart = ProductIdentityNormalizer.NormalizePartNumber(product.PartNumber);
-            var internalCode = ProductIdentityNormalizer.NormalizePartNumber(product.InternalCode);
-            var method = productPart == normalizedPart
+            Product = product,
+            Part = ProductIdentityNormalizer.NormalizePartNumber(product.PartNumber),
+            InternalCode = ProductIdentityNormalizer.NormalizePartNumber(product.InternalCode),
+        }).ToArray();
+        var direct = catalog.Where(product => product.Part == normalizedPart
+            || product.InternalCode == normalizedPart).ToArray();
+        var candidates = direct.Length > 0
+            ? direct
+            : catalog.Where(product => Compact(product.Part) == Compact(normalizedPart)
+                || Compact(product.InternalCode) == Compact(normalizedPart)).ToArray();
+
+        foreach (var candidate in candidates)
+        {
+            var method = direct.Length == 0
+                ? ProductResolutionMethods.CanonicalCompactIdentity
+                : candidate.Part == normalizedPart
+                || (direct.Length == 0 && Compact(candidate.Part) == Compact(normalizedPart))
                 ? ProductResolutionMethods.ExactPartNumber
-                : internalCode == normalizedPart
+                : candidate.InternalCode == normalizedPart
+                    || (direct.Length == 0 && Compact(candidate.InternalCode) == Compact(normalizedPart))
                     ? ProductResolutionMethods.ExactInternalCode
                     : null;
             if (method is null) continue;
 
-            yield return Candidate(product, method == ProductResolutionMethods.ExactPartNumber ? 1m : 0.99m,
-                method, "Exact normalized catalog identity", normalizedPart, normalizedManufacturer);
+            var confidence = method == ProductResolutionMethods.ExactPartNumber ? 1m
+                : method == ProductResolutionMethods.ExactInternalCode ? 0.99m : 0.98m;
+            yield return Candidate(candidate.Product, confidence, method,
+                method == ProductResolutionMethods.CanonicalCompactIdentity
+                    ? "Unique canonical compact catalog identity"
+                    : "Exact normalized catalog identity",
+                normalizedPart, normalizedManufacturer);
         }
     }
+
+    private static string? Compact(string? value) => value is null
+        ? null
+        : new string(value.Where(char.IsLetterOrDigit).ToArray());
 
     private static IEnumerable<RankedProductCandidate> ReferenceMatches(
         IReadOnlyCollection<ProductIdentityCandidate> products,

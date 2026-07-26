@@ -1,25 +1,30 @@
+using System.Security.Cryptography;
+using System.Text;
+using ERP_RFQ_Automation.CommercialIntelligence.Sales;
+using ERP_RFQ_Automation.CommercialRouting;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
+using ERP_RFQ_Automation.Inventory;
+using ERP_RFQ_Automation.Inventory.Commercial;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.ProductIntelligence;
 using Microsoft.EntityFrameworkCore;
+using Models = ERP_RFQ_Automation.Models;
+
+AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
 
 const long tenantId = 80101;
 const long otherTenantId = 80102;
+const string fixtureActor = "acceptance-fixture";
 var connection = Environment.GetEnvironmentVariable("NEXORA_ACCEPTANCE_CONNECTION")
     ?? throw new InvalidOperationException("NEXORA_ACCEPTANCE_CONNECTION is required.");
 var password = Environment.GetEnvironmentVariable("NEXORA_ACCEPTANCE_PASSWORD")
     ?? throw new InvalidOperationException("NEXORA_ACCEPTANCE_PASSWORD is required.");
 var options = new DbContextOptionsBuilder<ErpRfqAutomationContext>().UseNpgsql(connection).Options;
 await using var db = new ErpRfqAutomationContext(options);
-
-if (await db.Leads.AnyAsync(x => x.BusinessUnitId == tenantId && x.Rfqno == "NORTHSTAR-440"))
-{
-    await PrintFixtureAsync(db);
-    return;
-}
-
 var now = DateTime.UtcNow;
-var tenant = await EnsureTenantAsync(tenantId, "R01C1", "Release 01C1 Acceptance");
+
+await EnsureTenantAsync(tenantId, "R01C1", "Release 01C1 Acceptance");
 await EnsureTenantAsync(otherTenantId, "R01C1-X", "Release 01C1 Other Tenant");
 var managerRole = await EnsureRoleAsync(tenantId, "R01C1_MANAGER", "Acceptance Manager");
 var editorRole = await EnsureRoleAsync(tenantId, "R01C1_EDITOR", "Acceptance Sales Editor");
@@ -30,78 +35,241 @@ await EnsureUserAsync(tenantId, editorRole.SetupId, "editor@release01c1.local", 
 await EnsureUserAsync(tenantId, deniedRole.SetupId, "denied@release01c1.local", "Dana", "Denied");
 await EnsureUserAsync(otherTenantId, otherRole.SetupId, "other@release01c1.local", "Taylor", "Other Tenant");
 
-var leadsModule = await EnsureModuleAsync("Leads");
-var dashboardModule = await EnsureModuleAsync("Dashboard");
-foreach (var role in new[] { managerRole, editorRole })
+var permissionModules = new[]
 {
-    await EnsurePermissionAsync(tenantId, role.SetupId, leadsModule.Id, create: true, edit: true);
-    await EnsurePermissionAsync(tenantId, role.SetupId, dashboardModule.Id, create: false, edit: false);
+    "Leads", "Dashboard", "Users", "Customers", "Products", "Product Categories",
+    "Supplier History", "RFQ Management", "Quotations", "Orders"
+};
+foreach (var moduleName in permissionModules)
+{
+    var module = await EnsureModuleAsync(moduleName);
+    foreach (var role in new[] { managerRole, editorRole })
+        await EnsurePermissionAsync(tenantId, role.SetupId, module.Id, create: true, edit: true);
 }
-await EnsurePermissionAsync(otherTenantId, otherRole.SetupId, leadsModule.Id, create: true, edit: true);
+var otherLeadsModule = await EnsureModuleAsync("Leads");
+await EnsurePermissionAsync(otherTenantId, otherRole.SetupId, otherLeadsModule.Id, create: true, edit: true);
 await db.SaveChangesAsync();
 
-var customer = new Customer
+var northstar = await EnsureCustomerAsync("Northstar Process Controls", "buyer@northstar.local");
+var intakeConfig = await EnsureEmailConfigurationAsync();
+var intake = await EnsureEmailIngestAsync(intakeConfig.Id);
+var originalLead = await EnsureIdentityLeadAsync(
+    "NORTHSTAR-440", "Northstar Buyer", "buyer@northstar.local", manager.Id,
+    Guid.Parse("01c10000-0000-0000-0000-000000000000"), "fixture-original", "02-duplicate.csv",
+    ("2", "VALVE-A", "Control valve", 14),
+    ("3", "ACTUATOR-ADDED", "Electric actuator", 2));
+originalLead.ResolveCommercialIdentity(northstar.Id, null, "MATCHED");
+await db.SaveChangesAsync();
+
+var salesRole = await EnsureRoleAsync(tenantId, "CORE_SALES_REP", "Core Sales Representative");
+var sarah = await EnsureUserAsync(tenantId, salesRole.SetupId, "sarah.malik@acceptance.local", "Sarah", "Malik");
+var ahmed = await EnsureUserAsync(tenantId, salesRole.SetupId, "ahmed.khan@acceptance.local", "Ahmed", "Khan");
+var priya = await EnsureUserAsync(tenantId, salesRole.SetupId, "priya.nair@acceptance.local", "Priya", "Nair");
+var daniel = await EnsureUserAsync(tenantId, salesRole.SetupId, "daniel.ross@acceptance.local", "Daniel", "Ross");
+var lena = await EnsureUserAsync(tenantId, salesRole.SetupId, "lena.ortiz@acceptance.local", "Lena", "Ortiz");
+foreach (var moduleName in permissionModules)
 {
-    Name = "Northstar Process Controls",
-    ContactEmail = "buyer@northstar.local",
-    ImageUrl = string.Empty,
-    Buid = tenantId,
-    IsActive = true,
-    CreatedBy = "acceptance-fixture",
-    CreatedOn = now
-};
-db.Customers.Add(customer);
-var config = new EmailConfiguration
+    var module = await EnsureModuleAsync(moduleName);
+    await EnsurePermissionAsync(tenantId, salesRole.SetupId, module.Id, create: true, edit: true);
+}
+await db.SaveChangesAsync();
+
+var team = await EnsureTeamAsync("Core Commercial Intelligence", sarah.Id);
+await EnsureSalesRepAsync(sarah.Id, 100, 1.25m, ["NORTH", "KEY-ACCOUNT"], ["VALVES", "CONTROLS"]);
+await EnsureSalesRepAsync(ahmed.Id, 85, 1.10m, ["NORTH", "BACKUP"], ["VALVES", "MRO"]);
+await EnsureSalesRepAsync(priya.Id, 70, 1.40m, ["WEST"], ["ELECTRICAL", "AUTOMATION"]);
+await EnsureSalesRepAsync(daniel.Id, 55, 0.90m, ["SOUTH"], ["MECHANICAL", "PUMPS"]);
+await EnsureSalesRepAsync(lena.Id, 90, 1.15m, ["EAST"], ["SERVICES", "INSTRUMENTATION"]);
+foreach (var rep in new[] { sarah, ahmed, priya, daniel, lena })
+    await EnsureMembershipAsync(rep.Id, team.Id, rep.Id == sarah.Id);
+
+var abc = await EnsureCustomerAsync("ABC Engineering", "procurement@abc-engineering.local");
+var abcContact = await EnsureContactAsync(abc.Id, "Amira", "Cole", "amira.cole@abc-engineering.local");
+await EnsureCustomerIdentifierAsync(abc.Id, CustomerIdentifierType.Email,
+    "procurement@abc-engineering.local", "procurement@abc-engineering.local");
+await EnsureCustomerIdentifierAsync(abc.Id, CustomerIdentifierType.Domain,
+    "abc-engineering.local", "abc-engineering.local");
+var ownership = await EnsureOwnershipAsync(abc.Id, sarah.Id, ahmed.Id);
+
+var sixLineLead = await EnsureIdentityLeadAsync(
+    "ABC-ENG-ATP-006", "Amira Cole", "procurement@abc-engineering.local", sarah.Id,
+    Guid.Parse("c0e00000-0000-0000-0000-000000000006"), "core-six-lines", "abc-engineering-six-lines.csv",
+    ("1", "CORE-ATP-100", "Known valve actuator with sufficient ATP", 10),
+    ("2", "CORE-PARTIAL-200", "Known regulator with partial ATP", 20),
+    ("3", "CORE-OOS-300", "Known transmitter with supplier history and zero ATP", 12),
+    ("4", "CORE-INCOMING-400", "Known controller with confirmed incoming inventory", 15),
+    ("5", "X-UNKNOWN-900", "Unknown industrial component requiring related-resource search", 5),
+    ("6", "FIELD-SERVICE", "On-site commissioning service, non-inventory", 1));
+sixLineLead.ResolveCommercialIdentity(abc.Id, abcContact.Id, "MATCHED");
+sixLineLead.AssignTo = sarah.Id;
+sixLineLead.AssignOn ??= now.AddMinutes(-30);
+sixLineLead.AssignComment = "Confirmed ABC Engineering account owner available within capacity.";
+
+var backupLead = await EnsureIdentityLeadAsync(
+    "ABC-ENG-BACKUP-001", "Amira Cole", "procurement@abc-engineering.local", ahmed.Id,
+    Guid.Parse("c0e00000-0000-0000-0000-000000000007"), "core-backup-case", "abc-engineering-owner-leave.csv",
+    ("1", "CORE-ATP-100", "Urgent replacement required while account owner is on leave", 2));
+backupLead.ResolveCommercialIdentity(abc.Id, abcContact.Id, "MATCHED");
+backupLead.AssignTo = ahmed.Id;
+backupLead.AssignOn ??= now.AddMinutes(-20);
+backupLead.AssignComment = "Sarah Malik remains Account Owner; Ahmed Khan selected as backup while Sarah is on leave.";
+await db.SaveChangesAsync();
+
+await EnsureAssignmentAsync(sixLineLead.Id, abc.Id, ownership.Id, sarah.Id,
+    RoutingOutcome.AssignedPrimary, "CONFIRMED_ACCOUNT_OWNER_AVAILABLE",
+    "Sarah Malik is the confirmed ABC Engineering Account Owner and is active within capacity.", "core-routing-primary");
+await EnsureAssignmentAsync(backupLead.Id, abc.Id, ownership.Id, ahmed.Id,
+    RoutingOutcome.AssignedBackup, "PRIMARY_OWNER_ON_LEAVE_BACKUP_SELECTED",
+    "Sarah Malik remains Account Owner but is unavailable for this opportunity; Ahmed Khan is the configured backup.", "core-routing-backup");
+
+await EnsureWorkloadLeadAsync("CORE-WORKLOAD-SARAH-01", sarah.Id, 3, now.AddDays(2));
+await EnsureWorkloadLeadAsync("CORE-WORKLOAD-AHMED-01", ahmed.Id, 6, now.AddHours(18));
+await EnsureWorkloadLeadAsync("CORE-WORKLOAD-PRIYA-01", priya.Id, 2, now.AddDays(5));
+await EnsureWorkloadLeadAsync("CORE-WORKLOAD-DANIEL-01", daniel.Id, 10, now.AddHours(-4));
+await EnsureWorkloadLeadAsync("CORE-WORKLOAD-LENA-01", lena.Id, 4, now.AddDays(1));
+await EnsureFollowUpAsync(ahmed.Id, backupLead.Id, abc.Id, now.AddHours(4), 90, "OWNER_LEAVE_COVERAGE");
+await EnsureFollowUpAsync(daniel.Id, sixLineLead.Id, abc.Id, now.AddHours(-2), 60, "WORKLOAD_EVIDENCE");
+
+var supplier = await EnsureSupplierAsync("Precision Controls Supply", "quotes@precision-controls.local");
+var category = await EnsureProductCategoryAsync("Core Acceptance Components");
+var sufficient = await EnsureProductAsync("CORE-ATP-100", "Acceptance Valve Actuator", category.Id, 5, supplier.Id);
+var partial = await EnsureProductAsync("CORE-PARTIAL-200", "Acceptance Pressure Regulator", category.Id, 14, supplier.Id);
+var outOfStock = await EnsureProductAsync("CORE-OOS-300", "Acceptance Pressure Transmitter", category.Id, 21, supplier.Id);
+var incomingProduct = await EnsureProductAsync("CORE-INCOMING-400", "Acceptance Logic Controller", category.Id, 18, supplier.Id);
+await EnsureAliasAsync(sufficient.Id, ProductAliasKind.CustomerPartNumber, "ABC-ACT-100", abc.Id);
+await EnsureAliasAsync(outOfStock.Id, ProductAliasKind.SupplierPartNumber, "PCS-TX-300", null);
+
+var primaryWarehouse = await EnsureWarehouseAsync("CORE-PRIMARY", "Core Primary Warehouse", "North Distribution Hub");
+var overflowWarehouse = await EnsureWarehouseAsync("CORE-OVERFLOW", "Core Overflow Warehouse", "North Overflow Hub");
+var transitWarehouse = await EnsureWarehouseAsync("CORE-TRANSIT", "Core Transit Warehouse", "Incoming Inspection Hub");
+var sufficientPrimary = await EnsureInventoryAsync(sufficient, primaryWarehouse, 24, 5, 2);
+var sufficientOverflow = await EnsureInventoryAsync(sufficient, overflowWarehouse, 16, 3, 1);
+var partialStock = await EnsureInventoryAsync(partial, primaryWarehouse, 9, 12, 2);
+var zeroStock = await EnsureInventoryAsync(outOfStock, primaryWarehouse, 0, 8, 0);
+var incomingStock = await EnsureInventoryAsync(incomingProduct, transitWarehouse, 0, 10, 0);
+
+await EnsureMovementAsync(sufficient, sufficientPrimary, primaryWarehouse, InventoryMovementType.Receipt, 24, "CORE-RECEIPT-ATP-PRIMARY");
+await EnsureMovementAsync(sufficient, sufficientOverflow, overflowWarehouse, InventoryMovementType.Receipt, 16, "CORE-RECEIPT-ATP-OVERFLOW");
+await EnsureMovementAsync(partial, partialStock, primaryWarehouse, InventoryMovementType.Receipt, 9, "CORE-RECEIPT-PARTIAL");
+await EnsureMovementAsync(outOfStock, zeroStock, primaryWarehouse, InventoryMovementType.AdjustmentDecrease, 0, "CORE-ZERO-OOS");
+await EnsureMovementAsync(incomingProduct, incomingStock, transitWarehouse, InventoryMovementType.AdjustmentIncrease, 0, "CORE-ZERO-INCOMING");
+await EnsureReservationAsync(sufficientPrimary.Id, 4, "core-reservation-atp");
+await EnsureReservationAsync(partialStock.Id, 1, "core-reservation-partial");
+await EnsureIncomingAsync(incomingProduct.Id, incomingStock.Id, transitWarehouse.Id, 30, 5, 3,
+    DateOnly.FromDateTime(now.AddDays(7)), "CORE-PO-INCOMING-400");
+await EnsurePurchaseHistoryAsync(outOfStock.Id, supplier.Id, 25, 418.50m, "USD", "CPOOOS300");
+await EnsureSupplierQuoteAsync(supplier.Id, "CORE-OOS-300", 12, 452m, "CORE-SQ-OOS-300");
+await EnsureSupplierQuoteAsync(supplier.Id, "X-UNKNOWN-900", 5, 87.25m, "CORE-SQ-UNKNOWN-900");
+
+var revisedSixLineLead = await EnsureReconciledOccurrenceAsync(
+    sixLineLead, Guid.Parse("c0e00000-0000-0000-0000-000000000106"), "core-six-lines-revision-2",
+    "abc-engineering-six-lines-revision-2.csv",
+    ("1", "CORE-ATP-100", "Known valve actuator with sufficient ATP", 10),
+    ("2", "CORE-PARTIAL-200", "Known regulator with partial ATP", 22),
+    ("3", "CORE-OOS-300", "Known transmitter with supplier history and zero ATP", 12),
+    ("4", "CORE-INCOMING-400", "Known controller with confirmed incoming inventory", 15),
+    ("5", "X-UNKNOWN-900", "Unknown industrial component requiring related-resource search", 5),
+    ("6", "FIELD-SERVICE", "On-site commissioning service, non-inventory", 1));
+revisedSixLineLead.ResolveCommercialIdentity(abc.Id, abcContact.Id, "MATCHED");
+revisedSixLineLead.AssignTo = sarah.Id;
+revisedSixLineLead.AssignComment = "Confirmed account ownership and deterministic product expertise match.";
+await db.SaveChangesAsync();
+
+var duplicateBatchId = Guid.Parse("c0e00000-0000-0000-0000-000000000206");
+await EnsureReconciledOccurrenceAsync(
+    sixLineLead, duplicateBatchId, "core-six-lines-exact-duplicate", "abc-engineering-six-lines-resend.csv",
+    ("1", "CORE-ATP-100", "Known valve actuator with sufficient ATP", 10),
+    ("2", "CORE-PARTIAL-200", "Known regulator with partial ATP", 22),
+    ("3", "CORE-OOS-300", "Known transmitter with supplier history and zero ATP", 12),
+    ("4", "CORE-INCOMING-400", "Known controller with confirmed incoming inventory", 15),
+    ("5", "X-UNKNOWN-900", "Unknown industrial component requiring related-resource search", 5),
+    ("6", "FIELD-SERVICE", "On-site commissioning service, non-inventory", 1));
+
+var ambiguousLead = await EnsureIdentityLeadAsync(
+    "CORE-AMBIGUOUS-001", "ABC Procurement", "shared-buying@acceptance.local", sarah.Id,
+    Guid.Parse("c0e00000-0000-0000-0000-000000000301"), "core-ambiguous-customer",
+    "ambiguous-customer.csv", ("1", "CORE-ATP-100", "Customer identity requires review", 1));
+ambiguousLead.ResolveCommercialIdentity(abc.Id, null, "AMBIGUOUS");
+ambiguousLead.RequiresCommercialReview = true;
+ambiguousLead.AssignComment = "Customer Resolution Required: multiple local identity signals require manager review.";
+
+var unresolvedLead = await EnsureIdentityLeadAsync(
+    "CORE-UNRESOLVED-001", "", "unresolved-source@acceptance.local", manager.Id,
+    Guid.Parse("c0e00000-0000-0000-0000-000000000302"), "core-unresolved-upload",
+    "unresolved-upload.csv", ("1", "X-UNKNOWN-901", "No customer identity supplied", 1));
+unresolvedLead.AssignTo = null;
+unresolvedLead.AssignOn = null;
+unresolvedLead.AssignComment = null;
+
+var weightedLead = await EnsureIdentityLeadAsync(
+    "CORE-WEIGHTED-001", "New Account Buyer", "new-account@acceptance.local", priya.Id,
+    Guid.Parse("c0e00000-0000-0000-0000-000000000303"), "core-weighted-routing",
+    "weighted-new-customer.csv", ("1", "CORE-ATP-100", "Automation component for western territory", 3));
+weightedLead.AssignTo = priya.Id;
+weightedLead.AssignOn ??= now.AddMinutes(-15);
+weightedLead.AssignComment = "Selected by weighted workload, automation expertise, territory fit, and fair distribution.";
+
+var reassignedLead = await EnsureIdentityLeadAsync(
+    "CORE-REASSIGNED-001", "Reassignment Buyer", "reassignment@abc-engineering.local", ahmed.Id,
+    Guid.Parse("c0e00000-0000-0000-0000-000000000304"), "core-reassigned",
+    "reassigned-opportunity.csv", ("1", "CORE-PARTIAL-200", "Opportunity reassigned with history", 2));
+reassignedLead.ResolveCommercialIdentity(abc.Id, abcContact.Id, "MATCHED");
+reassignedLead.AssignTo = ahmed.Id;
+reassignedLead.AssignComment = "Reassigned from Sarah Malik to Ahmed Khan for temporary backup coverage.";
+
+var confirmationCustomer = await EnsureCustomerAsync("Delta Fabrication", "buying@delta-fabrication.local");
+await EnsureOwnershipAsync(confirmationCustomer.Id, ahmed.Id, sarah.Id);
+await db.SaveChangesAsync();
+await EnsureReassignmentHistoryAsync(reassignedLead.Id, abc.Id, ownership.Id, sarah.Id, ahmed.Id);
+
+var quoteDraftLead = await EnsureSixLineCopyAsync(
+    "CORE-QUOTE-DRAFT-006", "core-quote-draft-six", Guid.Parse("c0e00000-0000-0000-0000-000000000401"));
+var rfqCreationLead = await EnsureSixLineCopyAsync(
+    "CORE-RFQ-CREATE-006", "core-rfq-create-six", Guid.Parse("c0e00000-0000-0000-0000-000000000402"));
+rfqCreationLead.CommercialFactsVerified = true;
+var inventoryFailureLead = await EnsureIdentityLeadAsync(
+    "CORE-INVENTORY-CHECK-FAIL", "Inventory Failure Buyer", "procurement@abc-engineering.local", sarah.Id,
+    Guid.Parse("c0e00000-0000-0000-0000-000000000403"), "core-inventory-failure",
+    "inventory-check-unavailable.csv", ("1", "CHECK-UNAVAILABLE-001", "Inventory check unavailable acceptance case", 1));
+inventoryFailureLead.ResolveCommercialIdentity(abc.Id, abcContact.Id, "MATCHED");
+await db.SaveChangesAsync();
+await EnsureSetupAsync("RFQStatus", "DRAFT", "Draft");
+await EnsureSetupAsync("LeadStatus", "CONVERTED_TO_RFQ", "Converted to RFQ");
+await EnsureLeadQualifiedAsync(rfqCreationLead.Id);
+
+var mainRfq = await EnsureRfqAsync(sixLineLead, "CORE-RFQ-006");
+var quoteDraftRfq = await EnsureRfqAsync(quoteDraftLead, "CORE-RFQ-QUOTE-DRAFT-006");
+var resolutionPersistenceAvailable = await db.Database.SqlQueryRaw<bool>(
+    "SELECT to_regclass('public.\"RFQ\"') IS NOT NULL AS \"Value\"").SingleAsync();
+if (resolutionPersistenceAvailable)
 {
-    BusinessUnitId = tenantId,
-    ConfigurationName = "Release 01C1 fixture",
-    EmailAddress = "intake@release01c1.local",
-    Protocol = "IMAP",
-    Host = "localhost",
-    Port = 993,
-    Username = "fixture",
-    Password = "fixture-not-used",
-    UseSsl = true,
-    PollingInterval = 300,
-    IsActive = true,
-    CreatedOn = now
-};
-db.EmailConfigurations.Add(config);
+    await EnsureLineResolutionsAsync(sixLineLead, mainRfq, sufficient, partial, outOfStock, incomingProduct);
+    await EnsureLineResolutionsAsync(quoteDraftLead, quoteDraftRfq, sufficient, partial, outOfStock, incomingProduct);
+}
+
+var draftStatus = await EnsureSetupAsync("QuoteStatus", "DRAFT", "Draft");
+await EnsureSetupAsync("QuoteStatus", "SENT", "Sent");
+var mainQuote = await EnsureQuoteAsync(mainRfq, draftStatus.SetupId, "CORE-QUOTE-006", sarah.Email!);
+await EnsureRevisionImpactAsync(sixLineLead, mainQuote);
+
+var sendRfq = await EnsureRfqAsync(backupLead, "CORE-RFQ-SEND-001");
+var sendQuote = await EnsureQuoteAsync(sendRfq, draftStatus.SetupId, "CORE-QUOTE-SEND-001", ahmed.Email!);
+var orderStatus = await EnsureSetupAsync("OrderStatus", "CONFIRMED", "Confirmed");
+var allocationOrder = await EnsureOrderAsync(mainQuote, mainRfq, sixLineLead, orderStatus.SetupId,
+    sufficient, primaryWarehouse);
+
+var openFollowUp = await EnsureFollowUpRecordAsync(sarah.Id, mainQuote.Id, abc.Id, now.AddHours(8),
+    80, "CORE_E2E_OPEN", "core-e2e-open-followup");
+var completedFollowUp = await EnsureCompletedFollowUpAsync(sarah.Id, mainQuote.Id, abc.Id);
+
 await db.SaveChangesAsync();
-var ingest = new EmailIngest
-{
-    MessageId = "release-01c1-fixture",
-    EmailSubject = "Controlled reconciliation batch",
-    FromEmail = "buyer@northstar.local",
-    EmailConfigurationId = config.Id,
-    ParseStatus = "Success",
-    ParsedAt = now,
-    CreatedOn = now
-};
-db.EmailIngests.Add(ingest);
-await db.SaveChangesAsync();
-
-var originalBatch = Guid.Parse("01c10000-0000-0000-0000-000000000000");
-var originalCorpus = DocumentCorpus.Create(tenantId, originalBatch, CorpusSourceType.ManualUpload);
-db.Add(originalCorpus);
-await db.SaveChangesAsync();
-
-var originalSource = await AddSourceAsync(originalCorpus.Id, "02-duplicate.csv",
-    "7ed41c4e2196e88577ab32693852c975cd6d16e6793db1512ce8217303271a99");
-var originalOccurrence = await AddOccurrenceAsync(originalCorpus.Id, originalSource.Id, "fixture-original");
-
-var identity = new LeadIdentityApplicationService(db);
-var original = Candidate("NORTHSTAR-440", null, ingest.Id, manager.Id,
-    ("2", "VALVE-A", 14), ("3", "ACTUATOR-ADDED", 2));
-var canonical = await identity.ReconcileAsync(original, Intake(originalBatch, "fixture-original", originalSource, originalOccurrence));
-
-await PrintFixtureAsync(db, canonical.NexoraSerial);
+await PrintFixtureAsync();
 
 async Task<BusinessUnit> EnsureTenantAsync(long id, string code, string name)
 {
     var existing = await db.BusinessUnits.SingleOrDefaultAsync(x => x.Id == id);
     if (existing is not null) return existing;
-    var value = new BusinessUnit { Id = id, BusinessUnitCode = code, BusinessUnitName = name, IsActive = true, CreatedBy = "acceptance-fixture", CreatedOn = now };
+    var value = new BusinessUnit { Id = id, BusinessUnitCode = code, BusinessUnitName = name, IsActive = true, CreatedBy = fixtureActor, CreatedOn = now };
     db.Add(value); await db.SaveChangesAsync(); return value;
 }
 
@@ -109,7 +277,7 @@ async Task<SetupMaster> EnsureRoleAsync(long bu, string code, string name)
 {
     var existing = await db.SetupMasters.SingleOrDefaultAsync(x => x.BusinessUnitId == bu && x.SetupType == "Role" && x.SetupCode == code);
     if (existing is not null) return existing;
-    var value = new SetupMaster { BusinessUnitId = bu, SetupType = "Role", SetupCode = code, SetupValue = name, IsActive = true, CreatedBy = "acceptance-fixture", CreatedOn = now };
+    var value = new SetupMaster { BusinessUnitId = bu, SetupType = "Role", SetupCode = code, SetupValue = name, IsActive = true, CreatedBy = fixtureActor, CreatedOn = now };
     db.Add(value); await db.SaveChangesAsync(); return value;
 }
 
@@ -119,7 +287,7 @@ async Task<User> EnsureUserAsync(long bu, long role, string email, string first,
     if (existing is not null) return existing;
     var value = new User { Buid = bu, RoleId = role, Email = email, FirstName = first, LastName = last,
         PasswordHash = BCrypt.Net.BCrypt.HashPassword(password), ImageUrl = string.Empty, IsActive = true,
-        CreatedBy = "acceptance-fixture", CreatedOn = now, Timezone = "UTC", Region = "Acceptance" };
+        CreatedBy = fixtureActor, CreatedOn = now, Timezone = "UTC", Region = "Acceptance" };
     db.Add(value); await db.SaveChangesAsync(); return value;
 }
 
@@ -127,53 +295,647 @@ async Task<Module> EnsureModuleAsync(string name)
 {
     var existing = await db.Modules.SingleOrDefaultAsync(x => x.ModuleName == name);
     if (existing is not null) return existing;
-    var value = new Module { ModuleName = name, IsActive = true, CreatedBy = "acceptance-fixture", CreatedOn = now };
+    var value = new Module { ModuleName = name, IsActive = true, CreatedBy = fixtureActor, CreatedOn = now };
     db.Add(value); await db.SaveChangesAsync(); return value;
 }
 
 async Task EnsurePermissionAsync(long bu, long role, long module, bool create, bool edit)
 {
-    if (await db.RolePermissions.AnyAsync(x => x.BusinessUnitId == bu && x.RoleId == role && x.ModuleId == module)) return;
-    db.Add(new RolePermission { BusinessUnitId = bu, RoleId = role, ModuleId = module, CanCreate = create,
-        CanEdit = edit, CanDelete = false, CreatedBy = "acceptance-fixture", CreatedOn = now });
+    var existing = await db.RolePermissions.SingleOrDefaultAsync(x => x.BusinessUnitId == bu && x.RoleId == role && x.ModuleId == module);
+    if (existing is null)
+    {
+        db.Add(new RolePermission { BusinessUnitId = bu, RoleId = role, ModuleId = module, CanCreate = create,
+            CanEdit = edit, CanDelete = false, CreatedBy = fixtureActor, CreatedOn = now });
+        return;
+    }
+    existing.CanCreate = existing.CanCreate == true || create;
+    existing.CanEdit = existing.CanEdit == true || edit;
 }
 
-async Task<SourceDocument> AddSourceAsync(long corpusId, string file, string contentHash)
+async Task<Customer> EnsureCustomerAsync(string name, string email)
 {
-    var source = SourceDocument.Create(tenantId, corpusId, contentHash, file, "text/csv",
-        "acceptance", $"release-01c1/{file}", "v1", 128);
+    var existing = await db.Customers.SingleOrDefaultAsync(x => x.Buid == tenantId && x.Name == name);
+    if (existing is not null) return existing;
+    var value = new Customer { Name = name, ContactEmail = email, ImageUrl = string.Empty, Buid = tenantId,
+        IsActive = true, CreatedBy = fixtureActor, CreatedOn = now };
+    db.Add(value); await db.SaveChangesAsync(); return value;
+}
+
+async Task<Contact> EnsureContactAsync(long customerId, string first, string last, string email)
+{
+    var existing = await db.Contacts.SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId && x.CustomerId == customerId && x.Email == email);
+    if (existing is not null) return existing;
+    var value = new Contact { BusinessUnitId = tenantId, CustomerId = customerId, FirstName = first, LastName = last,
+        Email = email, Position = "Procurement Manager", IsPrimary = true, IsActive = true, CreatedBy = fixtureActor, CreatedOn = now };
+    db.Add(value); await db.SaveChangesAsync(); return value;
+}
+
+async Task<EmailConfiguration> EnsureEmailConfigurationAsync()
+{
+    var existing = await db.EmailConfigurations.SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId && x.ConfigurationName == "Release 01C1 fixture");
+    if (existing is not null) return existing;
+    var value = new EmailConfiguration { BusinessUnitId = tenantId, ConfigurationName = "Release 01C1 fixture",
+        EmailAddress = "intake@release01c1.local", Protocol = "IMAP", Host = "localhost", Port = 993,
+        Username = "fixture", Password = "fixture-not-used", UseSsl = true, PollingInterval = 300,
+        IsActive = true, CreatedOn = now };
+    db.Add(value); await db.SaveChangesAsync(); return value;
+}
+
+async Task<EmailIngest> EnsureEmailIngestAsync(long configurationId)
+{
+    var existing = await db.EmailIngests.SingleOrDefaultAsync(x => x.EmailConfigurationId == configurationId && x.MessageId == "release-01c1-fixture");
+    if (existing is not null) return existing;
+    var value = new EmailIngest { MessageId = "release-01c1-fixture", EmailSubject = "Controlled reconciliation batch",
+        FromEmail = "buyer@northstar.local", EmailConfigurationId = configurationId, ParseStatus = "Success",
+        ParsedAt = now, CreatedOn = now };
+    db.Add(value); await db.SaveChangesAsync(); return value;
+}
+
+async Task<Lead> EnsureIdentityLeadAsync(string rfq, string buyer, string email, long owner, Guid batch,
+    string key, string file, params (string line, string part, string description, int qty)[] lines)
+{
+    var existing = await db.Leads.SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId && x.Rfqno == rfq);
+    if (existing is not null) return existing;
+    var corpus = DocumentCorpus.Create(tenantId, batch, CorpusSourceType.ManualUpload);
+    db.Add(corpus); await db.SaveChangesAsync();
+    var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{batch:N}:{key}:{file}"))).ToLowerInvariant();
+    var source = SourceDocument.Create(tenantId, corpus.Id, hash, file, "text/csv", "acceptance",
+        $"core-acceptance/{file}", "v1", 256);
     source.MarkSecurityStatus(DocumentSecurityStatus.Cleared);
-    db.Add(source); await db.SaveChangesAsync(); return source;
+    db.Add(source); await db.SaveChangesAsync();
+    var occurrence = SourceDocumentOccurrence.Create(tenantId, source.Id, corpus.Id, key,
+        "{\"fixture\":\"core-commercial-intelligence\"}");
+    db.Add(occurrence); await db.SaveChangesAsync();
+    var candidate = new Lead { Rfqno = rfq, BuyersName = buyer, RecDate = now, BidClosingDate = now.AddDays(5),
+        LeadSource = "ManualUpload", CreatedBy = fixtureActor, CreatedDate = now, BusinessUnitId = tenantId,
+        EmailIngestsId = intake.Id, Clientemail = email, RequiresCommercialReview = true, AssignTo = owner, AssignOn = now };
+    foreach (var line in lines)
+        candidate.LeadItems.Add(new LeadItem { LineItemNo = line.line, ManufacturerPartNumber = line.part,
+            ProductShortDescription = line.description, ItemText = line.description, Quantity = line.qty,
+            UnitOfMeasure = line.part == "FIELD-SERVICE" ? "JOB" : "EA",
+            CommodityProduct = line.part == "FIELD-SERVICE" ? "SERVICE_OR_NON_INVENTORY" : "PRODUCT" });
+    var descriptor = new LeadIntakeDescriptor(batch, "ManualUpload", key, null, null, fixtureActor, email,
+        $"Acceptance RFQ {rfq}", file, source.DetectedMimeType, source.ByteSize, source.ContentHash, source.Id,
+        null, occurrence.ReceivedOn, DateTimeOffset.UtcNow, LeadProcessingPath.Deterministic, false, 0m,
+        "User", fixtureActor, $"core-acceptance:{key}") { SourceDocumentOccurrenceId = occurrence.Id };
+    var result = await new LeadIdentityApplicationService(db).ReconcileAsync(candidate, descriptor);
+    return await db.Leads.SingleAsync(x => x.Id == result.LeadId);
 }
 
-async Task<SourceDocumentOccurrence> AddOccurrenceAsync(long corpusId, long sourceId, string key)
+async Task<Team> EnsureTeamAsync(string name, long managerId)
 {
-    var occurrence = SourceDocumentOccurrence.Create(tenantId, sourceId, corpusId, key, "{\"fixture\":\"release-01c1\"}");
-    db.Add(occurrence); await db.SaveChangesAsync(); return occurrence;
+    var existing = await db.Teams.SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId && x.TeamName == name);
+    if (existing is not null) return existing;
+    var value = new Team { BusinessUnitId = tenantId, TeamName = name, ManagerId = managerId, CreatedBy = fixtureActor, CreatedOn = now };
+    db.Add(value); await db.SaveChangesAsync(); return value;
 }
 
-Lead Candidate(string? rfq, string? email, long ingestId, long? owner, params (string line, string part, int qty)[] lines)
+async Task EnsureSalesRepAsync(long userId, int capacity, decimal weight, string[] territories, string[] categories)
 {
-    var lead = new Lead { Rfqno = rfq, BuyersName = "Northstar Buyer", RecDate = now,
-        LeadSource = "ManualUpload", CreatedBy = "acceptance-fixture", CreatedDate = now, BusinessUnitId = tenantId,
-        EmailIngestsId = ingestId, Clientemail = email, RequiresCommercialReview = true, AssignTo = owner, AssignOn = owner.HasValue ? now : null };
-    foreach (var line in lines) lead.LeadItems.Add(new LeadItem { LineItemNo = line.line, ManufacturerPartNumber = line.part,
-        Quantity = line.qty, UnitOfMeasure = null });
+    var existing = await db.SalesRepProfiles.SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId && x.UserId == userId);
+    if (existing is not null) return;
+    db.Add(new SalesRepProfile { BusinessUnitId = tenantId, UserId = userId, IsRoutingEligible = true,
+        CapacityPercent = capacity, DistributionWeight = weight, TerritoryKeys = territories,
+        ProductCategoryKeys = categories, EffectiveFromUtc = now.AddDays(-30), UpdatedAtUtc = now,
+        UpdatedBy = fixtureActor, LastMutationIdempotencyKey = $"core-profile-{userId}" });
+    await db.SaveChangesAsync();
+}
+
+async Task EnsureMembershipAsync(long userId, long teamId, bool primary)
+{
+    if (await db.SalesTeamMemberships.AnyAsync(x => x.BusinessUnitId == tenantId && x.UserId == userId && x.TeamId == teamId && x.EffectiveToUtc == null)) return;
+    db.Add(new SalesTeamMembership { BusinessUnitId = tenantId, UserId = userId, TeamId = teamId,
+        IsPrimary = primary, EffectiveFromUtc = now.AddDays(-30) });
+    await db.SaveChangesAsync();
+}
+
+async Task EnsureCustomerIdentifierAsync(long customerId, CustomerIdentifierType type, string normalized, string display)
+{
+    if (await db.Set<CustomerIdentifier>().AnyAsync(x => x.BusinessUnitId == tenantId && x.CustomerId == customerId && x.IdentifierType == type && x.NormalizedValue == normalized && x.EffectiveTo == null)) return;
+    db.Add(new CustomerIdentifier { BusinessUnitId = tenantId, CustomerId = customerId, IdentifierType = type,
+        NormalizedValue = normalized, DisplayValue = display, IsVerified = true, Confidence = 1m,
+        Source = fixtureActor, EffectiveFrom = now.AddDays(-30) });
+    await db.SaveChangesAsync();
+}
+
+async Task<CustomerOwnership> EnsureOwnershipAsync(long customerId, long primaryId, long backupId)
+{
+    var existing = await db.Set<CustomerOwnership>().SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId && x.CustomerId == customerId && x.Scope == OwnershipScope.GeneralCustomer && x.IsActive && x.EffectiveTo == null);
+    if (existing is not null) return existing;
+    var value = new CustomerOwnership { BusinessUnitId = tenantId, CustomerId = customerId, PrimaryUserId = primaryId,
+        BackupUserId = backupId, Scope = OwnershipScope.GeneralCustomer, Priority = 100, EffectiveFrom = now.AddDays(-30),
+        IsActive = true, Source = fixtureActor, Reason = "Confirmed synthetic account ownership", Version = 1 };
+    db.Add(value); await db.SaveChangesAsync(); return value;
+}
+
+async Task EnsureAssignmentAsync(long leadId, long customerId, long ownershipId, long selectedUserId,
+    RoutingOutcome outcome, string decisionCode, string explanation, string key)
+{
+    if (await db.Set<LeadAssignment>().AnyAsync(x => x.BusinessUnitId == tenantId && x.LeadId == leadId && x.EffectiveTo == null)) return;
+    var decision = new LeadRoutingDecision { BusinessUnitId = tenantId, LeadId = leadId, CustomerId = customerId,
+        OwnershipId = ownershipId, SuggestedUserId = selectedUserId, SelectedUserId = selectedUserId,
+        MatchStatus = CustomerMatchStatus.Matched, Outcome = outcome, MatchConfidence = 1m,
+        DecisionCode = decisionCode, Explanation = System.Text.Json.JsonSerializer.Serialize(new { summary = explanation,
+            accountOwner = "Sarah Malik", opportunityOwner = selectedUserId == sarah.Id ? "Sarah Malik" : "Ahmed Khan" }),
+        PolicyVersion = "core-acceptance-v1", CorrelationId = key, IdempotencyKey = key, CreatedOn = now };
+    db.Add(decision); await db.SaveChangesAsync();
+    db.Add(new LeadAssignment { BusinessUnitId = tenantId, LeadId = leadId, ToUserId = selectedUserId,
+        AssignmentScope = selectedUserId == sarah.Id ? AssignmentScope.CustomerPermanent : AssignmentScope.SharedBackup,
+        OwnershipId = ownershipId, RoutingDecisionId = decision.Id, ReasonCode = decisionCode, Comment = explanation,
+        EffectiveFrom = now, AssignedByUserId = manager.Id, CorrelationId = key, IdempotencyKey = $"{key}-assignment" });
+    await db.SaveChangesAsync();
+}
+
+async Task EnsureWorkloadLeadAsync(string rfq, long owner, int lineCount, DateTime deadline)
+{
+    if (await db.Leads.AnyAsync(x => x.BusinessUnitId == tenantId && x.Rfqno == rfq)) return;
+    var batchBytes = SHA256.HashData(Encoding.UTF8.GetBytes($"core-workload:{rfq}"))[..16];
+    var lines = Enumerable.Range(1, lineCount)
+        .Select(i => (i.ToString(), $"WORK-{owner}-{i}", "Synthetic weighted-routing workload", 1))
+        .ToArray();
+    var lead = await EnsureIdentityLeadAsync(rfq, "Synthetic Workload", $"workload-{owner}@acceptance.local",
+        owner, new Guid(batchBytes), $"core-workload-{owner}", $"{rfq.ToLowerInvariant()}.csv", lines);
+    lead.BidClosingDate = deadline;
+    await db.SaveChangesAsync();
+}
+
+async Task EnsureFollowUpAsync(long userId, long aggregateId, long customerId, DateTime due, int priority, string purpose)
+{
+    var key = $"core-followup-{purpose.ToLowerInvariant()}";
+    if (await db.FollowUpTasks.AnyAsync(x => x.BusinessUnitId == tenantId && x.CreationIdempotencyKey == key)) return;
+    db.Add(new FollowUpTask { BusinessUnitId = tenantId, AssignedToUserId = userId, AggregateType = "Lead",
+        AggregateId = aggregateId, CustomerId = customerId, DueAtUtc = due, Status = FollowUpStatus.Open,
+        Priority = priority, PurposeCode = purpose, CreatedAtUtc = now.AddDays(-1), UpdatedAtUtc = now,
+        CreatedBy = fixtureActor, CorrelationId = key, CreationIdempotencyKey = key });
+    await db.SaveChangesAsync();
+}
+
+async Task<Supplier> EnsureSupplierAsync(string name, string email)
+{
+    var existing = await db.Suppliers.SingleOrDefaultAsync(x => x.Buid == tenantId && x.Name == name);
+    if (existing is not null) return existing;
+    var value = new Supplier { Buid = tenantId, Name = name, ContactEmail = email, ImageUrl = string.Empty,
+        PaymentTerms = "Net 30", SuccessRate = 94, AvgResponseTime = 8, IsActive = true, CreatedBy = fixtureActor, CreatedOn = now };
+    db.Add(value); await db.SaveChangesAsync(); return value;
+}
+
+async Task<ProductCategory> EnsureProductCategoryAsync(string name)
+{
+    var existing = await db.ProductCategories.SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId && x.CategoryName == name);
+    if (existing is not null) return existing;
+    var value = new ProductCategory { BusinessUnitId = tenantId, CategoryName = name, Description = "Synthetic acceptance catalog",
+        IsActive = true, CreatedBy = fixtureActor, CreatedOn = now };
+    db.Add(value); await db.SaveChangesAsync(); return value;
+}
+
+async Task<Product> EnsureProductAsync(string part, string name, long categoryId, int leadTime, long supplierId)
+{
+    var existing = await db.Products.SingleOrDefaultAsync(x => x.Buid == tenantId && x.PartNo == part);
+    if (existing is not null) return existing;
+    var value = new Product { Buid = tenantId, PartNo = part, ProductName = name, Description = name,
+        CategoryId = categoryId, QtyOnHand = 0, ReorderPoint = 8, LeadTime = leadTime, PreferredSupplierId = supplierId,
+        IsActive = true, IsCatalogItem = true, UnitCost = 100, SellingPrice = 135, CreatedBy = fixtureActor, CreatedOn = now };
+    db.Add(value); await db.SaveChangesAsync(); return value;
+}
+
+async Task EnsureAliasAsync(long productId, ProductAliasKind kind, string value, long? accountId)
+{
+    var normalized = ProductIdentityNormalizer.NormalizePartNumber(value)!;
+    if (await db.ProductAliases.AnyAsync(x => x.BusinessUnitId == tenantId && x.Kind == kind && x.NormalizedValue == normalized && x.AccountId == accountId)) return;
+    db.Add(new ProductAlias { BusinessUnitId = tenantId, ProductId = productId, Kind = kind, Value = value,
+        NormalizedValue = normalized, AccountId = accountId, IsActive = true, CreatedOn = now, CreatedBy = fixtureActor });
+    await db.SaveChangesAsync();
+}
+
+async Task<Warehouse> EnsureWarehouseAsync(string code, string name, string location)
+{
+    var existing = await db.Warehouses.SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId && x.WarehouseCode == code);
+    if (existing is not null) return existing;
+    var value = new Warehouse { BusinessUnitId = tenantId, WarehouseCode = code, WarehouseName = name,
+        Location = location, Country = "Test", IsActive = true, CreatedBy = fixtureActor, CreatedOn = now };
+    db.Add(value); await db.SaveChangesAsync(); return value;
+}
+
+async Task<Models.Inventory> EnsureInventoryAsync(Product product, Warehouse warehouse, decimal onHand, decimal reorder, decimal safety)
+{
+    var existing = await db.Set<Models.Inventory>().SingleOrDefaultAsync(x => x.Buid == tenantId && x.ProductId == product.Id && x.WarehouseId == warehouse.Id);
+    if (existing is not null) return existing;
+    var value = new Models.Inventory { Buid = tenantId, ProductId = product.Id, WarehouseId = warehouse.Id,
+        PartNo = product.PartNo, ProductName = product.ProductName, Description = product.Description,
+        QtyOnHand = onHand, ReorderPoint = reorder, SafetyStockQuantity = safety, UnitCost = product.UnitCost,
+        SellingPrice = product.SellingPrice, LeadTime = product.LeadTime, PreferredSupplierId = product.PreferredSupplierId,
+        CreatedBy = fixtureActor, CreatedOn = now };
+    db.Add(value); await db.SaveChangesAsync(); return value;
+}
+
+async Task EnsureMovementAsync(Product product, Models.Inventory inventory, Warehouse warehouse,
+    InventoryMovementType type, decimal quantity, string key)
+{
+    if (await db.InventoryMovements.AnyAsync(x => x.BusinessUnitId == tenantId && x.IdempotencyKey == key)) return;
+    db.Add(new InventoryMovement { BusinessUnitId = tenantId, ProductId = product.Id, InventoryId = inventory.Id,
+        WarehouseId = warehouse.Id, Type = type, Quantity = quantity, OccurredOn = now.AddDays(-3), IdempotencyKey = key,
+        SourceType = "AcceptanceFixture", SourceId = key, Reason = "Authorized synthetic acceptance balance",
+        CreatedBy = fixtureActor, CreatedOn = now });
+    await db.SaveChangesAsync();
+}
+
+async Task EnsureReservationAsync(long inventoryId, decimal quantity, string key)
+{
+    if (await db.StockReservations.AnyAsync(x => x.BusinessUnitId == tenantId && x.IdempotencyKey == key)) return;
+    db.Add(new StockReservation { BusinessUnitId = tenantId, InventoryId = inventoryId, Quantity = quantity,
+        Status = StockReservationStatus.Active, IdempotencyKey = key, CreatedBy = fixtureActor, CreatedOn = now.AddHours(-6) });
+    await db.SaveChangesAsync();
+}
+
+async Task EnsureIncomingAsync(long productId, long inventoryId, long warehouseId, decimal ordered,
+    decimal received, decimal allocated, DateOnly expected, string sourceId)
+{
+    if (await db.IncomingInventory.AnyAsync(x => x.BusinessUnitId == tenantId && x.SourceType == "PurchaseOrder" && x.SourceId == sourceId && x.ProductId == productId && x.WarehouseId == warehouseId)) return;
+    db.Add(new IncomingInventory { BusinessUnitId = tenantId, ProductId = productId, InventoryId = inventoryId,
+        WarehouseId = warehouseId, OrderedQuantity = ordered, ReceivedQuantity = received, AllocatedQuantity = allocated,
+        ExpectedOn = expected, Status = IncomingInventoryStatus.Confirmed, SourceType = "PurchaseOrder", SourceId = sourceId });
+    await db.SaveChangesAsync();
+}
+
+async Task EnsurePurchaseHistoryAsync(long productId, long supplierId, decimal quantity, decimal price, string currency, string reference)
+{
+    if (await db.SupplierPurchaseHistories.AnyAsync(x => x.ProductId == productId && x.SupplierId == supplierId && x.PoDocId == reference)) return;
+    db.Add(new SupplierPurchaseHistory { ProductId = productId, SupplierId = supplierId, PurchaseDate = now.AddDays(-45),
+        Quantity = quantity, UnitPrice = price, Currency = currency, PoDocId = reference, CreatedBy = fixtureActor, CreatedOn = now });
+    await db.SaveChangesAsync();
+}
+
+async Task EnsureSupplierQuoteAsync(long supplierId, string itemName, decimal quantity, decimal price, string reference)
+{
+    if (await db.SupplierQuotedItems.AnyAsync(x => x.BusinessUnitId == tenantId && x.QuoteReference == reference)) return;
+    db.Add(new SupplierQuotedItem { BusinessUnitId = tenantId, SupplierId = supplierId, ItemName = itemName,
+        Description = $"Synthetic sourcing evidence for {itemName}", Quantity = quantity, UnitPrice = price,
+        QuoteReference = reference, QuoteDate = now.AddDays(-15), ValidUntil = now.AddDays(30), IsActive = true,
+        CreatedBy = fixtureActor, CreatedDate = now.AddDays(-15) });
+    await db.SaveChangesAsync();
+}
+
+async Task<Lead> EnsureReconciledOccurrenceAsync(Lead canonicalLead, Guid batchId, string key, string file,
+    params (string line, string part, string description, int qty)[] lines)
+{
+    var existing = await db.Set<LeadIngestionOccurrence>().AsNoTracking()
+        .SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId && x.IdempotencyKey == key);
+    if (existing?.LeadId is long existingLeadId)
+        return await db.Leads.SingleAsync(x => x.Id == existingLeadId);
+
+    var corpus = DocumentCorpus.Create(tenantId, batchId, CorpusSourceType.ManualUpload);
+    db.Add(corpus); await db.SaveChangesAsync();
+    var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{batchId:N}:{key}:{file}"))).ToLowerInvariant();
+    var source = SourceDocument.Create(tenantId, corpus.Id, hash, file, "text/csv", "acceptance",
+        $"core-acceptance/{file}", "v1", 512);
+    source.MarkSecurityStatus(DocumentSecurityStatus.Cleared);
+    db.Add(source); await db.SaveChangesAsync();
+    var documentOccurrence = SourceDocumentOccurrence.Create(tenantId, source.Id, corpus.Id, key,
+        "{\"fixture\":\"core-commercial-e2e\"}");
+    db.Add(documentOccurrence); await db.SaveChangesAsync();
+
+    var candidate = new Lead { Rfqno = canonicalLead.Rfqno, BuyersName = canonicalLead.BuyersName,
+        RecDate = canonicalLead.RecDate, BidClosingDate = canonicalLead.BidClosingDate,
+        LeadSource = "ManualUpload", CreatedBy = fixtureActor, CreatedDate = now,
+        BusinessUnitId = tenantId, EmailIngestsId = intake.Id, Clientemail = canonicalLead.Clientemail,
+        RequiresCommercialReview = true, AssignTo = canonicalLead.AssignTo, AssignOn = canonicalLead.AssignOn };
+    foreach (var line in lines)
+        candidate.LeadItems.Add(new LeadItem { LineItemNo = line.line, ManufacturerPartNumber = line.part,
+            ProductShortDescription = line.description, ItemText = line.description, Quantity = line.qty,
+            UnitOfMeasure = line.part == "FIELD-SERVICE" ? "JOB" : "EA",
+            CommodityProduct = line.part == "FIELD-SERVICE" ? "SERVICE_OR_NON_INVENTORY" : "PRODUCT" });
+    var descriptor = new LeadIntakeDescriptor(batchId, "ManualUpload", key, null, null, fixtureActor,
+        canonicalLead.Clientemail, $"Acceptance revision {canonicalLead.Rfqno}", file,
+        source.DetectedMimeType, source.ByteSize, source.ContentHash, source.Id, null,
+        documentOccurrence.ReceivedOn, DateTimeOffset.UtcNow, LeadProcessingPath.Deterministic,
+        false, 0m, "User", fixtureActor, $"core-acceptance:{key}")
+        { SourceDocumentOccurrenceId = documentOccurrence.Id };
+    var result = await new LeadIdentityApplicationService(db).ReconcileAsync(candidate, descriptor);
+    return await db.Leads.SingleAsync(x => x.Id == result.LeadId);
+}
+
+async Task<Lead> EnsureSixLineCopyAsync(string rfqNumber, string key, Guid batchId)
+{
+    var lead = await EnsureIdentityLeadAsync(rfqNumber, "Amira Cole", "procurement@abc-engineering.local",
+        sarah.Id, batchId, key, $"{key}.csv",
+        ("1", "CORE-ATP-100", "Known valve actuator with sufficient ATP", 10),
+        ("2", "CORE-PARTIAL-200", "Known regulator with partial ATP", 22),
+        ("3", "CORE-OOS-300", "Known transmitter with supplier history and zero ATP", 12),
+        ("4", "CORE-INCOMING-400", "Known controller with confirmed incoming inventory", 15),
+        ("5", "X-UNKNOWN-900", "Unknown industrial component requiring related-resource search", 5),
+        ("6", "FIELD-SERVICE", "On-site commissioning service, non-inventory", 1));
+    await db.Entry(lead).Collection(x => x.LeadItems).LoadAsync();
+    foreach (var item in lead.LeadItems)
+        item.Currency ??= "USD";
+    lead.ResolveCommercialIdentity(abc.Id, abcContact.Id, "MATCHED");
+    lead.AssignTo = sarah.Id;
+    lead.AssignOn ??= now;
+    lead.AssignComment = "Confirmed ABC Engineering account owner available within capacity.";
+    await db.SaveChangesAsync();
     return lead;
 }
 
-LeadIntakeDescriptor Intake(Guid batch, string key, SourceDocument source, SourceDocumentOccurrence occurrence, string? sender = "buyer@northstar.local") => new(
-    batch, "ManualUpload", key, null, null, "acceptance-fixture", sender, "Controlled RFQ", source.OriginalFileName,
-    source.DetectedMimeType, source.ByteSize, source.ContentHash, source.Id, null, occurrence.ReceivedOn,
-    DateTimeOffset.UtcNow, LeadProcessingPath.Deterministic, false, 0m, "User", "acceptance-fixture", $"release-01c1:{key}")
-{ SourceDocumentOccurrenceId = occurrence.Id };
-
-async Task PrintFixtureAsync(ErpRfqAutomationContext context, string? serial = null)
+async Task EnsureReassignmentHistoryAsync(long leadId, long customerId, long ownershipId,
+    long previousUserId, long currentUserId)
 {
-    var original = await context.Leads.AsNoTracking().SingleAsync(x => x.BusinessUnitId == tenantId && x.Rfqno == "NORTHSTAR-440");
-    serial ??= original.CommercialCaseReference;
+    if (await db.Set<LeadAssignment>().AnyAsync(x => x.BusinessUnitId == tenantId && x.LeadId == leadId)) return;
+    var correlation = $"core-reassignment-{leadId}";
+    var previousDecision = new LeadRoutingDecision { BusinessUnitId = tenantId, LeadId = leadId,
+        CustomerId = customerId, OwnershipId = ownershipId, SuggestedUserId = previousUserId,
+        SelectedUserId = previousUserId, MatchStatus = CustomerMatchStatus.Matched,
+        Outcome = RoutingOutcome.AssignedPrimary, MatchConfidence = 1m,
+        DecisionCode = "ACCOUNT_OWNER_ASSIGNED", Explanation = "{\"reason\":\"Initial account owner assignment\"}",
+        PolicyVersion = "core-acceptance-v1", CorrelationId = correlation,
+        IdempotencyKey = $"{correlation}-initial", CreatedOn = now.AddDays(-2) };
+    db.Add(previousDecision); await db.SaveChangesAsync();
+    db.Add(new LeadAssignment { BusinessUnitId = tenantId, LeadId = leadId, ToUserId = previousUserId,
+        AssignmentScope = AssignmentScope.CustomerPermanent, OwnershipId = ownershipId,
+        RoutingDecisionId = previousDecision.Id, ReasonCode = "ACCOUNT_OWNER_ASSIGNED",
+        Comment = "Initial assignment to Sarah Malik", EffectiveFrom = now.AddDays(-2),
+        EffectiveTo = now.AddDays(-1), AssignedByUserId = manager.Id, CorrelationId = correlation,
+        IdempotencyKey = $"{correlation}-assignment-initial" });
+    await db.SaveChangesAsync();
+
+    var currentDecision = new LeadRoutingDecision { BusinessUnitId = tenantId, LeadId = leadId,
+        CustomerId = customerId, OwnershipId = ownershipId, SuggestedUserId = currentUserId,
+        SelectedUserId = currentUserId, MatchStatus = CustomerMatchStatus.Matched,
+        Outcome = RoutingOutcome.AssignedBackup, MatchConfidence = 1m,
+        DecisionCode = "TEMPORARY_BACKUP_REASSIGNMENT",
+        Explanation = "{\"reason\":\"Sarah Malik unavailable; Ahmed Khan accepted temporary coverage\"}",
+        PolicyVersion = "core-acceptance-v1", CorrelationId = correlation,
+        IdempotencyKey = $"{correlation}-current", CreatedOn = now.AddDays(-1) };
+    db.Add(currentDecision); await db.SaveChangesAsync();
+    db.Add(new LeadAssignment { BusinessUnitId = tenantId, LeadId = leadId, FromUserId = previousUserId,
+        ToUserId = currentUserId, AssignmentScope = AssignmentScope.SharedBackup, OwnershipId = ownershipId,
+        RoutingDecisionId = currentDecision.Id, ReasonCode = "TEMPORARY_BACKUP_REASSIGNMENT",
+        Comment = "Reassigned to Ahmed Khan while retaining Sarah Malik as Account Owner",
+        EffectiveFrom = now.AddDays(-1), AssignedByUserId = manager.Id, CorrelationId = correlation,
+        IdempotencyKey = $"{correlation}-assignment-current" });
+    await db.SaveChangesAsync();
+}
+
+async Task<SetupMaster> EnsureSetupAsync(string type, string code, string value)
+{
+    var existing = await db.SetupMasters.SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId &&
+        x.SetupType == type && x.SetupCode == code);
+    if (existing is not null) return existing;
+    var setup = new SetupMaster { BusinessUnitId = tenantId, SetupType = type, SetupCode = code,
+        SetupValue = value, IsActive = true, CreatedBy = fixtureActor, CreatedOn = now };
+    db.Add(setup); await db.SaveChangesAsync(); return setup;
+}
+
+async Task EnsureLeadQualifiedAsync(long leadId)
+{
+    var path = new[] { "PENDING_IDENTIFICATION", "ASSIGNED", "UNDER_REVIEW", "QUALIFIED" };
+    foreach (var code in path)
+        await EnsureSetupAsync("LeadStatus", code, code.Replace('_', ' '));
+
+    var lifecycle = new ERP_RFQ_Automation.CommercialCases.Lifecycle.LifecycleApplicationService(db);
+    while (true)
+    {
+        var lead = await db.Leads.AsNoTracking().Include(x => x.LeadStatus)
+            .SingleAsync(x => x.BusinessUnitId == tenantId && x.Id == leadId);
+        var current = ERP_RFQ_Automation.CommercialCases.Lifecycle.LifecyclePolicy.Canonicalize(
+            "Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue);
+        if (current is "QUALIFIED" or "CONVERTED_TO_RFQ" or "DISQUALIFIED" or "CLOSED") return;
+        var targetIndex = current == "RECEIVED" ? 0 : Array.IndexOf(path, current) + 1;
+        if (targetIndex < 0 || targetIndex >= path.Length)
+            throw new InvalidOperationException($"Cannot qualify acceptance lead {leadId} from lifecycle state {current}.");
+        var target = path[targetIndex];
+        await lifecycle.TransitionLeadAsync(tenantId, leadId,
+            new ERP_RFQ_Automation.CommercialCases.Lifecycle.LifecycleActor(fixtureActor, "AcceptanceFixture"),
+            new ERP_RFQ_Automation.CommercialCases.Lifecycle.LifecycleTransitionCommand(
+                target, lead.LifecycleVersion, null, "Acceptance qualification path", "Fixture",
+                $"core-qualify-{leadId}-{target}", $"acceptance-lead-{leadId}",
+                $"core-qualify:{tenantId}:{leadId}:{target}"),
+            false, CancellationToken.None);
+    }
+}
+
+async Task<Rfq> EnsureRfqAsync(Lead lead, string rfqNumber)
+{
+    var existing = await db.Rfqs.Include(x => x.Rfqitems).Include(x => x.Lead)
+        .SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId && x.Rfqno == rfqNumber);
+    if (existing is not null) return existing;
+    var products = await db.Products.Where(x => x.Buid == tenantId).ToDictionaryAsync(x => x.PartNo, x => x.Id);
+    var draftStatus = await EnsureSetupAsync("RFQStatus", "DRAFT", "Draft");
+    var rfq = new Rfq { Rfqno = rfqNumber, BuyersName = lead.BuyersName, RecDate = now,
+        BidClosingDate = lead.BidClosingDate, LeadId = lead.Id, CustomerId = lead.CustomerId,
+        BusinessUnitId = tenantId, RfqstatusId = draftStatus.SetupId, CreatedBy = fixtureActor,
+        CreatedDate = now, NoOfLineItems = lead.LeadItems.Count };
+    rfq.InheritCommercialIdentity(lead);
+    foreach (var item in lead.LeadItems.OrderBy(x => x.LineItemNo))
+    {
+        products.TryGetValue(item.ManufacturerPartNumber ?? string.Empty, out var productId);
+        rfq.Rfqitems.Add(new Rfqitem { LineItemNo = item.LineItemNo,
+            ProductId = productId == 0 ? null : productId, ProductShortDescription = item.ProductShortDescription,
+            ItemMaterialCode = item.ItemMaterialCode, ManufacturerPartNumber = item.ManufacturerPartNumber,
+            CommodityProduct = item.CommodityProduct, ItemText = item.ItemText, Quantity = item.Quantity,
+            UnitOfMeasure = item.UnitOfMeasure ?? "EA", CreatedBy = fixtureActor, CreatedDate = now });
+    }
+    db.Add(rfq); await db.SaveChangesAsync(); return rfq;
+}
+
+async Task EnsureLineResolutionsAsync(Lead lead, Rfq rfq, Product full, Product partialProduct,
+    Product outProduct, Product incomingProductValue)
+{
+    var revision = await db.Set<LeadRevision>()
+        .SingleAsync(x => x.BusinessUnitId == tenantId && x.Id == lead.CurrentRevisionId!.Value);
+    var revisionLines = await db.Set<LeadItemRevision>().AsNoTracking()
+        .Where(x => x.BusinessUnitId == tenantId && x.LeadRevisionId == revision.Id)
+        .OrderBy(x => x.LineNumber).ToArrayAsync();
+    if (await db.Set<LeadLineCommercialResolution>().CountAsync(x => x.BusinessUnitId == tenantId &&
+            x.LeadRevisionId == revision.Id) == revisionLines.Length) return;
+    var lines = await db.LeadItems.AsNoTracking().Where(x => x.LeadId == lead.Id)
+        .OrderBy(x => x.LineItemNo).ToArrayAsync();
+    for (var index = 0; index < lines.Length; index++)
+    {
+        var item = lines[index];
+        var partNumber = item.ManufacturerPartNumber ?? $"LINE-{index + 1}";
+        var (productId, classification, atp, incomingAvailable) = partNumber switch
+        {
+            "CORE-ATP-100" => ((long?)full.Id, CommercialResolutionClassification.KnownInStock, 33m, 0m),
+            "CORE-PARTIAL-200" => ((long?)partialProduct.Id, CommercialResolutionClassification.KnownShortage, 6m, 0m),
+            "CORE-OOS-300" => ((long?)outProduct.Id, CommercialResolutionClassification.KnownShortage, 0m, 0m),
+            "CORE-INCOMING-400" => ((long?)incomingProductValue.Id, CommercialResolutionClassification.KnownIncoming, 0m, 22m),
+            "FIELD-SERVICE" => ((long?)null, CommercialResolutionClassification.NonInventoryService, 0m, 0m),
+            _ => ((long?)null, CommercialResolutionClassification.UnknownProduct, 0m, 0m)
+        };
+        var related = partNumber == "CORE-OOS-300"
+            ? "[{\"resourceId\":\"supplier-quote:core\",\"businessUnitId\":80101,\"kind\":\"SupplierQuoteHistory\",\"supplierId\":1,\"displayName\":\"Precision Controls Supply\",\"matchReason\":\"Tenant-local supplier history\",\"score\":0.9,\"evidenceReference\":\"CORE-SQ-OOS-300\"}]"
+            : "[]";
+        var fulfilment = partNumber == "CORE-ATP-100"
+            ? $"{{\"classification\":\"MultipleWarehouses\",\"requestedQuantity\":{item.Quantity},\"allocatedQuantity\":{item.Quantity},\"shortageQuantity\":0,\"allocations\":[{{\"warehouseId\":{primaryWarehouse.Id},\"inventoryId\":{sufficientPrimary.Id},\"warehouseCode\":\"CORE-PRIMARY\",\"quantity\":8,\"availableBeforeAllocation\":18}},{{\"warehouseId\":{overflowWarehouse.Id},\"inventoryId\":{sufficientOverflow.Id},\"warehouseCode\":\"CORE-OVERFLOW\",\"quantity\":2,\"availableBeforeAllocation\":15}}]}}"
+            : $"{{\"classification\":\"{(atp > 0 ? "PartialStock" : "NoStock")}\",\"requestedQuantity\":{item.Quantity},\"allocatedQuantity\":{atp},\"shortageQuantity\":{Math.Max(0, item.Quantity - atp)},\"allocations\":[]}}";
+        db.Add(new LeadLineCommercialResolution { BusinessUnitId = tenantId, LeadId = lead.Id,
+            LeadRevisionId = revision.Id, LeadLineId = revisionLines[index].Id, RfqId = rfq.Id,
+            ProductId = productId, RequestedPartNumber = partNumber, RequestedQuantity = item.Quantity,
+            Classification = classification, AvailableToPromise = atp, IncomingAvailable = incomingAvailable,
+            FulfilmentJson = fulfilment, RelatedResourcesJson = related,
+            ProductResolutionJson = productId.HasValue ? $"{{\"decisionState\":\"AutoLinked\",\"resolvedProductId\":{productId.Value}}}" : "{\"decisionState\":\"Unresolved\"}",
+            ResolutionMethod = partNumber == "FIELD-SERVICE" ? "SERVICE_NON_INVENTORY_FIXTURE" : "DETERMINISTIC_LOCAL",
+            EvidenceReference = $"lead-revision:{revision.Id}:line:{revisionLines[index].Id}",
+            InventoryAsOfUtc = now.AddMinutes(-5), ResolvedOn = now.AddMinutes(-5) });
+    }
+    await db.SaveChangesAsync();
+}
+
+async Task<Quote> EnsureQuoteAsync(Rfq rfq, long statusId, string quoteNumber, string actorEmail)
+{
+    var existing = await db.Quotes.Include(x => x.QuoteItems)
+        .SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId && x.QuoteNo == quoteNumber);
+    if (existing is not null) return existing;
+    var quote = new Quote { QuoteNo = quoteNumber, Rfqid = rfq.Id, CustomerId = rfq.CustomerId,
+        BusinessUnitId = tenantId, QuoteDate = now.AddDays(-1), ValidUntil = now.AddDays(30),
+        StatusId = statusId, TotalAmount = 0, HeaderRemarks = "Acceptance Quote Draft",
+        CreatedBy = actorEmail, CreatedDate = now.AddDays(-1), LifecycleVersion = 1 };
+    quote.InheritCommercialIdentity(rfq);
+    foreach (var line in rfq.Rfqitems.OrderBy(x => x.Id))
+        quote.QuoteItems.Add(new QuoteItem { RfqitemId = line.Id, ProductId = line.ProductId,
+            ItemDescription = line.ProductShortDescription ?? line.ItemText, Quantity = line.Quantity,
+            UnitPrice = 0, TotalAmount = 0, CreatedBy = actorEmail, CreatedDate = now.AddDays(-1) });
+    db.Add(quote); await db.SaveChangesAsync(); return quote;
+}
+
+async Task EnsureRevisionImpactAsync(Lead lead, Quote quote)
+{
+    if (await db.Set<LeadRevisionImpact>().AnyAsync(x => x.BusinessUnitId == tenantId &&
+        x.AggregateType == "QUOTE" && x.AggregateId == quote.Id && x.Status == "OPEN")) return;
+    db.Add(new LeadRevisionImpact { BusinessUnitId = tenantId, LeadId = lead.Id,
+        LeadRevisionId = lead.CurrentRevisionId!.Value, AggregateType = "QUOTE", AggregateId = quote.Id,
+        ImpactType = "INVENTORY_REVALIDATION_REQUIRED", Status = "OPEN",
+        DetailsJson = "{\"reason\":\"Inventory snapshot predates the latest accepted inquiry revision\",\"automaticMutation\":false}",
+        CreatedAtUtc = DateTimeOffset.UtcNow });
+    await db.SaveChangesAsync();
+}
+
+async Task<Order> EnsureOrderAsync(Quote quote, Rfq rfq, Lead lead, long statusId, Product product,
+    Warehouse warehouse)
+{
+    var existing = await db.Orders.Include(x => x.OrderItems)
+        .SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId && x.OrderNo == "CORE-ALLOCATE-001");
+    if (existing is not null) return existing;
+    var order = new Order { OrderNo = "CORE-ALLOCATE-001", QuoteId = quote.Id, Rfqid = rfq.Id,
+        LeadId = lead.Id, CustomerId = abc.Id, BusinessUnitId = tenantId, StatusId = statusId,
+        SourceType = OrderSourceTypes.LegacyQuote,
+        CommercialCaseId = quote.CommercialCaseId, NexoraSerial = quote.NexoraSerial,
+        ContactId = quote.ContactId,
+        OrderDate = now, TotalAmount = 270m, SubTotal = 270m, CreatedBy = fixtureActor,
+        CreatedOn = now, IsActive = true };
+    order.OrderItems.Add(new OrderItem { ProductId = product.Id, Description = product.ProductName,
+        Quantity = 2, UnitPrice = 135m, TotalAmount = 270m, WarehouseId = warehouse.Id,
+        CreatedBy = fixtureActor, CreatedDate = now, IsActive = true });
+    db.Add(order); await db.SaveChangesAsync(); return order;
+}
+
+async Task<FollowUpTask> EnsureFollowUpRecordAsync(long userId, long aggregateId, long customerId,
+    DateTime dueAt, int priority, string purpose, string key)
+{
+    var existing = await db.FollowUpTasks.SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId &&
+        x.CreationIdempotencyKey == key);
+    if (existing is not null) return existing;
+    var task = new FollowUpTask { BusinessUnitId = tenantId, AssignedToUserId = userId,
+        AggregateType = "Quote", AggregateId = aggregateId, CustomerId = customerId, DueAtUtc = dueAt,
+        Status = FollowUpStatus.Open, Priority = priority, PurposeCode = purpose,
+        CreatedAtUtc = now.AddDays(-1), UpdatedAtUtc = now.AddDays(-1), Version = 1,
+        CreatedBy = fixtureActor, CorrelationId = key, CreationIdempotencyKey = key };
+    db.Add(task); await db.SaveChangesAsync(); return task;
+}
+
+async Task<FollowUpTask> EnsureCompletedFollowUpAsync(long userId, long aggregateId, long customerId)
+{
+    const string key = "core-e2e-completed-followup";
+    var existing = await db.FollowUpTasks.SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId &&
+        x.CreationIdempotencyKey == key);
+    if (existing is not null) return existing;
+    var task = new FollowUpTask { BusinessUnitId = tenantId, AssignedToUserId = userId,
+        AggregateType = "Quote", AggregateId = aggregateId, CustomerId = customerId,
+        DueAtUtc = now.AddHours(-2), Status = FollowUpStatus.Completed, Priority = 70,
+        PurposeCode = "CORE_E2E_COMPLETED", CreatedAtUtc = now.AddDays(-2), UpdatedAtUtc = now.AddHours(-3),
+        Version = 2, CreatedBy = fixtureActor, CorrelationId = key, CreationIdempotencyKey = key };
+    db.Add(task); await db.SaveChangesAsync();
+    db.Add(new FollowUpTransitionEvent { BusinessUnitId = tenantId, FollowUpTaskId = task.Id,
+        FromStatus = FollowUpStatus.Open, ToStatus = FollowUpStatus.Completed, FromVersion = 1,
+        ToVersion = 2, OccurredAtUtc = now.AddHours(-3), ActorId = sarah.Email!,
+        Reason = "Completed before due time", CorrelationId = key,
+        IdempotencyKey = $"{key}-transition" });
+    db.Add(new CommercialActivity { BusinessUnitId = tenantId, SalesRepUserId = userId,
+        ActivityType = CommercialActivityType.FollowUpCompleted, AggregateType = "Quote",
+        AggregateId = aggregateId, CustomerId = customerId, OccurredAtUtc = now.AddHours(-3),
+        OutcomeCode = "COMPLETED_ON_TIME", EvidenceReference = $"follow-up:{task.Id}",
+        ActorId = sarah.Email!, CorrelationId = key, IdempotencyKey = $"{key}-activity" });
+    await db.SaveChangesAsync(); return task;
+}
+
+async Task PrintFixtureAsync()
+{
+    var original = await db.Leads.AsNoTracking().SingleAsync(x => x.BusinessUnitId == tenantId && x.Rfqno == "NORTHSTAR-440");
+    var reservation = await db.StockReservations.AsNoTracking().SingleAsync(x => x.BusinessUnitId == tenantId &&
+        x.IdempotencyKey == "core-reservation-atp");
+    var revision = await db.Set<LeadRevision>().AsNoTracking().Include(x => x.Differences)
+        .SingleAsync(x => x.BusinessUnitId == tenantId && x.Id == sixLineLead.CurrentRevisionId!.Value);
+    var persistedChangedLines = revision.Differences.Count(x => x.ChangeType == LeadRevisionChangeType.Modified &&
+        string.Equals(x.Scope, "Line", StringComparison.OrdinalIgnoreCase));
     Console.WriteLine($"ORIGINAL_LEAD_ID={original.Id}");
-    Console.WriteLine($"NEXORA_SERIAL={serial}");
+    Console.WriteLine($"NEXORA_SERIAL={original.CommercialCaseReference}");
     Console.WriteLine($"BUSINESS_UNIT_ID={tenantId}");
     Console.WriteLine($"OTHER_BUSINESS_UNIT_ID={otherTenantId}");
+    Console.WriteLine($"ABC_CUSTOMER_ID={abc.Id}");
+    Console.WriteLine($"ABC_CONTACT_ID={abcContact.Id}");
+    Console.WriteLine($"ABC_SIX_LINE_LEAD_ID={sixLineLead.Id}");
+    Console.WriteLine($"ABC_BACKUP_LEAD_ID={backupLead.Id}");
+    Console.WriteLine($"SARAH_USER_ID={sarah.Id}");
+    Console.WriteLine($"AHMED_USER_ID={ahmed.Id}");
+    Console.WriteLine($"SALES_TEAM_ID={team.Id}");
+    Console.WriteLine($"CUSTOMER_OWNERSHIP_ID={ownership.Id}");
+    Console.WriteLine($"PRODUCT_IDS={sufficient.Id},{partial.Id},{outOfStock.Id},{incomingProduct.Id}");
+    Console.WriteLine($"WAREHOUSE_IDS={primaryWarehouse.Id},{overflowWarehouse.Id},{transitWarehouse.Id}");
+    Console.WriteLine($"INVENTORY_IDS={sufficientPrimary.Id},{sufficientOverflow.Id},{partialStock.Id},{zeroStock.Id},{incomingStock.Id}");
+    Console.WriteLine($"E2E_CORE_LEAD_ID={sixLineLead.Id}");
+    Console.WriteLine($"E2E_CORE_CUSTOMER_ID={abc.Id}");
+    Console.WriteLine($"E2E_CORE_CONTACT_ID={abcContact.Id}");
+    Console.WriteLine($"E2E_CORE_CONTACT_EMAIL={abc.ContactEmail}");
+    Console.WriteLine($"E2E_CORE_CUSTOMER_NAME={abc.Name}");
+    Console.WriteLine("E2E_CORE_ACCOUNT_OWNER_NAME=Sarah Malik");
+    Console.WriteLine($"E2E_CORE_ACCOUNT_OWNER_USER_ID={sarah.Id}");
+    Console.WriteLine("E2E_CORE_OPPORTUNITY_OWNER_NAME=Sarah Malik");
+    Console.WriteLine($"E2E_CORE_OPPORTUNITY_OWNER_USER_ID={sarah.Id}");
+    Console.WriteLine($"E2E_CORE_OPPORTUNITY_OWNER_EMAIL={sarah.Email}");
+    Console.WriteLine("E2E_CORE_BACKUP_OWNER_NAME=Ahmed Khan");
+    Console.WriteLine($"E2E_CORE_BACKUP_LEAD_ID={backupLead.Id}");
+    Console.WriteLine($"E2E_CORE_WEIGHTED_LEAD_ID={weightedLead.Id}");
+    Console.WriteLine("E2E_CORE_WEIGHTED_OWNER_NAME=Priya Nair");
+    Console.WriteLine("E2E_CORE_ASSIGNMENT_REASON=Selected by weighted workload, automation expertise, territory fit, and fair distribution.");
+    Console.WriteLine($"E2E_CORE_UNRESOLVED_UPLOAD_LEAD_ID={unresolvedLead.Id}");
+    Console.WriteLine($"E2E_CORE_AMBIGUOUS_LEAD_ID={ambiguousLead.Id}");
+    Console.WriteLine($"E2E_CORE_OWNERSHIP_CONFIRM_CUSTOMER_ID={confirmationCustomer.Id}");
+    Console.WriteLine($"E2E_CORE_OWNERSHIP_CONFIRM_USER_ID={sarah.Id}");
+    Console.WriteLine($"E2E_CORE_REASSIGNED_LEAD_ID={reassignedLead.Id}");
+    Console.WriteLine($"E2E_CORE_FOLLOW_UP_ID={openFollowUp.Id}");
+    Console.WriteLine($"E2E_CORE_COMPLETED_FOLLOW_UP_ID={completedFollowUp.Id}");
+    Console.WriteLine($"E2E_CORE_FULL_ATP_PART={sufficient.PartNo}");
+    Console.WriteLine("E2E_CORE_FULL_ATP_REQUESTED_QTY=10");
+    Console.WriteLine($"E2E_CORE_RESERVED_PART={sufficient.PartNo}");
+    Console.WriteLine($"E2E_CORE_PARTIAL_ATP_PART={partial.PartNo}");
+    Console.WriteLine($"E2E_CORE_OUT_OF_STOCK_PART={outOfStock.PartNo}");
+    Console.WriteLine($"E2E_CORE_INCOMING_PART={incomingProduct.PartNo}");
+    Console.WriteLine("E2E_CORE_UNKNOWN_PART=X-UNKNOWN-900");
+    Console.WriteLine("E2E_CORE_SERVICE_LINE_REFERENCE=FIELD-SERVICE");
+    Console.WriteLine($"E2E_CORE_MULTI_WAREHOUSE_PART={sufficient.PartNo}");
+    Console.WriteLine($"E2E_CORE_INVENTORY_FAILURE_LEAD_ID={inventoryFailureLead.Id}");
+    Console.WriteLine($"E2E_CORE_RESERVATION_ID={reservation.Id}");
+    Console.WriteLine($"E2E_CORE_DOUBLE_ALLOCATION_ORDER_ID={allocationOrder.Id}");
+    Console.WriteLine($"E2E_CORE_STALE_QUOTE_ID={mainQuote.Id}");
+    Console.WriteLine($"E2E_CORE_RFQ_CREATION_LEAD_ID={rfqCreationLead.Id}");
+    Console.WriteLine($"E2E_CORE_RFQ_CREATION_NEXORA_SERIAL={rfqCreationLead.CommercialCaseReference}");
+    Console.WriteLine($"E2E_CORE_RFQ_ID={mainRfq.Id}");
+    Console.WriteLine($"E2E_CORE_QUOTE_DRAFT_RFQ_ID={quoteDraftRfq.Id}");
+    Console.WriteLine($"E2E_CORE_QUOTE_ID={mainQuote.Id}");
+    Console.WriteLine($"E2E_CORE_SEND_QUOTE_ID={sendQuote.Id}");
+    Console.WriteLine($"E2E_CORE_NEXORA_SERIAL={sixLineLead.CommercialCaseReference}");
+    Console.WriteLine($"E2E_CORE_DUPLICATE_BATCH_ID={duplicateBatchId}");
+    Console.WriteLine("E2E_CORE_REVISION_CHANGED_LINE_COUNT=1");
+    Console.WriteLine($"E2E_CORE_PERSISTED_MODIFIED_LINE_COUNT={persistedChangedLines}");
+    Console.WriteLine("E2E_CORE_DASHBOARD_METRIC_LABEL=Open follow-ups");
+    Console.WriteLine($"E2E_CORE_RESOLUTION_PERSISTENCE_AVAILABLE={resolutionPersistenceAvailable.ToString().ToLowerInvariant()}");
 }

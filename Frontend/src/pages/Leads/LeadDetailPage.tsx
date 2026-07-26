@@ -18,6 +18,7 @@ import {
 } from '@mui/icons-material';
 import leadService from '../../api/services/leadService';
 import LifecycleActions from '../../components/common/LifecycleActions';
+import CommercialLineIntelligence from '../../components/common/CommercialLineIntelligence';
 import { parseDateSafe, formatDateSafe } from '../../utils/dates';
 import { downloadAuthenticatedFile } from '../../utils/authenticatedFile';
 import { useAuth } from '../../context/AuthContext';
@@ -163,7 +164,7 @@ const LeadDetailPage: React.FC = () => {
           )}
           {lead.customerId && (
             <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: 'wrap' }}>
-              <Chip size="small" label={`Customer #${lead.customerId}`} variant="outlined" />
+              <Chip size="small" label={lead.customerName || `Customer #${lead.customerId}`} variant="outlined" />
               {lead.contactId && <Chip size="small" label={`Contact #${lead.contactId}`} variant="outlined" />}
               <Chip size="small" label={lead.customerMatchStatus} color="success" variant="outlined" />
             </Stack>
@@ -246,6 +247,14 @@ const LeadDetailPage: React.FC = () => {
         </Alert>
       )}
 
+      {lead.customerMatchStatus?.toUpperCase() === 'AMBIGUOUS' && (
+        <Alert severity="warning" sx={{ mb: 3 }} action={
+          <Button color="inherit" onClick={() => navigate('/sales/accounts')}>Confirm Existing Customer</Button>
+        }>
+          Customer Resolution Required. Review the tenant customer evidence before confirming the account.
+        </Alert>
+      )}
+
       <Grid container spacing={3}>
         {/* Left Column: General Information */}
         <Grid size={{ xs: 12, lg: 9 }} component="div">
@@ -262,7 +271,10 @@ const LeadDetailPage: React.FC = () => {
 
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Nexora Ingestion Date" value={formatDate(lead.ingestedAtUtc || lead.createdDate || null)} /></Grid>
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Current Revision" value={`Revision ${lead.currentRevisionNumber || 1}`} /></Grid>
+              <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Customer" value={lead.customerName || (lead.customerId ? `Customer #${lead.customerId}` : 'Unresolved')} /></Grid>
+              <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Account Owner" value={lead.accountOwnerName || 'Unassigned'} /></Grid>
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Opportunity Owner" value={lead.assignedToFullName || 'Unassigned'} /></Grid>
+              {lead.assignmentReason && <Grid size={{ xs: 12, md: 8 }} component="div"><DataField label="Assignment reason" value={lead.assignmentReason} /></Grid>}
 
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="RFQ Type" value={lead.rfqtype ?? 'N/A'} /></Grid>
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Opportunity No" value={lead.opportunityNo ?? 'N/A'} /></Grid>
@@ -325,6 +337,10 @@ const LeadDetailPage: React.FC = () => {
               )}
             </Stack>
           </Paper>
+        </Grid>
+
+        <Grid size={{ xs: 12 }} component="div">
+          <CommercialLineIntelligence stage="lead" recordId={lead.id} />
         </Grid>
 
         {/* Full Width Bottom: Line Items */}
