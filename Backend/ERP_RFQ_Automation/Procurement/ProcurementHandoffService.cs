@@ -13,6 +13,8 @@ public sealed class ProcurementHandoffService(ErpRfqAutomationContext db) : IPro
     [
         ProcurementHandoffStatuses.ExternalPoCreated,
         ProcurementHandoffStatuses.SupplierConfirmed,
+        ProcurementHandoffStatuses.Dispatched,
+        ProcurementHandoffStatuses.Delivered,
         ProcurementHandoffStatuses.PartiallyReceived,
         ProcurementHandoffStatuses.Received,
         ProcurementHandoffStatuses.Cancelled
@@ -26,7 +28,15 @@ public sealed class ProcurementHandoffService(ErpRfqAutomationContext db) : IPro
                 [ProcurementHandoffStatuses.ExternalPoCreated, ProcurementHandoffStatuses.SupplierConfirmed,
                     ProcurementHandoffStatuses.Cancelled],
             [ProcurementHandoffStatuses.SupplierConfirmed] =
-                [ProcurementHandoffStatuses.SupplierConfirmed, ProcurementHandoffStatuses.PartiallyReceived,
+                [ProcurementHandoffStatuses.SupplierConfirmed, ProcurementHandoffStatuses.Dispatched,
+                    ProcurementHandoffStatuses.PartiallyReceived,
+                    ProcurementHandoffStatuses.Received, ProcurementHandoffStatuses.Cancelled],
+            [ProcurementHandoffStatuses.Dispatched] =
+                [ProcurementHandoffStatuses.Dispatched, ProcurementHandoffStatuses.Delivered,
+                    ProcurementHandoffStatuses.PartiallyReceived, ProcurementHandoffStatuses.Received,
+                    ProcurementHandoffStatuses.Cancelled],
+            [ProcurementHandoffStatuses.Delivered] =
+                [ProcurementHandoffStatuses.Delivered, ProcurementHandoffStatuses.PartiallyReceived,
                     ProcurementHandoffStatuses.Received, ProcurementHandoffStatuses.Cancelled],
             [ProcurementHandoffStatuses.PartiallyReceived] =
                 [ProcurementHandoffStatuses.PartiallyReceived, ProcurementHandoffStatuses.Received,
@@ -246,6 +256,9 @@ public sealed class ProcurementHandoffService(ErpRfqAutomationContext db) : IPro
                 ?? throw new KeyNotFoundException("Procurement handoff was not found in this tenant.");
             if (handoff.Version != command.ExpectedVersion)
                 throw new InvalidOperationException("The procurement handoff changed; refresh before updating it.");
+            if (handoff.IsAuthoritative)
+                throw new InvalidOperationException(
+                    "Provider-authoritative procurement state cannot be overwritten by a manual synchronization.");
             var observedStatus = handoff.ExternalStatus ?? handoff.Status;
             if (!AllowedTransitions.TryGetValue(observedStatus, out var transitions) || !transitions.Contains(status))
                 throw new InvalidOperationException(
@@ -260,6 +273,7 @@ public sealed class ProcurementHandoffService(ErpRfqAutomationContext db) : IPro
             handoff.ExternalApprovedUnitCost = command.ApprovedUnitCost;
             handoff.ExternalExpectedOn = command.ExpectedOn;
             handoff.ExternalStatus = status;
+            handoff.Status = status;
             handoff.LastSynchronizedOn = command.SynchronizedOn;
             handoff.SourceOfTruth = "Authorized manual entry";
             handoff.IsAuthoritative = false;
@@ -300,7 +314,9 @@ public sealed class ProcurementHandoffService(ErpRfqAutomationContext db) : IPro
         value.RequiredOn, value.DestinationType, value.WarehouseId, value.DeliveryLocation,
         value.ExternalSystemTarget, value.Status, value.ExternalSupplierPoNumber,
         value.ExternalSupplierPoLineNumber, value.ExternalOrderedQuantity,
-        value.ExternalApprovedUnitCost, value.ExternalExpectedOn, value.ExternalStatus,
+        value.ExternalSalesOrderNumber, value.ExternalApprovedUnitCost, value.ExternalExpectedOn, value.ExternalStatus,
+        value.SupplierConfirmedOn, value.DispatchedOn, value.DeliveredOn,
+        value.LastExternalEventId, value.LastCorrelationId,
         value.LastSynchronizedOn, value.SourceOfTruth, value.IsAuthoritative, value.Version);
 
     private void AddEvent(ProcurementHandoff handoff, string eventType, string actor,

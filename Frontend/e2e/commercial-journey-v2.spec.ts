@@ -1,10 +1,15 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { createHmac } from 'node:crypto';
 import { expect, test } from '@playwright/test';
 import * as XLSX from 'xlsx';
 import { api, apiUrl, jsonOk, loginAs, loginAsOtherTenant, required, requiredNumber } from './support/core-commercial';
 
-const evidenceDir = path.resolve('../docs/nexora/evidence/commercial-journey-v2');
+const evidenceRoot = process.env.E2E_EVIDENCE_ROOT
+  ? path.resolve(process.env.E2E_EVIDENCE_ROOT)
+  : path.resolve('../docs/nexora/evidence');
+const evidenceDir = path.join(evidenceRoot, 'commercial-journey-v2');
+const v1EvidenceDir = path.join(evidenceRoot, 'v1');
 const rfqId = () => requiredNumber('E2E_CORE_RFQ_ID');
 const quoteId = () => requiredNumber('E2E_CORE_QUOTE_ID');
 
@@ -664,7 +669,7 @@ test('25 external Supplier PO reference is linked through controlled UI and rema
   handoff = await jsonOk<ProcurementHandoff>(await api(page, token, 'get', `/api/procurement-handoffs/${handoff.id}`));
   expect(handoff.externalSupplierPoNumber).toBe('EXT-V2-PO-9001');
   expect(handoff.isAuthoritative).toBe(false);
-  expect(handoff.status).toBe('CREATED');
+  expect(handoff.status).toBe(handoff.externalStatus);
   expect(handoff.externalStatus).toBe('EXTERNAL_PO_CREATED');
   await page.goto('/procurement/handoffs');
   await expect(page.getByText('EXT-V2-PO-9001')).toBeVisible();
@@ -837,8 +842,49 @@ test('35 RFQ intelligence reconciles current coverage and explainable Digital Tw
   if (intelligence.commercialDecision !== 'VIABLE_READY') {
     await expect(page.getByRole('button', { name: 'Prepare Quote Draft' })).toBeDisabled();
   }
+  await fs.mkdir(v1EvidenceDir, { recursive: true });
   await page.screenshot({
-    path: path.resolve('../docs/nexora/evidence/v1/gate-02-opportunity-digital-twin.png'),
+    path: path.join(v1EvidenceDir, 'gate-02-opportunity-digital-twin.png'),
+    fullPage: true,
+  });
+});
+
+test('36 authenticated procurement callback becomes authoritative operational evidence', async ({ page }, testInfo) => {
+  const token = await loginAs(page, 'manager');
+  const handoff = await ensureProcurementHandoff(page, token);
+  const callback = {
+    handoffId: handoff.id,
+    externalEventId: `gate-3-${testInfo.project.name}-${Date.now()}`,
+    externalSupplierPoNumber: handoff.externalSupplierPoNumber || 'EXT-V2-PO-9001',
+    externalSupplierPoLineNumber: '10',
+    externalSalesOrderNumber: 'EXT-V2-SO-4001',
+    orderedQuantity: handoff.requiredQuantity,
+    approvedUnitCost: handoff.selectedUnitCost,
+    expectedOn: new Date(Date.now() + 10 * 86_400_000).toISOString().slice(0, 10),
+    status: handoff.status === 'CREATED' ? 'EXTERNAL_PO_CREATED' : handoff.status,
+    observedOn: new Date().toISOString(),
+  };
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const raw = JSON.stringify(callback);
+  const secret = required('E2E_PROCUREMENT_INTEGRATION_SECRET');
+  const signature = createHmac('sha256', secret).update(`${timestamp}\n${raw}`).digest('hex');
+  const response = await api(page, token, 'post', '/api/procurement-integrations/callbacks', callback, {
+    'X-Nexora-Timestamp': timestamp,
+    'X-Nexora-Signature': signature,
+    'X-Correlation-ID': `gate-3-${testInfo.project.name}`,
+  });
+  expect(response.status()).toBe(200);
+
+  await page.goto('/procurement/handoffs');
+  await expect(page.getByText('Operational synchronization', { exact: true })).toBeVisible();
+  await expect(page.getByText('Disposable ERP', { exact: false }).first()).toBeVisible();
+  await expect(page.getByText('Authoritative', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('Sales Order EXT-V2-SO-4001', { exact: true }).first()).toBeVisible();
+  const handoffRow = page.getByRole('row').filter({ hasText: handoff.customerOrderNumber });
+  await expect(handoffRow.getByRole('button', { name: 'Update status' })).toHaveCount(0);
+  await fs.mkdir(v1EvidenceDir, { recursive: true });
+  await page.screenshot({
+    path: path.join(v1EvidenceDir, 'gate-03-procurement-operational-sync.png'),
     fullPage: true,
   });
 });

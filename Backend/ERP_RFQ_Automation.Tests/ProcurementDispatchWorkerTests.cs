@@ -27,7 +27,10 @@ public sealed class ProcurementDispatchWorkerTests
         Assert.Equal(1, fixture.Notification.SendCount);
         Assert.Equal(ProcurementOutboxStatuses.Sent, state.Message.Status);
         Assert.NotNull(state.Message.SentOn);
-        Assert.StartsWith("legacy-notification-acceptance:", state.Message.ProviderReference);
+        Assert.Equal("test-acceptance-reference", state.Message.ProviderReference);
+        Assert.Equal("test", state.Message.ProviderName);
+        Assert.Null(state.Message.LeaseToken);
+        Assert.Null(state.Message.LeaseOwner);
         Assert.Equal(SolicitationStatus.Sent, state.Solicitation.Status);
         Assert.Equal($"/procurement/rfqs/{DispatchFixture.Rfq}/sourcing", fixture.Notification.LastRequest?.CtaPath);
         Assert.Equal("SUPPLIER_SOLICITATION_SENT", Assert.Single(state.Events).EventType);
@@ -44,8 +47,9 @@ public sealed class ProcurementDispatchWorkerTests
         var state = await fixture.StateAsync();
         Assert.Equal(1, fixture.Notification.SendCount);
         Assert.Equal(ProcurementOutboxStatuses.Failed, state.Message.Status);
+        Assert.Null(state.Message.DeadLetteredOn);
         Assert.Equal(1, state.Message.AttemptCount);
-        Assert.Equal("DELIVERY_REJECTED_OR_UNCERTAIN", state.Message.LastErrorCode);
+        Assert.Equal("DELIVERY_ACCEPTANCE_EVIDENCE_MISSING", state.Message.LastErrorCode);
         Assert.Equal(SolicitationStatus.DeliveryFailed, state.Solicitation.Status);
         Assert.Equal("SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN", Assert.Single(state.Events).EventType);
         Assert.False(await fixture.Worker.ProcessOneAsync(default));
@@ -62,7 +66,8 @@ public sealed class ProcurementDispatchWorkerTests
 
         var state = await fixture.StateAsync();
         Assert.Equal(0, fixture.Notification.SendCount);
-        Assert.Equal(ProcurementOutboxStatuses.Failed, state.Message.Status);
+        Assert.Equal(ProcurementOutboxStatuses.DeadLettered, state.Message.Status);
+        Assert.NotNull(state.Message.DeadLetteredOn);
         Assert.Equal("INVALID_DISPATCH_PAYLOAD", state.Message.LastErrorCode);
         Assert.Equal(SolicitationStatus.DeliveryFailed, state.Solicitation.Status);
     }
@@ -131,6 +136,10 @@ public sealed class ProcurementDispatchWorkerTests
         var first = fixture.Worker.ProcessOneAsync(default);
         await notification.SendStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
+        var claimed = await fixture.StateAsync();
+        Assert.NotNull(claimed.Message.LeaseToken);
+        Assert.NotNull(claimed.Message.LeaseUntil);
+
         Assert.False(await fixture.Worker.ProcessOneAsync(default));
         notification.ReleaseDelivery.TrySetResult();
         Assert.True(await first);
@@ -139,6 +148,23 @@ public sealed class ProcurementDispatchWorkerTests
         Assert.Equal(1, notification.SendCount);
         Assert.Equal(ProcurementOutboxStatuses.Sent, state.Message.Status);
         Assert.Equal(1, state.Message.AttemptCount);
+        Assert.Null(state.Message.LeaseToken);
+    }
+
+    [Fact]
+    public async Task Unconfigured_provider_is_dead_lettered_without_fabricating_delivery()
+    {
+        using var fixture = new DispatchFixture(deliveryConfiguration: new DisabledDeliveryConfiguration());
+        fixture.SeedPending();
+
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+
+        var state = await fixture.StateAsync();
+        Assert.Equal(0, fixture.Notification.SendCount);
+        Assert.Equal(ProcurementOutboxStatuses.DeadLettered, state.Message.Status);
+        Assert.Equal("DELIVERY_PROVIDER_NOT_CONFIGURED", state.Message.LastErrorCode);
+        Assert.Equal("console", state.Message.ProviderName);
+        Assert.Null(state.Message.ProviderReference);
     }
 
     [Fact]
@@ -246,7 +272,8 @@ public sealed class ProcurementDispatchWorkerTests
         public DispatchFixture(
             RecordingNotification? notification = null,
             TimeSpan? providerCallTimeout = null,
-            bool registerNotification = true)
+            bool registerNotification = true,
+            IProcurementDeliveryConfiguration? deliveryConfiguration = null)
         {
             Notification = notification ?? new RecordingNotification();
             var services = new ServiceCollection()
@@ -264,7 +291,8 @@ public sealed class ProcurementDispatchWorkerTests
                 NullLogger<ProcurementDispatchWorker>.Instance,
                 _tenantScope,
                 Heartbeat,
-                providerCallTimeout);
+                providerCallTimeout,
+                deliveryConfiguration);
         }
 
         public RecordingNotification Notification { get; }
@@ -332,6 +360,12 @@ public sealed class ProcurementDispatchWorkerTests
         }
     }
 
+    private sealed class DisabledDeliveryConfiguration : IProcurementDeliveryConfiguration
+    {
+        public bool IsConfigured => false;
+        public string ProviderName => "console";
+    }
+
     internal sealed class RecordingNotification : INotificationService
     {
         public bool Result { get; init; } = true;
@@ -343,13 +377,24 @@ public sealed class ProcurementDispatchWorkerTests
         public TaskCompletionSource ReleaseDelivery { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public async Task<bool> SendRfqToSupplierAsync(RfqToSupplierNotification request, CancellationToken ct = default)
+            => (await SendRfqToSupplierWithReceiptAsync(request, ct)).Accepted;
+
+        public async Task<NotificationDispatchReceipt> SendRfqToSupplierWithReceiptAsync(
+            RfqToSupplierNotification request,
+            CancellationToken ct = default)
         {
             SendCount++;
             LastRequest = request;
             SendStarted.TrySetResult();
             if (PauseDelivery) await ReleaseDelivery.Task.WaitAsync(ct);
             if (Exception is not null) throw Exception;
-            return Result;
+            return Result
+                ? new NotificationDispatchReceipt(
+                    true,
+                    "test",
+                    "test-acceptance-reference",
+                    DateTimeOffset.UtcNow)
+                : new NotificationDispatchReceipt(false, null, null, null);
         }
 
         public Task<bool> NotifyLeadNeedsReviewAsync(LeadNeedsReviewNotification request, CancellationToken ct = default) => Task.FromResult(true);

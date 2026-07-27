@@ -20,8 +20,23 @@ public sealed class ProcurementAuthenticatedHttpTests(Release01BHttpApplication 
         { HttpMethod.Get.Method, "/api/procurement/purchase-orders" },
         { HttpMethod.Post.Method, "/api/procurement/purchase-orders" },
         { HttpMethod.Post.Method, "/api/procurement/purchase-orders/1/issue" },
-        { HttpMethod.Post.Method, "/api/procurement/goods-receipts" }
+        { HttpMethod.Post.Method, "/api/procurement/goods-receipts" },
+        { HttpMethod.Get.Method, "/api/procurement-integrations/status" },
+        { HttpMethod.Post.Method, "/api/procurement-integrations/callbacks" }
     };
+
+    [Fact]
+    public async Task Integration_status_is_tenant_scoped_and_truthful_when_not_configured()
+    {
+        using var client = Client(Release01BHttpApplication.AllowedRole, Release01BHttpApplication.TenantA);
+
+        using var response = await client.GetAsync("/api/procurement-integrations/status");
+
+        await AssertStatusAsync(response, HttpStatusCode.OK);
+        using var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.False(payload.RootElement.GetProperty("isConfigured").GetBoolean());
+        Assert.Equal("NOT_INTEGRATED", payload.RootElement.GetProperty("connectorStatus").GetString());
+    }
 
     [Theory]
     [MemberData(nameof(CriticalRoutes))]

@@ -8,6 +8,71 @@ public sealed class Release02ProcurementHandoffPostgreSqlTests(PostgreSqlTestDat
 {
     [Fact]
     [Trait("Category", "PostgreSQL")]
+    public async Task Gate3_callback_inbox_has_migration_rls_least_privilege_and_append_only_trigger()
+    {
+        await using var connection = await database.OpenConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT
+                (SELECT count(*) FROM "__EFMigrationsHistory"
+                 WHERE "MigrationId" = '20260727171327_V1Gate03IntegrationOperationalVisibility') = 1,
+                (SELECT count(*) FROM pg_policies
+                 WHERE schemaname = 'public' AND tablename = 'procurement_callback_receipts'
+                   AND policyname = 'nexora_tenant_isolation'
+                   AND 'nexora_tenant_app' = ANY(roles)) = 1,
+                has_table_privilege('nexora_tenant_app', 'public.procurement_callback_receipts', 'SELECT,INSERT')
+                    AND NOT has_table_privilege('nexora_tenant_app', 'public.procurement_callback_receipts', 'UPDATE,DELETE'),
+                has_sequence_privilege('nexora_tenant_app', 'public."procurement_callback_receipts_Id_seq"', 'USAGE')
+                    AND NOT has_sequence_privilege('nexora_tenant_app', 'public."procurement_callback_receipts_Id_seq"', 'SELECT,UPDATE'),
+                (SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal
+                 AND tgname = 'trg_procurement_callback_receipts_append_only') = 1;
+            """;
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        for (var index = 0; index < 5; index++) Assert.True(reader.GetBoolean(index));
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Callback_receipts_are_cross_tenant_hidden_and_append_only()
+    {
+        await using var connection = await database.OpenConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await InsertIsolatedHandoffAsync(connection, transaction);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO procurement_callback_receipts
+                ("Id", "BusinessUnitId", "ProcurementHandoffId", "SourceSystem", "ExternalEventId",
+                 "PayloadHash", "CorrelationId", "Status", "ObservedQuantity", "ObservedUnitCost",
+                 "ObservedStatus", "ObservedOn", "ReceivedOn", "AppliedOn")
+            VALUES (992020, 99201, 992010, 'Disposable ERP', 'event-pg-1', repeat('b', 64),
+                    'corr-pg-1', 'APPLIED', 2, 19.50, 'EXTERNAL_PO_CREATED', now(), now(), now());
+            """;
+        await command.ExecuteNonQueryAsync();
+
+        command.CommandText = """
+            SET LOCAL ROLE nexora_tenant_app;
+            SELECT set_config('nexora.business_unit_id', '99202', true);
+            """;
+        await command.ExecuteNonQueryAsync();
+        command.CommandText = "SELECT count(*)::int FROM procurement_callback_receipts WHERE \"Id\" = 992020;";
+        Assert.Equal(0, Convert.ToInt32(await command.ExecuteScalarAsync()));
+        command.CommandText = "SELECT set_config('nexora.business_unit_id', '99201', true);";
+        await command.ExecuteNonQueryAsync();
+        command.CommandText = "SELECT count(*)::int FROM procurement_callback_receipts WHERE \"Id\" = 992020;";
+        Assert.Equal(1, Convert.ToInt32(await command.ExecuteScalarAsync()));
+
+        command.CommandText = "RESET ROLE;";
+        await command.ExecuteNonQueryAsync();
+        command.CommandText = "UPDATE procurement_callback_receipts SET \"Status\" = 'REJECTED' WHERE \"Id\" = 992020;";
+        var exception = await Assert.ThrowsAsync<PostgresException>(() => command.ExecuteNonQueryAsync());
+        Assert.Equal(PostgresErrorCodes.CheckViolation, exception.SqlState);
+        await transaction.RollbackAsync();
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
     public async Task Handoff_schema_has_migration_rls_least_privilege_and_lineage_trigger()
     {
         await using var connection = await database.OpenConnectionAsync();
@@ -96,6 +161,36 @@ public sealed class Release02ProcurementHandoffPostgreSqlTests(PostgreSqlTestDat
             """;
         var exception = await Assert.ThrowsAsync<PostgresException>(() => command.ExecuteNonQueryAsync());
         Assert.Equal(PostgresErrorCodes.ObjectNotInPrerequisiteState, exception.SqlState);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Gate3_dispatch_and_delivery_follow_the_governed_postgresql_lifecycle()
+    {
+        await using var connection = await database.OpenConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await InsertIsolatedHandoffAsync(connection, transaction);
+
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SET LOCAL session_replication_role = replica;
+            ALTER TABLE procurement_handoffs
+                ENABLE ALWAYS TRIGGER trg_procurement_handoffs_protect_lineage;
+            """;
+        await command.ExecuteNonQueryAsync();
+        foreach (var status in new[] { "EXTERNAL_PO_CREATED", "SUPPLIER_CONFIRMED", "DISPATCHED", "DELIVERED", "RECEIVED" })
+        {
+            command.CommandText = $"""
+                UPDATE procurement_handoffs SET "Status" = '{status}'
+                WHERE "Id" = 992010;
+                """;
+            Assert.Equal(1, await command.ExecuteNonQueryAsync());
+        }
+
+        command.CommandText = "SELECT \"Status\" FROM procurement_handoffs WHERE \"Id\" = 992010;";
+        Assert.Equal("RECEIVED", await command.ExecuteScalarAsync());
+        await transaction.RollbackAsync();
     }
 
     [Fact]

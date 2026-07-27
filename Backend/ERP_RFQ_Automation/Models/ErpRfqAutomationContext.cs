@@ -324,7 +324,8 @@ public partial class ErpRfqAutomationContext : DbContext
         {
             entity.HasKey(e => e.Id).HasName("PK__EmailIng__3214EC2728D6F6B3");
 
-            entity.HasIndex(e => e.MessageId, "UQ__EmailIng__C87C037D5950F99E").IsUnique();
+            entity.HasIndex(e => new { e.EmailConfigurationId, e.MessageId },
+                "UQ_EmailIngests_EmailConfigurationID_MessageID").IsUnique();
 
             entity.Property(e => e.Id).HasColumnName("ID");
             entity.Property(e => e.CreatedOn).HasDefaultValueSql("now()");

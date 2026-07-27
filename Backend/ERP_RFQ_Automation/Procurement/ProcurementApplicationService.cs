@@ -573,6 +573,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 SupplierSolicitationId = solicitation.Id,
                 Status = ProcurementOutboxStatuses.Pending,
                 PayloadJson = payload,
+                OriginCorrelationId = command.CorrelationId.Trim(),
                 NextAttemptOn = now,
                 CreatedOn = now,
                 UpdatedOn = now
@@ -708,6 +709,10 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             outbox.Status = ProcurementOutboxStatuses.Pending;
             outbox.AttemptCount = 0;
             outbox.NextAttemptOn = now;
+            outbox.LeaseOwner = null;
+            outbox.LeaseToken = null;
+            outbox.LeaseUntil = null;
+            outbox.DeadLetteredOn = null;
             outbox.LastErrorCode = null;
             outbox.UpdatedOn = now;
             solicitation.Status = SolicitationStatus.PendingDispatch;

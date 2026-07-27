@@ -24,13 +24,34 @@ export interface ProcurementHandoff {
   externalSupplierPoNumber?: string | null;
   externalSupplierPoLineNumber?: string | null;
   externalOrderedQuantity?: number | null;
+  externalSalesOrderNumber?: string | null;
   externalApprovedUnitCost?: number | null;
   externalExpectedOn?: string | null;
   externalStatus?: string | null;
+  supplierConfirmedOn?: string | null;
+  dispatchedOn?: string | null;
+  deliveredOn?: string | null;
+  lastExternalEventId?: string | null;
+  lastCorrelationId?: string | null;
   lastSynchronizedOn?: string | null;
   sourceOfTruth?: string | null;
   isAuthoritative: boolean;
   version: number;
+}
+
+export interface ProcurementIntegrationStatus {
+  isConfigured: boolean;
+  sourceSystem: string;
+  connectorStatus: string;
+  lastSuccessfulSync?: string | null;
+  awaitingSynchronization: number;
+  pendingDispatch: number;
+  retryingDispatch: number;
+  failedDispatch: number;
+  deadLetteredDispatch: number;
+  staleHandoffs: number;
+  reconciliationDifferences: number;
+  checkedOn: string;
 }
 
 export interface ProcurementHandoffCandidate {
@@ -49,6 +70,8 @@ const commandHeaders = (key: string) => ({
 });
 
 const procurementHandoffService = {
+  integrationStatus: async (): Promise<ProcurementIntegrationStatus> =>
+    (await axiosInstance.get<ProcurementIntegrationStatus>('/api/procurement-integrations/status')).data,
   candidates: async (): Promise<ProcurementHandoffCandidate[]> =>
     (await axiosInstance.get<ProcurementHandoffCandidate[]>('/api/procurement-handoffs/candidates')).data,
   search: async (search = '', customerOrderId?: number): Promise<ProcurementHandoff[]> =>

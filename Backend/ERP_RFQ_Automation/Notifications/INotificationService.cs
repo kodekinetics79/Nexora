@@ -3,6 +3,12 @@ using System.Threading.Tasks;
 
 namespace ERP_RFQ_Automation.Notifications
 {
+    public sealed record NotificationDispatchReceipt(
+        bool Accepted,
+        string? Provider,
+        string? AcceptanceReference,
+        DateTimeOffset? AcceptedOn);
+
     /// <summary>
     /// Intent-level notification API for the RFQ → quote → order flow. Each method
     /// renders the appropriate template and dispatches it through the configured
@@ -20,6 +26,11 @@ namespace ERP_RFQ_Automation.Notifications
 
         /// <summary>Sends an RFQ invitation to a supplier.</summary>
         Task<bool> SendRfqToSupplierAsync(RfqToSupplierNotification request, CancellationToken ct = default);
+
+        /// <summary>Sends a Supplier RFQ and returns provider acceptance evidence.</summary>
+        Task<NotificationDispatchReceipt> SendRfqToSupplierWithReceiptAsync(
+            RfqToSupplierNotification request,
+            CancellationToken ct = default);
 
         /// <summary>Delivers a prepared quotation to a buyer.</summary>
         Task<bool> SendQuoteToBuyerAsync(QuoteToBuyerNotification request, CancellationToken ct = default);

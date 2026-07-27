@@ -19,20 +19,24 @@ public sealed class ProcurementDispatchWorker : BackgroundService
     private readonly ILogger<ProcurementDispatchWorker> _logger;
     private readonly ITenantScopeAccessor _tenantScope;
     private readonly IProcurementDispatchHeartbeat _heartbeat;
+    private readonly IProcurementDeliveryConfiguration _deliveryConfiguration;
     private readonly TimeSpan _providerCallTimeout;
+    private readonly string _workerId = $"procurement-dispatch-{Environment.MachineName}-{Guid.NewGuid():N}";
 
     public ProcurementDispatchWorker(
         IServiceScopeFactory scopeFactory,
         ILogger<ProcurementDispatchWorker> logger,
         ITenantScopeAccessor tenantScope,
         IProcurementDispatchHeartbeat heartbeat,
-        TimeSpan? providerCallTimeout = null)
+        TimeSpan? providerCallTimeout = null,
+        IProcurementDeliveryConfiguration? deliveryConfiguration = null)
     {
         _scopeFactory = scopeFactory;
         _logger = logger;
         _tenantScope = tenantScope;
         _heartbeat = heartbeat;
         _providerCallTimeout = providerCallTimeout ?? DefaultProviderCallTimeout;
+        _deliveryConfiguration = deliveryConfiguration ?? TestDeliveryConfiguration.Instance;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -82,11 +86,17 @@ public sealed class ProcurementDispatchWorker : BackgroundService
         catch (JsonException ex)
         {
             _logger.LogWarning(ex, "Procurement dispatch payload {MessageId} is invalid.", claim.MessageId);
-            await FinishAsync(claim, DispatchOutcome.PermanentFailure, "INVALID_DISPATCH_PAYLOAD", ct);
+            await FinishAsync(claim, DispatchOutcome.PermanentFailure, "INVALID_DISPATCH_PAYLOAD", null, ct);
             return true;
         }
 
-        bool sent;
+        if (!_deliveryConfiguration.IsConfigured)
+        {
+            await FinishAsync(claim, DispatchOutcome.PermanentFailure, "DELIVERY_PROVIDER_NOT_CONFIGURED", null, ct);
+            return true;
+        }
+
+        NotificationDispatchReceipt receipt;
         var providerInvoked = false;
         try
         {
@@ -98,7 +108,7 @@ public sealed class ProcurementDispatchWorker : BackgroundService
             _heartbeat.BeginProviderCall(_providerCallTimeout);
             try
             {
-                sent = await notification.SendRfqToSupplierAsync(new RfqToSupplierNotification
+                receipt = await notification.SendRfqToSupplierWithReceiptAsync(new RfqToSupplierNotification
                 {
                     ToEmail = payload.ToEmail,
                     ToName = payload.SupplierName,
@@ -129,7 +139,7 @@ public sealed class ProcurementDispatchWorker : BackgroundService
             _logger.LogError(
                 "Supplier RFQ provider call timed out; delivery is uncertain for message {MessageId}, attempt {Attempt}, category {ErrorCategory}.",
                 claim.MessageId, claim.AttemptCount, ex.GetType().Name);
-            await FinishAsync(claim, DispatchOutcome.Uncertain, "DELIVERY_TIMEOUT_UNCERTAIN", ct);
+            await FinishAsync(claim, DispatchOutcome.Uncertain, "DELIVERY_TIMEOUT_UNCERTAIN", null, ct);
             return true;
         }
         catch (Exception ex) when (!providerInvoked)
@@ -138,7 +148,7 @@ public sealed class ProcurementDispatchWorker : BackgroundService
             _logger.LogError(
                 "Supplier RFQ dispatch setup failed before provider invocation for message {MessageId}, attempt {Attempt}, category {ErrorCategory}.",
                 claim.MessageId, claim.AttemptCount, ex.GetType().Name);
-            await FinishAsync(claim, DispatchOutcome.RetriableFailure, "DISPATCH_SETUP_FAILED", ct);
+            await FinishAsync(claim, DispatchOutcome.RetriableFailure, "DISPATCH_SETUP_FAILED", null, ct);
             return true;
         }
         catch (Exception ex)
@@ -147,15 +157,19 @@ public sealed class ProcurementDispatchWorker : BackgroundService
             _logger.LogError(
                 "Supplier RFQ delivery outcome is uncertain for message {MessageId}, attempt {Attempt}, category {ErrorCategory}.",
                 claim.MessageId, claim.AttemptCount, ex.GetType().Name);
-            await FinishAsync(claim, DispatchOutcome.Uncertain, "DELIVERY_UNCERTAIN", ct);
+            await FinishAsync(claim, DispatchOutcome.Uncertain, "DELIVERY_UNCERTAIN", null, ct);
             return true;
         }
 
-        if (!sent) _heartbeat.RecordDeliveryFailure();
+        var accepted = receipt.Accepted
+            && !string.IsNullOrWhiteSpace(receipt.Provider)
+            && !string.IsNullOrWhiteSpace(receipt.AcceptanceReference);
+        if (!accepted) _heartbeat.RecordDeliveryFailure();
         await FinishAsync(
             claim,
-            sent ? DispatchOutcome.Sent : DispatchOutcome.Uncertain,
-            sent ? null : "DELIVERY_REJECTED_OR_UNCERTAIN",
+            accepted ? DispatchOutcome.Sent : DispatchOutcome.Uncertain,
+            accepted ? null : "DELIVERY_ACCEPTANCE_EVIDENCE_MISSING",
+            accepted ? receipt : null,
             ct);
         return true;
     }
@@ -183,7 +197,8 @@ public sealed class ProcurementDispatchWorker : BackgroundService
             var db = tenantScope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
             var candidate = await db.ProcurementOutboxMessages.AsNoTracking()
                 .Where(x =>
-                    x.Status == ProcurementOutboxStatuses.Processing && x.UpdatedOn <= now - ClaimTimeout
+                    x.Status == ProcurementOutboxStatuses.Processing
+                        && (x.LeaseUntil == null || x.LeaseUntil <= now)
                     || x.Status == ProcurementOutboxStatuses.Pending && x.NextAttemptOn <= now)
                 .OrderBy(x => x.Status == ProcurementOutboxStatuses.Processing ? 0 : 1)
                 .ThenBy(x => x.NextAttemptOn)
@@ -215,7 +230,7 @@ public sealed class ProcurementDispatchWorker : BackgroundService
         {
             await using var tx = await db.Database.BeginTransactionAsync(
                 db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable, ct);
-            var now = DateTime.UtcNow;
+            var now = await DatabaseUtcNowAsync(db, ct);
 
             var message = await SelectCandidateForUpdateAsync(db, candidate, ct);
             if (message is null)
@@ -226,7 +241,7 @@ public sealed class ProcurementDispatchWorker : BackgroundService
 
             if (message.Status == ProcurementOutboxStatuses.Processing)
             {
-                if (message.UpdatedOn > now - ClaimTimeout)
+                if (message.LeaseUntil.HasValue && message.LeaseUntil > now)
                 {
                     await tx.CommitAsync(ct);
                     return null;
@@ -239,7 +254,7 @@ public sealed class ProcurementDispatchWorker : BackgroundService
                     message.Id, message.BusinessUnitId);
                 return new DispatchClaim(message.Id, message.BusinessUnitId,
                     message.SupplierSolicitationId, message.AttemptCount,
-                    message.PayloadJson, ReconciledOnly: true);
+                    message.PayloadJson, Guid.Empty, ReconciledOnly: true);
             }
 
             if (message.Status != ProcurementOutboxStatuses.Pending || message.NextAttemptOn > now)
@@ -250,6 +265,10 @@ public sealed class ProcurementDispatchWorker : BackgroundService
 
             message.Status = ProcurementOutboxStatuses.Processing;
             message.AttemptCount++;
+            message.LeaseOwner = _workerId;
+            message.LeaseToken = Guid.NewGuid();
+            message.LeaseUntil = now.Add(ClaimTimeout);
+            message.ProviderName = _deliveryConfiguration.ProviderName;
             message.UpdatedOn = now;
             var solicitation = await db.Set<SupplierSolicitation>()
                 .SingleAsync(x => x.Id == message.SupplierSolicitationId, ct);
@@ -259,7 +278,7 @@ public sealed class ProcurementDispatchWorker : BackgroundService
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
             return new DispatchClaim(message.Id, message.BusinessUnitId, message.SupplierSolicitationId,
-                message.AttemptCount, message.PayloadJson, ReconciledOnly: false);
+                message.AttemptCount, message.PayloadJson, message.LeaseToken.Value, ReconciledOnly: false);
         });
     }
 
@@ -293,6 +312,9 @@ public sealed class ProcurementDispatchWorker : BackgroundService
     {
         message.Status = ProcurementOutboxStatuses.Failed;
         message.LastErrorCode = "DELIVERY_UNCERTAIN";
+        message.LeaseOwner = null;
+        message.LeaseToken = null;
+        message.LeaseUntil = null;
         message.UpdatedOn = now;
         var solicitation = await db.Set<SupplierSolicitation>()
             .SingleAsync(x => x.Id == message.SupplierSolicitationId, ct);
@@ -307,6 +329,7 @@ public sealed class ProcurementDispatchWorker : BackgroundService
         DispatchClaim claim,
         DispatchOutcome outcome,
         string? errorCode,
+        NotificationDispatchReceipt? receipt,
         CancellationToken ct)
     {
         if (claim.ReconciledOnly) return;
@@ -318,13 +341,16 @@ public sealed class ProcurementDispatchWorker : BackgroundService
         {
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var message = await db.ProcurementOutboxMessages.SingleAsync(x => x.Id == claim.MessageId, ct);
+            var now = await DatabaseUtcNowAsync(db, ct);
             if (message.Status != ProcurementOutboxStatuses.Processing
-                || message.AttemptCount != claim.AttemptCount)
+                || message.AttemptCount != claim.AttemptCount
+                || message.LeaseOwner != _workerId
+                || message.LeaseToken != claim.LeaseToken
+                || message.LeaseUntil <= now)
                 throw new ProcurementConflictException("The procurement outbox claim is no longer owned by this dispatch attempt.");
 
             var solicitation = await db.Set<SupplierSolicitation>()
                 .SingleAsync(x => x.Id == message.SupplierSolicitationId, ct);
-            var now = DateTime.UtcNow;
             var terminalFailure = outcome is DispatchOutcome.PermanentFailure or DispatchOutcome.Uncertain
                 || (outcome == DispatchOutcome.RetriableFailure && message.AttemptCount >= MaxAttempts);
 
@@ -332,14 +358,18 @@ public sealed class ProcurementDispatchWorker : BackgroundService
             {
                 message.Status = ProcurementOutboxStatuses.Sent;
                 message.SentOn = now;
-                message.ProviderReference = $"legacy-notification-acceptance:{message.Id}:{message.AttemptCount}";
+                message.ProviderName = receipt!.Provider;
+                message.ProviderReference = receipt.AcceptanceReference;
                 message.LastErrorCode = null;
                 solicitation.Status = SolicitationStatus.Sent;
                 solicitation.SentOn = now;
             }
             else if (terminalFailure)
             {
-                message.Status = ProcurementOutboxStatuses.Failed;
+                message.Status = outcome == DispatchOutcome.Uncertain
+                    ? ProcurementOutboxStatuses.Failed
+                    : ProcurementOutboxStatuses.DeadLettered;
+                message.DeadLetteredOn = outcome == DispatchOutcome.Uncertain ? null : now;
                 message.LastErrorCode = errorCode;
                 solicitation.Status = SolicitationStatus.DeliveryFailed;
             }
@@ -351,6 +381,9 @@ public sealed class ProcurementDispatchWorker : BackgroundService
                 solicitation.Status = SolicitationStatus.PendingDispatch;
             }
 
+            message.LeaseOwner = null;
+            message.LeaseToken = null;
+            message.LeaseUntil = null;
             message.UpdatedOn = now;
             solicitation.UpdatedOn = now;
             solicitation.Version++;
@@ -396,7 +429,7 @@ public sealed class ProcurementDispatchWorker : BackgroundService
             AggregateVersion = solicitation.Version,
             EventType = eventType,
             Actor = "procurement-dispatch-worker",
-            CorrelationId = $"dispatch:{message.Id}:attempt:{message.AttemptCount}",
+            CorrelationId = message.OriginCorrelationId ?? $"dispatch:{message.Id}:attempt:{message.AttemptCount}",
             IdempotencyKey = $"dispatch:{message.Id}:attempt:{message.AttemptCount}:{eventType}",
             PayloadJson = JsonSerializer.Serialize(new { message.AttemptCount, message.Status, message.NextAttemptOn, message.LastErrorCode }),
             OccurredOn = occurredOn
@@ -409,6 +442,7 @@ public sealed class ProcurementDispatchWorker : BackgroundService
         long SupplierSolicitationId,
         int AttemptCount,
         string PayloadJson,
+        Guid LeaseToken,
         bool ReconciledOnly);
 
     private sealed record DispatchCandidate(
@@ -423,6 +457,19 @@ public sealed class ProcurementDispatchWorker : BackgroundService
         RetriableFailure,
         PermanentFailure,
         Uncertain
+    }
+
+    private static async Task<DateTime> DatabaseUtcNowAsync(ErpRfqAutomationContext db, CancellationToken ct)
+        => db.Database.IsNpgsql()
+            ? await db.Database.SqlQueryRaw<DateTime>(
+                "SELECT (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') AS \"Value\"").SingleAsync(ct)
+            : DateTime.UtcNow;
+
+    private sealed class TestDeliveryConfiguration : IProcurementDeliveryConfiguration
+    {
+        public static readonly TestDeliveryConfiguration Instance = new();
+        public bool IsConfigured => true;
+        public string ProviderName => "test";
     }
 }
 

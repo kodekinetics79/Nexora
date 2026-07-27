@@ -3,6 +3,11 @@ using System.Threading.Tasks;
 
 namespace ERP_RFQ_Automation.Notifications
 {
+    public sealed record EmailDeliveryReceipt(
+        string Provider,
+        string AcceptanceReference,
+        DateTimeOffset AcceptedOn);
+
     /// <summary>
     /// Provider-agnostic transport for a single email. Implementations wrap a
     /// concrete delivery mechanism (SMTP, SendGrid HTTP API, console/log). The
@@ -15,6 +20,6 @@ namespace ERP_RFQ_Automation.Notifications
         /// hard failure; the resilient wrapping (catch/log so a notification never
         /// breaks a business transaction) lives in <see cref="INotificationService"/>.
         /// </summary>
-        Task SendAsync(EmailMessage message, CancellationToken ct = default);
+        Task<EmailDeliveryReceipt?> SendAsync(EmailMessage message, CancellationToken ct = default);
     }
 }

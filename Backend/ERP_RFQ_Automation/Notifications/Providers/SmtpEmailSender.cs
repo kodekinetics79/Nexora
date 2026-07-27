@@ -25,7 +25,7 @@ namespace ERP_RFQ_Automation.Notifications.Providers
             _logger = logger;
         }
 
-        public async Task SendAsync(EmailMessage message, CancellationToken ct = default)
+        public async Task<EmailDeliveryReceipt?> SendAsync(EmailMessage message, CancellationToken ct = default)
         {
             var smtp = _options.Smtp;
             if (string.IsNullOrWhiteSpace(smtp.Host))
@@ -33,6 +33,8 @@ namespace ERP_RFQ_Automation.Notifications.Providers
                     "SMTP host is not configured (Notifications:Smtp:Host). Cannot send email.");
 
             using var mail = BuildMailMessage(message);
+            var messageId = $"<{Guid.NewGuid():N}@nexora.local>";
+            mail.Headers.Add("Message-ID", messageId);
 
             using var client = new SmtpClient(smtp.Host, smtp.Port > 0 ? smtp.Port : 587)
             {
@@ -56,6 +58,7 @@ namespace ERP_RFQ_Automation.Notifications.Providers
             _logger.LogInformation(
                 "[SmtpEmailSender] Email sent Tenant={TenantId} Subject=\"{Subject}\"",
                 message.TenantId ?? "-", message.Subject);
+            return new EmailDeliveryReceipt("smtp", messageId, DateTimeOffset.UtcNow);
         }
 
         private MailMessage BuildMailMessage(EmailMessage message)

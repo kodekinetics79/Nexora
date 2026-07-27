@@ -206,8 +206,9 @@ namespace ERP_RFQ_Automation.Services
             var subject = message.Subject ?? "";
             // Check if already processed by messageId or same from/to/subject (likely duplicate send).
             // A durable record already exists from a previous run, so it is safe to mark \Seen.
-            if (await context.EmailIngests.AnyAsync(e => e.MessageId == messageId ||
-                (e.FromEmail == from && e.ToEmail == to && e.EmailSubject == subject)))
+            if (await context.EmailIngests.AnyAsync(e => e.EmailConfigurationId == config.Id &&
+                (e.MessageId == messageId ||
+                    (e.FromEmail == from && e.ToEmail == to && e.EmailSubject == subject))))
             {
                 _logger.LogDebug("Skipping duplicate email: {MessageId} (From: {From}, Subject: {Subject})", messageId, from, subject);
                 return true;

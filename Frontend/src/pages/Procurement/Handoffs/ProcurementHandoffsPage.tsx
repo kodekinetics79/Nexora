@@ -15,7 +15,9 @@ const todayPlus = (days: number) => new Date(Date.now() + days * 86_400_000).toI
 const statusOptions: Record<string, string[]> = {
   CREATED: ['EXTERNAL_PO_CREATED', 'CANCELLED'],
   EXTERNAL_PO_CREATED: ['EXTERNAL_PO_CREATED', 'SUPPLIER_CONFIRMED', 'CANCELLED'],
-  SUPPLIER_CONFIRMED: ['SUPPLIER_CONFIRMED', 'PARTIALLY_RECEIVED', 'RECEIVED', 'CANCELLED'],
+  SUPPLIER_CONFIRMED: ['SUPPLIER_CONFIRMED', 'DISPATCHED', 'PARTIALLY_RECEIVED', 'RECEIVED', 'CANCELLED'],
+  DISPATCHED: ['DISPATCHED', 'DELIVERED', 'PARTIALLY_RECEIVED', 'RECEIVED', 'CANCELLED'],
+  DELIVERED: ['DELIVERED', 'PARTIALLY_RECEIVED', 'RECEIVED', 'CANCELLED'],
   PARTIALLY_RECEIVED: ['PARTIALLY_RECEIVED', 'RECEIVED', 'CANCELLED'],
   RECEIVED: ['RECEIVED'], CANCELLED: ['CANCELLED'],
 };
@@ -46,6 +48,10 @@ export default function ProcurementHandoffsPage() {
   const query = useQuery({
     queryKey: ['procurement-handoffs', search],
     queryFn: () => procurementHandoffService.search(search),
+  });
+  const integration = useQuery({
+    queryKey: ['procurement-integration-status'],
+    queryFn: procurementHandoffService.integrationStatus,
   });
   const candidates = useQuery({
     queryKey: ['procurement-handoff-candidates'],
@@ -95,8 +101,31 @@ export default function ProcurementHandoffsPage() {
       <Box><Typography variant="h4" component="h1" sx={{ fontWeight: 800 }}>Procurement Handoffs</Typography>
         <Typography color="text.secondary">Sourced Customer Order lines awaiting or synchronized with an external procurement system.</Typography></Box>
       <Stack direction="row" spacing={1}>{canEdit && <Button variant="contained" startIcon={<Add />} onClick={() => setCreateOpen(true)}>Create handoff</Button>}
-        <Button startIcon={<Refresh />} onClick={() => query.refetch()}>Refresh</Button></Stack>
+        <Button startIcon={<Refresh />} onClick={() => { void query.refetch(); void integration.refetch(); }}>Refresh</Button></Stack>
     </Stack>
+    {integration.isError && <Alert severity="error" sx={{ mb: 2 }}>Integration status could not be loaded.</Alert>}
+    {integration.data && <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
+      <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2} sx={{ justifyContent: 'space-between' }}>
+        <Box><Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
+          <Typography variant="subtitle1" sx={{ fontWeight: 800 }}>Operational synchronization</Typography>
+          <Chip size="small" color={integration.data.isConfigured ? 'info' : 'default'}
+            label={readable(integration.data.connectorStatus)} />
+        </Stack><Typography variant="body2" color="text.secondary">
+          {integration.data.sourceSystem} · {integration.data.lastSuccessfulSync
+            ? `Last verified ${new Date(integration.data.lastSuccessfulSync).toLocaleString()}`
+            : 'No authoritative callback received'}
+        </Typography></Box>
+        <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', rowGap: 1 }}>
+          <Box><Typography variant="caption" color="text.secondary">Awaiting sync</Typography><Typography sx={{ fontWeight: 800 }}>{integration.data.awaitingSynchronization}</Typography></Box>
+          <Box><Typography variant="caption" color="text.secondary">Dispatch backlog</Typography><Typography sx={{ fontWeight: 800 }}>{integration.data.pendingDispatch}</Typography></Box>
+          <Box><Typography variant="caption" color="text.secondary">Retries</Typography><Typography sx={{ fontWeight: 800 }}>{integration.data.retryingDispatch}</Typography></Box>
+          <Box><Typography variant="caption" color="text.secondary">Uncertain / failed</Typography><Typography sx={{ fontWeight: 800 }}>{integration.data.failedDispatch}</Typography></Box>
+          <Box><Typography variant="caption" color="text.secondary">Dead letters</Typography><Typography sx={{ fontWeight: 800 }}>{integration.data.deadLetteredDispatch}</Typography></Box>
+          <Box><Typography variant="caption" color="text.secondary">Stale</Typography><Typography sx={{ fontWeight: 800 }}>{integration.data.staleHandoffs}</Typography></Box>
+          <Box><Typography variant="caption" color="text.secondary">Differences</Typography><Typography sx={{ fontWeight: 800 }}>{integration.data.reconciliationDifferences}</Typography></Box>
+        </Stack>
+      </Stack>
+    </Paper>}
     <Paper variant="outlined" sx={{ p: 2, mb: 2 }}><TextField fullWidth size="small"
       label="Search Nexora Serial, Customer Order, Supplier, or external PO"
       value={search} onChange={(event) => setSearch(event.target.value)} /></Paper>
@@ -109,12 +138,15 @@ export default function ProcurementHandoffsPage() {
         <Typography variant="body2">{item.supplierName} · {item.requiredQuantity} · {new Intl.NumberFormat(undefined, { style: 'currency', currency: item.currencyCode }).format(item.selectedUnitCost)}</Typography>
         <Typography variant="caption">Demand {item.commercialDemandLineId} · Award {item.sourcingAwardId}</Typography>
         <Typography variant="caption">{readable(item.destinationType)}{item.deliveryLocation ? ` · ${item.deliveryLocation}` : ''}</Typography>
-        <Typography variant="caption">{item.externalSupplierPoNumber || `Awaiting ${item.externalSystemTarget}`}</Typography>
+        <Typography variant="caption">{item.externalSupplierPoNumber
+          ? `Supplier PO ${item.externalSupplierPoNumber} · line ${item.externalSupplierPoLineNumber}`
+          : `Awaiting ${item.externalSystemTarget}`}</Typography>
+        {item.externalSalesOrderNumber && <Typography variant="caption">Sales Order {item.externalSalesOrderNumber}</Typography>}
         <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
           <Chip size="small" variant="outlined" color={item.isAuthoritative ? 'success' : 'default'} label={item.isAuthoritative ? 'Authoritative' : 'Not authoritative'} />
           <Typography variant="caption">{item.sourceOfTruth || 'Not synchronized'}{item.lastSynchronizedOn ? ` · ${new Date(item.lastSynchronizedOn).toLocaleString()}` : ''}</Typography>
         </Stack>
-        {canEdit && <Button startIcon={item.externalSupplierPoNumber ? <Sync /> : <EditNote />} onClick={() => open(item)}>
+        {canEdit && !item.isAuthoritative && <Button startIcon={item.externalSupplierPoNumber ? <Sync /> : <EditNote />} onClick={() => open(item)}>
           {item.externalSupplierPoNumber ? 'Update status' : 'Add external reference'}</Button>}
       </Stack></Paper>)}</Stack>}
     {query.data && query.data.length > 0 && !mobile && <TableContainer component={Paper} variant="outlined">
@@ -130,10 +162,13 @@ export default function ProcurementHandoffsPage() {
         <TableCell align="right">{item.requiredQuantity} / {new Intl.NumberFormat(undefined, { style: 'currency', currency: item.currencyCode }).format(item.selectedUnitCost)}</TableCell>
         <TableCell>{readable(item.destinationType)}{item.deliveryLocation && <Typography variant="caption" sx={{ display: 'block' }}>{item.deliveryLocation}</Typography>}</TableCell>
         <TableCell><Chip size="small" label={readable(item.externalStatus || item.status)} color={statusColor(item.externalStatus || item.status)} />
-          <Typography variant="caption" sx={{ display: 'block' }}>{item.externalSupplierPoNumber || `Awaiting ${item.externalSystemTarget}`}</Typography></TableCell>
+          <Typography variant="caption" sx={{ display: 'block' }}>{item.externalSupplierPoNumber
+            ? `Supplier PO ${item.externalSupplierPoNumber} · line ${item.externalSupplierPoLineNumber}`
+            : `Awaiting ${item.externalSystemTarget}`}</Typography>
+          {item.externalSalesOrderNumber && <Typography variant="caption" sx={{ display: 'block' }}>Sales Order {item.externalSalesOrderNumber}</Typography>}</TableCell>
         <TableCell><Chip size="small" variant="outlined" color={item.isAuthoritative ? 'success' : 'default'} label={item.isAuthoritative ? 'Authoritative' : 'Not authoritative'} />
           <Typography variant="caption" sx={{ display: 'block' }}>{item.sourceOfTruth || 'Not synchronized'}{item.lastSynchronizedOn ? ` · ${new Date(item.lastSynchronizedOn).toLocaleString()}` : ''}</Typography></TableCell>
-        <TableCell align="right">{canEdit && <Button startIcon={item.externalSupplierPoNumber ? <Sync /> : <EditNote />} onClick={() => open(item)}>
+        <TableCell align="right">{canEdit && !item.isAuthoritative && <Button startIcon={item.externalSupplierPoNumber ? <Sync /> : <EditNote />} onClick={() => open(item)}>
           {item.externalSupplierPoNumber ? 'Update status' : 'Add external reference'}</Button>}</TableCell>
       </TableRow>)}</TableBody></Table>
     </TableContainer>}

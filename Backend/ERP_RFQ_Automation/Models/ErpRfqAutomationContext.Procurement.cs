@@ -17,6 +17,7 @@ public partial class ErpRfqAutomationContext
     public DbSet<ProcurementEvent> ProcurementEvents => Set<ProcurementEvent>();
     public DbSet<ProcurementOutboxMessage> ProcurementOutboxMessages => Set<ProcurementOutboxMessage>();
     public DbSet<ProcurementHandoff> ProcurementHandoffs => Set<ProcurementHandoff>();
+    public DbSet<ProcurementCallbackReceipt> ProcurementCallbackReceipts => Set<ProcurementCallbackReceipt>();
 
     partial void ConfigureProcurementModel(ModelBuilder modelBuilder);
 
@@ -111,7 +112,7 @@ public partial class ErpRfqAutomationContext
             entity.HasCheckConstraint("CK_procurement_handoffs_Destination",
                 "\"DestinationType\" IN ('WAREHOUSE','DROP_SHIP') AND (\"DestinationType\" <> 'WAREHOUSE' OR \"WarehouseId\" IS NOT NULL)");
             entity.HasCheckConstraint("CK_procurement_handoffs_Status",
-                "\"Status\" IN ('CREATED','EXTERNAL_PO_CREATED','SUPPLIER_CONFIRMED','PARTIALLY_RECEIVED','RECEIVED','CANCELLED')");
+                "\"Status\" IN ('CREATED','EXTERNAL_PO_CREATED','SUPPLIER_CONFIRMED','DISPATCHED','DELIVERED','PARTIALLY_RECEIVED','RECEIVED','CANCELLED')");
             entity.Property(x => x.NexoraSerial).HasMaxLength(100).IsRequired();
             entity.Property(x => x.DestinationType).HasMaxLength(24).IsRequired();
             entity.Property(x => x.DeliveryLocation).HasMaxLength(500);
@@ -121,7 +122,10 @@ public partial class ErpRfqAutomationContext
             entity.Property(x => x.RequestHash).HasMaxLength(64).IsRequired();
             entity.Property(x => x.ExternalSupplierPoNumber).HasMaxLength(160);
             entity.Property(x => x.ExternalSupplierPoLineNumber).HasMaxLength(80);
+            entity.Property(x => x.ExternalSalesOrderNumber).HasMaxLength(160);
             entity.Property(x => x.ExternalStatus).HasMaxLength(80);
+            entity.Property(x => x.LastExternalEventId).HasMaxLength(160);
+            entity.Property(x => x.LastCorrelationId).HasMaxLength(160);
             entity.Property(x => x.SourceOfTruth).HasMaxLength(100);
             entity.Property(x => x.CreatedBy).HasMaxLength(255).IsRequired();
             entity.Property(x => x.ModifiedBy).HasMaxLength(255);
@@ -157,6 +161,29 @@ public partial class ErpRfqAutomationContext
             entity.HasOne<Rfqitem>().WithMany().HasForeignKey(x => new { x.RfqItemId, x.RfqId })
                 .HasPrincipalKey(x => new { x.Id, x.Rfqid }).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne<Warehouse>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.WarehouseId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasQueryFilter(x => CurrentTenantId == null || x.BusinessUnitId == CurrentTenantId);
+        });
+
+        modelBuilder.Entity<ProcurementCallbackReceipt>(entity =>
+        {
+            entity.ToTable("procurement_callback_receipts");
+            entity.HasKey(x => x.Id);
+            entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
+            entity.Property(x => x.SourceSystem).HasMaxLength(100).IsRequired();
+            entity.Property(x => x.ExternalEventId).HasMaxLength(160).IsRequired();
+            entity.Property(x => x.PayloadHash).HasMaxLength(64).IsRequired();
+            entity.Property(x => x.CorrelationId).HasMaxLength(160).IsRequired();
+            entity.Property(x => x.Status).HasMaxLength(24).IsRequired();
+            entity.Property(x => x.RejectionCode).HasMaxLength(120);
+            entity.Property(x => x.ObservedQuantity).HasPrecision(18, 4);
+            entity.Property(x => x.ObservedUnitCost).HasPrecision(18, 4);
+            entity.Property(x => x.ObservedStatus).HasMaxLength(80).IsRequired();
+            entity.HasCheckConstraint("CK_procurement_callback_receipts_Status", "\"Status\" IN ('APPLIED','REJECTED')");
+            entity.HasIndex(x => new { x.BusinessUnitId, x.SourceSystem, x.ExternalEventId }).IsUnique();
+            entity.HasIndex(x => new { x.BusinessUnitId, x.ProcurementHandoffId, x.ReceivedOn });
+            entity.HasOne<ProcurementHandoff>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.ProcurementHandoffId })
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
             entity.HasQueryFilter(x => CurrentTenantId == null || x.BusinessUnitId == CurrentTenantId);
         });
@@ -380,9 +407,13 @@ public partial class ErpRfqAutomationContext
             entity.Property(x => x.Status).HasMaxLength(24).IsRequired();
             entity.Property(x => x.PayloadJson).HasColumnType("jsonb");
             entity.Property(x => x.ProviderReference).HasMaxLength(255);
+            entity.Property(x => x.ProviderName).HasMaxLength(100);
+            entity.Property(x => x.LeaseOwner).HasMaxLength(200);
+            entity.Property(x => x.OriginCorrelationId).HasMaxLength(160);
             entity.Property(x => x.LastErrorCode).HasMaxLength(120);
             entity.HasIndex(x => new { x.BusinessUnitId, x.SupplierSolicitationId }).IsUnique();
             entity.HasIndex(x => new { x.Status, x.NextAttemptOn });
+            entity.HasIndex(x => new { x.BusinessUnitId, x.DeadLetteredOn, x.NextAttemptOn });
             entity.HasOne<SupplierSolicitation>().WithMany()
                 .HasForeignKey(x => new { x.BusinessUnitId, x.SupplierSolicitationId })
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);

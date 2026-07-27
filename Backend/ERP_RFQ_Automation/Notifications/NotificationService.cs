@@ -49,7 +49,12 @@ namespace ERP_RFQ_Automation.Notifications
             return DispatchAsync(EmailTemplates.LeadNeedsReview, request, model, ct);
         }
 
-        public Task<bool> SendRfqToSupplierAsync(RfqToSupplierNotification request, CancellationToken ct = default)
+        public async Task<bool> SendRfqToSupplierAsync(RfqToSupplierNotification request, CancellationToken ct = default)
+            => (await SendRfqToSupplierWithReceiptAsync(request, ct).ConfigureAwait(false)).Accepted;
+
+        public Task<NotificationDispatchReceipt> SendRfqToSupplierWithReceiptAsync(
+            RfqToSupplierNotification request,
+            CancellationToken ct = default)
         {
             var model = new Dictionary<string, string?>
             {
@@ -63,7 +68,7 @@ namespace ERP_RFQ_Automation.Notifications
                 ["ctaUrl"] = ResolveCta(request.CtaPath),
                 ["ctaLabel"] = "Submit quotation"
             };
-            return DispatchAsync(EmailTemplates.RfqToSupplier, request, model, ct);
+            return DispatchWithReceiptAsync(EmailTemplates.RfqToSupplier, request, model, ct);
         }
 
         public Task<bool> SendQuoteToBuyerAsync(QuoteToBuyerNotification request, CancellationToken ct = default)
@@ -176,7 +181,15 @@ namespace ERP_RFQ_Automation.Notifications
                 };
                 message.AddTo(request.ToEmail, request.ToName);
 
-                await _emailSender.SendAsync(message, ct).ConfigureAwait(false);
+                var receipt = await _emailSender.SendAsync(message, ct).ConfigureAwait(false);
+
+                if (receipt is null)
+                {
+                    _logger.LogWarning(
+                        "[NotificationService] Provider did not accept '{Template}'. Tenant={TenantId} BU={BusinessUnitId}",
+                        templateName, request.TenantId ?? "-", request.BusinessUnitId ?? "-");
+                    return false;
+                }
 
                 _logger.LogInformation(
                     "[NotificationService] Dispatched '{Template}' to {To}. Tenant={TenantId} BU={BusinessUnitId}",
@@ -190,6 +203,51 @@ namespace ERP_RFQ_Automation.Notifications
                     "[NotificationService] Failed to send '{Template}' to {To}. Tenant={TenantId} BU={BusinessUnitId}. Notification suppressed.",
                     templateName, request.ToEmail, request.TenantId ?? "-", request.BusinessUnitId ?? "-");
                 return false;
+            }
+        }
+
+        private async Task<NotificationDispatchReceipt> DispatchWithReceiptAsync(
+            string templateName,
+            NotificationRequestBase request,
+            IDictionary<string, string?> model,
+            CancellationToken ct)
+        {
+            if (string.IsNullOrWhiteSpace(request.ToEmail))
+                return new NotificationDispatchReceipt(false, null, null, null);
+
+            try
+            {
+                var rendered = _renderer.Render(templateName, model);
+                var message = new EmailMessage
+                {
+                    Subject = rendered.Subject,
+                    HtmlBody = rendered.HtmlBody,
+                    TextBody = rendered.TextBody,
+                    TenantId = request.TenantId,
+                    BusinessUnitId = request.BusinessUnitId,
+                    Attachments = request.Attachments
+                };
+                message.AddTo(request.ToEmail, request.ToName);
+
+                var receipt = await _emailSender.SendAsync(message, ct).ConfigureAwait(false);
+                if (receipt is null)
+                    return new NotificationDispatchReceipt(false, null, null, null);
+
+                _logger.LogInformation(
+                    "[NotificationService] Provider accepted '{Template}'. Provider={Provider} Tenant={TenantId} BU={BusinessUnitId}",
+                    templateName, receipt.Provider, request.TenantId ?? "-", request.BusinessUnitId ?? "-");
+                return new NotificationDispatchReceipt(
+                    true,
+                    receipt.Provider,
+                    receipt.AcceptanceReference,
+                    receipt.AcceptedOn);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "[NotificationService] Failed to send '{Template}'. Tenant={TenantId} BU={BusinessUnitId}. Notification suppressed.",
+                    templateName, request.TenantId ?? "-", request.BusinessUnitId ?? "-");
+                return new NotificationDispatchReceipt(false, null, null, null);
             }
         }
 

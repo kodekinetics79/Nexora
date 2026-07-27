@@ -117,6 +117,7 @@ public static class ProcurementOutboxStatuses
     public const string Processing = "PROCESSING";
     public const string Sent = "SENT";
     public const string Failed = "FAILED";
+    public const string DeadLettered = "DEAD_LETTERED";
 }
 
 public sealed class SupplierPurchaseOrder
@@ -215,8 +216,14 @@ public sealed class ProcurementOutboxMessage
     public string PayloadJson { get; set; } = "{}";
     public int AttemptCount { get; set; }
     public DateTime NextAttemptOn { get; set; }
+    public string? LeaseOwner { get; set; }
+    public Guid? LeaseToken { get; set; }
+    public DateTime? LeaseUntil { get; set; }
+    public DateTime? DeadLetteredOn { get; set; }
     public DateTime? SentOn { get; set; }
     public string? ProviderReference { get; set; }
+    public string? ProviderName { get; set; }
+    public string? OriginCorrelationId { get; set; }
     public string? LastErrorCode { get; set; }
     public DateTime CreatedOn { get; set; }
     public DateTime UpdatedOn { get; set; }

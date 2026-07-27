@@ -39,7 +39,7 @@ public sealed class ProcurementHandoffServiceTests
         Assert.Equal("EXT-PO-7001", synchronized.ExternalSupplierPoNumber);
         Assert.Equal("10", synchronized.ExternalSupplierPoLineNumber);
         Assert.False(synchronized.IsAuthoritative);
-        Assert.Equal(ProcurementHandoffStatuses.Created, synchronized.Status);
+        Assert.Equal(ProcurementHandoffStatuses.ExternalPoCreated, synchronized.Status);
         Assert.Equal(ProcurementHandoffStatuses.ExternalPoCreated, synchronized.ExternalStatus);
         Assert.Equal("MANUAL", synchronized.ExternalSystemTarget);
         Assert.Equal(2, synchronized.Version);
@@ -120,7 +120,7 @@ public sealed class ProcurementHandoffServiceTests
                 new DateOnly(2026, 8, 12), ProcurementHandoffStatuses.ExternalPoCreated, synchronizedOn)));
     }
 
-    private static async Task<long> SeedSourcedCustomerOrderAsync(CustomerAwardTestFixture fixture)
+    internal static async Task<long> SeedSourcedCustomerOrderAsync(CustomerAwardTestFixture fixture)
     {
         var purchaseOrder = await fixture.CreatePurchaseOrderAsync("handoff-source-po", 10m);
         var award = await fixture.CreateAwardAsync(purchaseOrder, "handoff-source-award", 10m);

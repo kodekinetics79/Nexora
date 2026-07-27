@@ -41,7 +41,7 @@ namespace ERP_RFQ_Automation.Notifications.Providers
             _logger = logger;
         }
 
-        public async Task SendAsync(EmailMessage message, CancellationToken ct = default)
+        public async Task<EmailDeliveryReceipt?> SendAsync(EmailMessage message, CancellationToken ct = default)
         {
             var sg = _options.SendGrid;
             if (string.IsNullOrWhiteSpace(sg.ApiKey))
@@ -59,6 +59,8 @@ namespace ERP_RFQ_Automation.Notifications.Providers
                 Content = new StringContent(json, Encoding.UTF8, "application/json")
             };
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", sg.ApiKey);
+            var requestReference = Guid.NewGuid().ToString("N");
+            request.Headers.TryAddWithoutValidation("X-Nexora-Dispatch-Id", requestReference);
 
             _logger.LogInformation(
                 "[SendGridEmailSender] Sending email Tenant={TenantId} BU={BusinessUnitId} Subject=\"{Subject}\"",
@@ -66,15 +68,26 @@ namespace ERP_RFQ_Automation.Notifications.Providers
 
             using var response = await client.SendAsync(request, ct).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
-            {
-                var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
                 throw new InvalidOperationException(
-                    $"SendGrid send failed with status {(int)response.StatusCode} {response.ReasonPhrase}: {body}");
-            }
+                    $"SendGrid send failed with status {(int)response.StatusCode} {response.ReasonPhrase}.");
 
             _logger.LogInformation(
                 "[SendGridEmailSender] Email accepted by SendGrid (status {Status}) Tenant={TenantId} Subject=\"{Subject}\"",
                 (int)response.StatusCode, message.TenantId ?? "-", message.Subject);
+            var providerReference = response.Headers.TryGetValues("X-Message-Id", out var messageIds)
+                ? messageIds.FirstOrDefault()
+                : null;
+            if (string.IsNullOrWhiteSpace(providerReference))
+            {
+                _logger.LogWarning(
+                    "[SendGridEmailSender] SendGrid accepted the request but returned no X-Message-Id. Tenant={TenantId}",
+                    message.TenantId ?? "-");
+                return null;
+            }
+            return new EmailDeliveryReceipt(
+                "sendgrid",
+                providerReference,
+                DateTimeOffset.UtcNow);
         }
 
         private object BuildPayload(EmailMessage message)
