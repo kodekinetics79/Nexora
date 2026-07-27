@@ -13,6 +13,7 @@ interface Props {
   onExport: () => Promise<any>;
   templateFileName?: string;
   exportFileName?: string;
+  canUpload?: boolean;
 }
 
 const downloadBlob = (data: any, filename: string) => {
@@ -30,6 +31,7 @@ const UploadExportToolbar: React.FC<Props> = ({
   onExport,
   templateFileName = 'Template.xlsx',
   exportFileName = 'Export.xlsx',
+  canUpload = true,
 }) => {
   const { enqueueSnackbar } = useSnackbar();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -91,7 +93,7 @@ const UploadExportToolbar: React.FC<Props> = ({
         </Button>
       </Tooltip>
 
-      <Tooltip title="Upload filled template">
+      {canUpload && <Tooltip title="Upload filled template">
         <Button
           size="small"
           variant="outlined"
@@ -103,7 +105,7 @@ const UploadExportToolbar: React.FC<Props> = ({
         >
           Import
         </Button>
-      </Tooltip>
+      </Tooltip>}
 
       <Tooltip title="Export current data to Excel">
         <Button

@@ -71,7 +71,7 @@ public sealed class CommercialIntelligenceControllerFocusedTests
             Quote(87_072, tenant, draftRfq.Id, draftQuoteStatus.SetupId, eur.Id, 200m, null));
         await context.SaveChangesAsync();
 
-        var controller = new CommercialIntelligenceController(context, null!, null!)
+        var controller = new CommercialIntelligenceController(context, null!, null!, new TestRoleGate(true))
         {
             ControllerContext = new ControllerContext
             {
@@ -114,7 +114,7 @@ public sealed class CommercialIntelligenceControllerFocusedTests
         await context.SaveChangesAsync();
         var http = new DefaultHttpContext { User = Principal(tenant) };
         http.Request.Headers["Idempotency-Key"] = "ownership-replay";
-        var controller = new CommercialIntelligenceController(context, null!, null!)
+        var controller = new CommercialIntelligenceController(context, null!, null!, new TestRoleGate(true))
         {
             ControllerContext = new ControllerContext { HttpContext = http }
         };
@@ -128,14 +128,127 @@ public sealed class CommercialIntelligenceControllerFocusedTests
         Assert.True(ownership.IsActive);
     }
 
-    private static ClaimsPrincipal Principal(long tenant) => new(new ClaimsIdentity(
-        [new Claim("businessUnitId", tenant.ToString())], "focused-test"));
+    [Fact]
+    public async Task SalesToday_ForIndividualRepReturnsOnlyAssignedWork()
+    {
+        const long tenant = 87_201;
+        const long signedInUser = 87_202;
+        using var database = new TestDb();
+        await using var context = database.ContextFor(tenant);
+        Seed.BusinessUnit(context, tenant);
+        context.Users.AddRange(User(signedInUser, tenant, "signed-in@test"), User(87_203, tenant, "other@test"));
+        var now = DateTime.UtcNow;
+        context.FollowUpTasks.AddRange(
+            FollowUp(87_210, tenant, signedInUser, now.AddHours(-1), "MY_TASK"),
+            FollowUp(87_211, tenant, 87_203, now.AddHours(-1), "OTHER_TASK"));
+        await context.SaveChangesAsync();
+        var controller = new CommercialIntelligenceController(context, null!, null!, new TestRoleGate(false))
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = new DefaultHttpContext { User = Principal(tenant, signedInUser) }
+            }
+        };
+
+        var response = Assert.IsType<OkObjectResult>(await controller.SalesToday(default));
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(response.Value, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+
+        Assert.Equal("assigned_to_me", document.RootElement.GetProperty("scope").GetString());
+        var item = Assert.Single(document.RootElement.GetProperty("attentionItems").EnumerateArray());
+        Assert.Equal("MY_TASK", item.GetProperty("reason").GetString());
+    }
+
+    [Fact]
+    public async Task TeamOverview_ForIndividualRepIsForbidden()
+    {
+        const long tenant = 87_220;
+        using var database = new TestDb();
+        await using var context = database.ContextFor(tenant);
+        Seed.BusinessUnit(context, tenant);
+        await context.SaveChangesAsync();
+        var controller = new CommercialIntelligenceController(context, null!, null!, new TestRoleGate(false))
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = new DefaultHttpContext { User = Principal(tenant, 87_221, 87_222) }
+            }
+        };
+
+        Assert.IsType<ForbidResult>(await controller.TeamOverview(default));
+    }
+
+    [Fact]
+    public async Task FollowUps_CustomerFilterReturnsOnlyTenantCustomerQuotes()
+    {
+        const long tenant = 87_230;
+        using var database = new TestDb();
+        await using var context = database.ContextFor(tenant);
+        ((SqliteConnection)context.Database.GetDbConnection()).CreateFunction("now", () => DateTime.UtcNow);
+        var customer = Seed.Customer(context, 87_231, tenant, "Selected customer");
+        var otherCustomer = Seed.Customer(context, 87_232, tenant, "Other customer");
+        context.Users.Add(User(87_233, tenant, "owner@test"));
+        var quoteStatus = Status(context, 87_234, tenant, "QuoteStatus", "SENT");
+        var currency = Currency(context, 87_235, tenant, "USD");
+        var selectedQuote = Quote(87_236, tenant, 0, quoteStatus.SetupId, currency.Id, 100m, DateTime.UtcNow);
+        selectedQuote.CustomerId = customer.Id;
+        selectedQuote.Rfqid = null;
+        var otherQuote = Quote(87_237, tenant, 0, quoteStatus.SetupId, currency.Id, 100m, DateTime.UtcNow);
+        otherQuote.CustomerId = otherCustomer.Id;
+        otherQuote.Rfqid = null;
+        context.Quotes.AddRange(selectedQuote, otherQuote);
+        context.FollowUpTasks.AddRange(
+            new ERP_RFQ_Automation.CommercialIntelligence.Sales.FollowUpTask
+            {
+                Id = 87_238, BusinessUnitId = tenant, AggregateType = "Quote", AggregateId = selectedQuote.Id,
+                AssignedToUserId = 87_233, DueAtUtc = DateTime.UtcNow, PurposeCode = "SELECTED",
+                CreatedAtUtc = DateTime.UtcNow, UpdatedAtUtc = DateTime.UtcNow, CreatedBy = "test",
+                CorrelationId = "selected", CreationIdempotencyKey = "selected"
+            },
+            new ERP_RFQ_Automation.CommercialIntelligence.Sales.FollowUpTask
+            {
+                Id = 87_239, BusinessUnitId = tenant, AggregateType = "Quote", AggregateId = otherQuote.Id,
+                AssignedToUserId = 87_233, DueAtUtc = DateTime.UtcNow, PurposeCode = "OTHER",
+                CreatedAtUtc = DateTime.UtcNow, UpdatedAtUtc = DateTime.UtcNow, CreatedBy = "test",
+                CorrelationId = "other", CreationIdempotencyKey = "other"
+            });
+        await context.SaveChangesAsync();
+        var controller = new CommercialIntelligenceController(context, null!, null!, new TestRoleGate(true))
+        {
+            ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext { User = Principal(tenant) } }
+        };
+
+        var response = Assert.IsType<OkObjectResult>(await controller.FollowUps(null, customer.Id, default));
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(response.Value, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+
+        var row = Assert.Single(document.RootElement.EnumerateArray());
+        Assert.Equal("SELECTED", row.GetProperty("reason").GetString());
+    }
+
+    private static ClaimsPrincipal Principal(long tenant, long userId = 1, long roleId = 1) => new(new ClaimsIdentity(
+        [new Claim("businessUnitId", tenant.ToString()), new Claim(ClaimTypes.NameIdentifier, userId.ToString()), new Claim("roleId", roleId.ToString())], "focused-test"));
+
+    private sealed class TestRoleGate(bool manager) : IRoleGate
+    {
+        public Task<bool> IsSuperAdminAsync(long roleId, long businessUnitId) => Task.FromResult(false);
+        public Task<bool> IsManagerOrAdminAsync(long roleId, long businessUnitId) => Task.FromResult(manager);
+        public Task<bool> CanManageRoleAsync(long callerRoleId, long? targetRoleId, long businessUnitId) => Task.FromResult(manager);
+    }
 
     private static User User(long id, long tenant, string email) => new()
     {
         Id = id, FirstName = "Sales", LastName = "Owner", Email = email,
         PasswordHash = "not-used", ImageUrl = "n/a", Buid = tenant,
         IsActive = true, CreatedBy = "test", CreatedOn = DateTime.UtcNow
+    };
+
+    private static ERP_RFQ_Automation.CommercialIntelligence.Sales.FollowUpTask FollowUp(
+        long id, long tenant, long userId, DateTime dueAt, string purpose) => new()
+    {
+        Id = id, BusinessUnitId = tenant, AssignedToUserId = userId,
+        AggregateType = "Other", AggregateId = id, DueAtUtc = dueAt,
+        PurposeCode = purpose, CreatedAtUtc = DateTime.UtcNow,
+        UpdatedAtUtc = DateTime.UtcNow, CreatedBy = "test",
+        CorrelationId = $"follow-up-{id}", CreationIdempotencyKey = $"follow-up-{id}"
     };
 
     private static SetupMaster Status(ErpRfqAutomationContext context, long id, long tenant, string type, string code)

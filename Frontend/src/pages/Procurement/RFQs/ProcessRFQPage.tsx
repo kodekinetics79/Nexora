@@ -999,7 +999,7 @@ const ProcessRFQPage: React.FC = () => {
 
   const { data: customers = [] } = useQuery({
     queryKey: ['customers', userData?.businessUnitId],
-    queryFn: () => customerService.getAll({ businessUnitId: userData?.businessUnitId ?? 0, pageSize: 1000 }).then(res => res.items),
+    queryFn: () => customerService.getAll({ pageSize: 1000 }).then(res => res.items),
     enabled: !!userData?.businessUnitId,
   });
 
@@ -1008,15 +1008,12 @@ const ProcessRFQPage: React.FC = () => {
   const findMatchedCustomer = useCallback(async (leadData: AcceptedLeadFullResponseDTO) => {
     if (!leadData.clientemail) return;
     try {
-      const customer = await customerService.getCustomerByEmail(
-        leadData.clientemail,
-        userData?.businessUnitId ?? 0
-      );
+      const customer = await customerService.getCustomerByEmail(leadData.clientemail);
       if (customer) setMatchedCustomer(customer);
     } catch (e) {
       console.error('Customer matching failed', e);
     }
-  }, [userData?.businessUnitId]);
+  }, []);
 
   // ── Item mutations ─────────────────────────────────────────────────────────
 

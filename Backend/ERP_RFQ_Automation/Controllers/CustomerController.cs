@@ -4,10 +4,12 @@ using ERP_RFQ_Automation.DTOs.CurrencyDTOs;
 using ERP_RFQ_Automation.DTOs.CustomerDTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Security.DocumentInspection;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using System.IO;
+using System.Security.Claims;
 
 namespace ERP_RFQ_Automation.Controllers
 {
@@ -18,12 +20,17 @@ namespace ERP_RFQ_Automation.Controllers
     {
         private readonly ICustomerRepository _repository;
         private readonly IWebHostEnvironment _environment;
+        private readonly IFileInspectionService _fileInspection;
         private static readonly int[] AllowedPageSizes = { 5, 10, 25, 50, 100, 1000 };
 
-        public CustomerController(ICustomerRepository repository, IWebHostEnvironment environment)
+        public CustomerController(
+            ICustomerRepository repository,
+            IWebHostEnvironment environment,
+            IFileInspectionService fileInspection)
         {
             _repository = repository;
             _environment = environment;
+            _fileInspection = fileInspection;
         }
 
         // GET: api/Customer?pageNumber=1&pageSize=10&id=1&name=abc&contactEmail=abc@example.com&taxId=123&currencyId=1&isActive=true&businessUnitId=1
@@ -31,7 +38,6 @@ namespace ERP_RFQ_Automation.Controllers
         [HttpGet]
         [RequireModulePermission("Customers", PermissionAction.View)]
         public async Task<ActionResult<DTOs.CustomerDTOs.PaginatedResponseDTO<CustomerResponseDTO>>> GetAll(
-            [FromQuery] long? businessUnitId = null,
             [FromQuery] int pageNumber = 1,
             [FromQuery] int pageSize = 10,
             [FromQuery] long? id = null,
@@ -44,10 +50,7 @@ namespace ERP_RFQ_Automation.Controllers
         { 
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-                if (targetBUId <= 0)
+                if (!TryGetAuthenticatedBusinessUnitId(out var targetBUId))
                     return BadRequest("Business Unit ID is required.");
                 
                 if (pageNumber < 1)
@@ -77,14 +80,11 @@ namespace ERP_RFQ_Automation.Controllers
         // GET: api/Customer/5
         [HttpGet("{id}")]
         [RequireModulePermission("Customers", PermissionAction.View)]
-        public async Task<ActionResult<CustomerResponseDTO>> GetById(long id, [FromQuery] long? businessUnitId = null)
+        public async Task<ActionResult<CustomerResponseDTO>> GetById(long id)
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-                if (targetBUId <= 0)
+                if (!TryGetAuthenticatedBusinessUnitId(out var targetBUId))
                     return BadRequest("Business Unit ID is required.");
 
                 var customer = await _repository.GetByIdAsync(id, targetBUId);
@@ -129,26 +129,12 @@ namespace ERP_RFQ_Automation.Controllers
                 if (!ModelState.IsValid)
                     return BadRequest(ModelState);
 
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                if (claimBUId > 0) request.Buid = claimBUId;
-
-                if (request.Buid <= 0) return BadRequest("Business Unit ID is required.");
+                if (!TryGetAuthenticatedBusinessUnitId(out var businessUnitId))
+                    return BadRequest("Business Unit ID is required.");
 
                 string? imagePath = null;
                 if (request.ImageFile != null)
-                {
-                    var uploadsFolder = Path.Combine(_environment.WebRootPath, "CustomerImages");
-                    if (!Directory.Exists(uploadsFolder))
-                        Directory.CreateDirectory(uploadsFolder);
-
-                    var uniqueFileName = $"{Guid.NewGuid()}_{request.ImageFile.FileName}";
-                    var filePath = Path.Combine(uploadsFolder, uniqueFileName);
-                    using (var fileStream = new FileStream(filePath, FileMode.Create))
-                    {
-                        await request.ImageFile.CopyToAsync(fileStream);
-                    }
-                    imagePath = $"/CustomerImages/{uniqueFileName}";
-                }
+                    imagePath = await SaveCustomerImageAsync(request.ImageFile, HttpContext.RequestAborted);
 
                 var customer = new Customer
                 {
@@ -167,16 +153,16 @@ namespace ERP_RFQ_Automation.Controllers
                     ShippingState = request.ShippingState,
                     ShippingCountry = request.ShippingCountry,
                     ShippingPostalCode = request.ShippingPostalCode,
-                    Buid = request.Buid,
+                    Buid = businessUnitId,
                     IsActive = request.IsActive ?? true,
-                    CreatedBy = request.CreatedBy,
+                    CreatedBy = AuthenticatedActor(),
                     CreatedOn = DateTime.UtcNow
                 };
 
                 await _repository.AddAsync(customer);
 
                 var response = MapToResponse(customer);
-                return CreatedAtAction(nameof(GetById), new { id = customer.Id, businessUnitId = customer.Buid }, response);
+                return CreatedAtAction(nameof(GetById), new { id = customer.Id }, response);
             }
             catch (ArgumentException)
             {
@@ -191,38 +177,21 @@ namespace ERP_RFQ_Automation.Controllers
         // PUT: api/Customer/5
         [HttpPut("{id}")]
         [RequireModulePermission("Customers", PermissionAction.Edit)]
-        public async Task<ActionResult> Update(long id, [FromForm] CustomerUpdateRequestDTO request, [FromQuery] long? businessUnitId = null)
+        public async Task<ActionResult> Update(long id, [FromForm] CustomerUpdateRequestDTO request)
         {
             try
             {
                 if (!ModelState.IsValid)
                     return BadRequest(ModelState);
 
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                if (claimBUId > 0) request.Buid = claimBUId;
-
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? request.Buid);
-
-                if (targetBUId <= 0)
+                if (!TryGetAuthenticatedBusinessUnitId(out var targetBUId))
                     return BadRequest("Business Unit ID is required.");
 
                 var existing = await _repository.GetByIdAsync(id, targetBUId);
 
                 string? imagePath = existing.ImageUrl;
                 if (request.ImageFile != null)
-                {
-                    var uploadsFolder = Path.Combine(_environment.WebRootPath, "CustomerImages");
-                    if (!Directory.Exists(uploadsFolder))
-                        Directory.CreateDirectory(uploadsFolder);
-
-                    var uniqueFileName = $"{Guid.NewGuid()}_{request.ImageFile.FileName}";
-                    var filePath = Path.Combine(uploadsFolder, uniqueFileName);
-                    using (var fileStream = new FileStream(filePath, FileMode.Create))
-                    {
-                        await request.ImageFile.CopyToAsync(fileStream);
-                    }
-                    imagePath = $"/CustomerImages/{uniqueFileName}";
-                }
+                    imagePath = await SaveCustomerImageAsync(request.ImageFile, HttpContext.RequestAborted);
 
                 existing.Name = request.Name;
                 existing.ContactEmail = request.ContactEmail;
@@ -239,9 +208,9 @@ namespace ERP_RFQ_Automation.Controllers
                 existing.ShippingState = request.ShippingState;
                 existing.ShippingCountry = request.ShippingCountry;
                 existing.ShippingPostalCode = request.ShippingPostalCode;
-                existing.Buid = request.Buid;
+                existing.Buid = targetBUId;
                 existing.IsActive = request.IsActive ?? true;
-                existing.ModifiedBy = request.ModifiedBy;
+                existing.ModifiedBy = AuthenticatedActor();
                 existing.ModifiedOn = DateTime.UtcNow;
 
                 await _repository.UpdateAsync(existing, targetBUId);
@@ -265,14 +234,11 @@ namespace ERP_RFQ_Automation.Controllers
         // DELETE: api/Customer/5
         [HttpDelete("{id}")]
         [RequireModulePermission("Customers", PermissionAction.Delete)]
-        public async Task<ActionResult> Delete(long id, [FromQuery] long? businessUnitId = null)
+        public async Task<ActionResult> Delete(long id)
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-                if (targetBUId <= 0)
+                if (!TryGetAuthenticatedBusinessUnitId(out var targetBUId))
                     return BadRequest("Business Unit ID is required.");
 
                 await _repository.DeleteAsync(id, targetBUId);
@@ -292,7 +258,41 @@ namespace ERP_RFQ_Automation.Controllers
             }
         }
 
+        private bool TryGetAuthenticatedBusinessUnitId(out long businessUnitId) =>
+            long.TryParse(User.FindFirst("businessUnitId")?.Value, out businessUnitId) && businessUnitId > 0;
 
+        private string AuthenticatedActor() =>
+            User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.Identity?.Name ?? "authenticated-user";
+
+        private async Task<string> SaveCustomerImageAsync(IFormFile image, CancellationToken cancellationToken)
+        {
+            await using var content = new MemoryStream();
+            await image.CopyToAsync(content, cancellationToken);
+            content.Position = 0;
+            var inspection = await _fileInspection.InspectAsync(new FileInspectionRequest(
+                content, Path.GetFileName(image.FileName), image.ContentType, image.Length), cancellationToken);
+            var extension = inspection.DetectedContentType switch
+            {
+                "image/png" => ".png",
+                "image/jpeg" => ".jpg",
+                "image/gif" => ".gif",
+                "image/bmp" => ".bmp",
+                "image/tiff" => ".tiff",
+                "image/webp" => ".webp",
+                _ => null
+            };
+            if (!inspection.IsCleared || extension == null)
+                throw new ArgumentException("The customer image failed security inspection.");
+
+            var uploadsFolder = Path.Combine(_environment.WebRootPath, "CustomerImages");
+            Directory.CreateDirectory(uploadsFolder);
+            var storedName = $"{Guid.NewGuid():N}{extension}";
+            content.Position = 0;
+            await using var output = new FileStream(
+                Path.Combine(uploadsFolder, storedName), FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            await content.CopyToAsync(output, cancellationToken);
+            return $"/CustomerImages/{storedName}";
+        }
 
         private CustomerResponseDTO MapToResponse(Customer customer)
         {

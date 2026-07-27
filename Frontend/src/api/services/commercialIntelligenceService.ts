@@ -23,6 +23,7 @@ export interface CommercialAttentionItem {
 
 export interface SalesTodayDTO {
   generatedAt: string;
+  scope: 'tenant' | 'assigned_to_me';
   metrics: IntelligenceMetric[];
   attentionItems: CommercialAttentionItem[];
 }
@@ -246,6 +247,7 @@ export interface CommercialLineResolutionDTO {
 export interface ListParams {
   search?: string;
   status?: string;
+  customerId?: number;
   ownerUserId?: number;
   warehouseId?: number;
   from?: string;

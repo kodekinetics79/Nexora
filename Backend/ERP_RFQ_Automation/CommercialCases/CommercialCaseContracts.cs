@@ -12,14 +12,16 @@ public sealed record CommercialCaseSearchResult(
     int RfqCount,
     int QuoteCount,
     int OrderCount,
-    int ShipmentCount);
+    int ShipmentCount,
+    string MatchReason);
 
 public sealed record CommercialCaseDocument(
     string DocumentType,
     long DocumentId,
     string Reference,
     string? Status,
-    DateTime? OccurredOn);
+    DateTime? OccurredOn,
+    long? ParentDocumentId = null);
 
 public sealed record CommercialCaseStatusEvent(
     long Id,

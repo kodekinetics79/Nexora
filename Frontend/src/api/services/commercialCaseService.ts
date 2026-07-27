@@ -13,6 +13,7 @@ export interface CommercialCaseSearchResult {
   quoteCount: number;
   orderCount: number;
   shipmentCount: number;
+  matchReason: string;
 }
 
 export interface CommercialCaseDocument {
@@ -21,6 +22,7 @@ export interface CommercialCaseDocument {
   reference: string;
   status?: string | null;
   occurredOn?: string | null;
+  parentDocumentId?: number | null;
 }
 
 export interface CommercialCaseStatusEvent {

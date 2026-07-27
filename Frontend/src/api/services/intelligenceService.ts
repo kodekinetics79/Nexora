@@ -148,6 +148,32 @@ export interface CustomerItemPriceDTO {
   monthsAgo: number | null;
 }
 
+export interface CustomerRfqSummaryDTO {
+  rfqId: number;
+  rfqNo: string;
+  receivedOn: string;
+  bidClosingOn: string | null;
+  status: string | null;
+  lineCount: number;
+}
+
+export interface CustomerOrderSummaryDTO {
+  orderId: number;
+  orderNo: string;
+  orderDate: string;
+  status: string | null;
+  totalAmount: number;
+  quoteId: number | null;
+}
+
+export interface CustomerDemandSummaryDTO {
+  productId: number | null;
+  partNumber: string | null;
+  description: string | null;
+  inquiryCount: number;
+  requestedQuantity: number;
+}
+
 export interface CustomerContextDTO {
   customerId: number;
   customerName: string | null;
@@ -164,6 +190,9 @@ export interface CustomerContextDTO {
   lastQuoteDate: string | null;
   recentQuotes: CustomerQuoteSummaryDTO[];
   recentItemPrices: CustomerItemPriceDTO[];
+  recentRfqs: CustomerRfqSummaryDTO[];
+  recentOrders: CustomerOrderSummaryDTO[];
+  demandProfile: CustomerDemandSummaryDTO[];
   generatedAt: string;
 }
 

@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import dayjs from 'dayjs';
 import {
   Alert,
@@ -148,6 +148,8 @@ const KpiCard = ({ kpi }: { kpi: Release01KpiDTO }) => {
 
 export default function DashboardPage() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const isExecutiveToday = location.pathname === '/executive/today';
   const initialTo = useMemo(() => dayjs().startOf('day').format('YYYY-MM-DD'), []);
   const initialFrom = useMemo(() => dayjs(initialTo).subtract(30, 'day').format('YYYY-MM-DD'), [initialTo]);
   const [from, setFrom] = useState(initialFrom);
@@ -177,7 +179,7 @@ export default function DashboardPage() {
         sx={{ alignItems: { md: 'flex-end' }, justifyContent: 'space-between', mb: 2.5 }}
       >
         <Box>
-          <Typography variant="h4" sx={{ fontWeight: 900 }}>Dashboard</Typography>
+          <Typography variant="h4" sx={{ fontWeight: 900 }}>{isExecutiveToday ? 'Executive RFQ-to-Revenue' : 'Dashboard'}</Typography>
           <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mt: 0.5, flexWrap: 'wrap' }}>
             <Chip size="small" label={data?.definitionVersion ?? 'release-01'} variant="outlined" />
             {data?.roleScope && <Chip size="small" label={data.roleScope.scope} variant="outlined" />}

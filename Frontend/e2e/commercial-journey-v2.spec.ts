@@ -731,6 +731,83 @@ test('30 Client PO review remains usable on mobile', async ({ page }) => {
   await expect(page.getByRole('columnheader', { name: 'Decision' })).toBeVisible();
 });
 
+test('31 Customer 360 preserves ownership and commercial continuity', async ({ page }) => {
+  await loginAs(page, 'manager');
+  await page.goto(`/customers/${requiredNumber('E2E_CORE_CUSTOMER_ID')}`);
+  await expect(page.getByRole('heading', { name: required('E2E_CORE_CUSTOMER_NAME') })).toBeVisible();
+  await expect(page.getByText('Account ownership and active work', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(required('E2E_CORE_ACCOUNT_OWNER_NAME'), { exact: true })).toBeVisible();
+  await expect(page.getByText('Commercial performance', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('Follow-up and next action', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('Account health', { exact: true })).toBeVisible();
+  await expect(page.getByText('Recent Customer RFQs', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('Recent quote outcomes', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('Recent Customer Orders', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('Demand profile', { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Open active commercial work' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Open' }).first()).toBeVisible();
+});
+
+test('32 Sales Today is an actionable role-scoped work queue', async ({ page }) => {
+  await loginAs(page, 'manager');
+  await page.goto('/sales/today');
+  await expect(page.getByRole('heading', { name: 'Sales today' })).toBeVisible();
+  await expect(page.getByText('Team-wide commercial work that needs attention now.')).toBeVisible();
+  const firstAction = page.getByRole('button', { name: 'Open' }).first();
+  await expect(firstAction).toBeVisible();
+  await firstAction.click();
+  await expect(page).not.toHaveURL(/\/sales\/today$/);
+});
+
+test('33 commercial workspace accepts relationship-search deep links', async ({ page }) => {
+  await loginAs(page, 'manager');
+  await page.goto(`/commercial-cases?search=${encodeURIComponent(required('E2E_CORE_CUSTOMER_NAME'))}`);
+  await expect(page.getByRole('heading', { name: 'Commercial Workspace' })).toBeVisible();
+  await expect(page.getByPlaceholder(/Search by master reference/i)).toHaveValue(required('E2E_CORE_CUSTOMER_NAME'));
+  const targetCase = page.getByRole('button').filter({ hasText: required('E2E_CORE_NEXORA_SERIAL') }).first();
+  await expect(targetCase).toBeVisible();
+  await targetCase.click();
+  await expect(page.getByText(required('E2E_CORE_NEXORA_SERIAL'), { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(/Matched on Customer/i).first()).toBeVisible();
+  await expect(page.getByText('Opportunity command view', { exact: true })).toBeVisible();
+  await expect(page.getByText('Requested lines, Product match and ATP', { exact: true })).toBeVisible();
+});
+
+test('34 role Today surfaces expose persisted operational work', async ({ page }) => {
+  const token = await loginAs(page, 'manager');
+
+  const sourcing = await jsonOk<Array<{ supplierName: string }>>(await api(page, token, 'get', '/api/supplier-quote-inbox'));
+  await page.goto('/sourcing/today');
+  await expect(page.getByRole('heading', { name: 'Sourcing today' })).toBeVisible();
+  if (sourcing.length) await expect(page.getByText(sourcing[0].supplierName, { exact: true }).first()).toBeVisible();
+  await page.getByRole('button', { name: 'Open sourcing queue' }).click();
+  await expect(page).toHaveURL(/\/procurement\/rfqs\/all\?state=requires-sourcing$/);
+
+  const inventory = await jsonOk<{ metrics: Array<{ label: string; value: number }>; exceptions: Array<{ partNumber: string }> }>(
+    await api(page, token, 'get', '/api/inventory-intelligence/overview'),
+  );
+  await page.goto('/inventory/today');
+  await expect(page.getByRole('heading', { name: 'Inventory today' })).toBeVisible();
+  if (inventory.metrics.length) await expect(page.getByText(inventory.metrics[0].label, { exact: true })).toBeVisible();
+  if (inventory.exceptions.length) await expect(page.getByText(inventory.exceptions[0].partNumber, { exact: true }).first()).toBeVisible();
+  await page.getByRole('button', { name: 'View demand intelligence' }).click();
+  await expect(page).toHaveURL(/\/inventory\/demand$/);
+
+  await page.goto('/executive/today');
+  await expect(page.getByRole('heading', { name: 'Executive RFQ-to-Revenue' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Commercial Attention' })).toBeVisible();
+  await page.getByRole('button', { name: /New inquiries/ }).click();
+  await expect(page).toHaveURL(/\/procurement\/leads\/all$/);
+
+  const users = await jsonOk<{ totalCount: number }>(await api(page, token, 'get', '/api/User?pageSize=500'));
+  await page.goto('/admin/operations');
+  await expect(page.getByRole('heading', { name: 'Tenant admin operations' })).toBeVisible();
+  await expect(page.getByText('Tenant users', { exact: true })).toBeVisible();
+  await expect(page.getByText(users.totalCount.toLocaleString(), { exact: true }).first()).toBeVisible();
+  await page.getByRole('button', { name: 'Manage users' }).click();
+  await expect(page).toHaveURL(/\/security\/users$/);
+});
+
 test.afterEach(({ page }, testInfo) => {
   void page;
   expect(testInfo.annotations.filter((annotation) => annotation.type === 'skip')).toHaveLength(0);

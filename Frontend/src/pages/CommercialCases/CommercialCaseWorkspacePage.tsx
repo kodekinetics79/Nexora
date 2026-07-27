@@ -1,5 +1,5 @@
 import React from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
   Box,
@@ -18,6 +18,11 @@ import {
   Typography,
   CircularProgress,
   Alert,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableRow,
 } from '@mui/material';
 import {
   ArrowForward as OpenIcon,
@@ -28,6 +33,9 @@ import {
   Description as QuoteIcon,
   AssignmentTurnedIn as OrderIcon,
   LocalShipping as ShipmentIcon,
+  Storefront as SupplierIcon,
+  ShoppingCartCheckout as PurchaseIcon,
+  SyncAlt as HandoffIcon,
 } from '@mui/icons-material';
 import commercialCaseService, {
   type CommercialCaseDetail,
@@ -35,8 +43,15 @@ import commercialCaseService, {
 } from '../../api/services/commercialCaseService';
 import SearchField from '../../components/common/SearchField';
 import { formatDateSafe } from '../../utils/dates';
+import procurementService from '../../api/services/procurementService';
+import commercialIntelligenceService from '../../api/services/commercialIntelligenceService';
+import commercialLearningService from '../../api/services/commercialLearningService';
+import { useAuth } from '../../context/AuthContext';
 
-const DOC_ORDER: CommercialCaseDocument['documentType'][] = ['Lead', 'RFQ', 'Quote', 'Order', 'Shipment'];
+const DOC_ORDER: CommercialCaseDocument['documentType'][] = [
+  'Lead', 'RFQ', 'SourcingCase', 'SupplierRFQ', 'SupplierQuote',
+  'Quote', 'ClientPO', 'Order', 'SupplierPO', 'ProcurementHandoff', 'Shipment',
+];
 
 const DataField: React.FC<{ label: string; value: React.ReactNode }> = ({ label, value }) => (
   <Box>
@@ -59,6 +74,12 @@ const typeIcon = (type: CommercialCaseDocument['documentType']) => {
     case 'Quote': return <QuoteIcon fontSize="small" />;
     case 'Order': return <OrderIcon fontSize="small" />;
     case 'Shipment': return <ShipmentIcon fontSize="small" />;
+    case 'SourcingCase':
+    case 'SupplierRFQ':
+    case 'SupplierQuote': return <SupplierIcon fontSize="small" />;
+    case 'ClientPO':
+    case 'SupplierPO': return <PurchaseIcon fontSize="small" />;
+    case 'ProcurementHandoff': return <HandoffIcon fontSize="small" />;
     default: return <LeadIcon fontSize="small" />;
   }
 };
@@ -70,6 +91,12 @@ const openDocument = (navigate: ReturnType<typeof useNavigate>, doc: CommercialC
     Quote: `/sales/quotes/view/${doc.documentId}`,
     Order: `/sales/orders/${doc.documentId}`,
     Shipment: `/sales/shipments/${doc.documentId}`,
+    SourcingCase: `/procurement/sourcing-cases/${doc.documentId}`,
+    SupplierRFQ: doc.parentDocumentId ? `/procurement/rfqs/${doc.parentDocumentId}/sourcing` : '/procurement/rfqs/all?state=requires-sourcing',
+    SupplierQuote: `/procurement/supplier-quotes/${doc.documentId}`,
+    ClientPO: `/sales/client-pos/${doc.documentId}`,
+    SupplierPO: '/suppliers/purchase-orders',
+    ProcurementHandoff: '/procurement/handoffs',
   };
   const target = routes[doc.documentType];
   if (target) navigate(target);
@@ -86,12 +113,14 @@ const caseAge = (createdOn: string) => {
 
 const CommercialCaseWorkspacePage: React.FC = () => {
   const navigate = useNavigate();
+  const { hasPermission } = useAuth();
   const { id } = useParams<{ id?: string }>();
-  const [query, setQuery] = React.useState('');
+  const [searchParams] = useSearchParams();
+  const [query, setQuery] = React.useState(() => searchParams.get('search') ?? '');
   const [tab, setTab] = React.useState(0);
 
   const searchTerm = query.trim();
-  const { data: searchResults, isLoading: searchLoading } = useQuery({
+  const { data: searchResults, isLoading: searchLoading, isError: searchError, refetch: retrySearch } = useQuery({
     queryKey: ['commercial-cases', 'search', searchTerm],
     queryFn: () => commercialCaseService.search(searchTerm, 25),
     enabled: searchTerm.length >= 2,
@@ -102,11 +131,45 @@ const CommercialCaseWorkspacePage: React.FC = () => {
     return searchResults?.[0]?.id;
   }, [id, searchResults]);
 
-  const { data: detail, isLoading: detailLoading } = useQuery({
+  const { data: detail, isLoading: detailLoading, isError: detailError, refetch: retryDetail } = useQuery({
     queryKey: ['commercial-case', selectedCaseId],
     queryFn: () => commercialCaseService.getById(selectedCaseId ?? 0),
     enabled: !!selectedCaseId,
   });
+  const primaryRfqId = detail?.documents.find(document => document.documentType === 'RFQ')?.documentId;
+  const workbench = useQuery({
+    queryKey: ['commercial-case', selectedCaseId, 'rfq-workbench', primaryRfqId],
+    queryFn: () => procurementService.getWorkbench(primaryRfqId),
+    enabled: !!primaryRfqId && hasPermission('RFQ Management'),
+  });
+  const primaryRfqLineId = workbench.data?.lines[0]?.id;
+  const memory = useQuery({
+    queryKey: ['commercial-case', selectedCaseId, 'memory', primaryRfqLineId],
+    queryFn: () => commercialLearningService.getLineCard(primaryRfqLineId ?? 0),
+    enabled: !!primaryRfqLineId && hasPermission('Dashboard') && hasPermission('Quotations'),
+  });
+  const ownership = useQuery({
+    queryKey: ['commercial-case', selectedCaseId, 'ownership', workbench.data?.customerName],
+    queryFn: async () => {
+      const rows = await commercialIntelligenceService.getAccountOwnership({ search: workbench.data?.customerName ?? '' });
+      return rows.find(row => row.customerName === workbench.data?.customerName) ?? null;
+    },
+    enabled: !!workbench.data?.customerName && hasPermission('Customers'),
+  });
+
+  const commandSummary = React.useMemo(() => {
+    const lines = workbench.data?.lines ?? [];
+    const deadline = lines.map(line => line.requiredOn).filter((value): value is string => !!value).sort()[0];
+    const unresolved = lines.filter(line => ['UNKNOWN', 'POSSIBLE_MATCH'].includes(line.resolution)).length;
+    const short = lines.filter(line => line.shortfallQuantity > 0).length;
+    const readiness = unresolved > 0 ? `${unresolved} line(s) need Product review` : short > 0 ? `${short} line(s) require sourcing` : lines.length ? 'All lines have ATP coverage' : 'No requested lines available';
+    const nextAction = unresolved > 0 ? 'Resolve uncertain Product matches' :
+      short > 0 && !(workbench.data?.solicitations.length) ? 'Create Supplier RFQs' :
+      (workbench.data?.offers.length ?? 0) > 0 && !(workbench.data?.awards.length) ? 'Compare and select Supplier offers' :
+      (workbench.data?.awards.length ?? 0) > 0 && !workbench.data?.customerQuoteDraft ? 'Prepare the Customer Quote' :
+      workbench.data?.customerQuoteDraft ? 'Review the Customer Quote and follow-up state' : 'Review opportunity evidence';
+    return { deadline, readiness, nextAction };
+  }, [workbench.data]);
 
   const selectedResult = React.useMemo(
     () => searchResults?.find(item => item.id === selectedCaseId) ?? null,
@@ -181,6 +244,7 @@ const CommercialCaseWorkspacePage: React.FC = () => {
       </Paper>
 
       {tab === 0 && (
+        <Stack spacing={2}>
         <Paper sx={{ p: 3, borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
           <Grid container spacing={2.5}>
             <Grid size={{ xs: 12, md: 4 }}>
@@ -212,6 +276,46 @@ const CommercialCaseWorkspacePage: React.FC = () => {
             </Grid>
           </Grid>
         </Paper>
+        {primaryRfqId && !hasPermission('RFQ Management') && <Alert severity="info">RFQ Management view permission is required to see line readiness and sourcing evidence.</Alert>}
+        {workbench.isLoading && <Paper variant="outlined" sx={{ p: 4, textAlign: 'center' }}><CircularProgress size={24} /></Paper>}
+        {workbench.isError && <Alert severity="error" action={<Button color="inherit" onClick={() => void workbench.refetch()}>Retry</Button>}>RFQ command evidence could not be loaded.</Alert>}
+        {workbench.data && <>
+          <Paper sx={{ p: 3, borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
+            <Typography sx={{ fontWeight: 900, mb: 2 }}>Opportunity command view</Typography>
+            <Grid container spacing={2.5}>
+              <Grid size={{ xs: 12, md: 4 }}><DataField label="Customer" value={workbench.data.customerName ?? 'Unresolved'} /></Grid>
+              <Grid size={{ xs: 12, md: 4 }}><DataField label="Account owner" value={ownership.data?.ownerName ?? 'Unassigned'} /></Grid>
+              <Grid size={{ xs: 12, md: 4 }}><DataField label="Opportunity owner" value={ownership.data?.ownerName ?? 'Unassigned'} /></Grid>
+              <Grid size={{ xs: 12, md: 4 }}><DataField label="Deadline" value={commandSummary.deadline ? formatDateSafe(commandSummary.deadline) : 'Not recorded'} /></Grid>
+              <Grid size={{ xs: 12, md: 4 }}><DataField label="Readiness" value={commandSummary.readiness} /></Grid>
+              <Grid size={{ xs: 12, md: 4 }}><DataField label="Next action" value={commandSummary.nextAction} /></Grid>
+              <Grid size={{ xs: 12, md: 4 }}><DataField label="Supplier RFQs" value={workbench.data.solicitations.length} /></Grid>
+              <Grid size={{ xs: 12, md: 4 }}><DataField label="Supplier offers" value={workbench.data.offers.length} /></Grid>
+              <Grid size={{ xs: 12, md: 4 }}><DataField label="Selected offers" value={workbench.data.awards.length} /></Grid>
+            </Grid>
+            <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
+              <Button variant="contained" onClick={() => navigate(`/procurement/rfqs/view/${primaryRfqId}`)}>Open RFQ action view</Button>
+              <Button variant="outlined" onClick={() => navigate(`/procurement/rfqs/${primaryRfqId}/sourcing`)}>Open sourcing decisions</Button>
+            </Stack>
+          </Paper>
+          <Paper sx={{ p: 3, borderRadius: 2, border: '1px solid', borderColor: 'divider', overflowX: 'auto' }}>
+            <Typography sx={{ fontWeight: 900, mb: 2 }}>Requested lines, Product match and ATP</Typography>
+            <Table size="small"><TableHead><TableRow><TableCell>Part / description</TableCell><TableCell>Requested</TableCell><TableCell>ATP</TableCell><TableCell>Shortfall</TableCell><TableCell>Resolution</TableCell><TableCell>Evidence checked</TableCell></TableRow></TableHead><TableBody>
+              {workbench.data.lines.map(line => <TableRow key={line.id}><TableCell><Typography sx={{ fontWeight: 800 }}>{line.partNumber ?? 'Part unresolved'}</Typography><Typography variant="caption" color="text.secondary">{line.description}</Typography></TableCell><TableCell>{line.requestedQuantity}</TableCell><TableCell>{line.availableQuantity}</TableCell><TableCell>{line.shortfallQuantity}</TableCell><TableCell><Chip size="small" label={line.resolution.replaceAll('_', ' ')} /></TableCell><TableCell>{line.resolutionCheckedOn ? formatDateSafe(line.resolutionCheckedOn) : 'Pending'}</TableCell></TableRow>)}
+            </TableBody></Table>
+          </Paper>
+          {memory.data && <Paper sx={{ p: 3, borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
+            <Typography sx={{ fontWeight: 900, mb: 2 }}>Commercial memory and evidence</Typography>
+            <Grid container spacing={2.5}>
+              <Grid size={{ xs: 12, md: 4 }}><DataField label="Part" value={memory.data.product ? `${memory.data.product.partNumber} · ${memory.data.product.productName}` : 'Product unresolved'} /></Grid>
+              <Grid size={{ xs: 12, md: 4 }}><DataField label="Demand memory" value={memory.data.inventory?.recommendation ?? 'Insufficient verified demand evidence'} /></Grid>
+              <Grid size={{ xs: 12, md: 4 }}><DataField label="Recommended next action" value={memory.data.nextAction} /></Grid>
+              <Grid size={{ xs: 12, md: 4 }}><DataField label="Product evidence records" value={memory.data.product?.evidence.length ?? 0} /></Grid>
+              <Grid size={{ xs: 12, md: 4 }}><DataField label="Supplier evidence records" value={memory.data.suppliers.reduce((total, supplier) => total + supplier.evidence.length, 0)} /></Grid>
+            </Grid>
+          </Paper>}
+        </>}
+        </Stack>
       )}
 
       {tab === 1 && (
@@ -326,7 +430,7 @@ const CommercialCaseWorkspacePage: React.FC = () => {
             Commercial Workspace
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>
-            Search a lead by its permanent reference and open the full commercial trail in one place.
+            Search by Nexora Serial, customer, contact, part, supplier, RFQ, Quote, PO or email subject.
           </Typography>
         </Box>
         <Box sx={{ minWidth: { xs: '100%', lg: 420 }, width: { xs: '100%', lg: 420 } }}>
@@ -362,7 +466,13 @@ const CommercialCaseWorkspacePage: React.FC = () => {
               </Box>
             )}
 
-            {!searchLoading && searchTerm.length >= 2 && (searchResults?.length ?? 0) === 0 && (
+            {searchError && (
+              <Alert severity="error" action={<Button color="inherit" size="small" onClick={() => void retrySearch()}>Retry</Button>}>
+                Commercial case search could not be loaded.
+              </Alert>
+            )}
+
+            {!searchLoading && !searchError && searchTerm.length >= 2 && (searchResults?.length ?? 0) === 0 && (
               <Alert severity="warning" sx={{ borderRadius: 2 }}>
                 No commercial cases matched your search.
               </Alert>
@@ -393,6 +503,9 @@ const CommercialCaseWorkspacePage: React.FC = () => {
                     <Typography variant="body2" color="text.secondary">
                       {item.customerRfqNumber ?? 'No customer RFQ'}{item.customerEmail ? ` · ${item.customerEmail}` : ''}
                     </Typography>
+                    <Typography variant="caption" sx={{ color: 'primary.main', fontWeight: 800 }}>
+                      Matched on {item.matchReason}
+                    </Typography>
                     <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', pt: 0.5 }}>
                       <Chip label={`RFQs ${item.rfqCount}`} size="small" variant="outlined" />
                       <Chip label={`Quotes ${item.quoteCount}`} size="small" variant="outlined" />
@@ -417,7 +530,7 @@ const CommercialCaseWorkspacePage: React.FC = () => {
 
           {!detailLoading && detail && renderWorkspaceDetail(detail)}
 
-          {!detailLoading && !detail && (
+          {!detailLoading && !detailError && !detail && !selectedResult && (
             <Paper sx={{ p: 4, borderRadius: 2, border: '1px solid', borderColor: 'divider', minHeight: 640 }}>
               <Alert severity="info" sx={{ borderRadius: 2 }}>
                 Search for a commercial case to open the master reference, document trail, and activity timeline.
@@ -425,10 +538,10 @@ const CommercialCaseWorkspacePage: React.FC = () => {
             </Paper>
           )}
 
-          {!detailLoading && selectedResult && !detail && (
+          {!detailLoading && detailError && (
             <Paper sx={{ p: 4, borderRadius: 2, border: '1px solid', borderColor: 'divider', minHeight: 640 }}>
-              <Alert severity="warning" sx={{ borderRadius: 2 }}>
-                We found {selectedResult.masterReference}, but the detail view could not load.
+              <Alert severity="error" action={<Button color="inherit" size="small" onClick={() => void retryDetail()}>Retry</Button>} sx={{ borderRadius: 2 }}>
+                {selectedResult ? `We found ${selectedResult.masterReference}, but its workspace could not be loaded.` : 'The commercial workspace could not be loaded.'}
               </Alert>
             </Paper>
           )}

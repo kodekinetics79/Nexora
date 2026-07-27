@@ -75,7 +75,7 @@ const CreateOrderPage: React.FC = () => {
 
   const { data: customersData } = useQuery({
     queryKey: ['customers-lookup'],
-    queryFn: () => customerService.getAll({ businessUnitId, pageSize: 100 }),
+    queryFn: () => customerService.getAll({ pageSize: 100 }),
   });
 
   const { data: productsData } = useQuery({

@@ -35,7 +35,7 @@ export interface PaginatedCustomerResponse {
 }
 
 const customerService = {
-  getAll: async (params: { pageNumber?: number; pageSize?: number; name?: string; isActive?: boolean; businessUnitId?: number }): Promise<PaginatedCustomerResponse> => {
+  getAll: async (params: { pageNumber?: number; pageSize?: number; name?: string; isActive?: boolean }): Promise<PaginatedCustomerResponse> => {
     const r = await axiosInstance.get('/api/Customer', { params });
     return r.data;
   },
@@ -62,8 +62,8 @@ const customerService = {
     await axiosInstance.delete(`/api/Customer/${id}`);
   },
 
-  getCustomerByEmail: async (email: string, businessUnitId: number): Promise<CustomerDTO | null> => {
-    const r = await axiosInstance.get('/api/Customer/by-email', { params: { email, businessUnitId } });
+  getCustomerByEmail: async (email: string): Promise<CustomerDTO | null> => {
+    const r = await axiosInstance.get('/api/Customer/by-email', { params: { email } });
     return r.data;
   },
 

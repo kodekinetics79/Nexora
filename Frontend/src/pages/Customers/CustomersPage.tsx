@@ -111,9 +111,11 @@ const ContactSubForm: React.FC<{
 const CustomersPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { userData } = useAuth();
+  const { userData, hasPermission } = useAuth();
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
+  const canCreate = hasPermission('Customers', 'create');
+  const canEdit = hasPermission('Customers', 'edit');
 
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
   const [search, setSearch] = useState('');
@@ -318,9 +320,9 @@ const CustomersPage: React.FC = () => {
           <Tooltip title="View Details">
             <IconButton size="small" color="primary" onClick={() => navigate(`/customers/${p.row.id}`)}><ViewIcon fontSize="small" /></IconButton>
           </Tooltip>
-          <Tooltip title="Edit">
+          {canEdit && <Tooltip title="Edit">
             <IconButton size="small" color="info" onClick={() => handleEdit(p.row)}><EditIcon fontSize="small" /></IconButton>
-          </Tooltip>
+          </Tooltip>}
         </Stack>
       )
     },
@@ -341,8 +343,9 @@ const CustomersPage: React.FC = () => {
             onExport={customerService.export}
             templateFileName="CustomerTemplate.xlsx"
             exportFileName="Customers.xlsx"
+            canUpload={canCreate && canEdit}
           />
-          <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3 }}>Add Customer</Button>
+          {canCreate && <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3 }}>Add Customer</Button>}
         </Box>
       </Box>
 

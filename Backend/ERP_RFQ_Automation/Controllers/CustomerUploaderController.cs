@@ -3,6 +3,8 @@ using System.IO;
 using System.Security.Claims;
 using System.Threading.Tasks;
 using ERP_RFQ_Automation.Services;
+using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.Security.DocumentInspection;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -16,23 +18,26 @@ namespace ERP_RFQ_Automation.Controllers
     public class CustomerUploaderController : ControllerBase
     {
         private readonly CustomerUploaderService _service;
+        private readonly IFileInspectionService _fileInspection;
         private readonly ILogger<CustomerUploaderController> _logger;
 
-        public CustomerUploaderController(CustomerUploaderService service, ILogger<CustomerUploaderController> logger)
+        public CustomerUploaderController(
+            CustomerUploaderService service,
+            IFileInspectionService fileInspection,
+            ILogger<CustomerUploaderController> logger)
         {
             _service = service;
+            _fileInspection = fileInspection;
             _logger = logger;
         }
 
         [HttpGet("download-template")]
-        public async Task<IActionResult> DownloadTemplate([FromQuery] long? businessUnitId = null)
+        [RequireModulePermission("Customers", PermissionAction.View)]
+        public async Task<IActionResult> DownloadTemplate()
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-                if (targetBUId <= 0)
+                if (!TryGetAuthenticatedBusinessUnitId(out var targetBUId))
                     return BadRequest(new { success = false, message = "Business Unit ID is required." });
 
                 var fileBytes = await _service.GenerateTemplateAsync(targetBUId);
@@ -48,12 +53,11 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPost("upload-template")]
-        public async Task<IActionResult> UploadTemplate(IFormFile file, [FromForm] long? businessUnitId = null)
+        [RequireModulePermission("Customers", PermissionAction.Create)]
+        [RequireModulePermission("Customers", PermissionAction.Edit)]
+        public async Task<IActionResult> UploadTemplate(IFormFile file, CancellationToken cancellationToken)
         {
-            var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-            var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-            if (targetBUId <= 0)
+            if (!TryGetAuthenticatedBusinessUnitId(out var targetBUId))
                 return BadRequest(new { success = false, message = "Business Unit ID is required." });
 
             if (file == null || file.Length == 0)
@@ -62,7 +66,20 @@ namespace ERP_RFQ_Automation.Controllers
             try
             {
                 var createdBy = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? "system";
-                using var stream = file.OpenReadStream();
+                await using var stream = new MemoryStream();
+                await file.CopyToAsync(stream, cancellationToken);
+                stream.Position = 0;
+                var inspection = await _fileInspection.InspectAsync(
+                    new FileInspectionRequest(
+                        stream,
+                        Path.GetFileName(file.FileName),
+                        file.ContentType,
+                        file.Length),
+                    cancellationToken);
+                if (!inspection.IsCleared)
+                    return BadRequest(new { success = false, message = "The customer import file failed security inspection." });
+
+                stream.Position = 0;
                 var result = await _service.UploadTemplateAsync(stream, targetBUId, createdBy);
 
                 if (!result.Success)
@@ -78,14 +95,12 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet("export")]
-        public async Task<IActionResult> ExportData([FromQuery] long? businessUnitId = null)
+        [RequireModulePermission("Customers", PermissionAction.View)]
+        public async Task<IActionResult> ExportData()
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-                if (targetBUId <= 0)
+                if (!TryGetAuthenticatedBusinessUnitId(out var targetBUId))
                     return BadRequest(new { success = false, message = "Business Unit ID is required." });
 
                 var fileBytes = await _service.ExportCustomersAsync(targetBUId);
@@ -99,5 +114,8 @@ namespace ERP_RFQ_Automation.Controllers
                 return StatusCode(500, new { success = false, message = "Internal server error." });
             }
         }
+
+        private bool TryGetAuthenticatedBusinessUnitId(out long businessUnitId) =>
+            long.TryParse(User.FindFirst("businessUnitId")?.Value, out businessUnitId) && businessUnitId > 0;
     }
 }

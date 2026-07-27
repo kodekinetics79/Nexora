@@ -338,12 +338,7 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
             throw new UnauthorizedAccessException("The authenticated tenant context is required.");
     }
 
-    private static string Outcome(Quote quote)
-    {
-        var code = quote.Status?.SetupCode?.ToUpperInvariant();
-        return code is "ACCEPTED" or "ORDERED" || quote.StatusId == 44 ? "WON"
-            : code == "EXPIRED" ? "EXPIRED" : "LOST";
-    }
+    private static string Outcome(Quote quote) => CommercialLearningRules.ResolveQuoteOutcome(quote);
 
     private static IReadOnlyCollection<CurrencyValueSummary> Summaries(IEnumerable<ValuePoint> values,
         IReadOnlyDictionary<long, string> currencies) => values.GroupBy(x => x.CurrencyId).Select(group =>
@@ -367,6 +362,13 @@ public static class CommercialLearningRules
         new(["CUSTOMER_CANCELLED", "NO_RESPONSE", "LOST_COMPETITOR"], StringComparer.OrdinalIgnoreCase);
 
     public static bool CanRecommendStocking(int decidedCount, int wonCount) => decidedCount >= 5 && wonCount >= 2;
+    public static string ResolveQuoteOutcome(Quote quote)
+    {
+        var code = quote.Status?.SetupCode?.ToUpperInvariant();
+        return code is "ACCEPTED" or "ORDERED" || quote.StatusId == 44 ? "WON"
+            : code == "EXPIRED" ? "EXPIRED" : "LOST";
+    }
+
     public static string ClassifyLoss(string? reasonCode) => CommercialConstraints.Contains(reasonCode ?? "")
         ? "COMMERCIAL_CONSTRAINT" : CustomerDecisions.Contains(reasonCode ?? "")
             ? "CUSTOMER_DECISION" : "EXECUTION_REVIEW";

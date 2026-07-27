@@ -27,6 +27,8 @@ const commercialLearningService = {
     (await axiosInstance.get("/api/commercial-learning/suppliers", { params: { limit } })).data,
   getCustomers: async (limit = 100): Promise<CustomerCommercialMemory[]> =>
     (await axiosInstance.get("/api/commercial-learning/customers", { params: { limit } })).data,
+  getCustomer: async (customerId: number): Promise<CustomerCommercialMemory> =>
+    (await axiosInstance.get(`/api/commercial-learning/customers/${customerId}`)).data,
   getSalesReps: async (limit = 100): Promise<SalesRepCommercialMemory[]> =>
     (await axiosInstance.get("/api/commercial-learning/sales-reps", { params: { limit } })).data,
   getLineCard: async (rfqItemId: number): Promise<CommercialMemoryCard> =>

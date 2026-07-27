@@ -80,6 +80,20 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
 
   const menuItems: MenuItem[] = useMemo(() => {
     const rawItems: MenuItem[] = [
+      {
+        key: 'role-today',
+        label: 'Today',
+        icon: <DashboardIcon />,
+        activePrefixes: ['/sales/today', '/sales/team', '/sourcing/today', '/inventory/today', '/executive/today', '/admin/operations'],
+        children: [
+          { key: 'today-sales', label: 'Sales Rep Today', path: '/sales/today', moduleName: 'Leads' },
+          ...(isManager ? [{ key: 'today-sales-manager', label: 'Sales Manager Control Tower', path: '/sales/team', moduleName: 'Dashboard' }] : []),
+          { key: 'today-sourcing', label: 'Sourcing Today', path: '/sourcing/today', moduleName: 'Supplier History' },
+          { key: 'today-inventory', label: 'Inventory Today', path: '/inventory/today', moduleName: 'Products' },
+          { key: 'today-executive', label: 'Executive RFQ-to-Revenue', path: '/executive/today', moduleName: 'Dashboard' },
+          { key: 'today-admin', label: 'Tenant Admin Operations', path: '/admin/operations', moduleName: 'Users' },
+        ],
+      },
       // Managers get a Dashboard group with the WP-B1 Team Workload view;
       // everyone else keeps the familiar one-click Dashboard item.
       isManager

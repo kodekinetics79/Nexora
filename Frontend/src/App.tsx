@@ -82,6 +82,8 @@ const AccountOwnershipPage = lazy(() => import('./pages/SalesManagement/AccountO
 const RoutingQueuePage = lazy(() => import('./pages/SalesManagement/RoutingQueuePage'));
 const FollowUpsPage = lazy(() => import('./pages/SalesManagement/FollowUpsPage'));
 const PerformancePage = lazy(() => import('./pages/SalesManagement/PerformancePage'));
+const SourcingTodayPage = lazy(() => import('./pages/Today/SourcingTodayPage'));
+const TenantAdminOperationsPage = lazy(() => import('./pages/Today/TenantAdminOperationsPage'));
 
 // Intelligence surfaces — AI-assisted Lead→RFQ conversion and RFQ smart pricing.
 const LeadConvertPage = lazy(() => import('./pages/Intelligence/LeadConvertPage'));
@@ -127,6 +129,10 @@ function App() {
 
       {/* Sales Routes */}
       <Route path="/sales/today" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><SalesTodayPage /></PermissionGuard></MainLayout>} />
+      <Route path="/sourcing/today" element={<MainLayout><PermissionGuard moduleName="Supplier History" redirect><SourcingTodayPage /></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/today" element={<MainLayout><PermissionGuard moduleName="Products" redirect><InventoryOverviewPage /></PermissionGuard></MainLayout>} />
+      <Route path="/executive/today" element={<MainLayout><PermissionGuard moduleName="Dashboard" redirect><DashboardPage /></PermissionGuard></MainLayout>} />
+      <Route path="/admin/operations" element={<MainLayout><PermissionGuard moduleName="Users" redirect><TenantAdminOperationsPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/team" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><TeamOverviewPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/reps" element={<MainLayout><PermissionGuard moduleName="Users" redirect><RepDirectoryPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/reps/:userId" element={<MainLayout><PermissionGuard moduleName="Users" redirect><RepProfilePage /></PermissionGuard></MainLayout>} />

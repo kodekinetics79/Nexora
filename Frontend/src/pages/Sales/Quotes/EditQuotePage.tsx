@@ -111,7 +111,7 @@ const EditQuotePage: React.FC = () => {
 
   const { data: customers = [] } = useQuery({
     queryKey: ['customers-list', businessUnitId],
-    queryFn: () => customerService.getAll({ pageSize: 100, businessUnitId }).then(r => r.items),
+    queryFn: () => customerService.getAll({ pageSize: 100 }).then(r => r.items),
   });
 
   // Calculate Totals
