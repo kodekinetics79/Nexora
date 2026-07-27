@@ -63,7 +63,8 @@ public static class InventoryReservationModelBuilderExtensions
 
             entity.HasOne<Models.Inventory>()
                 .WithMany()
-                .HasForeignKey(x => x.InventoryId)
+                .HasForeignKey(x => new { x.BusinessUnitId, x.InventoryId })
+                .HasPrincipalKey(x => new { BusinessUnitId = x.Buid, InventoryId = x.Id })
                 .OnDelete(DeleteBehavior.Restrict);
         });
 

@@ -18,6 +18,19 @@ public class InventoryReservationTests
 
     private static long SeedInventory(ErpRfqAutomationContext ctx, long id, long buid, decimal onHand)
     {
+        Seed.EnsureBusinessUnit(ctx, buid);
+        var productId = 100_000 + id;
+        var warehouseId = 200_000 + id;
+        ctx.Products.Add(new Product
+        {
+            Id = productId, Buid = buid, PartNo = $"PRODUCT-{id}", ProductName = $"Item {id}",
+            CreatedBy = "test", CreatedOn = DateTime.UtcNow, IsActive = true
+        });
+        ctx.Warehouses.Add(new Warehouse
+        {
+            Id = warehouseId, BusinessUnitId = buid, WarehouseCode = $"WH-{id}",
+            WarehouseName = $"Warehouse {id}", CreatedBy = "test", CreatedOn = DateTime.UtcNow, IsActive = true
+        });
         ctx.Set<ERP_RFQ_Automation.Models.Inventory>().Add(new ERP_RFQ_Automation.Models.Inventory
         {
             Id = id,
@@ -26,6 +39,8 @@ public class InventoryReservationTests
             QtyOnHand = onHand,
             ReorderPoint = 0m,
             Buid = buid,
+            ProductId = productId,
+            WarehouseId = warehouseId,
             CreatedBy = "test",
             CreatedOn = DateTime.UtcNow,
         });
@@ -82,6 +97,20 @@ public class InventoryReservationTests
     }
 
     [Fact]
+    public async Task Reserve_rejects_same_key_for_a_different_request()
+    {
+        using var db = new TestDb();
+        using (var seed = db.ContextFor(null)) SeedInventory(seed, 120, Bu1, 100m);
+
+        await Service(db, Bu1).ReserveAsync(Bu1, 120, 25m, "strict-key", orderId: 7, orderItemId: 70);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            Service(db, Bu1).ReserveAsync(Bu1, 120, 26m, "strict-key", orderId: 7, orderItemId: 70));
+        Assert.Contains("different request", exception.Message);
+        Assert.Equal(75m, (await Service(db, Bu1).GetAvailabilityAsync(Bu1, 120)).Available);
+    }
+
+    [Fact]
     public async Task Release_for_order_restores_availability()
     {
         using var db = new TestDb();
@@ -93,6 +122,10 @@ public class InventoryReservationTests
         var released = await Service(db, Bu1).ReleaseForOrderAsync(Bu1, orderId: 99);
         Assert.Equal(1, released);
         Assert.Equal(100m, (await Service(db, Bu1).GetAvailabilityAsync(Bu1, 13)).Available);
+        using var verify = db.ContextFor(Bu1);
+        var lifecycleEvent = Assert.Single(verify.ProcurementEvents.Where(x =>
+            x.AggregateType == "StockReservation" && x.EventType == "STOCK_RESERVATION_RELEASED"));
+        Assert.Equal(2, lifecycleEvent.AggregateVersion);
     }
 
     [Fact]
@@ -112,6 +145,13 @@ public class InventoryReservationTests
         // Replaying consume must not decrement a second time.
         await Service(db, Bu1).ConsumeAsync(Bu1, r.Id);
         Assert.Equal(60m, (await Service(db, Bu1).GetAvailabilityAsync(Bu1, 14)).OnHand);
+        using var verify = db.ContextFor(Bu1);
+        var movement = Assert.Single(verify.InventoryMovements);
+        Assert.Equal(ERP_RFQ_Automation.Inventory.Commercial.InventoryMovementType.Issue, movement.Type);
+        Assert.Equal(40m, movement.Quantity);
+        var lifecycleEvent = Assert.Single(verify.ProcurementEvents.Where(x =>
+            x.AggregateType == "StockReservation" && x.EventType == "STOCK_RESERVATION_CONSUMED"));
+        Assert.Equal(2, lifecycleEvent.AggregateVersion);
     }
 
     [Fact]

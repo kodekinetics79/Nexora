@@ -1,6 +1,8 @@
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Procurement;
 using Microsoft.EntityFrameworkCore;
 using System.Data;
+using System.Text.Json;
 
 namespace ERP_RFQ_Automation.Inventory;
 
@@ -99,6 +101,8 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
     {
         if (_db.Database.IsNpgsql())
         {
+            if (orderId.HasValue)
+                await LockAsync($"reservation-order:{businessUnitId}:{orderId.Value}", ct);
             var lockIdentity = $"{businessUnitId}:{inventoryId}";
             await _db.Database.ExecuteSqlInterpolatedAsync(
                 $"SELECT pg_advisory_xact_lock(hashtextextended({lockIdentity}, 0))", ct);
@@ -108,7 +112,13 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         var existing = await _db.Set<StockReservation>()
             .FirstOrDefaultAsync(r => r.BusinessUnitId == businessUnitId && r.IdempotencyKey == idempotencyKey, ct);
         if (existing != null)
+        {
+            if (existing.InventoryId != inventoryId || existing.Quantity != quantity ||
+                existing.OrderId != orderId || existing.OrderItemId != orderItemId)
+                throw new InvalidOperationException(
+                    "The reservation idempotency key was already used for a different request.");
             return existing;
+        }
 
         var availability = await GetAvailabilityAsync(businessUnitId, inventoryId, ct);
         if (availability.Available < quantity)
@@ -125,6 +135,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
             IdempotencyKey = idempotencyKey,
             CreatedBy = actor ?? "system",
             CreatedOn = DateTime.UtcNow,
+            Version = 1,
         };
         _db.Set<StockReservation>().Add(reservation);
         await _db.SaveChangesAsync(ct);
@@ -133,6 +144,28 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
 
     public async Task<int> ReleaseForOrderAsync(long businessUnitId, long orderId, string? actor = null, CancellationToken ct = default)
     {
+        if (_db.Database.CurrentTransaction is not null)
+            return await ReleaseWithinTransactionAsync(businessUnitId, orderId, actor, ct);
+        var strategy = _db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
+            await using var transaction = await _db.Database.BeginTransactionAsync(isolation, ct);
+            var count = await ReleaseWithinTransactionAsync(businessUnitId, orderId, actor, ct);
+            await transaction.CommitAsync(ct);
+            return count;
+        });
+    }
+
+    private async Task<int> ReleaseWithinTransactionAsync(long businessUnitId, long orderId, string? actor,
+        CancellationToken ct)
+    {
+        await LockAsync($"reservation-order:{businessUnitId}:{orderId}", ct);
+        var reservationIds = await _db.Set<StockReservation>().AsNoTracking()
+            .Where(r => r.BusinessUnitId == businessUnitId && r.OrderId == orderId)
+            .OrderBy(r => r.Id).Select(r => r.Id).ToArrayAsync(ct);
+        foreach (var reservationId in reservationIds)
+            await LockAsync($"reservation:{businessUnitId}:{reservationId}", ct);
         var active = await _db.Set<StockReservation>()
             .Where(r => r.BusinessUnitId == businessUnitId && r.OrderId == orderId
                         && r.Status == StockReservationStatus.Active)
@@ -143,6 +176,8 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         {
             r.Status = StockReservationStatus.Released;
             r.ReleasedOn = now;
+            r.Version++;
+            AddReservationEvent(r, "STOCK_RESERVATION_RELEASED", actor, now);
         }
         if (active.Count > 0)
             await _db.SaveChangesAsync(ct);
@@ -151,6 +186,25 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
 
     public async Task ConsumeAsync(long businessUnitId, long reservationId, string? actor = null, CancellationToken ct = default)
     {
+        if (_db.Database.CurrentTransaction is not null)
+        {
+            await ConsumeWithinTransactionAsync(businessUnitId, reservationId, actor, ct);
+            return;
+        }
+        var strategy = _db.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(async () =>
+        {
+            var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
+            await using var transaction = await _db.Database.BeginTransactionAsync(isolation, ct);
+            await ConsumeWithinTransactionAsync(businessUnitId, reservationId, actor, ct);
+            await transaction.CommitAsync(ct);
+        });
+    }
+
+    private async Task ConsumeWithinTransactionAsync(long businessUnitId, long reservationId, string? actor,
+        CancellationToken ct)
+    {
+        await LockAsync($"reservation:{businessUnitId}:{reservationId}", ct);
         var reservation = await _db.Set<StockReservation>()
             .FirstOrDefaultAsync(r => r.BusinessUnitId == businessUnitId && r.Id == reservationId, ct)
             ?? throw new InvalidOperationException($"Reservation {reservationId} was not found.");
@@ -163,16 +217,69 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         var inventory = await _db.Set<Models.Inventory>()
             .FirstOrDefaultAsync(i => i.Id == reservation.InventoryId && i.Buid == businessUnitId, ct)
             ?? throw new InvalidOperationException($"Inventory {reservation.InventoryId} was not found.");
+        if (!inventory.ProductId.HasValue || !inventory.WarehouseId.HasValue)
+            throw new InvalidOperationException("A goods issue requires product and warehouse inventory identity.");
+        if (inventory.QtyOnHand < reservation.Quantity)
+            throw new InvalidOperationException("Physical on-hand stock is below the reserved issue quantity.");
 
         // Physical stock leaves the building only here, on an authorised goods issue.
+        var now = DateTime.UtcNow;
         inventory.QtyOnHand -= reservation.Quantity;
         inventory.ModifiedBy = actor ?? "system";
-        inventory.ModifiedOn = DateTime.UtcNow;
+        inventory.ModifiedOn = now;
 
         reservation.Status = StockReservationStatus.Consumed;
-        reservation.ConsumedOn = DateTime.UtcNow;
+        reservation.ConsumedOn = now;
+        reservation.Version++;
+        _db.InventoryMovements.Add(new Commercial.InventoryMovement
+        {
+            BusinessUnitId = businessUnitId,
+            ProductId = inventory.ProductId.Value,
+            InventoryId = inventory.Id,
+            WarehouseId = inventory.WarehouseId.Value,
+            Type = Commercial.InventoryMovementType.Issue,
+            Quantity = reservation.Quantity,
+            OccurredOn = now,
+            IdempotencyKey = $"reservation-consume:{reservation.Id}",
+            SourceType = "StockReservation",
+            SourceId = reservation.Id.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            Reason = "Authorised reserved stock issue",
+            CreatedBy = actor ?? "system",
+            CreatedOn = now
+        });
+        AddReservationEvent(reservation, "STOCK_RESERVATION_CONSUMED", actor, now);
 
         await _db.SaveChangesAsync(ct);
+    }
+
+    private async Task LockAsync(string identity, CancellationToken ct)
+    {
+        if (_db.Database.IsNpgsql())
+            await _db.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT pg_advisory_xact_lock(hashtextextended({identity}, 0))", ct);
+    }
+
+    private void AddReservationEvent(StockReservation reservation, string eventType, string? actor, DateTime occurredOn)
+    {
+        _db.ProcurementEvents.Add(new ProcurementEvent
+        {
+            BusinessUnitId = reservation.BusinessUnitId,
+            AggregateType = "StockReservation",
+            AggregateId = reservation.Id,
+            AggregateVersion = reservation.Version,
+            EventType = eventType,
+            Actor = actor ?? "system",
+            CorrelationId = $"stock-reservation:{reservation.Id}",
+            IdempotencyKey = $"{eventType.ToLowerInvariant()}:{reservation.Id}:{reservation.Version}",
+            PayloadJson = JsonSerializer.Serialize(new
+            {
+                reservation.InventoryId,
+                reservation.OrderId,
+                reservation.OrderItemId,
+                reservation.Quantity
+            }),
+            OccurredOn = occurredOn
+        });
     }
 
     private async Task<decimal> ActiveReservedAsync(long businessUnitId, long inventoryId, CancellationToken ct)

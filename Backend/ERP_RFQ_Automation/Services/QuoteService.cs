@@ -16,6 +16,7 @@ using ERP_RFQ_Automation.CommercialIntelligence.Sales;
 using ERP_RFQ_Automation.Sla;
 using ERP_RFQ_Automation.QuoteDelivery;
 using ERP_RFQ_Automation.Inventory.Commercial;
+using ERP_RFQ_Automation.CommercialLearning;
 
 namespace ERP_RFQ_Automation.Services
 {
@@ -61,6 +62,7 @@ namespace ERP_RFQ_Automation.Services
         private readonly ILifecycleApplicationService? _lifecycle;
         private readonly ISalesApplicationService? _sales;
         private readonly ICommercialLineResolutionApplicationService? _lineResolution;
+        private readonly CommercialLearningService? _commercialLearning;
 
         // Optional collaborators preserve existing direct constructions used by focused
         // tests; production DI supplies the lifecycle and sales services.
@@ -71,7 +73,8 @@ namespace ERP_RFQ_Automation.Services
             ERP_RFQ_Automation.Intelligence.Pricing.IBelowFloorGuard? belowFloorGuard = null,
             ILifecycleApplicationService? lifecycle = null,
             ISalesApplicationService? sales = null,
-            ICommercialLineResolutionApplicationService? lineResolution = null)
+            ICommercialLineResolutionApplicationService? lineResolution = null,
+            CommercialLearningService? commercialLearning = null)
         {
             _context = context;
             _emailService = emailService;
@@ -80,6 +83,7 @@ namespace ERP_RFQ_Automation.Services
             _lifecycle = lifecycle;
             _sales = sales;
             _lineResolution = lineResolution;
+            _commercialLearning = commercialLearning;
         }
 
         // Legacy QuoteStatus id map, used ONLY when no matching SetupMaster row is
@@ -189,6 +193,13 @@ namespace ERP_RFQ_Automation.Services
                 if (resourceLimit is not (10 or 20 or 50)) resourceLimit = 10;
                 await _lineResolution.ResolveLeadAsync(businessUnitId, leadId, resourceLimit, ct, forceRefresh: true);
                 await _lineResolution.LinkRfqAsync(businessUnitId, leadId, rfqId, ct);
+            }
+            if (_commercialLearning is not null)
+            {
+                var intelligence = await _commercialLearning.GetRfqIntelligenceAsync(businessUnitId, rfqId, ct);
+                if (intelligence.CommercialDecision != "VIABLE_READY")
+                    throw new InvalidOperationException(
+                        $"Customer Quote preparation is blocked: {intelligence.NextBestAction.Explanation}");
             }
 
             var strategy = _context.Database.CreateExecutionStrategy();

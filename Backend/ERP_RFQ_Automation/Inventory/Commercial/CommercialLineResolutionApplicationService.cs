@@ -11,7 +11,7 @@ public interface ICommercialLineResolutionApplicationService
 {
     Task<IReadOnlyList<LeadLineCommercialResolution>> ResolveLeadAsync(
         long businessUnitId, long leadId, int resourceLimit, CancellationToken ct = default,
-        bool forceRefresh = false);
+        bool forceRefresh = true);
     Task LinkRfqAsync(long businessUnitId, long leadId, long rfqId, CancellationToken ct = default);
 }
 
@@ -30,7 +30,7 @@ public sealed class CommercialLineResolutionApplicationService(
 
     public async Task<IReadOnlyList<LeadLineCommercialResolution>> ResolveLeadAsync(
         long businessUnitId, long leadId, int resourceLimit, CancellationToken ct = default,
-        bool forceRefresh = false)
+        bool forceRefresh = true)
     {
         if (businessUnitId <= 0 || leadId <= 0) throw new ArgumentOutOfRangeException(nameof(leadId));
         if (!SupportedLimits.Contains(resourceLimit))

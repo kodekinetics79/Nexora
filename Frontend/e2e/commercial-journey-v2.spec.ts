@@ -83,6 +83,16 @@ type SupplierQuoteDetail = {
   }>;
 };
 
+type RfqCommercialIntelligence = {
+  commercialDecision: string;
+  nextBestAction: { label: string; explanation: string };
+  lines: Array<{ rfqItemId: number; blockers: string[]; eligibleOfferCount: number }>;
+  digitalTwin: {
+    validity: string;
+    scenarios: Array<{ code: string; label: string; eligible: boolean; explanation: string }>;
+  };
+};
+
 const commandHeaders = (key: string) => ({
   'Idempotency-Key': key,
   'X-Correlation-ID': key,
@@ -806,6 +816,31 @@ test('34 role Today surfaces expose persisted operational work', async ({ page }
   await expect(page.getByText(users.totalCount.toLocaleString(), { exact: true }).first()).toBeVisible();
   await page.getByRole('button', { name: 'Manage users' }).click();
   await expect(page).toHaveURL(/\/security\/users$/);
+});
+
+test('35 RFQ intelligence reconciles current coverage and explainable Digital Twin', async ({ page }) => {
+  const token = await loginAs(page, 'manager');
+  const intelligence = await jsonOk<RfqCommercialIntelligence>(await api(
+    page, token, 'get', `/api/commercial-learning/rfqs/${rfqId()}/intelligence`,
+  ));
+  expect(intelligence.lines.length).toBeGreaterThan(0);
+  expect(intelligence.digitalTwin.scenarios.length).toBeGreaterThanOrEqual(3);
+  expect(intelligence.nextBestAction.explanation.length).toBeGreaterThan(10);
+
+  await page.goto(`/procurement/rfqs/view/${rfqId()}`);
+  await expect(page.getByText('Opportunity Digital Twin', { exact: true })).toBeVisible();
+  await expect(page.getByText(intelligence.nextBestAction.label, { exact: false }).first()).toBeVisible();
+  await expect(page.getByText(intelligence.digitalTwin.validity, { exact: false }).first()).toBeVisible();
+  for (const scenario of intelligence.digitalTwin.scenarios.slice(0, 3)) {
+    await expect(page.getByText(scenario.label, { exact: true })).toBeVisible();
+  }
+  if (intelligence.commercialDecision !== 'VIABLE_READY') {
+    await expect(page.getByRole('button', { name: 'Prepare Quote Draft' })).toBeDisabled();
+  }
+  await page.screenshot({
+    path: path.resolve('../docs/nexora/evidence/v1/gate-02-opportunity-digital-twin.png'),
+    fullPage: true,
+  });
 });
 
 test.afterEach(({ page }, testInfo) => {

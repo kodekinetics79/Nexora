@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System;
+using System.Security.Claims;
 using System.Threading.Tasks;
 
 namespace ERP_RFQ_Automation.Controllers
@@ -24,8 +25,15 @@ namespace ERP_RFQ_Automation.Controllers
         {
             _repository = repository;
             _context = context;
-            _context = context;
         }
+
+        private bool TryGetTenantId(out long businessUnitId) =>
+            long.TryParse(User.FindFirst("businessUnitId")?.Value, out businessUnitId) && businessUnitId > 0;
+
+        private string Actor() => User.FindFirstValue(ClaimTypes.Email)
+            ?? User.FindFirstValue(ClaimTypes.NameIdentifier)
+            ?? User.FindFirst("email")?.Value
+            ?? throw new UnauthorizedAccessException("Authenticated actor identity is required.");
 
         [HttpGet]
         [RequireModulePermission("Products", PermissionAction.View)]
@@ -38,28 +46,34 @@ namespace ERP_RFQ_Automation.Controllers
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-                if (targetBUId <= 0) return BadRequest("Business Unit ID is required.");
+                _ = businessUnitId; // Retained for client compatibility; authenticated tenant is authoritative.
+                if (!TryGetTenantId(out var targetBUId)) return Forbid();
                 if (pageNumber < 1) return BadRequest("Page number must be ≥ 1.");
                 // Relaxed validation: Allow any page size up to 1000
                 if (pageSize < 1 || pageSize > 1000) return BadRequest("Page size must be between 1 and 1000.");
 
                 var (items, totalItems) = await _repository.GetAllAsync(targetBUId, pageNumber, pageSize, search, isActive);
+                var materialized = items.ToList();
+                var ids = materialized.Select(x => x.Id).ToArray();
+                var stock = await _context.Set<Models.Inventory>().AsNoTracking().Where(x => x.Buid == targetBUId &&
+                        x.ProductId.HasValue && ids.Contains(x.ProductId.Value))
+                    .GroupBy(x => x.ProductId!.Value).Select(x => new { x.Key, Quantity = x.Sum(y => y.QtyOnHand) })
+                    .ToDictionaryAsync(x => x.Key, x => x.Quantity);
+                materialized.ForEach(x => x.QtyOnHand = stock.GetValueOrDefault(x.Id));
 
                 return Ok(new PaginatedProductResponseDTO
                 {
-                    Items = items,
+                    Items = materialized,
                     TotalItems = totalItems,
                     PageNumber = pageNumber,
                     PageSize = pageSize,
                     TotalPages = (int)Math.Ceiling(totalItems / (double)pageSize)
                 });
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error: {ex.Message}");
+                return Problem(statusCode: StatusCodes.Status500InternalServerError,
+                    title: "The product list could not be loaded.");
             }
         }
 
@@ -69,10 +83,8 @@ namespace ERP_RFQ_Automation.Controllers
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-                if (targetBUId <= 0) return BadRequest("Business Unit ID is required.");
+                _ = businessUnitId;
+                if (!TryGetTenantId(out var targetBUId)) return Forbid();
 
                 var product = await _repository.GetByIdAsync(id, targetBUId);
                 if (product == null) return NotFound();
@@ -107,7 +119,8 @@ namespace ERP_RFQ_Automation.Controllers
                     Description = product.Description,
                     CategoryId = product.CategoryId,
                     CategoryName = product.Category?.CategoryName,
-                    QtyOnHand = product.QtyOnHand,
+                    QtyOnHand = await _context.Set<Models.Inventory>().AsNoTracking().Where(x => x.Buid == targetBUId &&
+                        x.ProductId == product.Id).SumAsync(x => (decimal?)x.QtyOnHand) ?? 0m,
                     ReorderPoint = product.ReorderPoint,
                     UomId = product.UomId,
                     UomName = product.Uom?.UomName,
@@ -149,9 +162,10 @@ namespace ERP_RFQ_Automation.Controllers
 
                 return Ok(dto);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error: {ex.Message}");
+                return Problem(statusCode: StatusCodes.Status500InternalServerError,
+                    title: "The product could not be loaded.");
             }
         }
 
@@ -167,10 +181,8 @@ namespace ERP_RFQ_Automation.Controllers
         {
             if (!ModelState.IsValid) return BadRequest(ModelState);
             
-            var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-            if (claimBUId > 0) request.Buid = claimBUId;
-
-            if (request.Buid <= 0) return BadRequest("Business Unit ID is required.");
+            if (!TryGetTenantId(out var claimBUId)) return Forbid();
+            request.Buid = claimBUId;
 
             var product = new Product
             {
@@ -179,7 +191,7 @@ namespace ERP_RFQ_Automation.Controllers
                 ModelNo = request.ModelNo,
                 Description = request.Description,
                 CategoryId = request.CategoryId,
-                QtyOnHand = request.QtyOnHand,
+                QtyOnHand = 0m,
                 ReorderPoint = request.ReorderPoint,
                 UomId = request.UomId,
                 UnitCost = request.UnitCost,
@@ -206,7 +218,7 @@ namespace ERP_RFQ_Automation.Controllers
                 IsActive = request.IsActive,
                 IsCatalogItem = request.IsCatalogItem,
                 SubCategoryId = request.SubCategoryId,
-                CreatedBy = request.CreatedBy,
+                CreatedBy = Actor(),
                 CreatedOn = DateTime.UtcNow
             };
             await _repository.AddAsync(product, request.Attachments);
@@ -240,7 +252,8 @@ namespace ERP_RFQ_Automation.Controllers
                 Description = savedProduct.Description,
                 CategoryId = savedProduct.CategoryId,
                 CategoryName = savedProduct.Category?.CategoryName,
-                QtyOnHand = savedProduct.QtyOnHand,
+                QtyOnHand = await _context.Set<Models.Inventory>().AsNoTracking().Where(x => x.Buid == request.Buid &&
+                    x.ProductId == savedProduct.Id).SumAsync(x => (decimal?)x.QtyOnHand) ?? 0m,
                 ReorderPoint = savedProduct.ReorderPoint,
                 UomId = savedProduct.UomId,
                 UomName = savedProduct.Uom?.UomName,
@@ -290,10 +303,8 @@ namespace ERP_RFQ_Automation.Controllers
         {
             if (!ModelState.IsValid) return BadRequest(ModelState);
             
-            var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-            if (claimBUId > 0) request.Buid = claimBUId;
-
-            if (request.Buid <= 0) return BadRequest("Business Unit ID is required.");
+            if (!TryGetTenantId(out var claimBUId)) return Forbid();
+            request.Buid = claimBUId;
 
             var product = await _repository.GetByIdAsync(id, request.Buid);
             product.ProductName = request.ProductName;
@@ -301,7 +312,6 @@ namespace ERP_RFQ_Automation.Controllers
             product.ModelNo = request.ModelNo;
             product.Description = request.Description;
             product.CategoryId = request.CategoryId;
-            product.QtyOnHand = request.QtyOnHand;
             product.ReorderPoint = request.ReorderPoint;
             product.UomId = request.UomId;
             product.UnitCost = request.UnitCost;
@@ -327,7 +337,7 @@ namespace ERP_RFQ_Automation.Controllers
             product.IsActive = request.IsActive;
             product.IsCatalogItem = request.IsCatalogItem;
             product.SubCategoryId = request.SubCategoryId;
-            product.ModifiedBy = request.ModifiedBy;
+            product.ModifiedBy = Actor();
             product.ModifiedOn = DateTime.UtcNow;
 
             await _repository.UpdateAsync(product, request.Buid, request.Attachments);
@@ -361,7 +371,8 @@ namespace ERP_RFQ_Automation.Controllers
                 Description = savedProduct.Description,
                 CategoryId = savedProduct.CategoryId,
                 CategoryName = savedProduct.Category?.CategoryName,
-                QtyOnHand = savedProduct.QtyOnHand,
+                QtyOnHand = await _context.Set<Models.Inventory>().AsNoTracking().Where(x => x.Buid == request.Buid &&
+                    x.ProductId == savedProduct.Id).SumAsync(x => (decimal?)x.QtyOnHand) ?? 0m,
                 ReorderPoint = savedProduct.ReorderPoint,
                 UomId = savedProduct.UomId,
                 UomName = savedProduct.Uom?.UomName,
@@ -408,10 +419,8 @@ namespace ERP_RFQ_Automation.Controllers
         [RequireModulePermission("Products", PermissionAction.Delete)]
         public async Task<IActionResult> Delete(long id, [FromQuery] long? businessUnitId = null)
         {
-            var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-            var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-            if (targetBUId <= 0) return BadRequest("Business Unit ID is required.");
+            _ = businessUnitId;
+            if (!TryGetTenantId(out var targetBUId)) return Forbid();
 
             await _repository.DeleteAsync(id, targetBUId);
 
@@ -420,86 +429,92 @@ namespace ERP_RFQ_Automation.Controllers
 
         // Dropdown endpoints
         [HttpGet("lookups/business-units")]
+        [RequireModulePermission("Products", PermissionAction.View)]
         public async Task<ActionResult<List<BusinessUnitLookupDTO>>> GetBusinessUnits()
         {
-            return Ok(await _repository.GetActiveBusinessUnitsAsync());
+            if (!TryGetTenantId(out var targetBUId)) return Forbid();
+            var businessUnit = await _context.BusinessUnits.AsNoTracking()
+                .Where(x => x.Id == targetBUId && x.IsActive != false)
+                .Select(x => new BusinessUnitLookupDTO
+                {
+                    Id = x.Id,
+                    BusinessUnitName = x.BusinessUnitName,
+                    BusinessUnitCode = x.BusinessUnitCode
+                }).ToListAsync();
+            return Ok(businessUnit);
         }
 
         [HttpGet("lookups/product-categories")]
+        [RequireModulePermission("Products", PermissionAction.View)]
         public async Task<ActionResult<List<ProductCategoryLookupDTO>>> GetProductCategories([FromQuery] long? businessUnitId = null)
         {
-            var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-            var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-            if (targetBUId <= 0) return BadRequest("Business Unit ID is required.");
+            _ = businessUnitId;
+            if (!TryGetTenantId(out var targetBUId)) return Forbid();
             return Ok(await _repository.GetProductCategoriesAsync(targetBUId));
         }
 
         [HttpGet("lookups/item-statuses")]
+        [RequireModulePermission("Products", PermissionAction.View)]
         public async Task<ActionResult<List<LookupItemDTO>>> GetItemStatuses()
         {
             return Ok(await _repository.GetItemStatusesAsync());
         }
 
         [HttpGet("lookups/suppliers")]
+        [RequireModulePermission("Products", PermissionAction.View)]
         public async Task<ActionResult<List<SupplierLookupDTO>>> GetSuppliers([FromQuery] long? businessUnitId = null)
         {
-            var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-            var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-            if (targetBUId <= 0) return BadRequest("Business Unit ID is required.");
+            _ = businessUnitId;
+            if (!TryGetTenantId(out var targetBUId)) return Forbid();
             return Ok(await _repository.GetSuppliersAsync(targetBUId));
         }
 
         [HttpGet("lookups/product-subcategories")]
+        [RequireModulePermission("Products", PermissionAction.View)]
         public async Task<ActionResult<List<ProductSubCategoryLookupDTO>>> GetProductSubCategories([FromQuery] long? businessUnitId = null)
         {
-            var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-            var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-            if (targetBUId <= 0) return BadRequest("Business Unit ID is required.");
+            _ = businessUnitId;
+            if (!TryGetTenantId(out var targetBUId)) return Forbid();
             return Ok(await _repository.GetProductSubCategoriesAsync(targetBUId));
         }
 
         [HttpGet("lookups/warehouses")]
+        [RequireModulePermission("Products", PermissionAction.View)]
         public async Task<ActionResult<List<WarehouseLookupDTO>>> GetWarehouses([FromQuery] long? businessUnitId = null)
         {
-            var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-            var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-            if (targetBUId <= 0) return BadRequest("Business Unit ID is required.");
+            _ = businessUnitId;
+            if (!TryGetTenantId(out var targetBUId)) return Forbid();
             return Ok(await _repository.GetWarehousesAsync(targetBUId));
         }
 
         [HttpGet("lookups/uoms")]
+        [RequireModulePermission("Products", PermissionAction.View)]
         public async Task<ActionResult<List<LookupItemDTO>>> GetUoms([FromQuery] long? businessUnitId = null)
         {
-            var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-            var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-            if (targetBUId <= 0) return BadRequest("Business Unit ID is required.");
+            _ = businessUnitId;
+            if (!TryGetTenantId(out var targetBUId)) return Forbid();
             return Ok(await _repository.GetUomsAsync(targetBUId));
         }
 
         // Product Matching Endpoints
         [HttpPost("match-product")]
+        [RequireModulePermission("Products", PermissionAction.View)]
         public async Task<ActionResult<ProductMatchResponseDTO>> MatchProduct([FromBody] ProductMatchRequestDTO request)
         {
             if (!ModelState.IsValid) return BadRequest(ModelState);
             
-            var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-            if (claimBUId > 0) request.BusinessUnitId = claimBUId;
-
-            if (request.BusinessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+            if (!TryGetTenantId(out var claimBUId)) return Forbid();
+            request.BusinessUnitId = claimBUId;
 
             try
             {
                 var result = await _repository.MatchProductAsync(request);
                 return Ok(result);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(500, $"Failed to match product: {ex.Message}");
+                return Problem(statusCode: StatusCodes.Status500InternalServerError,
+                    title: "The product match could not be completed.");
             }
         }
 
@@ -507,10 +522,8 @@ namespace ERP_RFQ_Automation.Controllers
         [RequireModulePermission("Products", PermissionAction.View)]
         public async Task<ActionResult<StockDetailsDTO>> GetStockDetails(long id, [FromQuery] long? businessUnitId = null)
         {
-            var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-            var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-            if (targetBUId <= 0) return BadRequest("Business Unit ID is required.");
+            _ = businessUnitId;
+            if (!TryGetTenantId(out var targetBUId)) return Forbid();
 
             try
             {
@@ -521,9 +534,10 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 return NotFound(ex.Message);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(500, $"Failed to get stock details: {ex.Message}");
+                return Problem(statusCode: StatusCodes.Status500InternalServerError,
+                    title: "Stock details could not be loaded.");
             }
         }
 
@@ -531,19 +545,18 @@ namespace ERP_RFQ_Automation.Controllers
         [RequireModulePermission("Products", PermissionAction.View)]
         public async Task<ActionResult<PurchaseHistoryDTO>> GetPurchaseHistory(long id, [FromQuery] long? businessUnitId = null)
         {
-            var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-            var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-            if (targetBUId <= 0) return BadRequest("Business Unit ID is required.");
+            _ = businessUnitId;
+            if (!TryGetTenantId(out var targetBUId)) return Forbid();
 
             try
             {
                 var result = await _repository.GetPurchaseHistoryAsync(id, targetBUId);
                 return Ok(result);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(500, $"Failed to get purchase history: {ex.Message}");
+                return Problem(statusCode: StatusCodes.Status500InternalServerError,
+                    title: "Purchase history could not be loaded.");
             }
         }
     }

@@ -106,7 +106,7 @@ public sealed class ProcurementApplicationServiceTests
         Assert.Null(comparison.RecommendedSupplierQuotedItemId);
         Assert.Contains("lead time missing", line.Blockers);
         Assert.Contains("available quantity insufficient or unknown", line.Blockers);
-        Assert.Contains("reliability evidence missing", line.Blockers);
+        Assert.DoesNotContain("reliability evidence missing", line.Blockers);
     }
 
     [Fact]
@@ -792,6 +792,7 @@ internal sealed class ProcurementScenario : IDisposable
         line.ProductId = ProcurementTestData.Product;
         line.CurrencyId = ProcurementTestData.Currency;
         line.WarehouseId = ProcurementTestData.Warehouse;
+        line.UnitOfMeasure = "EA";
         await context.SaveChangesAsync();
         return id;
     }
@@ -873,10 +874,13 @@ internal static class ProcurementTestData
         supplier.RiskStatus = SupplierRiskStatuses.Low;
         supplier.ReadinessStatus = SupplierReadinessStatuses.Ready;
         supplier.ConcurrencyToken = Guid.NewGuid();
-        AgentSeed.Rfq(context, Rfq + offset, tenant, $"RFQ-QA-{offset}");
+        var rfq = AgentSeed.Rfq(context, Rfq + offset, tenant, $"RFQ-QA-{offset}");
+        context.Entry(rfq).Property(x => x.NexoraSerial).CurrentValue =
+            $"NXR-QA-{tenant}-{Rfq + offset}";
         var line = AgentSeed.RfqItem(context, RfqItem + offset, Rfq + offset, "QA Product", 10);
         line.ProductId = Product + offset;
         line.CurrencyId = Currency + offset;
         line.WarehouseId = Warehouse + offset;
+        line.UnitOfMeasure = "EA";
     }
 }

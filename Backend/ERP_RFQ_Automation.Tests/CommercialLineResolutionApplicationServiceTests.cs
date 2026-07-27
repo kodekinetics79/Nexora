@@ -17,9 +17,9 @@ public sealed class CommercialLineResolutionApplicationServiceTests
         await using var context = database.ContextFor(1);
         var service = Service(context, ProductResolutionDecisionState.AutoLinked, 901);
 
-        var first = await service.ResolveLeadAsync(1, 100, 10);
-        var expanded = await service.ResolveLeadAsync(1, 100, 50);
-        var replay = await service.ResolveLeadAsync(1, 100, 50);
+        var first = await service.ResolveLeadAsync(1, 100, 10, forceRefresh: false);
+        var expanded = await service.ResolveLeadAsync(1, 100, 50, forceRefresh: false);
+        var replay = await service.ResolveLeadAsync(1, 100, 50, forceRefresh: false);
 
         Assert.Single(first);
         Assert.Single(expanded);

@@ -398,7 +398,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var supplierIds = solicitations.Select(x => x.SupplierId).Concat(quoteRows.Select(x => x.SupplierId))
             .Concat(purchaseOrders.Select(x => x.SupplierId)).Distinct().ToArray();
         var supplierNames = await _db.Suppliers.AsNoTracking().Where(x => x.Buid == businessUnitId && supplierIds.Contains(x.Id))
-            .ToDictionaryAsync(x => x.Id, x => new { x.Name, x.ContactEmail }, ct);
+            .ToDictionaryAsync(x => x.Id, ct);
         var currencyIds = quoteRows.Where(x => x.CurrencyId.HasValue).Select(x => x.CurrencyId!.Value)
             .Concat(purchaseOrders.Select(x => x.CurrencyId)).Distinct().ToArray();
         var currencyCodes = await _db.Currencies.AsNoTracking().Where(x => x.BusinessUnitId == businessUnitId && currencyIds.Contains(x.Id))
@@ -453,9 +453,10 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         }).ToArray();
         var offerViews = quoteRows.Select(row =>
         {
-            var comparison = ToComparisonLine(row,
-                lines.SingleOrDefault(x => x.Id == row.RfqItemId)?.ShortfallQuantity ?? 0m);
             var supplier = supplierNames.GetValueOrDefault(row.SupplierId);
+            var sourceLine = lines.SingleOrDefault(x => x.Id == row.RfqItemId);
+            var comparison = ToComparisonLine(row, sourceLine?.ShortfallQuantity ?? 0m, supplier,
+                HasCanonicalLineage(row), sourceLine?.RequiredOn);
             return new SupplierOfferView(row.Id, row.SupplierSolicitationId ?? 0, row.RfqItemId ?? 0, row.SupplierId,
                 supplier?.Name ?? $"Supplier {row.SupplierId}", row.QuoteReference, row.QuoteRevision,
                 row.CurrencyId ?? 0, currencyCodes.GetValueOrDefault(row.CurrencyId ?? 0) ?? "N/A", row.Quantity,
@@ -535,11 +536,22 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             }
 
             var now = DateTime.UtcNow;
+            var sourcingCases = new List<SourcingCase>(requestedLines.Count);
+            foreach (var requestedLine in requestedLines)
+            {
+                sourcingCases.Add(await EnsureCanonicalSourcingCaseAsync(
+                    command.BusinessUnitId, rfq, requestedLine, requestedQuantities[requestedLine.Id],
+                    command.Actor, command.CorrelationId, command.IdempotencyKey, now, ct));
+            }
+            var sourcingCase = sourcingCases[0];
             var solicitation = new SupplierSolicitation
             {
                 BusinessUnitId = command.BusinessUnitId,
                 RfqId = command.RfqId,
                 SupplierId = command.SupplierId,
+                SourcingCaseId = sourcingCase.Id,
+                CommercialDemandLineId = sourcingCase.CommercialDemandLineId,
+                NexoraSerial = sourcingCase.NexoraSerial,
                 IdempotencyKey = command.IdempotencyKey.Trim(),
                 RequestHash = hash,
                 RequestedRfqItemIdsJson = JsonSerializer.Serialize(command.RfqItemIds.Order()),
@@ -571,6 +583,100 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             await tx.CommitAsync(ct);
             return new SolicitationResult(solicitation.Id, solicitation.Status.ToString(), false);
         });
+    }
+
+    private async Task<SourcingCase> EnsureCanonicalSourcingCaseAsync(
+        long businessUnitId, Rfq rfq, Rfqitem item, decimal unfulfilledQuantity,
+        string actor, string correlationId, string idempotencyKey, DateTime now, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(rfq.NexoraSerial))
+            throw new ProcurementConflictException("The RFQ must have an immutable Nexora Serial before supplier outreach.");
+
+        var identityKey = $"rfq:{rfq.Id}:line:{item.Id}";
+        var demandLine = await _db.CommercialDemandLines.SingleOrDefaultAsync(x =>
+            x.BusinessUnitId == businessUnitId && x.RfqItemId == item.Id, ct);
+        if (demandLine is null)
+        {
+            demandLine = new CommercialDemandLine
+            {
+                BusinessUnitId = businessUnitId,
+                RfqId = rfq.Id,
+                RfqItemId = item.Id,
+                NexoraSerial = rfq.NexoraSerial,
+                IdentityKey = identityKey,
+                CreatedOn = now,
+                CreatedBy = actor.Trim()
+            };
+            _db.CommercialDemandLines.Add(demandLine);
+            await _db.SaveChangesAsync(ct);
+        }
+        else if (demandLine.RfqId != rfq.Id || demandLine.NexoraSerial != rfq.NexoraSerial
+                 || demandLine.IdentityKey != identityKey)
+        {
+            throw new ProcurementConflictException(
+                "The immutable commercial Demand Line identity does not match this RFQ line.");
+        }
+
+        var sourcingCase = await _db.SourcingCases.SingleOrDefaultAsync(x =>
+            x.BusinessUnitId == businessUnitId && x.CommercialDemandLineId == demandLine.Id, ct);
+        if (sourcingCase is not null) return sourcingCase;
+
+        var requestedQuantity = (decimal)item.Quantity;
+        var stockQuantity = Math.Max(0m, requestedQuantity - unfulfilledQuantity);
+        var shortageDecisionKey = Hash(new
+        {
+            demandLine.Id,
+            RequestedQuantity = requestedQuantity,
+            StockQuantity = stockQuantity,
+            UnfulfilledQuantity = unfulfilledQuantity,
+            item.ProductId,
+            item.RequiredDesiredDate,
+            SourceEntireQuantity = false
+        });
+        sourcingCase = new SourcingCase
+        {
+            BusinessUnitId = businessUnitId,
+            CommercialDemandLineId = demandLine.Id,
+            RfqId = rfq.Id,
+            RfqItemId = item.Id,
+            LeadId = rfq.LeadId,
+            CustomerId = rfq.CustomerId,
+            ProductId = item.ProductId,
+            NexoraSerial = rfq.NexoraSerial,
+            RequestedPartNumber = item.ManufacturerPartNumber ?? item.ItemMaterialCode,
+            Manufacturer = item.ManufacturerName,
+            Description = item.ProductShortDescription ?? item.ProductShortName ?? item.CommodityProduct
+                ?? item.ItemMaterialCode ?? $"RFQ line {item.Id}",
+            UnitOfMeasure = item.UnitOfMeasure,
+            RequestedQuantity = requestedQuantity,
+            StockQuantity = stockQuantity,
+            UnfulfilledQuantity = unfulfilledQuantity,
+            RequiredOn = item.RequiredDesiredDate,
+            DeliveryLocation = item.StorageLocation,
+            SearchLimit = 10,
+            Status = SourcingCaseStatuses.OutreachReady,
+            NextAction = "Review and dispatch Supplier RFQ",
+            ShortageDecisionKey = shortageDecisionKey,
+            IdempotencyKey = $"{idempotencyKey.Trim()}:canonical-case:{item.Id}",
+            RequestHash = Hash(new { RfqId = rfq.Id, RfqItemId = item.Id, unfulfilledQuantity }),
+            CreatedOn = now,
+            CreatedBy = actor.Trim(),
+            UpdatedOn = now,
+            UpdatedBy = actor.Trim()
+        };
+        _db.SourcingCases.Add(sourcingCase);
+        await _db.SaveChangesAsync(ct);
+        AddEvent(businessUnitId, "SourcingCase", sourcingCase.Id, sourcingCase.Version,
+            "SOURCING_CASE_CREATED_FOR_OUTREACH", actor, correlationId,
+            $"{idempotencyKey.Trim()}:canonical-case:{item.Id}", JsonSerializer.Serialize(new
+            {
+                sourcingCase.CommercialDemandLineId,
+                sourcingCase.RfqId,
+                sourcingCase.RfqItemId,
+                sourcingCase.NexoraSerial,
+                sourcingCase.UnfulfilledQuantity
+            }), now);
+        return sourcingCase;
     }
 
     public async Task<SolicitationResult> RetrySolicitationAsync(RetrySolicitationCommand command, CancellationToken ct = default)
@@ -652,7 +758,23 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             if (rfqLines.Count != command.Lines.Count || command.Lines.Any(x =>
                     rfqLines[x.RfqItemId].ProductId.HasValue && rfqLines[x.RfqItemId].ProductId != x.ProductId))
                 throw new ProcurementValidationException("Every quoted product and line must belong to the solicited RFQ.");
+            if (rfqLines.Values.Any(x => string.IsNullOrWhiteSpace(x.UnitOfMeasure)))
+                throw new ProcurementValidationException("Every quoted RFQ line requires a verified unit of measure.");
             await RequireSupplierAsync(command.BusinessUnitId, solicitation.SupplierId, ct);
+            if (!solicitation.SourcingCaseId.HasValue || string.IsNullOrWhiteSpace(solicitation.NexoraSerial))
+                throw new ProcurementValidationException("Canonical Sourcing Case and Nexora Serial lineage are required.");
+            var sourcingCase = await _db.SourcingCases.AsNoTracking().SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == command.BusinessUnitId && x.Id == solicitation.SourcingCaseId.Value, ct)
+                ?? throw new ProcurementValidationException("Canonical Sourcing Case was not found.");
+            var demandLines = await _db.CommercialDemandLines.AsNoTracking().Where(x =>
+                    x.BusinessUnitId == command.BusinessUnitId && x.RfqId == solicitation.RfqId &&
+                    command.Lines.Select(line => line.RfqItemId).Contains(x.RfqItemId))
+                .ToDictionaryAsync(x => x.RfqItemId, ct);
+            if (demandLines.Count != command.Lines.Count)
+                throw new ProcurementValidationException("Every Supplier Quote line requires canonical demand lineage.");
+            var currencies = command.Lines.Select(x => x.CurrencyId).Distinct().ToArray();
+            if (currencies.Length != 1)
+                throw new ProcurementValidationException("One canonical Supplier Quote revision must use one currency.");
 
             var priorRows = await _db.SupplierQuotedItems.Where(x =>
                 x.BusinessUnitId == command.BusinessUnitId
@@ -662,6 +784,33 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 throw new ProcurementConflictException("The supplier quote revision must be newer than the current revision.");
 
             var now = DateTime.UtcNow;
+            var canonicalReference = await _db.SupplierQuotes.AsNoTracking()
+                .Where(x => x.BusinessUnitId == command.BusinessUnitId
+                    && x.SupplierSolicitationId == solicitation.Id)
+                .Select(x => x.SupplierQuoteReference)
+                .SingleOrDefaultAsync(ct) ?? command.SupplierQuoteReference;
+            var canonical = await new SupplierQuotes.SupplierQuoteInboxService(_db).CaptureAsync(
+                new SupplierQuotes.CaptureSupplierQuoteCommand(
+                    command.BusinessUnitId, solicitation.SupplierId, solicitation.Id, sourcingCase.Id,
+                    solicitation.NexoraSerial, canonicalReference, command.Revision,
+                    SupplierQuotes.SupplierQuoteCaptureChannels.Manual, null,
+                    $"procurement-workbench:{solicitation.Id}:revision:{command.Revision}", hash,
+                    currencies[0], command.ValidUntil, null,
+                    command.Lines.Sum(x => x.FreightCost + x.DutyCost + x.OtherCost),
+                    command.Lines.Sum(x => x.TaxAmount), null, null,
+                    command.Lines.Select((line, index) => new SupplierQuotes.CaptureSupplierQuoteLine(
+                        index + 1, line.RfqItemId, demandLines[line.RfqItemId].Id,
+                        rfqLines[line.RfqItemId].ManufacturerPartNumber ?? rfqLines[line.RfqItemId].ItemMaterialCode,
+                        rfqLines[line.RfqItemId].ManufacturerName, null,
+                        rfqLines[line.RfqItemId].ProductShortDescription ??
+                            rfqLines[line.RfqItemId].ProductShortName ?? rfqLines[line.RfqItemId].ItemMaterialCode ??
+                            $"RFQ line {line.RfqItemId}", line.Quantity, line.AvailableQuantity,
+                        rfqLines[line.RfqItemId].UnitOfMeasure!, line.UnitPrice,
+                        line.MinimumOrderQuantity, line.LeadTimeDays, null, null, null, false, null, [])).ToArray(),
+                    [], command.IdempotencyKey, command.Actor, command.CorrelationId), ct);
+            var canonicalLines = await _db.SupplierQuoteLines.AsNoTracking().Where(x =>
+                    x.BusinessUnitId == command.BusinessUnitId && x.SupplierQuoteRevisionId == canonical.RevisionId)
+                .ToDictionaryAsync(x => x.RfqItemId, ct);
             var revisedLineIds = command.Lines.Select(x => x.RfqItemId).ToHashSet();
             foreach (var priorRow in priorRows.Where(x => x.IsActive
                          && x.RfqItemId.HasValue && revisedLineIds.Contains(x.RfqItemId.Value)))
@@ -679,6 +828,11 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 RfqId = solicitation.RfqId,
                 RfqItemId = line.RfqItemId,
                 ProductId = line.ProductId,
+                SourceSupplierQuoteId = canonical.SupplierQuoteId,
+                SourceSupplierQuoteRevisionId = canonical.RevisionId,
+                SourceSupplierQuoteLineId = canonicalLines[line.RfqItemId].Id,
+                CommercialDemandLineId = demandLines[line.RfqItemId].Id,
+                SourcingCaseId = sourcingCase.Id,
                 ItemName = rfqLines[line.RfqItemId].ProductShortName ?? rfqLines[line.RfqItemId].ItemMaterialCode,
                 Description = rfqLines[line.RfqItemId].ProductShortDescription,
                 Quantity = line.Quantity,
@@ -728,12 +882,31 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var rows = await _db.SupplierQuotedItems.AsNoTracking().Where(x => x.BusinessUnitId == businessUnitId
             && x.RfqId == rfqItem.Rfqid && x.RfqItemId == rfqItemId && x.IsActive).ToListAsync(ct);
         var remainingRequirement = await GetNetSourcingRequirementAsync(businessUnitId, rfqItem, ct);
-        var lines = rows.Select(row => ToComparisonLine(row, remainingRequirement))
+        var supplierIds = rows.Select(x => x.SupplierId).Distinct().ToArray();
+        var suppliers = await _db.Suppliers.AsNoTracking().Where(x => x.Buid == businessUnitId &&
+            supplierIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
+        var sourceRevisionIds = rows.Where(x => x.SourceSupplierQuoteRevisionId.HasValue)
+            .Select(x => x.SourceSupplierQuoteRevisionId!.Value).Distinct().ToArray();
+        var readyRevisionIds = await _db.SupplierQuoteRevisions.AsNoTracking().Where(x =>
+                x.BusinessUnitId == businessUnitId && sourceRevisionIds.Contains(x.Id) &&
+                x.SupplierQuote.InboxStatus == SupplierQuotes.SupplierQuoteInboxStatuses.ReadyForComparison)
+            .Select(x => x.Id).ToArrayAsync(ct);
+        var lines = rows.Select(row => ToComparisonLine(row, remainingRequirement,
+                suppliers.GetValueOrDefault(row.SupplierId), row.SourceSupplierQuoteRevisionId.HasValue &&
+                readyRevisionIds.Contains(row.SourceSupplierQuoteRevisionId.Value), rfqItem.RequiredDesiredDate))
             .OrderBy(x => x.LandedUnitCost ?? decimal.MaxValue).ToArray();
         var eligible = lines.Where(x => x.Eligible).ToArray();
         var currencies = eligible.Select(x => x.CurrencyId).Distinct().ToArray();
+        if (currencies.Length > 1)
+            lines = lines.Select(line => line.Eligible
+                ? line with { Blockers = line.Blockers.Append("currency not comparable without approved FX evidence").ToArray(), Eligible = false }
+                : line).ToArray();
+        eligible = lines.Where(x => x.Eligible).ToArray();
+        currencies = eligible.Select(x => x.CurrencyId).Distinct().ToArray();
         var recommended = eligible.Length > 0 && currencies.Length == 1
-            ? eligible.OrderBy(x => x.LandedUnitCost).ThenBy(x => x.LeadTimeDays).ThenByDescending(x => x.Reliability).First().SupplierQuotedItemId
+            ? eligible.OrderByDescending(x => Math.Min(x.Quantity, x.AvailableQuantity ?? 0m) >= remainingRequirement)
+                .ThenBy(x => x.LandedUnitCost).ThenBy(x => x.LeadTimeDays)
+                .ThenBy(x => x.SupplierQuotedItemId).First().SupplierQuotedItemId
             : (long?)null;
         return new QuoteComparisonResult(rfqItemId, lines, recommended);
     }
@@ -757,11 +930,26 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             }
             var quote = await _db.SupplierQuotedItems.SingleOrDefaultAsync(x => x.BusinessUnitId == command.BusinessUnitId
                 && x.Id == command.SupplierQuotedItemId && x.IsActive, ct) ?? throw new ProcurementValidationException("Supplier quote was not found.");
+            if (string.IsNullOrWhiteSpace(command.Rationale))
+                throw new ProcurementValidationException("An evidence-based award rationale is required.");
             if (quote.Version != command.ExpectedQuoteVersion) throw new ProcurementConflictException("The supplier quote changed; refresh before awarding.");
             var rfqItem = await _db.Rfqitems.SingleAsync(x => x.Rfqid == quote.RfqId && x.Id == quote.RfqItemId, ct);
             var remainingRequirement = await GetNetSourcingRequirementAsync(command.BusinessUnitId, rfqItem, ct);
-            var comparison = ToComparisonLine(quote, remainingRequirement);
+            var supplier = await RequireSupplierAsync(command.BusinessUnitId, quote.SupplierId, ct);
+            var canonicalReady = quote.SourceSupplierQuoteRevisionId.HasValue &&
+                await _db.SupplierQuoteRevisions.AsNoTracking().AnyAsync(x => x.BusinessUnitId == command.BusinessUnitId &&
+                    x.Id == quote.SourceSupplierQuoteRevisionId.Value &&
+                    x.SupplierQuote.InboxStatus == SupplierQuotes.SupplierQuoteInboxStatuses.ReadyForComparison, ct);
+            var comparison = ToComparisonLine(quote, remainingRequirement, supplier, canonicalReady,
+                rfqItem.RequiredDesiredDate);
             if (!comparison.Eligible) throw new ProcurementValidationException($"The supplier quote cannot be awarded: {string.Join(", ", comparison.Blockers)}.");
+            var comparableCurrencies = await _db.SupplierQuotedItems.AsNoTracking().Where(x =>
+                    x.BusinessUnitId == command.BusinessUnitId && x.RfqItemId == quote.RfqItemId && x.IsActive &&
+                    x.SourceSupplierQuoteRevisionId.HasValue && x.CurrencyId.HasValue)
+                .Select(x => x.CurrencyId!.Value).Distinct().ToArrayAsync(ct);
+            if (comparableCurrencies.Length > 1)
+                throw new ProcurementValidationException(
+                    "Supplier offers use different currencies; an approved FX comparison is required before award.");
             if (command.Quantity > quote.Quantity || command.Quantity > quote.AvailableQuantity)
                 throw new ProcurementValidationException("Award quantity exceeds the quoted or available quantity.");
             if (quote.MinimumOrderQuantity is > 0 && command.Quantity < quote.MinimumOrderQuantity)
@@ -843,7 +1031,34 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             var quoteIds = awards.Select(x => x.SupplierQuotedItemId!.Value).ToArray();
             var quotes = await _db.SupplierQuotedItems.Where(x => x.BusinessUnitId == command.BusinessUnitId && quoteIds.Contains(x.Id))
                 .ToDictionaryAsync(x => x.Id, ct);
-            if (quotes.Count != quoteIds.Distinct().Count() || quotes.Values.Any(x => x.ProductId is null || x.ValidUntil <= DateTime.UtcNow))
+            var sourceQuoteIds = quotes.Values.Where(x => x.SourceSupplierQuoteId.HasValue)
+                .Select(x => x.SourceSupplierQuoteId!.Value).Distinct().ToArray();
+            var sourceRevisionIds = quotes.Values.Where(x => x.SourceSupplierQuoteRevisionId.HasValue)
+                .Select(x => x.SourceSupplierQuoteRevisionId!.Value).Distinct().ToArray();
+            var readySourceQuoteIds = await _db.SupplierQuotes.AsNoTracking().Where(x =>
+                    x.BusinessUnitId == command.BusinessUnitId && sourceQuoteIds.Contains(x.Id) &&
+                    x.InboxStatus == SupplierQuotes.SupplierQuoteInboxStatuses.ReadyForComparison)
+                .Select(x => x.Id).ToArrayAsync(ct);
+            var reviewDecisions = await _db.SupplierQuoteReviewDecisions.AsNoTracking().Where(x =>
+                    x.BusinessUnitId == command.BusinessUnitId && sourceRevisionIds.Contains(x.SupplierQuoteRevisionId))
+                .OrderByDescending(x => x.ReviewedOn).ThenByDescending(x => x.Id).ToArrayAsync(ct);
+            var latestCorrectionByRevision = reviewDecisions.GroupBy(x => x.SupplierQuoteRevisionId)
+                .ToDictionary(revision => revision.Key, revision => revision
+                    .GroupBy(x => x.SupplierQuoteFieldEvidenceId).Select(x => x.First())
+                    .Where(x => x.Status == SupplierQuotes.SupplierQuoteReviewStatuses.Corrected)
+                    .Select(x => (DateTime?)x.ReviewedOn).Max());
+            var rfqItemIds = awards.Select(x => x.RfqItemId!.Value).Distinct().ToArray();
+            var requiredDates = await _db.Rfqitems.AsNoTracking().Where(x => x.Rfq.BusinessUnitId == command.BusinessUnitId &&
+                    rfqItemIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, x => x.RequiredDesiredDate, ct);
+            if (quotes.Count != quoteIds.Distinct().Count() || readySourceQuoteIds.Length != sourceQuoteIds.Length ||
+                requiredDates.Count != rfqItemIds.Length || quotes.Values.Any(x => x.ProductId is null ||
+                    x.ValidUntil <= DateTime.UtcNow || !HasCanonicalLineage(x) ||
+                    !readySourceQuoteIds.Contains(x.SourceSupplierQuoteId!.Value) ||
+                    latestCorrectionByRevision.GetValueOrDefault(x.SourceSupplierQuoteRevisionId!.Value) >
+                        (x.ModifiedDate ?? x.CreatedDate) ||
+                    requiredDates[x.RfqItemId!.Value].HasValue &&
+                    (!x.QuoteDate.HasValue || !x.LeadTimeDays.HasValue ||
+                     x.QuoteDate.Value.AddDays(x.LeadTimeDays.Value) > requiredDates[x.RfqItemId.Value]!.Value)))
                 throw new ProcurementValidationException("Every award must retain a valid authoritative supplier quote and product.");
             var existingAwardLines = await _db.SupplierPurchaseOrderLines.AnyAsync(x => x.BusinessUnitId == command.BusinessUnitId
                 && command.AwardIds.Contains(x.SourcingAwardId), ct);
@@ -865,11 +1080,14 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             foreach (var award in awards)
             {
                 var quote = quotes[award.SupplierQuotedItemId!.Value];
+                var rfqItemId = award.RfqItemId ?? throw new ProcurementValidationException("The award lost its RFQ line identity.");
+                var productId = quote.ProductId ?? throw new ProcurementValidationException("The Supplier quote lost its Product identity.");
+                var orderedQuantity = award.Quantity ?? throw new ProcurementValidationException("The award lost its quantity.");
                 var inventory = await _db.Set<Models.Inventory>().SingleOrDefaultAsync(x => x.Buid == command.BusinessUnitId
-                    && x.ProductId == quote.ProductId && x.WarehouseId == command.WarehouseId, ct);
+                    && x.ProductId == productId && x.WarehouseId == command.WarehouseId, ct);
                 if (inventory is null)
                 {
-                    var product = await _db.Products.AsNoTracking().SingleAsync(x => x.Id == quote.ProductId
+                    var product = await _db.Products.AsNoTracking().SingleAsync(x => x.Id == productId
                         && x.Buid == command.BusinessUnitId, ct);
                     inventory = new Models.Inventory
                     {
@@ -891,9 +1109,9 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 po.Lines.Add(new SupplierPurchaseOrderLine
                 {
                     BusinessUnitId = command.BusinessUnitId, SourcingAwardId = award.Id, SupplierQuotedItemId = quote.Id,
-                    RfqId = command.RfqId, RfqItemId = award.RfqItemId!.Value, ProductId = quote.ProductId.Value,
+                    RfqId = command.RfqId, RfqItemId = rfqItemId, ProductId = productId,
                     WarehouseId = command.WarehouseId, InventoryId = inventory?.Id,
-                    OrderedQuantity = award.Quantity.Value, UnitCost = quote.UnitPrice!.Value, LandedUnitCost = award.LandedUnitCost!.Value
+                    OrderedQuantity = orderedQuantity, UnitCost = quote.UnitPrice!.Value, LandedUnitCost = award.LandedUnitCost!.Value
                 });
                 award.Status = "CONVERTED_TO_PO";
                 award.Version++;
@@ -1344,9 +1562,14 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             throw new ProcurementValidationException("Supplier candidate limit must be 10, 20, or 50.");
     }
 
-    private static QuoteComparisonLine ToComparisonLine(SupplierQuotedItem row, decimal remainingRequirement)
+    private static QuoteComparisonLine ToComparisonLine(SupplierQuotedItem row, decimal remainingRequirement,
+        Supplier? supplier, bool canonicalEvidenceReady, DateTime? requiredOn)
     {
         var blockers = new List<string>();
+        if (!HasCanonicalLineage(row) || !canonicalEvidenceReady)
+            blockers.Add("canonical evidence missing or unresolved");
+        if (supplier is null || SupplierRfqBlockingReasons(supplier).Count > 0)
+            blockers.Add("supplier is not award eligible");
         if (row.ProductId is null or <= 0) blockers.Add("product unresolved");
         if (row.UnitPrice is null or <= 0) blockers.Add("unit price missing");
         if (row.CurrencyId is null or <= 0) blockers.Add("currency missing");
@@ -1357,12 +1580,18 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         if (row.MinimumOrderQuantity is > 0
             && (remainingRequirement < row.MinimumOrderQuantity || quoteCapacity < row.MinimumOrderQuantity))
             blockers.Add("minimum order quantity cannot be satisfied");
-        if (row.ReliabilitySnapshot is null or < 0 or > 100) blockers.Add("reliability evidence missing");
         if (row.ValidUntil is null || row.ValidUntil <= DateTime.UtcNow) blockers.Add("quote expired or validity missing");
         if (row.LandedUnitCost is null or <= 0) blockers.Add("landed cost unavailable");
+        if (requiredOn.HasValue && row.QuoteDate.HasValue && row.LeadTimeDays.HasValue &&
+            row.QuoteDate.Value.AddDays(row.LeadTimeDays.Value) > requiredOn.Value)
+            blockers.Add("delivery date missed");
         return new QuoteComparisonLine(row.Id, row.SupplierId, row.Quantity, row.AvailableQuantity, row.UnitPrice ?? 0,
             row.LandedUnitCost, row.CurrencyId ?? 0, row.LeadTimeDays, row.ReliabilitySnapshot, row.ValidUntil, blockers, blockers.Count == 0);
     }
+
+    private static bool HasCanonicalLineage(SupplierQuotedItem row) => row.SourceSupplierQuoteId.HasValue &&
+        row.SourceSupplierQuoteRevisionId.HasValue && row.SourceSupplierQuoteLineId.HasValue &&
+        row.CommercialDemandLineId.HasValue && row.SourcingCaseId.HasValue;
 
     private static void ValidateDeliveryEvidence(string evidenceReference, string? evidenceSha256, DateTime? deliveredOn)
     {
@@ -1483,8 +1712,15 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             ?? throw new ProcurementValidationException("RFQ was not found in the authenticated tenant.");
 
     private async Task<Supplier> RequireSupplierAsync(long businessUnitId, long supplierId, CancellationToken ct)
-        => await _db.Suppliers.SingleOrDefaultAsync(x => x.Buid == businessUnitId && x.Id == supplierId && x.IsActive != false, ct)
+    {
+        var supplier = await _db.Suppliers.SingleOrDefaultAsync(x => x.Buid == businessUnitId &&
+            x.Id == supplierId && x.IsActive != false, ct)
             ?? throw new ProcurementValidationException("Supplier was not found in the authenticated tenant.");
+        var blockers = SupplierRfqBlockingReasons(supplier);
+        if (blockers.Count > 0)
+            throw new ProcurementValidationException($"Supplier is not eligible: {string.Join("; ", blockers)}.");
+        return supplier;
+    }
 
     private void AddEvent(long businessUnitId, string aggregateType, long aggregateId, long version, string eventType,
         string actor, string correlationId, string idempotencyKey, string payload, DateTime now)

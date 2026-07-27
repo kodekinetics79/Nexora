@@ -25,7 +25,7 @@ const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
 
   const emptyForm = {
     productName: '', partNo: '', modelNo: '', description: '',
-    categoryId: '', subCategoryId: '', qtyOnHand: 0, reorderPoint: 0,
+    categoryId: '', subCategoryId: '', reorderPoint: 0,
     uomId: '', unitCost: '', sellingPrice: '', finalLandedCost: '', finalSalesPrice: '',
     warehouseId: '', preferredSupplierId: '',
     batchTracking: false, serialTracking: false, expirationDate: '',
@@ -58,7 +58,6 @@ const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
         description: editData.description ?? '',
         categoryId: editData.categoryId != null ? String(editData.categoryId) : '',
         subCategoryId: editData.subCategoryId != null ? String(editData.subCategoryId) : '',
-        qtyOnHand: editData.qtyOnHand ?? 0,
         reorderPoint: editData.reorderPoint ?? 0,
         uomId: editData.uomId != null ? String(editData.uomId) : '',
         unitCost: editData.unitCost != null ? String(editData.unitCost) : '',
@@ -160,9 +159,6 @@ const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
 
           {/* Pricing & Stock */}
           <SectionTitle label="Pricing & Stock" />
-          <Grid size={{ xs: 6, sm: 3 }}>
-            <TextField fullWidth type="number" label={t('quantity') || 'Qty on Hand'} value={form.qtyOnHand} onChange={f('qtyOnHand')} />
-          </Grid>
           <Grid size={{ xs: 6, sm: 3 }}>
             <TextField fullWidth type="number" label="Reorder Point" value={form.reorderPoint} onChange={f('reorderPoint')} />
           </Grid>

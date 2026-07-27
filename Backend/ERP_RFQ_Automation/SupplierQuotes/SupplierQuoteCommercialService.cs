@@ -25,6 +25,8 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                 IsolationLevel.Serializable, cancellationToken);
             var quote = await context.SupplierQuotes
                 .Include(x => x.Revisions).ThenInclude(x => x.Lines)
+                .Include(x => x.Revisions).ThenInclude(x => x.Evidence)
+                .Include(x => x.Revisions).ThenInclude(x => x.ReviewDecisions)
                 .SingleOrDefaultAsync(x => x.BusinessUnitId == command.BusinessUnitId &&
                     x.Id == command.SupplierQuoteId, cancellationToken)
                 ?? throw new SupplierQuoteNotFoundException("The Supplier Quote was not found in this tenant.");
@@ -34,19 +36,109 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                 throw new SupplierQuoteValidationException("Complete critical field review before comparison.");
 
             var revision = quote.Revisions.Single(x => x.RevisionNumber == quote.CurrentRevisionNumber);
-            if (revision.ValidUntil is null || revision.ValidUntil <= DateTime.UtcNow)
+            var correctedByEvidence = revision.ReviewDecisions
+                .GroupBy(x => x.SupplierQuoteFieldEvidenceId)
+                .Select(x => x.OrderByDescending(y => y.ReviewedOn).ThenByDescending(y => y.Id).First())
+                .Where(x => x.Status == SupplierQuoteReviewStatuses.Corrected)
+                .ToDictionary(x => x.SupplierQuoteFieldEvidenceId);
+            string? Corrected(long? lineId, string fieldName) => revision.Evidence
+                .Where(x => x.SupplierQuoteLineId == lineId && x.FieldName.Equals(fieldName, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(x => x.Id).Select(x => correctedByEvidence.GetValueOrDefault(x.Id)?.CorrectedValue)
+                .FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
+            decimal EffectiveDecimal(SupplierQuoteLine line, string fieldName, decimal original) =>
+                Corrected(line.Id, fieldName) is { } value
+                    ? decimal.Parse(value, System.Globalization.NumberStyles.Number,
+                        System.Globalization.CultureInfo.InvariantCulture) : original;
+            decimal? EffectiveNullableDecimal(SupplierQuoteLine line, string fieldName, decimal? original) =>
+                Corrected(line.Id, fieldName) is { } value
+                    ? decimal.Parse(value, System.Globalization.NumberStyles.Number,
+                        System.Globalization.CultureInfo.InvariantCulture) : original;
+            int? EffectiveInt(SupplierQuoteLine line, string fieldName, int? original) =>
+                Corrected(line.Id, fieldName) is { } value
+                    ? int.Parse(value, System.Globalization.NumberStyles.Integer,
+                        System.Globalization.CultureInfo.InvariantCulture) : original;
+            var effectiveValidUntil = Corrected(null, "ValidUntil") is { } correctedValidity
+                ? DateTime.Parse(correctedValidity, System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.RoundtripKind) : revision.ValidUntil;
+            var effectiveCurrencyId = Corrected(null, "CurrencyId") is { } correctedCurrency
+                ? long.Parse(correctedCurrency, System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture) : revision.CurrencyId;
+            if (effectiveValidUntil is null || effectiveValidUntil <= DateTime.UtcNow)
                 throw new SupplierQuoteValidationException("A current, unexpired Supplier Quote validity date is required.");
             if (revision.Lines.Count == 0)
                 throw new SupplierQuoteValidationException("The Supplier Quote has no commercial lines.");
 
-            var replay = await context.SupplierQuotedItems.AsNoTracking()
+            var replayRows = await context.SupplierQuotedItems
                 .Where(x => x.BusinessUnitId == command.BusinessUnitId &&
                     x.SourceSupplierQuoteRevisionId == revision.Id)
-                .OrderBy(x => x.Id).Select(x => x.Id).ToArrayAsync(cancellationToken);
-            if (replay.Length > 0)
+                .OrderBy(x => x.Id).ToArrayAsync(cancellationToken);
+            if (replayRows.Length > 0)
             {
+                var lastProjection = replayRows.Max(x => x.ModifiedDate ?? x.CreatedDate);
+                var latestCorrection = revision.ReviewDecisions
+                    .Where(x => x.Status == SupplierQuoteReviewStatuses.Corrected)
+                    .Select(x => (DateTime?)x.ReviewedOn).Max();
+                if (!latestCorrection.HasValue || latestCorrection <= lastProjection)
+                {
+                    await transaction.CommitAsync(cancellationToken);
+                    return new SupplierQuoteProjectionResult(quote.Id, revision.Id,
+                        replayRows.Select(x => x.Id).ToArray(), true);
+                }
+                var replayIds = replayRows.Select(x => x.Id).ToArray();
+                if (await context.Set<SourcingAward>().AsNoTracking().AnyAsync(x =>
+                        x.BusinessUnitId == command.BusinessUnitId && x.SupplierQuotedItemId.HasValue &&
+                        replayIds.Contains(x.SupplierQuotedItemId.Value) && x.Status != "CANCELLED" &&
+                        x.Status != "REJECTED", cancellationToken))
+                    throw new SupplierQuoteValidationException(
+                        "A selected Supplier offer cannot be corrected in place; capture a new Supplier Quote revision.");
+                if (replayRows.Length != revision.Lines.Count)
+                    throw new SupplierQuoteConflictException(
+                        "The commercial projection no longer matches the canonical Supplier Quote revision.");
+
+                var totalCorrectedQuantity = revision.Lines.Sum(x => EffectiveDecimal(x, "Quantity", x.Quantity));
+                var correctedOn = DateTime.UtcNow;
+                foreach (var line in revision.Lines)
+                {
+                    var row = replayRows.SingleOrDefault(x => x.SourceSupplierQuoteLineId == line.Id)
+                        ?? throw new SupplierQuoteConflictException(
+                            "The commercial projection lost canonical Supplier Quote line identity.");
+                    var quantity = EffectiveDecimal(line, "Quantity", line.Quantity);
+                    var unitPrice = EffectiveDecimal(line, "UnitPrice", line.UnitPrice);
+                    var freight = decimal.Round(revision.FreightAmount * quantity / totalCorrectedQuantity, 4);
+                    var tax = decimal.Round(revision.TaxAmount * quantity / totalCorrectedQuantity, 4);
+                    row.Quantity = quantity;
+                    row.UnitPrice = unitPrice;
+                    row.CurrencyId = effectiveCurrencyId;
+                    row.LeadTimeDays = EffectiveInt(line, "LeadTimeDays", line.LeadTimeDays);
+                    row.AvailableQuantity = EffectiveNullableDecimal(line, "AvailableQuantity", line.AvailableQuantity);
+                    row.FreightCost = freight;
+                    row.TaxAmount = tax;
+                    row.LandedUnitCost = decimal.Round((unitPrice * quantity + freight + tax) / quantity, 4);
+                    row.ValidUntil = effectiveValidUntil;
+                    row.RequestHash = Hash(new { RevisionId = revision.Id, LineId = line.Id,
+                        CorrectionReviewedOn = latestCorrection.Value });
+                    row.ModifiedBy = command.Actor.Trim();
+                    row.ModifiedDate = correctedOn;
+                    row.Version++;
+                }
+                context.ProcurementEvents.Add(new ProcurementEvent
+                {
+                    BusinessUnitId = command.BusinessUnitId,
+                    AggregateType = "SupplierQuote",
+                    AggregateId = quote.Id,
+                    AggregateVersion = quote.Version,
+                    EventType = "SUPPLIER_QUOTE_PROJECTION_CORRECTED",
+                    Actor = command.Actor.Trim(),
+                    CorrelationId = command.CorrelationId.Trim(),
+                    IdempotencyKey = $"{command.IdempotencyKey.Trim()}:correction:{latestCorrection.Value.Ticks}",
+                    PayloadJson = JsonSerializer.Serialize(new { RevisionId = revision.Id,
+                        LineIds = replayRows.Select(x => x.Id) }),
+                    OccurredOn = correctedOn
+                });
+                await context.SaveChangesAsync(cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
-                return new SupplierQuoteProjectionResult(quote.Id, revision.Id, replay, true);
+                return new SupplierQuoteProjectionResult(quote.Id, revision.Id,
+                    replayRows.Select(x => x.Id).ToArray(), false);
             }
 
             var rfqLines = await context.Rfqitems.Where(x => x.Rfqid == quote.RfqId &&
@@ -66,13 +158,17 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                 row.Version++;
             }
 
-            var totalQuantity = revision.Lines.Sum(x => x.Quantity);
+            var totalQuantity = revision.Lines.Sum(x => EffectiveDecimal(x, "Quantity", x.Quantity));
             var now = DateTime.UtcNow;
             var rows = revision.Lines.OrderBy(x => x.LineNumber).Select(line =>
             {
-                var freight = decimal.Round(revision.FreightAmount * line.Quantity / totalQuantity, 4);
-                var tax = decimal.Round(revision.TaxAmount * line.Quantity / totalQuantity, 4);
-                var landed = decimal.Round((line.UnitPrice * line.Quantity + freight + tax) / line.Quantity, 4);
+                var quantity = EffectiveDecimal(line, "Quantity", line.Quantity);
+                var unitPrice = EffectiveDecimal(line, "UnitPrice", line.UnitPrice);
+                var available = EffectiveNullableDecimal(line, "AvailableQuantity", line.AvailableQuantity);
+                var leadTime = EffectiveInt(line, "LeadTimeDays", line.LeadTimeDays);
+                var freight = decimal.Round(revision.FreightAmount * quantity / totalQuantity, 4);
+                var tax = decimal.Round(revision.TaxAmount * quantity / totalQuantity, 4);
+                var landed = decimal.Round((unitPrice * quantity + freight + tax) / quantity, 4);
                 var rfqLine = rfqLines[line.RfqItemId];
                 return new SupplierQuotedItem
                 {
@@ -89,12 +185,12 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                     SourcingCaseId = quote.SourcingCaseId,
                     ItemName = line.PartNumber ?? rfqLine.ProductShortName ?? rfqLine.ItemMaterialCode,
                     Description = line.Description,
-                    Quantity = line.Quantity,
-                    UnitPrice = line.UnitPrice,
-                    CurrencyId = revision.CurrencyId,
+                    Quantity = quantity,
+                    UnitPrice = unitPrice,
+                    CurrencyId = effectiveCurrencyId,
                     QuoteReference = quote.SupplierQuoteReference,
-                    LeadTimeDays = line.LeadTimeDays,
-                    AvailableQuantity = line.AvailableQuantity ?? line.Quantity,
+                    LeadTimeDays = leadTime,
+                    AvailableQuantity = available,
                     FreightCost = freight,
                     TaxAmount = tax,
                     DutyCost = 0,
@@ -107,7 +203,7 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                     ResponseIdempotencyKey = $"canonical:{revision.Id}:{line.Id}",
                     RequestHash = Hash(new { RevisionId = revision.Id, LineId = line.Id, command.IdempotencyKey }),
                     QuoteDate = revision.CapturedOn,
-                    ValidUntil = revision.ValidUntil,
+                    ValidUntil = effectiveValidUntil,
                     CreatedBy = command.Actor.Trim(),
                     CreatedDate = now,
                     IsActive = true
@@ -171,6 +267,9 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                 x.RfqItemId == quoteItem.RfqitemId && (x.Status == "APPROVED" || x.Status == "SPLIT_APPROVED"),
                 cancellationToken) ?? throw new SupplierQuoteValidationException(
                     "An approved Supplier award for this Customer Quote line is required.");
+            if (award.Quantity != quoteItem.Quantity)
+                throw new SupplierQuoteValidationException(
+                    "Automated pricing requires one approved Supplier award covering the full Customer Quote line; split stock or multi-award fulfilment requires an approved blended-cost decision.");
             var projected = await context.SupplierQuotedItems.AsNoTracking().SingleAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.Id == award.SupplierQuotedItemId && x.IsActive,
                 cancellationToken);
@@ -178,12 +277,47 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                 projected.SourceSupplierQuoteRevisionId is null || projected.SourceSupplierQuoteLineId is null ||
                 projected.CommercialDemandLineId is null || projected.SourcingCaseId is null)
                 throw new SupplierQuoteValidationException("The award must retain current canonical Supplier Quote lineage.");
+            var reviewDecisions = await context.SupplierQuoteReviewDecisions.AsNoTracking().Where(x =>
+                    x.BusinessUnitId == command.BusinessUnitId &&
+                    x.SupplierQuoteRevisionId == projected.SourceSupplierQuoteRevisionId.Value)
+                .OrderByDescending(x => x.ReviewedOn).ThenByDescending(x => x.Id)
+                .ToArrayAsync(cancellationToken);
+            var latestCorrection = reviewDecisions.GroupBy(x => x.SupplierQuoteFieldEvidenceId)
+                .Select(x => x.First()).Where(x => x.Status == SupplierQuoteReviewStatuses.Corrected)
+                .Select(x => (DateTime?)x.ReviewedOn).Max();
+            if (latestCorrection > (projected.ModifiedDate ?? projected.CreatedDate))
+                throw new SupplierQuoteValidationException(
+                    "The awarded Supplier offer has a newer correction; capture and approve a new Supplier Quote revision before pricing.");
+            if (projected.AvailableQuantity < award.Quantity || projected.Quantity < award.Quantity)
+                throw new SupplierQuoteValidationException("The current Supplier offer no longer covers the awarded quantity.");
+            var canonicalQuote = await context.SupplierQuotes.AsNoTracking().SingleAsync(x =>
+                x.BusinessUnitId == command.BusinessUnitId && x.Id == projected.SourceSupplierQuoteId.Value,
+                cancellationToken);
+            if (canonicalQuote.InboxStatus != SupplierQuoteInboxStatuses.ReadyForComparison)
+                throw new SupplierQuoteValidationException(
+                    "The Supplier Quote is no longer ready for commercial use; complete its latest evidence review.");
+            var supplier = await context.Suppliers.AsNoTracking().SingleOrDefaultAsync(x =>
+                x.Buid == command.BusinessUnitId && x.Id == projected.SupplierId && x.IsActive != false,
+                cancellationToken);
+            if (supplier is null || supplier.GovernanceStatus is not (SupplierGovernanceStatuses.Approved or
+                    SupplierGovernanceStatuses.Preferred or SupplierGovernanceStatuses.Provisional) ||
+                supplier.ReadinessStatus != SupplierReadinessStatuses.Ready ||
+                supplier.ComplianceStatus is SupplierComplianceStatuses.Blocked or SupplierComplianceStatuses.Failed or
+                    SupplierComplianceStatuses.Restricted ||
+                supplier.RiskStatus is SupplierRiskStatuses.Blocked or SupplierRiskStatuses.High)
+                throw new SupplierQuoteValidationException("The Supplier is no longer eligible for commercial use.");
             var rfq = await context.Rfqs.AsNoTracking().SingleAsync(x => x.BusinessUnitId == command.BusinessUnitId &&
                 x.Id == quoteItem.Quote.Rfqid, cancellationToken);
             if (string.IsNullOrWhiteSpace(rfq.NexoraSerial))
                 throw new SupplierQuoteValidationException("The Customer Quote RFQ has no Nexora Serial lineage.");
             if (quoteItem.Quote.CurrencyId.HasValue && quoteItem.Quote.CurrencyId != projected.CurrencyId)
                 throw new SupplierQuoteValidationException("Customer Quote and Supplier award currencies differ; record an approved exchange rate before pricing.");
+            var requiredOn = await context.Rfqitems.AsNoTracking().Where(x => x.Id == quoteItem.RfqitemId &&
+                    x.Rfq.BusinessUnitId == command.BusinessUnitId)
+                .Select(x => x.RequiredDesiredDate).SingleAsync(cancellationToken);
+            if (requiredOn.HasValue && (!projected.QuoteDate.HasValue || !projected.LeadTimeDays.HasValue ||
+                    projected.QuoteDate.Value.AddDays(projected.LeadTimeDays.Value) > requiredOn.Value))
+                throw new SupplierQuoteValidationException("The Supplier offer no longer meets the Customer required delivery date.");
 
             var landed = award.LandedUnitCost ?? throw new SupplierQuoteValidationException("The award has no landed-cost evidence.");
             var customerUnitPrice = decimal.Round(landed / (1m - command.TargetMarginPercent / 100m), 6,

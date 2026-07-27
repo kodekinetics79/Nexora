@@ -70,6 +70,14 @@ public sealed class EfSupplierQuoteStore(ErpRfqAutomationContext context) : ISup
     public async Task<SupplierQuoteCaptureResult> PersistRevisionAsync(SupplierQuote quote,
         SupplierQuoteRevision revision, bool isNewQuote, CancellationToken cancellationToken)
     {
+        if (context.Database.CurrentTransaction is not null)
+        {
+            if (isNewQuote && context.Entry(quote).State == EntityState.Detached) context.Add(quote);
+            if (!quote.Revisions.Contains(revision)) quote.Revisions.Add(revision);
+            await context.SaveChangesAsync(cancellationToken);
+            return new SupplierQuoteCaptureResult(quote.Id, revision.Id, revision.RevisionNumber,
+                quote.InboxStatus, revision.Evidence.Count(x => x.ReviewRequired), false);
+        }
         var strategy = context.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
@@ -88,22 +96,37 @@ public sealed class EfSupplierQuoteStore(ErpRfqAutomationContext context) : ISup
     {
         var query = context.Set<SupplierQuote>().AsNoTracking().Where(x => x.BusinessUnitId == businessUnitId);
         if (!string.IsNullOrWhiteSpace(status)) query = query.Where(x => x.InboxStatus == status);
-        return await query.OrderByDescending(x => x.UpdatedOn).Take(limit)
+        var rows = await query.OrderByDescending(x => x.UpdatedOn).Take(limit)
             .Join(context.Suppliers.AsNoTracking().Where(x => x.Buid == businessUnitId),
                 quote => quote.SupplierId, supplier => supplier.Id, (quote, supplier) => new { quote, supplier })
-            .Select(x => new SupplierQuoteInboxRow(x.quote.Id, x.quote.SupplierId, x.supplier.Name,
-                x.quote.SupplierQuoteReference, x.quote.NexoraSerial, x.quote.SourcingCaseId,
-                x.quote.CurrentRevisionNumber, x.quote.InboxStatus, x.quote.UpdatedOn,
-                context.Set<SupplierQuoteFieldEvidence>().Count(e => e.BusinessUnitId == businessUnitId &&
-                    e.SupplierQuoteRevisionId == context.Set<SupplierQuoteRevision>()
-                        .Where(r => r.BusinessUnitId == businessUnitId && r.SupplierQuoteId == x.quote.Id &&
-                                    r.RevisionNumber == x.quote.CurrentRevisionNumber)
-                        .Select(r => r.Id).FirstOrDefault() && e.ReviewRequired &&
-                    !context.Set<SupplierQuoteReviewDecision>().Any(d => d.BusinessUnitId == businessUnitId &&
-                        d.SupplierQuoteFieldEvidenceId == e.Id &&
-                        (d.Status == SupplierQuoteReviewStatuses.Accepted ||
-                         d.Status == SupplierQuoteReviewStatuses.Corrected)))))
+            .Select(x => new
+            {
+                Quote = x.quote,
+                SupplierName = x.supplier.Name,
+                RevisionId = context.Set<SupplierQuoteRevision>()
+                    .Where(r => r.BusinessUnitId == businessUnitId && r.SupplierQuoteId == x.quote.Id &&
+                        r.RevisionNumber == x.quote.CurrentRevisionNumber)
+                    .Select(r => r.Id).FirstOrDefault()
+            })
             .ToListAsync(cancellationToken);
+        var revisionIds = rows.Select(x => x.RevisionId).Where(x => x > 0).ToArray();
+        var evidence = await context.Set<SupplierQuoteFieldEvidence>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && revisionIds.Contains(x.SupplierQuoteRevisionId) &&
+                x.ReviewRequired).ToArrayAsync(cancellationToken);
+        var evidenceIds = evidence.Select(x => x.Id).ToArray();
+        var latestByEvidence = (await context.Set<SupplierQuoteReviewDecision>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && evidenceIds.Contains(x.SupplierQuoteFieldEvidenceId))
+                .OrderByDescending(x => x.ReviewedOn).ThenByDescending(x => x.Id)
+                .ToArrayAsync(cancellationToken))
+            .GroupBy(x => x.SupplierQuoteFieldEvidenceId).ToDictionary(x => x.Key, x => x.First());
+        return rows.Select(row => new SupplierQuoteInboxRow(row.Quote.Id, row.Quote.SupplierId,
+            row.SupplierName, row.Quote.SupplierQuoteReference, row.Quote.NexoraSerial,
+            row.Quote.SourcingCaseId, row.Quote.CurrentRevisionNumber, row.Quote.InboxStatus,
+            row.Quote.UpdatedOn, Math.Max(row.Quote.InboxStatus == SupplierQuoteInboxStatuses.ReviewRequired ? 1 : 0,
+                evidence.Count(item => item.SupplierQuoteRevisionId == row.RevisionId &&
+                    (!latestByEvidence.TryGetValue(item.Id, out var latest) ||
+                     latest.Status is not (SupplierQuoteReviewStatuses.Accepted or SupplierQuoteReviewStatuses.Corrected))))))
+            .ToArray();
     }
 
     public async Task<SupplierQuoteDetail?> GetDetailAsync(long businessUnitId, long supplierQuoteId,
@@ -138,6 +161,8 @@ public sealed class EfSupplierQuoteStore(ErpRfqAutomationContext context) : ISup
                 x.BusinessUnitId == command.BusinessUnitId && x.Id == command.EvidenceId &&
                 x.SupplierQuoteRevisionId == revision.Id, cancellationToken)
                 ?? throw new SupplierQuoteNotFoundException("The field evidence was not found in this revision.");
+            if (command.Status == SupplierQuoteReviewStatuses.Corrected)
+                ValidateCorrection(evidence.FieldName, command.CorrectedValue);
 
             context.Add(new SupplierQuoteReviewDecision
             {
@@ -153,12 +178,36 @@ public sealed class EfSupplierQuoteStore(ErpRfqAutomationContext context) : ISup
             });
             await context.SaveChangesAsync(cancellationToken);
 
-            var unresolved = await context.Set<SupplierQuoteFieldEvidence>().AnyAsync(x =>
-                x.BusinessUnitId == command.BusinessUnitId && x.SupplierQuoteRevisionId == revision.Id &&
-                x.ReviewRequired && !context.Set<SupplierQuoteReviewDecision>().Any(d =>
-                    d.BusinessUnitId == command.BusinessUnitId && d.SupplierQuoteFieldEvidenceId == x.Id &&
-                    (d.Status == SupplierQuoteReviewStatuses.Accepted ||
-                     d.Status == SupplierQuoteReviewStatuses.Corrected)), cancellationToken);
+            var requiredEvidenceIds = await context.Set<SupplierQuoteFieldEvidence>()
+                .Where(x => x.BusinessUnitId == command.BusinessUnitId &&
+                    x.SupplierQuoteRevisionId == revision.Id && x.ReviewRequired)
+                .Select(x => x.Id).ToArrayAsync(cancellationToken);
+            var latestDecisions = await context.Set<SupplierQuoteReviewDecision>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == command.BusinessUnitId &&
+                    requiredEvidenceIds.Contains(x.SupplierQuoteFieldEvidenceId))
+                .OrderByDescending(x => x.ReviewedOn).ThenByDescending(x => x.Id)
+                .ToArrayAsync(cancellationToken);
+            var latestByEvidence = latestDecisions.GroupBy(x => x.SupplierQuoteFieldEvidenceId)
+                .ToDictionary(x => x.Key, x => x.First());
+            var unresolved = requiredEvidenceIds.Any(id =>
+                !latestByEvidence.TryGetValue(id, out var latest) ||
+                latest.Status is not (SupplierQuoteReviewStatuses.Accepted or SupplierQuoteReviewStatuses.Corrected));
+            var latestCorrection = latestByEvidence.Values
+                .Where(x => x.Status == SupplierQuoteReviewStatuses.Corrected)
+                .Select(x => (DateTime?)x.ReviewedOn).Max();
+            if (latestCorrection.HasValue)
+            {
+                var projected = await context.SupplierQuotedItems.AsNoTracking().Where(x =>
+                        x.BusinessUnitId == command.BusinessUnitId && x.SourceSupplierQuoteRevisionId == revision.Id)
+                    .Select(x => new { x.Id, ProjectedOn = x.ModifiedDate ?? x.CreatedDate })
+                    .ToArrayAsync(cancellationToken);
+                var projectedIds = projected.Select(x => x.Id).ToArray();
+                unresolved |= projected.Any(x => latestCorrection > x.ProjectedOn) &&
+                    await context.Set<SourcingAward>().AsNoTracking().AnyAsync(x =>
+                        x.BusinessUnitId == command.BusinessUnitId && x.SupplierQuotedItemId.HasValue &&
+                        projectedIds.Contains(x.SupplierQuotedItemId.Value) &&
+                        x.Status != "CANCELLED" && x.Status != "REJECTED", cancellationToken);
+            }
             quote.InboxStatus = unresolved ? SupplierQuoteInboxStatuses.ReviewRequired
                 : SupplierQuoteInboxStatuses.ReadyForComparison;
             quote.UpdatedOn = DateTime.UtcNow;
@@ -174,7 +223,8 @@ public sealed class EfSupplierQuoteStore(ErpRfqAutomationContext context) : ISup
         var revisions = quote.Revisions.OrderByDescending(x => x.RevisionNumber).Select(revision =>
         {
             var latest = revision.ReviewDecisions.GroupBy(x => x.SupplierQuoteFieldEvidenceId)
-                .ToDictionary(x => x.Key, x => x.OrderByDescending(y => y.ReviewedOn).First());
+                .ToDictionary(x => x.Key, x => x.OrderByDescending(y => y.ReviewedOn)
+                    .ThenByDescending(y => y.Id).First());
             return new SupplierQuoteRevisionDetail(revision.Id, revision.RevisionNumber,
                 revision.CaptureChannel, revision.CurrencyId, revision.ValidUntil, revision.RequiresReview,
                 revision.CapturedOn,
@@ -192,6 +242,28 @@ public sealed class EfSupplierQuoteStore(ErpRfqAutomationContext context) : ISup
         return new SupplierQuoteDetail(quote.Id, quote.SupplierId, supplierName,
             quote.SupplierSolicitationId, quote.SourcingCaseId, quote.RfqId, quote.NexoraSerial,
             quote.SupplierQuoteReference, quote.CurrentRevisionNumber, quote.InboxStatus, quote.Version, revisions);
+    }
+
+    private static void ValidateCorrection(string fieldName, string? value)
+    {
+        var normalized = value?.Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+            throw new SupplierQuoteValidationException("A corrected value is required.");
+        var culture = System.Globalization.CultureInfo.InvariantCulture;
+        var valid = fieldName.ToUpperInvariant() switch
+        {
+            "CURRENCYID" => long.TryParse(normalized, System.Globalization.NumberStyles.Integer, culture, out var id) && id > 0,
+            "VALIDUNTIL" => DateTime.TryParse(normalized, culture,
+                System.Globalization.DateTimeStyles.RoundtripKind, out var date) && date > DateTime.UtcNow,
+            "QUANTITY" or "UNITPRICE" => decimal.TryParse(normalized,
+                System.Globalization.NumberStyles.Number, culture, out var positive) && positive > 0m,
+            "AVAILABLEQUANTITY" => decimal.TryParse(normalized,
+                System.Globalization.NumberStyles.Number, culture, out var available) && available >= 0m,
+            "LEADTIMEDAYS" => int.TryParse(normalized,
+                System.Globalization.NumberStyles.Integer, culture, out var days) && days >= 0,
+            _ => normalized.Length <= 4000 && !normalized.Any(char.IsControl)
+        };
+        if (!valid) throw new SupplierQuoteValidationException($"The corrected {fieldName} value is invalid.");
     }
 }
 

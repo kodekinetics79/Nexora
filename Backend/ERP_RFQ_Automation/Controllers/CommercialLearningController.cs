@@ -70,6 +70,14 @@ public sealed class CommercialLearningController(CommercialLearningService servi
     public Task<CommercialMemoryCard> MemoryCard(long rfqItemId, CancellationToken cancellationToken) =>
         service.GetLineCardAsync(TenantId(), rfqItemId, cancellationToken);
 
+    [HttpGet("rfqs/{rfqId:long}/intelligence")]
+    [RequireModulePermission("RFQ Management", PermissionAction.View)]
+    [RequireModulePermission("Products", PermissionAction.View)]
+    [RequireModulePermission("Supplier History", PermissionAction.View)]
+    [RequireModulePermission("Quotations", PermissionAction.View)]
+    public Task<RfqCommercialIntelligence> RfqIntelligence(long rfqId, CancellationToken cancellationToken) =>
+        service.GetRfqIntelligenceAsync(TenantId(), rfqId, cancellationToken);
+
     [HttpGet("learning-studio")]
     [RequireModulePermission("Dashboard", PermissionAction.View)]
     public Task<LearningStudioSummary> LearningStudio(CancellationToken cancellationToken) =>

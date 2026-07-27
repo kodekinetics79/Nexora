@@ -32,6 +32,7 @@ import LifecycleActions from '../../../components/common/LifecycleActions';
 import lifecycleService from '../../../api/services/commercialLifecycleService';
 import CommercialLineIntelligence from '../../../components/common/CommercialLineIntelligence';
 import procurementService from '../../../api/services/procurementService';
+import commercialLearningService from '../../../api/services/commercialLearningService';
 
 const DataField: React.FC<{ label: string; value: string | number | null; bold?: boolean; color?: string }> = ({ label, value, bold = true, color = 'text.primary' }) => (
   <Box sx={{ mb: 1.5 }}>
@@ -70,6 +71,12 @@ const ViewRFQPage: React.FC = () => {
     queryKey: ['procurement-sourcing-workbench', Number(id)],
     queryFn: () => procurementService.getWorkbench(Number(id)),
     enabled: !!id && hasPermission('RFQ Management'),
+    retry: 1,
+  });
+  const intelligenceQuery = useQuery({
+    queryKey: ['rfq-commercial-intelligence', Number(id)],
+    queryFn: () => commercialLearningService.getRfqIntelligence(Number(id)),
+    enabled: !!id && hasPermission('RFQ Management') && hasPermission('Quotations'),
     retry: 1,
   });
 
@@ -116,24 +123,26 @@ const ViewRFQPage: React.FC = () => {
   if (!rfq) return <Box sx={{ p: 4 }}><Typography>RFQ not found.</Typography></Box>;
 
   const isDraft = lifecycle?.currentStatusCode === 'DRAFT';
-  const canPrepareQuote = Boolean(rfq.customerId && rfq.leadId && rfq.rfqitems.length > 0);
+  const intelligence = intelligenceQuery.data;
+  const canPrepareQuote = intelligence?.commercialDecision === 'VIABLE_READY';
   const sourcingLines = new Map((sourcingQuery.data?.lines ?? []).map((line) => [line.id, line]));
   const offersByLine = new Map<number, number>();
   for (const offer of sourcingQuery.data?.offers ?? []) {
     offersByLine.set(offer.rfqItemId, (offersByLine.get(offer.rfqItemId) ?? 0) + 1);
   }
-  const awardedLines = new Set((sourcingQuery.data?.awards ?? []).map((award) => award.rfqItemId));
+  const intelligenceLines = new Map((intelligence?.lines ?? []).map((line) => [line.rfqItemId, line]));
   const lineMatches = (itemId: number, filter: string) => {
     const line = sourcingLines.get(itemId);
+    const decisionLine = intelligenceLines.get(itemId);
     const quoteCount = offersByLine.get(itemId) ?? 0;
     const sourcingRequired = Boolean(line && line.shortfallQuantity > 0 && line.resolution !== 'INCOMING');
-    const ready = Boolean(line && (line.shortfallQuantity <= 0 || awardedLines.has(itemId)));
+    const ready = Boolean(decisionLine && decisionLine.unfulfilledQuantity <= 0 && decisionLine.blockers.length === 0);
     if (filter === 'stock') return line?.resolution === 'IN_STOCK';
     if (filter === 'partial') return line?.resolution === 'PARTIAL';
     if (filter === 'sourcing') return sourcingRequired;
     if (filter === 'quoted') return quoteCount > 0;
     if (filter === 'unresolved') return line?.resolution === 'UNKNOWN' || line?.resolution === 'POSSIBLE_MATCH';
-    if (filter === 'pricing') return sourcingRequired && !awardedLines.has(itemId);
+    if (filter === 'pricing') return Boolean(decisionLine && decisionLine.unfulfilledQuantity > 0 && decisionLine.offerCount > 0);
     if (filter === 'ready') return ready;
     return true;
   };
@@ -148,13 +157,8 @@ const ViewRFQPage: React.FC = () => {
     { key: 'pricing', label: 'Pricing pending', value: rfq.rfqitems.filter((x) => lineMatches(x.id, 'pricing')).length, icon: <PricingIcon fontSize="small" /> },
     { key: 'ready', label: 'Ready for quote', value: rfq.rfqitems.filter((x) => lineMatches(x.id, 'ready')).length, icon: <ApproveIcon fontSize="small" /> },
   ];
-  const readyCount = summary.find((item) => item.key === 'ready')?.value ?? 0;
-  const readinessPercent = rfq.rfqitems.length ? Math.round((readyCount / rfq.rfqitems.length) * 100) : 0;
-  const primaryBlocker = summary.find((item) => item.key === 'unresolved' && item.value > 0)
-    ? 'Resolve uncertain item matches'
-    : summary.find((item) => item.key === 'pricing' && item.value > 0)
-      ? 'Select verified supplier costs'
-      : null;
+  const readinessPercent = intelligence?.readinessScore ?? 0;
+  const primaryBlocker = intelligence?.nextBestAction.explanation ?? (intelligenceQuery.isLoading ? 'Calculating from current commercial evidence' : 'Commercial intelligence unavailable');
   const evidenceItem = rfq.rfqitems.find((item) => item.id === evidenceItemId);
 
   return (
@@ -245,7 +249,7 @@ const ViewRFQPage: React.FC = () => {
             <Grid size={{ xs: 6, md: 3 }}>
               <Typography variant="caption" color="text.secondary">Commercial readiness</Typography>
               <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}><LinearProgress variant="determinate" value={readinessPercent} sx={{ flex: 1, height: 8, borderRadius: 1 }} /><Typography sx={{ fontWeight: 800 }}>{readinessPercent}%</Typography></Stack>
-              <Typography variant="caption" color={primaryBlocker ? 'warning.main' : 'success.main'}>{primaryBlocker || 'Ready to prepare Customer Quote'}</Typography>
+              <Typography variant="caption" color={intelligence?.commercialDecision === 'VIABLE_READY' ? 'success.main' : 'warning.main'}>{primaryBlocker}</Typography>
             </Grid>
           </Grid>
         </Paper>
@@ -304,6 +308,25 @@ const ViewRFQPage: React.FC = () => {
 
             <Box sx={{ mb: 2 }}><CommercialLineIntelligence stage="rfq" recordId={rfq.id} /></Box>
 
+            {intelligenceQuery.isError && <Alert severity="error" action={<Button color="inherit" onClick={() => intelligenceQuery.refetch()}>Retry</Button>}>Commercial intelligence could not be reconciled.</Alert>}
+            {intelligence && <Paper variant="outlined" sx={{ p: 2.5, borderRadius: 1 }}>
+              <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} sx={{ justifyContent: 'space-between', mb: 2 }}>
+                <Box>
+                  <Typography sx={{ fontWeight: 900 }}>Opportunity Digital Twin</Typography>
+                  <Typography variant="body2" color="text.secondary">{intelligence.nextBestAction.label}: {intelligence.nextBestAction.explanation}</Typography>
+                  <Typography variant="caption" color="text.secondary">Confidence {Math.round(intelligence.nextBestAction.confidence * 100)}% · {intelligence.digitalTwin.validity}</Typography>
+                </Box>
+                <Button variant="outlined" onClick={() => navigate(intelligence.nextBestAction.overrideAction)}>Review and decide</Button>
+              </Stack>
+              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', xl: 'repeat(4, 1fr)' }, gap: 1.5 }}>
+                {intelligence.digitalTwin.scenarios.map((scenario) => <Box key={scenario.code} sx={{ border: '1px solid', borderColor: 'divider', p: 1.5, minHeight: 132 }}>
+                  <Stack direction="row" spacing={1} sx={{ justifyContent: 'space-between', alignItems: 'center' }}><Typography variant="subtitle2" sx={{ fontWeight: 800 }}>{scenario.label}</Typography><Chip size="small" color={scenario.eligible ? 'success' : 'default'} label={scenario.eligible ? 'Eligible' : 'Evidence needed'} /></Stack>
+                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>{scenario.explanation}</Typography>
+                  {scenario.estimatedLandedCost != null && <Typography variant="body2" sx={{ mt: 1, fontWeight: 800 }}>Landed total {scenario.estimatedLandedCost.toLocaleString()} · {scenario.estimatedLeadTimeDays ?? '—'} days</Typography>}
+                </Box>)}
+              </Box>
+            </Paper>}
+
             {/* Line Items */}
             <Paper sx={{ borderRadius: 1, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>
               <Box sx={{ p: 2.5, bgcolor: '#fafafa', borderBottom: '1px solid', borderColor: 'divider' }}>
@@ -352,7 +375,7 @@ const ViewRFQPage: React.FC = () => {
                         <Typography variant="caption" sx={{ fontWeight: 700 }}>{sourcingLines.get(item.id)?.resolution.replaceAll('_', ' ') || 'Checking'}</Typography>
                         <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>ATP {sourcingLines.get(item.id)?.availableQuantity ?? '—'} · Short {sourcingLines.get(item.id)?.shortfallQuantity ?? '—'}</Typography>
                       </TableCell>
-                      <TableCell><Chip size="small" label={offersByLine.get(item.id) ?? 0} color={(offersByLine.get(item.id) ?? 0) > 0 ? 'info' : 'default'} /></TableCell>
+                      <TableCell><Stack spacing={0.5} sx={{ alignItems: 'flex-start' }}><Chip size="small" label={`${intelligenceLines.get(item.id)?.eligibleOfferCount ?? 0}/${offersByLine.get(item.id) ?? 0} eligible`} color={(intelligenceLines.get(item.id)?.eligibleOfferCount ?? 0) > 0 ? 'success' : 'default'} />{(intelligenceLines.get(item.id)?.bidQualityFlags.length ?? 0) > 0 && <Typography variant="caption" color="warning.main">{intelligenceLines.get(item.id)?.bidQualityFlags.length} quality finding(s)</Typography>}</Stack></TableCell>
                       <TableCell>
                         {(() => {
                           const sourcingLine = sourcingLines.get(item.id);

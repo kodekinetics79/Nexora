@@ -82,7 +82,9 @@ public partial class ErpRfqAutomationContext
             entity.HasOne(x => x.Currency).WithMany(x => x.SupplierQuotedItems)
                 .HasForeignKey(x => new { x.BusinessUnitId, x.CurrencyId })
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
-            entity.HasOne<Product>().WithMany().HasForeignKey(x => x.ProductId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Product>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.ProductId })
+                .HasPrincipalKey(x => new { BusinessUnitId = x.Buid, ProductId = x.Id })
+                .OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<SourcingAward>().HasOne<Currency>().WithMany()
@@ -298,10 +300,14 @@ public partial class ErpRfqAutomationContext
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne<Rfqitem>().WithMany().HasForeignKey(x => new { x.RfqItemId, x.RfqId })
                 .HasPrincipalKey(x => new { x.Id, x.Rfqid }).OnDelete(DeleteBehavior.Restrict);
-            entity.HasOne<Product>().WithMany().HasForeignKey(x => x.ProductId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Product>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.ProductId })
+                .HasPrincipalKey(x => new { BusinessUnitId = x.Buid, ProductId = x.Id })
+                .OnDelete(DeleteBehavior.Restrict);
             entity.HasOne<Warehouse>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.WarehouseId })
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
-            entity.HasOne<Models.Inventory>().WithMany().HasForeignKey(x => x.InventoryId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Models.Inventory>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.InventoryId })
+                .HasPrincipalKey(x => new { BusinessUnitId = x.Buid, InventoryId = x.Id })
+                .OnDelete(DeleteBehavior.Restrict);
             entity.HasOne<IncomingInventory>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.IncomingInventoryId })
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
             entity.HasQueryFilter(x => CurrentTenantId == null || x.BusinessUnitId == CurrentTenantId);
