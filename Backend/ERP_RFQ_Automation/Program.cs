@@ -184,6 +184,7 @@ builder.Services.AddSingleton<IProcurementDeliveryConfiguration, ProcurementDeli
 builder.Services.AddScoped<SupplierQuoteInboxService>();
 builder.Services.AddScoped<SupplierQuoteCommercialService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialLearning.CommercialLearningService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.CommercialLearning.LearningGovernanceService>();
 builder.Services.AddScoped<SupplierQuoteDocumentIntakeService>();
 builder.Services.AddHostedService<ProcurementDispatchWorker>();
 builder.Services.AddSingleton<ICommercialDocumentClassifier, DeterministicCommercialDocumentClassifier>();
@@ -275,7 +276,7 @@ builder.Services.AddScoped<QuotationUploaderService>();
 builder.Services.AddScoped<FolderService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<ILLMService, OllamaLlmService>();
-builder.Services.AddSingleton<IAiGovernanceService, AiGovernanceService>();
+builder.Services.AddScoped<IAiGovernanceService, AiGovernanceService>();
 builder.Services.AddSingleton<IAiReservationReconciler, AiReservationReconciler>();
 builder.Services.AddHostedService<AiReservationReconciliationWorker>();
 builder.Services.AddHttpClient<OllamaLlmService>(client =>

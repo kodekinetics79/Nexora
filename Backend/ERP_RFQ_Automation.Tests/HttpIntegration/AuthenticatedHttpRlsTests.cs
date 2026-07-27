@@ -200,6 +200,31 @@ public sealed class AuthenticatedHttpRlsTests(Release01BHttpApplication app)
             (await denied.GetAsync($"/api/Contact/{Release01BHttpApplication.TenantAContactId}")).StatusCode);
     }
 
+    [Fact]
+    public async Task Processing_evidence_requires_auth_permission_and_authenticated_tenant_scope()
+    {
+        using var anonymous = app.CreateClient();
+        using var allowed = Client(Release01BHttpApplication.AllowedRole, Release01BHttpApplication.TenantA);
+        using var denied = Client(Release01BHttpApplication.DeniedRole, Release01BHttpApplication.TenantA);
+        var ownPath = $"/api/processing-evidence/rfqs/{Release01BHttpApplication.TenantAProcurementRfqId}";
+        var crossTenantPath = $"/api/processing-evidence/rfqs/{Release01BHttpApplication.TenantBProcurementRfqId}";
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.GetAsync(ownPath)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await denied.GetAsync(ownPath)).StatusCode);
+
+        var own = await allowed.GetAsync(ownPath);
+        Assert.Equal(HttpStatusCode.OK, own.StatusCode);
+        using var payload = JsonDocument.Parse(await own.Content.ReadAsStringAsync());
+        Assert.Equal(Release01BHttpApplication.TenantALeadId,
+            payload.RootElement.GetProperty("leadId").GetInt64());
+        Assert.Contains(Release01BHttpApplication.TenantAProcurementRfqId,
+            payload.RootElement.GetProperty("rfqs").EnumerateArray()
+                .Select(x => x.GetProperty("rfqId").GetInt64()));
+
+        Assert.Equal(HttpStatusCode.NotFound,
+            (await allowed.GetAsync(crossTenantPath)).StatusCode);
+    }
+
     private HttpClient Client(long roleId, long? tenantId)
     {
         var client = app.CreateClient();

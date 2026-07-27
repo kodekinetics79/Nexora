@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using System.Diagnostics;
 using ERP_RFQ_Automation.AI;
 
@@ -78,7 +79,7 @@ namespace ERP_RFQ_Automation.Services
             }
 
             // Intelligent text truncation
-            var processedText = PreprocessText(fullText);
+            var processedText = PrepareProviderInput(fullText);
             var instructions = BuildExtractionInstructions();
             var maximumRequestBytes = MeasureRequestBytes(instructions, processedText);
             var governedContext = context with { ProviderClass = _providerClass };
@@ -194,6 +195,28 @@ namespace ERP_RFQ_Automation.Services
             _log.LogWarning("All extraction attempts failed");
             return null;
         }
+
+        private string PrepareProviderInput(string text)
+        {
+            var processed = PreprocessText(text);
+            if (_providerClass != AiProviderClass.External)
+                return processed;
+
+            // External fallback receives the smallest extraction chunk selected by the
+            // caller. Remove direct contact identifiers that are not needed to resolve
+            // part, quantity, date, or commercial line fields.
+            processed = EmailAddressPattern().Replace(processed, "[REDACTED_EMAIL]");
+            processed = PhoneNumberPattern().Replace(processed, "[REDACTED_PHONE]");
+            return processed;
+        }
+
+        [GeneratedRegex(@"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])",
+            RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 100)]
+        private static partial Regex EmailAddressPattern();
+
+        [GeneratedRegex(@"(?<!\d)(?:\+?\d[\d .()/-]{7,}\d)(?!\d)",
+            RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 100)]
+        private static partial Regex PhoneNumberPattern();
 
         private async Task<ProviderCallResult<LeadExtractionResult>> SendExtractionRequestAsync(
             string trustedInstructions, string untrustedDocument, CancellationToken ct)

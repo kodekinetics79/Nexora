@@ -531,15 +531,8 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
         var productStats = await context.QuoteItems.AsNoTracking().Where(x => x.Quote.BusinessUnitId == businessUnitId &&
             x.ProductId.HasValue).GroupBy(x => x.ProductId!.Value).Select(x => new
             { ProductId = x.Key, Decided = x.Count(v => v.Quote.OutcomeOn != null) }).ToArrayAsync(cancellationToken);
-        var signals = grouped.Take(50).Select(group =>
-        {
-            var latest = group.OrderByDescending(x => x.d.ReviewedOn).First();
-            var conflict = group.Select(x => x.d.CorrectedValue).Distinct().Count() > 1;
-            return new LearningSignal("SUPPLIER_QUOTE_CORRECTION", group.Key.FieldName,
-                latest.d.CorrectedValue ?? "", group.Count(), latest.d.ReviewedOn,
-                conflict ? "CONFLICT_REVIEW" : group.Count() >= 3 ? "REUSABLE" : "OBSERVING",
-                $"SupplierQuoteEvidence:{latest.e.Id}");
-        }).ToArray();
+        var signals = await new LearningGovernanceService(context)
+            .BuildSignalsAsync(businessUnitId, cancellationToken);
         return new LearningStudioSummary(DateTime.UtcNow, decisions.Count, conflicting, templateCount,
             productStats.Count(x => x.Decided >= 3), productStats.Count(x => x.Decided < 3), signals);
     }

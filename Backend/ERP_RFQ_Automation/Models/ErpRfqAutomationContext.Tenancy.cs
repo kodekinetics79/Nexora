@@ -176,6 +176,7 @@ public partial class ErpRfqAutomationContext
         ConfigureCommercialDocumentsModel(modelBuilder);
         ConfigureSupplierGovernanceModel(modelBuilder);
         ConfigureSupplierQuotesModel(modelBuilder);
+        ConfigureCommercialLearningModel(modelBuilder);
         modelBuilder.Entity<Quote>().HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
         modelBuilder.Entity<QuoteItem>().HasAlternateKey(x => new { x.Id, x.QuoteId });
         modelBuilder.Entity<ERP_RFQ_Automation.Inventory.StockReservation>()

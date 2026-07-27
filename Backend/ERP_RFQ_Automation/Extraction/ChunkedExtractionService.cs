@@ -23,6 +23,24 @@ public enum ExtractionOutcomeStatus
     Failed
 }
 
+public enum ExtractionProcessingPath
+{
+    LegacyUnknown,
+    NativeParser,
+    DeterministicRules,
+    LocalOcr,
+    LocalModel,
+    ExternalFallback
+}
+
+public enum ExtractionOcrStatus
+{
+    NotRequired,
+    Completed,
+    Partial,
+    Failed
+}
+
 /// <summary>
 /// Parsed, ready-to-extract view of ONE document. Produced by the document reader and
 /// consumed by the extraction service. <see cref="LineItemRegions"/> is the authoritative
@@ -37,6 +55,10 @@ public sealed class DocumentExtractionInput
     public string SourceId { get; init; } = Guid.NewGuid().ToString("N");
     public long? ExtractionJobId { get; init; }
     public long? SourceDocumentOccurrenceId { get; init; }
+    public ExtractionProcessingPath ProcessingPath { get; init; } = ExtractionProcessingPath.NativeParser;
+    public ExtractionOcrStatus OcrStatus { get; init; } = ExtractionOcrStatus.NotRequired;
+    public int OcrPageCount { get; init; }
+    public bool OcrTruncated { get; init; }
 
     /// <summary>Header/context text extracted once (buyer, RFQ no, dates, terms).</summary>
     public string HeaderText { get; init; } = "";
@@ -60,6 +82,10 @@ public sealed class ChunkedExtractionOutcome
     public string? ReviewReason { get; init; }
     public List<string> Diagnostics { get; init; } = new();
     public AiProviderClass? AiProviderClass { get; init; }
+    public ExtractionProcessingPath ProcessingPath { get; init; } = ExtractionProcessingPath.NativeParser;
+    public ExtractionOcrStatus OcrStatus { get; init; } = ExtractionOcrStatus.NotRequired;
+    public int OcrPageCount { get; init; }
+    public bool OcrTruncated { get; init; }
 
     /// <summary>
     /// Multi-inquiry auto-split (see <see cref="MultiInquirySplitter"/>): when the
@@ -143,6 +169,13 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
 
         if (expected == 0)
         {
+            if (_llm.ProviderClass == AiProviderClass.External)
+            {
+                return Failed(0,
+                    "External processing requires locally reduced line-item regions; whole-document disclosure is blocked.",
+                    input);
+            }
+
             // No detected line-item rows: a single whole-document pass (header + any body).
             var single = await _llm.ExtractLeadDataAsync(
                 Clip(input.HeaderText, MaxChunkChars),
@@ -151,7 +184,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                     ExtractionJobId: input.ExtractionJobId,
                     SourceDocumentOccurrenceId: input.SourceDocumentOccurrenceId), ct);
             if (single is null)
-                return Failed(0, "LLM returned no result for the document.");
+                return Failed(0, "LLM returned no result for the document.", input);
             var items0 = single.Items ?? new List<LeadItemData>();
             var status0 = single.OverallConfidence is < MinAcceptableConfidence
                 ? ExtractionOutcomeStatus.NeedsReview
@@ -176,7 +209,11 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                 ReviewReason = status0 == ExtractionOutcomeStatus.NeedsReview ? "Overall confidence below threshold." : null,
                 Diagnostics = diagnostics,
                 SplitResults = split0,
-                AiProviderClass = _llm.ProviderClass
+                AiProviderClass = _llm.ProviderClass,
+                ProcessingPath = EffectivePath(input, _llm.ProviderClass),
+                OcrStatus = input.OcrStatus,
+                OcrPageCount = input.OcrPageCount,
+                OcrTruncated = input.OcrTruncated
             };
         }
 
@@ -222,7 +259,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         }
 
         if (headerSource is null)
-            return Failed(expected, "All chunks failed; no data extracted.");
+            return Failed(expected, "All chunks failed; no data extracted.", input);
 
         // Count conservation: never claim "complete" unless every parsed row was extracted.
         var extracted = mergedItems.Count;
@@ -260,7 +297,11 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             ReviewReason = reviewReason,
             Diagnostics = diagnostics,
             SplitResults = splitResults,
-            AiProviderClass = _llm.ProviderClass
+            AiProviderClass = _llm.ProviderClass,
+            ProcessingPath = EffectivePath(input, _llm.ProviderClass),
+            OcrStatus = input.OcrStatus,
+            OcrPageCount = input.OcrPageCount,
+            OcrTruncated = input.OcrTruncated
         };
     }
 
@@ -330,7 +371,8 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             ReviewReason = reviewReason,
             Diagnostics = diagnostics,
             SplitResults = splitResults,
-            CanonicalImport = import
+            CanonicalImport = import,
+            ProcessingPath = ExtractionProcessingPath.DeterministicRules
         });
     }
 
@@ -472,7 +514,14 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
     private static string? FormatDate(DateTime? value)
         => value?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
 
-    private static ChunkedExtractionOutcome Failed(int expected, string reason)
+    private static ExtractionProcessingPath EffectivePath(DocumentExtractionInput input, AiProviderClass providerClass)
+        => providerClass switch
+        {
+            AiProviderClass.External => ExtractionProcessingPath.ExternalFallback,
+            _ => input.ProcessingPath
+        };
+
+    private static ChunkedExtractionOutcome Failed(int expected, string reason, DocumentExtractionInput? input = null)
         => new()
         {
             Status = ExtractionOutcomeStatus.Failed,
@@ -480,6 +529,10 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             ExpectedItemCount = expected,
             ExtractedItemCount = 0,
             ReviewReason = reason,
-            Diagnostics = new List<string> { reason }
+            Diagnostics = new List<string> { reason },
+            ProcessingPath = input?.ProcessingPath ?? ExtractionProcessingPath.NativeParser,
+            OcrStatus = input?.OcrStatus ?? ExtractionOcrStatus.NotRequired,
+            OcrPageCount = input?.OcrPageCount ?? 0,
+            OcrTruncated = input?.OcrTruncated ?? false
         };
 }

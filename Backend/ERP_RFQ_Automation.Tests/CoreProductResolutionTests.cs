@@ -124,7 +124,7 @@ public sealed class CoreProductResolutionTests
     }
 
     [Fact]
-    public async Task EfCatalog_ExplicitlyExcludesOtherTenantAndSharedProducts()
+    public async Task EfCatalog_ExplicitlyExcludesOtherTenantProducts()
     {
         using var database = new TestDb();
         await using (var seed = database.ContextFor(null))
@@ -133,8 +133,7 @@ public sealed class CoreProductResolutionTests
             Seed.BusinessUnit(seed, 12);
             seed.Products.AddRange(
                 DbProduct(1, 11, "TENANT-11"),
-                DbProduct(2, 12, "TENANT-12"),
-                DbProduct(3, null, "SHARED"));
+                DbProduct(2, 12, "TENANT-12"));
             await seed.SaveChangesAsync();
         }
 

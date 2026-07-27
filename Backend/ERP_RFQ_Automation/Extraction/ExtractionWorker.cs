@@ -570,10 +570,11 @@ public sealed class DefaultExtractionDocumentReader : IExtractionDocumentReader
                 return new DocumentExtractionInput
                 {
                     BusinessUnitId = job.BusinessUnitId,
-                    SourceId = $"{job.Id}:claim:{job.Attempts}",
+                    SourceId = $"job:{job.Id}",
                     ExtractionJobId = job.Id,
                     SourceDocumentOccurrenceId = job.SourceDocumentOccurrenceId,
                     SourceDocumentName = name,
+                    ProcessingPath = ExtractionProcessingPath.DeterministicRules,
                     IsStructured = true,
                     StructuredRows = rows,
                     HeaderText = string.Join('\n', lines.Take(1)),
@@ -592,10 +593,11 @@ public sealed class DefaultExtractionDocumentReader : IExtractionDocumentReader
         return new DocumentExtractionInput
         {
             BusinessUnitId = job.BusinessUnitId,
-            SourceId = $"{job.Id}:claim:{job.Attempts}",
+            SourceId = $"job:{job.Id}",
             ExtractionJobId = job.Id,
             SourceDocumentOccurrenceId = job.SourceDocumentOccurrenceId,
             SourceDocumentName = name,
+            ProcessingPath = ExtractionProcessingPath.NativeParser,
             IsStructured = false,
             HeaderText = header,
             LineItemRegions = regions
@@ -764,10 +766,12 @@ public sealed class LeadPersister : ILeadPersister
                         .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.Id == job.SourceDocumentOccurrenceId)
                         .Select(x => x.LogicalGroupKey).SingleOrDefaultAsync(ct);
             }
-            var attributedExternalCost = await _context.Set<ERP_RFQ_Automation.AI.AiRequest>()
+            var externalRequests = await _context.Set<ERP_RFQ_Automation.AI.AiRequest>()
+                .AsNoTracking()
                 .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.ExtractionJobId == job.Id
                     && x.ProviderClass == ERP_RFQ_Automation.AI.AiProviderClass.External)
-                .SumAsync(x => x.EstimatedCost ?? 0m, ct);
+                .ToListAsync(ct);
+            var attributedExternalCost = ProcessingCostAttribution.Summarize(externalRequests).Amount;
             for (var i = 0; i < leads.Count; i++)
             {
                 var path = outcome.CanonicalImport is not null
@@ -870,11 +874,19 @@ public sealed class LeadPersister : ILeadPersister
             source.StartExtraction();
         var run = ExtractionRun.Create(job.BusinessUnitId, source.Id, Guid.NewGuid(), job.Id,
             job.Attempts, "llm-unstructured/v1", "lead-extraction/v1");
+        run.RecordProcessingEvidence(outcome.ProcessingPath, outcome.OcrStatus,
+            outcome.OcrPageCount, outcome.OcrTruncated);
+        var externalRequests = await _context.Set<ERP_RFQ_Automation.AI.AiRequest>()
+            .AsNoTracking()
+            .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.ExtractionJobId == job.Id
+                && x.ProviderClass == ERP_RFQ_Automation.AI.AiProviderClass.External)
+            .ToListAsync(ct);
+        var cost = ProcessingCostAttribution.Summarize(externalRequests);
         run.RecordCostStatus(
-            outcome.AiProviderClass == ERP_RFQ_Automation.AI.AiProviderClass.External ? "RateUnavailable" : "LocalNoCharge",
-            "LocalNoCharge",
-            outcome.AiProviderClass == ERP_RFQ_Automation.AI.AiProviderClass.External ? null : 0m,
-            outcome.AiProviderClass == ERP_RFQ_Automation.AI.AiProviderClass.External ? null : "USD");
+            cost.Status,
+            outcome.OcrStatus == ExtractionOcrStatus.NotRequired ? "NotRequired" : "LocalUnpriced",
+            cost.Amount,
+            cost.Currency);
         run.Start();
         _context.Add(run);
         await _context.SaveChangesAsync(ct);
@@ -886,7 +898,7 @@ public sealed class LeadPersister : ILeadPersister
         }
         if (source.Corpus.Status == CorpusStatus.Processing)
             source.Corpus.RequireReview();
-        run.Complete(0, 0, 0, 0, 0, 0);
+        run.Complete(outcome.OcrPageCount, 0, 0, outcome.ExtractedItemCount, 0, 0);
         await _context.SaveChangesAsync(ct);
     }
 

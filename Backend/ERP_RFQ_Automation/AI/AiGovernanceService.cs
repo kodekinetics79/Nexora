@@ -69,11 +69,16 @@ public sealed class AiGovernanceService : IAiGovernanceService
 {
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ITenantScopeAccessor _tenantScope;
+    private readonly ITenantContext _tenantContext;
 
-    public AiGovernanceService(IServiceScopeFactory scopeFactory, ITenantScopeAccessor tenantScope)
+    public AiGovernanceService(
+        IServiceScopeFactory scopeFactory,
+        ITenantScopeAccessor tenantScope,
+        ITenantContext tenantContext)
     {
         _scopeFactory = scopeFactory;
         _tenantScope = tenantScope;
+        _tenantContext = tenantContext;
     }
 
     public async Task<AiReservation> ReserveAsync(
@@ -82,6 +87,7 @@ public sealed class AiGovernanceService : IAiGovernanceService
     {
         if (context.BusinessUnitId <= 0 || string.IsNullOrWhiteSpace(context.IdempotencyKey))
             throw new AiPolicyDeniedException("invalid_context");
+        EnsureTenant(context.BusinessUnitId);
 
         var now = DateTime.UtcNow;
         var inputHash = Hash(input);
@@ -120,7 +126,7 @@ public sealed class AiGovernanceService : IAiGovernanceService
             if (denial is null && context.ProviderClass == AiProviderClass.External)
             {
                 var recentProviderClasses = await db.AiRequests.AsNoTracking()
-                    .Where(x => x.BusinessUnitId == context.BusinessUnitId && x.Status == AiCallStatuses.Succeeded)
+                    .Where(x => x.BusinessUnitId == context.BusinessUnitId && x.Status != AiCallStatuses.Denied)
                     .OrderByDescending(x => x.CreatedOn).Take(100).Select(x => x.ProviderClass).ToListAsync(ct);
                 if ((recentProviderClasses.Count(x => x == AiProviderClass.External) + 1m) / (recentProviderClasses.Count + 1m) > .10m)
                     denial = "external_dependency_cap";
@@ -166,6 +172,28 @@ public sealed class AiGovernanceService : IAiGovernanceService
             budget.SoftTokenLimit = policy!.MonthlySoftTokenLimit;
             budget.HardTokenLimit = policy.MonthlyHardTokenLimit;
 
+            if (policy.MaxTokensPerDocument is { } documentLimit
+                && (context.SourceDocumentOccurrenceId.HasValue || context.ExtractionJobId.HasValue))
+            {
+                var documentUsage = await db.AiRequests.AsNoTracking()
+                    .Where(x => x.BusinessUnitId == context.BusinessUnitId
+                        && x.Status != AiCallStatuses.Denied
+                        && (context.SourceDocumentOccurrenceId.HasValue
+                            ? x.SourceDocumentOccurrenceId == context.SourceDocumentOccurrenceId
+                            : x.ExtractionJobId == context.ExtractionJobId))
+                    .SumAsync(x => x.CompletedOn == null
+                        ? x.ReservedTokens
+                        : x.InputTokens + x.OutputTokens, ct);
+                if (checked(documentUsage + reserve) > documentLimit)
+                {
+                    db.AiRequests.Add(NewRequest(context, provider, model, input, inputHash, estimatedInput, 0, now,
+                        AiCallStatuses.Denied, "document_budget_exceeded"));
+                    await db.SaveChangesAsync(ct);
+                    await tx.CommitAsync(ct);
+                    throw new AiPolicyDeniedException("document_budget_exceeded");
+                }
+            }
+
             if (budget.HardTokenLimit is { } hard
                 && checked(budget.ReservedTokens + budget.SettledTokens + reserve) > hard)
             {
@@ -181,6 +209,8 @@ public sealed class AiGovernanceService : IAiGovernanceService
             budget.UpdatedOn = now;
             var request = NewRequest(context, provider, model, input, inputHash, estimatedInput, reserve, now,
                 AiCallStatuses.Reserved, null);
+            request.BudgetWarning = budget.SoftTokenLimit is { } soft
+                && budget.ReservedTokens + budget.SettledTokens > soft;
             db.AiRequests.Add(request);
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
@@ -254,6 +284,32 @@ public sealed class AiGovernanceService : IAiGovernanceService
             request.ErrorCode = errorCode;
             request.CompletedOn = DateTime.UtcNow;
 
+            if (request.ProviderClass == AiProviderClass.External)
+            {
+                var policy = await db.AiProcessingPolicies.SingleAsync(
+                    x => x.BusinessUnitId == reservation.BusinessUnitId, ct);
+                if (policy.ExternalInputCostPerMillionTokens.HasValue
+                    && policy.ExternalOutputCostPerMillionTokens.HasValue
+                    && !string.IsNullOrWhiteSpace(policy.ExternalCostCurrency)
+                    && !string.IsNullOrWhiteSpace(policy.ExternalPricingVersion))
+                {
+                    request.EstimatedCost = decimal.Round(
+                        (Math.Max(0, inputTokens) * policy.ExternalInputCostPerMillionTokens.Value
+                         + Math.Max(0, outputTokens) * policy.ExternalOutputCostPerMillionTokens.Value) / 1_000_000m,
+                        6, MidpointRounding.AwayFromZero);
+                    request.CostCurrency = policy.ExternalCostCurrency.Trim().ToUpperInvariant();
+                    request.CostStatus = AiCostStatuses.EstimatedConfiguredRate;
+                    request.CostPricingVersion = policy.ExternalPricingVersion;
+                }
+                else
+                {
+                    request.EstimatedCost = null;
+                    request.CostCurrency = null;
+                    request.CostStatus = AiCostStatuses.RateUnavailable;
+                    request.CostPricingVersion = null;
+                }
+            }
+
             var period = new DateTime(request.CreatedOn.Year, request.CreatedOn.Month, 1, 0, 0, 0, DateTimeKind.Utc);
             var budget = await db.AiBudgetPeriods.SingleAsync(
                 x => x.BusinessUnitId == reservation.BusinessUnitId && x.PeriodStartUtc == period, ct);
@@ -287,11 +343,19 @@ public sealed class AiGovernanceService : IAiGovernanceService
             InjectionDetected = context.InjectionDetected,
             EstimatedInputTokens = estimatedInput,
             ReservedTokens = reserved,
-            CostStatus = context.ProviderClass == AiProviderClass.Local ? "LocalUnpriced" : "RateUnavailable",
+            CostStatus = context.ProviderClass == AiProviderClass.Local
+                ? AiCostStatuses.LocalUnpriced
+                : AiCostStatuses.RateUnavailable,
             ErrorCode = errorCode,
             CreatedOn = now,
             CompletedOn = status == AiCallStatuses.Denied ? now : null
         };
+
+    private void EnsureTenant(long businessUnitId)
+    {
+        if (_tenantContext.BusinessUnitId != businessUnitId)
+            throw new AiPolicyDeniedException("tenant_context_mismatch");
+    }
 
     private static string? PolicyDenial(
         AiProcessingPolicy? policy,

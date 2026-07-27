@@ -24,6 +24,14 @@ public static class AiTokenSources
     public const string Estimated = "Estimated";
 }
 
+public static class AiCostStatuses
+{
+    public const string LocalUnpriced = "LocalUnpriced";
+    public const string RateUnavailable = "RateUnavailable";
+    public const string EstimatedConfiguredRate = "EstimatedConfiguredRate";
+    public const string Priced = "Priced";
+}
+
 public sealed class AiProcessingPolicy
 {
     public long BusinessUnitId { get; set; }
@@ -34,6 +42,11 @@ public sealed class AiProcessingPolicy
     public string? AllowedModel { get; set; }
     public long? MonthlySoftTokenLimit { get; set; }
     public long? MonthlyHardTokenLimit { get; set; }
+    public long? MaxTokensPerDocument { get; set; }
+    public decimal? ExternalInputCostPerMillionTokens { get; set; }
+    public decimal? ExternalOutputCostPerMillionTokens { get; set; }
+    public string? ExternalCostCurrency { get; set; }
+    public string? ExternalPricingVersion { get; set; }
     public long Version { get; set; } = 1;
     public DateTime UpdatedOn { get; set; }
     public string UpdatedBy { get; set; } = null!;
@@ -60,11 +73,13 @@ public sealed class AiRequest
     public bool InjectionDetected { get; set; }
     public long EstimatedInputTokens { get; set; }
     public long ReservedTokens { get; set; }
+    public bool BudgetWarning { get; set; }
     public long InputTokens { get; set; }
     public long OutputTokens { get; set; }
     public decimal? EstimatedCost { get; set; }
     public string? CostCurrency { get; set; }
-    public string CostStatus { get; set; } = "NotPriced";
+    public string CostStatus { get; set; } = AiCostStatuses.RateUnavailable;
+    public string? CostPricingVersion { get; set; }
     public string TokenSource { get; set; } = AiTokenSources.Estimated;
     public string? ErrorCode { get; set; }
     public DateTime CreatedOn { get; set; }

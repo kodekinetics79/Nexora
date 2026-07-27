@@ -19,8 +19,24 @@ export interface CustomerCommercialMemory { customerId: number; customerName: st
 export interface SalesRepCommercialMemory { salesRepUserId: number; salesRepName: string; ownedOpportunities: number; decidedCount: number; wonCount: number; lostCount: number; commercialConstraintLosses: number; customerDecisionLosses: number; executionReviewLosses: number; followUpsDue: number; followUpsCompleted: number; conversionRatePercent?: number | null; weightedCoverage: number; firstMeaningfulActionHours?: number | null; quoteTurnaroundHours?: number | null; followUpCompletionPercent?: number | null; insightCaptureCount: number; valueConversionPercent?: number | null; coachingOpportunity: string; evidence: CommercialEvidenceLink[] }
 export interface InventoryDemandMemory { productId: number; partNumber: string; productName: string; observedDemand: number; qualifiedDemand: number; quotedDemand: number; probabilityWeightedDemand: number; committedDemand: number; fulfilledDemand: number; decidedOpportunities: number; wonOpportunities: number; conversionRatePercent?: number | null; stockingRecommendationEligible: boolean; recommendation: string; evidence: CommercialEvidenceLink[] }
 export interface CommercialMemoryCard { nexoraSerial: string; rfqId: number; rfqItemId: number; product?: ProductCommercialMemory | null; inventory?: InventoryDemandMemory | null; suppliers: SupplierCommercialEvaluation[]; nextAction: string }
-export interface LearningSignal { signalType: string; subject: string; value: string; sampleSize: number; lastObservedOn: string; status: string; evidenceReference: string }
+export type LearningGovernanceAction = "approve" | "disable" | "rollback";
+export interface LearningSignal {
+  signalId: string;
+  signalType: string;
+  subject: string;
+  value: string;
+  sampleSize: number;
+  lastObservedOn: string;
+  status: string;
+  evidenceReference: string;
+  governanceVersion: number;
+  governanceStatus?: string | null;
+  governanceAction?: string | null;
+  governedOn?: string | null;
+  governedByUserId?: number | null;
+}
 export interface LearningStudioSummary { generatedAt: string; approvedCorrections: number; conflictingCorrections: number; supplierQuoteTemplates: number; productMemoriesWithDecisions: number; productMemoriesBelowThreshold: number; recentSignals: LearningSignal[] }
+export interface LearningGovernanceCommand { reason: string; expectedVersion: number; revertsVersion?: number }
 export interface ExplainableRecommendation { code: string; label: string; explanation: string; confidence: number; userOverrideAllowed: boolean; overrideAction: string; evidence: CommercialEvidenceLink[] }
 export interface RfqLineIntelligence { rfqItemId: number; partNumber: string; requestedQuantity: number; stockQuantity: number; unfulfilledQuantity: number; fulfilmentRoute: string; offerCount: number; eligibleOfferCount: number; blockers: string[]; bidQualityFlags: BidQualityFlag[] }
 export interface OpportunityScenario { code: string; label: string; eligible: boolean; explanation: string; estimatedLandedCost?: number | null; currencyId?: number | null; estimatedLeadTimeDays?: number | null; confidence: number; assumptions: string[]; evidence: CommercialEvidenceLink[] }
@@ -44,5 +60,19 @@ const commercialLearningService = {
     (await axiosInstance.get(`/api/commercial-learning/rfqs/${rfqId}/intelligence`)).data,
   getStudio: async (): Promise<LearningStudioSummary> =>
     (await axiosInstance.get("/api/commercial-learning/learning-studio")).data,
+  governSignal: async (
+    signalId: string,
+    action: LearningGovernanceAction,
+    command: LearningGovernanceCommand,
+  ): Promise<void> => {
+    const body = action === "rollback"
+      ? { ...command, revertsVersion: command.expectedVersion }
+      : command;
+    await axiosInstance.post(
+      `/api/commercial-learning/learning-studio/${encodeURIComponent(signalId)}/${action}`,
+      body,
+      { headers: { "Idempotency-Key": crypto.randomUUID() } },
+    );
+  },
 };
 export default commercialLearningService;

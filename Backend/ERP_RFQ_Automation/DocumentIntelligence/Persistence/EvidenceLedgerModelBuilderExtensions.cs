@@ -76,6 +76,8 @@ public static class EvidenceLedgerModelBuilderExtensions
                     "(status = 'Failed' AND failure_reason IS NOT NULL) OR (status <> 'Failed' AND failure_reason IS NULL)");
                 table.HasCheckConstraint("ck_extraction_runs_cost",
                     "(processing_cost_amount IS NULL AND processing_cost_currency IS NULL) OR (processing_cost_amount >= 0 AND processing_cost_currency ~ '^[A-Z]{3}$')");
+                table.HasCheckConstraint("ck_extraction_runs_ocr_evidence",
+                    "ocr_page_count >= 0 AND (ocr_status <> 'NotRequired' OR (ocr_page_count = 0 AND ocr_truncated = FALSE))");
             });
             entity.HasKey(x => x.Id);
             entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id })
@@ -101,6 +103,10 @@ public static class EvidenceLedgerModelBuilderExtensions
             entity.Property(x => x.EvidenceCount).HasColumnName("evidence_count");
             entity.Property(x => x.FindingCount).HasColumnName("finding_count");
             entity.Property(x => x.FailureReason).HasColumnName("failure_reason").HasMaxLength(4_000);
+            entity.Property(x => x.ProcessingPath).HasColumnName("processing_path").HasConversion<string>().HasMaxLength(32);
+            entity.Property(x => x.OcrStatus).HasColumnName("ocr_status").HasConversion<string>().HasMaxLength(32);
+            entity.Property(x => x.OcrPageCount).HasColumnName("ocr_page_count");
+            entity.Property(x => x.OcrTruncated).HasColumnName("ocr_truncated");
             entity.Property(x => x.ProcessingCostAmount).HasColumnName("processing_cost_amount").HasPrecision(18, 6);
             entity.Property(x => x.ProcessingCostCurrency).HasColumnName("processing_cost_currency").HasMaxLength(3).IsFixedLength();
             entity.Property(x => x.ProcessingCostStatus).HasColumnName("processing_cost_status").HasMaxLength(32);

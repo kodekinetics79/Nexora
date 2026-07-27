@@ -132,6 +132,37 @@ public sealed class AiProviderPrivacySurfaceTests
     }
 
     [Fact]
+    public async Task Policy_denial_occurs_before_external_http_execution()
+    {
+        var handler = new RecordingHandler(_ => Success("{}"));
+        var service = CreateService(handler, new CapturingLogger<OllamaLlmService>(),
+            new DenyingGovernance(), external: true);
+
+        await Assert.ThrowsAsync<AiPolicyDeniedException>(() =>
+            service.ExtractLeadDataAsync("PART-1 quantity 10", Context()));
+
+        Assert.Empty(handler.RequestBodies);
+    }
+
+    [Fact]
+    public async Task External_fallback_redacts_direct_contact_identifiers()
+    {
+        var handler = new RecordingHandler(_ => Success("{\"Items\":[]}"));
+        var service = CreateService(handler, new CapturingLogger<OllamaLlmService>(),
+            new PermissiveGovernance(), external: true);
+
+        await service.ExtractLeadDataAsync(
+            "Contact buyer@example.com or +1 (212) 555-0199 for PART-1 quantity 10", Context());
+
+        var body = Assert.Single(handler.RequestBodies);
+        Assert.DoesNotContain("buyer@example.com", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("212) 555-0199", body, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED_EMAIL]", body, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED_PHONE]", body, StringComparison.Ordinal);
+        Assert.Contains("PART-1", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task HealthResponse_IsOpaqueAndNeverReturnsProviderBodiesOrKeyMetadata()
     {
         var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.BadGateway)
@@ -166,12 +197,12 @@ public sealed class AiProviderPrivacySurfaceTests
 
     private static OllamaLlmService CreateService(
         HttpMessageHandler handler, ILogger<OllamaLlmService> logger,
-        IAiGovernanceService? governance = null)
+        IAiGovernanceService? governance = null, bool external = false)
         => new(new HttpClient(handler), logger, Configuration(new Dictionary<string, string?>
         {
-            ["Ollama:BaseUrl"] = "https://ollama.test/",
+            ["Ollama:BaseUrl"] = external ? "https://ollama.test/" : "http://127.0.0.1:11434/",
             ["Ollama:Model"] = "test-model",
-            ["Ollama:ApiKey"] = "test-key"
+            ["Ollama:ApiKey"] = external ? "test-key" : null
         }), governance ?? new PermissiveGovernance());
 
     private static AiCallContext Context() =>
@@ -235,6 +266,18 @@ public sealed class AiProviderPrivacySurfaceTests
             CompletedInputTokens = inputTokens;
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class DenyingGovernance : IAiGovernanceService
+    {
+        public Task<AiReservation> ReserveAsync(AiCallContext context, string provider, string model,
+            string input, int maximumInputBytes, int maximumOutputTokens, int maximumAttempts, CancellationToken ct)
+            => Task.FromException<AiReservation>(new AiPolicyDeniedException("external_processing_denied"));
+        public Task RecordAttemptAsync(AiReservation reservation, AiAttemptCompletion attempt, CancellationToken ct)
+            => throw new InvalidOperationException("No provider attempt is permitted after policy denial.");
+        public Task CompleteAsync(AiReservation reservation, string status, long inputTokens,
+            long outputTokens, string tokenSource, string? output, string? errorCode, CancellationToken ct)
+            => throw new InvalidOperationException("No provider completion is permitted after policy denial.");
     }
 
     private sealed class CapturingLogger<T> : ILogger<T>

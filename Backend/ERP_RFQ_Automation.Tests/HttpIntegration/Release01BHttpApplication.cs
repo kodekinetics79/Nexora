@@ -282,9 +282,12 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         db.Leads.AddRange(
             Lead(TenantALeadId, TenantA, 86_301, TenantACustomerId, "HTTP-A-RFQ"),
             Lead(TenantBLeadId, TenantB, 86_302, TenantBCustomerId, "HTTP-B-RFQ"));
+        await db.SaveChangesAsync();
 
         ProcurementTestData.SeedGraph(db, TenantA, TenantAProcurementOffset);
         ProcurementTestData.SeedGraph(db, TenantB, TenantBProcurementOffset);
+        LinkRfqToLead(db, TenantAProcurementRfqId, TenantALeadId);
+        LinkRfqToLead(db, TenantBProcurementRfqId, TenantBLeadId);
 
         db.Set<LeadIngestionBatch>().AddRange(
             Batch(TenantABatchId, TenantA, now),
@@ -357,6 +360,16 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
             Attachment(TenantAAttachmentId, TenantALeadId, "tenant-a.txt", tenantABytes.Length),
             Attachment(TenantBAttachmentId, TenantBLeadId, "tenant-b.txt", tenantBBytes.Length));
         await db.SaveChangesAsync();
+    }
+
+    private static void LinkRfqToLead(ErpRfqAutomationContext db, long rfqId, long leadId)
+    {
+        var rfq = db.Rfqs.Local.Single(x => x.Id == rfqId);
+        var lead = db.Leads.Local.Single(x => x.Id == leadId);
+        db.Entry(rfq).Property(x => x.CommercialCaseId).CurrentValue = null;
+        db.Entry(rfq).Property(x => x.NexoraSerial).CurrentValue = null;
+        rfq.LeadId = leadId;
+        rfq.InheritCommercialIdentity(lead);
     }
 
     private static BusinessUnit BusinessUnit(long id, string code) => new()

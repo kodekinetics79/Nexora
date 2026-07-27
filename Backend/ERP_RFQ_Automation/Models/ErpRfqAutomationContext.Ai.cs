@@ -20,6 +20,10 @@ public partial class ErpRfqAutomationContext
             entity.Property(e => e.AllowedPurposes).HasMaxLength(500).IsRequired();
             entity.Property(e => e.AllowedProvider).HasMaxLength(100);
             entity.Property(e => e.AllowedModel).HasMaxLength(255);
+            entity.Property(e => e.ExternalInputCostPerMillionTokens).HasPrecision(18, 6);
+            entity.Property(e => e.ExternalOutputCostPerMillionTokens).HasPrecision(18, 6);
+            entity.Property(e => e.ExternalCostCurrency).HasMaxLength(3);
+            entity.Property(e => e.ExternalPricingVersion).HasMaxLength(100);
             entity.Property(e => e.Version).HasDefaultValue(1L).IsConcurrencyToken();
             entity.Property(e => e.UpdatedBy).HasMaxLength(255).IsRequired();
             entity.HasOne<BusinessUnit>().WithOne()
@@ -45,6 +49,7 @@ public partial class ErpRfqAutomationContext
             entity.Property(e => e.EstimatedCost).HasPrecision(18, 6);
             entity.Property(e => e.CostCurrency).HasMaxLength(3);
             entity.Property(e => e.CostStatus).HasMaxLength(32).IsRequired();
+            entity.Property(e => e.CostPricingVersion).HasMaxLength(100);
             entity.Property(e => e.ErrorCode).HasMaxLength(100);
             entity.HasIndex(e => new { e.BusinessUnitId, e.IdempotencyKey }).IsUnique()
                 .HasDatabaseName("UX_AiRequests_BU_IdempotencyKey");

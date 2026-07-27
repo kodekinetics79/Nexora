@@ -66,7 +66,7 @@ public sealed class LeadIngestionOccurrence
     public string PolicyVersion { get; set; } = "release-01a/v1";
     public LeadProcessingPath ProcessingPath { get; set; }
     public bool ExternalAiUsed { get; set; }
-    public decimal ExternalCost { get; set; }
+    public decimal? ExternalCost { get; set; }
     public DateTimeOffset? SourceReceivedAtUtc { get; set; }
     public DateTimeOffset IngestedAtUtc { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; }

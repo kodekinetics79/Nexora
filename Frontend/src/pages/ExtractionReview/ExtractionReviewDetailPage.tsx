@@ -21,9 +21,10 @@ import {
   ArrowBack as BackIcon,
 } from '@mui/icons-material';
 import dayjs from 'dayjs';
+import { ChevronDown, ChevronUp, Cloud, Cpu, FileSearch } from 'lucide-react';
 import { useSnackbar } from 'notistack';
 import extractionReviewService from '../../api/services/extractionReviewService';
-import type { SubmitReviewPayload, ReviewItemPayload } from '../../api/services/extractionReviewService';
+import type { LeadProcessingEvidence, SubmitReviewPayload, ReviewItemPayload } from '../../api/services/extractionReviewService';
 import type { LeadItemResponseDTO } from '../../api/services/leadService';
 import { openAuthenticatedFile } from '../../utils/authenticatedFile';
 
@@ -64,6 +65,23 @@ interface ReviewHeaderState {
 }
 
 const LOW_CONFIDENCE = 0.5;
+
+const readable = (text?: string | null): string =>
+  (text || 'Not recorded').replaceAll('_', ' ').toLowerCase().replace(/^./, (letter) => letter.toUpperCase());
+
+const costLabel = (
+  amount: number | null | undefined,
+  currency: string | null | undefined,
+  status: string | null | undefined,
+): string => {
+  const normalizedStatus = (status || '').toUpperCase();
+  if (amount == null || !Number.isFinite(amount) || normalizedStatus.includes('UNKNOWN') || normalizedStatus.includes('UNAVAILABLE') || normalizedStatus.includes('UNPRICED')) {
+    return 'Cost unavailable';
+  }
+  return `${currency || 'Currency not recorded'} ${amount.toLocaleString(undefined, { maximumFractionDigits: 6 })}`;
+};
+
+const evidenceValue = (value: string | number | null | undefined): string => value == null || value === '' ? 'Not linked' : String(value);
 
 const toDateInput = (value?: string | null): string => {
   if (!value) return '';
@@ -110,6 +128,12 @@ const ExtractionReviewDetailPage: React.FC = () => {
     queryFn: () => extractionReviewService.getLead(Number(id)),
     enabled: !!id,
   });
+  const processingEvidence = useQuery({
+    queryKey: ['lead-processing-evidence', Number(id)],
+    queryFn: () => extractionReviewService.getProcessingEvidence(Number(id)),
+    enabled: !!id && Number.isFinite(Number(id)),
+    retry: false,
+  });
 
   const [header, setHeader] = useState<ReviewHeaderState>({
     rfqno: '', buyersName: '', bidClosingDate: '', opportunityNo: '', headerRemarks: '',
@@ -118,6 +142,7 @@ const ExtractionReviewDetailPage: React.FC = () => {
   const [newRowSeq, setNewRowSeq] = useState(-1);
   const [approveDialogOpen, setApproveDialogOpen] = useState(false);
   const [approvalReason, setApprovalReason] = useState('Verified against the source document.');
+  const [processingEvidenceExpanded, setProcessingEvidenceExpanded] = useState(false);
 
   // Seed editable state once the lead loads.
   useEffect(() => {
@@ -301,18 +326,18 @@ const ExtractionReviewDetailPage: React.FC = () => {
       {/* Header row: title + confidence + actions */}
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 3, flexWrap: 'wrap', gap: 2 }}>
         <Box>
-          <Typography variant="h5" sx={{ fontWeight: 950, letterSpacing: '-0.02em', mb: 0.5 }}>
+          <Typography variant="h5" sx={{ fontWeight: 950, mb: 0.5 }}>
             Review Extraction — {lead.rfqno || `#${lead.id}`}
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>
-            Verify and correct the AI-extracted data before approving
+            Verify the extracted data against its source evidence before approving
           </Typography>
         </Box>
         <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center' }}>
           {/* Prominent overall confidence */}
           <Paper elevation={0} sx={{ px: 2, py: 1, borderRadius: 2, border: '1px solid', borderColor: 'divider', display: 'flex', alignItems: 'center', gap: 1.5 }}>
-            <Box role="img" aria-label={`Overall AI confidence ${aiConfidence} percent`}>
-              <Typography sx={{ fontSize: '0.6rem', fontWeight: 900, color: 'text.disabled', textTransform: 'uppercase' }}>AI Confidence</Typography>
+            <Box role="img" aria-label={`Overall extraction confidence ${aiConfidence} percent`}>
+              <Typography sx={{ fontSize: '0.6rem', fontWeight: 900, color: 'text.disabled', textTransform: 'uppercase' }}>Extraction confidence</Typography>
               <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
                 <Typography sx={{ fontWeight: 900, fontSize: '1.1rem', color: `${confidenceColor}.main` }}>{aiConfidence}%</Typography>
                 <Box sx={{ width: 90, height: 6, bgcolor: 'action.hover', borderRadius: 3, overflow: 'hidden' }}>
@@ -359,6 +384,15 @@ const ExtractionReviewDetailPage: React.FC = () => {
           ? reviewReasonFromState
           : `This document was flagged for manual review${aiConfidence < 70 ? ` (extraction confidence ${aiConfidence}%)` : ''}. Please verify the fields below before approving.`}
       </Alert>
+
+      <ProcessingEvidencePanel
+        evidence={processingEvidence.data}
+        loading={processingEvidence.isLoading}
+        failed={processingEvidence.isError}
+        expanded={processingEvidenceExpanded}
+        onToggle={() => setProcessingEvidenceExpanded((current) => !current)}
+        onRetry={() => void processingEvidence.refetch()}
+      />
 
       <Grid container spacing={3}>
         {/* Editable header */}
@@ -566,3 +600,86 @@ const ExtractionReviewDetailPage: React.FC = () => {
 };
 
 export default ExtractionReviewDetailPage;
+
+interface ProcessingEvidencePanelProps {
+  evidence: LeadProcessingEvidence | null | undefined;
+  loading: boolean;
+  failed: boolean;
+  expanded: boolean;
+  onToggle: () => void;
+  onRetry: () => void;
+}
+
+function ProcessingEvidencePanel({ evidence, loading, failed, expanded, onToggle, onRetry }: ProcessingEvidencePanelProps) {
+  if (loading) {
+    return <Paper variant="outlined" sx={{ mb: 3, p: 2 }}><Stack direction="row" spacing={1.5} sx={{ alignItems: 'center' }}><CircularProgress size={20} /><Typography variant="body2">Loading authoritative processing evidence...</Typography></Stack></Paper>;
+  }
+  if (failed) {
+    return <Alert severity="warning" sx={{ mb: 3 }} action={<Button size="small" onClick={onRetry}>Retry</Button>}>Processing evidence is temporarily unavailable. You can still review the source document and extracted fields.</Alert>;
+  }
+  if (!evidence) {
+    return <Alert severity="info" sx={{ mb: 3 }}>No authoritative processing record is linked to this Lead yet.</Alert>;
+  }
+
+  const latestOccurrence = evidence.occurrences[evidence.occurrences.length - 1];
+  const latestJob = evidence.jobs[evidence.jobs.length - 1];
+  const latestRun = evidence.runs[evidence.runs.length - 1];
+  const isExternal = evidence.externalRequestCount > 0;
+  const localRate = `${Math.round(evidence.localRequestRate * 100)}%`;
+  return (
+    <Paper variant="outlined" sx={{ mb: 3, p: 2.5 }}>
+      <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} sx={{ justifyContent: 'space-between', alignItems: { xs: 'flex-start', md: 'center' } }}>
+        <Box>
+          <Stack direction="row" spacing={1} useFlexGap sx={{ alignItems: 'center', flexWrap: 'wrap', mb: 0.5 }}>
+            <FileSearch size={20} />
+            <Typography sx={{ fontWeight: 900 }}>Processing evidence</Typography>
+            <Chip size="small" icon={isExternal ? <Cloud size={15} /> : <Cpu size={15} />} color={isExternal ? 'warning' : 'success'} label={isExternal ? 'External provider used' : 'Local processing'} />
+            <Chip size="small" variant="outlined" label={readable(latestRun?.status ?? latestJob?.status)} />
+          </Stack>
+          <Typography variant="body2" color="text.secondary">Authoritative path, OCR outcome, provider use, and cost linkage for this extraction.</Typography>
+        </Box>
+        <Button variant="outlined" startIcon={expanded ? <ChevronUp size={17} /> : <ChevronDown size={17} />} onClick={onToggle}>{expanded ? 'Hide evidence' : 'Show evidence'}</Button>
+      </Stack>
+
+      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(5, minmax(0, 1fr))' }, gap: 2, mt: 2 }}>
+        <Box><Typography variant="caption" color="text.secondary">Processing path</Typography><Typography sx={{ fontWeight: 700 }}>{readable(latestRun?.processingPath)}</Typography></Box>
+        <Box><Typography variant="caption" color="text.secondary">OCR outcome</Typography><Typography sx={{ fontWeight: 700 }}>{readable(latestRun?.ocrStatus)}</Typography></Box>
+        <Box><Typography variant="caption" color="text.secondary">OCR pages</Typography><Typography sx={{ fontWeight: 700 }}>{latestRun?.ocrPageCount ?? 'Not recorded'}</Typography></Box>
+        <Box><Typography variant="caption" color="text.secondary">Local model share</Typography><Typography sx={{ fontWeight: 700 }}>{localRate}</Typography><Typography variant="caption" color="text.secondary">{evidence.localRequestCount} local · {evidence.externalRequestCount} external</Typography></Box>
+        <Box><Typography variant="caption" color="text.secondary">External provider cost</Typography><Typography sx={{ fontWeight: 700 }}>{costLabel(evidence.externalCostAmount, evidence.externalCostCurrency, evidence.externalCostStatus)}</Typography><Typography variant="caption" color="text.secondary">{readable(evidence.externalCostStatus)}</Typography></Box>
+      </Box>
+
+      {expanded && <Box sx={{ mt: 2, pt: 2, borderTop: '1px solid', borderColor: 'divider' }}>
+        <Typography variant="subtitle2" sx={{ mb: 1 }}>Traceability</Typography>
+        <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))', lg: 'repeat(4, minmax(0, 1fr))' }, gap: 1.5 }}>
+          <EvidenceField label="Nexora Serial" value={evidenceValue(evidence.nexoraSerial)} />
+          <EvidenceField label="Intake occurrence" value={evidenceValue(latestOccurrence?.occurrenceId)} />
+          <EvidenceField label="Extraction job" value={evidenceValue(latestJob?.extractionJobId)} />
+          <EvidenceField label="Extraction run" value={evidenceValue(latestRun?.runId)} />
+          <EvidenceField label="Correlation" value={evidenceValue(latestOccurrence?.correlationId)} />
+          <EvidenceField label="Source documents" value={String(new Set(evidence.occurrences.map((item) => item.sourceDocumentId).filter((value) => value != null)).size)} />
+          <EvidenceField label="OCR compute status" value={readable(latestRun?.ocrCostStatus)} />
+          <EvidenceField label="Completed" value={latestRun?.completedOn ? new Date(latestRun.completedOn).toLocaleString() : 'Not recorded'} />
+          <EvidenceField label="Linked RFQs" value={evidence.rfqs.length === 0 ? 'None linked' : evidence.rfqs.map((rfq) => rfq.rfqNumber).join(', ')} />
+          <EvidenceField label="Parser version" value={evidenceValue(latestRun?.parserVersion)} />
+          <EvidenceField label="Schema version" value={evidenceValue(latestRun?.schemaVersion)} />
+          <EvidenceField label="Run attempt" value={latestRun ? `${latestRun.attemptNumber}` : 'Not recorded'} />
+        </Box>
+
+        <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>Provider decisions</Typography>
+        {evidence.aiRequests.length === 0 ? <Typography variant="body2" color="text.secondary">No model-provider call is linked to this extraction.</Typography> : <Stack spacing={1}>
+          {evidence.aiRequests.map((call) => <Box key={call.requestId} sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '2fr 1fr 1fr 1fr' }, gap: 1, py: 1, borderBottom: '1px solid', borderColor: 'divider' }}>
+            <Box><Typography variant="body2" sx={{ fontWeight: 700 }}>{call.provider}{call.model ? ` · ${call.model}` : ''}</Typography><Typography variant="caption" color="text.secondary">{call.version} · {call.reason} · {call.attempts.length} attempt{call.attempts.length === 1 ? '' : 's'}{call.budgetWarning ? ' · budget warning' : ''}</Typography></Box>
+            <EvidenceField label="Location" value={readable(call.providerClass)} />
+            <EvidenceField label="Result" value={readable(call.result)} />
+            <EvidenceField label="Cost" value={`${costLabel(call.estimatedCost, call.costCurrency, call.costStatus)} · ${readable(call.costStatus)}${call.costPricingVersion ? ` · ${call.costPricingVersion}` : ''}`} />
+          </Box>)}
+        </Stack>}
+      </Box>}
+    </Paper>
+  );
+}
+
+function EvidenceField({ label, value }: { label: string; value: string }) {
+  return <Box sx={{ minWidth: 0 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="body2" sx={{ fontWeight: 700, overflowWrap: 'anywhere' }}>{value}</Typography></Box>;
+}

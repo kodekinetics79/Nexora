@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using ERP_RFQ_Automation.Extraction;
 
 namespace ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 
@@ -401,6 +402,10 @@ public sealed class ExtractionRun
         ParserVersion = EvidenceLedgerGuard.Required(parserVersion, 128, nameof(parserVersion));
         SchemaVersion = EvidenceLedgerGuard.Required(schemaVersion, 128, nameof(schemaVersion));
         Status = ExtractionRunStatus.Pending;
+        ProcessingPath = parserVersion.StartsWith("native-spreadsheet/", StringComparison.Ordinal)
+            ? ExtractionProcessingPath.DeterministicRules
+            : ExtractionProcessingPath.NativeParser;
+        OcrStatus = ExtractionOcrStatus.NotRequired;
         ProcessingCostStatus = "NotSettled";
         OcrCostStatus = "NotRequired";
         CreatedOn = now;
@@ -425,6 +430,10 @@ public sealed class ExtractionRun
     public int EvidenceCount { get; private set; }
     public int FindingCount { get; private set; }
     public string? FailureReason { get; private set; }
+    public ExtractionProcessingPath ProcessingPath { get; private set; }
+    public ExtractionOcrStatus OcrStatus { get; private set; }
+    public int OcrPageCount { get; private set; }
+    public bool OcrTruncated { get; private set; }
     public decimal? ProcessingCostAmount { get; private set; }
     public string? ProcessingCostCurrency { get; private set; }
     public string ProcessingCostStatus { get; private set; } = null!;
@@ -461,6 +470,21 @@ public sealed class ExtractionRun
             throw new ArgumentOutOfRangeException(nameof(amount));
         if (amount.HasValue != (ProcessingCostCurrency is not null))
             throw new ArgumentException("Cost amount and currency must be supplied together.");
+    }
+
+    public void RecordProcessingEvidence(ExtractionProcessingPath processingPath,
+        ExtractionOcrStatus ocrStatus, int ocrPageCount, bool ocrTruncated)
+    {
+        if (ocrPageCount < 0)
+            throw new ArgumentOutOfRangeException(nameof(ocrPageCount));
+        if (ocrStatus == ExtractionOcrStatus.NotRequired && (ocrPageCount != 0 || ocrTruncated))
+            throw new ArgumentException("OCR evidence cannot contain pages or truncation when OCR was not required.");
+
+        ProcessingPath = processingPath;
+        OcrStatus = ocrStatus;
+        OcrPageCount = ocrPageCount;
+        OcrTruncated = ocrTruncated;
+        UpdatedOn = DateTimeOffset.UtcNow;
     }
 
     public void Complete(int pageCount, int regionCount, int inquiryCount, int lineItemCount,

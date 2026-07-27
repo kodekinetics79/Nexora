@@ -22,15 +22,24 @@ public class OrderStockReservationTests
         Seed.EnsureBusinessUnit(ctx, Bu);
         var customer = Seed.Customer(ctx, id: 1, buid: Bu, name: "Acme");
         var status = Seed.LeadStatus(ctx, setupId: 900, businessUnitId: Bu, value: "Confirmed");
+        ctx.Set<Warehouse>().Add(new Warehouse
+        {
+            Id = 1, WarehouseCode = "MAIN", WarehouseName = "Main warehouse", BusinessUnitId = Bu,
+            IsActive = true, CreatedBy = "test", CreatedOn = DateTime.UtcNow
+        });
         ctx.SaveChanges();
 
-        ctx.Set<Product>().Add(new Product { Id = 1, PartNo = partNo, ProductName = "Widget", Buid = Bu, CreatedBy = "test", CreatedOn = DateTime.UtcNow });
+        ctx.Set<Product>().Add(new Product
+        {
+            Id = 1, PartNo = partNo, ProductName = "Widget", Buid = Bu, WarehouseId = 1,
+            CreatedBy = "test", CreatedOn = DateTime.UtcNow
+        });
         if (withInventory)
         {
             ctx.Set<ERP_RFQ_Automation.Models.Inventory>().Add(new ERP_RFQ_Automation.Models.Inventory
             {
                 Id = 1, PartNo = partNo, ProductName = "Widget", QtyOnHand = onHand, ReorderPoint = 0m,
-                Buid = Bu, CreatedBy = "test", CreatedOn = DateTime.UtcNow
+                Buid = Bu, ProductId = 1, WarehouseId = 1, CreatedBy = "test", CreatedOn = DateTime.UtcNow
             });
         }
         ctx.Set<Order>().Add(new Order
@@ -40,7 +49,7 @@ public class OrderStockReservationTests
         });
         ctx.Set<OrderItem>().Add(new OrderItem
         {
-            Id = 1, OrderId = 1, ProductId = 1, Quantity = orderQty, UnitPrice = 10m, Discount = 0m,
+            Id = 1, OrderId = 1, ProductId = 1, WarehouseId = 1, Quantity = orderQty, UnitPrice = 10m, Discount = 0m,
             TaxAmount = 0m, TotalAmount = orderQty * 10m, CreatedBy = "test", CreatedDate = DateTime.UtcNow, IsActive = true
         });
         ctx.SaveChanges();

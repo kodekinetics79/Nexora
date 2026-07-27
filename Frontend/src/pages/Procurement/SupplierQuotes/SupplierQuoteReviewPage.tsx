@@ -5,6 +5,7 @@ import { ArrowBack, CompareArrows, FactCheck } from "@mui/icons-material";
 import { Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, MenuItem, Paper, Stack, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TextField, Typography } from "@mui/material";
 import { toast } from "react-hot-toast";
 import supplierQuoteService, { type SupplierQuoteEvidence, type SupplierQuoteReviewStatus } from "../../../api/services/supplierQuoteService";
+import CommercialProcessingEvidence from "../../../components/common/CommercialProcessingEvidence";
 
 export default function SupplierQuoteReviewPage() {
   const id = Number(useParams().supplierQuoteId);
@@ -26,6 +27,7 @@ export default function SupplierQuoteReviewPage() {
   return <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1400, mx: "auto" }}>
     <Button startIcon={<ArrowBack />} onClick={() => navigate("/procurement/supplier-quotes")} sx={{ mb: 1 }}>Supplier Quote Inbox</Button>
     <Stack direction={{ xs: "column", md: "row" }} sx={{ justifyContent: "space-between", gap: 2, mb: 3 }}><Box><Typography variant="h4" sx={{ fontWeight: 800 }}>{quote.supplierQuoteReference}</Typography><Typography color="text.secondary">{quote.supplierName} · {quote.nexoraSerial} · Sourcing Case {quote.sourcingCaseId}</Typography></Box><Stack direction="row" spacing={1} sx={{ alignItems: "center" }}><Chip color={quote.inboxStatus === "READY_FOR_COMPARISON" ? "success" : "warning"} label={quote.inboxStatus.replaceAll("_", " ")} />{quote.inboxStatus === "READY_FOR_COMPARISON" && <Button variant="contained" startIcon={<CompareArrows />} disabled={projection.isPending} onClick={() => projection.mutate()}>Compare offer</Button>}</Stack></Stack>
+    <CommercialProcessingEvidence resource="supplier-quotes" id={quote.supplierQuoteId} />
     {quote.revisions.slice().reverse().map((revision) => <Paper variant="outlined" key={revision.revisionId} sx={{ mb: 2, p: 2 }}>
       <Stack direction="row" sx={{ justifyContent: "space-between", mb: 2 }}><Typography variant="h6">Revision {revision.revisionNumber}</Typography><Typography color="text.secondary">{revision.captureChannel.replaceAll("_", " ")} · {new Date(revision.capturedOn).toLocaleString()}</Typography></Stack>
       <Typography sx={{ fontWeight: 700, mb: 1 }}>Commercial lines</Typography>

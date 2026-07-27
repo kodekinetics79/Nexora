@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.DTOs.DocumentIntelligence;
+using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Services.DocumentIntelligence;
 using ERP_RFQ_Automation.Services.Interfaces;
@@ -146,6 +147,19 @@ public class ChunkedExtractionServiceTests
         var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(new List<string>()));
 
         Assert.Equal(ExtractionOutcomeStatus.Failed, outcome.Status);
+    }
+
+    [Fact]
+    public async Task NoDetectedRows_ExternalProviderCannotReceiveWholeDocument()
+    {
+        var llm = new StubLlm(AiProviderClass.External, Ext.Result(Ext.Items(1, 0.9), 0.9));
+
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(
+            Doc(Array.Empty<string>(), "confidential whole document"));
+
+        Assert.Equal(ExtractionOutcomeStatus.Failed, outcome.Status);
+        Assert.Equal(0, llm.CallCount);
+        Assert.Contains("whole-document disclosure is blocked", outcome.ReviewReason);
     }
 
     [Fact]

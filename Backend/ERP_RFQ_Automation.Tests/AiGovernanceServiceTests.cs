@@ -158,6 +158,79 @@ public sealed class AiGovernanceServiceTests
         Assert.Equal("external_dependency_cap", denied.Code);
     }
 
+    [Fact]
+    public async Task Pending_external_request_counts_toward_dependency_cap()
+    {
+        using var fixture = new Fixture(hardLimit: 100_000);
+        for (var i = 0; i < 9; i++)
+        {
+            var local = await fixture.Service.ReserveAsync(fixture.Context($"pending-local-{i}"),
+                "Ollama", "test", "local", 10, 10, 1, default);
+            await fixture.Service.CompleteAsync(local, AiCallStatuses.Succeeded,
+                1, 1, AiTokenSources.Estimated, null, null, default);
+        }
+
+        await fixture.Service.ReserveAsync(fixture.Context("pending-external-one", AiProviderClass.External),
+            "External", "test", "external", 10, 10, 1, default);
+        var denied = await Assert.ThrowsAsync<AiPolicyDeniedException>(() => fixture.Service.ReserveAsync(
+            fixture.Context("pending-external-two", AiProviderClass.External),
+            "External", "test", "external", 10, 10, 1, default));
+
+        Assert.Equal("external_dependency_cap", denied.Code);
+    }
+
+    [Fact]
+    public async Task Per_document_budget_denies_additional_reservation_atomically()
+    {
+        using var fixture = new Fixture(hardLimit: 100_000, maxTokensPerDocument: 25);
+        await fixture.Service.ReserveAsync(fixture.Context("document-first", extractionJobId: 551),
+            "Ollama", "test", "local", 10, 10, 1, default);
+
+        var denied = await Assert.ThrowsAsync<AiPolicyDeniedException>(() => fixture.Service.ReserveAsync(
+            fixture.Context("document-second", extractionJobId: 551),
+            "Ollama", "test", "local", 10, 10, 1, default));
+
+        Assert.Equal("document_budget_exceeded", denied.Code);
+    }
+
+    [Fact]
+    public async Task External_cost_uses_only_versioned_tenant_rate_policy()
+    {
+        using var fixture = new Fixture(hardLimit: 100_000,
+            externalInputRate: 2m, externalOutputRate: 4m);
+        for (var i = 0; i < 9; i++)
+        {
+            var local = await fixture.Service.ReserveAsync(fixture.Context($"priced-local-{i}"),
+                "Ollama", "test", "local", 10, 10, 1, default);
+            await fixture.Service.CompleteAsync(local, AiCallStatuses.Succeeded,
+                1, 1, AiTokenSources.Estimated, null, null, default);
+        }
+        var external = await fixture.Service.ReserveAsync(
+            fixture.Context("priced-external", AiProviderClass.External),
+            "External", "test", "external", 10, 10, 1, default);
+        await fixture.Service.CompleteAsync(external, AiCallStatuses.Succeeded,
+            1_000, 500, AiTokenSources.ProviderExact, "result", null, default);
+
+        await using var db = fixture.Database.ContextFor(null);
+        var request = await db.AiRequests.IgnoreQueryFilters().SingleAsync(x => x.Id == external.RequestId);
+        Assert.Equal(.004m, request.EstimatedCost);
+        Assert.Equal("USD", request.CostCurrency);
+        Assert.Equal("EstimatedConfiguredRate", request.CostStatus);
+        Assert.Equal("test-rate-v1", request.CostPricingVersion);
+    }
+
+    [Fact]
+    public async Task Caller_cannot_replace_the_authenticated_tenant_context()
+    {
+        using var fixture = new Fixture();
+        var forged = fixture.Context("forged-tenant") with { BusinessUnitId = 99_999 };
+
+        var denied = await Assert.ThrowsAsync<AiPolicyDeniedException>(() => fixture.Service.ReserveAsync(
+            forged, "Ollama", "test", "private input", 32, 10, 1, default));
+
+        Assert.Equal("tenant_context_mismatch", denied.Code);
+    }
+
     private sealed class Fixture : IDisposable
     {
         private const long BusinessUnitId = 44_001;
@@ -170,7 +243,10 @@ public sealed class AiGovernanceServiceTests
         public Fixture(
             bool withPolicy = true,
             long? hardLimit = null,
-            bool externalProcessingAllowed = true)
+            bool externalProcessingAllowed = true,
+            long? maxTokensPerDocument = null,
+            decimal? externalInputRate = null,
+            decimal? externalOutputRate = null)
         {
             using (var db = Database.ContextFor(null))
             {
@@ -183,6 +259,11 @@ public sealed class AiGovernanceServiceTests
                         ExternalProcessingAllowed = externalProcessingAllowed,
                         AllowedPurposes = AiPurposes.RfqExtraction,
                         MonthlyHardTokenLimit = hardLimit,
+                        MaxTokensPerDocument = maxTokensPerDocument,
+                        ExternalInputCostPerMillionTokens = externalInputRate,
+                        ExternalOutputCostPerMillionTokens = externalOutputRate,
+                        ExternalCostCurrency = externalInputRate.HasValue ? "USD" : null,
+                        ExternalPricingVersion = externalInputRate.HasValue ? "test-rate-v1" : null,
                         UpdatedOn = DateTime.UtcNow,
                         UpdatedBy = "test"
                     });
@@ -192,15 +273,21 @@ public sealed class AiGovernanceServiceTests
             var tenantScope = new TenantScopeAccessor();
             _provider = new ServiceCollection()
                 .AddSingleton<ITenantScopeAccessor>(tenantScope)
+                .AddSingleton<ITenantContext>(new StubTenant(BusinessUnitId))
                 .AddScoped(_ => Database.ContextFor(tenantScope.BusinessUnitId))
                 .BuildServiceProvider();
-            Service = new AiGovernanceService(ScopeFactory, tenantScope);
+            Service = new AiGovernanceService(
+                ScopeFactory,
+                tenantScope,
+                _provider.GetRequiredService<ITenantContext>());
         }
 
         public AiCallContext Context(
             string key,
-            AiProviderClass providerClass = AiProviderClass.Local) =>
-            new(BusinessUnitId, AiPurposes.RfqExtraction, key, "test-v1", ProviderClass: providerClass);
+            AiProviderClass providerClass = AiProviderClass.Local,
+            long? extractionJobId = null) =>
+            new(BusinessUnitId, AiPurposes.RfqExtraction, key, "test-v1",
+                ProviderClass: providerClass, ExtractionJobId: extractionJobId);
 
         public void Dispose()
         {

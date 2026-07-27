@@ -9,7 +9,8 @@ namespace ERP_RFQ_Automation.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/commercial-learning")]
-public sealed class CommercialLearningController(CommercialLearningService service) : ControllerBase
+public sealed class CommercialLearningController(CommercialLearningService service,
+    LearningGovernanceService governance) : ControllerBase
 {
     [HttpGet("products")]
     [RequireModulePermission("Products", PermissionAction.View)]
@@ -83,6 +84,66 @@ public sealed class CommercialLearningController(CommercialLearningService servi
     public Task<LearningStudioSummary> LearningStudio(CancellationToken cancellationToken) =>
         service.GetStudioAsync(TenantId(), cancellationToken);
 
+    [HttpPost("learning-studio/{signalId}/approve")]
+    [RequireModulePermission("Dashboard", PermissionAction.Edit)]
+    public Task<ActionResult<LearningGovernanceResult>> ApproveLearningSignal(string signalId,
+        [FromBody] LearningGovernanceCommand command, CancellationToken cancellationToken) =>
+        Govern(signalId, LearningGovernanceActions.Approved, command, cancellationToken);
+
+    [HttpPost("learning-studio/{signalId}/disable")]
+    [RequireModulePermission("Dashboard", PermissionAction.Edit)]
+    public Task<ActionResult<LearningGovernanceResult>> DisableLearningSignal(string signalId,
+        [FromBody] LearningGovernanceCommand command, CancellationToken cancellationToken) =>
+        Govern(signalId, LearningGovernanceActions.Disabled, command, cancellationToken);
+
+    [HttpPost("learning-studio/{signalId}/rollback")]
+    [RequireModulePermission("Dashboard", PermissionAction.Edit)]
+    public Task<ActionResult<LearningGovernanceResult>> RollbackLearningSignal(string signalId,
+        [FromBody] LearningGovernanceCommand command, CancellationToken cancellationToken) =>
+        Govern(signalId, LearningGovernanceActions.RolledBack, command, cancellationToken);
+
+    private async Task<ActionResult<LearningGovernanceResult>> Govern(string signalId, string action,
+        LearningGovernanceCommand command, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return Ok(await governance.GovernAsync(TenantId(), signalId, action, command,
+                ActorUserId(), IdempotencyKey(), cancellationToken));
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return Unauthorized(new ProblemDetails { Status = StatusCodes.Status401Unauthorized,
+                Title = "Invalid authentication context",
+                Detail = "A valid authenticated tenant and actor are required." });
+        }
+        catch (KeyNotFoundException exception)
+        {
+            return NotFound(new ProblemDetails { Status = StatusCodes.Status404NotFound,
+                Title = "Learning signal not found", Detail = exception.Message });
+        }
+        catch (LearningGovernanceConflictException exception)
+        {
+            return Conflict(new ProblemDetails { Status = StatusCodes.Status409Conflict,
+                Title = "Learning governance conflict", Detail = exception.Message });
+        }
+        catch (LearningGovernanceValidationException exception)
+        {
+            return BadRequest(new ProblemDetails { Status = StatusCodes.Status400BadRequest,
+                Title = "Invalid learning governance request", Detail = exception.Message });
+        }
+    }
+
     private long TenantId() => long.TryParse(User.FindFirst("businessUnitId")?.Value, out var tenant) && tenant > 0
         ? tenant : throw new UnauthorizedAccessException("A valid authenticated tenant claim is required.");
+    private long ActorUserId() => long.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value ??
+            User.FindFirst("sub")?.Value, out var actor) && actor > 0
+        ? actor : throw new UnauthorizedAccessException("A valid authenticated actor claim is required.");
+    private string IdempotencyKey()
+    {
+        var value = Request.Headers["Idempotency-Key"].ToString().Trim();
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 160 || value.Any(char.IsControl))
+            throw new LearningGovernanceValidationException(
+                "Idempotency-Key is required and must not exceed 160 printable characters.");
+        return value;
+    }
 }

@@ -245,7 +245,7 @@ export interface BatchReconciliationDTO {
   possibleMatches: number;
   rejected: number;
   externalOccurrences: number;
-  externalCost: number;
+  externalCost?: number | null;
   items: BatchReconciliationItemDTO[];
 }
 

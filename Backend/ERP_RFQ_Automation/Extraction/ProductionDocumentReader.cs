@@ -106,18 +106,18 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         }
 
         // Unstructured formats -> extract raw text, then chunk over line-item regions.
-        var text = ext switch
+        var read = ext switch
         {
             "pdf" => ExtractTextFromPdf(bytes),
             // Legacy Word 97-2003 binary (SEC folder door): shared OLE/piece-table
             // parser; falls back to the OpenXML reader for mislabeled .docx files.
-            "doc" => ExtractTextFromLegacyDoc(bytes),
-            "docx" => ExtractTextFromDocx(bytes),
+            "doc" => Native(ExtractTextFromLegacyDoc(bytes)),
+            "docx" => Native(ExtractTextFromDocx(bytes)),
             "jpg" or "jpeg" or "png" or "bmp" or "tiff" or "tif" or "gif" => ExtractTextFromImage(bytes),
-            _ => DecodeText(bytes)
+            _ => Native(DecodeText(bytes))
         };
 
-        return Unstructured(job, name, text ?? string.Empty);
+        return Unstructured(job, name, read);
     }
 
     // ---- input builders --------------------------------------------------
@@ -126,19 +126,20 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         => new()
         {
             BusinessUnitId = job.BusinessUnitId,
-            SourceId = $"{job.Id}:claim:{job.Attempts}",
+            SourceId = $"job:{job.Id}",
             ExtractionJobId = job.Id,
             SourceDocumentOccurrenceId = job.SourceDocumentOccurrenceId,
             SourceDocumentName = name,
+            ProcessingPath = ExtractionProcessingPath.DeterministicRules,
             IsStructured = true,
             StructuredRows = rows,
             HeaderText = string.Empty,
             LineItemRegions = rows.Select(r => r.ProductName ?? string.Empty).ToList()
         };
 
-    private static DocumentExtractionInput Unstructured(ExtractionJob job, string name, string text)
+    private static DocumentExtractionInput Unstructured(ExtractionJob job, string name, DocumentReadResult read)
     {
-        var lines = text
+        var lines = read.Text
             .Replace("\r\n", "\n")
             .Split('\n')
             .Select(l => l.TrimEnd('\r'))
@@ -154,10 +155,14 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         return new DocumentExtractionInput
         {
             BusinessUnitId = job.BusinessUnitId,
-            SourceId = $"{job.Id}:claim:{job.Attempts}",
+            SourceId = $"job:{job.Id}",
             ExtractionJobId = job.Id,
             SourceDocumentOccurrenceId = job.SourceDocumentOccurrenceId,
             SourceDocumentName = name,
+            ProcessingPath = read.ProcessingPath,
+            OcrStatus = read.OcrStatus,
+            OcrPageCount = read.OcrPageCount,
+            OcrTruncated = read.OcrTruncated,
             IsStructured = false,
             HeaderText = header,
             LineItemRegions = regions
@@ -200,7 +205,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
 
     // ---- PDF (text layer + OCR fallback) ---------------------------------
 
-    private string ExtractTextFromPdf(byte[] bytes)
+    private DocumentReadResult ExtractTextFromPdf(byte[] bytes)
     {
         string pdfText = string.Empty;
         try
@@ -218,30 +223,39 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
 
         // Fast path: the PDF already carries an embedded text layer.
         if (!IsNearEmpty(pdfText))
-            return pdfText;
+            return Native(pdfText);
 
         _log.LogInformation("PDF has little/no embedded text; attempting OCR fallback.");
         var ocr = TryOcrScannedPdf(bytes);
-        if (!IsNearEmpty(ocr))
-            return "[OCR-EXTRACTED TEXT FROM SCANNED PDF - lower confidence, may contain recognition errors]\n" + ocr;
+        if (!IsNearEmpty(ocr.Text))
+            return new DocumentReadResult(
+                "[OCR-EXTRACTED TEXT FROM SCANNED PDF - lower confidence, may contain recognition errors]\n" + ocr.Text,
+                ExtractionProcessingPath.LocalOcr,
+                ocr.FailedPageCount > 0 ? ExtractionOcrStatus.Partial : ExtractionOcrStatus.Completed,
+                ocr.PageCount, ocr.Truncated);
 
         _log.LogWarning("Scanned PDF could not be OCR'd (OCR unavailable or produced no text).");
-        return string.Empty;
+        return new DocumentReadResult(string.Empty, ExtractionProcessingPath.LocalOcr,
+            ExtractionOcrStatus.Failed, ocr.PageCount, ocr.Truncated);
     }
 
     /// <summary>Rasterizes a scanned PDF with Docnet and OCRs each page with Tesseract.</summary>
-    private string TryOcrScannedPdf(byte[] pdfBytes)
+    private OcrReadResult TryOcrScannedPdf(byte[] pdfBytes)
     {
         const int MaxOcrPages = 10;     // bound runtime for large documents
         const double RenderScale = 2.0; // ~144 DPI: OCR accuracy vs. memory/time
         try
         {
             var sb = new StringBuilder();
+            var pagesToProcess = 0;
+            var truncated = false;
+            var failedPageCount = 0;
             lock (OcrLock)
             {
                 using var docReader = DocLib.Instance.GetDocReader(pdfBytes, new PageDimensions(RenderScale));
                 var pageCount = docReader.GetPageCount();
-                var pagesToProcess = Math.Min(pageCount, MaxOcrPages);
+                pagesToProcess = Math.Min(pageCount, MaxOcrPages);
+                truncated = pageCount > MaxOcrPages;
                 if (pageCount > MaxOcrPages)
                     _log.LogWarning("Scanned PDF has {Total} pages; OCR limited to first {Limit}.", pageCount, MaxOcrPages);
 
@@ -266,22 +280,23 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
                     }
                     catch (Exception exPage)
                     {
+                        failedPageCount++;
                         _log.LogWarning(exPage, "OCR failed for scanned PDF page {Page}.", i);
                     }
                 }
             }
-            return sb.ToString();
+            return new OcrReadResult(sb.ToString(), pagesToProcess, truncated, failedPageCount);
         }
         catch (Exception ex)
         {
             _log.LogWarning(ex, "Scanned-PDF OCR fallback unavailable or failed.");
-            return string.Empty;
+            return new OcrReadResult(string.Empty, 0, false, 0);
         }
     }
 
     // ---- images ----------------------------------------------------------
 
-    private string ExtractTextFromImage(byte[] bytes)
+    private DocumentReadResult ExtractTextFromImage(byte[] bytes)
     {
         try
         {
@@ -290,13 +305,16 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
                 using var engine = new TesseractEngine(_tessDataPath, "eng", EngineMode.Default);
                 using var img = Pix.LoadFromMemory(bytes);
                 using var page = engine.Process(img);
-                return page.GetText();
+                var text = page.GetText();
+                return new DocumentReadResult(text ?? string.Empty, ExtractionProcessingPath.LocalOcr,
+                    IsNearEmpty(text) ? ExtractionOcrStatus.Failed : ExtractionOcrStatus.Completed, 1, false);
             }
         }
         catch (Exception ex)
         {
             _log.LogWarning(ex, "Image OCR failed.");
-            return string.Empty;
+            return new DocumentReadResult(string.Empty, ExtractionProcessingPath.LocalOcr,
+                ExtractionOcrStatus.Failed, 0, false);
         }
     }
 
@@ -380,6 +398,19 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
     }
 
     private static bool IsNearEmpty(string? s) => CountNonWhitespace(s) < NearEmptyThreshold;
+
+    private static DocumentReadResult Native(string? text) => new(
+        text ?? string.Empty, ExtractionProcessingPath.NativeParser,
+        ExtractionOcrStatus.NotRequired, 0, false);
+
+    private sealed record DocumentReadResult(
+        string Text,
+        ExtractionProcessingPath ProcessingPath,
+        ExtractionOcrStatus OcrStatus,
+        int OcrPageCount,
+        bool OcrTruncated);
+
+    private sealed record OcrReadResult(string Text, int PageCount, bool Truncated, int FailedPageCount);
 }
 
 public sealed class EvidenceIntegrityException : IOException

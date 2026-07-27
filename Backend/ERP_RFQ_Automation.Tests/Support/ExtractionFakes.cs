@@ -24,9 +24,16 @@ public sealed class StubLlm : ILLMService
     private readonly Queue<LeadExtractionResult?> _responses;
     public List<string> Prompts { get; } = new();
     public int CallCount { get; private set; }
+    public AiProviderClass ProviderClass { get; }
 
     public StubLlm(params LeadExtractionResult?[] responses)
-        => _responses = new Queue<LeadExtractionResult?>(responses);
+        : this(AiProviderClass.Local, responses) { }
+
+    public StubLlm(AiProviderClass providerClass, params LeadExtractionResult?[] responses)
+    {
+        ProviderClass = providerClass;
+        _responses = new Queue<LeadExtractionResult?>(responses);
+    }
 
     public Task<LeadExtractionResult?> ExtractLeadDataAsync(
         string fullText, AiCallContext context, CancellationToken cancellationToken = default)

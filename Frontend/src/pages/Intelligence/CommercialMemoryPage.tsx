@@ -1,19 +1,57 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { Alert, Box, Button, Chip, CircularProgress, Paper, Stack, Tab, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Tabs, Typography } from "@mui/material";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, Paper, Stack, Tab, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Tabs, TextField, Typography } from "@mui/material";
 import { Refresh } from "@mui/icons-material";
-import commercialLearningService, { type CurrencyValueSummary } from "../../api/services/commercialLearningService";
+import { Ban, CheckCircle2, RotateCcw } from "lucide-react";
+import { useSnackbar } from "notistack";
+import commercialLearningService, { type CurrencyValueSummary, type LearningGovernanceAction, type LearningSignal } from "../../api/services/commercialLearningService";
+import { useAuth } from "../../context/AuthContext";
 
 const value = (group?: CurrencyValueSummary) => group?.medianValue == null ? "No verified sample" :
   `${group.currencyCode} ${group.medianValue.toLocaleString(undefined, { maximumFractionDigits: 4 })} (${group.sampleSize})`;
 
+const readable = (text?: string | null) => (text || "Not recorded").replaceAll("_", " ").toLowerCase().replace(/^./, (letter) => letter.toUpperCase());
+
+interface GovernanceDialogState {
+  signal: LearningSignal;
+  action: LearningGovernanceAction;
+}
+
 export default function CommercialMemoryPage() {
   const [tab, setTab] = useState(0);
+  const [governanceDialog, setGovernanceDialog] = useState<GovernanceDialogState | null>(null);
+  const [governanceReason, setGovernanceReason] = useState("");
+  const queryClient = useQueryClient();
+  const { enqueueSnackbar } = useSnackbar();
+  const { hasPermission } = useAuth();
+  const canGovernLearning = hasPermission("Dashboard", "edit");
+  const openGovernanceDialog = (signal: LearningSignal, action: LearningGovernanceAction) => {
+    setGovernanceReason("");
+    setGovernanceDialog({ signal, action });
+  };
+  const closeGovernanceDialog = () => {
+    setGovernanceDialog(null);
+    setGovernanceReason("");
+  };
   const products = useQuery({ queryKey: ["commercial-learning", "products"], queryFn: () => commercialLearningService.getProducts() });
   const suppliers = useQuery({ queryKey: ["commercial-learning", "suppliers"], queryFn: () => commercialLearningService.getSuppliers() });
   const customers = useQuery({ queryKey: ["commercial-learning", "customers"], queryFn: () => commercialLearningService.getCustomers() });
   const salesReps = useQuery({ queryKey: ["commercial-learning", "sales-reps"], queryFn: () => commercialLearningService.getSalesReps() });
   const studio = useQuery({ queryKey: ["commercial-learning", "studio"], queryFn: commercialLearningService.getStudio });
+  const governanceMutation = useMutation({
+    mutationFn: () => commercialLearningService.governSignal(
+      governanceDialog!.signal.signalId,
+      governanceDialog!.action,
+      { reason: governanceReason.trim(), expectedVersion: governanceDialog!.signal.governanceVersion },
+    ),
+    onSuccess: async () => {
+      const action = governanceDialog?.action ?? "approve";
+      closeGovernanceDialog();
+      await queryClient.invalidateQueries({ queryKey: ["commercial-learning", "studio"] });
+      enqueueSnackbar(`Learning signal ${action === "approve" ? "approved" : action === "disable" ? "disabled" : "restored to its previous state"}.`, { variant: "success" });
+    },
+    onError: () => enqueueSnackbar("The learning decision could not be recorded. Refresh the signal and try again.", { variant: "error" }),
+  });
   const loading = products.isLoading || suppliers.isLoading || customers.isLoading || salesReps.isLoading || studio.isLoading;
   const failed = products.isError || suppliers.isError || customers.isError || salesReps.isError || studio.isError;
   if (loading) return <Box sx={{ minHeight: "60vh", display: "grid", placeItems: "center" }}><CircularProgress /></Box>;
@@ -45,7 +83,25 @@ export default function CommercialMemoryPage() {
         {[["Approved corrections", studio.data.approvedCorrections], ["Conflicts", studio.data.conflictingCorrections], ["Source templates", studio.data.supplierQuoteTemplates], ["Decision-ready products", studio.data.productMemoriesWithDecisions], ["Below threshold", studio.data.productMemoriesBelowThreshold]].map(([label, count]) => <Box key={String(label)}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h5" sx={{ fontWeight: 800 }}>{count}</Typography></Box>)}
       </Box>
       {studio.data.conflictingCorrections > 0 && <Alert severity="warning">Conflicting approved corrections require human review before reuse.</Alert>}
-      <TableContainer component={Paper} variant="outlined"><Table size="small"><TableHead><TableRow><TableCell>Learned signal</TableCell><TableCell>Approved value</TableCell><TableCell align="right">Samples</TableCell><TableCell>Status</TableCell><TableCell>Last observed</TableCell><TableCell>Evidence</TableCell></TableRow></TableHead><TableBody>{studio.data.recentSignals.map((signal) => <TableRow key={`${signal.evidenceReference}:${signal.subject}`}><TableCell>{signal.subject}</TableCell><TableCell>{signal.value}</TableCell><TableCell align="right">{signal.sampleSize}</TableCell><TableCell><Chip size="small" color={signal.status === "CONFLICT_REVIEW" ? "warning" : signal.status === "REUSABLE" ? "success" : "default"} label={signal.status.replaceAll("_", " ")} /></TableCell><TableCell>{new Date(signal.lastObservedOn).toLocaleString()}</TableCell><TableCell>{signal.evidenceReference}</TableCell></TableRow>)}{studio.data.recentSignals.length === 0 && <TableRow><TableCell colSpan={6} align="center">No approved correction signals are available yet.</TableCell></TableRow>}</TableBody></Table></TableContainer>
+      {!canGovernLearning && <Alert severity="info">You can inspect learning evidence here. Dashboard edit permission is required to approve, disable, or roll back a signal.</Alert>}
+      <TableContainer component={Paper} variant="outlined"><Table size="small"><TableHead><TableRow><TableCell>Learned signal</TableCell><TableCell>Observed value</TableCell><TableCell align="right">Samples</TableCell><TableCell>Evidence status</TableCell><TableCell>Governance</TableCell><TableCell>Last observed</TableCell><TableCell>Evidence</TableCell>{canGovernLearning && <TableCell align="right">Actions</TableCell>}</TableRow></TableHead><TableBody>{studio.data.recentSignals.map((signal) => {
+        const governanceStatus = (signal.governanceStatus || signal.status || "OBSERVED").toUpperCase();
+        const governanceAction = signal.governanceAction ? readable(signal.governanceAction) : "No governed decision";
+        return <TableRow key={signal.signalId || `${signal.evidenceReference}:${signal.subject}`}><TableCell><Typography sx={{ fontWeight: 700 }}>{signal.subject}</Typography><Typography variant="caption" color="text.secondary">{readable(signal.signalType)}</Typography></TableCell><TableCell>{signal.value}</TableCell><TableCell align="right">{signal.sampleSize}</TableCell><TableCell><Chip size="small" color={signal.status === "CONFLICT_REVIEW" ? "warning" : signal.status === "REUSABLE" || signal.status === "APPROVED" ? "success" : "default"} label={readable(signal.status)} /></TableCell><TableCell><Chip size="small" variant={signal.governanceVersion === 0 ? "outlined" : "filled"} color={governanceStatus === "APPROVED" ? "success" : governanceStatus === "DISABLED" ? "default" : "info"} label={`${governanceAction} · v${signal.governanceVersion}`} />{signal.governedOn && <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>{new Date(signal.governedOn).toLocaleString()}</Typography>}</TableCell><TableCell>{new Date(signal.lastObservedOn).toLocaleString()}</TableCell><TableCell><Typography variant="body2" sx={{ maxWidth: 240, overflowWrap: "anywhere" }}>{signal.evidenceReference}</Typography><Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5, overflowWrap: "anywhere" }}>Signal {signal.signalId}</Typography></TableCell>{canGovernLearning && <TableCell align="right"><Stack direction="row" spacing={0.5} useFlexGap sx={{ justifyContent: "flex-end", flexWrap: "wrap", minWidth: 260 }}>
+          {governanceStatus !== "APPROVED" && <Button size="small" startIcon={<CheckCircle2 size={16} />} onClick={() => openGovernanceDialog(signal, "approve")}>Approve</Button>}
+          {governanceStatus !== "DISABLED" && <Button size="small" color="warning" startIcon={<Ban size={16} />} onClick={() => openGovernanceDialog(signal, "disable")}>Disable</Button>}
+          {signal.governanceVersion > 0 && <Button size="small" startIcon={<RotateCcw size={16} />} onClick={() => openGovernanceDialog(signal, "rollback")}>Roll back</Button>}
+        </Stack></TableCell>}</TableRow>;
+      })}{studio.data.recentSignals.length === 0 && <TableRow><TableCell colSpan={canGovernLearning ? 8 : 7} align="center">No correction signals have enough verified evidence yet.</TableCell></TableRow>}</TableBody></Table></TableContainer>
     </Stack>}
+    <Dialog open={governanceDialog !== null} onClose={() => !governanceMutation.isPending && closeGovernanceDialog()} fullWidth maxWidth="sm">
+      <DialogTitle>{governanceDialog ? `${readable(governanceDialog.action)} learning signal` : "Learning decision"}</DialogTitle>
+      <DialogContent dividers><Stack spacing={2}>
+        <Alert severity={governanceDialog?.action === "disable" ? "warning" : "info"}>This records a new auditable governance version. The observed evidence remains unchanged.</Alert>
+        <Box><Typography variant="caption" color="text.secondary">Signal</Typography><Typography sx={{ fontWeight: 700 }}>{governanceDialog?.signal.subject}</Typography><Typography variant="body2">{governanceDialog?.signal.value}</Typography></Box>
+        <TextField autoFocus required multiline minRows={3} label="Decision reason" value={governanceReason} onChange={(event) => setGovernanceReason(event.target.value)} helperText="Explain the business evidence for this decision." />
+      </Stack></DialogContent>
+      <DialogActions><Button onClick={closeGovernanceDialog} disabled={governanceMutation.isPending}>Cancel</Button><Button variant="contained" startIcon={governanceDialog?.action === "approve" ? <CheckCircle2 size={17} /> : governanceDialog?.action === "disable" ? <Ban size={17} /> : <RotateCcw size={17} />} disabled={!governanceReason.trim() || governanceMutation.isPending} onClick={() => governanceMutation.mutate()}>{governanceMutation.isPending ? "Recording..." : governanceDialog ? readable(governanceDialog.action) : "Record"}</Button></DialogActions>
+    </Dialog>
   </Box>;
 }

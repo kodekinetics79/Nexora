@@ -889,6 +889,45 @@ test('36 authenticated procurement callback becomes authoritative operational ev
   });
 });
 
+test('37 local-first processing evidence and governed learning remain visible across the journey', async ({ page }) => {
+  const token = await loginAs(page, 'manager');
+  const processing = await jsonOk<{
+    leadId: number;
+    nexoraSerial: string;
+    localRequestCount: number;
+    externalRequestCount: number;
+    externalCostAmount?: number | null;
+    externalCostStatus: string;
+  }>(await api(page, token, 'get', `/api/processing-evidence/rfqs/${rfqId()}`));
+  expect(processing.leadId).toBe(requiredNumber('E2E_CORE_LEAD_ID'));
+  expect(processing.nexoraSerial).toBe(required('E2E_CORE_NEXORA_SERIAL'));
+  expect(processing.externalCostAmount).toBeNull();
+  expect(processing.externalCostStatus).toBe('LocalComputeUnpriced');
+
+  await page.goto(`/procurement/rfqs/view/${rfqId()}`);
+  await expect(page.getByText('Processing evidence', { exact: true })).toBeVisible();
+  await expect(page.getByText('Local-first', { exact: true })).toBeVisible();
+
+  const [supplierQuoteId] = await captureAndProjectOffers(page, token);
+  await page.goto(`/procurement/supplier-quotes/${supplierQuoteId}`);
+  await expect(page.getByText('Processing evidence', { exact: true })).toBeVisible();
+
+  const clientPo = await ensureClientPoAcceptance(page, token, 'exact');
+  await page.goto(`/sales/client-pos/${clientPo.header.id}`);
+  await expect(page.getByText('Processing evidence', { exact: true })).toBeVisible();
+
+  await page.goto('/intelligence/commercial-memory');
+  await page.getByRole('tab', { name: 'Learning Studio' }).click();
+  await expect(page.getByRole('columnheader', { name: 'Learned signal' })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'Evidence status' })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'Governance' })).toBeVisible();
+  await fs.mkdir(v1EvidenceDir, { recursive: true });
+  await page.screenshot({
+    path: path.join(v1EvidenceDir, 'gate-04-processing-learning.png'),
+    fullPage: true,
+  });
+});
+
 test.afterEach(({ page }, testInfo) => {
   void page;
   expect(testInfo.annotations.filter((annotation) => annotation.type === 'skip')).toHaveLength(0);

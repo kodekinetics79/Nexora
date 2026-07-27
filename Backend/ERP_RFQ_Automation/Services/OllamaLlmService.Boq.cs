@@ -22,11 +22,12 @@ namespace ERP_RFQ_Automation.Services
 
             // Reuse the extraction preprocessor (whitespace normalization + intelligent
             // truncation) — service scopes are prose-heavy, the same limits apply.
-            var processedText = PreprocessText(scopeText);
+            var processedText = PrepareProviderInput(scopeText);
             var instructions = BuildBoqInstructions();
             var maximumRequestBytes = MeasureRequestBytes(instructions, processedText);
+            var governedContext = context with { ProviderClass = _providerClass };
             var reservation = await _governance.ReserveAsync(
-                context, "Ollama", _model, processedText, maximumRequestBytes,
+                governedContext, "Ollama", _model, processedText, maximumRequestBytes,
                 _maximumOutputTokens, MAX_RETRIES, cancellationToken);
             long totalInputTokens = 0;
             long totalOutputTokens = 0;

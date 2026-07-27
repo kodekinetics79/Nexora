@@ -335,7 +335,7 @@ export default function LeadIngestionBatchPage() {
 
       <Alert severity={batch.externalOccurrences > 0 ? 'warning' : 'success'} sx={{ mb: 3 }}>
         {batch.externalOccurrences > 0
-          ? `${batch.externalOccurrences} occurrence${batch.externalOccurrences === 1 ? '' : 's'} used external processing. Recorded external cost: ${batch.externalCost.toFixed(4)}.`
+          ? `${batch.externalOccurrences} occurrence${batch.externalOccurrences === 1 ? '' : 's'} used external processing. ${batch.externalCost == null ? 'Provider cost is not priced.' : `Recorded external cost: ${batch.externalCost.toFixed(4)}.`}`
           : 'No external processing is recorded for this batch.'}
       </Alert>
 

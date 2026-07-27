@@ -6,6 +6,7 @@ import {
 } from '@mui/material';
 import { ArrowBack, Description, OpenInNew, ShoppingCartCheckout } from '@mui/icons-material';
 import customerAwardService from '../../../api/services/customerAwardService';
+import CommercialProcessingEvidence from '../../../components/common/CommercialProcessingEvidence';
 
 const readable = (value: string) => value.replaceAll('_', ' ');
 const money = (value: number | null | undefined, currency: string) =>
@@ -37,6 +38,8 @@ export default function ClientPurchaseOrderReviewPage() {
         {match.header.customerOrderId && <Button variant="contained" startIcon={<ShoppingCartCheckout />} onClick={() => navigate(`/sales/orders/${match.header.customerOrderId}`)}>Customer Order</Button>}
       </Stack>
     </Stack>
+
+    <CommercialProcessingEvidence resource="client-purchase-orders" id={match.header.id} />
 
     {match.header.discrepancyCount > 0 ? <Alert severity="warning" sx={{ mb: 2 }}>
       Review the highlighted differences against the selected Customer Quote revision. Previous evidence remains unchanged.

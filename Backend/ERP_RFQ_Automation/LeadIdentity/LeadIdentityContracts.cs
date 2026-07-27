@@ -21,7 +21,7 @@ public sealed record LeadIntakeDescriptor(
     DateTimeOffset IngestedAtUtc,
     LeadProcessingPath ProcessingPath,
     bool ExternalAiUsed,
-    decimal ExternalCost,
+    decimal? ExternalCost,
     string ActorType,
     string ActorId,
     string CorrelationId)
@@ -58,7 +58,7 @@ public sealed record LeadMatchCandidateDto(long CandidateId, long CandidateLeadI
     string DownstreamImpactJson, string ReviewState, int Version);
 public sealed record BatchReconciliationDto(Guid BatchId, int FilesReceived, int LogicalInquiries,
     int NewLeads, int ExactDuplicates, int Revisions, int PossibleMatches, int Rejected,
-    int ExternalOccurrences, decimal ExternalCost, IReadOnlyList<BatchReconciliationItemDto> Items);
+    int ExternalOccurrences, decimal? ExternalCost, IReadOnlyList<BatchReconciliationItemDto> Items);
 public sealed record PossibleMatchQueueItemDto(Guid BatchId, long OccurrenceId, string? FileName,
     DateTimeOffset IngestedAtUtc, decimal Confidence, IReadOnlyList<LeadMatchCandidateDto> MatchCandidates);
 

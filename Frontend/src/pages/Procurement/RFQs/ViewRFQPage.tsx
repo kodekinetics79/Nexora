@@ -33,6 +33,7 @@ import lifecycleService from '../../../api/services/commercialLifecycleService';
 import CommercialLineIntelligence from '../../../components/common/CommercialLineIntelligence';
 import procurementService from '../../../api/services/procurementService';
 import commercialLearningService from '../../../api/services/commercialLearningService';
+import CommercialProcessingEvidence from '../../../components/common/CommercialProcessingEvidence';
 
 const DataField: React.FC<{ label: string; value: string | number | null; bold?: boolean; color?: string }> = ({ label, value, bold = true, color = 'text.primary' }) => (
   <Box sx={{ mb: 1.5 }}>
@@ -254,6 +255,8 @@ const ViewRFQPage: React.FC = () => {
           </Grid>
         </Paper>
       </Box>
+
+      <CommercialProcessingEvidence resource="rfqs" id={rfq.id} />
 
       <Grid container spacing={1.5} sx={{ mb: 3 }}>
         {summary.map((item) => (

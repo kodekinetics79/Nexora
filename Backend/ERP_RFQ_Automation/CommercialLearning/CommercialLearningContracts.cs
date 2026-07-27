@@ -88,5 +88,11 @@ public sealed record LearningStudioSummary(DateTime GeneratedAt,
     int ProductMemoriesWithDecisions, int ProductMemoriesBelowThreshold,
     IReadOnlyCollection<LearningSignal> RecentSignals);
 
-public sealed record LearningSignal(string SignalType, string Subject, string Value,
-    int SampleSize, DateTime LastObservedOn, string Status, string EvidenceReference);
+public sealed record LearningSignal(string SignalId, string SignalType, string Subject, string Value,
+    int SampleSize, DateTime LastObservedOn, string Status, string EvidenceReference,
+    long GovernanceVersion, string? GovernanceAction, DateTime? GovernedOn, long? GovernedByUserId);
+
+public sealed record LearningGovernanceCommand(long ExpectedVersion, string Reason, long? RevertsVersion = null);
+
+public sealed record LearningGovernanceResult(string SignalId, long Version, string Action,
+    string EffectiveStatus, long? RevertsVersion, DateTime OccurredOn, bool IdempotentReplay);
