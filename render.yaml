@@ -30,6 +30,8 @@ services:
         value: "3310"
       - key: ConnectionStrings__DefaultConnection
         sync: false
+      - key: ConnectionStrings__MigrationConnection
+        sync: false
       - key: Database__ApplyMigrationsOnStartup
         value: "true"
       - key: Jwt__Key

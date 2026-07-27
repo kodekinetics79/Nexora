@@ -1,5 +1,6 @@
 using ERP_RFQ_Automation.Services;
 using ERP_RFQ_Automation.Services.Interfaces;
+using ERP_RFQ_Automation.HealthChecks;
 
 namespace ERP_RFQ_Automation.QuoteDelivery;
 
@@ -90,7 +91,10 @@ public sealed class QuoteDeliveryDispatcher(IServiceScopeFactory scopes, ILogger
     }
 }
 
-public sealed class QuoteDeliveryWorker(QuoteDeliveryDispatcher dispatcher, ILogger<QuoteDeliveryWorker> logger)
+public sealed class QuoteDeliveryWorker(
+    QuoteDeliveryDispatcher dispatcher,
+    ILogger<QuoteDeliveryWorker> logger,
+    IQuoteDeliveryWorkerHeartbeat heartbeat)
     : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -98,14 +102,17 @@ public sealed class QuoteDeliveryWorker(QuoteDeliveryDispatcher dispatcher, ILog
         logger.LogInformation("Quote delivery worker started.");
         while (!stoppingToken.IsCancellationRequested)
         {
+            heartbeat.Beat();
             try
             {
                 var count = await dispatcher.DispatchOnceAsync(stoppingToken);
+                heartbeat.RecordSuccess();
                 if (count == 0) await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
             catch (Exception exception)
             {
+                heartbeat.RecordFailure();
                 logger.LogError("Quote delivery worker cycle failed with {ErrorCode}.", exception.GetType().Name);
                 await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
             }

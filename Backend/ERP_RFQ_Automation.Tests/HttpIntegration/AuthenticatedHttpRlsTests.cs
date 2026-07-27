@@ -11,6 +11,29 @@ namespace ERP_RFQ_Automation.Tests.HttpIntegration;
 public sealed class AuthenticatedHttpRlsTests(Release01BHttpApplication app)
 {
     [Fact]
+    public async Task Operations_readiness_requires_permission_and_keeps_queue_counts_tenant_scoped()
+    {
+        using var anonymous = app.CreateClient();
+        using var denied = Client(Release01BHttpApplication.DeniedRole, Release01BHttpApplication.TenantA);
+        using var allowed = Client(Release01BHttpApplication.AllowedRole, Release01BHttpApplication.TenantA);
+
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await anonymous.GetAsync("/api/operations/readiness")).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden,
+            (await denied.GetAsync("/api/operations/readiness")).StatusCode);
+
+        var response = await allowed.GetAsync("/api/operations/readiness");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var extraction = body.RootElement.GetProperty("queues").EnumerateArray()
+            .Single(x => x.GetProperty("key").GetString() == "extraction");
+        Assert.Equal(1, extraction.GetProperty("pending").GetInt32());
+        Assert.Equal(0, extraction.GetProperty("deadLetter").GetInt32());
+        Assert.True(body.RootElement.GetProperty("healthChecks").GetArrayLength() >= 5);
+        Assert.True(body.RootElement.GetProperty("blockingReasons").GetArrayLength() > 0);
+    }
+
+    [Fact]
     public async Task Unauthenticated_request_is_challenged()
     {
         using var client = app.CreateClient();

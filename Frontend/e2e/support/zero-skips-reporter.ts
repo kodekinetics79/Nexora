@@ -1,6 +1,6 @@
 import type { FullResult, Reporter, Suite, TestCase, TestResult } from '@playwright/test/reporter';
 
-const EXPECTED_TESTS = 27;
+const EXPECTED_TESTS = 38;
 
 export default class ZeroSkipsReporter implements Reporter {
   private discovered = 0;
@@ -23,7 +23,7 @@ export default class ZeroSkipsReporter implements Reporter {
         : null,
       this.skipped.length > 0 ? `skipped tests: ${this.skipped.join('; ')}` : null,
     ].filter(Boolean).join(' | ');
-    console.error(`Release 01C acceptance gate failed: ${reasons}`);
+    console.error(`V1 acceptance gate failed: ${reasons}`);
     return { status: 'failed' };
   }
 }

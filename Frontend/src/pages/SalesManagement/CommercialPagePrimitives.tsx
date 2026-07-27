@@ -76,6 +76,7 @@ export function ResponsiveTable({ label, children }: { label: string; children: 
 export function StatusChip({ value }: { value: string }) {
   const normalized = value.toLowerCase();
   const color = normalized.includes('overdue') || normalized.includes('short') || normalized.includes('blocked')
+      || normalized.includes('unhealthy') || normalized.includes('failed') || normalized.includes('dead')
     ? 'error'
     : normalized.includes('pending') || normalized.includes('due') || normalized.includes('review')
       ? 'warning'

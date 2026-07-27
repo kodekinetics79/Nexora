@@ -143,11 +143,14 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Services.IPlatformAuditSe
 builder.Services.AddSingleton<ERP_RFQ_Automation.HealthChecks.IExtractionWorkerHeartbeat,
     ERP_RFQ_Automation.HealthChecks.ExtractionWorkerHeartbeat>();
 builder.Services.AddSingleton<IProcurementDispatchHeartbeat, ProcurementDispatchHeartbeat>();
+builder.Services.AddSingleton<ERP_RFQ_Automation.HealthChecks.IQuoteDeliveryWorkerHeartbeat,
+    ERP_RFQ_Automation.HealthChecks.QuoteDeliveryWorkerHeartbeat>();
 builder.Services.AddHealthChecks()
     .AddCheck<ERP_RFQ_Automation.HealthChecks.DatabaseHealthCheck>("database", tags: new[] { "live", "ready" })
     .AddCheck<ERP_RFQ_Automation.HealthChecks.EvidenceStorageHealthCheck>("evidence-storage", tags: new[] { "ready" })
     .AddCheck<ERP_RFQ_Automation.HealthChecks.MalwareScannerHealthCheck>("malware-scanner", tags: new[] { "ready" })
     .AddCheck<ERP_RFQ_Automation.HealthChecks.ExtractionWorkerHealthCheck>("extraction-worker", tags: new[] { "ready" })
+    .AddCheck<ERP_RFQ_Automation.HealthChecks.QuoteDeliveryWorkerHealthCheck>("quote-delivery-worker", tags: new[] { "ready" })
     .AddCheck<ProcurementDispatchHealthCheck>("procurement-dispatch-worker", tags: new[] { "ready" });
 // Register repositories
 builder.Services.AddScoped<ISetupMasterRepository, SetupMasterRepository>();

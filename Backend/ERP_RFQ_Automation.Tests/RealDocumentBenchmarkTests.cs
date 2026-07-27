@@ -44,9 +44,9 @@ public sealed class RealDocumentBenchmarkTests
             Fixture.Bytes("customer-rfq.csv", "csv", CreateCsv("RFQ-CSV-01", "CSV-100", "7"), "CSV-100", 1),
             Fixture.Bytes("multi-sheet-rfq.xlsx", "xlsx", CreateWorkbook(), "SHEET-200", 2),
             Fixture.Bytes("native-rfq.pdf", "pdf", CreateNativePdf("RFQ-PDF-01 PART PDF-100 QTY 9"), "RFQ-PDF-01"),
-            Fixture.Bytes("scanned-rfq.pdf", "pdf", CreateImagePdf(image), string.Empty, expectOcrPath: true),
+            Fixture.Bytes("scanned-rfq.pdf", "pdf", CreateImagePdf(image), "ABC123", expectOcrPath: true),
             Fixture.Bytes("customer-rfq.docx", "docx", CreateDocx("RFQ RFQ-DOCX-01 PART DOCX-100 QTY 11"), "RFQ-DOCX-01"),
-            Fixture.Bytes("rfq-image.png", "png", image, string.Empty, expectOcrPath: true),
+            Fixture.Bytes("rfq-image.png", "png", image, "ABC123", expectOcrPath: true),
             Fixture.Text("supplier-quote.txt", "SUPPLIER QUOTE SQ-01\nPART SUP-100\nPRICE 12.50 USD", "SUP-100"),
             Fixture.Bytes("client-po.csv", "csv", CreateCsv("PO-CLIENT-01", "PO-100", "3"), "PO-100", 1),
             Fixture.Bytes("duplicate-original.txt", "txt", original, "RFQ-DUP-01"),
@@ -62,6 +62,7 @@ public sealed class RealDocumentBenchmarkTests
         var elapsed = new List<double>();
         var inputs = new Dictionary<string, DocumentExtractionInput>(StringComparer.Ordinal);
         var reviewCount = 0;
+        var usableCount = 0;
 
         for (var index = 0; index < fixtures.Length; index++)
         {
@@ -83,9 +84,7 @@ public sealed class RealDocumentBenchmarkTests
             Assert.Equal($"job:{index + 1}", input.SourceId);
             Assert.NotEqual(ExtractionProcessingPath.ExternalFallback, input.ProcessingPath);
             var searchable = SearchableText(input);
-            Assert.True(
-                searchable.Contains(fixture.ExpectedToken, StringComparison.OrdinalIgnoreCase),
-                $"{fixture.Name} did not contain {fixture.ExpectedToken}; path={input.ProcessingPath}; ocr={input.OcrStatus}; text={searchable}");
+            var usable = searchable.Contains(fixture.ExpectedToken, StringComparison.OrdinalIgnoreCase);
             if (fixture.ExpectedRows is { } rows)
             {
                 Assert.True(input.IsStructured);
@@ -95,17 +94,26 @@ public sealed class RealDocumentBenchmarkTests
             if (fixture.ExpectOcrPath)
             {
                 Assert.Equal(ExtractionProcessingPath.LocalOcr, input.ProcessingPath);
-                if (fixture.ExpectOcrSuccess)
+                if (input.OcrStatus == ExtractionOcrStatus.Completed)
                 {
-                    Assert.Equal(ExtractionOcrStatus.Completed, input.OcrStatus);
                     Assert.True(input.OcrPageCount > 0);
+                    Assert.True(usable,
+                        $"{fixture.Name} completed OCR without the expected critical value {fixture.ExpectedToken}.");
                 }
                 else
                 {
                     Assert.Equal(ExtractionOcrStatus.Failed, input.OcrStatus);
+                    Assert.False(usable,
+                        $"{fixture.Name} reported failed OCR but returned the expected critical value.");
                     reviewCount++;
                 }
             }
+            else
+            {
+                Assert.True(usable,
+                    $"{fixture.Name} did not contain {fixture.ExpectedToken}; path={input.ProcessingPath}; ocr={input.OcrStatus}; text={searchable}");
+            }
+            if (usable) usableCount++;
         }
 
         Assert.Equal(
@@ -117,8 +125,9 @@ public sealed class RealDocumentBenchmarkTests
 
         var ordered = elapsed.OrderBy(value => value).ToArray();
         _output.WriteLine(
-            "fixtures={0}; localRate=100%; externalRate=0%; humanReviewRate={1:P1}; p50Ms={2:F1}; p95Ms={3:F1}; governedOcrFailures={4}",
+            "fixtures={0}; localPathRate=100%; usableDocumentRate={1:P1}; externalRate=0%; humanReviewRate={2:P1}; p50Ms={3:F1}; p95Ms={4:F1}; governedOcrFailures={5}",
             fixtures.Length,
+            (double)usableCount / fixtures.Length,
             (double)reviewCount / fixtures.Length,
             Percentile(ordered, 0.50),
             Percentile(ordered, 0.95),
@@ -261,8 +270,7 @@ public sealed class RealDocumentBenchmarkTests
         byte[] Content,
         string ExpectedToken,
         int? ExpectedRows,
-        bool ExpectOcrPath,
-        bool ExpectOcrSuccess)
+        bool ExpectOcrPath)
     {
         public string StoragePath => "fixture://" + Name;
         public string Hash => Convert.ToHexString(SHA256.HashData(Content)).ToLowerInvariant();
@@ -276,9 +284,8 @@ public sealed class RealDocumentBenchmarkTests
             byte[] content,
             string expectedToken,
             int? expectedRows = null,
-            bool expectOcrPath = false,
-            bool expectOcrSuccess = false)
-            => new(name, extension, content, expectedToken, expectedRows, expectOcrPath, expectOcrSuccess);
+            bool expectOcrPath = false)
+            => new(name, extension, content, expectedToken, expectedRows, expectOcrPath);
     }
 
     private sealed class FixtureStorage : IEvidenceObjectStorage

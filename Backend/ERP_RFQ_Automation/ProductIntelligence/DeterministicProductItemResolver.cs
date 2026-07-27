@@ -9,6 +9,9 @@ public sealed class DeterministicProductItemResolver : IProductItemResolver
 
     private readonly IProductResolutionCatalog _catalog;
     private readonly IApprovedProductReferenceSource _references;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, CatalogSnapshot> _tenantSnapshots = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<ProductMatchKey, ProductMatch> _matches = new();
+    private readonly SemaphoreSlim _snapshotGate = new(1, 1);
 
     public DeterministicProductItemResolver(
         IProductResolutionCatalog catalog,
@@ -29,14 +32,65 @@ public sealed class DeterministicProductItemResolver : IProductItemResolver
 
         var normalizedPart = ProductIdentityNormalizer.NormalizePartNumber(request.OriginalPartNumber);
         var normalizedManufacturer = ProductIdentityNormalizer.NormalizeManufacturer(request.OriginalManufacturer);
-        var products = (await _catalog.GetActiveProductsAsync(request.BusinessUnitId, cancellationToken))
-            .Where(product => product.BusinessUnitId == request.BusinessUnitId)
-            .GroupBy(product => product.ProductId)
-            .Select(group => group.First())
-            .ToArray();
-        var references = (await _references.GetApprovedReferencesAsync(request.BusinessUnitId, cancellationToken))
-            .Where(reference => reference.BusinessUnitId == request.BusinessUnitId)
-            .ToArray();
+        var snapshot = await GetSnapshotAsync(request.BusinessUnitId, cancellationToken);
+        var key = new ProductMatchKey(request.BusinessUnitId, normalizedPart, normalizedManufacturer,
+            request.OriginalPartNumber?.Trim(), request.Description?.Trim());
+        var match = _matches.GetOrAdd(key, _ => Match(snapshot.Products, snapshot.References, request,
+            normalizedPart, normalizedManufacturer));
+
+        return new ProductResolutionResult(
+            request.BusinessUnitId,
+            request.SourceLeadRevisionId,
+            request.SourceLeadItemRevisionId,
+            request.OriginalPartNumber,
+            normalizedPart,
+            request.OriginalManufacturer,
+            normalizedManufacturer,
+            match.RankedCandidates,
+            match.Confidence,
+            match.Margin,
+            match.Method,
+            CurrentRuleVersion,
+            request.Evidence ?? Array.Empty<ProductResolutionEvidence>(),
+            match.DecisionState,
+            match.ResolvedProductId,
+            match.IsAmbiguous,
+            false);
+    }
+
+    private async Task<CatalogSnapshot> GetSnapshotAsync(long businessUnitId, CancellationToken cancellationToken)
+    {
+        if (_tenantSnapshots.TryGetValue(businessUnitId, out var cached)) return cached;
+
+        await _snapshotGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (_tenantSnapshots.TryGetValue(businessUnitId, out cached)) return cached;
+            var products = (await _catalog.GetActiveProductsAsync(businessUnitId, cancellationToken))
+                .Where(product => product.BusinessUnitId == businessUnitId)
+                .GroupBy(product => product.ProductId)
+                .Select(group => group.First())
+                .ToArray();
+            var references = (await _references.GetApprovedReferencesAsync(businessUnitId, cancellationToken))
+                .Where(reference => reference.BusinessUnitId == businessUnitId)
+                .ToArray();
+            cached = new CatalogSnapshot(products, references);
+            _tenantSnapshots.TryAdd(businessUnitId, cached);
+            return cached;
+        }
+        finally
+        {
+            _snapshotGate.Release();
+        }
+    }
+
+    private static ProductMatch Match(
+        ProductIdentityCandidate[] products,
+        ApprovedProductReference[] references,
+        ProductResolutionRequest request,
+        string? normalizedPart,
+        string? normalizedManufacturer)
+    {
 
         var ranked = ExactMatches(products, normalizedPart, normalizedManufacturer).ToList();
         if (ranked.Count == 0)
@@ -71,24 +125,8 @@ public sealed class DeterministicProductItemResolver : IProductItemResolver
                 ? ProductResolutionDecisionState.ReviewRequired
                 : ProductResolutionDecisionState.Unresolved;
 
-        return new ProductResolutionResult(
-            request.BusinessUnitId,
-            request.SourceLeadRevisionId,
-            request.SourceLeadItemRevisionId,
-            request.OriginalPartNumber,
-            normalizedPart,
-            request.OriginalManufacturer,
-            normalizedManufacturer,
-            ranked,
-            confidence,
-            margin,
-            top?.Method,
-            CurrentRuleVersion,
-            request.Evidence ?? Array.Empty<ProductResolutionEvidence>(),
-            decision,
-            autoLink ? top!.ProductId : null,
-            ambiguous,
-            false);
+        return new ProductMatch(ranked, confidence, margin, top?.Method, decision,
+            autoLink ? top!.ProductId : null, ambiguous);
     }
 
     private static IEnumerable<RankedProductCandidate> ExactMatches(
@@ -208,4 +246,24 @@ public sealed class DeterministicProductItemResolver : IProductItemResolver
         return new RankedProductCandidate(product.ProductId, product.PartNumber, product.InternalCode,
             product.Manufacturer, product.ProductName, confidence, method, reason, details);
     }
+
+    private sealed record CatalogSnapshot(
+        ProductIdentityCandidate[] Products,
+        ApprovedProductReference[] References);
+
+    private sealed record ProductMatchKey(
+        long BusinessUnitId,
+        string? NormalizedPart,
+        string? NormalizedManufacturer,
+        string? OriginalPart,
+        string? Description);
+
+    private sealed record ProductMatch(
+        IReadOnlyList<RankedProductCandidate> RankedCandidates,
+        decimal Confidence,
+        decimal Margin,
+        string? Method,
+        ProductResolutionDecisionState DecisionState,
+        long? ResolvedProductId,
+        bool IsAmbiguous);
 }

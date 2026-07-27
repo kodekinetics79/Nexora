@@ -110,9 +110,12 @@ public sealed class CoreSalesForceInventoryPerformanceBenchmarkTests(
             Assert.Equal(ProductResolutionDecisionState.AutoLinked, result.DecisionState);
             Assert.Equal(42, result.ResolvedProductId);
         }
+        Assert.Equal(1, catalog.Calls);
+        Assert.Equal(1, references.Calls);
+        Assert.True(SourceCallReduction(operations, catalog.Calls + references.Calls) >= .20m);
         return Measurement.Local("exact_normalized_product_lookup", operations, samples,
             queryCount: catalog.Calls + references.Calls, contentCount: 100,
-            note: $"Catalog calls={catalog.Calls}; approved-reference calls={references.Calls}; exact part and exact internal-code inputs alternate.");
+            note: $"Scoped catalog calls={catalog.Calls}; scoped approved-reference calls={references.Calls}; source_call_reduction={SourceCallReduction(operations, catalog.Calls + references.Calls):P2}; exact part and exact internal-code inputs alternate.");
     }
 
     private static Measurement BenchmarkMultiWarehouseAtp()
@@ -251,12 +254,18 @@ public sealed class CoreSalesForceInventoryPerformanceBenchmarkTests(
         Assert.Equal(9_000, autoLinked);
         Assert.Equal(1_000, unresolved);
         Assert.Equal(0, externalCalls);
+        Assert.Equal(1, catalog.Calls);
+        Assert.Equal(1, references.Calls);
+        Assert.True(SourceCallReduction(operations, catalog.Calls + references.Calls) >= .20m);
         var duplicates = operations - signatures.Count;
         return Measurement.Local("local_classification_10000_requested_lines", operations, samples,
             queryCount: catalog.Calls + references.Calls, duplicateCount: duplicates,
             contentCount: signatures.Count,
-            note: $"auto_linked={autoLinked}; unresolved={unresolved}; unique_request_signatures={signatures.Count}; requested_duplicate_signatures={duplicates}; classifier_deduplication=0.");
+            note: $"auto_linked={autoLinked}; unresolved={unresolved}; unique_request_signatures={signatures.Count}; requested_duplicate_signatures={duplicates}; scoped_source_calls={catalog.Calls + references.Calls}; source_call_reduction={SourceCallReduction(operations, catalog.Calls + references.Calls):P2}.");
     }
+
+    private static decimal SourceCallReduction(int operations, long observedCalls)
+        => 1m - observedCalls / (decimal)(operations * 2);
 
     private async Task SeedInventoryAsync(CommandCounter counter)
     {

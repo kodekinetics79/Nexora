@@ -159,6 +159,26 @@ public sealed class CoreProductResolutionTests
         Assert.Empty(result.RankedCandidates);
     }
 
+    [Fact]
+    public async Task ResolverCoalescesTenantCatalogLoadsAndKeepsTenantSnapshotsSeparate()
+    {
+        var catalog = new CountingCatalog([
+            Product(1, 11, "PART-11"),
+            Product(2, 12, "PART-12")
+        ]);
+        var references = new CountingReferences([]);
+        var resolver = new DeterministicProductItemResolver(catalog, references);
+
+        var ownTenant = await Task.WhenAll(Enumerable.Range(1, 100)
+            .Select(_ => resolver.ResolveAsync(Request(11, "PART-11"))));
+        var otherTenant = await resolver.ResolveAsync(Request(12, "PART-12"));
+
+        Assert.All(ownTenant, result => Assert.Equal(1, result.ResolvedProductId));
+        Assert.Equal(2, otherTenant.ResolvedProductId);
+        Assert.Equal(2, catalog.Calls);
+        Assert.Equal(2, references.Calls);
+    }
+
     private static ProductResolutionRequest Request(long businessUnitId, string? part, string? description = null) =>
         new(businessUnitId, 101, 1001, part, "Acme", description,
             [new ProductResolutionEvidence("source-cell", "document-1!A2", part)]);
@@ -211,5 +231,32 @@ public sealed class CoreProductResolutionTests
         public Task<IReadOnlyList<ApprovedProductReference>> GetApprovedReferencesAsync(
             long businessUnitId,
             CancellationToken cancellationToken = default) => Task.FromResult(references);
+    }
+
+    private sealed class CountingCatalog(IReadOnlyList<ProductIdentityCandidate> products) : IProductResolutionCatalog
+    {
+        private int _calls;
+        public int Calls => Volatile.Read(ref _calls);
+
+        public Task<IReadOnlyList<ProductIdentityCandidate>> GetActiveProductsAsync(
+            long businessUnitId, CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref _calls);
+            return Task.FromResult(products);
+        }
+    }
+
+    private sealed class CountingReferences(IReadOnlyList<ApprovedProductReference> references)
+        : IApprovedProductReferenceSource
+    {
+        private int _calls;
+        public int Calls => Volatile.Read(ref _calls);
+
+        public Task<IReadOnlyList<ApprovedProductReference>> GetApprovedReferencesAsync(
+            long businessUnitId, CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref _calls);
+            return Task.FromResult(references);
+        }
     }
 }

@@ -13,7 +13,7 @@ RUN dotnet publish ERP_RFQ_Automation/ERP_RFQ_Automation.csproj -c Release -o /a
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
 # Native libs for Tesseract/Leptonica OCR (the Tesseract nuget also ships linux-x64 natives).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libleptonica-dev libtesseract-dev \
+    && apt-get install -y --no-install-recommends libleptonica-dev libtesseract-dev tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /app ./

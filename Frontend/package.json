@@ -5,9 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "tsc && vite build && node scripts/check-bundle-budget.mjs",
     "e2e": "playwright test",
-    "e2e:acceptance": "E2E_FULL_ACCEPTANCE=true playwright test --workers=1 --retries=0",
+    "e2e:acceptance": "E2E_FULL_ACCEPTANCE=true playwright test --config playwright.commercial-journey-v2.config.ts --workers=1 --retries=0",
     "e2e:list": "playwright test --list",
     "e2e:install": "playwright install chromium",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",

@@ -244,6 +244,7 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         const long supplierHistoryModuleId = 84_005;
         const long ordersModuleId = 84_006;
         const long productsModuleId = 84_007;
+        const long usersModuleId = 84_008;
         db.Modules.AddRange(
             Module(leadsModuleId, "Leads"),
             Module(dashboardModuleId, "Dashboard"),
@@ -251,7 +252,8 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
             Module(rfqManagementModuleId, "RFQ Management"),
             Module(supplierHistoryModuleId, "Supplier History"),
             Module(ordersModuleId, "Orders"),
-            Module(productsModuleId, "Products"));
+            Module(productsModuleId, "Products"),
+            Module(usersModuleId, "Users"));
 
         db.SetupMasters.AddRange(
             Role(AllowedRole, TenantA, "Release 01B Reader"),
@@ -264,7 +266,36 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
             Permission(85_004, AllowedRole, rfqManagementModuleId, TenantA, canCreate: true, canEdit: true),
             Permission(85_005, AllowedRole, supplierHistoryModuleId, TenantA, canCreate: true, canEdit: true),
             Permission(85_006, AllowedRole, ordersModuleId, TenantA, canCreate: true, canEdit: true),
-            Permission(85_007, AllowedRole, productsModuleId, TenantA, canCreate: true, canEdit: true));
+            Permission(85_007, AllowedRole, productsModuleId, TenantA, canCreate: true, canEdit: true),
+            Permission(85_008, AllowedRole, usersModuleId, TenantA));
+
+        db.Set<ExtractionJob>().AddRange(
+            new ExtractionJob
+            {
+                Id = 395_001,
+                BatchId = TenantABatchId,
+                BusinessUnitId = TenantA,
+                SourceType = ExtractionSourceType.ManualUpload,
+                ContentHash = new string('1', 64),
+                StoragePath = "test-evidence://tenant-a/queued",
+                Status = ExtractionStatus.Pending,
+                NextAttemptAt = now.UtcDateTime,
+                CreatedOn = now.UtcDateTime,
+                UpdatedOn = now.UtcDateTime
+            },
+            new ExtractionJob
+            {
+                Id = 395_002,
+                BatchId = TenantBBatchId,
+                BusinessUnitId = TenantB,
+                SourceType = ExtractionSourceType.ManualUpload,
+                ContentHash = new string('2', 64),
+                StoragePath = "test-evidence://tenant-b/dead-letter",
+                Status = ExtractionStatus.DeadLetter,
+                NextAttemptAt = now.UtcDateTime,
+                CreatedOn = now.UtcDateTime,
+                UpdatedOn = now.UtcDateTime
+            });
 
         db.Customers.AddRange(
             Customer(TenantACustomerId, TenantA, "Tenant A Customer", "buyer-a@nexora.invalid"),

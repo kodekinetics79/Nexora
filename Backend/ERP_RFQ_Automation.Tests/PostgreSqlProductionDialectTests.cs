@@ -890,6 +890,63 @@ public sealed class PostgreSqlProductionDialectTests
         await transactionWithoutTenant.RollbackAsync();
     }
 
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task ExtractionJobs_are_read_and_write_isolated_by_runtime_rls()
+    {
+        const long tenantOne = 93_101;
+        const long tenantTwo = 93_102;
+        var marker = Guid.NewGuid().ToString("N");
+        var hashOne = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(marker + "-one"))).ToLowerInvariant();
+        var hashTwo = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(marker + "-two"))).ToLowerInvariant();
+
+        await using (var owner = _database.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(owner, tenantOne);
+            Seed.EnsureBusinessUnit(owner, tenantTwo);
+            owner.Set<ExtractionJob>().AddRange(
+                Extraction(tenantOne, hashOne, marker + "-one.pdf"),
+                Extraction(tenantTwo, hashTwo, marker + "-two.pdf"));
+            await owner.SaveChangesAsync();
+        }
+
+        await using (var tenantContext = _database.TenantContextWithRls(tenantOne))
+        {
+            var visible = await tenantContext.Set<ExtractionJob>().IgnoreQueryFilters()
+                .Where(job => job.FileName != null && job.FileName.StartsWith(marker))
+                .Select(job => job.BusinessUnitId)
+                .ToListAsync();
+            Assert.Equal(new[] { tenantOne }, visible);
+
+            var forgedHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(marker + "-forged"))).ToLowerInvariant();
+            var exception = await Assert.ThrowsAsync<PostgresException>(() =>
+                tenantContext.Database.ExecuteSqlInterpolatedAsync($$"""
+                    INSERT INTO "ExtractionJobs"
+                        ("BatchId", "BusinessUnitId", "SourceType", "ContentHash", "StoragePath", "FileName",
+                         "Status", "Priority", "SchedulerTag", "Attempts", "MaxAttempts", "NextAttemptAt", "CreatedOn", "UpdatedOn")
+                    VALUES
+                        ({{Guid.NewGuid()}}, {{tenantTwo}}, 'ManualUpload', {{forgedHash}}, {{"evidence/" + forgedHash}},
+                         {{marker + "-forged.pdf"}}, 'Pending', 0, 0, 0, 5, now(), now(), now());
+                    """));
+            Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+        }
+
+        static ExtractionJob Extraction(long tenantId, string hash, string fileName) => new()
+        {
+            BatchId = Guid.NewGuid(),
+            BusinessUnitId = tenantId,
+            SourceType = ExtractionSourceType.ManualUpload,
+            ContentHash = hash,
+            StoragePath = "evidence/" + hash,
+            FileName = fileName,
+            Status = ExtractionStatus.Pending,
+            MaxAttempts = 5,
+            NextAttemptAt = DateTime.UtcNow,
+            CreatedOn = DateTime.UtcNow,
+            UpdatedOn = DateTime.UtcNow
+        };
+    }
+
     private async Task SeedRlsLeadsAsync(string marker, long tenantOne, long tenantTwo)
     {
         await using var connection = await _database.OpenConnectionAsync();

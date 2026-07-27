@@ -320,7 +320,8 @@ test('03 RFQ line evidence opens without inventing unavailable provenance', asyn
   await loginAs(page, 'manager');
   await page.goto(`/procurement/rfqs/view/${requiredNumber('E2E_CORE_RFQ_ID')}`);
   await page.getByRole('button', { name: /Sourcing required/i }).click();
-  await page.getByRole('button', { name: 'Evidence' }).first().click();
+  const line = page.getByRole('row').filter({ hasText: required('E2E_CORE_PARTIAL_ATP_PART') });
+  await line.getByRole('button', { name: /Inspect persisted source and normalization evidence/i }).click();
   await expect(page.getByText('Source evidence', { exact: true })).toBeVisible();
   await expect(page.getByText(/Open Canonical Lead to inspect document/i)).toBeVisible();
   await fs.mkdir(evidenceDir, { recursive: true });
@@ -924,6 +925,42 @@ test('37 local-first processing evidence and governed learning remain visible ac
   await fs.mkdir(v1EvidenceDir, { recursive: true });
   await page.screenshot({
     path: path.join(v1EvidenceDir, 'gate-04-processing-learning.png'),
+    fullPage: true,
+  });
+});
+
+test('38 production readiness reconciles runtime health and tenant queues', async ({ page }) => {
+  const token = await loginAs(page, 'manager');
+  const readiness = await jsonOk<{
+    deploymentReadiness: string;
+    blockingReasons: string[];
+    healthChecks: Array<{ name: string; status: string }>;
+    queues: Array<{ label: string; pending: number; inFlight: number; deadLetter: number }>;
+    aiLast30Days: { local: number; external: number; externalSharePercent: number; unresolved: number };
+  }>(await api(page, token, 'get', '/api/operations/readiness'));
+
+  expect(readiness.healthChecks.length).toBeGreaterThanOrEqual(5);
+  expect(readiness.queues).toHaveLength(3);
+  expect(readiness.aiLast30Days.externalSharePercent).toBeLessThanOrEqual(10);
+
+  await page.goto('/admin/operations');
+  await expect(page.getByRole('heading', { name: 'Production readiness' })).toBeVisible();
+  await expect(page.getByText(`Runtime readiness is ${readiness.deploymentReadiness}.`, { exact: false })).toBeVisible();
+  for (const reason of readiness.blockingReasons) {
+    await expect(page.getByText(reason, { exact: true })).toBeVisible();
+  }
+  for (const check of readiness.healthChecks) {
+    await expect(page.getByRole('row').filter({ hasText: check.name }).getByText(check.status, { exact: true })).toBeVisible();
+  }
+  for (const queue of readiness.queues) {
+    const row = page.getByRole('row').filter({ hasText: queue.label });
+    await expect(row).toContainText(queue.pending.toLocaleString());
+    await expect(row).toContainText(queue.inFlight.toLocaleString());
+    await expect(row).toContainText(queue.deadLetter.toLocaleString());
+  }
+  await fs.mkdir(v1EvidenceDir, { recursive: true });
+  await page.screenshot({
+    path: path.join(v1EvidenceDir, 'gate-05-production-readiness.png'),
     fullPage: true,
   });
 });
