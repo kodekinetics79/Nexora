@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.MultiTenancy;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Logging;
@@ -26,11 +27,21 @@ public sealed class ExtractionQueue : IExtractionQueue
 {
     private readonly ErpRfqAutomationContext _context;
     private readonly ILogger<ExtractionQueue> _log;
+    private readonly ITenantContext? _tenantContext;
 
     public ExtractionQueue(ErpRfqAutomationContext context, ILogger<ExtractionQueue> log)
     {
         _context = context;
         _log = log;
+    }
+
+    public ExtractionQueue(
+        ErpRfqAutomationContext context,
+        ILogger<ExtractionQueue> log,
+        ITenantContext tenantContext)
+        : this(context, log)
+    {
+        _tenantContext = tenantContext;
     }
 
     // All entity columns default to their property names (case-sensitive, quoted).
@@ -204,17 +215,24 @@ RETURNING {ReturningColumns};";
     {
         var now = DateTime.UtcNow;
         var conn = await OpenAsync(ct);
+        await using var transaction = await conn.BeginTransactionAsync(ct);
+        await PrepareExecutionScopeAsync(conn, transaction, ct);
         await using var cmd = conn.CreateCommand();
+        cmd.Transaction = transaction;
         cmd.CommandText = ClaimSql;
         AddParam(cmd, "now", now);
         AddParam(cmd, "leaseExpiry", now.Add(leaseDuration));
         AddParam(cmd, "worker", workerId);
         AddParam(cmd, "cap", perTenantCap < 1 ? 1 : perTenantCap);
 
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        if (!await reader.ReadAsync(ct))
-            return null;
-        return MapJob(reader);
+        ExtractionJob? job = null;
+        await using (var reader = await cmd.ExecuteReaderAsync(ct))
+        {
+            if (await reader.ReadAsync(ct))
+                job = MapJob(reader);
+        }
+        await transaction.CommitAsync(ct);
+        return job;
     }
 
     public async Task<bool> RenewLeaseAsync(
@@ -298,13 +316,42 @@ WHERE ""Id"" = @id AND ""LeasedBy"" = @worker AND ""Attempts"" = @attempt
     private async Task<int> ExecuteAsync(string sql, CancellationToken ct, params (string Name, object? Value)[] parameters)
     {
         var conn = await OpenAsync(ct);
+        var currentTransaction = _context.Database.CurrentTransaction?.GetDbTransaction();
+        await using var ownedTransaction = currentTransaction is null
+            ? await conn.BeginTransactionAsync(ct)
+            : null;
+        var transaction = currentTransaction ?? ownedTransaction!;
+        await PrepareExecutionScopeAsync(conn, transaction, ct);
         await using var cmd = conn.CreateCommand();
-        if (_context.Database.CurrentTransaction is { } transaction)
-            cmd.Transaction = transaction.GetDbTransaction();
+        cmd.Transaction = transaction;
         cmd.CommandText = sql;
         foreach (var (name, value) in parameters)
             AddParam(cmd, name, value);
-        return await cmd.ExecuteNonQueryAsync(ct);
+        var rows = await cmd.ExecuteNonQueryAsync(ct);
+        if (ownedTransaction is not null)
+            await ownedTransaction.CommitAsync(ct);
+        return rows;
+    }
+
+    private async Task PrepareExecutionScopeAsync(
+        DbConnection connection, DbTransaction transaction, CancellationToken ct)
+    {
+        if (_tenantContext is null)
+            return;
+
+        await using var setup = connection.CreateCommand();
+        setup.Transaction = transaction;
+        if (_tenantContext.BusinessUnitId is { } businessUnitId)
+        {
+            setup.CommandText = $"SET LOCAL ROLE {TenantRlsCommandInterceptor.TenantRole}; " +
+                "SELECT set_config('nexora.business_unit_id', @tenant_id, true);";
+            AddParam(setup, "tenant_id", businessUnitId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+        else
+        {
+            setup.CommandText = $"SET LOCAL ROLE {TenantRlsCommandInterceptor.PipelineRole};";
+        }
+        await setup.ExecuteNonQueryAsync(ct);
     }
 
     private static void AddParam(DbCommand cmd, string name, object? value)

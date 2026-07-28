@@ -213,6 +213,8 @@ public sealed class PostgreSqlProductionDialectTests
         {
             Seed.EnsureBusinessUnit(context, 9_911);
             await context.SaveChangesAsync();
+            await EnqueueGovernedJobAsync(
+                context, NewQueue(context), $"runtime-role-{Guid.NewGuid():N}", 9_911, maxAttempts: 3);
         }
         await using (var admin = await _database.OpenConnectionAsync())
         await using (var create = admin.CreateCommand())
@@ -335,6 +337,27 @@ public sealed class PostgreSqlProductionDialectTests
                 pipelineRead.CommandText = "SET LOCAL ROLE nexora_pipeline_app; SELECT count(*) FROM public.\"ExtractionJobs\";";
                 Assert.IsType<long>(await pipelineRead.ExecuteScalarAsync());
                 await pipelineTransaction.RollbackAsync();
+            }
+
+            var runtimeOptions = new DbContextOptionsBuilder<ErpRfqAutomationContext>()
+                .UseNpgsql(runtimeConnectionString)
+                .Options;
+            await using (var claimContext = new ErpRfqAutomationContext(runtimeOptions, new StubTenant(null)))
+            {
+                var queue = new ExtractionQueue(
+                    claimContext, new NoopLogger<ExtractionQueue>(), new StubTenant(null));
+                var claimed = await queue.ClaimAsync(
+                    "runtime-role-test", TimeSpan.FromMinutes(2), perTenantCap: 1);
+                Assert.NotNull(claimed);
+                Assert.Equal(9_911, claimed.BusinessUnitId);
+                Assert.Equal(ExtractionStatus.Leased, claimed.Status);
+
+                await using var tenantContext = new ErpRfqAutomationContext(
+                    runtimeOptions, new StubTenant(claimed.BusinessUnitId));
+                var tenantQueue = new ExtractionQueue(
+                    tenantContext, new NoopLogger<ExtractionQueue>(), new StubTenant(claimed.BusinessUnitId));
+                Assert.True(await tenantQueue.SetStatusAsync(
+                    claimed.Id, "runtime-role-test", claimed.Attempts, ExtractionStatus.Extracting));
             }
 
             await using (var secretTransaction = await runtime.BeginTransactionAsync())
