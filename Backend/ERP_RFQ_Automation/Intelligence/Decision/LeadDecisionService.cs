@@ -74,7 +74,7 @@ public sealed class LeadDecisionService : ILeadDecisionService
                 l.Clientemail,
                 l.BidClosingDate,
                 l.Aiconfidence,
-                SenderEmail = l.EmailIngests.FromEmail,
+                SenderEmail = l.EmailIngests != null ? l.EmailIngests.FromEmail : l.Clientemail,
                 Items = l.LeadItems
                     .OrderBy(li => li.Id)
                     .Select(li => new ItemRow(

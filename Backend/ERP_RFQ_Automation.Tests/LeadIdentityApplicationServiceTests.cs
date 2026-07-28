@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Tests.Support;
@@ -7,6 +8,49 @@ namespace ERP_RFQ_Automation.Tests;
 
 public sealed class LeadIdentityApplicationServiceTests
 {
+    [Fact]
+    public async Task Batch_includes_security_rejected_intake_before_lead_reconciliation()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(70);
+        Seed.BusinessUnit(context, 70);
+        var batchId = Guid.NewGuid();
+        context.Add(new LeadIngestionBatch
+        {
+            Id = batchId,
+            BusinessUnitId = 70,
+            SourceChannel = "ManualUpload",
+            CreatedBy = "test",
+            CreatedAtUtc = DateTimeOffset.UtcNow,
+            UpdatedAtUtc = DateTimeOffset.UtcNow
+        });
+        var corpus = DocumentCorpus.Create(70, batchId, CorpusSourceType.ManualUpload);
+        context.Add(corpus);
+        await context.SaveChangesAsync();
+        var source = SourceDocument.Create(70, corpus.Id, new string('a', 64), "customer-rfq.doc",
+            "application/msword", "evidence", "quarantine/rfq.doc", "v1", 128);
+        source.MarkSecurityStatus(DocumentSecurityStatus.Quarantined);
+        context.Add(source);
+        await context.SaveChangesAsync();
+        var intake = SourceDocumentOccurrence.Create(70, source.Id, corpus.Id, "batch-rejected",
+            "{\"fileName\":\"customer-rfq.doc\"}");
+        intake.MarkRejected("SecurityInspection", "document_quarantined",
+            "{\"status\":\"Quarantined\",\"reason\":\"Malware scanner unavailable; the file remains quarantined.\"}");
+        context.Add(intake);
+        await context.SaveChangesAsync();
+
+        var result = await new LeadIdentityApplicationService(context).GetBatchAsync(70, batchId);
+
+        Assert.NotNull(result);
+        Assert.Equal(1, result.FilesReceived);
+        Assert.Equal(1, result.Rejected);
+        var item = Assert.Single(result.Items);
+        Assert.Equal("RejectedOrUnprocessable", item.Classification);
+        Assert.Equal("Rejected", item.IntakeStatus);
+        Assert.Equal("document_quarantined", item.ErrorCode);
+        Assert.Contains(item.Reasons, reason => reason.Contains("scanner unavailable", StringComparison.OrdinalIgnoreCase));
+    }
+
     [Fact]
     public async Task New_duplicate_revision_and_separate_inquiry_preserve_one_canonical_identity()
     {

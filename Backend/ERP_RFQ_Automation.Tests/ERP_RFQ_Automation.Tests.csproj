@@ -26,4 +26,8 @@
     <ProjectReference Include="..\ERP_RFQ_Automation\ERP_RFQ_Automation.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="Fixtures\legacy-rfq.xls" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

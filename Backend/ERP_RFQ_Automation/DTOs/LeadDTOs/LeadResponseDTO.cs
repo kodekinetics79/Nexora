@@ -30,7 +30,7 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         public DateTime CreatedDate { get; set; }
         public long BusinessUnitId { get; set; }
         public string? BusinessUnitName { get; set; }
-        public long EmailIngestsId { get; set; }
+        public long? EmailIngestsId { get; set; }
         public DateTime? ModifiedDate { get; set; }
         public string? EmailSource { get; set; }
         public string? Clientemail { get; set; }

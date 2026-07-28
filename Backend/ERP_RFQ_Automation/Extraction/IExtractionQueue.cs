@@ -94,4 +94,12 @@ public interface IExtractionQueue
     /// the failing document never blocks or fails the rest of the batch.
     /// </summary>
     Task<bool> FailAsync(long jobId, string workerId, int leaseAttempt, string error, CancellationToken ct = default);
+
+    /// <summary>Dead-letter a deterministic, non-retryable failure for the matching lease.</summary>
+    Task<bool> FailPermanentlyAsync(
+        long jobId,
+        string workerId,
+        int leaseAttempt,
+        string error,
+        CancellationToken ct = default) => FailAsync(jobId, workerId, leaseAttempt, error, ct);
 }

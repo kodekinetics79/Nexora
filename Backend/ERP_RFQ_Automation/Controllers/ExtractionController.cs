@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Extraction;
+using ERP_RFQ_Automation.Security.DocumentInspection;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -30,6 +31,8 @@ namespace ERP_RFQ_Automation.Controllers
         // Interactive uploads outrank bulk backfills in the weighted-fair claim ordering.
         private const int InteractivePriority = 10;
         private const long MaxBytesPerFile = 25L * 1024 * 1024; // 25 MB, mirrors ManualUpload
+        private const long MaxBytesPerBatch = 200L * 1024 * 1024;
+        private const int MaxFilesPerBatch = 50;
 
         public ExtractionController(
             IDocumentIngestion ingestion,
@@ -44,7 +47,8 @@ namespace ERP_RFQ_Automation.Controllers
         /// per file. Returns 202 Accepted with the shared batch id and a per-file outcome.
         /// </summary>
         [HttpPost("upload")]
-        [RequestSizeLimit(200L * 1024 * 1024)]
+        [RequestSizeLimit(MaxBytesPerBatch)]
+        [RequestFormLimits(MultipartBodyLengthLimit = MaxBytesPerBatch)]
         // Uploading documents creates leads — same gate as the manual-upload lead pages.
         [RequireModulePermission("Leads", PermissionAction.Create)]
         public async Task<IActionResult> Upload([FromForm] List<IFormFile> files, CancellationToken ct = default)
@@ -55,23 +59,20 @@ namespace ERP_RFQ_Automation.Controllers
 
             if (files == null || files.Count == 0)
                 return BadRequest(new { success = false, message = "No files uploaded." });
+            if (files.Count > MaxFilesPerBatch)
+                return BadRequest(new { success = false, message = $"A batch can contain at most {MaxFilesPerBatch} files." });
+            if (files.Sum(file => file.Length) > MaxBytesPerBatch)
+                return BadRequest(new { success = false, message = "The batch exceeds the 200 MB limit." });
+            if (files.Any(file => file.Length == 0))
+                return BadRequest(new { success = false, message = "Empty files cannot be uploaded. Remove them and retry the batch." });
+            if (files.Any(file => file.Length > MaxBytesPerFile))
+                return BadRequest(new { success = false, message = "Each file must be 25 MB or smaller." });
 
             var batchId = Guid.NewGuid();
             var results = new List<object>(files.Count);
 
             foreach (var file in files)
             {
-                if (file.Length == 0)
-                {
-                    results.Add(new { jobId = 0L, fileName = file.FileName, outcome = "Skipped", reason = "Empty file." });
-                    continue;
-                }
-                if (file.Length > MaxBytesPerFile)
-                {
-                    results.Add(new { jobId = 0L, fileName = file.FileName, outcome = "Skipped", reason = "File exceeds 25 MB limit." });
-                    continue;
-                }
-
                 try
                 {
                     byte[] bytes;
@@ -96,8 +97,10 @@ namespace ERP_RFQ_Automation.Controllers
                     results.Add(new
                     {
                         jobId = ingested.JobId,
+                        occurrenceId = (long?)ingested.SourceDocumentOccurrenceId,
                         fileName = file.FileName,
-                        outcome = ingested.Outcome.ToString()
+                        outcome = ingested.Outcome.ToString(),
+                        errorCode = (string?)null
                     });
                 }
                 catch (DocumentInspectionException ex)
@@ -108,8 +111,12 @@ namespace ERP_RFQ_Automation.Controllers
                     results.Add(new
                     {
                         jobId = 0L,
+                        occurrenceId = ex.SourceDocumentOccurrenceId,
                         fileName = file.FileName,
                         outcome = ex.Inspection.Status.ToString(),
+                        errorCode = ex.Inspection.Status == FileInspectionStatus.Rejected
+                            ? "document_rejected"
+                            : "document_quarantined",
                         reason = ex.Inspection.Reason
                     });
                 }
@@ -117,7 +124,7 @@ namespace ERP_RFQ_Automation.Controllers
                 {
                     // Poison-file isolation at the ingest boundary: one bad file never fails the batch.
                     _logger.LogError(ex, "Failed to enqueue uploaded file {FileName}.", file.FileName);
-                    results.Add(new { jobId = 0L, fileName = file.FileName, outcome = "Error", reason = "Failed to enqueue file." });
+                    results.Add(new { jobId = 0L, occurrenceId = (long?)null, fileName = file.FileName, outcome = "Error", errorCode = "ingestion_failed", reason = "Failed to enqueue file." });
                 }
             }
 

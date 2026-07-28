@@ -52,7 +52,8 @@ public sealed record BatchReconciliationItemDto(long OccurrenceId, long? LeadId,
     string Classification, int? RevisionNumber, string? FileName, DateTimeOffset IngestedAtUtc,
     string ProcessingPath, bool ExternalAiUsed, decimal Confidence, IReadOnlyList<string> Reasons,
     IReadOnlyList<LeadMatchCandidateDto> MatchCandidates,
-    string CustomerResolutionStatus, string? AssignedOpportunityOwner);
+    string CustomerResolutionStatus, string? AssignedOpportunityOwner,
+    string IntakeStatus, string? ErrorCode, long? SourceDocumentOccurrenceId);
 public sealed record LeadMatchCandidateDto(long CandidateId, long CandidateLeadId, string NexoraSerial,
     string? CustomerRfqReference, decimal Confidence, string MatchEvidenceJson, string DifferencesJson,
     string DownstreamImpactJson, string ReviewState, int Version);

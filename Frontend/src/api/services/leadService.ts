@@ -195,8 +195,10 @@ export type LeadOccurrenceClassification =
 
 export interface GovernedUploadJobDTO {
   jobId: number;
+  occurrenceId?: number | null;
   fileName: string;
   outcome: string;
+  errorCode?: string | null;
   reason?: string | null;
 }
 
@@ -220,6 +222,9 @@ export interface BatchReconciliationItemDTO {
   matchCandidates: LeadMatchCandidateDTO[];
   customerResolutionStatus: string;
   assignedOpportunityOwner?: string | null;
+  intakeStatus?: string;
+  errorCode?: string | null;
+  sourceDocumentOccurrenceId?: number | null;
 }
 
 export interface LeadMatchCandidateDTO {

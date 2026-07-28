@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
@@ -17,25 +17,44 @@ import {
 import leadService from '../../api/services/leadService';
 import { useSnackbar } from 'notistack';
 
+const MAX_FILE_BYTES = 25 * 1024 * 1024;
+const MAX_BATCH_BYTES = 200 * 1024 * 1024;
+const MAX_FILES = 50;
+const SUPPORTED_EXTENSIONS = [
+  '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.csv', '.txt',
+  '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tif', '.tiff', '.webp',
+];
+const ACCEPTED_FILE_TYPES = SUPPORTED_EXTENSIONS.join(',');
+
+const extensionOf = (name: string): string => {
+  const separator = name.lastIndexOf('.');
+  return separator >= 0 ? name.slice(separator).toLowerCase() : '';
+};
+
 const ManualUploadLeadsPage: React.FC = () => {
   const { t } = useTranslation();
   const { enqueueSnackbar } = useSnackbar();
   const navigate = useNavigate();
+  const inputRef = useRef<HTMLInputElement>(null);
   const [files, setFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [selectionError, setSelectionError] = useState<string | null>(null);
 
   const uploadMutation = useMutation({
     mutationFn: (fd: FormData) => leadService.uploadGoverned(fd),
     onSuccess: (result) => {
-      const accepted = result.jobs.filter((job) => job.outcome === 'Enqueued' || job.outcome === 'Duplicate');
-      if (accepted.length === 0) {
-        enqueueSnackbar('No documents were accepted. Review the file outcomes and try again.', { variant: 'error' });
-        return;
-      }
-      enqueueSnackbar('Documents queued for governed ingestion and reconciliation.', { variant: 'success' });
-      setFiles([]);
+      const stopped = result.jobs.filter((job) => ['Skipped', 'Rejected', 'Quarantined', 'Error'].includes(job.outcome));
+      enqueueSnackbar(
+        stopped.length === 0
+          ? 'Documents queued for ingestion and reconciliation.'
+          : `${stopped.length} document${stopped.length === 1 ? '' : 's'} need attention. Opened the batch outcomes.`,
+        { variant: stopped.length === 0 ? 'success' : 'warning' },
+      );
       if (result.batchId) {
+        setFiles([]);
         navigate(`/procurement/leads/ingestion/${encodeURIComponent(result.batchId)}`);
+      } else {
+        setSelectionError('The server did not return a batch reference. Your selected files have been retained.');
       }
     },
     onError: (err: any) => {
@@ -44,10 +63,29 @@ const ManualUploadLeadsPage: React.FC = () => {
     onSettled: () => setUploading(false),
   });
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) {
-      setFiles(prev => [...prev, ...Array.from(e.target.files!)]);
+  const addFiles = (incoming: File[]) => {
+    const combined = [...files, ...incoming];
+    const unsupported = incoming.filter((file) => !SUPPORTED_EXTENSIONS.includes(extensionOf(file.name)));
+    const oversized = incoming.filter((file) => file.size > MAX_FILE_BYTES);
+    const batchTooLarge = combined.reduce((total, file) => total + file.size, 0) > MAX_BATCH_BYTES;
+    if (unsupported.length > 0 || oversized.length > 0 || combined.length > MAX_FILES || batchTooLarge) {
+      const reasons = [
+        unsupported.length > 0 ? `${unsupported.length} unsupported format${unsupported.length === 1 ? '' : 's'}` : null,
+        oversized.length > 0 ? `${oversized.length} file${oversized.length === 1 ? '' : 's'} over 25 MB` : null,
+        combined.length > MAX_FILES ? `a maximum of ${MAX_FILES} files per batch` : null,
+        batchTooLarge ? 'the batch is over 200 MB' : null,
+      ].filter(Boolean);
+      setSelectionError(`Selection stopped: ${reasons.join(', ')}.`);
+      return;
     }
+
+    setSelectionError(null);
+    setFiles(combined);
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) addFiles(Array.from(e.target.files));
+    e.target.value = '';
   };
 
   const removeFile = (index: number) => {
@@ -95,7 +133,21 @@ const ManualUploadLeadsPage: React.FC = () => {
 
           {/* Upload Area */}
           <Paper
-            component="label"
+            role="button"
+            tabIndex={0}
+            aria-label="Select RFQ documents"
+            onClick={() => inputRef.current?.click()}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                inputRef.current?.click();
+              }
+            }}
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => {
+              event.preventDefault();
+              if (!uploading) addFiles(Array.from(event.dataTransfer.files));
+            }}
             sx={{
               p: 8,
               display: 'flex',
@@ -112,15 +164,17 @@ const ManualUploadLeadsPage: React.FC = () => {
               mb: 4
             }}
           >
-            <input type="file" multiple hidden onChange={handleFileChange} />
+            <input ref={inputRef} type="file" multiple hidden accept={ACCEPTED_FILE_TYPES} onChange={handleFileChange} />
             <InboxIcon sx={{ fontSize: 56, color: '#1e293b', mb: 2 }} />
             <Typography variant="h6" sx={{ fontWeight: 700, color: '#1e293b' }}>
               Click or drag files to this area to select
             </Typography>
             <Typography variant="body2" color="text.secondary">
-              Support for PDF, DOCX, XLSX, and Images. Maximum size: 25MB per file.
+              PDF, DOC, DOCX, XLS, XLSX, CSV, TXT, and common images. Maximum 25 MB per file.
             </Typography>
           </Paper>
+
+          {selectionError && <Alert severity="warning" sx={{ mb: 3 }}>{selectionError}</Alert>}
 
           {/* File Queue Preview */}
           {files.length > 0 && (

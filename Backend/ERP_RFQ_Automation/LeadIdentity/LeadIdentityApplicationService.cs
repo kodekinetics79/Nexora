@@ -3,6 +3,8 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
+using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.CommercialRouting;
 using Microsoft.EntityFrameworkCore;
@@ -221,13 +223,31 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
     public async Task<BatchReconciliationDto?> GetBatchAsync(long bu, Guid batchId, CancellationToken ct = default)
     {
         if (!await _db.Set<LeadIngestionBatch>().AnyAsync(x => x.BusinessUnitId == bu && x.Id == batchId, ct)) return null;
-        var filesReceived = await (
-            from occurrence in _db.Set<ERP_RFQ_Automation.DocumentIntelligence.Persistence.SourceDocumentOccurrence>().AsNoTracking()
-            join corpus in _db.Set<ERP_RFQ_Automation.DocumentIntelligence.Persistence.DocumentCorpus>().AsNoTracking()
+        var intakeOccurrences = await (
+            from occurrence in _db.Set<SourceDocumentOccurrence>().AsNoTracking()
+            join corpus in _db.Set<DocumentCorpus>().AsNoTracking()
                 on new { occurrence.BusinessUnitId, occurrence.CorpusId }
                 equals new { corpus.BusinessUnitId, CorpusId = corpus.Id }
+            join document in _db.Set<SourceDocument>().AsNoTracking()
+                on new { occurrence.BusinessUnitId, SourceDocumentId = occurrence.SourceDocumentId }
+                equals new { document.BusinessUnitId, SourceDocumentId = document.Id }
             where occurrence.BusinessUnitId == bu && corpus.BatchId == batchId
-            select occurrence.Id).Distinct().CountAsync(ct);
+            orderby occurrence.Id
+            select new
+            {
+                occurrence.Id,
+                occurrence.ExtractionJobId,
+                occurrence.IntakeStatus,
+                occurrence.LastErrorCode,
+                occurrence.LastErrorDetailsJson,
+                occurrence.ReceivedOn,
+                document.OriginalFileName
+            }).ToListAsync(ct);
+        var extractionJobIds = intakeOccurrences.Where(x => x.ExtractionJobId.HasValue)
+            .Select(x => x.ExtractionJobId!.Value).Distinct().ToArray();
+        var extractionErrors = await _db.Set<ExtractionJob>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == bu && extractionJobIds.Contains(x.Id) && x.LastError != null)
+            .ToDictionaryAsync(x => x.Id, x => x.LastError!, ct);
         var rows = await _db.Set<LeadIngestionOccurrence>().AsNoTracking().Where(x => x.BusinessUnitId == bu && x.BatchId == batchId)
             .Include(x => x.Lead).ThenInclude(x => x!.AssignToNavigation)
             .Include(x => x.MatchCandidates).ThenInclude(x => x.CandidateLead)
@@ -241,12 +261,68 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
                 c.ReviewState.ToString(), c.Version)).ToArray(),
             x.Lead?.CustomerMatchStatus ?? "Awaiting customer resolution",
             x.Lead?.AssignToNavigation is null ? null
-                : $"{x.Lead.AssignToNavigation.FirstName} {x.Lead.AssignToNavigation.LastName}".Trim())).ToArray();
-        return new(batchId, filesReceived, rows.Count,
+                : $"{x.Lead.AssignToNavigation.FirstName} {x.Lead.AssignToNavigation.LastName}".Trim(),
+            "Reconciled", null, x.SourceDocumentOccurrenceId)).ToList();
+
+        var reconciledIntakeIds = rows.Where(x => x.SourceDocumentOccurrenceId.HasValue)
+            .Select(x => x.SourceDocumentOccurrenceId!.Value).ToHashSet();
+        foreach (var intake in intakeOccurrences.Where(x => !reconciledIntakeIds.Contains(x.Id)))
+        {
+            var rejected = intake.IntakeStatus is IntakeOccurrenceStatus.Rejected or IntakeOccurrenceStatus.DeadLetter;
+            items.Add(new BatchReconciliationItemDto(
+                0, null, null,
+                rejected ? LeadOccurrenceClassification.RejectedOrUnprocessable.ToString() : "Pending",
+                null, intake.OriginalFileName, intake.ReceivedOn,
+                $"Intake{intake.IntakeStatus}", false, rejected ? 1m : 0m,
+                IntakeReasons(
+                    intake.LastErrorDetailsJson,
+                    intake.LastErrorCode,
+                    intake.IntakeStatus,
+                    intake.ExtractionJobId.HasValue
+                        ? extractionErrors.GetValueOrDefault(intake.ExtractionJobId.Value)
+                        : null),
+                Array.Empty<LeadMatchCandidateDto>(), "Awaiting customer resolution", null,
+                intake.IntakeStatus.ToString(), intake.LastErrorCode, intake.Id));
+        }
+
+        var intakeRejected = intakeOccurrences.Count(x =>
+            !reconciledIntakeIds.Contains(x.Id)
+            && x.IntakeStatus is IntakeOccurrenceStatus.Rejected or IntakeOccurrenceStatus.DeadLetter);
+        return new(batchId, intakeOccurrences.Count, rows.Count,
             Count(LeadOccurrenceClassification.New), Count(LeadOccurrenceClassification.ExactDuplicate), Count(LeadOccurrenceClassification.Revision),
-            Count(LeadOccurrenceClassification.PossibleMatchReviewRequired), Count(LeadOccurrenceClassification.RejectedOrUnprocessable),
-            rows.Count(x => x.ExternalAiUsed), rows.Sum(x => x.ExternalCost), items);
+            Count(LeadOccurrenceClassification.PossibleMatchReviewRequired), Count(LeadOccurrenceClassification.RejectedOrUnprocessable) + intakeRejected,
+            rows.Count(x => x.ExternalAiUsed), rows.Sum(x => x.ExternalCost), items.OrderBy(x => x.IngestedAtUtc).ToArray());
         int Count(LeadOccurrenceClassification c) => rows.Count(x => x.Classification == c);
+    }
+
+    private static IReadOnlyList<string> IntakeReasons(
+        string? detailsJson,
+        string? errorCode,
+        IntakeOccurrenceStatus status,
+        string? extractionError = null)
+    {
+        if (!string.IsNullOrWhiteSpace(detailsJson))
+        {
+            try
+            {
+                using var details = JsonDocument.Parse(detailsJson);
+                if (details.RootElement.TryGetProperty("reason", out var reason)
+                    && reason.ValueKind == JsonValueKind.String
+                    && !string.IsNullOrWhiteSpace(reason.GetString()))
+                    return new[] { reason.GetString()! };
+            }
+            catch (JsonException)
+            {
+                // The machine-readable error code remains authoritative if legacy details are malformed.
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(extractionError))
+            return new[] { extractionError };
+
+        return new[] { !string.IsNullOrWhiteSpace(errorCode)
+            ? $"Intake stopped: {errorCode.Replace('_', ' ')}."
+            : $"Intake status: {status}." };
     }
 
     public async Task<IReadOnlyList<PossibleMatchQueueItemDto>> GetPossibleMatchesAsync(

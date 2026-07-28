@@ -803,7 +803,7 @@ namespace ERP_RFQ_Automation.Repositories
                 .Include(l => l.EmailIngests)
                 .Where(l => l.BusinessUnitId == businessUnitId)
                 .Where(l => l.LeadStatusId == null)
-                .Where(l => l.EmailIngests.ParseStatus == "NeedsReview");
+                .Where(l => l.EmailIngests == null || l.EmailIngests.ParseStatus == "NeedsReview");
 
             if (!string.IsNullOrWhiteSpace(search))
             {
@@ -829,7 +829,7 @@ namespace ERP_RFQ_Automation.Repositories
                     l.LeadSource,
                     l.Aiconfidence,
                     l.HeaderRemarks,
-                    ReceivedOn = (DateTime?)l.EmailIngests.CreatedOn,
+                    ReceivedOn = l.EmailIngests != null ? (DateTime?)l.EmailIngests.CreatedOn : l.CreatedDate,
                     ItemCount = l.LeadItems.Count,
                     l.ReviewVersion
                 })

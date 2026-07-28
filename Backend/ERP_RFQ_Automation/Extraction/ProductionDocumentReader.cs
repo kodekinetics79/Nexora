@@ -28,7 +28,7 @@ namespace ERP_RFQ_Automation.Extraction;
 ///   * PDF   — PdfPig text layer, with a Docnet(rasterize)+Tesseract(OCR) fallback for
 ///             scanned / image-only PDFs (same approach as EmailService/ManualUploadService).
 ///   * DOCX  — OpenXML text extraction.
-///   * XLSX  — EPPlus; header-mapped into <see cref="RfqSpreadsheetRow"/> and routed down the
+///   * XLS/XLSX — ExcelDataReader/EPPlus; header-mapped into <see cref="RfqSpreadsheetRow"/> and routed down the
 ///             DETERMINISTIC structured-bypass hook (IsStructured=true) so the LLM is skipped.
 ///   * CSV   — parsed into <see cref="RfqSpreadsheetRow"/> (structured bypass, same as XLSX).
 ///   * Images (jpg/jpeg/png/bmp/tiff) — Tesseract OCR.
@@ -94,15 +94,18 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         // Structured spreadsheets/CSV bypass the LLM entirely via the deterministic normalizer.
         if (bytes.Length > 0 && (ext == "xlsx" || ext == "xlsm"))
         {
-            var rows = TryParseSpreadsheet(() => _spreadsheetParser.ParseXlsx(bytes, name), name, "XLSX");
-            if (rows.Count > 0)
-                return Structured(job, name, rows);
+            return Structured(job, name,
+                ParseSpreadsheet(() => _spreadsheetParser.ParseXlsx(bytes, name), name, "XLSX"));
+        }
+        if (bytes.Length > 0 && ext == "xls")
+        {
+            return Structured(job, name,
+                ParseSpreadsheet(() => _spreadsheetParser.ParseXls(bytes, name), name, "XLS"));
         }
         if (bytes.Length > 0 && ext == "csv")
         {
-            var rows = TryParseSpreadsheet(() => _spreadsheetParser.ParseCsv(bytes, name), name, "CSV");
-            if (rows.Count > 0)
-                return Structured(job, name, rows);
+            return Structured(job, name,
+                ParseSpreadsheet(() => _spreadsheetParser.ParseCsv(bytes, name), name, "CSV"));
         }
 
         // Unstructured formats -> extract raw text, then chunk over line-item regions.
@@ -113,7 +116,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             // parser; falls back to the OpenXML reader for mislabeled .docx files.
             "doc" => Native(ExtractTextFromLegacyDoc(bytes)),
             "docx" => Native(ExtractTextFromDocx(bytes)),
-            "jpg" or "jpeg" or "png" or "bmp" or "tiff" or "tif" or "gif" => ExtractTextFromImage(bytes),
+            "jpg" or "jpeg" or "png" or "bmp" or "tiff" or "tif" or "gif" or "webp" => ExtractTextFromImage(bytes),
             _ => Native(DecodeText(bytes))
         };
 
@@ -320,19 +323,26 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
 
     // ---- spreadsheets -> structured rows ---------------------------------
 
-    private List<RfqSpreadsheetRow> TryParseSpreadsheet(
+    private List<RfqSpreadsheetRow> ParseSpreadsheet(
         Func<IReadOnlyList<RfqSpreadsheetRow>> parse,
         string name,
         string format)
     {
         try
         {
-            return parse().ToList();
+            var rows = parse().ToList();
+            if (rows.Count == 0)
+                throw new DocumentParsingException($"The {format} workbook contains no recognizable RFQ rows.");
+            return rows;
+        }
+        catch (DocumentParsingException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
             _log.LogWarning(ex, "{Format} structured parse failed for {Name}.", format, name);
-            return new List<RfqSpreadsheetRow>();
+            throw new DocumentParsingException($"The {format} workbook could not be parsed safely.", ex);
         }
     }
 
@@ -424,4 +434,10 @@ public sealed class EvidenceIntegrityException : IOException
 
     public long ExtractionJobId { get; }
     public string Code { get; }
+}
+
+public sealed class DocumentParsingException : IOException
+{
+    public DocumentParsingException(string message, Exception? innerException = null)
+        : base(message, innerException) { }
 }

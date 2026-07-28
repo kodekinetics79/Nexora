@@ -33,6 +33,31 @@ public sealed class ProductionDocumentReaderTests
         Assert.DoesNotContain(job.StoragePath, error.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("rfq.xlsx", "xlsx", "not-an-openxml-workbook")]
+    [InlineData("rfq.csv", "csv", "heading-only")]
+    public async Task InvalidStructuredDocument_StopsWithTypedParseFailure(
+        string fileName,
+        string fileType,
+        string content)
+    {
+        var job = new ExtractionJob
+        {
+            Id = 124,
+            BusinessUnitId = 7,
+            StoragePath = "memory://evidence/object",
+            ContentHash = new string('b', 64),
+            FileName = fileName,
+            FileType = fileType
+        };
+        var reader = new ProductionDocumentReader(
+            NullLogger<ProductionDocumentReader>.Instance,
+            new TestEnvironment(),
+            new MemoryStorage(System.Text.Encoding.UTF8.GetBytes(content)));
+
+        await Assert.ThrowsAsync<DocumentParsingException>(() => reader.ReadAsync(job));
+    }
+
     private sealed class FailingStorage : IEvidenceObjectStorage
     {
         public bool IsDurable => true;
@@ -43,6 +68,18 @@ public sealed class ProductionDocumentReaderTests
         public Task<Stream> OpenVerifiedReadAsync(
             string storageUri, string expectedSha256, CancellationToken ct = default)
             => Task.FromException<Stream>(new InvalidDataException("hash mismatch"));
+    }
+
+    private sealed class MemoryStorage(byte[] content) : IEvidenceObjectStorage
+    {
+        public bool IsDurable => true;
+        public Task ProbeAsync(CancellationToken ct = default) => Task.CompletedTask;
+        public Task<EvidenceObject> WriteImmutableAsync(
+            long businessUnitId, string zone, string sha256, string extension,
+            ReadOnlyMemory<byte> value, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<Stream> OpenVerifiedReadAsync(
+            string storageUri, string expectedSha256, CancellationToken ct = default) =>
+            Task.FromResult<Stream>(new MemoryStream(content, writable: false));
     }
 
     private sealed class TestEnvironment : IWebHostEnvironment

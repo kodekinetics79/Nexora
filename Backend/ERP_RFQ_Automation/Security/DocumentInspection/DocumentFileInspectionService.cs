@@ -153,7 +153,7 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
 
         if (StartsWith(bytes, OleSignature))
         {
-            return new("application/msword", [".doc"]);
+            return InspectOleCompound(bytes, extension);
         }
 
         if (StartsWith(bytes, ZipSignature))
@@ -231,7 +231,9 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
                 foreach (var entry in archive.Entries)
                 {
                     ValidateArchivePath(entry.FullName);
-                    names.Add(entry.FullName.Replace('\\', '/'));
+                    var normalizedName = entry.FullName.Replace('\\', '/');
+                    if (!names.Add(normalizedName))
+                        throw new UnsafeArchiveException("The OOXML package contains duplicate entry names.");
 
                     if (entry.Length > _options.MaximumArchiveEntryBytes)
                     {
@@ -309,9 +311,9 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
                     ?.Attribute("ContentType")?.Value;
                 var macroEnabled = workbookContentType?.Contains("macroEnabled",
                     StringComparison.OrdinalIgnoreCase) == true || names.Contains("xl/vbaProject.bin");
-                return macroEnabled
-                    ? new("application/vnd.ms-excel.sheet.macroenabled.12", [".xlsm"])
-                    : new("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", [".xlsx"]);
+                if (macroEnabled)
+                    throw new UnsafeArchiveException("Macro-enabled Excel workbooks are not supported.");
+                return new("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", [".xlsx"]);
             }
 
             throw new UnsafeArchiveException("The ZIP payload is not a supported Word or Excel OOXML package.");
@@ -325,6 +327,149 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
         {
             throw new UnsafeArchiveException("The OOXML package is malformed or unreadable.");
         }
+    }
+
+    private TypeDetection InspectOleCompound(byte[] bytes, string extension)
+    {
+        var streamNames = ReadOleDirectoryNames(bytes);
+        if (streamNames.Any(name => name.Equals("_VBA_PROJECT_CUR", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("VBA", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("Macros", StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new UnsafeArchiveException("Macro-enabled legacy Office documents are not supported.");
+        }
+        var isWord = streamNames.Contains("WordDocument");
+        var isExcel = streamNames.Contains("Workbook") || streamNames.Contains("Book");
+
+        if (extension == ".doc" && isWord && !isExcel)
+            return new("application/msword", [".doc"]);
+        if (extension == ".xls" && isExcel && !isWord)
+            return new("application/vnd.ms-excel", [".xls"]);
+
+        throw new UnsafeArchiveException(
+            "The legacy Office document structure does not match its file extension.");
+    }
+
+    private HashSet<string> ReadOleDirectoryNames(byte[] bytes)
+    {
+        const uint EndOfChain = 0xFFFFFFFE;
+        const uint FreeSector = 0xFFFFFFFF;
+        if (bytes.Length < 512)
+            throw new UnsafeArchiveException("The legacy Office document is truncated.");
+
+        var sectorShift = ReadUInt16(bytes, 30);
+        var sectorSize = sectorShift switch
+        {
+            9 => 512,
+            12 => 4096,
+            _ => throw new UnsafeArchiveException("The legacy Office document has an invalid sector size.")
+        };
+        if (bytes.Length < sectorSize || bytes.Length % sectorSize != 0)
+            throw new UnsafeArchiveException("The legacy Office document has an invalid compound-file length.");
+
+        var sectorCount = (bytes.Length / sectorSize) - 1;
+        var fatSectorCount = ReadUInt32(bytes, 44);
+        var firstDirectorySector = ReadUInt32(bytes, 48);
+        var firstDifatSector = ReadUInt32(bytes, 68);
+        var difatSectorCount = ReadUInt32(bytes, 72);
+        if (fatSectorCount == 0 || fatSectorCount > sectorCount || difatSectorCount > sectorCount)
+            throw new UnsafeArchiveException("The legacy Office document has an invalid allocation table.");
+
+        var fatSectorIds = new List<uint>();
+        for (var index = 0; index < 109 && fatSectorIds.Count < fatSectorCount; index++)
+        {
+            var sector = ReadUInt32(bytes, 76 + index * 4);
+            if (sector != FreeSector)
+                AddOleSector(fatSectorIds, sector, sectorCount);
+        }
+
+        var visitedDifat = new HashSet<uint>();
+        var difatSector = firstDifatSector;
+        var difatEntries = sectorSize / 4 - 1;
+        for (var index = 0u; index < difatSectorCount; index++)
+        {
+            ValidateOleSector(difatSector, sectorCount, visitedDifat, "DIFAT");
+            var offset = OleSectorOffset(difatSector, sectorSize);
+            for (var entry = 0; entry < difatEntries && fatSectorIds.Count < fatSectorCount; entry++)
+            {
+                var sector = ReadUInt32(bytes, offset + entry * 4);
+                if (sector != FreeSector)
+                    AddOleSector(fatSectorIds, sector, sectorCount);
+            }
+            difatSector = ReadUInt32(bytes, offset + difatEntries * 4);
+        }
+
+        if (fatSectorIds.Count != fatSectorCount)
+            throw new UnsafeArchiveException("The legacy Office document allocation table is incomplete.");
+
+        var fat = new List<uint>(fatSectorIds.Count * (sectorSize / 4));
+        foreach (var fatSector in fatSectorIds)
+        {
+            var offset = OleSectorOffset(fatSector, sectorSize);
+            for (var entry = 0; entry < sectorSize / 4; entry++)
+                fat.Add(ReadUInt32(bytes, offset + entry * 4));
+        }
+
+        var directoryBytes = new MemoryStream();
+        var visitedDirectory = new HashSet<uint>();
+        var directorySector = firstDirectorySector;
+        var maximumDirectorySectors = Math.Max(1,
+            (int)Math.Ceiling(_options.MaximumArchiveEntries * 128d / sectorSize));
+        while (directorySector != EndOfChain)
+        {
+            if (visitedDirectory.Count >= maximumDirectorySectors)
+                throw new UnsafeArchiveException("The legacy Office document contains too many directory entries.");
+            ValidateOleSector(directorySector, sectorCount, visitedDirectory, "directory");
+            directoryBytes.Write(bytes, OleSectorOffset(directorySector, sectorSize), sectorSize);
+            if (directorySector >= fat.Count)
+                throw new UnsafeArchiveException("The legacy Office directory chain is invalid.");
+            directorySector = fat[(int)directorySector];
+        }
+
+        var directory = directoryBytes.ToArray();
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var offset = 0; offset + 128 <= directory.Length; offset += 128)
+        {
+            var nameLength = ReadUInt16(directory, offset + 64);
+            var objectType = directory[offset + 66];
+            if (objectType is not (1 or 2 or 5) || nameLength is < 2 or > 64 || nameLength % 2 != 0)
+                continue;
+            var name = Encoding.Unicode.GetString(directory, offset, nameLength - 2);
+            if (!string.IsNullOrWhiteSpace(name))
+                names.Add(name);
+        }
+
+        return names;
+    }
+
+    private static void AddOleSector(List<uint> sectors, uint sector, int sectorCount)
+    {
+        if (sector >= sectorCount || sectors.Contains(sector))
+            throw new UnsafeArchiveException("The legacy Office allocation table contains an invalid sector.");
+        sectors.Add(sector);
+    }
+
+    private static void ValidateOleSector(uint sector, int sectorCount, HashSet<uint> visited, string chain)
+    {
+        if (sector >= sectorCount || !visited.Add(sector))
+            throw new UnsafeArchiveException($"The legacy Office {chain} chain is invalid.");
+    }
+
+    private static int OleSectorOffset(uint sector, int sectorSize) =>
+        checked((int)((sector + 1) * (uint)sectorSize));
+
+    private static ushort ReadUInt16(byte[] bytes, int offset)
+    {
+        if (offset < 0 || offset + 2 > bytes.Length)
+            throw new UnsafeArchiveException("The legacy Office document is truncated.");
+        return System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(offset, 2));
+    }
+
+    private static uint ReadUInt32(byte[] bytes, int offset)
+    {
+        if (offset < 0 || offset + 4 > bytes.Length)
+            throw new UnsafeArchiveException("The legacy Office document is truncated.");
+        return System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(offset, 4));
     }
 
     private static void ValidateArchivePath(string path)
@@ -443,7 +588,7 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
 
     private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".pdf", ".doc", ".docx", ".xlsx", ".xlsm", ".csv", ".txt",
+        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".xlsm", ".csv", ".txt",
         ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"
     };
 
@@ -452,9 +597,9 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
         {
             ["application/pdf"] = new(StringComparer.OrdinalIgnoreCase) { "application/pdf" },
             ["application/msword"] = new(StringComparer.OrdinalIgnoreCase) { "application/msword", "application/x-msword" },
+            ["application/vnd.ms-excel"] = new(StringComparer.OrdinalIgnoreCase) { "application/vnd.ms-excel", "application/x-msexcel", "application/octet-stream" },
             ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"] = new(StringComparer.OrdinalIgnoreCase) { "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
             ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"] = new(StringComparer.OrdinalIgnoreCase) { "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
-            ["application/vnd.ms-excel.sheet.macroenabled.12"] = new(StringComparer.OrdinalIgnoreCase) { "application/vnd.ms-excel.sheet.macroenabled.12", "application/vnd.ms-excel" },
             ["text/csv"] = new(StringComparer.OrdinalIgnoreCase) { "text/csv", "application/csv", "text/plain" },
             ["text/plain"] = new(StringComparer.OrdinalIgnoreCase) { "text/plain" },
             ["image/png"] = new(StringComparer.OrdinalIgnoreCase) { "image/png" },

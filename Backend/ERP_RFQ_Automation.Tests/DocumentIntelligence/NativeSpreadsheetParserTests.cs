@@ -69,6 +69,22 @@ public class NativeSpreadsheetParserTests
     }
 
     [Fact]
+    public void ParseXls_LegacyBiffWorkbook_PreservesMappedValuesAndCoordinates()
+    {
+        var bytes = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", "legacy-rfq.xls"));
+
+        var row = Assert.Single(_parser.ParseXls(bytes, "legacy-rfq.xls"));
+
+        Assert.Equal("RFQ-XLS-1", row.RfqNo);
+        Assert.Equal("Acme", row.BuyerName);
+        Assert.Equal("Legacy pump", row.ProductName);
+        Assert.Equal("12", row.Quantity);
+        Assert.Equal("P-100", row.ManufacturerPartNumber);
+        Assert.Equal("'RFQ'!A2", row.FieldSourceAddresses[RfqSpreadsheetFields.RfqNo]);
+        Assert.Equal("'RFQ'!E2", row.FieldSourceAddresses[RfqSpreadsheetFields.ManufacturerPartNumber]);
+    }
+
+    [Fact]
     public void Normalizer_UsesParserNativeAddressesForEveryMappedField()
     {
         const string csv = "Buyer,Quantity,RFQ,Received Date,Description,Unit Price,Currency\n" +

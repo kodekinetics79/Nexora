@@ -28,10 +28,20 @@ public sealed class IngestedDocument
 
 public sealed class DocumentInspectionException : IOException
 {
-    public DocumentInspectionException(FileInspectionResult inspection)
-        : base(inspection.Reason) => Inspection = inspection;
+    public DocumentInspectionException(
+        FileInspectionResult inspection,
+        long? sourceDocumentOccurrenceId = null,
+        Guid? batchId = null)
+        : base(inspection.Reason)
+    {
+        Inspection = inspection;
+        SourceDocumentOccurrenceId = sourceDocumentOccurrenceId;
+        BatchId = batchId;
+    }
 
     public FileInspectionResult Inspection { get; }
+    public long? SourceDocumentOccurrenceId { get; }
+    public Guid? BatchId { get; }
 }
 
 /// <summary>
@@ -168,6 +178,19 @@ public sealed class DocumentIngestionService : IDocumentIngestion
             _context.Add(source);
             await _context.SaveChangesAsync(ct);
         }
+        else if (inspection.IsCleared
+                 && source.SecurityStatus == DocumentSecurityStatus.Quarantined
+                 && await CanReleaseAfterScannerRecoveryAsync(source.Id, ct))
+        {
+            source.ReleaseFromQuarantine(
+                selectedObject.Bucket,
+                selectedObject.Key,
+                selectedObject.Version);
+            _log.LogInformation(
+                "Released source document {SourceDocumentId} for tenant {BusinessUnitId} after a clean security rescan.",
+                source.Id, businessUnitId);
+            await _context.SaveChangesAsync(ct);
+        }
 
         var occurrenceKey = SourceOccurrenceIdentity.BuildKey(actualBatchId, sourceType, metadata);
         var occurrence = await _context.Set<SourceDocumentOccurrence>()
@@ -215,7 +238,7 @@ public sealed class DocumentIngestionService : IDocumentIngestion
                     }));
             await _context.SaveChangesAsync(ct);
             await transaction.CommitAsync(ct);
-            throw new DocumentInspectionException(rejectedInspection);
+            throw new DocumentInspectionException(rejectedInspection, occurrence.Id, actualBatchId);
         }
 
         var fileType = ExtensionForMime(inspection.DetectedContentType, suppliedExtension);
@@ -272,6 +295,35 @@ public sealed class DocumentIngestionService : IDocumentIngestion
         _ => DocumentSecurityStatus.Rejected
     };
 
+    private async Task<bool> CanReleaseAfterScannerRecoveryAsync(long sourceDocumentId, CancellationToken ct)
+    {
+        var metadata = await _context.Set<SourceDocumentOccurrence>()
+            .Where(x => x.SourceDocumentId == sourceDocumentId)
+            .Select(x => x.SourceMetadataJson)
+            .ToListAsync(ct);
+
+        foreach (var value in metadata)
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(value);
+                if (document.RootElement.TryGetProperty("inspection", out var inspection)
+                    && inspection.TryGetProperty("ScannerSignature", out var signature)
+                    && signature.ValueKind == JsonValueKind.String
+                    && !string.IsNullOrWhiteSpace(signature.GetString()))
+                {
+                    return false;
+                }
+            }
+            catch (JsonException)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private static string BuildSourceMetadata(
         string fileName,
         ExtractionSourceType sourceType,
@@ -312,6 +364,7 @@ public sealed class DocumentIngestionService : IDocumentIngestion
     {
         "application/pdf" => "pdf",
         "application/msword" => "doc",
+        "application/vnd.ms-excel" => "xls",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" =>
             suppliedExtension.Equals(".xlsm", StringComparison.OrdinalIgnoreCase) ? "xlsm" : "xlsx",

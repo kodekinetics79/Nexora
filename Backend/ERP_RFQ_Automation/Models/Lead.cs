@@ -41,7 +41,7 @@ public partial class Lead
 
     public long BusinessUnitId { get; set; }
 
-    public long EmailIngestsId { get; set; }
+    public long? EmailIngestsId { get; set; }
 
     public DateTime? ModifiedDate { get; set; }
 
@@ -63,7 +63,7 @@ public partial class Lead
 
     public virtual BusinessUnit BusinessUnit { get; set; } = null!;
 
-    public virtual EmailIngest EmailIngests { get; set; } = null!;
+    public virtual EmailIngest? EmailIngests { get; set; }
 
     public virtual ICollection<LeadItem> LeadItems { get; set; } = new List<LeadItem>();
 

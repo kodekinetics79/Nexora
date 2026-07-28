@@ -891,6 +891,18 @@ public sealed class PostgreSqlProductionDialectTests
         Assert.Equal("poison document", deadLetter.LastError);
         Assert.Null(deadLetter.LeasedBy);
 
+        var permanentJobId = (await EnqueueGovernedJobAsync(
+            context, queue, marker + "-permanent", businessUnitId, 5)).JobId;
+        var permanentClaim = await queue.ClaimAsync("worker-permanent", TimeSpan.FromMinutes(5), 4);
+        Assert.Equal(permanentJobId, permanentClaim!.Id);
+        Assert.True(await queue.FailPermanentlyAsync(
+            permanentJobId, "worker-permanent", permanentClaim.Attempts, "invalid spreadsheet"));
+        var permanent = await context.Set<ExtractionJob>().AsNoTracking()
+            .SingleAsync(job => job.Id == permanentJobId);
+        Assert.Equal(ExtractionStatus.DeadLetter, permanent.Status);
+        Assert.Equal(1, permanent.Attempts);
+        Assert.Equal("invalid spreadsheet", permanent.LastError);
+
         var retryJobId = (await EnqueueGovernedJobAsync(context, queue, marker + "-retry", businessUnitId, 3)).JobId;
         var retryClaim = await queue.ClaimAsync("worker-c", TimeSpan.FromMinutes(5), 4);
         Assert.Equal(retryJobId, retryClaim!.Id);

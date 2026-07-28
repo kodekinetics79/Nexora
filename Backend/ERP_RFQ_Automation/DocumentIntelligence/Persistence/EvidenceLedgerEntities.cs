@@ -247,6 +247,21 @@ public sealed class SourceDocument
         UpdatedOn = changedOn ?? DateTimeOffset.UtcNow;
     }
 
+    public void ReleaseFromQuarantine(
+        string objectBucket,
+        string objectKey,
+        string objectVersion,
+        DateTimeOffset? changedOn = null)
+    {
+        if (SecurityStatus != DocumentSecurityStatus.Quarantined)
+            throw new InvalidOperationException("Only a quarantined source document can be released.");
+
+        ObjectBucket = EvidenceLedgerGuard.Required(objectBucket, 255, nameof(objectBucket));
+        ObjectKey = EvidenceLedgerGuard.Required(objectKey, 1024, nameof(objectKey));
+        ObjectVersion = EvidenceLedgerGuard.Required(objectVersion, 255, nameof(objectVersion));
+        MarkSecurityStatus(DocumentSecurityStatus.Cleared, changedOn);
+    }
+
     public void StartExtraction(DateTimeOffset? changedOn = null) =>
         TransitionProcessing(DocumentProcessingStatus.Extracting, changedOn ?? DateTimeOffset.UtcNow,
             DocumentProcessingStatus.Received);

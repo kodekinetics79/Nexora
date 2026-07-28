@@ -303,6 +303,25 @@ WHERE ""Id"" = @id AND ""LeasedBy"" = @worker AND ""Attempts"" = @attempt
         return rows > 0;
     }
 
+    public async Task<bool> FailPermanentlyAsync(
+        long jobId, string workerId, int leaseAttempt, string error, CancellationToken ct = default)
+    {
+        const string sql = @"UPDATE ""ExtractionJobs""
+SET ""Status"" = 'DeadLetter',
+    ""LastError"" = @error,
+    ""NextAttemptAt"" = @now,
+    ""LeasedBy"" = NULL,
+    ""LeaseExpiresAt"" = NULL,
+    ""UpdatedOn"" = @now
+WHERE ""Id"" = @id AND ""LeasedBy"" = @worker AND ""Attempts"" = @attempt
+  AND ""LeaseExpiresAt"" > @now
+  AND ""Status"" IN ('Leased','Extracting','Persisting');";
+        var rows = await ExecuteAsync(sql, ct,
+            ("id", jobId), ("worker", workerId), ("attempt", leaseAttempt),
+            ("error", Trim(error, 4000)), ("now", DateTime.UtcNow));
+        return rows > 0;
+    }
+
     // ---- helpers ---------------------------------------------------------
 
     private async Task<DbConnection> OpenAsync(CancellationToken ct)

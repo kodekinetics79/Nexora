@@ -16,7 +16,6 @@ public sealed class DocumentFileInspectionServiceTests
     [InlineData("photo.bmp", "image/bmp", "424D0000")]
     [InlineData("photo.tif", "image/tiff", "49492A000000")]
     [InlineData("photo.webp", "image/webp", "524946460000000057454250")]
-    [InlineData("legacy.doc", "application/msword", "D0CF11E0A1B11AE10000")]
     public async Task InspectAsync_ClearsSupportedBinarySignatures(
         string fileName,
         string contentType,
@@ -27,6 +26,42 @@ public sealed class DocumentFileInspectionServiceTests
         Assert.Equal(FileInspectionStatus.Cleared, result.Status);
         Assert.Equal(contentType, result.DetectedContentType);
         Assert.Equal(EicarMalwareScanner.EngineName, result.ScannerEngine);
+    }
+
+    [Theory]
+    [InlineData("legacy.doc", "application/msword", "WordDocument")]
+    [InlineData("legacy.xls", "application/vnd.ms-excel", "Workbook")]
+    public async Task InspectAsync_ClearsLegacyOfficeOnlyWhenDirectoryMatchesExtension(
+        string fileName,
+        string contentType,
+        string principalStream)
+    {
+        var result = await InspectAsync(CreateOleCompound(principalStream), fileName, contentType);
+
+        Assert.Equal(FileInspectionStatus.Cleared, result.Status);
+        Assert.Equal(contentType, result.DetectedContentType);
+    }
+
+    [Fact]
+    public async Task InspectAsync_RejectsTruncatedOrMislabeledOleDocuments()
+    {
+        var truncated = await InspectAsync(Convert.FromHexString("D0CF11E0A1B11AE10000"), "legacy.doc");
+        var mislabeled = await InspectAsync(CreateOleCompound("Workbook"), "legacy.doc");
+
+        Assert.Equal(FileInspectionStatus.Rejected, truncated.Status);
+        Assert.Equal(FileInspectionStatus.Rejected, mislabeled.Status);
+    }
+
+    [Fact]
+    public async Task InspectAsync_RejectsMacroEnabledLegacyExcel()
+    {
+        var result = await InspectAsync(
+            CreateOleCompound("Workbook", "_VBA_PROJECT_CUR"),
+            "legacy.xls",
+            "application/vnd.ms-excel");
+
+        Assert.Equal(FileInspectionStatus.Rejected, result.Status);
+        Assert.Contains("Macro-enabled", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Theory]
@@ -62,7 +97,7 @@ public sealed class DocumentFileInspectionServiceTests
     }
 
     [Fact]
-    public async Task InspectAsync_DistinguishesXlsxAndXlsm()
+    public async Task InspectAsync_ClearsXlsxAndRejectsMacroEnabledWorkbook()
     {
         var xlsx = CreateOpenXmlPackage(
             "xl/workbook.xml",
@@ -79,8 +114,8 @@ public sealed class DocumentFileInspectionServiceTests
         Assert.Equal(
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             xlsxResult.DetectedContentType);
-        Assert.Equal(FileInspectionStatus.Cleared, xlsmResult.Status);
-        Assert.Equal("application/vnd.ms-excel.sheet.macroenabled.12", xlsmResult.DetectedContentType);
+        Assert.Equal(FileInspectionStatus.Rejected, xlsmResult.Status);
+        Assert.Contains("Macro-enabled", xlsmResult.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -382,6 +417,53 @@ public sealed class DocumentFileInspectionServiceTests
 
         return target.ToArray();
     }
+
+    private static byte[] CreateOleCompound(string principalStream, params string[] additionalEntries)
+    {
+        const int sectorSize = 512;
+        const uint freeSector = 0xFFFFFFFF;
+        const uint endOfChain = 0xFFFFFFFE;
+        const uint fatSector = 0xFFFFFFFD;
+        var bytes = new byte[sectorSize * 3];
+        Convert.FromHexString("D0CF11E0A1B11AE1").CopyTo(bytes, 0);
+        WriteUInt16(bytes, 24, 0x003E);
+        WriteUInt16(bytes, 26, 0x0003);
+        WriteUInt16(bytes, 28, 0xFFFE);
+        WriteUInt16(bytes, 30, 9);
+        WriteUInt16(bytes, 32, 6);
+        WriteUInt32(bytes, 44, 1);
+        WriteUInt32(bytes, 48, 1);
+        WriteUInt32(bytes, 56, 4096);
+        WriteUInt32(bytes, 60, endOfChain);
+        WriteUInt32(bytes, 68, endOfChain);
+        WriteUInt32(bytes, 76, 0);
+        for (var index = 1; index < 109; index++) WriteUInt32(bytes, 76 + index * 4, freeSector);
+
+        WriteUInt32(bytes, sectorSize, fatSector);
+        WriteUInt32(bytes, sectorSize + 4, endOfChain);
+        for (var index = 2; index < sectorSize / 4; index++) WriteUInt32(bytes, sectorSize + index * 4, freeSector);
+
+        WriteDirectoryEntry(bytes, sectorSize * 2, "Root Entry", 5);
+        WriteDirectoryEntry(bytes, sectorSize * 2 + 128, principalStream, 2);
+        for (var index = 0; index < additionalEntries.Length && index < 2; index++)
+            WriteDirectoryEntry(bytes, sectorSize * 2 + (index + 2) * 128, additionalEntries[index], 1);
+        return bytes;
+    }
+
+    private static void WriteDirectoryEntry(byte[] bytes, int offset, string name, byte objectType)
+    {
+        var encoded = Encoding.Unicode.GetBytes(name + '\0');
+        encoded.CopyTo(bytes, offset);
+        WriteUInt16(bytes, offset + 64, (ushort)encoded.Length);
+        bytes[offset + 66] = objectType;
+        WriteUInt32(bytes, offset + 116, 0xFFFFFFFE);
+    }
+
+    private static void WriteUInt16(byte[] bytes, int offset, ushort value) =>
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(offset, 2), value);
+
+    private static void WriteUInt32(byte[] bytes, int offset, uint value) =>
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(offset, 4), value);
 
     private static async Task<MalwareScanResult> ScanWithClamServerAsync(string response)
     {

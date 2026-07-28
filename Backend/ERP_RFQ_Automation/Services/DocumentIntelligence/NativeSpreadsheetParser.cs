@@ -1,4 +1,6 @@
+using System.Globalization;
 using System.Text;
+using ExcelDataReader;
 using OfficeOpenXml;
 
 namespace ERP_RFQ_Automation.Services.DocumentIntelligence;
@@ -6,6 +8,8 @@ namespace ERP_RFQ_Automation.Services.DocumentIntelligence;
 public sealed class NativeSpreadsheetParser
 {
     private const string CsvWorksheetName = "CSV";
+
+    static NativeSpreadsheetParser() => Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 
     public IReadOnlyList<RfqSpreadsheetRow> ParseXlsx(byte[] bytes, string sourceDocumentName)
     {
@@ -81,6 +85,59 @@ public sealed class NativeSpreadsheetParser
 
         return rows;
     }
+
+    public IReadOnlyList<RfqSpreadsheetRow> ParseXls(byte[] bytes, string sourceDocumentName)
+    {
+        using var stream = new MemoryStream(bytes, writable: false);
+        using var reader = ExcelReaderFactory.CreateBinaryReader(stream, new ExcelReaderConfiguration
+        {
+            FallbackEncoding = Encoding.GetEncoding(1252),
+            LeaveOpen = false
+        });
+        var rows = new List<RfqSpreadsheetRow>();
+
+        do
+        {
+            if (!reader.Read() || reader.FieldCount == 0)
+                continue;
+
+            const int headerRow = 1;
+            var headers = ReadHeaders(1, reader.FieldCount, column => CellText(reader.GetValue(column - 1)));
+            var fieldColumns = BuildFieldColumnMap(headers);
+            var rowNumber = headerRow;
+
+            while (reader.Read())
+            {
+                rowNumber++;
+                string? Cell(string field) => ReadCell(
+                    fieldColumns,
+                    field,
+                    column => column <= reader.FieldCount ? CellText(reader.GetValue(column - 1)) : null);
+
+                var row = CreateRow(
+                    sourceDocumentName,
+                    string.IsNullOrWhiteSpace(reader.Name) ? "Worksheet" : reader.Name,
+                    headerRow,
+                    rowNumber,
+                    headers,
+                    fieldColumns,
+                    Cell);
+
+                if (IsMaterial(row))
+                    rows.Add(row);
+            }
+        } while (reader.NextResult());
+
+        return rows;
+    }
+
+    private static string? CellText(object? value) => value switch
+    {
+        null => null,
+        DateTime date => date.ToString("O", CultureInfo.InvariantCulture),
+        IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture),
+        _ => value.ToString()
+    };
 
     private static RfqSpreadsheetRow CreateRow(
         string sourceDocumentName,

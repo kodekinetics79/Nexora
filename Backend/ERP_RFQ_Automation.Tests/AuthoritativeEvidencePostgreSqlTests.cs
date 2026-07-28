@@ -230,7 +230,7 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task QuarantinedSource_CannotBeQueuedByLaterClearScan()
+    public async Task ScannerOutageQuarantine_IsReleasedByLaterCleanScan()
     {
         var tenantId = NewTenantId();
         var bytes = ValidCsv();
@@ -259,15 +259,14 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
 
             context.ChangeTracker.Clear();
             var replay = NewIngestion(context, queue, root, ClearedInspection());
-            var error = await Assert.ThrowsAsync<DocumentInspectionException>(() => replay.IngestAsync(
-                bytes, "customer-rfq.csv", tenantId, ExtractionSourceType.ExcelTemplate));
-            Assert.Equal(FileInspectionStatus.Quarantined, error.Inspection.Status);
+            var released = await replay.IngestAsync(
+                bytes, "customer-rfq.csv", tenantId, ExtractionSourceType.ExcelTemplate);
 
-            Assert.Empty(await context.Set<ExtractionJob>()
-                .Where(x => x.BusinessUnitId == tenantId).ToListAsync());
+            Assert.True(released.JobId > 0);
             var source = await context.Set<SourceDocument>()
                 .SingleAsync(x => x.BusinessUnitId == tenantId);
-            Assert.Equal(DocumentSecurityStatus.Quarantined, source.SecurityStatus);
+            Assert.Equal(DocumentSecurityStatus.Cleared, source.SecurityStatus);
+            Assert.Contains("/cleared/", source.ObjectKey, StringComparison.Ordinal);
             Assert.Equal(2, await context.Set<SourceDocumentOccurrence>()
                 .CountAsync(x => x.BusinessUnitId == tenantId));
         }

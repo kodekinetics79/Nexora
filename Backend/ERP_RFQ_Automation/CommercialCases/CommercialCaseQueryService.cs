@@ -44,7 +44,7 @@ public sealed class CommercialCaseQueryService : ICommercialCaseQueryService
                 (c.Lead.BuyersName != null && c.Lead.BuyersName.ToLower().Contains(term)) ||
                 (c.Lead.Clientemail != null && c.Lead.Clientemail.ToLower().Contains(term)) ||
                 (c.Lead.OpportunityNo != null && c.Lead.OpportunityNo.ToLower().Contains(term)) ||
-                (c.Lead.EmailIngests.EmailSubject != null && c.Lead.EmailIngests.EmailSubject.ToLower().Contains(term)) ||
+                (c.Lead.EmailIngests != null && c.Lead.EmailIngests.EmailSubject != null && c.Lead.EmailIngests.EmailSubject.ToLower().Contains(term)) ||
                 _db.Customers.Any(customer => customer.Buid == businessUnitId && customer.Id == c.Lead.CustomerId &&
                     customer.Name.ToLower().Contains(term)) ||
                 _db.Contacts.Any(contact => contact.BusinessUnitId == businessUnitId && contact.CustomerId == c.Lead.CustomerId &&
@@ -132,7 +132,7 @@ public sealed class CommercialCaseQueryService : ICommercialCaseQueryService
                     po.PurchaseOrderNumber.ToLower().Contains(term)) ||
                  _db.ProcurementHandoffs.Any(h => h.BusinessUnitId == businessUnitId && h.NexoraSerial == c.MasterReference &&
                     h.ExternalSupplierPoNumber != null && h.ExternalSupplierPoNumber.ToLower().Contains(term))) ? "Supplier PO" :
-                (c.Lead.EmailIngests.EmailSubject != null && c.Lead.EmailIngests.EmailSubject.ToLower().Contains(term)) ? "Email subject" :
+                (c.Lead.EmailIngests != null && c.Lead.EmailIngests.EmailSubject != null && c.Lead.EmailIngests.EmailSubject.ToLower().Contains(term)) ? "Email subject" :
                 (c.Lead.OpportunityNo != null && c.Lead.OpportunityNo.ToLower().Contains(term)) ? "Opportunity" :
                 "Related commercial record"))
             .ToListAsync(cancellationToken);

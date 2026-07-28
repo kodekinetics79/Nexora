@@ -198,6 +198,11 @@ const ReconciliationRow = ({ item }: { item: BatchReconciliationItemDTO }) => {
             Ingested {dayjs(item.ingestedAtUtc).isValid() ? dayjs(item.ingestedAtUtc).format('DD MMM YYYY, HH:mm') : 'time unavailable'}
             {' | '}{readable(item.processingPath)}{' | '}{confidenceLabel(item.confidence)}
           </Typography>
+          {item.intakeStatus && item.intakeStatus !== 'Reconciled' && (
+            <Typography variant="body2" color={meta.color === 'error' ? 'error.main' : 'text.secondary'} sx={{ mt: 0.75 }}>
+              Intake: {readable(item.intakeStatus)}{item.errorCode ? ` (${readable(item.errorCode)})` : ''}
+            </Typography>
+          )}
           <Typography variant="body2" sx={{ mt: 1 }}>
             Customer: {readable(item.customerResolutionStatus || 'Awaiting customer resolution')}
             {' | '}Owner: {item.assignedOpportunityOwner || 'Not assigned'}
@@ -221,14 +226,23 @@ const ReconciliationRow = ({ item }: { item: BatchReconciliationItemDTO }) => {
             variant="outlined"
           />
           {canOpenLead && (
-            <Button
-              variant="outlined"
-              size="small"
-              endIcon={<OpenIcon />}
-              onClick={() => navigate(`/procurement/leads/view/${item.leadId}`)}
-            >
-              Open lead
-            </Button>
+            <>
+              <Button
+                variant="outlined"
+                size="small"
+                endIcon={<OpenIcon />}
+                onClick={() => navigate(`/procurement/leads/view/${item.leadId}`)}
+              >
+                Review inquiry
+              </Button>
+              <Button
+                variant="contained"
+                size="small"
+                onClick={() => navigate(`/procurement/leads/${item.leadId}/convert`)}
+              >
+                Prepare RFQ
+              </Button>
+            </>
           )}
         </Stack>
       </Stack>
@@ -349,7 +363,12 @@ export default function LeadIngestionBatchPage() {
         <Alert severity="info">No recorded occurrences match this summary category.</Alert>
       ) : (
         <Stack spacing={1.5}>
-          {visibleItems.map((item) => <ReconciliationRow key={item.occurrenceId} item={item} />)}
+          {visibleItems.map((item) => (
+            <ReconciliationRow
+              key={`${item.sourceDocumentOccurrenceId ?? 'lead'}:${item.occurrenceId}:${item.classification}`}
+              item={item}
+            />
+          ))}
         </Stack>
       )}
     </Box>

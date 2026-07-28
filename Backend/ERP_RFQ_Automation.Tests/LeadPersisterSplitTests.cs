@@ -11,7 +11,7 @@ namespace ERP_RFQ_Automation.Tests;
 
 /// <summary>
 /// LeadPersister invariants for the unified pipeline: a multi-inquiry outcome persists N
-/// separate Leads (one per group) that SHARE one EmailIngest + the source evidence; the
+/// separate Leads (one per group) that share source evidence without inventing email provenance; the
 /// email door's provenance sidecar links leads to the REAL pre-created ingest instead of
 /// a synthetic one; the WP-BOQ inquiry classification lands on the Lead. Runs on the
 /// TestDb (real model, SQLite in-memory, FKs + unique indexes enforced).
@@ -60,12 +60,11 @@ public class LeadPersisterSplitTests : IDisposable
     }
 
     [Fact]
-    public async Task SplitOutcome_PersistsOneLeadPerGroup_SharingOneIngest()
+    public async Task ManualSplitOutcome_PersistsWithoutEmailConfiguration()
     {
         await using (var seedCtx = _db.ContextFor(null))
         {
             Seed.BusinessUnit(seedCtx, 1);
-            Seed.EmailConfig(seedCtx, 100, 1);
             await seedCtx.SaveChangesAsync();
             await SeedAuthoritativeSourceAsync(seedCtx, Job());
         }
@@ -86,8 +85,8 @@ public class LeadPersisterSplitTests : IDisposable
             Assert.Equal(2, leads.Count);
             Assert.Equal(firstLeadId, leads[0].Id);
 
-            // One shared EmailIngest for the whole document.
-            Assert.Equal(leads[0].EmailIngestsId, leads[1].EmailIngestsId);
+            Assert.All(leads, lead => Assert.Null(lead.EmailIngestsId));
+            Assert.Empty(await assertCtx.EmailIngests.ToListAsync());
 
             // Per-group conservation + identity.
             Assert.Equal("RFQ-A", leads[0].Rfqno);

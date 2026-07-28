@@ -285,6 +285,24 @@ public sealed class ExtractionWorker : BackgroundService
             // Leave the lease to expire; another worker reclaims it after shutdown.
             throw;
         }
+        catch (DocumentParsingException ex)
+        {
+            _log.LogWarning(ex, "Document parsing stopped for tenant {BusinessUnitId}, job {JobId}.",
+                job.BusinessUnitId, job.Id);
+            try
+            {
+                if (!await queue.FailPermanentlyAsync(job.Id, workerId, job.Attempts,
+                        ex.Message, CancellationToken.None))
+                    LogLeaseLost(job.Id, workerId, "recording document parse failure");
+                else
+                    await MarkIntakeFailureAsync(job, "document_parse_failed", CancellationToken.None, permanent: true);
+            }
+            catch (Exception failEx)
+            {
+                _log.LogError(failEx, "Failed to persist document parse failure for job {JobId}.", job.Id);
+            }
+            return true;
+        }
         catch (EvidenceIntegrityException ex)
         {
             _log.LogCritical(ex,
@@ -469,7 +487,11 @@ public sealed class ExtractionWorker : BackgroundService
         }
     }
 
-    private async Task MarkIntakeFailureAsync(ExtractionJob job, string errorCode, CancellationToken ct)
+    private async Task MarkIntakeFailureAsync(
+        ExtractionJob job,
+        string errorCode,
+        CancellationToken ct,
+        bool permanent = false)
     {
         if (!job.SourceDocumentOccurrenceId.HasValue) return;
         using var scope = _scopeFactory.CreateScope();
@@ -479,7 +501,7 @@ public sealed class ExtractionWorker : BackgroundService
             .SingleAsync(x => x.BusinessUnitId == job.BusinessUnitId && x.Id == job.SourceDocumentOccurrenceId, ct);
         if (occurrence.IntakeStatus == IntakeOccurrenceStatus.Processing)
         {
-            if (job.Attempts >= job.MaxAttempts) occurrence.MarkDeadLetter(errorCode);
+            if (permanent || job.Attempts >= job.MaxAttempts) occurrence.MarkDeadLetter(errorCode);
             else occurrence.MarkRetryable(errorCode);
             await db.SaveChangesAsync(ct);
         }
@@ -1021,11 +1043,10 @@ public sealed class LeadPersister : ILeadPersister
     }
 
     /// <summary>
-    /// Resolves the EmailIngest all leads of this job link to: the PRE-CREATED row named
-    /// by the sidecar (email door — its ParseStatus/ParsedAt are updated to the outcome),
-    /// or a synthetic per-job row (manual/folder/queue uploads), exactly as before.
+    /// Resolves the pre-created EmailIngest for the email door. Other ingestion doors
+    /// retain their own source occurrence and do not require synthetic email settings.
     /// </summary>
-    private async Task<EmailIngest> ResolveIngestAsync(
+    private async Task<EmailIngest?> ResolveIngestAsync(
         ExtractionJob job, ExtractionJobMetadata? metadata, string parseStatus, DateTime now, CancellationToken ct)
     {
         if (metadata?.EmailIngestId is > 0)
@@ -1044,28 +1065,14 @@ public sealed class LeadPersister : ILeadPersister
                 return existing;
             }
             _log.LogWarning(
-                "Job {JobId} referenced an EmailIngest unavailable in its tenant; using a synthetic ingest.",
+                "Job {JobId} referenced an EmailIngest unavailable in its tenant.",
                 job.Id);
         }
 
-        var config = await _context.EmailConfigurations.AsNoTracking()
-                         .FirstOrDefaultAsync(e => e.IsActive && e.BusinessUnitId == job.BusinessUnitId, ct)
-                     ?? throw new InvalidOperationException(
-                         "No active EmailConfiguration is available for this tenant's lead persistence.");
+        if (job.SourceType == ExtractionSourceType.Email)
+            throw new InvalidOperationException("The email ingestion provenance record is unavailable.");
 
-        return new EmailIngest
-        {
-            // BU-scoped so identical content ingested by two tenants (allowed by the
-            // per-BU idempotency index) can never collide on the unique MessageId.
-            MessageId = $"Extraction_{job.SourceType}_{job.BusinessUnitId}_{job.ContentHash[..Math.Min(24, job.ContentHash.Length)]}",
-            EmailSubject = metadata?.Subject ?? job.FileName ?? "Extraction job",
-            FromEmail = metadata?.FromEmail ?? "extraction@pipeline.local",
-            ToEmail = "system@rfq.com",
-            EmailConfigurationId = config.Id,
-            CreatedOn = now,
-            ParseStatus = parseStatus,
-            ParsedAt = now
-        };
+        return null;
     }
 
     private async Task<ExtractionJobMetadata?> ResolveMetadataAsync(
@@ -1117,7 +1124,7 @@ public sealed class LeadPersister : ILeadPersister
         ExtractionJob job,
         ExtractionJobMetadata? metadata,
         LeadExtractionResult ai,
-        EmailIngest ingest,
+        EmailIngest? ingest,
         DateTime now,
         string remarksPrefix)
     {
