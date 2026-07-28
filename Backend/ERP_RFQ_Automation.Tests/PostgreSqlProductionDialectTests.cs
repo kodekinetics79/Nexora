@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.AI;
+using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Sla;
@@ -377,6 +378,52 @@ public sealed class PostgreSqlProductionDialectTests
             drop.CommandText = $"REVOKE nexora_tenant_app, nexora_identity_app, nexora_pipeline_app FROM {runtimeRole}; DROP ROLE IF EXISTS {runtimeRole};";
             await drop.ExecuteNonQueryAsync();
         }
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task QuoteOutcome_LifecycleTransactionUsesConfiguredRetryStrategy()
+    {
+        var businessUnitId = 9_800_000L + Random.Shared.Next(1, 100_000);
+        var options = new DbContextOptionsBuilder<ErpRfqAutomationContext>()
+            .UseNpgsql(_database.ConnectionString, npgsql => npgsql.EnableRetryOnFailure())
+            .Options;
+        await using var context = new ErpRfqAutomationContext(options, new StubTenant(null));
+        Seed.EnsureBusinessUnit(context, businessUnitId);
+        var sent = new SetupMaster
+        {
+            SetupType = "QuoteStatus",
+            SetupCode = "SENT",
+            SetupValue = "Sent",
+            BusinessUnitId = businessUnitId,
+            IsActive = true,
+            CreatedBy = "retry-strategy-test",
+            CreatedOn = DateTime.UtcNow
+        };
+        context.SetupMasters.Add(sent);
+        await context.SaveChangesAsync();
+        var quote = new Quote
+        {
+            QuoteNo = $"RETRY-{Guid.NewGuid():N}",
+            BusinessUnitId = businessUnitId,
+            StatusId = sent.SetupId,
+            SentOn = DateTime.UtcNow.AddDays(-2),
+            ValidUntil = DateTime.UtcNow.AddDays(-1),
+            CreatedBy = "retry-strategy-test",
+            CreatedDate = DateTime.UtcNow.AddDays(-2)
+        };
+        context.Quotes.Add(quote);
+        await context.SaveChangesAsync();
+
+        var service = new QuoteOutcomeService(
+            context,
+            null!,
+            new NoopLogger<QuoteOutcomeService>(),
+            lifecycle: new QueryingQuoteLifecycle(context));
+
+        Assert.True(await service.ExpireAsync(quote.Id));
+        context.ChangeTracker.Clear();
+        Assert.NotNull((await context.Quotes.SingleAsync(x => x.Id == quote.Id)).OutcomeOn);
     }
 
     [Fact]
@@ -1128,4 +1175,37 @@ public sealed class PostgreSqlProductionDialectTests
 
     private static ExtractionQueue NewQueue(ERP_RFQ_Automation.Models.ErpRfqAutomationContext context)
         => new(context, new NoopLogger<ExtractionQueue>());
+
+    private sealed class QueryingQuoteLifecycle(ErpRfqAutomationContext context) : ILifecycleApplicationService
+    {
+        public async Task<LifecycleTransitionResult> TransitionQuoteInCurrentTransactionAsync(
+            long businessUnitId, long quoteId, LifecycleActor actor, LifecycleTransitionCommand command,
+            bool reopen, CancellationToken ct)
+        {
+            Assert.NotNull(context.Database.CurrentTransaction);
+            await context.Quotes.SingleAsync(
+                quote => quote.BusinessUnitId == businessUnitId && quote.Id == quoteId, ct);
+            await context.SaveChangesAsync(ct);
+            return null!;
+        }
+
+        public Task<LifecycleStateView> GetLeadStateAsync(long businessUnitId, long leadId, CancellationToken ct) =>
+            throw new NotSupportedException();
+        public Task<LifecycleStateView> GetRfqStateAsync(long businessUnitId, long rfqId, CancellationToken ct) =>
+            throw new NotSupportedException();
+        public Task<LifecycleStateView> GetQuoteStateAsync(long businessUnitId, long quoteId, CancellationToken ct) =>
+            throw new NotSupportedException();
+        public Task<LifecycleTransitionResult> TransitionLeadAsync(long businessUnitId, long leadId,
+            LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct) =>
+            throw new NotSupportedException();
+        public Task<LifecycleTransitionResult> TransitionRfqAsync(long businessUnitId, long rfqId,
+            LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct) =>
+            throw new NotSupportedException();
+        public Task<LifecycleTransitionResult> TransitionQuoteAsync(long businessUnitId, long quoteId,
+            LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct) =>
+            throw new NotSupportedException();
+        public Task<LifecycleTransitionResult> TransitionLeadInCurrentTransactionAsync(long businessUnitId,
+            long leadId, LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct) =>
+            throw new NotSupportedException();
+    }
 }

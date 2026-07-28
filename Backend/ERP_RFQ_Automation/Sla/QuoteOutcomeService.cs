@@ -165,15 +165,16 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
         QuoteResponseDTO dto;
         if (_lifecycle is not null)
         {
-            await using var transaction = await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
-            await _lifecycle.TransitionQuoteInCurrentTransactionAsync(
-                businessUnitId,
-                quoteId,
-                new LifecycleActor(actorEmail, "quote-outcome"),
-                OutcomeCommand(quote, statusCode, reasonCode, note, actorEmail),
-                false,
-                ct);
-            await transaction.CommitAsync(ct);
+            await ExecuteLifecycleTransactionAsync(async () =>
+            {
+                await _lifecycle.TransitionQuoteInCurrentTransactionAsync(
+                    businessUnitId,
+                    quoteId,
+                    new LifecycleActor(actorEmail, "quote-outcome"),
+                    OutcomeCommand(quote, statusCode, reasonCode, note, actorEmail),
+                    false,
+                    ct);
+            }, ct);
             dto = await _quoteService.GetQuoteAsync(quoteId);
         }
         else
@@ -224,15 +225,16 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
         // NOTE: RespondedOn deliberately NOT stamped — the customer never responded.
         if (_lifecycle is not null)
         {
-            await using var transaction = await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
-            await _lifecycle.TransitionQuoteInCurrentTransactionAsync(
-                quote.BusinessUnitId,
-                quoteId,
-                new LifecycleActor("system:sla-sweep", "sla-worker"),
-                OutcomeCommand(quote, "EXPIRED", reasonCode, null, "system:sla-sweep"),
-                false,
-                ct);
-            await transaction.CommitAsync(ct);
+            await ExecuteLifecycleTransactionAsync(async () =>
+            {
+                await _lifecycle.TransitionQuoteInCurrentTransactionAsync(
+                    quote.BusinessUnitId,
+                    quoteId,
+                    new LifecycleActor("system:sla-sweep", "sla-worker"),
+                    OutcomeCommand(quote, "EXPIRED", reasonCode, null, "system:sla-sweep"),
+                    false,
+                    ct);
+            }, ct);
         }
         else
         {
@@ -246,6 +248,18 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
         await RecordOutcomeMetricAsync(quote, "expired", reasonCode, ct);
 
         return true;
+    }
+
+    private async Task ExecuteLifecycleTransactionAsync(Func<Task> operation, CancellationToken ct)
+    {
+        var strategy = _context.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(async () =>
+        {
+            await using var transaction = await _context.Database.BeginTransactionAsync(
+                IsolationLevel.Serializable, ct);
+            await operation();
+            await transaction.CommitAsync(ct);
+        });
     }
 
     private static LifecycleTransitionCommand OutcomeCommand(
