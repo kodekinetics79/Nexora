@@ -965,6 +965,68 @@ test('38 production readiness reconciles runtime health and tenant queues', asyn
   });
 });
 
+test('39 platform owner console uses authenticated persisted operational data', async ({ page }) => {
+  const failures: string[] = [];
+  page.on('response', (response) => {
+    if (response.url().includes('/api/platform/') && response.status() >= 400) {
+      failures.push(`${response.status()} ${response.url()}`);
+    }
+  });
+
+  await page.goto('/platform/overview');
+  await page.getByLabel('Email').fill(required('E2E_PLATFORM_EMAIL'));
+  await page.getByLabel('Password').fill(required('E2E_PLATFORM_PASSWORD'));
+  await page.getByRole('button', { name: 'Enter Control Plane' }).click();
+  await expect(page.getByRole('heading', { name: 'Platform Overview' })).toBeVisible();
+  await expect(page.getByText('System Health', { exact: true })).toBeVisible();
+
+  await page.getByRole('link', { name: 'Tenants' }).click();
+  await expect(page.getByRole('heading', { name: 'Tenants' })).toBeVisible();
+  await expect(page.getByText('Release 01C1 Acceptance', { exact: true }).first()).toBeVisible();
+
+  await page.getByRole('button', { name: 'Provision Tenant' }).click();
+  const provisionDialog = page.getByRole('dialog', { name: 'Provision New Tenant' });
+  await provisionDialog.getByLabel('Organization name').fill('V1 Platform Acceptance Tenant');
+  await provisionDialog.getByLabel('Slug').fill('v1-platform-acceptance');
+  await provisionDialog.getByRole('combobox', { name: /Plan/ }).click();
+  await page.getByRole('option', { name: 'Pro' }).click();
+  await page.getByRole('button', { name: 'Provision', exact: true }).click();
+  await expect(page.getByText('V1 Platform Acceptance Tenant', { exact: true })).toBeVisible();
+
+  let tenantRow = page.getByRole('row').filter({ hasText: 'Release 01C1 Acceptance' });
+  await tenantRow.getByRole('button', { name: 'Suspend' }).click();
+  await page.getByLabel('Audit reason').fill('V1 acceptance lifecycle verification');
+  await page.getByRole('button', { name: 'suspend', exact: true }).click();
+  await expect(tenantRow.getByText('suspended', { exact: true })).toBeVisible();
+
+  tenantRow = page.getByRole('row').filter({ hasText: 'Release 01C1 Acceptance' });
+  await tenantRow.getByRole('button', { name: 'Resume' }).click();
+  await page.getByLabel('Audit reason').fill('V1 acceptance lifecycle restoration');
+  await page.getByRole('button', { name: 'resume', exact: true }).click();
+  await expect(tenantRow.getByText('active', { exact: true })).toBeVisible();
+
+  await tenantRow.getByRole('button', { name: 'Impersonate' }).click();
+  await page.getByLabel('Audit reason').fill('V1 read-only support-session verification');
+  await page.getByRole('button', { name: 'impersonate', exact: true }).click();
+  await page.getByText('Release 01C1 Acceptance', { exact: true }).first().click();
+  await expect(page.getByText('Tenant Registry', { exact: true })).toBeVisible();
+  await expect(page.getByText(required('E2E_PLATFORM_TENANT_ID'), { exact: true })).toBeVisible();
+
+  await page.getByRole('link', { name: 'Pipeline' }).click();
+  await expect(page.getByRole('heading', { name: 'Extraction Pipeline' })).toBeVisible();
+  await expect(page.getByText('Queue Depth', { exact: true })).toBeVisible();
+
+  await page.getByRole('link', { name: 'Plans', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Plans', exact: true })).toBeVisible();
+  await expect(page.getByText('Enterprise', { exact: true }).first()).toBeVisible();
+
+  await page.getByRole('link', { name: 'Audit Log' }).click();
+  await expect(page.getByRole('heading', { name: 'Audit Log' })).toBeVisible();
+  await expect(page.getByText('tenant.provision', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('impersonate.issue', { exact: true }).first()).toBeVisible();
+  expect(failures).toEqual([]);
+});
+
 test.afterEach(({ page }, testInfo) => {
   void page;
   expect(testInfo.annotations.filter((annotation) => annotation.type === 'skip')).toHaveLength(0);

@@ -1,22 +1,7 @@
-// ---------------------------------------------------------------------------
-// Platform API client (typed)
-//
-// Every `/api/platform/*` call in the owner console goes through the
-// `PlatformApi` interface below. Today it is fulfilled by an in-memory MOCK
-// adapter so the UI can be built and demoed before the ADR-0005 backend ships.
-//
-// ============================ MOCK → REAL SWAP =============================
-// When the real endpoints are live, flip `USE_MOCK` to `false` (or drive it
-// from an env flag) and fill in `httpPlatformApi` below. Each method already
-// documents its target endpoint. No page or hook changes are required — they
-// import `platformApi` and never touch axios directly.
-// ==========================================================================
-
 import platformHttp from './platformHttp';
 import type {
   AuditEntry,
   ExtractionJob,
-  FeatureFlag,
   ImpersonationTicket,
   JobStatus,
   OverviewMetrics,
@@ -25,26 +10,11 @@ import type {
   ProvisionTenantInput,
   QueueStats,
   Tenant,
-  TenantDetail,
-  UsageMeter,
 } from '../types';
-import {
-  buildAudit,
-  buildJobs,
-  buildUsers,
-  FEATURE_FLAGS,
-  PLANS,
-  TENANTS,
-} from './mockData';
-
-// Live by default. Set `VITE_PLATFORM_API_MOCK=true` to run the console against
-// the in-memory mock adapter for offline development / demos.
-const USE_MOCK = import.meta.env.VITE_PLATFORM_API_MOCK === 'true';
 
 export interface AuditQuery {
   action?: string;
   tenantId?: string;
-  result?: 'success' | 'failure' | 'all';
   search?: string;
 }
 
@@ -55,43 +25,17 @@ export interface JobQuery {
 
 export interface PlatformApi {
   getOverview(): Promise<OverviewMetrics>;
-
   listTenants(): Promise<Tenant[]>;
-  getTenant(id: string): Promise<TenantDetail>;
+  getTenant(id: string): Promise<Tenant>;
   provisionTenant(input: ProvisionTenantInput): Promise<Tenant>;
-  suspendTenant(id: string): Promise<Tenant>;
-  resumeTenant(id: string): Promise<Tenant>;
-  impersonateTenant(id: string): Promise<ImpersonationTicket>;
-  setTenantFlag(tenantId: string, flagKey: string, enabled: boolean): Promise<Record<string, boolean>>;
-
+  suspendTenant(id: string, reason: string): Promise<Tenant>;
+  resumeTenant(id: string, reason: string): Promise<Tenant>;
+  impersonateTenant(id: string, reason: string): Promise<ImpersonationTicket>;
   getQueueStats(): Promise<QueueStats>;
   listJobs(query?: JobQuery): Promise<ExtractionJob[]>;
-  requeueJob(jobId: string): Promise<ExtractionJob>;
-  discardJob(jobId: string): Promise<void>;
-
   listPlans(): Promise<Plan[]>;
-  listFeatureFlags(): Promise<FeatureFlag[]>;
-
   listAudit(query?: AuditQuery): Promise<AuditEntry[]>;
 }
-
-// ---------------------------------------------------------------------------
-// MOCK adapter
-// ---------------------------------------------------------------------------
-
-const delay = <T>(value: T, ms = 320): Promise<T> =>
-  new Promise((resolve) => setTimeout(() => resolve(value), ms));
-
-// Mutable in-memory stores so provisioning / suspend / flag toggles feel live
-// across the session. Cloned from the seed data on module load.
-const tenantStore: Tenant[] = TENANTS.map((t) => ({ ...t, usage: { ...t.usage } }));
-let jobStore: ExtractionJob[] = buildJobs(140);
-const auditStore: AuditEntry[] = buildAudit(120);
-// Per-tenant flag overrides on top of plan entitlements.
-const flagOverrides: Record<string, Record<string, boolean>> = {};
-
-const planFor = (tier: PlanTier): Plan =>
-  PLANS.find((p) => p.tier === tier) ?? PLANS[0];
 
 type BackendTenant = {
   id: string | number;
@@ -100,361 +44,76 @@ type BackendTenant = {
   status?: string | null;
   planCode?: string | null;
   createdOn?: string | null;
-  primaryBusinessUnitId?: string | number | null;
-  primaryContactEmail?: string | null;
-  region?: string | null;
-  usage?: Partial<Tenant['usage']> | null;
-  extractionSuccessRate?: number | null;
-  pipelineHealth?: string | null;
+};
+
+type BackendImpersonation = {
+  tenantId: string | number;
+  token: string;
+  expiresAtUtc: string;
 };
 
 const normalizePlanTier = (planCode?: string | null): PlanTier => {
   const tier = (planCode ?? '').toLowerCase();
-  return tier === 'free' || tier === 'enterprise' ? tier : 'pro';
+  return tier === 'free' || tier === 'pro' || tier === 'enterprise' ? tier : 'unassigned';
 };
 
 const normalizeTenantStatus = (status?: string | null): Tenant['status'] => {
-  const normalized = (status ?? 'active').toLowerCase();
-  if (normalized === 'trial' || normalized === 'suspended' || normalized === 'provisioning') return normalized;
-  return 'active';
+  const normalized = (status ?? 'provisioning').toLowerCase();
+  if (normalized === 'active' || normalized === 'trial' || normalized === 'suspended' || normalized === 'archived') return normalized;
+  return 'provisioning';
 };
 
-const normalizeTenant = (tenant: BackendTenant): Tenant => {
-  const plan = planFor(normalizePlanTier(tenant.planCode));
-  const usage = tenant.usage ?? {};
-  return {
-    id: String(tenant.id),
-    name: tenant.name,
-    slug: tenant.slug,
-    planTier: plan.tier,
-    status: normalizeTenantStatus(tenant.status),
-    region: tenant.region ?? 'us-east-1',
-    primaryContactEmail: tenant.primaryContactEmail ?? 'owner@nexora.app',
-    createdAt: tenant.createdOn ?? new Date().toISOString(),
-    usage: {
-      docsProcessedMtd: usage.docsProcessedMtd ?? 0,
-      docQuota: usage.docQuota ?? plan.monthlyDocQuota,
-      seatsUsed: usage.seatsUsed ?? 0,
-      seatQuota: usage.seatQuota ?? plan.seatQuota,
-      llmCostMtdUsd: usage.llmCostMtdUsd ?? 0,
-      storageUsedGb: usage.storageUsedGb ?? 0,
-    },
-    extractionSuccessRate: tenant.extractionSuccessRate ?? 1,
-    pipelineHealth:
-      tenant.pipelineHealth === 'degraded' || tenant.pipelineHealth === 'down'
-        ? tenant.pipelineHealth
-        : 'healthy',
-  };
-};
-
-const effectiveFlags = (tenant: Tenant): Record<string, boolean> => {
-  const entitlements = new Set(planFor(tenant.planTier).entitlements);
-  const base: Record<string, boolean> = {};
-  for (const flag of FEATURE_FLAGS) base[flag.key] = entitlements.has(flag.key);
-  return { ...base, ...(flagOverrides[tenant.id] ?? {}) };
-};
-
-const buildUsageMeters = (tenant: Tenant): UsageMeter[] => {
-  const period = new Date().toISOString().slice(0, 7);
-  return [
-    { metric: 'docs', label: 'Documents Processed', used: tenant.usage.docsProcessedMtd, limit: tenant.usage.docQuota, unit: 'docs', period },
-    { metric: 'seats', label: 'Seats', used: tenant.usage.seatsUsed, limit: tenant.usage.seatQuota, unit: 'seats', period },
-    { metric: 'storage', label: 'Storage', used: Math.round(tenant.usage.storageUsedGb), limit: tenant.planTier === 'enterprise' ? null : 250, unit: 'GB', period },
-    { metric: 'llm_cost', label: 'LLM Spend', used: Math.round(tenant.usage.llmCostMtdUsd), limit: null, unit: 'USD', period },
-  ];
-};
-
-const perTenantQueue = (tenant: Tenant): QueueStats => {
-  const jobs = jobStore.filter((j) => j.tenantId === tenant.id);
-  return {
-    queueDepth: jobs.filter((j) => j.status === 'queued').length,
-    inFlight: jobs.filter((j) => j.status === 'in_flight').length,
-    deadLetter: jobs.filter((j) => j.status === 'dead_letter').length,
-    processedLast24h: jobs.filter((j) => j.status === 'succeeded').length,
-    avgLatencyMs: Math.round(
-      jobs.reduce((s, j) => s + (j.latencyMs ?? 0), 0) / Math.max(jobs.length, 1),
-    ),
-    successRate: tenant.extractionSuccessRate,
-  };
-};
-
-const trailingSeries = (days: number) =>
-  Array.from({ length: days }, (_, i) => {
-    const d = new Date();
-    d.setDate(d.getDate() - (days - 1 - i));
-    return d.toISOString().slice(0, 10);
-  });
-
-const mockPlatformApi: PlatformApi = {
-  async getOverview() {
-    const active = tenantStore.filter((t) => t.status === 'active' || t.status === 'trial');
-    const docsProcessedMtd = tenantStore.reduce((s, t) => s + t.usage.docsProcessedMtd, 0);
-    const llmCostMtdUsd = tenantStore.reduce((s, t) => s + t.usage.llmCostMtdUsd, 0);
-    const totalQueue = jobStore.filter((j) => j.status === 'queued').length;
-    const inFlight = jobStore.filter((j) => j.status === 'in_flight').length;
-    const deadLetter = jobStore.filter((j) => j.status === 'dead_letter').length;
-    const succeeded = jobStore.filter((j) => j.status === 'succeeded').length;
-    const failed = jobStore.filter((j) => j.status === 'failed' || j.status === 'dead_letter').length;
-
-    const dates = trailingSeries(14);
-    const throughput = dates.map((date, i) => ({
-      date,
-      docs: 2600 + Math.round(Math.sin(i / 2) * 700) + i * 40,
-      failures: 40 + ((i * 7) % 55),
-    }));
-    const costTrend = dates.map((date, i) => ({
-      date,
-      costUsd: 520 + Math.round(Math.cos(i / 3) * 120) + i * 12,
-    }));
-
-    const tenantsByPlan: OverviewMetrics['tenantsByPlan'] = (['free', 'pro', 'enterprise'] as PlanTier[]).map((tier) => ({
-      tier,
-      count: tenantStore.filter((t) => t.planTier === tier).length,
-    }));
-
-    return delay({
-      tenantCount: tenantStore.length,
-      activeTenants: active.length,
-      docsProcessedMtd,
-      extractionSuccessRate: succeeded / Math.max(succeeded + failed, 1),
-      queueDepth: totalQueue,
-      inFlight,
-      deadLetter,
-      llmCostMtdUsd,
-      llmCostTrendPct: 12.4,
-      seatsInUse: tenantStore.reduce((s, t) => s + t.usage.seatsUsed, 0),
-      services: [
-        { key: 'api', name: 'Platform API', status: 'healthy', latencyMs: 42, detail: 'p95 42ms · 0 errors/min' },
-        { key: 'extractor', name: 'Extraction Workers', status: deadLetter > 20 ? 'degraded' : 'healthy', latencyMs: 1820, detail: `${inFlight} in-flight · ${deadLetter} dead-letter` },
-        { key: 'llm', name: 'LLM Gateway', status: 'healthy', latencyMs: 940, detail: 'Primary pool nominal' },
-        { key: 'ocr', name: 'OCR Service', status: 'degraded', latencyMs: 3100, detail: 'Elevated latency on eu-west-1' },
-        { key: 'db', name: 'Primary Database', status: 'healthy', latencyMs: 6, detail: 'Replication lag 0.2s' },
-        { key: 'queue', name: 'Message Queue', status: 'healthy', latencyMs: 3, detail: `${totalQueue} queued` },
-      ],
-      throughput,
-      costTrend,
-      tenantsByPlan,
-    } satisfies OverviewMetrics);
+const normalizeTenant = (tenant: BackendTenant): Tenant => ({
+  id: String(tenant.id),
+  name: tenant.name,
+  slug: tenant.slug,
+  planTier: normalizePlanTier(tenant.planCode),
+  status: normalizeTenantStatus(tenant.status),
+  region: 'Not recorded',
+  primaryContactEmail: '',
+  createdAt: tenant.createdOn ?? '',
+  usage: {
+    docsProcessedMtd: 0,
+    docQuota: null,
+    seatsUsed: 0,
+    seatQuota: null,
+    llmCostMtdUsd: 0,
+    storageUsedGb: 0,
   },
-
-  async listTenants() {
-    return delay(tenantStore.map((t) => ({ ...t, usage: { ...t.usage } })));
-  },
-
-  async getTenant(id) {
-    const tenant = tenantStore.find((t) => t.id === id);
-    if (!tenant) throw new Error(`Tenant ${id} not found`);
-    const detail: TenantDetail = {
-      ...tenant,
-      usage: { ...tenant.usage },
-      users: buildUsers(tenant.id, Math.max(tenant.usage.seatsUsed, 1)),
-      flags: effectiveFlags(tenant),
-      usageMeters: buildUsageMeters(tenant),
-      recentAudit: auditStore.filter((a) => a.tenantId === tenant.id).slice(0, 12),
-      queue: perTenantQueue(tenant),
-    };
-    return delay(detail);
-  },
-
-  async provisionTenant(input) {
-    const plan = planFor(input.planTier);
-    const tenant: Tenant = {
-      id: `tnt_${input.slug}`,
-      name: input.name,
-      slug: input.slug,
-      planTier: input.planTier,
-      status: 'provisioning',
-      region: input.region,
-      primaryContactEmail: input.primaryContactEmail,
-      createdAt: new Date().toISOString(),
-      extractionSuccessRate: 0,
-      pipelineHealth: 'healthy',
-      usage: {
-        docsProcessedMtd: 0,
-        docQuota: plan.monthlyDocQuota,
-        seatsUsed: 0,
-        seatQuota: plan.seatQuota,
-        llmCostMtdUsd: 0,
-        storageUsedGb: 0,
-      },
-    };
-    tenantStore.unshift(tenant);
-    return delay(tenant, 600);
-  },
-
-  async suspendTenant(id) {
-    const tenant = tenantStore.find((t) => t.id === id);
-    if (!tenant) throw new Error(`Tenant ${id} not found`);
-    tenant.status = 'suspended';
-    tenant.pipelineHealth = 'down';
-    return delay({ ...tenant, usage: { ...tenant.usage } });
-  },
-
-  async resumeTenant(id) {
-    const tenant = tenantStore.find((t) => t.id === id);
-    if (!tenant) throw new Error(`Tenant ${id} not found`);
-    tenant.status = 'active';
-    tenant.pipelineHealth = 'healthy';
-    return delay({ ...tenant, usage: { ...tenant.usage } });
-  },
-
-  async impersonateTenant(id) {
-    const tenant = tenantStore.find((t) => t.id === id);
-    if (!tenant) throw new Error(`Tenant ${id} not found`);
-    const expires = new Date();
-    expires.setMinutes(expires.getMinutes() + 15);
-    return delay({
-      tenantId: id,
-      token: `imp_${btoa(id).replace(/=/g, '')}_${Date.now().toString(36)}`,
-      expiresAt: expires.toISOString(),
-    });
-  },
-
-  async setTenantFlag(tenantId, flagKey, enabled) {
-    const tenant = tenantStore.find((t) => t.id === tenantId);
-    if (!tenant) throw new Error(`Tenant ${tenantId} not found`);
-    flagOverrides[tenantId] = { ...(flagOverrides[tenantId] ?? {}), [flagKey]: enabled };
-    return delay(effectiveFlags(tenant));
-  },
-
-  async getQueueStats() {
-    const totals: QueueStats = {
-      queueDepth: jobStore.filter((j) => j.status === 'queued').length,
-      inFlight: jobStore.filter((j) => j.status === 'in_flight').length,
-      deadLetter: jobStore.filter((j) => j.status === 'dead_letter').length,
-      processedLast24h: jobStore.filter((j) => j.status === 'succeeded').length,
-      avgLatencyMs: Math.round(
-        jobStore.reduce((s, j) => s + (j.latencyMs ?? 0), 0) / Math.max(jobStore.length, 1),
-      ),
-      successRate:
-        jobStore.filter((j) => j.status === 'succeeded').length /
-        Math.max(jobStore.filter((j) => j.status !== 'queued' && j.status !== 'in_flight').length, 1),
-    };
-    return delay(totals);
-  },
-
-  async listJobs(query) {
-    let jobs = jobStore;
-    if (query?.tenantId) jobs = jobs.filter((j) => j.tenantId === query.tenantId);
-    if (query?.status && query.status !== 'all') jobs = jobs.filter((j) => j.status === query.status);
-    return delay(jobs.map((j) => ({ ...j })));
-  },
-
-  async requeueJob(jobId) {
-    const job = jobStore.find((j) => j.id === jobId);
-    if (!job) throw new Error(`Job ${jobId} not found`);
-    job.status = 'queued';
-    job.attempts = 0;
-    job.error = null;
-    job.updatedAt = new Date().toISOString();
-    return delay({ ...job });
-  },
-
-  async discardJob(jobId) {
-    jobStore = jobStore.filter((j) => j.id !== jobId);
-    return delay(undefined);
-  },
-
-  async listPlans() {
-    return delay(PLANS.map((p) => ({ ...p })));
-  },
-
-  async listFeatureFlags() {
-    return delay(FEATURE_FLAGS.map((f) => ({ ...f })));
-  },
-
-  async listAudit(query) {
-    let rows = auditStore;
-    if (query?.action) rows = rows.filter((a) => a.action === query.action);
-    if (query?.tenantId) rows = rows.filter((a) => a.tenantId === query.tenantId);
-    if (query?.result && query.result !== 'all') rows = rows.filter((a) => a.result === query.result);
-    if (query?.search) {
-      const q = query.search.toLowerCase();
-      rows = rows.filter(
-        (a) =>
-          a.actor.toLowerCase().includes(q) ||
-          a.actorEmail.toLowerCase().includes(q) ||
-          a.action.toLowerCase().includes(q) ||
-          (a.tenantName ?? '').toLowerCase().includes(q) ||
-          a.targetId.toLowerCase().includes(q),
-      );
-    }
-    return delay(rows.map((a) => ({ ...a })));
-  },
-};
-
-// ---------------------------------------------------------------------------
-// REAL (HTTP) adapter — endpoints per ADR-0005. Uses the dedicated
-// `platformHttp` axios instance, which attaches the PLATFORM token (scope=
-// platform) — never the tenant token — and clears the platform session on 401.
-// ---------------------------------------------------------------------------
+  extractionSuccessRate: 0,
+  pipelineHealth: 'degraded',
+});
 
 const httpPlatformApi: PlatformApi = {
-  // GET /api/platform/overview
   getOverview: async () => (await platformHttp.get<OverviewMetrics>('/api/platform/overview')).data,
-
-  // GET /api/platform/tenants
   listTenants: async () =>
     (await platformHttp.get<BackendTenant[]>('/api/platform/tenants')).data.map(normalizeTenant),
-  // GET /api/platform/tenants/:id
-  getTenant: async (id) => {
-    const tenant = normalizeTenant((await platformHttp.get<BackendTenant>(`/api/platform/tenants/${id}`)).data);
-    return {
-      ...tenant,
-      users: [],
-      flags: {},
-      usageMeters: [],
-      recentAudit: [],
-      queue: {
-        queueDepth: 0,
-        inFlight: 0,
-        deadLetter: 0,
-        processedLast24h: 0,
-        avgLatencyMs: 0,
-        successRate: tenant.extractionSuccessRate,
-      },
-    };
-  },
-  // POST /api/platform/tenants
+  getTenant: async (id) =>
+    normalizeTenant((await platformHttp.get<BackendTenant>(`/api/platform/tenants/${id}`)).data),
   provisionTenant: async (input) => {
-    const created = (await platformHttp.post<BackendTenant>('/api/platform/tenants', input)).data;
-    return {
-      ...normalizeTenant(created),
-      planTier: input.planTier,
-      region: input.region,
-      primaryContactEmail: input.primaryContactEmail,
-    };
+    const plans = (await platformHttp.get<Plan[]>('/api/platform/plans')).data;
+    const planId = plans.find((plan) => plan.tier === input.planTier)?.id;
+    if (!planId) throw new Error(`No persisted ${input.planTier} plan is available.`);
+    return normalizeTenant((await platformHttp.post<BackendTenant>('/api/platform/tenants', {
+      name: input.name,
+      slug: input.slug,
+      planId: Number(planId),
+    })).data);
   },
-  // POST /api/platform/tenants/:id/suspend
-  suspendTenant: async (id) => normalizeTenant((await platformHttp.post<BackendTenant>(`/api/platform/tenants/${id}/suspend`, { reason: 'Platform action' })).data),
-  // POST /api/platform/tenants/:id/resume
-  resumeTenant: async (id) => normalizeTenant((await platformHttp.post<BackendTenant>(`/api/platform/tenants/${id}/resume`, { reason: 'Platform action' })).data),
-  // POST /api/platform/tenants/:id/impersonate
-  impersonateTenant: async (id) => (await platformHttp.post<ImpersonationTicket>(`/api/platform/tenants/${id}/impersonate`)).data,
-  // PUT /api/platform/tenants/:id/flags/:flagKey
-  setTenantFlag: async (tenantId, flagKey, enabled) =>
-    (await platformHttp.put<Record<string, boolean>>(`/api/platform/tenants/${tenantId}/flags/${flagKey}`, { enabled })).data,
-
-  // GET /api/platform/pipeline/queue
+  suspendTenant: async (id, reason) =>
+    normalizeTenant((await platformHttp.post<BackendTenant>(`/api/platform/tenants/${id}/suspend`, { reason })).data),
+  resumeTenant: async (id, reason) =>
+    normalizeTenant((await platformHttp.post<BackendTenant>(`/api/platform/tenants/${id}/resume`, { reason })).data),
+  impersonateTenant: async (id, reason) => {
+    const response = (await platformHttp.post<BackendImpersonation>(`/api/platform/tenants/${id}/impersonate`, { reason })).data;
+    return { tenantId: String(response.tenantId), token: response.token, expiresAt: response.expiresAtUtc };
+  },
   getQueueStats: async () => (await platformHttp.get<QueueStats>('/api/platform/pipeline/queue')).data,
-  // GET /api/platform/pipeline/jobs
-  listJobs: async (query) => (await platformHttp.get<ExtractionJob[]>('/api/platform/pipeline/jobs', { params: query })).data,
-  // POST /api/platform/pipeline/jobs/:id/requeue
-  requeueJob: async (jobId) => (await platformHttp.post<ExtractionJob>(`/api/platform/pipeline/jobs/${jobId}/requeue`)).data,
-  // DELETE /api/platform/pipeline/jobs/:id
-  discardJob: async (jobId) => {
-    await platformHttp.delete(`/api/platform/pipeline/jobs/${jobId}`);
-  },
-
-  // GET /api/platform/plans
+  listJobs: async (query) =>
+    (await platformHttp.get<ExtractionJob[]>('/api/platform/pipeline/jobs', { params: query })).data,
   listPlans: async () => (await platformHttp.get<Plan[]>('/api/platform/plans')).data,
-  // GET /api/platform/feature-flags
-  listFeatureFlags: async () => (await platformHttp.get<FeatureFlag[]>('/api/platform/feature-flags')).data,
-
-  // GET /api/platform/audit
-  listAudit: async (query) => (await platformHttp.get<AuditEntry[]>('/api/platform/audit', { params: query })).data,
+  listAudit: async (query) =>
+    (await platformHttp.get<AuditEntry[]>('/api/platform/audit', { params: query })).data,
 };
 
-// The single client the whole console imports. Swap the assignment (or the
-// `USE_MOCK` flag) to go live — nothing else changes.
-export const platformApi: PlatformApi = USE_MOCK ? mockPlatformApi : httpPlatformApi;
+export const platformApi: PlatformApi = httpPlatformApi;

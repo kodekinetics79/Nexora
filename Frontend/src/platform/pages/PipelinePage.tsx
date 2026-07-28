@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import Stack from '../components/Flex';
 import { useSearchParams } from 'react-router-dom';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import {
   Box,
   Chip,
@@ -18,14 +18,12 @@ import {
 import { DataGrid, type GridColDef } from '@mui/x-data-grid';
 import {
   Bolt as InFlightIcon,
-  DeleteOutlined as DiscardIcon,
   Layers as QueueIcon,
   ReportGmailerrorred as DeadLetterIcon,
-  Replay as RequeueIcon,
+  Refresh as RefreshIcon,
   Speed as LatencyIcon,
   TaskAlt as ProcessedIcon,
 } from '@mui/icons-material';
-import { useSnackbar } from 'notistack';
 import { platformApi } from '../api/client';
 import { platformKeys } from '../api/queryKeys';
 import type { ExtractionJob, JobStatus } from '../types';
@@ -36,8 +34,6 @@ import { EmptyState, ErrorState, TilesSkeleton } from '../components/States';
 import { fmtDateTime, fmtLatency, fmtNumber, fmtPercent } from '../components/format';
 
 export default function PipelinePage() {
-  const queryClient = useQueryClient();
-  const { enqueueSnackbar } = useSnackbar();
   const [searchParams, setSearchParams] = useSearchParams();
   const tenantParam = searchParams.get('tenant') ?? 'all';
   const [tab, setTab] = useState(0); // 0 = all jobs, 1 = dead-letter
@@ -57,28 +53,6 @@ export default function PipelinePage() {
   const { data: jobs, isLoading: jobsLoading, isError, refetch } = useQuery({
     queryKey: platformKeys.jobs(jobsQuery),
     queryFn: () => platformApi.listJobs(jobsQuery),
-  });
-
-  const invalidate = () => {
-    queryClient.invalidateQueries({ queryKey: platformKeys.all });
-  };
-
-  const requeueMutation = useMutation({
-    mutationFn: (jobId: string) => platformApi.requeueJob(jobId),
-    onSuccess: () => {
-      enqueueSnackbar('Job requeued', { variant: 'success' });
-      invalidate();
-    },
-    onError: () => enqueueSnackbar('Requeue failed', { variant: 'error' }),
-  });
-
-  const discardMutation = useMutation({
-    mutationFn: (jobId: string) => platformApi.discardJob(jobId),
-    onSuccess: () => {
-      enqueueSnackbar('Job discarded', { variant: 'info' });
-      invalidate();
-    },
-    onError: () => enqueueSnackbar('Discard failed', { variant: 'error' }),
   });
 
   const setTenant = (value: string) => {
@@ -114,29 +88,8 @@ export default function PipelinePage() {
           </Typography>
         </Tooltip>
       ) : <Typography variant="caption" color="text.secondary">—</Typography> },
-      { field: 'actions', headerName: 'Actions', width: 110, sortable: false, filterable: false, renderCell: (p) => {
-        const canRetry = p.row.status === 'failed' || p.row.status === 'dead_letter';
-        return (
-          <Stack direction="row" spacing={0.5}>
-            <Tooltip title={canRetry ? 'Requeue' : 'Only failed jobs can be requeued'}>
-              <span>
-                <IconButton size="small" color="primary" disabled={!canRetry || requeueMutation.isPending} onClick={() => requeueMutation.mutate(p.row.id)}>
-                  <RequeueIcon fontSize="small" />
-                </IconButton>
-              </span>
-            </Tooltip>
-            <Tooltip title="Discard">
-              <span>
-                <IconButton size="small" color="error" disabled={discardMutation.isPending} onClick={() => discardMutation.mutate(p.row.id)}>
-                  <DiscardIcon fontSize="small" />
-                </IconButton>
-              </span>
-            </Tooltip>
-          </Stack>
-        );
-      } },
     ],
-    [requeueMutation, discardMutation],
+    [],
   );
 
   return (
@@ -187,7 +140,7 @@ export default function PipelinePage() {
             </TextField>
             <Tooltip title="Refresh">
               <IconButton onClick={() => refetch()} sx={{ bgcolor: 'action.hover', borderRadius: 2 }}>
-                <RequeueIcon fontSize="small" />
+                <RefreshIcon fontSize="small" />
               </IconButton>
             </Tooltip>
           </Stack>
@@ -198,7 +151,7 @@ export default function PipelinePage() {
             <Stack direction="row" spacing={1} alignItems="center" sx={{ color: 'text.secondary' }}>
               <LatencyIcon fontSize="small" />
               <Typography variant="caption">
-                Jobs that exhausted all retries. Requeue after fixing the underlying cause, or discard to drop permanently.
+                Jobs that exhausted governed automatic retries and require operational review.
               </Typography>
             </Stack>
           </Box>

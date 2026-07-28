@@ -12,7 +12,6 @@ import {
   DialogTitle,
   IconButton,
   InputAdornment,
-  LinearProgress,
   MenuItem,
   Paper,
   TextField,
@@ -38,7 +37,7 @@ import type { PlanTier, Tenant, TenantStatus } from '../types';
 import PageHeader from '../components/PageHeader';
 import { PlanChip, TenantStatusChip } from '../components/StatusChip';
 import { ErrorState } from '../components/States';
-import { fmtCompact, fmtCurrency, fmtRelative } from '../components/format';
+import { fmtRelative } from '../components/format';
 
 type ActionKind = 'suspend' | 'resume' | 'impersonate';
 
@@ -46,11 +45,7 @@ const emptyForm = {
   name: '',
   slug: '',
   planTier: 'pro' as PlanTier,
-  region: 'us-east-1',
-  primaryContactEmail: '',
 };
-
-const REGIONS = ['us-east-1', 'us-west-2', 'eu-west-1', 'ap-southeast-1'];
 
 export default function TenantsPage() {
   const navigate = useNavigate();
@@ -64,6 +59,7 @@ export default function TenantsPage() {
   const [provisionOpen, setProvisionOpen] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [confirm, setConfirm] = useState<{ kind: ActionKind; tenant: Tenant } | null>(null);
+  const [actionReason, setActionReason] = useState('');
 
   const { data: tenants, isLoading, isError, refetch } = useQuery({
     queryKey: platformKeys.tenants(),
@@ -78,7 +74,7 @@ export default function TenantsPage() {
   const provisionMutation = useMutation({
     mutationFn: () => platformApi.provisionTenant(form),
     onSuccess: (t) => {
-      enqueueSnackbar(`Provisioning started for ${t.name}`, { variant: 'success' });
+      enqueueSnackbar(`${t.name} provisioned`, { variant: 'success' });
       setProvisionOpen(false);
       setForm(emptyForm);
       invalidate();
@@ -88,9 +84,9 @@ export default function TenantsPage() {
 
   const actionMutation = useMutation({
     mutationFn: async ({ kind, tenant }: { kind: ActionKind; tenant: Tenant }) => {
-      if (kind === 'suspend') return { kind, result: await platformApi.suspendTenant(tenant.id) };
-      if (kind === 'resume') return { kind, result: await platformApi.resumeTenant(tenant.id) };
-      return { kind, result: await platformApi.impersonateTenant(tenant.id) };
+      if (kind === 'suspend') return { kind, result: await platformApi.suspendTenant(tenant.id, actionReason.trim()) };
+      if (kind === 'resume') return { kind, result: await platformApi.resumeTenant(tenant.id, actionReason.trim()) };
+      return { kind, result: await platformApi.impersonateTenant(tenant.id, actionReason.trim()) };
     },
     onSuccess: (res, vars) => {
       if (res.kind === 'impersonate') {
@@ -100,6 +96,7 @@ export default function TenantsPage() {
         invalidate();
       }
       setConfirm(null);
+      setActionReason('');
     },
     onError: () => enqueueSnackbar('Action failed', { variant: 'error' }),
   });
@@ -110,14 +107,17 @@ export default function TenantsPage() {
     if (statusFilter !== 'all') list = list.filter((t) => t.status === statusFilter);
     if (search.trim()) {
       const q = search.toLowerCase();
-      list = list.filter((t) => t.name.toLowerCase().includes(q) || t.slug.toLowerCase().includes(q) || t.primaryContactEmail.toLowerCase().includes(q));
+      list = list.filter((t) => t.name.toLowerCase().includes(q) || t.slug.toLowerCase().includes(q));
     }
     return list;
   }, [tenants, planFilter, statusFilter, search]);
 
   const slugValid = /^[a-z0-9-]{2,}$/.test(form.slug);
-  const emailValid = /.+@.+\..+/.test(form.primaryContactEmail);
-  const formValid = form.name.trim().length > 1 && slugValid && emailValid;
+  const formValid = form.name.trim().length > 1 && slugValid;
+  const openConfirm = (kind: ActionKind, tenant: Tenant) => {
+    setActionReason('');
+    setConfirm({ kind, tenant });
+  };
 
   const columns: GridColDef<Tenant>[] = [
     {
@@ -131,7 +131,7 @@ export default function TenantsPage() {
             {p.row.name}
           </Typography>
           <Typography variant="caption" color="text.secondary">
-            {p.row.slug} · {p.row.region}
+            {p.row.slug}
           </Typography>
         </Box>
       ),
@@ -147,52 +147,6 @@ export default function TenantsPage() {
       headerName: 'Status',
       width: 140,
       renderCell: (p) => <TenantStatusChip status={p.row.status} />,
-    },
-    {
-      field: 'usage',
-      headerName: 'Docs (MTD)',
-      width: 160,
-      sortComparator: (a: Tenant['usage'], b: Tenant['usage']) => a.docsProcessedMtd - b.docsProcessedMtd,
-      valueGetter: (_v, row) => row.usage.docsProcessedMtd,
-      renderCell: (p) => {
-        const u = p.row.usage;
-        const pct = u.docQuota ? Math.min((u.docsProcessedMtd / u.docQuota) * 100, 100) : null;
-        return (
-          <Box sx={{ width: '100%' }}>
-            <Typography variant="caption" sx={{ fontWeight: 600 }}>
-              {fmtCompact(u.docsProcessedMtd)}
-              {u.docQuota ? ` / ${fmtCompact(u.docQuota)}` : ' · ∞'}
-            </Typography>
-            {pct != null && (
-              <LinearProgress
-                variant="determinate"
-                value={pct}
-                color={pct > 90 ? 'error' : pct > 75 ? 'warning' : 'primary'}
-                sx={{ height: 5, borderRadius: 3, mt: 0.5 }}
-              />
-            )}
-          </Box>
-        );
-      },
-    },
-    {
-      field: 'seats',
-      headerName: 'Seats',
-      width: 100,
-      valueGetter: (_v, row) => row.usage.seatsUsed,
-      renderCell: (p) => (
-        <Typography variant="body2" sx={{ fontWeight: 600 }}>
-          {p.row.usage.seatsUsed}
-          {p.row.usage.seatQuota ? ` / ${p.row.usage.seatQuota}` : ''}
-        </Typography>
-      ),
-    },
-    {
-      field: 'llmCost',
-      headerName: 'LLM Cost',
-      width: 120,
-      valueGetter: (_v, row) => row.usage.llmCostMtdUsd,
-      renderCell: (p) => <Typography variant="body2">{fmtCurrency(p.row.usage.llmCostMtdUsd, true)}</Typography>,
     },
     {
       field: 'createdAt',
@@ -215,7 +169,7 @@ export default function TenantsPage() {
         <Stack direction="row" spacing={0.5} onClick={(e) => e.stopPropagation()}>
           {p.row.status === 'suspended' ? (
             <Tooltip title="Resume">
-              <IconButton size="small" color="success" onClick={() => setConfirm({ kind: 'resume', tenant: p.row })}>
+              <IconButton size="small" color="success" onClick={() => openConfirm('resume', p.row)}>
                 <ResumeIcon fontSize="small" />
               </IconButton>
             </Tooltip>
@@ -225,7 +179,7 @@ export default function TenantsPage() {
                 size="small"
                 color="warning"
                 disabled={p.row.status === 'provisioning'}
-                onClick={() => setConfirm({ kind: 'suspend', tenant: p.row })}
+                onClick={() => openConfirm('suspend', p.row)}
               >
                 <SuspendIcon fontSize="small" />
               </IconButton>
@@ -236,7 +190,7 @@ export default function TenantsPage() {
               size="small"
               color="primary"
               disabled={p.row.status !== 'active'}
-              onClick={() => setConfirm({ kind: 'impersonate', tenant: p.row })}
+              onClick={() => openConfirm('impersonate', p.row)}
             >
               <ImpersonateIcon fontSize="small" />
             </IconButton>
@@ -273,6 +227,7 @@ export default function TenantsPage() {
             <MenuItem value="free">Free</MenuItem>
             <MenuItem value="pro">Pro</MenuItem>
             <MenuItem value="enterprise">Enterprise</MenuItem>
+            <MenuItem value="unassigned">Unassigned</MenuItem>
           </TextField>
           <TextField size="small" select label="Status" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as TenantStatus | 'all')} sx={{ minWidth: 160 }}>
             <MenuItem value="all">All Statuses</MenuItem>
@@ -280,6 +235,7 @@ export default function TenantsPage() {
             <MenuItem value="trial">Trial</MenuItem>
             <MenuItem value="suspended">Suspended</MenuItem>
             <MenuItem value="provisioning">Provisioning</MenuItem>
+            <MenuItem value="archived">Archived</MenuItem>
           </TextField>
         </Stack>
       </Paper>
@@ -329,29 +285,11 @@ export default function TenantsPage() {
               fullWidth
               required
             />
-            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
-              <TextField label="Plan" select value={form.planTier} onChange={(e) => setForm({ ...form, planTier: e.target.value as PlanTier })} fullWidth>
-                <MenuItem value="free">Free</MenuItem>
-                <MenuItem value="pro">Pro</MenuItem>
-                <MenuItem value="enterprise">Enterprise</MenuItem>
-              </TextField>
-              <TextField label="Region" select value={form.region} onChange={(e) => setForm({ ...form, region: e.target.value })} fullWidth>
-                {REGIONS.map((r) => (
-                  <MenuItem key={r} value={r}>
-                    {r}
-                  </MenuItem>
-                ))}
-              </TextField>
-            </Stack>
-            <TextField
-              label="Primary contact email"
-              type="email"
-              value={form.primaryContactEmail}
-              onChange={(e) => setForm({ ...form, primaryContactEmail: e.target.value })}
-              error={form.primaryContactEmail.length > 0 && !emailValid}
-              fullWidth
-              required
-            />
+            <TextField label="Plan" select value={form.planTier} onChange={(e) => setForm({ ...form, planTier: e.target.value as PlanTier })} fullWidth>
+              <MenuItem value="free">Free</MenuItem>
+              <MenuItem value="pro">Pro</MenuItem>
+              <MenuItem value="enterprise">Enterprise</MenuItem>
+            </TextField>
           </Stack>
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
@@ -370,15 +308,24 @@ export default function TenantsPage() {
         <DialogContent>
           <DialogContentText>
             {confirm?.kind === 'suspend' && (
-              <>Suspending <strong>{confirm.tenant.name}</strong> halts all extraction jobs and blocks tenant sign-in. Usage metering pauses.</>
+              <>Mark <strong>{confirm.tenant.name}</strong> as suspended and record the reason in the platform audit trail?</>
             )}
             {confirm?.kind === 'resume' && (
-              <>Resume <strong>{confirm.tenant.name}</strong>? Extraction workers and tenant sign-in will be re-enabled immediately.</>
+              <>Return <strong>{confirm.tenant.name}</strong> to active status and record the action?</>
             )}
             {confirm?.kind === 'impersonate' && (
               <>Issue a 15-minute impersonation session for <strong>{confirm.tenant.name}</strong>? This is recorded in the platform audit log.</>
             )}
           </DialogContentText>
+          <TextField
+            autoFocus
+            fullWidth
+            required
+            label="Audit reason"
+            value={actionReason}
+            onChange={(event) => setActionReason(event.target.value)}
+            sx={{ mt: 2 }}
+          />
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
           <Button onClick={() => setConfirm(null)} color="inherit">
@@ -388,7 +335,7 @@ export default function TenantsPage() {
             variant="contained"
             color={confirm?.kind === 'suspend' ? 'warning' : confirm?.kind === 'resume' ? 'success' : 'primary'}
             onClick={() => confirm && actionMutation.mutate(confirm)}
-            disabled={actionMutation.isPending}
+            disabled={actionMutation.isPending || actionReason.trim().length < 3}
             sx={{ fontWeight: 700, textTransform: 'capitalize' }}
           >
             {actionMutation.isPending ? 'Working…' : confirm?.kind}

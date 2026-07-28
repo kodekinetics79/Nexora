@@ -44,6 +44,7 @@ const TENANT_TONE: Record<TenantStatus, Tone> = {
   trial: 'info',
   suspended: 'error',
   provisioning: 'warning',
+  archived: 'neutral',
 };
 
 export const TenantStatusChip = ({ status }: { status: TenantStatus }) => (
@@ -84,6 +85,7 @@ const PLAN_TONE: Record<PlanTier, Tone> = {
   free: 'neutral',
   pro: 'info',
   enterprise: 'success',
+  unassigned: 'warning',
 };
 
 export const PlanChip = ({ tier }: { tier: PlanTier }) => (

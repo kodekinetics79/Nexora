@@ -7,13 +7,14 @@
 // only `src/platform/api/*` changes — these types stay put.
 // ---------------------------------------------------------------------------
 
-export type PlanTier = 'free' | 'pro' | 'enterprise';
+export type PlanTier = 'free' | 'pro' | 'enterprise' | 'unassigned';
 
 export type TenantStatus =
   | 'active'
   | 'trial'
   | 'suspended'
-  | 'provisioning';
+  | 'provisioning'
+  | 'archived';
 
 export type HealthStatus = 'healthy' | 'degraded' | 'down';
 
@@ -44,7 +45,7 @@ export interface Plan {
   monthlyDocQuota: number | null;
   /** Seat quota. `null` = unlimited. */
   seatQuota: number | null;
-  priceMonthlyUsd: number;
+  priceMonthlyUsd: number | null;
   /** Feature-flag keys granted by default on this plan. */
   entitlements: string[];
 }
@@ -174,7 +175,7 @@ export interface OverviewMetrics {
   inFlight: number;
   deadLetter: number;
   llmCostMtdUsd: number;
-  llmCostTrendPct: number; // vs prior period
+  llmCostTrendPct: number | null; // vs prior comparable period
   seatsInUse: number;
   services: ServiceHealth[];
   /** Documents processed per day for the trailing 14 days. */
@@ -190,8 +191,6 @@ export interface ProvisionTenantInput {
   name: string;
   slug: string;
   planTier: PlanTier;
-  region: string;
-  primaryContactEmail: string;
 }
 
 export interface ImpersonationTicket {

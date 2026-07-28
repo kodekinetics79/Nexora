@@ -42,6 +42,7 @@ const PLAN_COLOR: Record<PlanTier, string> = {
   free: '#94a3b8',
   pro: '#3b82f6',
   enterprise: '#10b981',
+  unassigned: '#64748b',
 };
 
 export default function OverviewPage() {
@@ -117,7 +118,7 @@ export default function OverviewPage() {
             value={fmtCompact(data.docsProcessedMtd)}
             icon={<DocsIcon />}
             color="#3b82f6"
-            deltaPct={8.6}
+            caption="successful extraction jobs"
           />
         </Grid>
         <Grid size={{ xs: 12, sm: 6, md: 4, lg: 2.4 }}>
@@ -126,7 +127,7 @@ export default function OverviewPage() {
             value={fmtPercent(data.extractionSuccessRate)}
             icon={<SuccessIcon />}
             color="#10b981"
-            caption="trailing 30d"
+            caption="all terminal jobs"
           />
         </Grid>
         <Grid size={{ xs: 12, sm: 6, md: 4, lg: 2.4 }}>
@@ -144,7 +145,7 @@ export default function OverviewPage() {
             value={fmtCurrency(data.llmCostMtdUsd, true)}
             icon={<CostIcon />}
             color="#8b5cf6"
-            deltaPct={data.llmCostTrendPct}
+            deltaPct={data.llmCostTrendPct ?? undefined}
           />
         </Grid>
       </Grid>

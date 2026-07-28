@@ -22,14 +22,11 @@ import { EmptyState, ErrorState } from '../components/States';
 import { fmtDateTime } from '../components/format';
 
 const ACTIONS = [
-  'tenant.provisioned',
-  'tenant.suspended',
-  'tenant.resumed',
-  'plan.changed',
-  'feature_flag.toggled',
-  'user.impersonated',
-  'deadletter.requeued',
-  'quota.overridden',
+  'tenant.provision',
+  'tenant.suspend',
+  'tenant.resume',
+  'tenant.ai-policy.update',
+  'impersonate.issue',
 ];
 
 export default function AuditLogPage() {
@@ -38,16 +35,14 @@ export default function AuditLogPage() {
 
   const [search, setSearch] = useState('');
   const [action, setAction] = useState('all');
-  const [result, setResult] = useState<'all' | 'success' | 'failure'>('all');
 
   const query: AuditQuery = useMemo(
     () => ({
       action: action === 'all' ? undefined : action,
-      result,
       tenantId: tenantFromUrl || undefined,
       search: search.trim() || undefined,
     }),
-    [action, result, tenantFromUrl, search],
+    [action, tenantFromUrl, search],
   );
 
   const { data: tenants } = useQuery({
@@ -62,11 +57,10 @@ export default function AuditLogPage() {
 
   const tenantName = tenants?.find((t) => t.id === tenantFromUrl)?.name;
 
-  const hasFilters = search.trim() !== '' || action !== 'all' || result !== 'all';
+  const hasFilters = search.trim() !== '' || action !== 'all';
   const clearFilters = () => {
     setSearch('');
     setAction('all');
-    setResult('all');
   };
 
   const columns: GridColDef<AuditEntry>[] = [
@@ -125,11 +119,6 @@ export default function AuditLogPage() {
                 {a}
               </MenuItem>
             ))}
-          </TextField>
-          <TextField size="small" select label="Result" value={result} onChange={(e) => setResult(e.target.value as 'all' | 'success' | 'failure')} sx={{ minWidth: 150 }}>
-            <MenuItem value="all">All results</MenuItem>
-            <MenuItem value="success">Success</MenuItem>
-            <MenuItem value="failure">Failure</MenuItem>
           </TextField>
           {hasFilters && (
             <Button color="inherit" startIcon={<ClearIcon />} onClick={clearFilters} sx={{ fontWeight: 700 }}>

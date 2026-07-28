@@ -11,6 +11,7 @@ using ERP_RFQ_Automation.OrderToCash;
 using ERP_RFQ_Automation.ProductIntelligence;
 using Microsoft.EntityFrameworkCore;
 using Models = ERP_RFQ_Automation.Models;
+using PlatformModels = ERP_RFQ_Automation.Platform.Models;
 
 AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
 
@@ -27,6 +28,14 @@ var now = DateTime.UtcNow;
 
 await EnsureTenantAsync(tenantId, "R01C1", "Release 01C1 Acceptance");
 await EnsureTenantAsync(otherTenantId, "R01C1-X", "Release 01C1 Other Tenant");
+var platformPlan = await EnsurePlatformPlanAsync("enterprise", "Enterprise", 4, 8, 10000, 100);
+await EnsurePlatformPlanAsync("pro", "Pro", 2, 4, 5000, 25);
+await EnsurePlatformPlanAsync("free", "Free", 1, 2, 1000, 5);
+var platformTenant = await EnsurePlatformTenantAsync(
+    "release-01c1-acceptance", "Release 01C1 Acceptance", tenantId, platformPlan.Id);
+await EnsurePlatformTenantAsync(
+    "release-01c1-other", "Release 01C1 Other Tenant", otherTenantId, platformPlan.Id);
+await EnsurePlatformUserAsync("owner@acceptance.local", "Acceptance Platform Owner");
 var managerRole = await EnsureRoleAsync(tenantId, "R01C1_MANAGER", "Acceptance Manager");
 var editorRole = await EnsureRoleAsync(tenantId, "R01C1_EDITOR", "Acceptance Sales Editor");
 var deniedRole = await EnsureRoleAsync(tenantId, "R01C1_DENIED", "Acceptance Denied");
@@ -311,6 +320,61 @@ async Task<BusinessUnit> EnsureTenantAsync(long id, string code, string name)
     if (existing is not null) return existing;
     var value = new BusinessUnit { Id = id, BusinessUnitCode = code, BusinessUnitName = name, IsActive = true, CreatedBy = fixtureActor, CreatedOn = now };
     db.Add(value); await db.SaveChangesAsync(); return value;
+}
+
+async Task<PlatformModels.Plan> EnsurePlatformPlanAsync(
+    string code, string name, int weight, int concurrency, int documents, int seats)
+{
+    var existing = await db.Set<PlatformModels.Plan>().SingleOrDefaultAsync(x => x.Code == code);
+    if (existing is null)
+    {
+        existing = new PlatformModels.Plan { Code = code, CreatedOn = now };
+        db.Add(existing);
+    }
+    existing.Name = name;
+    existing.Weight = weight;
+    existing.MaxConcurrentExtractionJobs = concurrency;
+    existing.MaxDocsPerMonth = documents;
+    existing.MaxSeats = seats;
+    existing.Features = "{\"local_first_ai\":true,\"commercial_intelligence\":true}";
+    existing.IsActive = true;
+    await db.SaveChangesAsync();
+    return existing;
+}
+
+async Task<PlatformModels.Tenant> EnsurePlatformTenantAsync(
+    string slug, string name, long businessUnitId, long planId)
+{
+    var existing = await db.Set<PlatformModels.Tenant>().SingleOrDefaultAsync(x => x.Slug == slug);
+    if (existing is null)
+    {
+        existing = new PlatformModels.Tenant { Slug = slug, CreatedBy = fixtureActor, CreatedOn = now };
+        db.Add(existing);
+    }
+    existing.Name = name;
+    existing.Status = PlatformModels.TenantStatus.Active;
+    existing.PlanId = planId;
+    existing.PrimaryBusinessUnitId = businessUnitId;
+    await db.SaveChangesAsync();
+    return existing;
+}
+
+async Task<PlatformModels.PlatformUser> EnsurePlatformUserAsync(string email, string displayName)
+{
+    var existing = await db.Set<PlatformModels.PlatformUser>().SingleOrDefaultAsync(x => x.Email == email);
+    if (existing is null)
+    {
+        existing = new PlatformModels.PlatformUser { Email = email, CreatedBy = fixtureActor, CreatedOn = now };
+        db.Add(existing);
+    }
+    existing.DisplayName = displayName;
+    existing.PlatformRole = PlatformModels.PlatformRole.Owner;
+    existing.IsActive = true;
+    if (string.IsNullOrWhiteSpace(existing.PasswordHash) ||
+        !BCrypt.Net.BCrypt.Verify(password, existing.PasswordHash))
+        existing.PasswordHash = BCrypt.Net.BCrypt.HashPassword(password);
+    await db.SaveChangesAsync();
+    return existing;
 }
 
 async Task<SetupMaster> EnsureRoleAsync(long bu, string code, string name)
@@ -1098,6 +1162,8 @@ async Task PrintFixtureAsync()
     Console.WriteLine($"NEXORA_SERIAL={original.CommercialCaseReference}");
     Console.WriteLine($"BUSINESS_UNIT_ID={tenantId}");
     Console.WriteLine($"OTHER_BUSINESS_UNIT_ID={otherTenantId}");
+    Console.WriteLine("E2E_PLATFORM_EMAIL=owner@acceptance.local");
+    Console.WriteLine($"E2E_PLATFORM_TENANT_ID={platformTenant.Id}");
     Console.WriteLine($"ABC_CUSTOMER_ID={abc.Id}");
     Console.WriteLine($"ABC_CONTACT_ID={abcContact.Id}");
     Console.WriteLine($"ABC_SIX_LINE_LEAD_ID={sixLineLead.Id}");

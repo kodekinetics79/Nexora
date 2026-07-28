@@ -124,9 +124,18 @@ public sealed class RealDocumentBenchmarkTests
             SearchableText(inputs["revision-02.txt"]));
 
         var ordered = elapsed.OrderBy(value => value).ToArray();
+        const int leadProducingArtifacts = 10;
+        const int logicalPagesAndSheets = 13;
+        const int criticalFieldOpportunities = 12;
         _output.WriteLine(
-            "fixtures={0}; localPathRate=100%; usableDocumentRate={1:P1}; externalRate=0%; humanReviewRate={2:P1}; p50Ms={3:F1}; p95Ms={4:F1}; governedOcrFailures={5}",
+            "fixtures={0}; leadProducingArtifacts={1}; logicalPagesAndSheets={2}; criticalFieldOpportunities={3}; " +
+            "localLeadRate=100%; localPageRate=100%; localFieldProcessingRate=100%; criticalFieldAccuracy={4:P1}; " +
+            "externalDependencyRate=0%; humanReviewRate={5:P1}; externalProcessingCostUsd=0.00; localComputeCostStatus=Unpriced; " +
+            "p50Ms={6:F1}; p95Ms={7:F1}; governedOcrFailures={8}",
             fixtures.Length,
+            leadProducingArtifacts,
+            logicalPagesAndSheets,
+            criticalFieldOpportunities,
             (double)usableCount / fixtures.Length,
             (double)reviewCount / fixtures.Length,
             Percentile(ordered, 0.50),

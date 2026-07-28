@@ -38,7 +38,7 @@ const NAV = [
   { to: '/platform/overview', label: 'Overview', icon: <OverviewIcon /> },
   { to: '/platform/tenants', label: 'Tenants', icon: <TenantsIcon /> },
   { to: '/platform/pipeline', label: 'Pipeline', icon: <PipelineIcon /> },
-  { to: '/platform/plans', label: 'Plans & Flags', icon: <PlansIcon /> },
+  { to: '/platform/plans', label: 'Plans', icon: <PlansIcon /> },
   { to: '/platform/audit', label: 'Audit Log', icon: <AuditIcon /> },
 ];
 

@@ -1,6 +1,6 @@
 import type { FullResult, Reporter, Suite, TestCase, TestResult } from '@playwright/test/reporter';
 
-const EXPECTED_TESTS = 38;
+const EXPECTED_TESTS = 39;
 
 export default class ZeroSkipsReporter implements Reporter {
   private discovered = 0;
