@@ -454,18 +454,26 @@ var app = builder.Build();
 // Database:ApplyMigrationsOnStartup=false only when an external release job owns it.
 var applyMigrations = app.Configuration.GetValue<bool?>("Database:ApplyMigrationsOnStartup")
     ?? app.Environment.IsProduction();
-var migrationConnection = app.Configuration.GetConnectionString("MigrationConnection")
+var configuredMigrationConnection = app.Configuration.GetConnectionString("MigrationConnection");
+var migrationConnection = configuredMigrationConnection
     ?? ResolveDirectMigrationConnection(connectionString);
+var allowManagedOwnerCompatibility = app.Configuration.GetValue<bool>(
+    "Database:AllowManagedOwnerRoleMigrationCompatibility");
+if (allowManagedOwnerCompatibility && string.IsNullOrWhiteSpace(configuredMigrationConnection))
+    throw new InvalidOperationException(
+        "Managed owner migration compatibility requires an explicit ConnectionStrings:MigrationConnection " +
+        "separate from the least-privilege runtime connection.");
 if (applyMigrations)
 {
-    var migrationOptions = new DbContextOptionsBuilder<ErpRfqAutomationContext>()
+    var migrationOptionsBuilder = new DbContextOptionsBuilder<ErpRfqAutomationContext>()
         .UseNpgsql(migrationConnection, npgsql =>
         {
             npgsql.EnableRetryOnFailure(5, TimeSpan.FromSeconds(10), null);
             npgsql.CommandTimeout(120);
-        })
-        .Options;
-    await using var migrationDb = new ErpRfqAutomationContext(migrationOptions);
+        });
+    if (allowManagedOwnerCompatibility)
+        migrationOptionsBuilder.AddInterceptors(new ManagedPostgresMigrationCommandInterceptor());
+    await using var migrationDb = new ErpRfqAutomationContext(migrationOptionsBuilder.Options);
     await migrationDb.Database.MigrateAsync();
 }
 await SyncFinanceProviderSecretsAsync(

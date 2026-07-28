@@ -4,6 +4,7 @@ using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Sla;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
@@ -665,6 +666,7 @@ public sealed class PostgreSqlProductionDialectTests
     {
         var marker = Guid.NewGuid().ToString("N");
         const long businessUnitId = 91_001;
+        var targetJobIds = new List<long>();
 
         await using (var seed = _database.ContextFor(null))
         {
@@ -673,7 +675,11 @@ public sealed class PostgreSqlProductionDialectTests
             {
                 var result = await EnqueueGovernedJobAsync(seed, queue, $"{marker}-{index}", businessUnitId, 5);
                 Assert.Equal(EnqueueOutcome.Enqueued, result.Outcome);
+                targetJobIds.Add(result.JobId);
             }
+            await seed.Set<ExtractionJob>()
+                .Where(job => targetJobIds.Contains(job.Id))
+                .ExecuteUpdateAsync(update => update.SetProperty(job => job.Priority, int.MaxValue));
         }
 
         var claims = await Task.WhenAll(Enumerable.Range(0, 4).Select(async index =>
@@ -683,13 +689,42 @@ public sealed class PostgreSqlProductionDialectTests
         }));
 
         Assert.All(claims, claim => Assert.NotNull(claim));
+        Assert.All(claims, claim => Assert.Equal(businessUnitId, claim!.BusinessUnitId));
         Assert.Equal(4, claims.Select(claim => claim!.Id).Distinct().Count());
 
         await using var capContext = _database.ContextFor(null);
         var cappedClaim = await NewQueue(capContext).ClaimAsync($"worker-{marker}-capped", TimeSpan.FromMinutes(5), 4);
-        Assert.Null(cappedClaim);
+        Assert.True(cappedClaim is null || cappedClaim.BusinessUnitId != businessUnitId);
         Assert.Equal(1, await capContext.Set<ExtractionJob>()
             .CountAsync(job => job.BusinessUnitId == businessUnitId && job.Status == ExtractionStatus.Pending));
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task SlaDeadlineQueryExcludesPostgresInfinityWithoutIntegerYearCast()
+    {
+        const long businessUnitId = 91_051;
+        var marker = Guid.NewGuid().ToString("N");
+        await using var context = _database.ContextFor(null);
+        Seed.EnsureBusinessUnit(context, businessUnitId);
+        Seed.EmailConfig(context, businessUnitId, businessUnitId);
+        Seed.EmailIngest(context, businessUnitId, businessUnitId, "NeedsReview");
+        await context.SaveChangesAsync();
+        await context.Database.ExecuteSqlInterpolatedAsync($$"""
+            INSERT INTO "Leads"
+                ("RFQNo", "RecDate", "BidClosingDate", "LeadSource", "CreatedBy", "CreatedDate", "BusinessUnitID", "EmailIngestsID")
+            VALUES
+                ({{marker + "-finite"}}, now(), now() + interval '1 day', 'Test', 'tests', now(), {{businessUnitId}}, {{businessUnitId}}),
+                ({{marker + "-infinity"}}, now(), 'infinity'::timestamp, 'Test', 'tests', now(), {{businessUnitId}}, {{businessUnitId}});
+            """);
+
+        var candidates = await SlaSweepWorker
+            .OpenLeadDeadlineCandidates(context, businessUnitId, DateTime.UtcNow.AddDays(2))
+            .Where(lead => lead.Rfqno != null && lead.Rfqno.StartsWith(marker))
+            .Select(lead => lead.Rfqno)
+            .ToListAsync();
+
+        Assert.Equal(new[] { marker + "-finite" }, candidates);
     }
 
     [Fact]

@@ -33,6 +33,7 @@ public sealed class SlaSweepWorker : BackgroundService
 {
     /// <summary>Sweep period. Overridable for tests.</summary>
     public static readonly TimeSpan Period = TimeSpan.FromMinutes(5);
+    private static readonly DateTime EarliestCommercialDeadline = new(2000, 1, 1);
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<SlaSweepWorker> _log;
@@ -117,14 +118,7 @@ public sealed class SlaSweepWorker : BackgroundService
         // Real dates only (sentinels < 2000 are "unknown", mirroring the extraction
         // pipeline's SanitizeDate); open leads = status null or 24 (accepted), never
         // rejected (25 carries a rejected-reason).
-        var leads = await db.Leads.AsNoTracking().IgnoreQueryFilters()
-            .Where(l => l.BusinessUnitId == bu
-                        && l.BidClosingDate != null
-                        && l.BidClosingDate.Value.Year >= 2000
-                        && (l.LeadStatusId == null || l.LeadStatus != null &&
-                            (l.LeadStatus.SetupCode == "QUALIFIED" || l.LeadStatus.SetupValue == "Accepted" || l.LeadStatus.SetupValue == "Qualified"))
-                        && l.LeadRejectedReasonId == null
-                        && l.BidClosingDate <= horizon)
+        var leads = await OpenLeadDeadlineCandidates(db, bu, horizon)
             .Select(l => new { l.Id, l.Rfqno, l.BidClosingDate, l.AssignTo })
             .ToListAsync(ct);
         if (leads.Count == 0) return;
@@ -185,6 +179,19 @@ public sealed class SlaSweepWorker : BackgroundService
             await RecordEventAsync(db, bu, "lead", lead.Id, level, ct);
         }
     }
+
+    internal static IQueryable<Lead> OpenLeadDeadlineCandidates(
+        ErpRfqAutomationContext db, long businessUnitId, DateTime horizon)
+        => db.Leads.AsNoTracking().IgnoreQueryFilters()
+            .Where(lead => lead.BusinessUnitId == businessUnitId
+                && lead.BidClosingDate != null
+                && lead.BidClosingDate >= EarliestCommercialDeadline
+                && lead.BidClosingDate <= horizon
+                && (lead.LeadStatusId == null || lead.LeadStatus != null
+                    && (lead.LeadStatus.SetupCode == "QUALIFIED"
+                        || lead.LeadStatus.SetupValue == "Accepted"
+                        || lead.LeadStatus.SetupValue == "Qualified"))
+                && lead.LeadRejectedReasonId == null);
 
     // ---------------- 2. unassigned aging ----------------
 

@@ -34,6 +34,8 @@ services:
         sync: false
       - key: Database__ApplyMigrationsOnStartup
         value: "true"
+      - key: Database__AllowManagedOwnerRoleMigrationCompatibility
+        value: "true"
       - key: Jwt__Key
         sync: false
       - key: CommercialFinance__DunningProviderWebhookSecret
