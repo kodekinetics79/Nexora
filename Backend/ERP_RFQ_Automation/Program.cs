@@ -515,13 +515,33 @@ static async Task ValidateRuntimeDatabaseRoleAsync(string runtimeConnection)
                AND NOT runtime_role.rolsuper
                AND NOT runtime_role.rolbypassrls
                AND pg_has_role(current_user, 'nexora_tenant_app', 'MEMBER')
+               AND pg_has_role(current_user, 'nexora_identity_app', 'MEMBER')
+               AND pg_has_role(current_user, 'nexora_pipeline_app', 'MEMBER')
+               AND EXISTS (
+                   SELECT 1 FROM pg_roles identity_role
+                   WHERE identity_role.rolname = 'nexora_identity_app'
+                     AND NOT identity_role.rolcanlogin
+                     AND NOT identity_role.rolinherit
+                     AND NOT identity_role.rolsuper
+                     AND NOT identity_role.rolcreatedb
+                     AND NOT identity_role.rolcreaterole
+                     AND identity_role.rolbypassrls)
+               AND EXISTS (
+                   SELECT 1 FROM pg_roles pipeline_role
+                   WHERE pipeline_role.rolname = 'nexora_pipeline_app'
+                     AND NOT pipeline_role.rolcanlogin
+                     AND NOT pipeline_role.rolinherit
+                     AND NOT pipeline_role.rolsuper
+                     AND NOT pipeline_role.rolcreatedb
+                     AND NOT pipeline_role.rolcreaterole
+                     AND pipeline_role.rolbypassrls)
                AND NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexora_ai_maintenance')
         FROM pg_roles runtime_role
         WHERE runtime_role.rolname = current_user;
         """;
     if (await command.ExecuteScalarAsync() is not true)
         throw new InvalidOperationException(
-            "The runtime database role must be NOINHERIT, non-superuser, non-BYPASSRLS, a member of nexora_tenant_app, and have no AI maintenance bypass role.");
+            "The runtime database role must be NOINHERIT, non-superuser, non-BYPASSRLS, a member of the tenant, identity, and pipeline execution roles, and have no AI maintenance bypass role.");
 }
 
 await DemoUserSeeder.EnsureAsync(app.Services, app.Configuration, app.Environment);

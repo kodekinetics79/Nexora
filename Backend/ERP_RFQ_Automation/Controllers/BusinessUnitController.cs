@@ -84,7 +84,6 @@ namespace ERP_RFQ_Automation.Controllers
 
         // GET: api/BusinessUnit/Dropdown
         [HttpGet("Dropdown")]
-        [AllowAnonymous]
         public async Task<ActionResult<IEnumerable<BusinessUnitResponseDTO>>> GetDropdown()
         {
             try

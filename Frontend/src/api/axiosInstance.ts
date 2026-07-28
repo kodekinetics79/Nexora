@@ -22,7 +22,7 @@ axiosInstance.interceptors.request.use(
 // FE-11: Requests that are part of the login / bootstrap flow must never
 // trigger a redirect on 401 — otherwise a failed login or a pre-auth
 // bootstrap call would bounce the user around the /login screen in a loop.
-const AUTH_EXEMPT_PATHS = ['/api/Auth/Login', '/api/BusinessUnit/Dropdown'];
+const AUTH_EXEMPT_PATHS = ['/api/Auth/Login'];
 
 // Debounce guard: once we start redirecting, ignore every subsequent 401 so a
 // burst of parallel background calls (or a reload race) can't loop.

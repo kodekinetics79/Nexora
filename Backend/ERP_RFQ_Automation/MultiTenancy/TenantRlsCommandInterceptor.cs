@@ -16,6 +16,8 @@ namespace ERP_RFQ_Automation.MultiTenancy;
 public sealed class TenantRlsCommandInterceptor : DbCommandInterceptor
 {
     public const string TenantRole = "nexora_tenant_app";
+    public const string IdentityRole = "nexora_identity_app";
+    public const string PipelineRole = "nexora_pipeline_app";
 
     private readonly ITenantContext _tenantContext;
     private readonly IHttpContextAccessor? _httpContextAccessor;
@@ -130,7 +132,8 @@ public sealed class TenantRlsCommandInterceptor : DbCommandInterceptor
 
     private void Prepare(DbCommand command, Guid commandId)
     {
-        if (_tenantContext.BusinessUnitId is not { } businessUnitId)
+        var executionScope = ResolveExecutionScope();
+        if (executionScope is null)
             return;
 
         if (command.Transaction is null)
@@ -142,7 +145,7 @@ public sealed class TenantRlsCommandInterceptor : DbCommandInterceptor
 
         try
         {
-            using var setup = CreateSetupCommand(command, businessUnitId, SignedActor(businessUnitId));
+            using var setup = CreateSetupCommand(command, executionScope.Value);
             setup.ExecuteNonQuery();
         }
         catch
@@ -154,7 +157,8 @@ public sealed class TenantRlsCommandInterceptor : DbCommandInterceptor
 
     private async Task PrepareAsync(DbCommand command, Guid commandId, CancellationToken cancellationToken)
     {
-        if (_tenantContext.BusinessUnitId is not { } businessUnitId)
+        var executionScope = ResolveExecutionScope();
+        if (executionScope is null)
             return;
 
         if (command.Transaction is null)
@@ -166,7 +170,7 @@ public sealed class TenantRlsCommandInterceptor : DbCommandInterceptor
 
         try
         {
-            await using var setup = CreateSetupCommand(command, businessUnitId, SignedActor(businessUnitId));
+            await using var setup = CreateSetupCommand(command, executionScope.Value);
             await setup.ExecuteNonQueryAsync(cancellationToken);
         }
         catch
@@ -176,12 +180,46 @@ public sealed class TenantRlsCommandInterceptor : DbCommandInterceptor
         }
     }
 
-    private static DbCommand CreateSetupCommand(
-        DbCommand command, long businessUnitId, SignedActorEnvelope? signedActor)
+    private ExecutionScope? ResolveExecutionScope()
+    {
+        var businessUnitId = _tenantContext.BusinessUnitId;
+        var role = ResolveDatabaseRole(businessUnitId, _httpContextAccessor);
+        return role is null
+            ? null
+            : new ExecutionScope(
+                role,
+                businessUnitId,
+                businessUnitId is { } tenantId ? SignedActor(tenantId) : null);
+    }
+
+    internal static string? ResolveDatabaseRole(
+        long? businessUnitId, IHttpContextAccessor? httpContextAccessor)
+    {
+        if (businessUnitId.HasValue)
+            return TenantRole;
+        if (httpContextAccessor is null)
+            return null;
+
+        var httpContext = httpContextAccessor.HttpContext;
+        if (httpContext is null)
+            return PipelineRole;
+        if (httpContext.Request.Path.StartsWithSegments("/api/platform"))
+            return PipelineRole;
+        return string.Equals(httpContext.Request.Path.Value, "/api/Auth/Login", StringComparison.OrdinalIgnoreCase)
+            ? IdentityRole
+            : null;
+    }
+
+    private static DbCommand CreateSetupCommand(DbCommand command, ExecutionScope executionScope)
     {
         var setup = command.Connection!.CreateCommand();
         setup.Transaction = command.Transaction;
-        setup.CommandText = $"SET LOCAL ROLE {TenantRole}; SELECT set_config('nexora.business_unit_id', @tenant_id, true), set_config('nexora.actor_id', @actor_id, true), set_config('nexora.actor_signature', @actor_signature, true), set_config('nexora.gl_issued_at', @gl_issued_at, true), set_config('nexora.gl_expires_at', @gl_expires_at, true), set_config('nexora.gl_nonce', @gl_nonce, true), set_config('nexora.gl_signature', @gl_signature, true);";
+        setup.CommandText = $"SET LOCAL ROLE {executionScope.Role};";
+        if (executionScope.BusinessUnitId is not { } businessUnitId)
+            return setup;
+
+        var signedActor = executionScope.SignedActor;
+        setup.CommandText += " SELECT set_config('nexora.business_unit_id', @tenant_id, true), set_config('nexora.actor_id', @actor_id, true), set_config('nexora.actor_signature', @actor_signature, true), set_config('nexora.gl_issued_at', @gl_issued_at, true), set_config('nexora.gl_expires_at', @gl_expires_at, true), set_config('nexora.gl_nonce', @gl_nonce, true), set_config('nexora.gl_signature', @gl_signature, true);";
         var parameter = setup.CreateParameter();
         parameter.ParameterName = "tenant_id";
         parameter.Value = businessUnitId.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -211,6 +249,9 @@ public sealed class TenantRlsCommandInterceptor : DbCommandInterceptor
 
     private sealed record SignedActorEnvelope(string Actor, string Signature, long IssuedAtUnix,
         long ExpiresAtUnix, string Nonce, string EnvelopeSignature);
+
+    private readonly record struct ExecutionScope(
+        string Role, long? BusinessUnitId, SignedActorEnvelope? SignedActor);
 
     private SignedActorEnvelope? SignedActor(long businessUnitId)
     {

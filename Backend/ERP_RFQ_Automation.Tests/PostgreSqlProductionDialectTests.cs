@@ -224,7 +224,7 @@ public sealed class PostgreSqlProductionDialectTests
                 ON CONFLICT ("Id") DO NOTHING;
                 DROP ROLE IF EXISTS {runtimeRole};
                 CREATE ROLE {runtimeRole} LOGIN PASSWORD '{runtimePassword}' NOINHERIT NOSUPERUSER NOBYPASSRLS;
-                GRANT nexora_tenant_app TO {runtimeRole};
+                GRANT nexora_tenant_app, nexora_identity_app, nexora_pipeline_app TO {runtimeRole};
                 """;
             await create.ExecuteNonQueryAsync();
         }
@@ -247,6 +247,18 @@ public sealed class PostgreSqlProductionDialectTests
                            AND NOT runtime_role.rolsuper
                            AND NOT runtime_role.rolbypassrls
                            AND pg_has_role(current_user, 'nexora_tenant_app', 'MEMBER')
+                           AND pg_has_role(current_user, 'nexora_identity_app', 'MEMBER')
+                           AND pg_has_role(current_user, 'nexora_pipeline_app', 'MEMBER')
+                           AND EXISTS (
+                               SELECT 1 FROM pg_roles execution_role
+                               WHERE execution_role.rolname IN ('nexora_identity_app', 'nexora_pipeline_app')
+                                 AND NOT execution_role.rolcanlogin
+                                 AND NOT execution_role.rolinherit
+                                 AND NOT execution_role.rolsuper
+                                 AND NOT execution_role.rolcreatedb
+                                 AND NOT execution_role.rolcreaterole
+                                 AND execution_role.rolbypassrls
+                               HAVING count(*) = 2)
                     FROM pg_roles runtime_role WHERE runtime_role.rolname = current_user;
                     """;
                 Assert.True((bool)(await attributes.ExecuteScalarAsync())!);
@@ -296,12 +308,50 @@ public sealed class PostgreSqlProductionDialectTests
             Assert.Equal(PostgresErrorCodes.InsufficientPrivilege,
                 (await Assert.ThrowsAsync<PostgresException>(() => forgedAudit.ExecuteNonQueryAsync())).SqlState);
             await deniedTransaction.RollbackAsync();
+
+            await using (var identityTransaction = await runtime.BeginTransactionAsync())
+            {
+                await using var identityRead = runtime.CreateCommand();
+                identityRead.Transaction = identityTransaction;
+                identityRead.CommandText = "SET LOCAL ROLE nexora_identity_app; SELECT count(*) FROM public.\"Users\";";
+                Assert.IsType<long>(await identityRead.ExecuteScalarAsync());
+                await identityTransaction.RollbackAsync();
+            }
+
+            await using (var identityWriteTransaction = await runtime.BeginTransactionAsync())
+            {
+                await using var identityWrite = runtime.CreateCommand();
+                identityWrite.Transaction = identityWriteTransaction;
+                identityWrite.CommandText = "SET LOCAL ROLE nexora_identity_app; UPDATE public.\"Users\" SET \"Email\" = \"Email\" WHERE false;";
+                Assert.Equal(PostgresErrorCodes.InsufficientPrivilege,
+                    (await Assert.ThrowsAsync<PostgresException>(() => identityWrite.ExecuteNonQueryAsync())).SqlState);
+                await identityWriteTransaction.RollbackAsync();
+            }
+
+            await using (var pipelineTransaction = await runtime.BeginTransactionAsync())
+            {
+                await using var pipelineRead = runtime.CreateCommand();
+                pipelineRead.Transaction = pipelineTransaction;
+                pipelineRead.CommandText = "SET LOCAL ROLE nexora_pipeline_app; SELECT count(*) FROM public.\"ExtractionJobs\";";
+                Assert.IsType<long>(await pipelineRead.ExecuteScalarAsync());
+                await pipelineTransaction.RollbackAsync();
+            }
+
+            await using (var secretTransaction = await runtime.BeginTransactionAsync())
+            {
+                await using var secretRead = runtime.CreateCommand();
+                secretRead.Transaction = secretTransaction;
+                secretRead.CommandText = "SET LOCAL ROLE nexora_pipeline_app; SELECT count(*) FROM public.\"FinanceProviderSecrets\";";
+                Assert.Equal(PostgresErrorCodes.InsufficientPrivilege,
+                    (await Assert.ThrowsAsync<PostgresException>(() => secretRead.ExecuteScalarAsync())).SqlState);
+                await secretTransaction.RollbackAsync();
+            }
         }
         finally
         {
             await using var admin = await _database.OpenConnectionAsync();
             await using var drop = admin.CreateCommand();
-            drop.CommandText = $"REVOKE nexora_tenant_app FROM {runtimeRole}; DROP ROLE IF EXISTS {runtimeRole};";
+            drop.CommandText = $"REVOKE nexora_tenant_app, nexora_identity_app, nexora_pipeline_app FROM {runtimeRole}; DROP ROLE IF EXISTS {runtimeRole};";
             await drop.ExecuteNonQueryAsync();
         }
     }

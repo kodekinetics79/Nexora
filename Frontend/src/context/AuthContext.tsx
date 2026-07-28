@@ -6,7 +6,6 @@ import React, {
   useEffect,
 } from "react";
 import { jwtDecode } from "jwt-decode";
-import axiosInstance from "../api/axiosInstance";
 
 // FE-12: proactively handle JWT expiry instead of waiting for a failed call.
 const SESSION_EXPIRED_MESSAGE = "Your session has expired. Please sign in again.";
@@ -44,11 +43,6 @@ export interface Permission {
   canDelete: boolean;
 }
 
-interface BusinessUnit {
-  id: number;
-  businessUnitName: string;
-}
-
 interface UserData {
   id?: number;
   email?: string;
@@ -62,8 +56,6 @@ interface UserData {
 interface AuthContextType {
   token: string | null;
   userData: UserData;
-  businessUnits: BusinessUnit[];
-  loadingBusinessUnits: boolean;
   setToken: (token: string | null) => void;
   setUserData: (data: UserData) => void;
   logout: () => void;
@@ -85,8 +77,6 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
     return stored;
   });
-  const [businessUnits, setBusinessUnits] = useState<BusinessUnit[]>([]);
-  const [loadingBusinessUnits, setLoadingBusinessUnits] = useState<boolean>(false);
   const [userData, setUserDataState] = useState<UserData>(() => {
     const stored = localStorage.getItem("userData");
     return stored ? JSON.parse(stored) : {};
@@ -165,21 +155,6 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     return () => window.clearTimeout(timer);
   }, [token]);
 
-  useEffect(() => {
-    const fetchBusinessUnits = async () => {
-      setLoadingBusinessUnits(true);
-      try {
-        const response = await axiosInstance.get("/api/BusinessUnit/Dropdown");
-        setBusinessUnits(response.data);
-      } catch (err) {
-        console.error("Failed to fetch business units", err);
-      } finally {
-        setLoadingBusinessUnits(false);
-      }
-    };
-    fetchBusinessUnits();
-  }, []);
-
   return (
     <AuthContext.Provider
       value={{
@@ -188,8 +163,6 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         setToken,
         setUserData,
         logout,
-        businessUnits,
-        loadingBusinessUnits,
         hasPermission,
       }}
     >
