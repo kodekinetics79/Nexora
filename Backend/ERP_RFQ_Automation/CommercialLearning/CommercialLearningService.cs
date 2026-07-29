@@ -506,14 +506,27 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
             : decision == "NO_QUOTE_REVIEW"
                 ? new ExplainableRecommendation("REVIEW_NO_QUOTE", "Review no-quote decision",
                     $"{allBlockers.Length} blockers remain and the customer deadline is {slaRisk.ToLowerInvariant().Replace('_', ' ')}.",
-                    .9m, true, $"/procurement/rfqs/{rfqId}", evidence)
+                    .9m, true, $"/procurement/rfqs/view/{rfqId}", evidence)
                 : new ExplainableRecommendation("RECOVER_COVERAGE", "Recover line coverage",
                     $"Resolve {lineResults.Count(x => x.Blockers.Count > 0)} blocked lines before quoting.", .9m,
-                    true, $"/procurement/sourcing/workbench?rfqId={rfqId}", evidence);
+                    true, $"/procurement/rfqs/{rfqId}/sourcing", evidence);
+        var pricingDecisions = await context.CustomerQuoteSourcingDecisions.AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && x.RfqId == rfqId && lineIds.Contains(x.RfqItemId))
+            .OrderByDescending(x => x.CreatedOn).ThenByDescending(x => x.Id).ToArrayAsync(cancellationToken);
+        var currencyIds = offers.Where(x => x.CurrencyId.HasValue).Select(x => x.CurrencyId!.Value)
+            .Concat(pricingDecisions.Select(x => x.CurrencyId))
+            .Concat(lines.Where(x => x.CurrencyId.HasValue).Select(x => x.CurrencyId!.Value))
+            .Distinct().ToArray();
+        var currencyCodes = await context.Currencies.AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && currencyIds.Contains(x.Id))
+            .ToDictionaryAsync(x => x.Id, x => x.Code, cancellationToken);
+        var predictivePricing = await BuildPredictivePricingAsync(businessUnitId, rfq.CustomerId,
+            lines, currencyCodes, cancellationToken);
         return new RfqCommercialIntelligence(rfq.Id, rfq.Rfqno, rfq.NexoraSerial ?? $"RFQ-{rfq.Id}",
             readiness, decision, slaRisk, clarification, next, lineResults,
             BuildDigitalTwin(lineResults, lines.ToDictionary(x => x.Id, x => x.RequiredDesiredDate),
-                offers, suppliers, revisions, quoteStatuses, evidence));
+                offers, suppliers, revisions, quoteStatuses, pricingDecisions, predictivePricing, evidence,
+                currencyCodes));
     }
 
     public async Task<LearningStudioSummary> GetStudioAsync(long businessUnitId,
@@ -572,25 +585,149 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
         return Math.Min(offer.Quantity, offer.AvailableQuantity ?? 0m) >= requiredQuantity;
     }
 
+    private async Task<IReadOnlyCollection<PredictivePriceLine>> BuildPredictivePricingAsync(
+        long businessUnitId, long? customerId, IReadOnlyCollection<Rfqitem> currentLines,
+        IReadOnlyDictionary<long, string> currencyCodes,
+        CancellationToken cancellationToken)
+    {
+        var productIds = currentLines.Where(x => x.ProductId.HasValue)
+            .Select(x => x.ProductId!.Value).Distinct().ToArray();
+        if (productIds.Length == 0) return currentLines.Select(x => new PredictivePriceLine(x.Id,
+            "PRODUCT_IDENTITY_REQUIRED", "SHADOW", null, null, null, null, null, 0, 0, null,
+            "Exact Product identity is required before historical pricing can be reconciled.",
+            ["No fuzzy Product matching is used for pricing."], [])).ToArray();
+
+        var cutoff = DateTime.UtcNow.AddMonths(-24);
+        var historyRows = await context.QuoteItems.AsNoTracking()
+            .Where(x => x.Quote.BusinessUnitId == businessUnitId && x.ProductId.HasValue &&
+                productIds.Contains(x.ProductId.Value) && x.Quote.CurrencyId.HasValue &&
+                x.UnitPrice > 0m && (x.Quote.QuoteDate ?? x.Quote.CreatedDate ?? x.CreatedDate) >= cutoff)
+            .OrderByDescending(x => x.Quote.QuoteDate ?? x.Quote.CreatedDate ?? x.CreatedDate)
+            .Take(Math.Min(10_000, Math.Max(2_000, productIds.Length * 500)))
+            .Select(x => new PricingHistoryRow(x.QuoteId, x.ProductId!.Value, x.Quote.CustomerId,
+                x.Quote.CurrencyId!.Value, x.Quantity, x.UnitPrice, x.DeliveryLeadTime,
+                x.Quote.QuoteDate ?? x.Quote.CreatedDate ?? x.CreatedDate ?? DefaultPeriodFrom,
+                x.Quote.QuoteNo, x.Quote.OutcomeOn))
+            .ToArrayAsync(cancellationToken);
+        var history = historyRows.GroupBy(x => x.ProductId)
+            .SelectMany(group => group.OrderByDescending(x => x.OccurredOn).Take(250)).ToArray();
+        var quoteIds = history.Select(x => x.QuoteId).Distinct().ToArray();
+        var orderedQuoteIds = quoteIds.Length == 0 ? new HashSet<long>() : (await context.Orders.AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && x.SourceType == OrderSourceTypes.CustomerAward &&
+                x.QuoteId.HasValue && quoteIds.Contains(x.QuoteId.Value))
+            .Select(x => x.QuoteId!.Value).Distinct().ToArrayAsync(cancellationToken)).ToHashSet();
+
+        var result = new List<PredictivePriceLine>(currentLines.Count);
+        foreach (var line in currentLines.OrderBy(x => x.Id))
+        {
+            if (!line.ProductId.HasValue || !line.CurrencyId.HasValue)
+            {
+                result.Add(new PredictivePriceLine(line.Id, "CURRENCY_OR_PRODUCT_REQUIRED", "SHADOW",
+                    null, null, null, null, null, 0, 0, null,
+                    "Exact Product and currency evidence are required.",
+                    ["No unstamped currency or cross-currency conversion is inferred."], []));
+                continue;
+            }
+
+            var productCohort = history.Where(x => x.ProductId == line.ProductId.Value &&
+                    x.CurrencyId == line.CurrencyId.Value)
+                .GroupBy(x => x.QuoteId)
+                .Select(group =>
+                {
+                    var rows = group.OrderBy(x => x.OccurredOn).ToArray();
+                    var quantity = rows.Sum(x => Math.Max(0m, x.Quantity));
+                    var unitPrice = quantity > 0m
+                        ? rows.Sum(x => x.UnitPrice * Math.Max(0m, x.Quantity)) / quantity
+                        : rows.Average(x => x.UnitPrice);
+                    var sample = rows[^1];
+                    var won = orderedQuoteIds.Contains(group.Key);
+                    return new PricingOutcomeRow(group.Key, sample.CustomerId, sample.CurrencyId,
+                        quantity, decimal.Round(unitPrice, 6), sample.OccurredOn, sample.QuoteNumber,
+                        won, won || rows.Any(x => x.OutcomeOn.HasValue));
+                })
+                .Where(x => x.IsDecided)
+                .OrderBy(x => x.OccurredOn)
+                .ToArray();
+            var customerCohort = customerId.HasValue
+                ? productCohort.Where(x => x.CustomerId == customerId).ToArray() : [];
+            var cohort = customerCohort.Length >= 3 ? customerCohort : productCohort;
+            var quantityComparable = cohort.Where(x => x.Quantity > 0m && line.Quantity > 0 &&
+                Math.Min(x.Quantity, (decimal)line.Quantity) / Math.Max(x.Quantity, (decimal)line.Quantity) >= .25m)
+                .ToArray();
+            if (quantityComparable.Length >= 3) cohort = quantityComparable;
+            var wins = cohort.Where(x => x.IsCustomerOrderWin)
+                .OrderBy(x => x.OccurredOn).ToArray();
+            var prices = wins.Select(x => x.UnitPrice).OrderBy(x => x).ToArray();
+            var sufficient = wins.Length >= 3;
+            decimal? mape = null;
+            var holdoutCount = 0;
+            if (wins.Length >= 4)
+            {
+                var errors = new List<decimal>();
+                for (var index = 3; index < wins.Length; index++)
+                {
+                    var holdout = wins[index];
+                    var training = wins.Take(index).Select(x => x.UnitPrice).OrderBy(x => x).ToArray();
+                    var predicted = Median(training);
+                    errors.Add(holdout.UnitPrice == 0m ? 0m :
+                        Math.Abs(predicted - holdout.UnitPrice) / holdout.UnitPrice * 100m);
+                }
+                holdoutCount = errors.Count;
+                mape = decimal.Round(errors.Average(), 2);
+            }
+            var evidence = wins.OrderByDescending(x => x.OccurredOn).Take(10)
+                .Select(x => new CommercialEvidenceLink("CustomerQuote", x.QuoteId, x.QuoteNumber,
+                    x.OccurredOn, "ACTUAL_CUSTOMER_ORDER")).ToArray();
+            result.Add(new PredictivePriceLine(line.Id, sufficient ? "READY_SHADOW" : "INSUFFICIENT_EVIDENCE",
+                "SHADOW", sufficient ? Median(prices) : null, wins.LastOrDefault()?.UnitPrice,
+                sufficient ? prices.First() : null, sufficient ? prices.Last() : null,
+                null, cohort.Length, wins.Length, mape,
+                $"Exact Product {line.ProductId.Value}; currency {line.CurrencyId.Value}; quantity {line.Quantity}; " +
+                $"{(customerCohort.Length >= 3 ? "same Customer" : "tenant Product fallback")}; trailing 24 months; " +
+                $"requested lead time {(line.RequiredDesiredDate.HasValue ? "recorded" : "not recorded") }.",
+                ["Actual Customer Orders define wins.", "No FX or external market feed is used.",
+                    "Open and undecided Quotes are excluded.",
+                    "Prediction is advisory and cannot confirm a price."], evidence, holdoutCount,
+                cohort.Length >= 3 ? decimal.Round((wins.Length + 1m) / (cohort.Length + 2m), 4) : null,
+                line.CurrencyId, currencyCodes.GetValueOrDefault(line.CurrencyId.Value)));
+        }
+        return result;
+    }
+
     private static OpportunityDigitalTwin BuildDigitalTwin(IReadOnlyCollection<RfqLineIntelligence> lines,
         IReadOnlyDictionary<long, DateTime?> requiredDates,
         IReadOnlyCollection<SupplierQuotedItem> offers, IReadOnlyDictionary<long, Supplier> suppliers,
         IReadOnlyDictionary<long, SupplierQuoteRevision> revisions,
         IReadOnlyDictionary<long, string> quoteStatuses,
-        IReadOnlyCollection<CommercialEvidenceLink> rfqEvidence)
+        IReadOnlyCollection<CustomerQuoteSourcingDecision> pricingDecisions,
+        IReadOnlyCollection<PredictivePriceLine> predictivePricing,
+        IReadOnlyCollection<CommercialEvidenceLink> rfqEvidence,
+        IReadOnlyDictionary<long, string> currencyCodes)
     {
         var scenarios = new List<OpportunityScenario>();
         var stockOnly = lines.Count > 0 && lines.All(x => x.StockQuantity >= x.RequestedQuantity);
         scenarios.Add(new OpportunityScenario("STOCK_ONLY", "Stock only", stockOnly,
             stockOnly ? "Current tenant ATP covers every requested line." : "Current ATP does not cover every line.",
-            null, null, 0, stockOnly ? .95m : 1m,
-            ["ATP excludes active reservations, allocation, quarantine, damage, expiry and safety stock."], rfqEvidence));
+            null, null, 0, DateTime.UtcNow, null, null, "UNASSESSED",
+            "Inventory cost and currency are not stamped on the current ATP evidence.", stockOnly ? .95m : 1m,
+            lines.Select(x => new ScenarioQuantityAllocation(x.RfqItemId, x.RequestedQuantity,
+                Math.Min(x.StockQuantity, x.RequestedQuantity), 0m, null, DateTime.UtcNow)).ToArray(),
+            [new ScenarioCostSource("INTERNAL_STOCK", "Internal inventory cost", null, null,
+                "EVIDENCE_REQUIRED", null)],
+            ["ATP excludes active reservations, allocation, quarantine, damage, expiry and safety stock."],
+            ["Confirm inventory cost currency before margin approval."], rfqEvidence));
+
+        var latestDecisionByOffer = pricingDecisions
+            .GroupBy(x => x.SupplierQuotedItemId)
+            .ToDictionary(x => x.Key, x => x.OrderByDescending(y => y.CreatedOn).ThenByDescending(y => y.Id).First());
 
         OpportunityScenario OfferScenario(string code, string label, bool preserveStock,
             Func<IEnumerable<SupplierQuotedItem>, IOrderedEnumerable<SupplierQuotedItem>> rank,
-            Func<SupplierQuoteLine, bool>? lineFilter = null)
+            bool requireReliability = false, bool requirePartialImmediate = false,
+            bool requireAuthorizedMargin = false, Func<SupplierQuoteLine, bool>? lineFilter = null)
         {
-            var selected = new List<(SupplierQuotedItem Offer, decimal Quantity)>();
+            var selected = new List<(SupplierQuotedItem Offer, decimal SupplierQuantity,
+                decimal StockQuantity, RfqLineIntelligence Line, CustomerQuoteSourcingDecision? Decision)>();
             foreach (var line in lines.OrderBy(x => x.RfqItemId))
             {
                 var required = preserveStock ? Math.Max(0m, line.RequestedQuantity - line.StockQuantity) : line.RequestedQuantity;
@@ -598,6 +735,8 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
                 var choices = offers.Where(x => x.RfqItemId == line.RfqItemId &&
                     IsOfferDecisionReady(x, suppliers.GetValueOrDefault(x.SupplierId), revisions,
                         quoteStatuses, required, requiredDates.GetValueOrDefault(line.RfqItemId)));
+                if (requireReliability) choices = choices.Where(x => x.ReliabilitySnapshot.HasValue);
+                if (requireAuthorizedMargin) choices = choices.Where(x => latestDecisionByOffer.ContainsKey(x.Id));
                 if (lineFilter is not null) choices = choices.Where(offer =>
                     revisions[offer.SourceSupplierQuoteRevisionId!.Value].Lines.Any(canonical =>
                         canonical.Id == offer.SourceSupplierQuoteLineId && lineFilter(canonical)));
@@ -605,26 +744,74 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
                 if (choice is null)
                     return new OpportunityScenario(code, label, false,
                         "At least one line lacks an evidence-complete, governed offer with sufficient availability.",
-                        null, null, null, 1m,
-                        ["Only current canonical Supplier Quote revisions are eligible."], rfqEvidence);
-                selected.Add((choice, required));
+                        null, null, null, null, null, null, "BLOCKED",
+                        "Required offer, reliability, margin or approval evidence is incomplete.", 1m, [], [],
+                        ["Only current canonical Supplier Quote revisions are eligible."],
+                        [requireAuthorizedMargin ? "Record an authorized Customer Quote sourcing decision." :
+                            "Select and approve the final Supplier offer."], rfqEvidence);
+                selected.Add((choice, required, preserveStock ? Math.Min(line.StockQuantity, line.RequestedQuantity) : 0m,
+                    line, latestDecisionByOffer.GetValueOrDefault(choice.Id)));
             }
+            if (selected.Count == 0)
+                return new OpportunityScenario(code, label, false,
+                    "No Supplier quantity is required; use the stock-only route.", null, null, null, null,
+                    null, null, "NOT_APPLICABLE", "Current ATP covers every requested line.", 1m, [], [],
+                    ["Supplier comparison is not applicable when no Supplier quantity is required."],
+                    ["Use the stock-only route and verify internal inventory cost before margin approval."], rfqEvidence);
+            if (requirePartialImmediate && !selected.Any(x => x.StockQuantity > 0m && x.SupplierQuantity > 0m))
+                return new OpportunityScenario(code, label, false,
+                    "No line can combine immediate ATP with evidence-complete sourced balance.",
+                    null, null, null, null, null, null, "BLOCKED",
+                    "Partial immediate delivery requires both current ATP and a governed offer.", 1m, [], [],
+                    ["Immediate quantity is never inferred without ATP."],
+                    ["Confirm a split delivery promise with the Customer."], rfqEvidence);
             var currencies = selected.Select(x => x.Offer.CurrencyId!.Value).Distinct().ToArray();
             if (currencies.Length > 1)
                 return new OpportunityScenario(code, label, false,
                     "Selected offers use different currencies and no approved FX snapshot was supplied.",
-                    null, null, null, 1m, ["Cross-currency amounts are never ranked without verified FX evidence."],
+                    null, null, null, null, null, null, "BLOCKED",
+                    "Cross-currency risk cannot be quantified without approved FX evidence.", 1m, [], [],
+                    ["Cross-currency amounts are never ranked without verified FX evidence."],
+                    ["Provide an approved FX snapshot or compare currencies separately."],
                     selected.Select(x => new CommercialEvidenceLink("SupplierQuotedItem", x.Offer.Id,
                         x.Offer.QuoteReference ?? $"Offer {x.Offer.Id}", x.Offer.QuoteDate, "SCENARIO_SOURCE")).ToArray());
-            var cost = selected.Sum(x => x.Offer.LandedUnitCost!.Value * x.Quantity);
-            var lead = selected.Count == 0 ? 0 : selected.Max(x => x.Offer.LeadTimeDays!.Value);
+            var cost = selected.Sum(x => x.Offer.LandedUnitCost!.Value * x.SupplierQuantity);
+            var hasUnpricedStock = selected.Any(x => x.StockQuantity > 0m);
+            var lead = selected.Max(x => x.Offer.LeadTimeDays!.Value);
+            var delivery = selected.Max(x =>
+                (x.Offer.QuoteDate ?? x.Offer.CreatedDate).AddDays(x.Offer.LeadTimeDays!.Value));
+            var validity = selected.Min(x => x.Offer.ValidUntil);
+            var margin = selected.Count > 0 && selected.All(x => x.Decision is not null)
+                ? decimal.Round(selected.Sum(x => x.Decision!.TargetMarginPercent * x.SupplierQuantity) /
+                    selected.Sum(x => x.SupplierQuantity), 2) : (decimal?)null;
+            var reliability = selected.Where(x => x.Offer.ReliabilitySnapshot.HasValue)
+                .Select(x => x.Offer.ReliabilitySnapshot!.Value).ToArray();
+            var risk = selected.Count == 0 ? "NOT_APPLICABLE" : reliability.Length != selected.Count ? "UNASSESSED"
+                : reliability.Average() >= 90m ? "LOW" : reliability.Average() >= 75m ? "MEDIUM" : "HIGH";
             return new OpportunityScenario(code, label, true,
-                $"Deterministic comparison selected {selected.Count} current Supplier offer(s).",
-                decimal.Round(cost, 4), currencies.SingleOrDefault(), lead, .9m,
+                hasUnpricedStock
+                    ? $"Route selected {selected.Count} current Supplier offer(s); total landed cost is withheld until internal stock cost is verified."
+                    : $"Deterministic comparison selected {selected.Count} current Supplier offer(s).",
+                hasUnpricedStock ? null : decimal.Round(cost, 4), currencies.Single(), lead, delivery, validity, margin, risk,
+                risk == "NOT_APPLICABLE" ? "No Supplier quantity is required for this route."
+                    : risk == "UNASSESSED" ? "Supplier reliability evidence is incomplete."
+                    : $"Selected offer reliability snapshot averages {decimal.Round(reliability.Average(), 1)}%.", .9m,
+                selected.Select(x => new ScenarioQuantityAllocation(x.Line.RfqItemId, x.Line.RequestedQuantity,
+                    x.StockQuantity, x.SupplierQuantity, x.Offer.Id,
+                    (x.Offer.QuoteDate ?? x.Offer.CreatedDate).AddDays(x.Offer.LeadTimeDays!.Value))).ToArray(),
+                selected.Select(x => new ScenarioCostSource("SUPPLIER_LANDED", "Supplier landed cost",
+                    decimal.Round(x.Offer.LandedUnitCost!.Value * x.SupplierQuantity, 4), x.Offer.CurrencyId,
+                    "VERIFIED", new CommercialEvidenceLink("SupplierQuotedItem", x.Offer.Id,
+                        x.Offer.QuoteReference ?? $"Offer {x.Offer.Id}", x.Offer.QuoteDate, "COST_SOURCE")))
+                    .Concat(selected.Where(x => x.StockQuantity > 0m).Select(x => new ScenarioCostSource(
+                        "INTERNAL_STOCK", "Internal inventory cost", null, null, "EVIDENCE_REQUIRED", null))).ToArray(),
                 [preserveStock ? "Uses current ATP first and sources only the shortage." : "Sources the full requested quantity.",
                     "Freight, duty and other captured costs are included in landed cost."],
+                margin.HasValue ? ["Authorized margin exists; final Quote approval policy still applies."] :
+                    ["Select and approve the final fulfilment route.", "Confirm margin before Customer Quote approval."],
                 selected.Select(x => new CommercialEvidenceLink("SupplierQuotedItem", x.Offer.Id,
-                    x.Offer.QuoteReference ?? $"Offer {x.Offer.Id}", x.Offer.QuoteDate, "SCENARIO_SOURCE")).ToArray());
+                    x.Offer.QuoteReference ?? $"Offer {x.Offer.Id}", x.Offer.QuoteDate, "SCENARIO_SOURCE")).ToArray(),
+                currencyCodes.GetValueOrDefault(currencies.Single()));
         }
 
         scenarios.Add(OfferScenario("SUPPLIER_ONLY", "Supplier only", false,
@@ -635,18 +822,64 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
             rows => rows.OrderBy(x => x.LeadTimeDays).ThenBy(x => x.LandedUnitCost)));
         scenarios.Add(OfferScenario("LOWEST_LANDED_COST", "Lowest landed cost", true,
             rows => rows.OrderBy(x => x.LandedUnitCost).ThenBy(x => x.LeadTimeDays)));
-        scenarios.Add(new OpportunityScenario("BEST_MARGIN", "Best verified margin", false,
-            "No authorized Customer target and required-margin input was supplied; margin is not inferred.",
-            null, null, null, 1m, ["Customer target and margin remain confidential and opt-in."], []));
-        scenarios.Add(new OpportunityScenario("LOWEST_RISK", "Lowest verified risk", false,
-            "Authoritative fulfilment outcomes are not integrated, so Supplier delivery risk is not ranked.",
-            null, null, null, 1m, ["Supplier master scores are not treated as fulfilment evidence."], []));
+        scenarios.Add(OfferScenario("BEST_MARGIN", "Best verified margin", true,
+            rows => rows.OrderByDescending(x => latestDecisionByOffer[x.Id].TargetMarginPercent)
+                .ThenBy(x => x.LandedUnitCost), requireAuthorizedMargin: true));
+        scenarios.Add(OfferScenario("LOWEST_RISK", "Lowest verified risk", true,
+            rows => rows.OrderByDescending(x => x.ReliabilitySnapshot).ThenBy(x => x.LandedUnitCost),
+            requireReliability: true));
         scenarios.Add(new OpportunityScenario("APPROVED_ALTERNATE", "Approved alternate", false,
             "No authoritative alternate-product approval evidence is recorded for this RFQ.",
-            null, null, null, 1m, ["An alternate is never treated as approved from Supplier data alone."], []));
+            null, null, null, null, null, null, "BLOCKED",
+            "Supplier alternate declarations are evidence, not Customer or engineering approval.", 1m, [], [],
+            ["An alternate is never treated as approved from Supplier data alone."],
+            ["Capture explicit alternate approval before recommendation."], []));
+        scenarios.Add(OfferScenario("PARTIAL_IMMEDIATE", "Partial immediate delivery", true,
+            rows => rows.OrderBy(x => x.LeadTimeDays).ThenBy(x => x.LandedUnitCost),
+            requirePartialImmediate: true));
+
+        var bridges = pricingDecisions.GroupBy(x => x.RfqItemId).Select(group => group
+                .OrderByDescending(x => x.CreatedOn).ThenByDescending(x => x.Id).First())
+            .Select(decision =>
+            {
+                var offer = offers.SingleOrDefault(x => x.Id == decision.SupplierQuotedItemId);
+                var evidence = new CommercialEvidenceLink("CustomerQuoteSourcingDecision", decision.Id,
+                    $"Pricing decision {decision.Id}", decision.CreatedOn, "TARGET_BRIDGE");
+                var validOffer = offer is not null && offer.CurrencyId == decision.CurrencyId &&
+                    offer.Quantity > 0m && decision.CustomerUnitPrice > 0m &&
+                    decision.TargetMarginPercent is >= 0m and < 100m &&
+                    IsOfferEvidenceCurrent(offer, suppliers.GetValueOrDefault(offer.SupplierId), revisions,
+                        quoteStatuses, requiredDates.GetValueOrDefault(decision.RfqItemId));
+                if (!validOffer)
+                    return new CustomerTargetBridge(decision.RfqItemId, "STALE_OR_INVALID_EVIDENCE",
+                        decision.CustomerUnitPrice, decision.TargetMarginPercent, null, null, null,
+                        decision.CurrencyId, "Target bridge withheld until the selected offer is current, canonical, currency-matched and valid.", evidence);
+                var maximumLanded = decimal.Round(decision.CustomerUnitPrice *
+                    (1m - decision.TargetMarginPercent / 100m), 6);
+                var adjustments = decimal.Round(
+                    (offer!.FreightCost + offer.DutyCost + offer.OtherCost + (offer.TaxAmount ?? 0m) -
+                        (offer.DiscountAmount ?? 0m)) / offer.Quantity, 6);
+                var maximumSupplier = decimal.Round(maximumLanded - adjustments, 6);
+                return new CustomerTargetBridge(decision.RfqItemId,
+                    maximumSupplier > 0m ? "VERIFIED_SOURCING_DECISION" : "TARGET_INFEASIBLE",
+                    decision.CustomerUnitPrice, decision.TargetMarginPercent, maximumLanded, adjustments,
+                    maximumSupplier, decision.CurrencyId,
+                    "max landed = target price x (1 - gross margin); max supplier = max landed - per-unit freight, duty, tax and other captured cost, plus discount",
+                    evidence);
+            }).ToArray();
+        var holdouts = predictivePricing.Where(x => x.BacktestHoldoutCount > 0 &&
+            x.BacktestMeanAbsolutePercentError.HasValue).ToArray();
+        var holdoutCount = holdouts.Sum(x => x.BacktestHoldoutCount);
         return new OpportunityDigitalTwin(DateTime.UtcNow,
             "Valid until Supplier Quote expiry or any inventory, reservation, governance, or Quote revision change.",
-            scenarios, "Select and document the final fulfilment route in the Sourcing workbench.");
+            "SHADOW", "digital-twin-v2.3", scenarios, bridges, predictivePricing,
+            new PricingBacktestSummary(holdoutCount > 0 ? "MEASURED" : "INSUFFICIENT_HOLDOUTS",
+                holdoutCount, holdoutCount == 0 ? null : decimal.Round(
+                    holdouts.Sum(x => x.BacktestMeanAbsolutePercentError!.Value * x.BacktestHoldoutCount) /
+                    holdoutCount, 2),
+                "Same tenant, exact Product and currency, trailing 24 months; actual Customer Orders are wins.",
+                "Sparse cohorts are withheld; no FX or market feed is inferred."),
+            "Review evidence, then use the governed Sourcing and Customer Quote workflows.");
     }
 
     private static SupplierBidQualitySummary BuildBidQuality(
@@ -737,6 +970,12 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
     private static decimal Median(IReadOnlyList<decimal> values) => values.Count % 2 == 1
         ? values[values.Count / 2] : (values[values.Count / 2 - 1] + values[values.Count / 2]) / 2m;
     private sealed record ValuePoint(long CurrencyId, decimal Value, DateTime OccurredOn, long RecordId);
+    private sealed record PricingHistoryRow(long QuoteId, long ProductId, long? CustomerId, long CurrencyId,
+        decimal Quantity, decimal UnitPrice, int? DeliveryLeadTimeDays, DateTime OccurredOn, string QuoteNumber,
+        DateTime? OutcomeOn);
+    private sealed record PricingOutcomeRow(long QuoteId, long? CustomerId, long CurrencyId,
+        decimal Quantity, decimal UnitPrice, DateTime OccurredOn, string QuoteNumber,
+        bool IsCustomerOrderWin, bool IsDecided);
 }
 
 public static class CommercialLearningRules

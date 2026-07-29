@@ -175,7 +175,7 @@ function App() {
       <Route path="/procurement/rfqs/outstanding" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><OutstandingRFQsPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/rfqs/process/:id" element={<MainLayout><PermissionGuard moduleName="RFQ Management" action="edit" redirect><ProcessRFQPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/rfqs/view/:id" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><ViewRFQPage /></PermissionGuard></MainLayout>} />
-      <Route path="/procurement/rfqs/:id/pricing" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><RfqPricingPage /></PermissionGuard></MainLayout>} />
+      <Route path="/procurement/rfqs/:id/pricing" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><PermissionGuard moduleName="Quotations" redirect><RfqPricingPage /></PermissionGuard></PermissionGuard></MainLayout>} />
       <Route path="/procurement/rfqs/:rfqId/sourcing" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><SourcingWorkbenchPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/sourcing" element={<Navigate to="/procurement/sourcing-cases" replace />} />
       <Route path="/procurement/sourcing-cases" element={<Navigate to="/procurement/rfqs/all?state=requires-sourcing" replace />} />

@@ -202,7 +202,14 @@ const CommercialCaseWorkspacePage: React.FC = () => {
       }
     },
   });
-  const primaryRfqId = detail?.documents.find(document => document.documentType === 'RFQ')?.documentId;
+  const primaryRfqId = detail?.documents
+    .filter(document => document.documentType === 'RFQ')
+    .sort((left, right) => {
+      const rightOccurredOn = right.occurredOn ? new Date(right.occurredOn).getTime() : 0;
+      const leftOccurredOn = left.occurredOn ? new Date(left.occurredOn).getTime() : 0;
+      return rightOccurredOn - leftOccurredOn || right.documentId - left.documentId;
+    })[0]
+    ?.documentId;
   const workbench = useQuery({
     queryKey: ['commercial-case', selectedCaseId, 'rfq-workbench', primaryRfqId],
     queryFn: () => procurementService.getWorkbench(primaryRfqId),
@@ -284,7 +291,7 @@ const CommercialCaseWorkspacePage: React.FC = () => {
         <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2} sx={{ justifyContent: 'space-between', alignItems: { xs: 'flex-start', lg: 'center' } }}>
           <Box>
             <Stack direction="row" spacing={1.25} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
-              <Typography sx={{ fontSize: '1.45rem', fontWeight: 950, letterSpacing: '-0.02em' }}>
+              <Typography sx={{ fontSize: '1.45rem', fontWeight: 950, letterSpacing: 0 }}>
                 {current.masterReference}
               </Typography>
               <Chip
@@ -645,7 +652,7 @@ const CommercialCaseWorkspacePage: React.FC = () => {
 
       <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2} sx={{ justifyContent: 'space-between', alignItems: { xs: 'flex-start', lg: 'center' }, mb: 2.5 }}>
         <Box>
-          <Typography variant="h4" sx={{ fontWeight: 950, letterSpacing: '-0.02em' }}>
+          <Typography variant="h4" sx={{ fontWeight: 950, letterSpacing: 0 }}>
             Commercial Workspace
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>

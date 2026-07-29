@@ -927,11 +927,11 @@ namespace ERP_RFQ_Automation.Services
             // once a manager approves, so the held send cannot re-hold itself.
             if (!options.BypassFloorHold && _belowFloorGuard is not null)
             {
-                var check = await _belowFloorGuard.CheckQuoteSendAsync(quoteId, CancellationToken.None);
+                var check = await _belowFloorGuard.CheckQuoteSendAsync(quoteId, businessUnitId, CancellationToken.None);
                 if (check.IsBelowFloor)
                 {
                     var approval = await _belowFloorGuard.CreateSendHoldAsync(
-                        quoteId, recipientEmail, customSubject, customBody, check,
+                        quoteId, businessUnitId, recipientEmail, customSubject, customBody, check,
                         options.RequestedByUserId, options.RequestedBy, CancellationToken.None);
                     return QuoteSendResult.HeldForApproval(approval.Id, approval.Summary);
                 }

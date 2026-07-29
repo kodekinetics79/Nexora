@@ -63,12 +63,7 @@ export interface ConvertLeadResponse {
 
 // ─── RFQ smart-pricing preview ───────────────────────────────────────────────
 
-export type PriceSignalSource =
-  | 'priceList'
-  | 'recentQuote'
-  | 'supplierQuote'
-  | 'purchaseHistory'
-  | 'productMaster';
+export type PriceSignalSource = 'recentQuote';
 
 export interface PriceSignal {
   source: PriceSignalSource;
@@ -81,6 +76,7 @@ export interface PricePreviewLine {
   rfqItemId: number;
   description: string | null;
   quantity: number | null;
+  currency: string | null;
   recommendedUnitPrice: number | null;
   floorUnitPrice: number | null;
   marginPct: number | null;
@@ -94,29 +90,21 @@ export interface PricePreviewLine {
 
 export interface PricePreviewTotals {
   recommendedTotal: number | null;
+  byCurrency: Array<{ currency: string; recommendedTotal: number; lineCount: number }>;
+  pricedLineCount: number;
+  unpricedLineCount: number;
 }
 
 export interface PricePreview {
   rfqId: number;
   currency: string | null;
+  mode: 'SHADOW';
+  applyAllowed: boolean;
+  applyBlocker: string;
   lines: PricePreviewLine[];
   totals: PricePreviewTotals;
   /** 0..1 — never shown raw in the UI. */
   overallConfidence: number | null;
-}
-
-export interface ApplyPricingLineRequest {
-  rfqItemId: number;
-  unitPrice: number;
-}
-
-export interface ApplyPricingRequest {
-  lines: ApplyPricingLineRequest[];
-}
-
-export interface ApplyPricingResponse {
-  applied: number;
-  total: number | null;
 }
 
 // ─── GET /api/intelligence/customers/{id}/context (WP-B2) ────────────────────
@@ -217,14 +205,6 @@ const intelligenceService = {
   getPricePreview: async (rfqId: number): Promise<PricePreview> => {
     const r = await axiosInstance.get<PricePreview>(
       `/api/intelligence/rfqs/${rfqId}/price-preview`
-    );
-    return r.data;
-  },
-
-  applyPricing: async (rfqId: number, body: ApplyPricingRequest): Promise<ApplyPricingResponse> => {
-    const r = await axiosInstance.post<ApplyPricingResponse>(
-      `/api/intelligence/rfqs/${rfqId}/apply-pricing`,
-      body
     );
     return r.data;
   },

@@ -94,7 +94,12 @@ type RfqCommercialIntelligence = {
   lines: Array<{ rfqItemId: number; blockers: string[]; eligibleOfferCount: number }>;
   digitalTwin: {
     validity: string;
-    scenarios: Array<{ code: string; label: string; eligible: boolean; explanation: string }>;
+    mode: string;
+    policyVersion: string;
+    scenarios: Array<{ code: string; label: string; eligible: boolean; explanation: string; riskBand: string; riskExplanation: string; quantities: unknown[]; costSources: unknown[]; approvalRequirements: string[] }>;
+    predictivePricing: Array<{ rfqItemId: number; status: string; mode: string }>;
+    customerTargetBridges: unknown[];
+    backtest: { status: string; holdoutCount: number };
   };
 };
 
@@ -830,16 +835,39 @@ test('35 RFQ intelligence reconciles current coverage and explainable Digital Tw
     page, token, 'get', `/api/commercial-learning/rfqs/${rfqId()}/intelligence`,
   ));
   expect(intelligence.lines.length).toBeGreaterThan(0);
-  expect(intelligence.digitalTwin.scenarios.length).toBeGreaterThanOrEqual(3);
+  expect(intelligence.digitalTwin.mode).toBe('SHADOW');
+  expect(intelligence.digitalTwin.policyVersion).toBe('digital-twin-v2.3');
+  expect(intelligence.digitalTwin.scenarios).toHaveLength(9);
+  expect(intelligence.digitalTwin.scenarios.map(scenario => scenario.code)).toEqual(expect.arrayContaining([
+    'STOCK_ONLY', 'SUPPLIER_ONLY', 'SPLIT_STOCK_SOURCE', 'FASTEST_DELIVERY',
+    'LOWEST_LANDED_COST', 'BEST_MARGIN', 'LOWEST_RISK', 'APPROVED_ALTERNATE', 'PARTIAL_IMMEDIATE',
+  ]));
+  expect(intelligence.digitalTwin.predictivePricing).toHaveLength(intelligence.lines.length);
   expect(intelligence.nextBestAction.explanation.length).toBeGreaterThan(10);
+  const blockedApply = await api(page, token, 'post', `/api/intelligence/rfqs/${rfqId()}/apply-pricing`, {
+    lines: [{ rfqItemId: intelligence.lines[0].rfqItemId, unitPrice: 1 }],
+  });
+  expect(blockedApply.status()).toBe(409);
 
   await page.goto(`/procurement/rfqs/view/${rfqId()}`);
   await expect(page.getByText('Opportunity Digital Twin', { exact: true })).toBeVisible();
   await expect(page.getByText(intelligence.nextBestAction.label, { exact: false }).first()).toBeVisible();
   await expect(page.getByText(intelligence.digitalTwin.validity, { exact: false }).first()).toBeVisible();
-  for (const scenario of intelligence.digitalTwin.scenarios.slice(0, 3)) {
+  for (const scenario of intelligence.digitalTwin.scenarios) {
     await expect(page.getByText(scenario.label, { exact: true })).toBeVisible();
   }
+  await expect(page.getByText('Predictive pricing · shadow mode', { exact: true })).toBeVisible();
+  await expect(page.getByText('Customer target bridge', { exact: true })).toBeVisible();
+  const firstScenarioEvidence = page.locator('details').first();
+  await firstScenarioEvidence.locator('summary').click();
+  await expect(firstScenarioEvidence.getByText(intelligence.digitalTwin.scenarios[0].riskExplanation, { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Smart Pricing' }).click();
+  await expect(page).toHaveURL(new RegExp(`/procurement/rfqs/${rfqId()}/pricing$`));
+  await expect(page.getByRole('heading', { name: 'Shadow pricing workspace' })).toBeVisible();
+  await expect(page.getByText(/governed Supplier award pricing bridge/i)).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Apply pricing' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Return to RFQ' }).click();
+  await expect(page).toHaveURL(new RegExp(`/procurement/rfqs/view/${rfqId()}$`));
   if (intelligence.commercialDecision !== 'VIABLE_READY') {
     await expect(page.getByRole('button', { name: 'Prepare Quote Draft' })).toBeDisabled();
   }

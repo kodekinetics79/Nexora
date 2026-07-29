@@ -54,7 +54,7 @@ public interface IBelowFloorGuard
     /// Returns <see cref="BelowFloorCheck.Clear"/> when the quote has no RFQ linkage
     /// (nothing to compare against) or does not exist (the send path raises its own 404).
     /// </summary>
-    Task<BelowFloorCheck> CheckQuoteSendAsync(long quoteId, CancellationToken ct);
+    Task<BelowFloorCheck> CheckQuoteSendAsync(long quoteId, long businessUnitId, CancellationToken ct);
 
     /// <summary>Parks a below-floor apply-pricing request as a pending approval.</summary>
     Task<AgentApproval> CreateApplyPricingHoldAsync(
@@ -63,7 +63,7 @@ public interface IBelowFloorGuard
 
     /// <summary>Parks a below-floor quote send as a pending approval.</summary>
     Task<AgentApproval> CreateSendHoldAsync(
-        long quoteId, string recipientEmail, string? customSubject, string? customBody,
+        long quoteId, long businessUnitId, string recipientEmail, string? customSubject, string? customBody,
         BelowFloorCheck check, long? requestedByUserId, string? requestedBy, CancellationToken ct);
 }
 
@@ -99,7 +99,8 @@ public sealed class BelowFloorGuard : IBelowFloorGuard
         if (request?.Lines is not { Count: > 0 }) return BelowFloorCheck.Clear;
 
         var preview = await _engine.PriceRfqAsync(rfqId, businessUnitId, ct);
-        var floorByItem = preview.Lines.ToDictionary(l => l.RfqItemId, l => l.FloorUnitPrice);
+        var floorByItem = preview.Lines.Where(l => l.FloorUnitPrice.HasValue)
+            .ToDictionary(l => l.RfqItemId, l => l.FloorUnitPrice!.Value);
 
         // Malformed requests (unknown line, non-positive price, duplicate) are left
         // to the engine's own validation so the caller gets its usual 400 — a hold
@@ -121,10 +122,10 @@ public sealed class BelowFloorGuard : IBelowFloorGuard
         return new BelowFloorCheck { Lines = offending, Preview = preview };
     }
 
-    public async Task<BelowFloorCheck> CheckQuoteSendAsync(long quoteId, CancellationToken ct)
+    public async Task<BelowFloorCheck> CheckQuoteSendAsync(long quoteId, long businessUnitId, CancellationToken ct)
     {
-        var quote = await _db.Quotes.AsNoTracking().IgnoreQueryFilters()
-            .Where(q => q.Id == quoteId)
+        var quote = await _db.Quotes.AsNoTracking()
+            .Where(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId)
             .Select(q => new
             {
                 q.Id,
@@ -144,7 +145,7 @@ public sealed class BelowFloorGuard : IBelowFloorGuard
         var preview = await _engine.PriceRfqAsync(quote.Rfqid.Value, quote.BusinessUnitId, ct);
         var floorByItem = preview.Lines
             .Where(l => l.FloorUnitPrice > 0)
-            .ToDictionary(l => l.RfqItemId, l => l.FloorUnitPrice);
+            .ToDictionary(l => l.RfqItemId, l => l.FloorUnitPrice!.Value);
 
         var offending = quote.Items
             .Where(i => i.UnitPrice > 0
@@ -163,7 +164,7 @@ public sealed class BelowFloorGuard : IBelowFloorGuard
         long rfqId, long businessUnitId, BelowFloorCheck check,
         long? requestedByUserId, string? requestedBy, CancellationToken ct)
     {
-        var rfqNo = await _db.Rfqs.AsNoTracking().IgnoreQueryFilters()
+        var rfqNo = await _db.Rfqs.AsNoTracking()
             .Where(r => r.Id == rfqId && r.BusinessUnitId == businessUnitId)
             .Select(r => r.Rfqno)
             .FirstOrDefaultAsync(ct);
@@ -185,11 +186,11 @@ public sealed class BelowFloorGuard : IBelowFloorGuard
     }
 
     public async Task<AgentApproval> CreateSendHoldAsync(
-        long quoteId, string recipientEmail, string? customSubject, string? customBody,
+        long quoteId, long businessUnitId, string recipientEmail, string? customSubject, string? customBody,
         BelowFloorCheck check, long? requestedByUserId, string? requestedBy, CancellationToken ct)
     {
-        var quote = await _db.Quotes.AsNoTracking().IgnoreQueryFilters()
-            .Where(q => q.Id == quoteId)
+        var quote = await _db.Quotes.AsNoTracking()
+            .Where(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId)
             .Select(q => new { q.BusinessUnitId, q.QuoteNo, q.Rfqid })
             .FirstAsync(ct);
         var label = $"Quote #{quote.QuoteNo}";
@@ -206,10 +207,10 @@ public sealed class BelowFloorGuard : IBelowFloorGuard
         }, JsonOpts);
 
         var approval = await SaveHoldAsync(
-            quote.BusinessUnitId, inputJson, BuildSummary(label, check), requestedByUserId, requestedBy, ct);
+            businessUnitId, inputJson, BuildSummary(label, check), requestedByUserId, requestedBy, ct);
 
         if (quote.Rfqid.HasValue)
-            await NotifyIfInsideDeadlineBufferAsync(approval, quote.BusinessUnitId, quote.Rfqid.Value, label, ct);
+            await NotifyIfInsideDeadlineBufferAsync(approval, businessUnitId, quote.Rfqid.Value, label, ct);
         return approval;
     }
 
