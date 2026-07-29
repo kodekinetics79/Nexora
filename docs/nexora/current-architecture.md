@@ -74,3 +74,13 @@ Routing is deterministic and explainable. Candidate scoring uses measured open a
 ## Deployment Boundaries
 
 Production secrets remain environment-only. Render `/ready` validates database, durable object-store write/read capability, malware scanner reachability, extraction-worker freshness, and procurement-dispatch-worker freshness. This release task does not deploy or mutate live data.
+
+## V2/V3 Shared Contracts
+
+- `Lead.Id` remains the canonical inquiry identity. `CommercialCase` remains immutable lineage and an event projection; it does not become a competing workflow aggregate.
+- A commercial exception is a derived, tenant-scoped coordination record anchored by `BusinessUnitId + CommercialCaseId + NexoraSerial`. It never replaces Lead, RFQ, Quote, Order, follow-up, routing, sourcing, pricing, or finance state.
+- Gate 1 detection is deterministic and limited to authoritative overdue follow-up and unassigned routing sources. Unsupported or unavailable source signals are omitted and reported as unknown, never inferred as healthy.
+- Exception decisions are optimistic, idempotent, append-only, and outboxed. Reconciliation may detect, refresh, reopen, or resolve a derived exception, but cannot execute authoritative commercial actions.
+- Autopilot begins in `Observe` and `Recommend` modes. Pricing, awards, purchase-order issue, external communication, inventory commitment, and lifecycle outcomes remain validated human commands.
+- Predictive features begin in shadow mode with persisted feature/evidence versions, sample size, confidence, outcome comparison, override, approval, rollback, and tenant-local learning.
+- External portal identity is a separate trust domain from tenant and platform-owner authentication. No portal route is accepted before invitation, MFA/session, object authorization, revocation, and audit contracts are certified.

@@ -356,6 +356,8 @@ interface LoginResponse {
   userName: string;
   roleId: number | null;
   roleName: string;
+  isSuperAdmin: boolean;
+  isManager: boolean;
   businessUnitId: number | null;
   businessUnitName: string | null;
   token: string;
@@ -427,6 +429,8 @@ const LoginPage: React.FC = () => {
         email: data.email,
         userName: data.userName,
         roleName: data.roleName,
+        isSuperAdmin: data.isSuperAdmin === true,
+        isManager: data.isManager === true,
         roleId: data.roleId ?? undefined,
         businessUnitId: data.businessUnitId ?? undefined,
         permissions: permissions,

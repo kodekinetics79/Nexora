@@ -9,6 +9,8 @@ namespace ERP_RFQ_Automation.DTOs.AuthDTOs
         public string UserName { get; set; } = null!;
         public long? RoleId { get; set; }
         public string RoleName { get; set; } = null!;
+        public bool IsSuperAdmin { get; set; }
+        public bool IsManager { get; set; }
         public long? BusinessUnitId { get; set; }
         public string? BusinessUnitName { get; set; }
         public string Token { get; set; } = null!;

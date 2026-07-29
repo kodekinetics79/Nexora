@@ -2,6 +2,8 @@
 
 Status values are `Verified`, `Partial`, `Planned`, and `Blocked`. Evidence is based on code, migrations, and tests; UI observations alone are not accepted.
 
+The V1 development certificate records the frozen candidate at `430841e`. This register is the dated integration view for later work and may mark deployment-dependent or broader behavior `Partial` without invalidating a narrower V1 development claim. Gate dependencies are accepted only from rows explicitly marked `Verified` for the behavior used.
+
 | Capability | Status | Exact evidence | Release 01 disposition |
 |---|---|---|---|
 | Tenant authentication and scoped HTTP access | Verified | `Backend/ERP_RFQ_Automation/Program.cs`, `Models/ErpRfqAutomationContext.Tenancy.cs` | Preserve; add missing action permissions and PostgreSQL negative tests. |
@@ -30,6 +32,9 @@ Status values are `Verified`, `Partial`, `Planned`, and `Blocked`. Evidence is b
 | Supplier PO, receipt, and inventory reconciliation | Partial | `Procurement/ProcurementApplicationService.cs`, migrations `20260726052445`, `20260726060029`, `20260726061608`, `ProcurementPostgreSqlTests.cs` | PO creation is `DRAFT`; issue requires a controlled evidence reference, SHA-256, and UTC delivery timestamp before incoming supply is created, and only issued POs can be received. Tenant-qualified lineage, receipts, events, RLS, retry, and concurrency are PostgreSQL-tested; resolving the referenced immutable provider/object record remains a production prerequisite. |
 | Supplier delivery provider reconciliation | Partial | `Procurement/ProcurementDispatchWorker.cs`, `Services/Interfaces/INotificationService.cs` | Durable outbox, lease fencing, heartbeat and at-most-once handling after provider invocation exist. Ambiguous outcomes fail terminally and require explicit review; the legacy Boolean provider interface still has no authoritative provider idempotency or status-lookup contract. |
 | Vercel frontend / Render API / Neon PostgreSQL configuration | Partial | `vercel.json`, `render.yaml`, environment-driven backend configuration | Configuration inspected; browser SIT and deployed storage/scanner/worker/Neon readiness are not certified. |
+| Commercial Exception Center | Planned | `CommercialIntelligence/Exceptions/CommercialExceptionEntities.cs`, `docs/nexora/v2-v3-completion-matrix.md` | Gate 1 contract frozen. Detection is restricted to verified overdue-follow-up and unassigned-routing sources until implementation, RLS, reconciliation and browser acceptance pass. |
+| Predictive commercial decisions | Blocked | `Intelligence/Pricing/PricingEngine.cs`, `CommercialLearning/CommercialLearningService.cs` | Shadow-only until canonical evidence, currency safety, cost authority, calibration, drift and governed outcome capture are certified. |
+| External collaboration portal identity | Blocked | `Platform/Auth/PlatformAuthExtensions.cs`, `docs/nexora/current-architecture.md` | Separate external identity trust model is required; tenant/platform authentication must not be reused as a portal shortcut. |
 
 ## Certification Rule
 

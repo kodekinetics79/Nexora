@@ -80,6 +80,7 @@ export interface AccountOwnershipDTO {
 }
 
 export interface RoutingQueueItemDTO {
+  sourceId: number;
   leadId: number;
   nexoraSerial: string;
   customerName?: string | null;
@@ -248,6 +249,7 @@ export interface ListParams {
   search?: string;
   status?: string;
   customerId?: number;
+  sourceId?: number;
   ownerUserId?: number;
   warehouseId?: number;
   from?: string;
@@ -270,8 +272,8 @@ const commercialIntelligenceService = {
     (await axiosInstance.get<AccountOwnershipDTO[]>(`${commercialRoot}/account-ownership`, { params })).data,
   assignAccount: async (customerId: number, ownerUserId: number, expectedVersion: number, idempotencyKey: string): Promise<AccountOwnershipDTO> =>
     (await axiosInstance.post<AccountOwnershipDTO>(`${commercialRoot}/account-ownership/${customerId}/assign`, { ownerUserId, expectedVersion }, { headers: { 'Idempotency-Key': idempotencyKey } })).data,
-  getRoutingQueue: async (): Promise<RoutingQueueItemDTO[]> =>
-    (await axiosInstance.get<RoutingQueueItemDTO[]>(`${commercialRoot}/routing-queue`)).data,
+  getRoutingQueue: async (params: { sourceId?: number } = {}): Promise<RoutingQueueItemDTO[]> =>
+    (await axiosInstance.get<RoutingQueueItemDTO[]>(`${commercialRoot}/routing-queue`, { params })).data,
   assignRoutingItem: async (leadId: number, ownerUserId: number, expectedVersion: number, idempotencyKey: string): Promise<void> => {
     await axiosInstance.post(`${commercialRoot}/routing-queue/${leadId}/assign`, { ownerUserId, expectedVersion }, { headers: { 'Idempotency-Key': idempotencyKey } });
   },

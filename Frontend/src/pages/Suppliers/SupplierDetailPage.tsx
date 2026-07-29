@@ -72,8 +72,8 @@ const SupplierDetailPage: React.FC = () => {
   if (!supplier) return <Box sx={{ p: 4 }}><Typography>Supplier not found.</Typography></Box>;
 
   const apiBase = import.meta.env.VITE_API_BASE_URL ?? import.meta.env.VITE_API_URL ?? '';
-  const role = (userData.roleName || '').toLowerCase();
-  const canGovern = hasPermission('Suppliers', 'edit') && (role.includes('manager') || role.includes('admin'));
+  const canEdit = hasPermission('Suppliers', 'edit');
+  const canGovern = userData.isManager === true && canEdit;
   const openGovernance = () => {
     setGovernance({
       governanceStatus: supplier.governanceStatus || 'UNVERIFIED',
@@ -120,9 +120,9 @@ const SupplierDetailPage: React.FC = () => {
           {canGovern && <Button variant="outlined" onClick={openGovernance} sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 1.5 }}>
             Review Governance
           </Button>}
-          <Button variant="contained" startIcon={<EditIcon />} onClick={() => setEditOpen(true)} disableElevation sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 1.5 }}>
+          {canEdit && <Button variant="contained" startIcon={<EditIcon />} onClick={() => setEditOpen(true)} disableElevation sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 1.5 }}>
             Edit Supplier
-          </Button>
+          </Button>}
         </Box>
       </Box>
 
@@ -227,7 +227,7 @@ const SupplierDetailPage: React.FC = () => {
         </Grid>
       </Grid>
 
-      <SupplierFormDialog open={editOpen} onClose={() => setEditOpen(false)} supplierId={Number(id)} />
+      {canEdit && <SupplierFormDialog open={editOpen} onClose={() => setEditOpen(false)} supplierId={Number(id)} />}
       <Dialog open={governanceOpen} onClose={() => setGovernanceOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle>Supplier Governance Review</DialogTitle>
         <DialogContent dividers sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 2 }}>

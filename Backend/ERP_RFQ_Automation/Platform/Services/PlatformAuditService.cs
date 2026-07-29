@@ -9,7 +9,7 @@ namespace ERP_RFQ_Automation.Platform.Services;
 
 public interface IPlatformAuditService
 {
-    /// <summary>Append one immutable audit record. Never throws to the caller.</summary>
+    /// <summary>Append one immutable audit record. Persistence failures propagate to the caller.</summary>
     Task WriteAsync(
         ClaimsPrincipal actor,
         string action,
@@ -51,7 +51,9 @@ public class PlatformAuditService : IPlatformAuditService
         {
             var sub = actor.FindFirst(JwtRegisteredClaimNames.Sub)?.Value
                       ?? actor.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-            long.TryParse(sub, out var actorId);
+            if (!long.TryParse(sub, out var actorId) || actorId <= 0)
+                throw new InvalidOperationException(
+                    "A valid platform actor identifier is required to write a privileged audit record.");
 
             var entry = new PlatformAuditLog
             {
@@ -68,10 +70,10 @@ public class PlatformAuditService : IPlatformAuditService
             _context.Set<PlatformAuditLog>().Add(entry);
             await _context.SaveChangesAsync(ct);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            // Audit must never break the request path; surface loudly in logs instead.
-            _logger.LogError(ex, "Failed to write platform audit log for action {Action}", action);
+            _logger.LogError("Failed to write platform audit log for action {Action}", action);
+            throw;
         }
     }
 }

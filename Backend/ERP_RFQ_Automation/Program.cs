@@ -214,6 +214,7 @@ builder.Services.AddScoped<ICommercialCaseQueryService, CommercialCaseQueryServi
 builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.IInventoryAvailabilityService, ERP_RFQ_Automation.Inventory.InventoryAvailabilityService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialIntelligence.Sales.ISalesPersistence, ERP_RFQ_Automation.CommercialIntelligence.Sales.EfSalesPersistence>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialIntelligence.Sales.ISalesApplicationService, ERP_RFQ_Automation.CommercialIntelligence.Sales.SalesApplicationService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.CommercialIntelligence.Exceptions.ICommercialExceptionApplicationService, ERP_RFQ_Automation.CommercialIntelligence.Exceptions.CommercialExceptionApplicationService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.IOrderStockReservationService, ERP_RFQ_Automation.Inventory.OrderStockReservationService>();
 builder.Services.AddSingleton<ERP_RFQ_Automation.Inventory.Commercial.IProductIdentityResolver, ERP_RFQ_Automation.Inventory.Commercial.ProductIdentityResolver>();
 builder.Services.AddSingleton<ERP_RFQ_Automation.Inventory.Commercial.IFulfilmentRouteService, ERP_RFQ_Automation.Inventory.Commercial.FulfilmentRouteService>();

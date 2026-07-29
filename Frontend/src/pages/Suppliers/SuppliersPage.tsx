@@ -109,9 +109,15 @@ const ContactSubForm: React.FC<{
 const SuppliersPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { userData } = useAuth();
+  const { userData, hasPermission } = useAuth();
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
+  const canCreateSupplier = hasPermission('Suppliers', 'create');
+  const canEditSupplier = hasPermission('Suppliers', 'edit');
+  const canViewContacts = hasPermission('Customers');
+  const canCreateContact = hasPermission('Customers', 'create');
+  const canEditContact = hasPermission('Customers', 'edit');
+  const canDeleteContact = hasPermission('Customers', 'delete');
 
   // List state
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
@@ -140,7 +146,7 @@ const SuppliersPage: React.FC = () => {
   const { data: contacts = [], isLoading: contactsLoading } = useQuery({
     queryKey: ['supplier-contacts', selectedRecord?.id],
     queryFn: () => contactService.getBySupplier(selectedRecord!.id),
-    enabled: !!selectedRecord?.id && isModalOpen,
+    enabled: !!selectedRecord?.id && isModalOpen && canViewContacts,
   });
 
   const f = (field: string) => (e: React.ChangeEvent<HTMLInputElement | { name?: string; value: unknown }>) =>
@@ -226,6 +232,7 @@ const SuppliersPage: React.FC = () => {
 
   // ── Handlers ──
   const handleEdit = (record: SupplierDTO) => {
+    if (!canEditSupplier) return;
     setSelectedRecord(record);
     setFormData({
       name: record.name ?? '', contactEmail: record.contactEmail ?? '',
@@ -240,6 +247,7 @@ const SuppliersPage: React.FC = () => {
   };
 
   const handleAddNew = () => {
+    if (!canCreateSupplier) return;
     setSelectedRecord(null);
     setFormData(emptySupplier);
     setShowContactForm(false);
@@ -248,6 +256,7 @@ const SuppliersPage: React.FC = () => {
   };
 
   const handleSaveSupplier = () => {
+    if (selectedRecord ? !canEditSupplier : !canCreateSupplier) return;
     const fd = new FormData();
     Object.entries(formData).forEach(([k, v]) => {
       if (k === 'imageFile') {
@@ -318,9 +327,9 @@ const SuppliersPage: React.FC = () => {
           <Tooltip title="View Details">
             <IconButton size="small" color="primary" onClick={() => navigate(`/suppliers/${p.row.id}`)}><ViewIcon fontSize="small" /></IconButton>
           </Tooltip>
-          <Tooltip title="Edit">
+          {canEditSupplier && <Tooltip title="Edit">
             <IconButton size="small" color="info" onClick={() => handleEdit(p.row)}><EditIcon fontSize="small" /></IconButton>
-          </Tooltip>
+          </Tooltip>}
         </Stack>
       )
     },
@@ -335,8 +344,8 @@ const SuppliersPage: React.FC = () => {
           <Typography variant="body2" color="text.secondary">{t('manage_supplier_network')}</Typography>
         </Box>
         <Box sx={{ display: 'flex', gap: 1.5, alignItems: 'center' }}>
-          <UploadExportToolbar onDownloadTemplate={supplierService.downloadTemplate} onUpload={supplierService.uploadTemplate} onExport={supplierService.export} templateFileName="SupplierTemplate.xlsx" exportFileName="Suppliers.xlsx" />
-          <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3 }}>{t('add_supplier')}</Button>
+          <UploadExportToolbar canUpload={canCreateSupplier} onDownloadTemplate={supplierService.downloadTemplate} onUpload={supplierService.uploadTemplate} onExport={supplierService.export} templateFileName="SupplierTemplate.xlsx" exportFileName="Suppliers.xlsx" />
+          {canCreateSupplier && <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3 }}>{t('add_supplier')}</Button>}
         </Box>
       </Box>
 
@@ -527,7 +536,7 @@ const SuppliersPage: React.FC = () => {
             <Typography variant="overline" sx={{ fontWeight: 800, color: 'text.secondary', letterSpacing: '0.08em' }}>
               {t('contacts')} {selectedRecord && !contactsLoading && `(${contacts.length})`}
             </Typography>
-            {selectedRecord && !showContactForm && (
+            {selectedRecord && canCreateContact && !showContactForm && (
               <Button size="small" variant="outlined" startIcon={<PersonAddIcon />}
                 onClick={() => { setEditingContact(null); setContactForm(emptyContact); setShowContactForm(true); }}
                 sx={{ fontWeight: 700, textTransform: 'none' }}>
@@ -544,7 +553,7 @@ const SuppliersPage: React.FC = () => {
           )}
 
           {/* Inline contact sub-form */}
-          {selectedRecord && showContactForm && (
+          {selectedRecord && canViewContacts && showContactForm && (
             <ContactSubForm
               value={contactForm}
               onChange={setContactForm}
@@ -585,14 +594,14 @@ const SuppliersPage: React.FC = () => {
                       <Chip label={c.isActive ? 'Active' : 'Inactive'} color={c.isActive ? 'success' : 'default'} size="small" variant="outlined" sx={{ height: 18, fontSize: '0.65rem', fontWeight: 800 }} />
                     </TableCell>
                     <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>
-                      <Tooltip title="Edit">
+                      {canEditContact && <Tooltip title="Edit">
                         <IconButton size="small" onClick={() => openEditContact(c)}><EditIcon fontSize="small" /></IconButton>
-                      </Tooltip>
-                      <Tooltip title="Remove">
+                      </Tooltip>}
+                      {canDeleteContact && <Tooltip title="Remove">
                         <IconButton size="small" color="error" onClick={() => deleteContactMutation.mutate(c.id)}>
                           <DeleteIcon fontSize="small" />
                         </IconButton>
-                      </Tooltip>
+                      </Tooltip>}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -603,7 +612,7 @@ const SuppliersPage: React.FC = () => {
           {selectedRecord && !contactsLoading && contacts.length === 0 && !showContactForm && (
             <Box sx={{ textAlign: 'center', py: 3 }}>
               <PersonAddIcon sx={{ fontSize: 36, color: 'action.disabled', mb: 0.5 }} />
-              <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>No contacts yet. Click "Add Contact" to add one.</Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>{canCreateContact ? 'No contacts yet. Add the first contact.' : 'No contacts are recorded.'}</Typography>
             </Box>
           )}
 

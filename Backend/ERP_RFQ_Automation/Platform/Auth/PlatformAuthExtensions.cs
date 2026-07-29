@@ -18,20 +18,41 @@ public static class PlatformAuthExtensions
     /// <summary>
     /// Adds the "Platform" JWT bearer scheme. It validates audience
     /// <c>nexora-platform</c> so a tenant token (audience "RFQ") FAILS here, and a
-    /// platform token FAILS on the tenant scheme. Uses a dedicated signing key
-    /// <c>Jwt:PlatformKey</c> when configured (recommended), else falls back to
-    /// <c>Jwt:Key</c> — the audience check alone already enforces the boundary.
+    /// platform token FAILS on the tenant scheme. Production requires a dedicated
+    /// <c>Jwt:PlatformKey</c>; Development and Testing may fall back to
+    /// <c>Jwt:Key</c> to preserve local development usability.
     /// </summary>
     public static AuthenticationBuilder AddPlatformJwtBearer(
         this AuthenticationBuilder builder, IConfiguration config)
     {
+        var environment = config["ASPNETCORE_ENVIRONMENT"]
+                          ?? config["DOTNET_ENVIRONMENT"]
+                          ?? config[HostDefaults.EnvironmentKey]
+                          ?? Environments.Production;
+        var allowsLocalFallback = environment.Equals(Environments.Development, StringComparison.OrdinalIgnoreCase)
+                                  || environment.Equals("Testing", StringComparison.OrdinalIgnoreCase);
         var signingKey = config["Jwt:PlatformKey"];
-        if (string.IsNullOrWhiteSpace(signingKey))
+
+        if (!allowsLocalFallback)
+        {
+            if (string.IsNullOrWhiteSpace(signingKey))
+                throw new InvalidOperationException(
+                    "Jwt:PlatformKey is required outside Development and Testing and cannot fall back to Jwt:Key.");
+
+            var tenantSigningKey = config["Jwt:Key"];
+            if (!string.IsNullOrWhiteSpace(tenantSigningKey)
+                && string.Equals(signingKey, tenantSigningKey, StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    "Jwt:PlatformKey must be distinct from Jwt:Key outside Development and Testing.");
+        }
+        else if (string.IsNullOrWhiteSpace(signingKey))
+        {
             signingKey = config["Jwt:Key"];
+        }
 
         if (string.IsNullOrWhiteSpace(signingKey) || Encoding.UTF8.GetByteCount(signingKey) < 32)
             throw new InvalidOperationException(
-                "Jwt:PlatformKey (or fallback Jwt:Key) is missing or shorter than 256 bits (32 bytes).");
+                $"The platform JWT signing key for {environment} is missing or shorter than 256 bits (32 bytes).");
 
         var issuer = config["Jwt:PlatformIssuer"] ?? config["Jwt:Issuer"] ?? "";
         var audience = config["Jwt:PlatformAudience"] ?? PlatformAuthConstants.Audience;

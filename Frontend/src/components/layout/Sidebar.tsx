@@ -28,6 +28,7 @@ import {
   AutoAwesome as CopilotIcon,
   FactCheck as BoqIcon,
   AccountBalance as FinanceIcon,
+  WarningAmber as ExceptionIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../../context/AuthContext';
 
@@ -50,12 +51,8 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useTranslation();
-  const { hasPermission, userData } = useAuth();
-
-  // Mirrors the backend RoleGate rule (role name contains admin/manager). The
-  // server still enforces this on the workload endpoint; hiding the entry just
-  // avoids showing reps a manager-only page.
-  const isManager = /admin|manager/i.test(userData?.roleName ?? '');
+  const { userData, hasPermission } = useAuth();
+  const isManager = userData.isManager === true;
 
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
     'dashboard': location.pathname.startsWith('/dashboard'),
@@ -67,6 +64,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
     'supplier_mgmt': location.pathname.includes('/suppliers') || location.pathname.includes('/supplier-quotes') || location.pathname.includes('/commercial-inbox') || location.pathname.includes('/quoted-items') || location.pathname.includes('/purchase-orders') || location.pathname.includes('/sourcing-cases'),
     'lead_mgmt': location.pathname.includes('/leads') || location.pathname.includes('/commercial-cases'),
     'copilot': location.pathname.includes('/copilot'),
+    'sales-management': location.pathname.startsWith('/sales/'),
   });
 
   const handleGroupClick = (key: string) => {
@@ -129,15 +127,16 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
         label: 'Sales Management',
         icon: <CustomerIcon />,
         moduleName: 'Leads',
-        activePrefixes: ['/sales/today', '/sales/team', '/sales/reps', '/sales/accounts', '/sales/routing', '/sales/follow-ups', '/sales/performance'],
+        activePrefixes: ['/sales/today', '/sales/team', '/sales/reps', '/sales/accounts', '/sales/routing', '/sales/follow-ups', '/sales/performance', '/sales/exceptions'],
         children: [
           { key: 'sales-today', label: 'Sales Today', path: '/sales/today', moduleName: 'Leads' },
-          { key: 'sales-team', label: 'Team Overview', path: '/sales/team', moduleName: 'Leads' },
+          ...(isManager ? [{ key: 'sales-team', label: 'Team Overview', path: '/sales/team', moduleName: 'Leads' }] : []),
           { key: 'sales-reps', label: 'Sales Reps', path: '/sales/reps', moduleName: 'Users' },
           { key: 'sales-accounts', label: 'Account Ownership', path: '/sales/accounts', moduleName: 'Customers' },
           { key: 'sales-routing', label: 'Routing Queue', path: '/sales/routing', moduleName: 'Leads' },
           { key: 'sales-follow-ups', label: 'Follow-ups', path: '/sales/follow-ups', moduleName: 'Quotations' },
           { key: 'sales-performance', label: 'Performance', path: '/sales/performance', moduleName: 'Dashboard' },
+          { key: 'sales-exceptions', label: 'Commercial Exceptions', path: '/sales/exceptions', moduleName: 'Leads', icon: <ExceptionIcon fontSize="small" /> },
           { key: 'commercial-memory', label: 'Commercial Memory', path: '/intelligence/commercial-memory', moduleName: 'Dashboard' },
         ],
       },

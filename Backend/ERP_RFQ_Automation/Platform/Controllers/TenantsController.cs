@@ -101,6 +101,10 @@ public class TenantsController : ControllerBase
         {
             created = await strategy.ExecuteAsync(async () =>
             {
+                // A failed execution-strategy attempt can leave generated keys and
+                // post-SaveChanges states tracked even though its transaction rolled
+                // back. Every attempt must construct a fresh provisioning graph.
+                _context.ChangeTracker.Clear();
                 await using var tx = await _context.Database.BeginTransactionAsync(ct);
 
                 var tenant = new Tenant
@@ -134,19 +138,19 @@ public class TenantsController : ControllerBase
                 tenant.ModifiedOn = DateTime.UtcNow;
                 await _context.SaveChangesAsync(ct);
 
+                await _audit.WriteAsync(User, "tenant.provision", nameof(Tenant), tenant.Id.ToString(),
+                    new { tenant.Name, tenant.Slug, tenant.PlanId, tenant.PrimaryBusinessUnitId },
+                    actAsTenantId: tenant.Id, httpContext: HttpContext, ct: ct);
+
                 await tx.CommitAsync(ct);
                 return tenant;
             });
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            _logger.LogError(ex, "Failed to provision tenant {Slug}", slug);
+            _logger.LogError("Failed to provision tenant {Slug}", slug);
             return StatusCode(500, new { error = "Provisioning failed." });
         }
-
-        await _audit.WriteAsync(User, "tenant.provision", nameof(Tenant), created.Id.ToString(),
-            new { created.Name, created.Slug, created.PlanId, created.PrimaryBusinessUnitId },
-            actAsTenantId: created.Id, httpContext: HttpContext, ct: ct);
 
         var withPlan = await _context.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
             .Include(t => t.Plan).FirstAsync(t => t.Id == created.Id, ct);
@@ -252,30 +256,69 @@ public class TenantsController : ControllerBase
         if (string.IsNullOrWhiteSpace(reason))
             return BadRequest(new { error = "A reason is required." });
 
-        var tenant = await _context.Set<Tenant>().IgnoreQueryFilters()
-            .FirstOrDefaultAsync(t => t.Id == id, ct);
-        if (tenant is null)
+        var strategy = _context.Database.CreateExecutionStrategy();
+        try
+        {
+            await strategy.ExecuteAsync(async () =>
+            {
+                // Reload inside every retry attempt. Reusing an entity that passed
+                // through SaveChanges in a rolled-back attempt can otherwise commit
+                // only the audit row while the tenant remains incorrectly Unchanged.
+                _context.ChangeTracker.Clear();
+                await using var tx = await _context.Database.BeginTransactionAsync(ct);
+
+                var tenant = await _context.Set<Tenant>().IgnoreQueryFilters()
+                    .FirstOrDefaultAsync(t => t.Id == id, ct);
+                if (tenant is null)
+                    throw new TenantNotFoundException();
+
+                if (target == TenantStatus.Suspended && tenant.Status != TenantStatus.Active)
+                    throw new InvalidTenantStatusTransitionException(tenant.Status, "Active", "suspended");
+                if (target == TenantStatus.Active && tenant.Status != TenantStatus.Suspended)
+                    throw new InvalidTenantStatusTransitionException(tenant.Status, "Suspended", "resumed");
+
+                var previous = tenant.Status;
+                tenant.Status = target;
+                tenant.StatusReason = reason;
+                tenant.ModifiedBy = User.FindFirst("email")?.Value ?? "platform";
+                tenant.ModifiedOn = DateTime.UtcNow;
+                await _context.SaveChangesAsync(ct);
+
+                await _audit.WriteAsync(User, action, nameof(Tenant), tenant.Id.ToString(),
+                    new { from = previous.ToString(), to = target.ToString(), reason },
+                    actAsTenantId: tenant.Id, httpContext: HttpContext, ct: ct);
+
+                await tx.CommitAsync(ct);
+            });
+        }
+        catch (TenantNotFoundException)
+        {
             return NotFound();
-
-        if (target == TenantStatus.Suspended && tenant.Status != TenantStatus.Active)
-            return Conflict(new { error = $"Only an Active tenant can be suspended (current: {tenant.Status})." });
-        if (target == TenantStatus.Active && tenant.Status != TenantStatus.Suspended)
-            return Conflict(new { error = $"Only a Suspended tenant can be resumed (current: {tenant.Status})." });
-
-        var previous = tenant.Status;
-        tenant.Status = target;
-        tenant.StatusReason = reason;
-        tenant.ModifiedBy = User.FindFirst("email")?.Value ?? "platform";
-        tenant.ModifiedOn = DateTime.UtcNow;
-        await _context.SaveChangesAsync(ct);
-
-        await _audit.WriteAsync(User, action, nameof(Tenant), tenant.Id.ToString(),
-            new { from = previous.ToString(), to = target.ToString(), reason },
-            actAsTenantId: tenant.Id, httpContext: HttpContext, ct: ct);
+        }
+        catch (InvalidTenantStatusTransitionException ex)
+        {
+            return Conflict(new { error = ex.Message });
+        }
+        catch (Exception)
+        {
+            _logger.LogError("Failed to change tenant {TenantId} status with action {Action}", id, action);
+            return StatusCode(500, new { error = "Tenant status change failed." });
+        }
 
         var withPlan = await _context.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
-            .Include(t => t.Plan).FirstAsync(t => t.Id == tenant.Id, ct);
+            .Include(t => t.Plan).FirstAsync(t => t.Id == id, ct);
         return Ok(ToDto(withPlan));
+    }
+
+    private sealed class TenantNotFoundException : Exception;
+
+    private sealed class InvalidTenantStatusTransitionException : Exception
+    {
+        public InvalidTenantStatusTransitionException(
+            TenantStatus current, string required, string operation)
+            : base($"Only a {required} tenant can be {operation} (current: {current}).")
+        {
+        }
     }
 
     private static TenantSummaryDto ToDto(Tenant t) => new()

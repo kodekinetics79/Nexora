@@ -82,6 +82,7 @@ const AccountOwnershipPage = lazy(() => import('./pages/SalesManagement/AccountO
 const RoutingQueuePage = lazy(() => import('./pages/SalesManagement/RoutingQueuePage'));
 const FollowUpsPage = lazy(() => import('./pages/SalesManagement/FollowUpsPage'));
 const PerformancePage = lazy(() => import('./pages/SalesManagement/PerformancePage'));
+const CommercialExceptionCenterPage = lazy(() => import('./pages/SalesManagement/CommercialExceptionCenterPage'));
 const SourcingTodayPage = lazy(() => import('./pages/Today/SourcingTodayPage'));
 const TenantAdminOperationsPage = lazy(() => import('./pages/Today/TenantAdminOperationsPage'));
 
@@ -140,6 +141,7 @@ function App() {
       <Route path="/sales/routing" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><RoutingQueuePage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/follow-ups" element={<MainLayout><PermissionGuard moduleName="Quotations" redirect><FollowUpsPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/performance" element={<MainLayout><PermissionGuard moduleName="Dashboard" redirect><PerformancePage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/exceptions" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><CommercialExceptionCenterPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/quotes" element={<MainLayout><PermissionGuard moduleName="Quotations" redirect><QuotesPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/quotes/create" element={<MainLayout><PermissionGuard moduleName="Quotations" action="create" redirect><CreateQuotePage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/quotes/view/:id" element={<MainLayout><PermissionGuard moduleName="Quotations" redirect><QuoteViewPage /></PermissionGuard></MainLayout>} />

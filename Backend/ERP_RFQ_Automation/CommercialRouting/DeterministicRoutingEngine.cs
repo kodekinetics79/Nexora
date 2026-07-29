@@ -138,6 +138,7 @@ public sealed class DeterministicRoutingEngine
             LeadId = request.LeadId,
             RoutingDecision = decision,
             ReasonCode = code,
+            Priority = PriorityFor(status, code, confidence),
             EnteredOn = request.OccurredOn,
             SlaDueOn = request.OccurredOn.Add(policy.UnassignedSla),
             SuggestedCustomerId = candidate?.CustomerId,
@@ -150,6 +151,17 @@ public sealed class DeterministicRoutingEngine
         };
         return new RoutingResult(decision, null, workItem);
     }
+
+    private static int PriorityFor(CustomerMatchStatus status, string code, decimal confidence) => code switch
+    {
+        "AMBIGUOUS_CUSTOMER" => 90,
+        "OWNER_UNAVAILABLE" => 80,
+        "MATCH_BELOW_THRESHOLD" => confidence >= 0.70m ? 75 : 70,
+        "NO_EFFECTIVE_OWNERSHIP" => 60,
+        "NO_MATCH_EVIDENCE" => 50,
+        _ when status == CustomerMatchStatus.Ambiguous => 90,
+        _ => 50
+    };
 
     private static LeadRoutingDecision CreateDecision(
         RoutingRequest request,

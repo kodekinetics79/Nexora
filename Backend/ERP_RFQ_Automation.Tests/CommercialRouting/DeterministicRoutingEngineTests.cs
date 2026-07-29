@@ -40,6 +40,7 @@ public sealed class DeterministicRoutingEngineTests
 
         Assert.Equal(CustomerMatchStatus.Ambiguous, result.Decision.MatchStatus);
         Assert.Equal("AMBIGUOUS_CUSTOMER", result.WorkItem?.ReasonCode);
+        Assert.Equal(90, result.WorkItem?.Priority);
         Assert.Same(result.Decision, result.WorkItem?.RoutingDecision);
         Assert.Null(result.Assignment);
     }
@@ -108,6 +109,7 @@ public sealed class DeterministicRoutingEngineTests
 
         Assert.Equal(CustomerMatchStatus.BelowThreshold, result.Decision.MatchStatus);
         Assert.Equal("MATCH_BELOW_THRESHOLD", result.WorkItem?.ReasonCode);
+        Assert.Equal(75, result.WorkItem?.Priority);
     }
 
     [Fact]
@@ -122,6 +124,7 @@ public sealed class DeterministicRoutingEngineTests
 
         Assert.Equal("OWNER_UNAVAILABLE", result.WorkItem?.ReasonCode);
         Assert.Equal(501, result.WorkItem?.SuggestedUserId);
+        Assert.Equal(80, result.WorkItem?.Priority);
     }
 
     [Fact]

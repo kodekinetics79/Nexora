@@ -228,14 +228,16 @@ public sealed class CommercialIntelligenceController(
 
     [HttpGet("routing-queue")]
     [RequireModulePermission("Leads", PermissionAction.View)]
-    public async Task<ActionResult> RoutingQueue(CancellationToken ct)
+    public async Task<ActionResult> RoutingQueue([FromQuery] long? sourceId, CancellationToken ct)
     {
         var tenant = TenantId();
         var rows = await (from item in db.Set<UnassignedWorkItem>().AsNoTracking()
             join lead in db.Leads.AsNoTracking() on item.LeadId equals lead.Id
-            where item.BusinessUnitId == tenant && item.Status == WorkItemStatus.Open
+            where item.BusinessUnitId == tenant &&
+                  ((!sourceId.HasValue && item.Status == WorkItemStatus.Open) ||
+                   (sourceId.HasValue && item.Id == sourceId.Value))
             orderby item.Priority descending, item.EnteredOn
-            select new { leadId = lead.Id, nexoraSerial = lead.CommercialCaseReference ?? $"LEAD-{lead.Id}",
+            select new { sourceId = item.Id, leadId = lead.Id, nexoraSerial = lead.CommercialCaseReference ?? $"LEAD-{lead.Id}",
                 customerName = lead.BuyersName, receivedAt = lead.RecDate, dueAt = (DateTime?)item.SlaDueOn,
                 reason = item.RequiredAction, recommendedOwnerUserId = item.SuggestedUserId,
                 recommendedOwnerName = (string?)null, recommendationReason = item.ReasonCode, version = item.Version }).Take(250).ToListAsync(ct);
@@ -254,7 +256,11 @@ public sealed class CommercialIntelligenceController(
 
     [HttpGet("follow-ups")]
     [RequireModulePermission("Quotations", PermissionAction.View)]
-    public async Task<ActionResult> FollowUps([FromQuery] string? status, [FromQuery] long? customerId, CancellationToken ct)
+    public async Task<ActionResult> FollowUps(
+        [FromQuery] string? status,
+        [FromQuery] long? customerId,
+        [FromQuery] long? sourceId,
+        CancellationToken ct)
     {
         var tenant = TenantId();
         var tenantWide = await IsTenantWideAsync(tenant);
@@ -263,6 +269,7 @@ public sealed class CommercialIntelligenceController(
         var query = db.FollowUpTasks.AsNoTracking().Where(x => x.BusinessUnitId == tenant &&
             (string.IsNullOrWhiteSpace(status) || status != "open" || x.Status == FollowUpStatus.Open || x.Status == FollowUpStatus.InProgress));
         if (!tenantWide) query = query.Where(x => x.AssignedToUserId == userId!.Value);
+        if (sourceId.HasValue) query = query.Where(x => x.Id == sourceId.Value);
         if (customerId.HasValue)
             query = query.Where(x => x.AggregateType == "Quote" && db.Quotes.Any(q =>
                 q.BusinessUnitId == tenant && q.CustomerId == customerId.Value && q.Id == x.AggregateId));

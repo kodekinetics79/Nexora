@@ -38,6 +38,8 @@ services:
         value: "true"
       - key: Jwt__Key
         sync: false
+      - key: Jwt__PlatformKey
+        sync: false
       - key: CommercialFinance__DunningProviderWebhookSecret
         sync: false
       - key: CommercialFinance__ContactVerificationSecret

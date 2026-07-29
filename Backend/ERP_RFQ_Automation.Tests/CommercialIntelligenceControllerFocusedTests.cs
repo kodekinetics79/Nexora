@@ -217,7 +217,7 @@ public sealed class CommercialIntelligenceControllerFocusedTests
             ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext { User = Principal(tenant) } }
         };
 
-        var response = Assert.IsType<OkObjectResult>(await controller.FollowUps(null, customer.Id, default));
+        var response = Assert.IsType<OkObjectResult>(await controller.FollowUps(null, customer.Id, null, default));
         using var document = JsonDocument.Parse(JsonSerializer.Serialize(response.Value, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
 
         var row = Assert.Single(document.RootElement.EnumerateArray());

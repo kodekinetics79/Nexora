@@ -33,6 +33,7 @@ import dashboardService, {
   type Release01KpiUnit,
 } from '../../api/services/dashboardService';
 import commercialIntelligenceService from '../../api/services/commercialIntelligenceService';
+import { useAuth } from '../../context/AuthContext';
 
 const formatValue = (kpi: Release01KpiDTO): string => {
   if (kpi.state === 'insufficient_data' || kpi.value === null) {
@@ -147,6 +148,7 @@ const KpiCard = ({ kpi }: { kpi: Release01KpiDTO }) => {
 };
 
 export default function DashboardPage() {
+  const { hasPermission } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const isExecutiveToday = location.pathname === '/executive/today';
@@ -259,6 +261,7 @@ export default function DashboardPage() {
               ['RFQs requiring review', '/procurement/rfqs/draft'],
               ['RFQs ready for Quote', '/procurement/rfqs/all?state=ready-for-quote'],
               ['Quote Drafts awaiting action', '/sales/quotes?state=draft'],
+              ...(hasPermission('Leads') ? [['Commercial exceptions', '/sales/exceptions']] : []),
             ].map(([label, route]) => (
               <Button key={label} variant="outlined" endIcon={<DrillDownIcon />} onClick={() => navigate(route)} sx={{ minHeight: 56, justifyContent: 'space-between', textAlign: 'left' }}>
                 {label}
