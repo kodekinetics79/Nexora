@@ -32,6 +32,13 @@ public sealed record OpportunityPriorityItem(
     bool InsufficientEvidence,
     string RecommendedActionCode,
     string RecommendedActionLabel,
+    decimal? ExpectedCommercialValue,
+    string? ExpectedCommercialValueCurrency,
+    string ExpectedCommercialValueStatus,
+    IReadOnlyList<OpportunityPrioritySignal> Components,
+    DateTime? ResponseDeadline,
+    string CurrentBlocker,
+    IReadOnlyList<OpportunityActionOption> AvailableActions,
     IReadOnlyList<string> Reasons,
     string EvidenceJson,
     DateTime EvidenceCutoffAtUtc,
@@ -42,6 +49,29 @@ public sealed record OpportunityPriorityItem(
     bool IsCurrent,
     IReadOnlyList<OpportunityOutcomeItem> Outcomes,
     OpportunityFeedbackItem? LatestFeedback);
+
+public sealed record OpportunityPrioritySignal(
+    string Code,
+    string Label,
+    decimal? Value,
+    string? Unit,
+    int SampleSize,
+    decimal Confidence,
+    string Status,
+    DateTime EvidenceAsOfUtc,
+    string SourceType,
+    string SourceReference,
+    string Evidence);
+
+public sealed record OpportunityActionOption(string Code, string Label);
+
+public sealed record OpportunityPriorityComponentSet(
+    IReadOnlyList<OpportunityPrioritySignal> Signals,
+    decimal? ExpectedCommercialValue,
+    string? Currency,
+    string Status,
+    DateTime? ResponseDeadline,
+    string CurrentBlocker);
 
 public sealed record OpportunityPriorityPage(
     IReadOnlyList<OpportunityPriorityItem> Items,

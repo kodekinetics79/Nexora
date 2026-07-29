@@ -47,6 +47,9 @@ public sealed class OpportunityRecommendation
     public int SampleSize { get; set; }
     public string RecommendedActionCode { get; set; } = string.Empty;
     public string RecommendedActionLabel { get; set; } = string.Empty;
+    public decimal? ExpectedCommercialValue { get; set; }
+    public string? ExpectedCommercialValueCurrency { get; set; }
+    public string ComponentsJson { get; set; } = null!;
     public string RationaleJson { get; set; } = "[]";
     public string CohortKey { get; set; } = string.Empty;
     public string Mode { get; set; } = OpportunityPriorityMode.Shadow;

@@ -33,6 +33,132 @@ public sealed class LeadDecisionServiceTests
     }
 
     [Fact]
+    public async Task Customer_history_uses_recent_sent_quotes_and_only_their_recent_orders()
+    {
+        using var database = new TestDb();
+        var now = DateTime.UtcNow;
+        await using (var seed = database.ContextFor(null))
+        {
+            var customer = Seed.Customer(seed, 101, TenantId, "Measured Buyer");
+            var lead = Seed.Lead(seed, 1, TenantId, buyersName: "Measured Buyer");
+            lead.ResolveCommercialIdentity(customer.Id, null, "VERIFIED");
+            seed.SetupMasters.Add(new SetupMaster
+            {
+                SetupId = 701,
+                SetupType = "OrderStatus",
+                SetupValue = "Open",
+                BusinessUnitId = TenantId,
+                IsActive = true,
+                CreatedBy = "test",
+                CreatedOn = now
+            });
+            seed.Currencies.Add(new Currency
+            {
+                Id = 702,
+                Code = "USD",
+                CurrencyName = "US Dollar",
+                BusinessUnitId = TenantId,
+                IsActive = true,
+                CreatedBy = "test",
+                CreatedOn = now
+            });
+            seed.Quotes.AddRange(
+                new Quote
+                {
+                    Id = 703,
+                    QuoteNo = "QT-RECENT",
+                    CustomerId = customer.Id,
+                    BusinessUnitId = TenantId,
+                    QuoteDate = now.AddDays(-11),
+                    SentOn = now.AddDays(-10),
+                    CreatedBy = "test",
+                    CreatedDate = now.AddDays(-11)
+                },
+                new Quote
+                {
+                    Id = 704,
+                    QuoteNo = "QT-OLD",
+                    CustomerId = customer.Id,
+                    BusinessUnitId = TenantId,
+                    QuoteDate = now.AddMonths(-25),
+                    SentOn = now.AddMonths(-25),
+                    CreatedBy = "test",
+                    CreatedDate = now.AddMonths(-25)
+                },
+                new Quote
+                {
+                    Id = 708,
+                    QuoteNo = "QT-RECENT-OLD-ORDER",
+                    CustomerId = customer.Id,
+                    BusinessUnitId = TenantId,
+                    QuoteDate = now.AddDays(-20),
+                    SentOn = now.AddDays(-19),
+                    CreatedBy = "test",
+                    CreatedDate = now.AddDays(-20)
+                });
+            seed.Orders.AddRange(
+                new Order
+                {
+                    Id = 705,
+                    OrderNo = "SO-ELIGIBLE",
+                    QuoteId = 703,
+                    SourceType = "LEGACY_QUOTE",
+                    CustomerId = customer.Id,
+                    BusinessUnitId = TenantId,
+                    StatusId = 701,
+                    CurrencyId = 702,
+                    OrderDate = now.AddDays(-5),
+                    TotalAmount = 250m,
+                    CreatedBy = "test",
+                    CreatedOn = now,
+                    IsActive = true
+                },
+                new Order
+                {
+                    Id = 706,
+                    OrderNo = "SO-OLD-QUOTE",
+                    QuoteId = 704,
+                    SourceType = "LEGACY_QUOTE",
+                    CustomerId = customer.Id,
+                    BusinessUnitId = TenantId,
+                    StatusId = 701,
+                    CurrencyId = 702,
+                    OrderDate = now.AddDays(-4),
+                    TotalAmount = 900m,
+                    CreatedBy = "test",
+                    CreatedOn = now,
+                    IsActive = true
+                },
+                new Order
+                {
+                    Id = 707,
+                    OrderNo = "SO-OLD-ORDER",
+                    QuoteId = 708,
+                    SourceType = "LEGACY_QUOTE",
+                    CustomerId = customer.Id,
+                    BusinessUnitId = TenantId,
+                    StatusId = 701,
+                    CurrencyId = 702,
+                    OrderDate = now.AddMonths(-25),
+                    TotalAmount = 700m,
+                    CreatedBy = "test",
+                    CreatedOn = now,
+                    IsActive = true
+                });
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = database.ContextFor(TenantId);
+        var brief = await new LeadDecisionService(context).GetBriefAsync(1, TenantId, default);
+
+        Assert.Equal(2, brief.Customer.Quotes);
+        Assert.Equal(1, brief.Customer.Orders);
+        Assert.Equal(250m, brief.Customer.TotalOrderValue);
+        Assert.Equal("USD", brief.Customer.TotalOrderCurrency);
+        Assert.Equal(now.AddDays(-5), brief.Customer.EvidenceAsOfUtc);
+    }
+
+    [Fact]
     public async Task Heuristic_customer_matching_is_tenant_scoped_and_explicitly_weaker()
     {
         using var database = new TestDb();
@@ -128,7 +254,7 @@ public sealed class LeadDecisionServiceTests
     }
 
     [Fact]
-    public async Task Same_currency_margin_is_quantity_and_revenue_weighted()
+    public async Task Product_cost_without_currency_never_creates_margin()
     {
         using var database = new TestDb();
         await using (var seed = database.ContextFor(null))
@@ -146,11 +272,64 @@ public sealed class LeadDecisionServiceTests
 
         Assert.Equal("USD", brief.Currency);
         Assert.Equal(190m, brief.EstimatedValue);
-        Assert.Equal(31.1m, brief.MarginPotentialPct);
+        Assert.Null(brief.MarginPotentialPct);
+        Assert.Equal(0, brief.MarginCostedItems);
+        Assert.False(brief.IsMarginComplete);
         Assert.Equal(2, brief.Coverage.CatalogOnHandItems);
         Assert.Equal(2m, brief.Coverage.CatalogOnHandQuantity);
         Assert.Contains(brief.Reasons, reason => reason.Contains("not ATP", StringComparison.Ordinal));
         Assert.DoesNotContain(brief.Reasons, reason => reason.Contains("We stock", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Duplicate_exact_product_identifiers_fail_closed()
+    {
+        using var database = new TestDb();
+        await using (var seed = database.ContextFor(null))
+        {
+            var lead = Seed.Lead(seed, 1, TenantId, buyersName: null);
+            lead.LeadItems.Add(Item(1001, null, "DUPLICATE", "Ambiguous product", 1, 100m, "USD"));
+            var first = Product(501, "FIRST", "First", 1m, 50m, 100m);
+            var second = Product(502, "SECOND", "Second", 1m, 55m, 100m);
+            first.ModelNo = "DUPLICATE";
+            second.ModelNo = "DUPLICATE";
+            seed.Products.AddRange(first, second);
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = database.ContextFor(TenantId);
+        var brief = await new LeadDecisionService(context).GetBriefAsync(1, TenantId, default);
+
+        var item = Assert.Single(brief.Coverage.Items);
+        Assert.False(item.Matched);
+        Assert.Null(item.ProductId);
+        Assert.Equal(0, brief.Coverage.CoveredItems);
+        Assert.Null(brief.MarginPotentialPct);
+    }
+
+    [Fact]
+    public async Task Conflicting_cross_identifier_product_matches_fail_closed()
+    {
+        using var database = new TestDb();
+        await using (var seed = database.ContextFor(null))
+        {
+            var lead = Seed.Lead(seed, 1, TenantId, buyersName: null);
+            lead.LeadItems.Add(Item(1001, "PART-A", "PART-B", "Conflicting identifiers", 1, 100m, "USD"));
+            var first = Product(501, "PART-A", "First", 1m, 50m, 100m);
+            first.ModelNo = "MODEL-A";
+            var second = Product(502, "PART-B", "Second", 1m, 55m, 100m);
+            second.ModelNo = "PART-B";
+            seed.Products.AddRange(first, second);
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = database.ContextFor(TenantId);
+        var brief = await new LeadDecisionService(context).GetBriefAsync(1, TenantId, default);
+
+        var item = Assert.Single(brief.Coverage.Items);
+        Assert.False(item.Matched);
+        Assert.Null(item.ProductId);
+        Assert.Equal(0, brief.Coverage.CoveredItems);
     }
 
     [Fact]

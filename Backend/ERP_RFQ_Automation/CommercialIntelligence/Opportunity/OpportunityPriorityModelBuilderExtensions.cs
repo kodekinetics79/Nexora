@@ -5,7 +5,7 @@ namespace ERP_RFQ_Automation.CommercialIntelligence.Opportunity;
 
 public static class OpportunityPriorityModelBuilderExtensions
 {
-    public static ModelBuilder ApplyOpportunityPriorityModel(this ModelBuilder modelBuilder)
+    public static ModelBuilder ApplyOpportunityPriorityModel(this ModelBuilder modelBuilder, bool usePostgreSql)
     {
         modelBuilder.Entity<Lead>().HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
 
@@ -20,6 +20,39 @@ public static class OpportunityPriorityModelBuilderExtensions
                 table.HasCheckConstraint("CK_opportunity_recommendations_SampleSize", "\"SampleSize\" >= 0");
                 table.HasCheckConstraint("CK_opportunity_recommendations_EvidenceHash", "length(\"EvidenceHash\") = 64");
                 table.HasCheckConstraint("CK_opportunity_recommendations_Generated", "\"GeneratedAtUtc\" >= \"EvidenceCutoffAtUtc\"");
+                if (usePostgreSql)
+                {
+                    table.HasCheckConstraint("CK_opportunity_recommendations_EcvNonNegative",
+                        "\"ExpectedCommercialValue\" IS NULL OR \"ExpectedCommercialValue\" >= 0");
+                    table.HasCheckConstraint("CK_opportunity_recommendations_EcvCurrency", """
+                        COALESCE(
+                            "ComponentsJson" ? 'expectedCommercialValue'
+                            AND "ComponentsJson" ? 'currency'
+                            AND (("ExpectedCommercialValue" IS NULL) = ("ExpectedCommercialValueCurrency" IS NULL))
+                            AND ("ExpectedCommercialValueCurrency" IS NULL OR "ExpectedCommercialValueCurrency" ~ '^[A-Z]{3}$')
+                            AND CASE
+                                WHEN "ExpectedCommercialValue" IS NULL THEN
+                                    "ComponentsJson" -> 'expectedCommercialValue' = 'null'::jsonb
+                                    AND "ComponentsJson" -> 'currency' = 'null'::jsonb
+                                ELSE
+                                    jsonb_typeof("ComponentsJson" -> 'expectedCommercialValue') = 'number'
+                                    AND ("ComponentsJson" ->> 'expectedCommercialValue')::numeric = "ExpectedCommercialValue"
+                                    AND "ComponentsJson" ->> 'currency' = "ExpectedCommercialValueCurrency"
+                            END,
+                            FALSE)
+                        """);
+                    table.HasCheckConstraint("CK_opportunity_recommendations_ComponentsObject", """
+                        COALESCE(
+                            jsonb_typeof("ComponentsJson") = 'object'
+                            AND "ComponentsJson" ? 'signals'
+                            AND "ComponentsJson" ? 'status'
+                            AND "ComponentsJson" ? 'currentBlocker'
+                            AND jsonb_typeof("ComponentsJson" -> 'signals') = 'array'
+                            AND jsonb_typeof("ComponentsJson" -> 'status') = 'string'
+                            AND jsonb_typeof("ComponentsJson" -> 'currentBlocker') = 'string',
+                            FALSE)
+                        """);
+                }
             });
             entity.HasKey(x => x.Id);
             entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
@@ -34,6 +67,9 @@ public static class OpportunityPriorityModelBuilderExtensions
             entity.Property(x => x.Completeness).HasPrecision(5, 4);
             entity.Property(x => x.RecommendedActionCode).HasMaxLength(80).IsRequired();
             entity.Property(x => x.RecommendedActionLabel).HasMaxLength(160).IsRequired();
+            entity.Property(x => x.ExpectedCommercialValue).HasPrecision(20, 4);
+            entity.Property(x => x.ExpectedCommercialValueCurrency).HasMaxLength(12);
+            entity.Property(x => x.ComponentsJson).HasColumnType("jsonb").IsRequired();
             entity.Property(x => x.RationaleJson).HasColumnType("jsonb").IsRequired();
             entity.Property(x => x.CohortKey).HasMaxLength(100).IsRequired();
             entity.Property(x => x.Mode).HasMaxLength(20).IsRequired();

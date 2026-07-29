@@ -2,6 +2,22 @@ import axiosInstance from '../axiosInstance';
 
 export type OpportunityFeedbackCode = 'Accepted' | 'Rejected' | 'Replaced' | 'Deferred' | 'Reverted';
 
+export interface OpportunityPrioritySignal {
+  code: string;
+  label: string;
+  value?: number | null;
+  unit?: string | null;
+  sampleSize: number;
+  confidence: number;
+  status: string;
+  evidenceAsOfUtc: string;
+  sourceType: string;
+  sourceReference: string;
+  evidence: string;
+}
+
+export interface OpportunityActionOption { code: string; label: string }
+
 export interface OpportunityPriorityItem {
   recommendationId: number;
   commercialCaseId: number;
@@ -18,6 +34,13 @@ export interface OpportunityPriorityItem {
   insufficientEvidence: boolean;
   recommendedActionCode: string;
   recommendedActionLabel: string;
+  expectedCommercialValue?: number | null;
+  expectedCommercialValueCurrency?: string | null;
+  expectedCommercialValueStatus: string;
+  components: OpportunityPrioritySignal[];
+  responseDeadline?: string | null;
+  currentBlocker: string;
+  availableActions: OpportunityActionOption[];
   reasons: string[];
   evidenceJson: string;
   policyVersion: string;
@@ -107,8 +130,8 @@ const commandConfig = (identity: OpportunityCommandIdentity) => ({
 const root = '/api/opportunity-priorities';
 
 const opportunityPriorityService = {
-  getPriorities: async (): Promise<OpportunityPriorityResponse> =>
-    (await axiosInstance.get<OpportunityPriorityResponse>(root)).data,
+  getPriorities: async (pageNumber = 1, pageSize = 25): Promise<OpportunityPriorityResponse> =>
+    (await axiosInstance.get<OpportunityPriorityResponse>(root, { params: { pageNumber, pageSize } })).data,
 
   reconcileAll: async (initialIdentity: OpportunityCommandIdentity): Promise<OpportunityReconcileResult> => {
     let identity = initialIdentity;
@@ -116,11 +139,22 @@ const opportunityPriorityService = {
     let aggregate: OpportunityReconcileResult | null = null;
 
     for (let batch = 0; batch < 10_000; batch += 1) {
-      const result: OpportunityReconcileResult = (await axiosInstance.post<OpportunityReconcileResult>(
-        `${root}/reconcile`,
-        { ...identity, afterCommercialCaseId, batchSize: 100 },
-        commandConfig(identity),
-      )).data;
+      let result: OpportunityReconcileResult;
+      try {
+        result = (await axiosInstance.post<OpportunityReconcileResult>(
+          `${root}/reconcile`,
+          { ...identity, afterCommercialCaseId, batchSize: 100 },
+          commandConfig(identity),
+        )).data;
+      } catch (error) {
+        if (aggregate) {
+          throw new Error(
+            `Reconciliation stopped after ${aggregate.evaluated} opportunities. Earlier batches were persisted; retry to continue safely.`,
+            { cause: error },
+          );
+        }
+        throw error;
+      }
       aggregate = aggregate
         ? {
             ...result,
@@ -133,12 +167,16 @@ const opportunityPriorityService = {
         : result;
       if (!result.hasMore) return aggregate ?? result;
       if (!result.nextAfterCommercialCaseId || result.nextAfterCommercialCaseId === afterCommercialCaseId) {
-        throw new Error('Opportunity reconciliation did not advance its durable cursor.');
+        throw new Error(
+          `Reconciliation stopped after ${aggregate.evaluated} opportunities because its durable cursor did not advance. Earlier batches were persisted; retry safely after review.`,
+        );
       }
       afterCommercialCaseId = result.nextAfterCommercialCaseId;
       identity = createOpportunityCommandIdentity();
     }
-    throw new Error('Opportunity reconciliation exceeded the bounded batch limit.');
+    throw new Error(
+      `Reconciliation stopped after ${aggregate?.evaluated ?? 0} opportunities at the bounded batch limit. Earlier batches were persisted; retry safely after review.`,
+    );
   },
 
   getForCommercialCase: async (commercialCaseId: number): Promise<OpportunityPriorityItem> =>

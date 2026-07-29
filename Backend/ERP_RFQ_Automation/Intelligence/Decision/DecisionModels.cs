@@ -37,6 +37,12 @@ public sealed class LeadDecisionBrief
     /// </summary>
     public decimal? MarginPotentialPct { get; set; }
 
+    /// <summary>Lead lines with authoritative price, quantity, cost, and matching currency evidence.</summary>
+    public int MarginCostedItems { get; set; }
+
+    /// <summary>True only when every Lead line contributed to the margin calculation.</summary>
+    public bool IsMarginComplete { get; set; }
+
     public CustomerHistory Customer { get; set; } = new();
 
     public DeadlineFeasibility Deadline { get; set; } = new();
@@ -127,6 +133,9 @@ public sealed class CustomerHistory
     public decimal? TotalOrderValue { get; set; }
 
     public string? TotalOrderCurrency { get; set; }
+
+    /// <summary>Latest sent-Quote or linked-Order evidence used by the customer cohort.</summary>
+    public DateTime? EvidenceAsOfUtc { get; set; }
 }
 
 /// <summary>Can we realistically respond before the bid closes?</summary>

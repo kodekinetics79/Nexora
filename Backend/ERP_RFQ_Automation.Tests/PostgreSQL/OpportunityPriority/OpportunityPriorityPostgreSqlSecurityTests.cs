@@ -1,6 +1,8 @@
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Npgsql;
 
 namespace ERP_RFQ_Automation.Tests.PostgreSQL.OpportunityPriority;
@@ -20,6 +22,86 @@ public sealed class OpportunityPriorityPostgreSqlSecurityTests(PostgreSqlTestDat
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
+    public async Task Populated_component_migration_upgrades_rolls_back_and_reupgrades()
+    {
+        var databaseName = $"nexora_v2g2_upgrade_{Guid.NewGuid():N}";
+        var adminBuilder = new NpgsqlConnectionStringBuilder(database.ConnectionString) { Database = "postgres" };
+        var isolatedBuilder = new NpgsqlConnectionStringBuilder(database.ConnectionString) { Database = databaseName };
+        await using (var admin = new NpgsqlConnection(adminBuilder.ConnectionString))
+        {
+            await admin.OpenAsync();
+            await using var create = admin.CreateCommand();
+            create.CommandText = $"CREATE DATABASE \"{databaseName}\"";
+            await create.ExecuteNonQueryAsync();
+        }
+
+        try
+        {
+            await using var context = database.ContextForConnectionString(isolatedBuilder.ConnectionString, 839_001);
+            var migrator = context.GetService<IMigrator>();
+            const string previous = "20260729031740_V2Gate02OpportunityPriorityShadow";
+            const string current = "20260729054001_V2Gate02ValidateOpportunityCommercialComponents";
+            await migrator.MigrateAsync(previous);
+
+            var lead = Seed.Lead(context, 839_011, 839_001);
+            await context.SaveChangesAsync();
+            var identity = await context.Leads.IgnoreQueryFilters().AsNoTracking()
+                .Where(x => x.Id == lead.Id)
+                .Select(x => new { x.CommercialCaseId, x.CommercialCaseReference })
+                .SingleAsync();
+
+            await using (var transaction = await context.Database.BeginTransactionAsync())
+            {
+                await context.Database.ExecuteSqlInterpolatedAsync($$"""
+                    INSERT INTO commercial_opportunity_recommendations
+                      ("Id","BusinessUnitId","CommercialCaseId","NexoraSerial","LeadId","LeadVersion",
+                       "RecommendationKey","PolicyVersion","FeatureSchemaVersion","EvidenceCutoffAtUtc",
+                       "EvidenceSnapshotJson","EvidenceHash","PriorityScore","PriorityBand","Confidence",
+                       "Completeness","SampleSize","RecommendedActionCode","RecommendedActionLabel",
+                       "RationaleJson","CohortKey","Mode","GeneratedAtUtc")
+                    VALUES (839101,839001,{{identity.CommercialCaseId}},{{identity.CommercialCaseReference}},839011,1,
+                            'migration-recommendation','migration-policy','migration-schema',now()-interval '1 minute',
+                            '{}'::jsonb,repeat('a',64),50,'Medium',0.5,0.5,1,'REVIEW','Review opportunity',
+                            '[]'::jsonb,'insufficient-evidence','Shadow',now());
+                    INSERT INTO commercial_opportunity_events
+                      ("Id","BusinessUnitId","OpportunityRecommendationId","EventType","SourceType","SourceId",
+                       "ActorId","OccurredAtUtc","CorrelationId","IdempotencyKey","RequestHash","PayloadJson")
+                    VALUES (839102,839001,839101,'OpportunityRecommendation.Generated','Recommendation',839101,
+                            'migration-test',now(),'migration-event','migration-event',repeat('b',64),'{}'::jsonb);
+                    INSERT INTO commercial_opportunity_outbox
+                      ("Id","BusinessUnitId","OpportunityEventId","EventType","PayloadJson",
+                       "OccurredAtUtc","AvailableAtUtc","AttemptCount")
+                    VALUES (839103,839001,839102,'OpportunityRecommendation.Generated','{}'::jsonb,now(),now(),0);
+                    """);
+                await transaction.CommitAsync();
+            }
+
+            await migrator.MigrateAsync(current);
+            await AssertComponentMigrationStateAsync(context, expectedColumns: 3, expectedHistory: true);
+            Assert.Equal("legacy_reconcile_required", await context.Database.SqlQueryRaw<string>(
+                "SELECT \"ComponentsJson\"->>'status' AS \"Value\" FROM commercial_opportunity_recommendations WHERE \"Id\"=839101").SingleAsync());
+
+            await migrator.MigrateAsync(previous);
+            await AssertComponentMigrationStateAsync(context, expectedColumns: 0, expectedHistory: false);
+
+            await migrator.MigrateAsync(current);
+            await AssertComponentMigrationStateAsync(context, expectedColumns: 3, expectedHistory: true);
+            Assert.Equal("legacy_reconcile_required", await context.Database.SqlQueryRaw<string>(
+                "SELECT \"ComponentsJson\"->>'status' AS \"Value\" FROM commercial_opportunity_recommendations WHERE \"Id\"=839101").SingleAsync());
+        }
+        finally
+        {
+            NpgsqlConnection.ClearAllPools();
+            await using var admin = new NpgsqlConnection(adminBuilder.ConnectionString);
+            await admin.OpenAsync();
+            await using var drop = admin.CreateCommand();
+            drop.CommandText = $"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)";
+            await drop.ExecuteNonQueryAsync();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
     public async Task Latest_schema_forces_tenant_RLS_and_installs_integrity_guards()
     {
         await using var connection = await database.OpenConnectionAsync();
@@ -28,6 +110,10 @@ public sealed class OpportunityPriorityPostgreSqlSecurityTests(PostgreSqlTestDat
             SELECT
                 (SELECT count(*) FROM "__EFMigrationsHistory"
                  WHERE "MigrationId" = '20260729031740_V2Gate02OpportunityPriorityShadow') = 1,
+                (SELECT count(*) FROM "__EFMigrationsHistory"
+                 WHERE "MigrationId" = '20260729043226_V2Gate02OpportunityCommercialComponents') = 1,
+                (SELECT count(*) FROM "__EFMigrationsHistory"
+                 WHERE "MigrationId" = '20260729054001_V2Gate02ValidateOpportunityCommercialComponents') = 1,
                 (SELECT count(*) FROM pg_policies
                  WHERE schemaname = 'public'
                    AND policyname = 'nexora_tenant_isolation'
@@ -73,13 +159,115 @@ public sealed class OpportunityPriorityPostgreSqlSecurityTests(PostgreSqlTestDat
                 has_table_privilege('nexora_tenant_app', 'public.commercial_opportunity_outbox', 'SELECT,INSERT,UPDATE')
                   AND NOT has_table_privilege('nexora_tenant_app', 'public.commercial_opportunity_outbox', 'DELETE'),
                 has_table_privilege('nexora_tenant_app', 'public.commercial_opportunity_operations', 'SELECT,INSERT')
-                  AND NOT has_table_privilege('nexora_tenant_app', 'public.commercial_opportunity_operations', 'UPDATE,DELETE');
+                  AND NOT has_table_privilege('nexora_tenant_app', 'public.commercial_opportunity_operations', 'UPDATE,DELETE'),
+                (SELECT count(*) FROM pg_constraint
+                 WHERE conrelid = 'public.commercial_opportunity_recommendations'::regclass
+                   AND conname = ANY(ARRAY[
+                     'CK_opportunity_recommendations_EcvNonNegative',
+                     'CK_opportunity_recommendations_EcvCurrency',
+                     'CK_opportunity_recommendations_ComponentsObject'])) = 3,
+                (SELECT count(*)
+                 FROM pg_policy p
+                 JOIN pg_class c ON c.oid = p.polrelid
+                 JOIN pg_namespace n ON n.oid = c.relnamespace
+                 WHERE n.nspname = 'public'
+                   AND p.polname = 'nexora_tenant_isolation'
+                   AND c.relname = ANY(ARRAY[
+                     'commercial_opportunity_recommendations',
+                     'commercial_opportunity_outcomes',
+                     'commercial_opportunity_feedback',
+                     'commercial_opportunity_events',
+                     'commercial_opportunity_outbox',
+                     'commercial_opportunity_operations'])
+                   AND pg_get_expr(p.polqual, p.polrelid) LIKE '%nexora.business_unit_id%'
+                   AND pg_get_expr(p.polwithcheck, p.polrelid) LIKE '%nexora.business_unit_id%') = 6;
             """;
 
         await using var reader = await command.ExecuteReaderAsync();
         Assert.True(await reader.ReadAsync());
-        for (var index = 0; index < 10; index++)
+        for (var index = 0; index < 14; index++)
             Assert.True(reader.GetBoolean(index), $"Gate 2 schema security assertion {index + 1} failed.");
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Commercial_component_constraints_reject_invalid_expected_value()
+    {
+        var fixture = new OpportunityFixture(840_001, 840_011, 840_101, 'z');
+        await SeedGraphAsync(fixture);
+
+        await using var connection = await database.OpenConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = $$"""
+            INSERT INTO commercial_opportunity_recommendations
+              ("Id","BusinessUnitId","CommercialCaseId","NexoraSerial","LeadId","LeadVersion",
+               "RecommendationKey","PolicyVersion","FeatureSchemaVersion","EvidenceCutoffAtUtc",
+               "EvidenceSnapshotJson","EvidenceHash","PriorityScore","PriorityBand","Confidence",
+               "Completeness","SampleSize","RecommendedActionCode","RecommendedActionLabel",
+               "ExpectedCommercialValue","ExpectedCommercialValueCurrency","ComponentsJson",
+               "RationaleJson","CohortKey","Mode","GeneratedAtUtc")
+            VALUES ({{fixture.BaseId + 70}}, {{fixture.TenantId}}, {{fixture.CommercialCaseId}}, '{{fixture.NexoraSerial}}',
+                    {{fixture.LeadId}}, 1, 'invalid-negative-ecv', 'test-policy', 'test-schema', now(), '{}'::jsonb,
+                    repeat('2', 64), 50, 'Medium', 0.5, 0.5, 1, 'REVIEW', 'Review opportunity',
+                    -1, 'USD',
+                    '{"signals":[],"expectedCommercialValue":-1,"currency":"USD","status":"shadow_unvalidated","currentBlocker":"none"}'::jsonb,
+                    '[]'::jsonb, 'eligible-shadow', 'Shadow', now());
+            """;
+
+        var error = await Assert.ThrowsAsync<PostgresException>(() => command.ExecuteNonQueryAsync());
+        Assert.Equal(PostgresErrorCodes.CheckViolation, error.SqlState);
+        Assert.Equal("CK_opportunity_recommendations_EcvNonNegative", error.ConstraintName);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Commercial_component_constraints_reject_currency_and_json_mismatches()
+    {
+        var fixture = new OpportunityFixture(840_201, 840_211, 840_301, 'y');
+        await SeedGraphAsync(fixture);
+        var invalidCases = new[]
+        {
+            (Offset: 71, Value: "10", Currency: "NULL",
+                Components: "'{\"signals\":[],\"expectedCommercialValue\":10,\"currency\":null,\"status\":\"shadow_unvalidated\",\"currentBlocker\":\"none\"}'::jsonb",
+                Constraint: "CK_opportunity_recommendations_EcvCurrency"),
+            (Offset: 72, Value: "NULL", Currency: "'USD'",
+                Components: "'{\"signals\":[],\"expectedCommercialValue\":null,\"currency\":\"USD\",\"status\":\"insufficient_evidence\",\"currentBlocker\":\"none\"}'::jsonb",
+                Constraint: "CK_opportunity_recommendations_EcvCurrency"),
+            (Offset: 73, Value: "NULL", Currency: "NULL", Components: "'[]'::jsonb",
+                Constraint: "CK_opportunity_recommendations_ComponentsObject"),
+            (Offset: 74, Value: "10", Currency: "'usd'",
+                Components: "'{\"signals\":[],\"expectedCommercialValue\":10,\"currency\":\"usd\",\"status\":\"shadow_unvalidated\",\"currentBlocker\":\"none\"}'::jsonb",
+                Constraint: "CK_opportunity_recommendations_EcvCurrency"),
+            (Offset: 75, Value: "NULL", Currency: "NULL",
+                Components: "'{\"signals\":[],\"expectedCommercialValue\":null,\"currency\":null,\"currentBlocker\":\"none\"}'::jsonb",
+                Constraint: "CK_opportunity_recommendations_ComponentsObject"),
+            (Offset: 76, Value: "NULL", Currency: "NULL",
+                Components: "'{\"signals\":[],\"status\":\"insufficient_evidence\",\"currentBlocker\":\"none\"}'::jsonb",
+                Constraint: "CK_opportunity_recommendations_EcvCurrency")
+        };
+
+        foreach (var invalid in invalidCases)
+        {
+            await using var connection = await database.OpenConnectionAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = $$"""
+                INSERT INTO commercial_opportunity_recommendations
+                  ("Id","BusinessUnitId","CommercialCaseId","NexoraSerial","LeadId","LeadVersion",
+                   "RecommendationKey","PolicyVersion","FeatureSchemaVersion","EvidenceCutoffAtUtc",
+                   "EvidenceSnapshotJson","EvidenceHash","PriorityScore","PriorityBand","Confidence",
+                   "Completeness","SampleSize","RecommendedActionCode","RecommendedActionLabel",
+                   "ExpectedCommercialValue","ExpectedCommercialValueCurrency","ComponentsJson",
+                   "RationaleJson","CohortKey","Mode","GeneratedAtUtc")
+                VALUES ({{fixture.BaseId + invalid.Offset}}, {{fixture.TenantId}}, {{fixture.CommercialCaseId}}, '{{fixture.NexoraSerial}}',
+                        {{fixture.LeadId}}, 1, 'invalid-components-{{invalid.Offset}}', 'test-policy', 'test-schema', now(),
+                        '{}'::jsonb, repeat('3', 64), 50, 'Medium', 0.5, 0.5, 1, 'REVIEW', 'Review opportunity',
+                        {{invalid.Value}}, {{invalid.Currency}}, {{invalid.Components}}, '[]'::jsonb,
+                        'eligible-shadow', 'Shadow', now());
+                """;
+            var error = await Assert.ThrowsAsync<PostgresException>(() => command.ExecuteNonQueryAsync());
+            Assert.Equal(PostgresErrorCodes.CheckViolation, error.SqlState);
+            Assert.Equal(invalid.Constraint, error.ConstraintName);
+        }
     }
 
     [Fact]
@@ -95,12 +283,12 @@ public sealed class OpportunityPriorityPostgreSqlSecurityTests(PostgreSqlTestDat
               ("Id","BusinessUnitId","CommercialCaseId","NexoraSerial","LeadId","LeadVersion",
                "RecommendationKey","PolicyVersion","FeatureSchemaVersion","EvidenceCutoffAtUtc",
                "EvidenceSnapshotJson","EvidenceHash","PriorityScore","PriorityBand","Confidence",
-               "Completeness","SampleSize","RecommendedActionCode","RecommendedActionLabel",
+               "Completeness","SampleSize","RecommendedActionCode","RecommendedActionLabel","ComponentsJson",
                "RationaleJson","CohortKey","Mode","GeneratedAtUtc")
             VALUES ({{tenantA.BaseId + 60}}, {{tenantA.TenantId}}, {{tenantB.CommercialCaseId}}, '{{tenantB.NexoraSerial}}',
                     {{tenantA.LeadId}}, 1, 'mismatched-lineage', 'test-policy', 'test-schema', now(), '{}'::jsonb,
                     repeat('6', 64), 50, 'Medium', 0.5, 0.5, 1, 'REVIEW', 'Review opportunity',
-                    '[]'::jsonb, 'eligible-shadow', 'Shadow', now());
+                    '{"signals":[],"expectedCommercialValue":null,"currency":null,"status":"legacy_reconcile_required","responseDeadline":null,"currentBlocker":"Reconcile to generate commercial components."}'::jsonb, '[]'::jsonb, 'eligible-shadow', 'Shadow', now());
             """, "opportunity recommendation must retain tenant-qualified lead and Nexora Serial lineage");
 
         await AssertInsertRejectedAsync($$"""
@@ -108,12 +296,12 @@ public sealed class OpportunityPriorityPostgreSqlSecurityTests(PostgreSqlTestDat
               ("Id","BusinessUnitId","CommercialCaseId","NexoraSerial","LeadId","LeadVersion",
                "SupersedesRecommendationId","RecommendationKey","PolicyVersion","FeatureSchemaVersion",
                "EvidenceCutoffAtUtc","EvidenceSnapshotJson","EvidenceHash","PriorityScore","PriorityBand",
-               "Confidence","Completeness","SampleSize","RecommendedActionCode","RecommendedActionLabel",
+               "Confidence","Completeness","SampleSize","RecommendedActionCode","RecommendedActionLabel","ComponentsJson",
                "RationaleJson","CohortKey","Mode","GeneratedAtUtc")
             VALUES ({{tenantA.BaseId + 61}}, {{tenantA.TenantId}}, {{tenantA.CommercialCaseId}}, '{{tenantA.NexoraSerial}}',
                     {{tenantA.LeadId}}, 2, {{tenantB.RecommendationId}}, 'cross-case-supersession', 'test-policy',
                     'test-schema', now(), '{}'::jsonb, repeat('7', 64), 50, 'Medium', 0.5, 0.5, 1,
-                    'REVIEW', 'Review opportunity', '[]'::jsonb, 'eligible-shadow', 'Shadow', now());
+                    'REVIEW', 'Review opportunity', '{"signals":[],"expectedCommercialValue":null,"currency":null,"status":"legacy_reconcile_required","responseDeadline":null,"currentBlocker":"Reconcile to generate commercial components."}'::jsonb, '[]'::jsonb, 'eligible-shadow', 'Shadow', now());
             """, "superseded recommendation must retain the same commercial identity");
     }
 
@@ -159,24 +347,72 @@ public sealed class OpportunityPriorityPostgreSqlSecurityTests(PostgreSqlTestDat
             await transaction.RollbackAsync();
         }
 
-        await using (var transaction = await connection.BeginTransactionAsync())
+        var crossTenantWrites = new[]
         {
+            $$"""
+                INSERT INTO commercial_opportunity_recommendations
+                  ("Id","BusinessUnitId","CommercialCaseId","NexoraSerial","LeadId","LeadVersion",
+                   "RecommendationKey","PolicyVersion","FeatureSchemaVersion","EvidenceCutoffAtUtc",
+                   "EvidenceSnapshotJson","EvidenceHash","PriorityScore","PriorityBand","Confidence",
+                   "Completeness","SampleSize","RecommendedActionCode","RecommendedActionLabel","ComponentsJson",
+                   "RationaleJson","CohortKey","Mode","GeneratedAtUtc")
+                VALUES ({{tenantB.BaseId + 91}},{{tenantB.TenantId}},{{tenantB.CommercialCaseId}},'{{tenantB.NexoraSerial}}',
+                        {{tenantB.LeadId}},1,'cross-tenant-rec','test-policy','test-schema',now()-interval '1 minute',
+                        '{}'::jsonb,repeat('a',64),50,'Medium',0.5,0.5,1,'REVIEW','Review opportunity',
+                        '{"signals":[],"expectedCommercialValue":null,"currency":null,"status":"insufficient_evidence","currentBlocker":"none"}'::jsonb,
+                        '[]'::jsonb,'insufficient-evidence','Shadow',now());
+                """,
+            $$"""
+                INSERT INTO commercial_opportunity_outcomes
+                  ("Id","BusinessUnitId","OpportunityRecommendationId","OutcomeCode","ObservedAtUtc",
+                   "SourceType","SourceId","SourceVersion","EvidenceJson","EvidenceHash","CorrelationId")
+                VALUES ({{tenantB.BaseId + 92}},{{tenantB.TenantId}},{{tenantB.RecommendationId}},'QUOTE_LOST',now(),
+                        'Quote',{{tenantB.BaseId + 80}},2,'{}'::jsonb,repeat('b',64),'cross-tenant-outcome');
+                """,
+            $$"""
+                INSERT INTO commercial_opportunity_feedback
+                  ("Id","BusinessUnitId","OpportunityRecommendationId","Decision","Reason","ActorId",
+                   "OccurredAtUtc","IdempotencyKey","CorrelationId")
+                VALUES ({{tenantB.BaseId + 93}},{{tenantB.TenantId}},{{tenantB.RecommendationId}},'Deferred',
+                        'cross tenant','security-test',now(),'cross-tenant-feedback','cross-tenant-feedback');
+                """,
+            $$"""
+                INSERT INTO commercial_opportunity_events
+                  ("Id","BusinessUnitId","OpportunityRecommendationId","EventType","SourceType","SourceId",
+                   "ActorId","OccurredAtUtc","CorrelationId","IdempotencyKey","RequestHash","PayloadJson")
+                VALUES ({{tenantB.BaseId + 94}},{{tenantB.TenantId}},{{tenantB.RecommendationId}},
+                        'OpportunityRecommendation.Generated','Recommendation',{{tenantB.RecommendationId}},
+                        'security-test',now(),'cross-tenant-event','cross-tenant-event',repeat('c',64),'{}'::jsonb);
+                """,
+            $$"""
+                INSERT INTO commercial_opportunity_outbox
+                  ("Id","BusinessUnitId","OpportunityEventId","EventType","PayloadJson",
+                   "OccurredAtUtc","AvailableAtUtc","AttemptCount")
+                VALUES ({{tenantB.BaseId + 95}},{{tenantB.TenantId}},{{tenantB.RecommendationEventId}},
+                        'OpportunityRecommendation.Generated','{}'::jsonb,now(),now(),0);
+                """,
+            $$"""
+                INSERT INTO commercial_opportunity_operations
+                  ("BusinessUnitId","OperationType","IdempotencyKey","RequestHash",
+                   "CorrelationId","ActorId","ResultJson","OccurredAtUtc")
+                VALUES ({{tenantB.TenantId}}, 'Reconcile', 'cross-tenant-denied', repeat('f', 64),
+                        'cross-tenant-denied', 'security-test', '{}'::jsonb, now());
+                """
+        };
+
+        foreach (var sql in crossTenantWrites)
+        {
+            await using var transaction = await connection.BeginTransactionAsync();
             await ExecuteAsync(connection, transaction, $$"""
                 SET LOCAL ROLE nexora_tenant_app;
                 SELECT set_config('nexora.business_unit_id', '{{tenantA.TenantId}}', true);
                 """);
             await using var crossTenantWrite = connection.CreateCommand();
             crossTenantWrite.Transaction = transaction;
-            crossTenantWrite.CommandText = $$"""
-                INSERT INTO commercial_opportunity_operations
-                  ("BusinessUnitId","OperationType","IdempotencyKey","RequestHash",
-                   "CorrelationId","ActorId","ResultJson","OccurredAtUtc")
-                VALUES ({{tenantB.TenantId}}, 'Reconcile', 'cross-tenant-denied', repeat('f', 64),
-                        'cross-tenant-denied', 'security-test', '{}'::jsonb, now());
-                """;
-            var error = await Assert.ThrowsAsync<PostgresException>(
-                () => crossTenantWrite.ExecuteNonQueryAsync());
-            Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, error.SqlState);
+            crossTenantWrite.CommandText = sql;
+            var error = await Assert.ThrowsAsync<PostgresException>(() => crossTenantWrite.ExecuteNonQueryAsync());
+            Assert.Contains(error.SqlState,
+                new[] { PostgresErrorCodes.InsufficientPrivilege, PostgresErrorCodes.RaiseException });
             await transaction.RollbackAsync();
         }
     }
@@ -307,12 +543,12 @@ public sealed class OpportunityPriorityPostgreSqlSecurityTests(PostgreSqlTestDat
               ("Id","BusinessUnitId","CommercialCaseId","NexoraSerial","LeadId","LeadVersion",
                "RecommendationKey","PolicyVersion","FeatureSchemaVersion","EvidenceCutoffAtUtc",
                "EvidenceSnapshotJson","EvidenceHash","PriorityScore","PriorityBand","Confidence",
-               "Completeness","SampleSize","RecommendedActionCode","RecommendedActionLabel",
+               "Completeness","SampleSize","RecommendedActionCode","RecommendedActionLabel","ComponentsJson",
                "RationaleJson","CohortKey","Mode","GeneratedAtUtc")
             VALUES ({{fixture.BaseId + 91}}, {{fixture.TenantId}}, {{fixture.CommercialCaseId}}, '{{fixture.NexoraSerial}}',
                     {{fixture.LeadId}}, 1, 'unaudited-recommendation', 'test-policy-unaudited', 'test-schema',
                     now() - interval '1 minute', '{}'::jsonb, repeat('e', 64), 50, 'Medium', 0.5, 0.5, 1,
-                    'REVIEW', 'Review opportunity', '[]'::jsonb, 'eligible-shadow', 'Shadow', now());
+                    'REVIEW', 'Review opportunity', '{"signals":[],"expectedCommercialValue":null,"currency":null,"status":"legacy_reconcile_required","responseDeadline":null,"currentBlocker":"Reconcile to generate commercial components."}'::jsonb, '[]'::jsonb, 'eligible-shadow', 'Shadow', now());
             """, "commercial opportunity record requires a matching append-only event");
 
         await AssertCommitRejectedAsync($$"""
@@ -362,12 +598,12 @@ public sealed class OpportunityPriorityPostgreSqlSecurityTests(PostgreSqlTestDat
               ("Id","BusinessUnitId","CommercialCaseId","NexoraSerial","LeadId","LeadVersion",
                "RecommendationKey","PolicyVersion","FeatureSchemaVersion","EvidenceCutoffAtUtc",
                "EvidenceSnapshotJson","EvidenceHash","PriorityScore","PriorityBand","Confidence",
-               "Completeness","SampleSize","RecommendedActionCode","RecommendedActionLabel",
+               "Completeness","SampleSize","RecommendedActionCode","RecommendedActionLabel","ComponentsJson",
                "RationaleJson","CohortKey","Mode","GeneratedAtUtc")
             VALUES ({{fixture.RecommendationId}}, {{fixture.TenantId}}, {{fixture.CommercialCaseId}}, @serial,
                     {{fixture.LeadId}}, 1, @recommendationKey, 'test-policy', 'test-schema',
                     now() - interval '2 minutes', '{}'::jsonb, @evidenceHash, 80, 'High', 0.8, 0.9, 3,
-                    'FOLLOW_UP', 'Follow up now', '["deterministic evidence"]'::jsonb,
+                    'FOLLOW_UP', 'Follow up now', '{"signals":[],"expectedCommercialValue":null,"currency":null,"status":"legacy_reconcile_required","responseDeadline":null,"currentBlocker":"Reconcile to generate commercial components."}'::jsonb, '["deterministic evidence"]'::jsonb,
                     'eligible-shadow', 'Shadow', now() - interval '1 minute');
 
             INSERT INTO commercial_opportunity_feedback
@@ -463,6 +699,46 @@ public sealed class OpportunityPriorityPostgreSqlSecurityTests(PostgreSqlTestDat
         command.Transaction = transaction;
         command.CommandText = sql;
         await command.ExecuteNonQueryAsync();
+    }
+
+    private static async Task AssertComponentMigrationStateAsync(
+        ErpRfqAutomationContext context,
+        int expectedColumns,
+        bool expectedHistory)
+    {
+        Assert.Equal(1, await context.Database.SqlQueryRaw<int>(
+            "SELECT count(*)::int AS \"Value\" FROM commercial_opportunity_recommendations WHERE \"Id\"=839101").SingleAsync());
+        Assert.Equal(expectedColumns, await context.Database.SqlQueryRaw<int>("""
+            SELECT count(*)::int AS "Value"
+            FROM information_schema.columns
+            WHERE table_name='commercial_opportunity_recommendations'
+              AND column_name IN ('ComponentsJson','ExpectedCommercialValue','ExpectedCommercialValueCurrency')
+            """).SingleAsync());
+        Assert.Equal(expectedHistory, await context.Database.SqlQueryRaw<bool>("""
+            SELECT count(*) = 2 AS "Value"
+            FROM "__EFMigrationsHistory"
+            WHERE "MigrationId" IN (
+                '20260729043226_V2Gate02OpportunityCommercialComponents',
+                '20260729054001_V2Gate02ValidateOpportunityCommercialComponents')
+            """).SingleAsync());
+        if (!expectedHistory) return;
+        Assert.Equal(3, await context.Database.SqlQueryRaw<int>("""
+            SELECT count(*)::int AS "Value" FROM pg_constraint
+            WHERE conrelid='commercial_opportunity_recommendations'::regclass
+              AND conname IN ('CK_opportunity_recommendations_ComponentsObject',
+                              'CK_opportunity_recommendations_EcvCurrency',
+                              'CK_opportunity_recommendations_EcvNonNegative')
+              AND convalidated
+            """).SingleAsync());
+        Assert.Null(await context.Database.SqlQueryRaw<string?>("""
+            SELECT column_default AS "Value" FROM information_schema.columns
+            WHERE table_name='commercial_opportunity_recommendations' AND column_name='ComponentsJson'
+            """).SingleAsync());
+        Assert.Equal("O", await context.Database.SqlQueryRaw<string>("""
+            SELECT tgenabled::text AS "Value" FROM pg_trigger
+            WHERE tgrelid='commercial_opportunity_recommendations'::regclass
+              AND tgname='trg_opportunity_recommendations_append_only'
+            """).SingleAsync());
     }
 
     private sealed class OpportunityFixture(long tenantId, long leadId, long baseId, char hashCharacter)

@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using ERP_RFQ_Automation.Intelligence.Decision;
+using ERP_RFQ_Automation.Inventory.Commercial;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.MultiTenancy;
 using Microsoft.EntityFrameworkCore;
@@ -14,10 +15,24 @@ public sealed class OpportunityPriorityApplicationService(
     ITenantContext tenantContext,
     ILeadDecisionService leadDecisions) : IOpportunityPriorityApplicationService
 {
-    public const string PolicyVersion = "opportunity-priority-shadow-v1";
-    public const string FeatureSchemaVersion = "opportunity-safe-signals-v1";
+    public const string PolicyVersion = "opportunity-priority-shadow-v3";
+    public const string FeatureSchemaVersion = "opportunity-commercial-components-v2";
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly OpportunityActionOption[] ActionCatalog =
+    [
+        new("REVIEW_EXPIRED_DEADLINE", "Review expired deadline"),
+        new("RESOLVE_CUSTOMER_IDENTITY", "Resolve Customer identity"),
+        new("REQUEST_CLARIFICATION", "Request Product clarification"),
+        new("REFRESH_FULFILMENT_EVIDENCE", "Refresh fulfilment evidence"),
+        new("SEARCH_KNOWN_SUPPLIERS", "Search known Suppliers"),
+        new("RESERVE_AVAILABLE_STOCK", "Review stock reservation"),
+        new("ESCALATE_APPROVAL", "Escalate margin review"),
+        new("REVIEW_INQUIRY", "Review inquiry evidence"),
+        new("OPEN_OPPORTUNITY", "Open opportunity"),
+        new("RESOLVE_UNMATCHED_PARTS", "Resolve unmatched parts"),
+        new("SOURCE_UNKNOWN_PARTS", "Review unknown parts")
+    ];
 
     public async Task<OpportunityPriorityPage> QueryAsync(
         long businessUnitId,
@@ -56,7 +71,7 @@ public sealed class OpportunityPriorityApplicationService(
         if (!string.IsNullOrWhiteSpace(query.PriorityBand))
             source = source.Where(x => x.PriorityBand == query.PriorityBand.Trim());
         if (query.InsufficientEvidenceOnly)
-            source = source.Where(x => x.Completeness < 0.6m);
+            source = source.Where(x => x.ExpectedCommercialValue == null);
 
         var total = await source.CountAsync(cancellationToken);
         var currentRecommendations = await scopedSource.CountAsync(cancellationToken);
@@ -74,6 +89,7 @@ public sealed class OpportunityPriorityApplicationService(
                 feedback.BusinessUnitId == businessUnitId &&
                 feedback.OpportunityRecommendationId == x.Id),
             cancellationToken);
+        // ECV remains currency-denominated. Do not compare unlike currencies in the tenant-wide queue.
         var rows = await source
             .OrderByDescending(x => x.PriorityScore)
             .ThenBy(x => x.EvidenceCutoffAtUtc)
@@ -184,8 +200,10 @@ public sealed class OpportunityPriorityApplicationService(
                     x.CustomerId,
                     x.AssignTo,
                     x.LifecycleVersion,
+                    x.CurrentRevisionId,
                     x.Aiconfidence,
                     x.BidClosingDate,
+                    x.ModifiedDate ?? x.CreatedDate,
                     db.Orders.Any(order =>
                         order.BusinessUnitId == businessUnitId &&
                         order.CommercialCaseId == x.CommercialCaseId) ||
@@ -244,11 +262,21 @@ public sealed class OpportunityPriorityApplicationService(
                 }
 
                 var brief = await leadDecisions.GetBriefAsync(lead.LeadId, businessUnitId, cancellationToken);
-                var candidate = BuildCandidate(lead, brief, reconciledAtUtc);
+                var fulfilment = await GetFulfilmentEvidenceAsync(
+                    businessUnitId,
+                    lead.LeadId,
+                    lead.CurrentRevisionId,
+                    Math.Max(0, brief.Coverage.TotalItems),
+                    lead.EvidenceAsOfUtc,
+                    reconciledAtUtc,
+                    cancellationToken);
+                var candidate = BuildCandidate(lead, brief, fulfilment, reconciledAtUtc);
 
                 OpportunityRecommendation recommendation;
                 if (existing is not null &&
                     string.Equals(existing.PolicyVersion, PolicyVersion, StringComparison.Ordinal) &&
+                    string.Equals(existing.FeatureSchemaVersion, FeatureSchemaVersion, StringComparison.Ordinal) &&
+                    HasCurrentComponentSet(existing.ComponentsJson) &&
                     FixedEquals(existing.EvidenceHash, candidate.EvidenceHash))
                 {
                     recommendation = existing;
@@ -657,6 +685,7 @@ public sealed class OpportunityPriorityApplicationService(
             var reasons = Deserialize<string[]>(row.RationaleJson);
             leads.TryGetValue(row.LeadId, out var lead);
             var ownerId = lead?.AssignTo;
+            var components = Deserialize<OpportunityPriorityComponentSet>(row.ComponentsJson);
             items.Add(new OpportunityPriorityItem(
                 row.Id,
                 row.CommercialCaseId,
@@ -670,9 +699,16 @@ public sealed class OpportunityPriorityApplicationService(
                 row.Confidence,
                 row.Completeness,
                 row.SampleSize,
-                row.Completeness < 0.6m,
+                string.Equals(components.Status, "insufficient_evidence", StringComparison.Ordinal),
                 row.RecommendedActionCode,
                 row.RecommendedActionLabel,
+                row.ExpectedCommercialValue,
+                row.ExpectedCommercialValueCurrency,
+                components.Status,
+                components.Signals,
+                components.ResponseDeadline,
+                components.CurrentBlocker,
+                ActionCatalog,
                 reasons,
                 row.EvidenceSnapshotJson,
                 row.EvidenceCutoffAtUtc,
@@ -687,7 +723,11 @@ public sealed class OpportunityPriorityApplicationService(
         return items;
     }
 
-    private static Candidate BuildCandidate(LeadIdentity lead, LeadDecisionBrief brief, DateTime cutoffAtUtc)
+    private static Candidate BuildCandidate(
+        LeadIdentity lead,
+        LeadDecisionBrief brief,
+        FulfilmentEvidence fulfilment,
+        DateTime cutoffAtUtc)
     {
         var exactItems = brief.Coverage.Items
             .Where(x => x.Matched &&
@@ -698,16 +738,17 @@ public sealed class OpportunityPriorityApplicationService(
             .ToArray();
         var totalItems = Math.Max(0, brief.Coverage.TotalItems);
         var exactCoverage = totalItems == 0 ? 0m : decimal.Round(exactItems.Length * 100m / totalItems, 2);
+        var hasCanonicalCustomer = brief.Customer.IsDecisionGradeIdentity && brief.Customer.CustomerId.HasValue;
         var missingSignals = new List<string>();
         if (totalItems == 0) missingSignals.Add("No lead lines are available for scoring.");
         if (exactItems.Length < totalItems) missingSignals.Add("Some lines lack an exact code or manufacturer-part match.");
-        if (!lead.CustomerId.HasValue) missingSignals.Add("Canonical customer identity is unresolved.");
+        if (!hasCanonicalCustomer) missingSignals.Add("Canonical customer identity is unresolved or invalid.");
         if (!lead.ExtractionConfidence.HasValue) missingSignals.Add("Extraction confidence is unavailable.");
         if (!lead.BidClosingDate.HasValue || lead.BidClosingDate.Value.Year < 2000)
             missingSignals.Add("A usable bid deadline is unavailable.");
 
         var score = (int)Math.Round(exactCoverage * 0.55m, MidpointRounding.AwayFromZero);
-        if (lead.CustomerId.HasValue) score += 15;
+        if (hasCanonicalCustomer) score += 15;
         if (lead.ExtractionConfidence is >= 0.8m) score += 10;
         var deadline = lead.BidClosingDate is { Year: >= 2000 } ? lead.BidClosingDate : null;
         var deadlineBand = deadline switch
@@ -727,27 +768,127 @@ public sealed class OpportunityPriorityApplicationService(
         }
         score = Math.Clamp(score, 0, 100);
 
-        var (actionCode, actionLabel) = deadline.HasValue && deadline.Value < cutoffAtUtc
-            ? ("REVIEW_EXPIRED_DEADLINE", "Review expired deadline")
-            : totalItems == 0
-                ? ("REVIEW_INQUIRY", "Review inquiry evidence")
-                : exactItems.Length == totalItems
-                    ? ("OPEN_OPPORTUNITY", "Open opportunity")
-                    : exactItems.Length > 0
-                        ? ("RESOLVE_UNMATCHED_PARTS", "Resolve unmatched parts")
-                        : ("SOURCE_UNKNOWN_PARTS", "Review unknown parts");
-        var completenessSignals = 2 + (lead.CustomerId.HasValue ? 1 : 0) +
+        var customerQuality = brief.Customer.IsDecisionGradeIdentity
+            ? Math.Min(1m, 0.5m + Math.Min(5, brief.Customer.Orders) * 0.1m)
+            : (decimal?)null;
+        var winLikelihood = brief.Customer.IsDecisionGradeIdentity && brief.Customer.Quotes >= 3
+            ? Math.Min(1m, Math.Max(0m, (decimal)Math.Min(brief.Customer.Orders, brief.Customer.Quotes) / brief.Customer.Quotes))
+            : (decimal?)null;
+        var normalizedCurrency = brief.Currency?.Trim().ToUpperInvariant();
+        var currencySafe = IsIsoCurrencyCode(normalizedCurrency);
+        var margin = brief.IsMarginComplete && brief.MarginPotentialPct is >= 0m and <= 100m
+            ? brief.MarginPotentialPct
+            : null;
+        var opportunityValue = brief.EstimatedValue is > 0m &&
+                               string.Equals(brief.ValueConfidence, "high", StringComparison.OrdinalIgnoreCase) &&
+                               currencySafe
+            ? brief.EstimatedValue
+            : null;
+        var expectedGrossProfit = opportunityValue.HasValue && margin.HasValue
+            ? decimal.Round(opportunityValue.Value * margin.Value / 100m, 4)
+            : (decimal?)null;
+        var effort = Math.Max(1m, totalItems + fulfilment.ShortageLines * 2m + fulfilment.UnresolvedLines * 3m);
+        var expectedCommercialValue = expectedGrossProfit.HasValue && winLikelihood.HasValue &&
+                                      customerQuality.HasValue && fulfilment.Value.HasValue
+            ? decimal.Round(
+                winLikelihood.Value * expectedGrossProfit.Value * customerQuality.Value *
+                fulfilment.Value.Value / effort, 4)
+            : (decimal?)null;
+        var completenessSignals = 2 + (hasCanonicalCustomer ? 1 : 0) +
                                   (lead.ExtractionConfidence.HasValue ? 1 : 0) +
                                   (deadline.HasValue ? 1 : 0);
         var completeness = decimal.Round(completenessSignals / 5m, 4);
         var confidence = decimal.Round(Math.Min(1m, completeness * (0.5m + exactCoverage / 200m)), 4);
+        var currentBlocker = deadline.HasValue && deadline.Value < cutoffAtUtc
+            ? "Response deadline has passed."
+                : !hasCanonicalCustomer
+                ? "Canonical customer identity is unresolved or invalid."
+                : fulfilment.UnresolvedLines > 0
+                    ? "One or more lines require Product or possible-match review."
+                    : fulfilment.Value is <= 0m
+                        ? "No deadline-qualified internal availability is evidenced."
+                    : fulfilment.Status != "measured"
+                        ? fulfilment.Evidence
+                        : !opportunityValue.HasValue
+                            ? "Currency-safe opportunity value is unavailable."
+                            : !margin.HasValue
+                                ? "Verified cost and margin evidence is unavailable."
+                                : !winLikelihood.HasValue
+                                    ? "At least three canonical Customer Quote outcomes are required for win likelihood."
+                                    : "No evidence blocker is active.";
+        var urgencyValue = deadlineBand switch
+        {
+            "critical" => 1m,
+            "soon" => 0.75m,
+            "comfortable" => 0.4m,
+            "overdue" => 0m,
+            _ => (decimal?)null
+        };
+        var components = new OpportunityPriorityComponentSet(
+            [
+                Signal("opportunity_value", "Opportunity value", opportunityValue, brief.Currency, totalItems,
+                    opportunityValue.HasValue ? 0.9m : 0m,
+                    opportunityValue.HasValue ? "measured" : "unavailable", lead.EvidenceAsOfUtc,
+                    "High-confidence priced Lead lines in one ISO currency only."),
+                Signal("win_likelihood", "Evidenced win likelihood", winLikelihood, "ratio", brief.Customer.Quotes,
+                    winLikelihood.HasValue ? Math.Min(1m, brief.Customer.Quotes / 20m) : 0m,
+                    winLikelihood.HasValue ? "evidenced_proxy" : "insufficient_sample",
+                    brief.Customer.EvidenceAsOfUtc ?? lead.EvidenceAsOfUtc,
+                    "Linked Orders divided by sent Quotes in the same 24-month canonical Customer cohort; minimum sample is three Quotes."),
+                Signal("margin", "Expected margin", margin, "percent", exactItems.Length,
+                    margin.HasValue ? confidence : 0m, margin.HasValue ? "measured" : "unavailable", lead.EvidenceAsOfUtc,
+                    "Available only when every line has price and cost in the same authoritative currency; Product master costs without currency are excluded."),
+                Signal("urgency", "Urgency", urgencyValue, "ratio", deadline.HasValue ? 1 : 0,
+                    deadline.HasValue ? 1m : 0m, deadline.HasValue ? "measured" : "unavailable", lead.EvidenceAsOfUtc,
+                    deadlineBand),
+                Signal("customer_quality", "Customer quality", customerQuality, "ratio", brief.Customer.Orders,
+                    customerQuality.HasValue ? Math.Min(1m, (brief.Customer.Orders + 1) / 10m) : 0m,
+                    customerQuality.HasValue ? "evidenced_proxy" : "unavailable",
+                    brief.Customer.EvidenceAsOfUtc ?? lead.EvidenceAsOfUtc,
+                    "Deterministic bounded proxy from canonical Customer identity and linked 24-month Order count."),
+                Signal("fulfilment_confidence", "Fulfilment confidence", fulfilment.Value, "ratio",
+                    fulfilment.SampleSize, fulfilment.Confidence, fulfilment.Status, fulfilment.EvidenceAsOfUtc,
+                    fulfilment.Evidence),
+                Signal("sourcing_effort", "Estimated sourcing effort", effort, "effort_points", totalItems,
+                    fulfilment.Confidence, "estimated", fulfilment.EvidenceAsOfUtc,
+                    "One point per line, two per shortage line, and three per unresolved line.")
+            ],
+            expectedCommercialValue,
+            expectedCommercialValue.HasValue ? normalizedCurrency : null,
+            expectedCommercialValue.HasValue ? "shadow_unvalidated" : "insufficient_evidence",
+            deadline,
+            currentBlocker);
+
+        var (actionCode, actionLabel) = deadline.HasValue && deadline.Value < cutoffAtUtc
+            ? ("REVIEW_EXPIRED_DEADLINE", "Review expired deadline")
+            : totalItems == 0
+                ? ("REVIEW_INQUIRY", "Review inquiry evidence")
+            : exactItems.Length == 0
+                ? ("SOURCE_UNKNOWN_PARTS", "Review unknown parts")
+            : exactItems.Length < totalItems
+                ? ("RESOLVE_UNMATCHED_PARTS", "Resolve unmatched parts")
+            : fulfilment.UnresolvedLines > 0
+                ? ("REQUEST_CLARIFICATION", "Request Product clarification")
+                : !hasCanonicalCustomer
+                    ? ("RESOLVE_CUSTOMER_IDENTITY", "Resolve Customer identity")
+                : !fulfilment.Value.HasValue
+                    ? ("REFRESH_FULFILMENT_EVIDENCE", "Refresh fulfilment evidence")
+                : fulfilment.ShortageLines > 0
+                    ? ("SEARCH_KNOWN_SUPPLIERS", "Search known Suppliers")
+                : fulfilment.Value is < 0.999m
+                        ? ("SEARCH_KNOWN_SUPPLIERS", "Source uncovered quantity")
+                    : margin is null or < 15m
+                        ? ("ESCALATE_APPROVAL", "Escalate margin review")
+                    : string.Equals(lead.CurrentStage, "Lead", StringComparison.Ordinal)
+                        ? ("OPEN_OPPORTUNITY", "Open opportunity")
+                        : ("RESERVE_AVAILABLE_STOCK", "Review stock reservation");
         var reasons = new List<string>
         {
             $"{exactItems.Length} of {totalItems} lines have deterministic code or manufacturer-part matches.",
-            lead.CustomerId.HasValue
+            hasCanonicalCustomer
                 ? "Canonical tenant-qualified customer identity is present."
-                : "Customer history is excluded because canonical identity is unresolved.",
-            "Inventory quantity, ambiguous name matches, mixed-currency value and margin are excluded from this score."
+                : "Customer history is excluded because canonical identity is unresolved or invalid.",
+            "Raw inventory quantity, ambiguous name matches, mixed-currency value and unverified margin are excluded."
         };
         reasons.AddRange(missingSignals);
 
@@ -759,7 +900,8 @@ public sealed class OpportunityPriorityApplicationService(
             commercialCaseId = lead.CommercialCaseId,
             lead.NexoraSerial,
             currentStage = lead.CurrentStage,
-            canonicalCustomerId = lead.CustomerId,
+            suppliedCustomerId = lead.CustomerId,
+            canonicalCustomerId = hasCanonicalCustomer ? brief.Customer.CustomerId : null,
             ownerUserId = lead.OwnerUserId,
             extractionConfidence = lead.ExtractionConfidence,
             bidClosingDate = deadline,
@@ -767,12 +909,13 @@ public sealed class OpportunityPriorityApplicationService(
             totalItems,
             exactMatchedItems = exactItems,
             exactCoveragePct = exactCoverage,
-            excludedSignals = new[] { "ambiguous_name_match", "raw_qty_on_hand", "mixed_currency_value", "margin" },
-            missingSignals
+            excludedSignals = new[] { "ambiguous_name_match", "raw_qty_on_hand", "mixed_currency_value", "unverified_margin" },
+            missingSignals,
+            components
         }, JsonOptions);
         var hash = HashJson(evidenceJson);
         var band = score >= 75 ? "Critical" : score >= 50 ? "High" : score >= 25 ? "Medium" : "Low";
-        var cohort = completeness < 0.6m ? "insufficient-evidence" : "eligible-shadow";
+        var cohort = expectedCommercialValue.HasValue ? "eligible-shadow" : "insufficient-evidence";
         return new Candidate(
             hash,
             evidenceJson,
@@ -783,9 +926,87 @@ public sealed class OpportunityPriorityApplicationService(
             exactItems.Length,
             actionCode,
             actionLabel,
+            expectedCommercialValue,
+            expectedCommercialValue.HasValue ? normalizedCurrency : null,
+            JsonSerializer.Serialize(components, JsonOptions),
             JsonSerializer.Serialize(reasons, JsonOptions),
             cohort);
     }
+
+    private async Task<FulfilmentEvidence> GetFulfilmentEvidenceAsync(
+        long businessUnitId,
+        long leadId,
+        long? currentRevisionId,
+        int expectedLineCount,
+        DateTime fallbackEvidenceAsOfUtc,
+        DateTime cutoffAtUtc,
+        CancellationToken cancellationToken)
+    {
+        if (expectedLineCount <= 0)
+            return new(null, 0, 0m, "unavailable", fallbackEvidenceAsOfUtc,
+                "No Lead lines are available for fulfillment measurement.", 0, 0);
+        if (!currentRevisionId.HasValue)
+            return new(null, 0, 0m, "unavailable", fallbackEvidenceAsOfUtc,
+                "The Lead does not have a current immutable revision for fulfillment evidence.", 0, 0);
+
+        var rows = await db.Set<LeadLineCommercialResolution>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId &&
+                        x.LeadId == leadId &&
+                        x.LeadRevisionId == currentRevisionId.Value)
+            .OrderByDescending(x => x.ResolvedOn)
+            .ThenByDescending(x => x.Id)
+            .ToListAsync(cancellationToken);
+        var latest = rows.GroupBy(x => x.LeadLineId).Select(x => x.First()).ToArray();
+        if (latest.Length == 0)
+            return new(null, 0, 0m, "unavailable", fallbackEvidenceAsOfUtc,
+                "Authoritative line-resolution evidence has not been created.", 0, 0);
+        var asOf = latest.Min(x => x.InventoryAsOfUtc == default ? x.ResolvedOn : x.InventoryAsOfUtc);
+        if (asOf < cutoffAtUtc.AddHours(-72))
+            return new(null, latest.Length, 0m, "stale", asOf,
+                "Inventory resolution is older than 72 hours.",
+                latest.Count(x => x.Classification == CommercialResolutionClassification.KnownShortage),
+                latest.Count(x => x.Classification is CommercialResolutionClassification.UnknownProduct
+                    or CommercialResolutionClassification.PossibleMatchReview));
+        var requested = latest.Sum(x => Math.Max(0m, x.RequestedQuantity));
+        var covered = latest.Sum(x => Math.Min(
+            Math.Max(0m, x.RequestedQuantity), Math.Max(0m, x.AvailableToPromise)));
+        var unresolved = latest.Count(x => x.Classification is CommercialResolutionClassification.UnknownProduct
+            or CommercialResolutionClassification.PossibleMatchReview);
+        var shortages = latest.Count(x => x.Classification == CommercialResolutionClassification.KnownShortage);
+        var coverageCompleteness = decimal.Round(
+            Math.Min(1m, (decimal)latest.Length / expectedLineCount), 4);
+        var allLinesResolved = latest.Length >= expectedLineCount;
+        var value = requested > 0m && unresolved == 0 && allLinesResolved
+            ? decimal.Round(covered / requested, 4)
+            : (decimal?)null;
+        var status = !allLinesResolved ? "incomplete" : value.HasValue ? "measured" : "unresolved";
+        return new(value, latest.Length, coverageCompleteness, status, asOf,
+            value.HasValue
+                ? "Latest persisted ATP by current-revision Lead line; incoming supply is excluded without deadline-qualified timing and certainty."
+                : !allLinesResolved
+                    ? $"Commercial resolution exists for {latest.Length} of {expectedLineCount} Lead lines."
+                    : "Product resolution is incomplete for one or more Lead lines.",
+            shortages, unresolved);
+    }
+
+    private static OpportunityPrioritySignal Signal(
+        string code, string label, decimal? value, string? unit, int sampleSize, decimal confidence,
+        string status, DateTime evidenceAsOfUtc, string evidence)
+    {
+        var (sourceType, sourceReference) = code switch
+        {
+            "fulfilment_confidence" or "sourcing_effort" =>
+                ("LeadLineCommercialResolution", "Current immutable Lead revision"),
+            "win_likelihood" or "customer_quality" =>
+                ("CustomerCommercialHistory", "Canonical Customer quote and order counters"),
+            _ => ("LeadDecisionBrief", LeadDecisionPolicy.Version)
+        };
+        return new(code, label, value, unit, Math.Max(0, sampleSize), Math.Clamp(confidence, 0m, 1m),
+            status, evidenceAsOfUtc, sourceType, sourceReference, evidence);
+    }
+
+    private static bool IsIsoCurrencyCode(string? value)
+        => value is { Length: 3 } && value.All(character => character is >= 'A' and <= 'Z');
 
     private void AppendEvent(
         OpportunityRecommendation recommendation,
@@ -877,7 +1098,13 @@ public sealed class OpportunityPriorityApplicationService(
         Required(command.IdempotencyKey, nameof(command.IdempotencyKey), 160);
         Required(command.ActorId, nameof(command.ActorId), 160);
         if (decision == OpportunityFeedbackDecision.Replaced)
+        {
             Required(command.ReplacementActionCode, nameof(command.ReplacementActionCode), 80);
+            if (!ActionCatalog.Any(option => string.Equals(
+                    option.Code, command.ReplacementActionCode?.Trim(), StringComparison.OrdinalIgnoreCase)))
+                throw new ArgumentException("Replacement action must be selected from the governed action catalog.",
+                    nameof(command.ReplacementActionCode));
+        }
         else if (!string.IsNullOrWhiteSpace(command.ReplacementActionCode))
             throw new ArgumentException("A replacement action is only valid for Replaced feedback.");
     }
@@ -973,6 +1200,37 @@ public sealed class OpportunityPriorityApplicationService(
         }
     }
 
+    private static bool HasCurrentComponentSet(string json)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object ||
+                !root.TryGetProperty("status", out var status) || status.ValueKind != JsonValueKind.String ||
+                string.Equals(status.GetString(), "legacy_reconcile_required", StringComparison.Ordinal))
+                return false;
+            if (!root.TryGetProperty("signals", out var signals) ||
+                signals.ValueKind != JsonValueKind.Array || signals.GetArrayLength() != 7)
+                return false;
+
+            var codes = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var signal in signals.EnumerateArray())
+            {
+                if (signal.ValueKind != JsonValueKind.Object ||
+                    !signal.TryGetProperty("code", out var code) || code.ValueKind != JsonValueKind.String ||
+                    string.IsNullOrWhiteSpace(code.GetString()))
+                    return false;
+                codes.Add(code.GetString()!);
+            }
+            return codes.Count == 7;
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
     private sealed record LeadIdentity(
         long LeadId,
         long CommercialCaseId,
@@ -980,8 +1238,10 @@ public sealed class OpportunityPriorityApplicationService(
         long? CustomerId,
         long? OwnerUserId,
         long LeadVersion,
+        long? CurrentRevisionId,
         decimal? ExtractionConfidence,
         DateTime? BidClosingDate,
+        DateTime EvidenceAsOfUtc,
         bool HasTerminalOutcome,
         string CurrentStage);
 
@@ -995,6 +1255,16 @@ public sealed class OpportunityPriorityApplicationService(
         long SourceVersion,
         string EvidenceJson);
 
+    private sealed record FulfilmentEvidence(
+        decimal? Value,
+        int SampleSize,
+        decimal Confidence,
+        string Status,
+        DateTime EvidenceAsOfUtc,
+        string Evidence,
+        int ShortageLines,
+        int UnresolvedLines);
+
     private sealed record Candidate(
         string EvidenceHash,
         string EvidenceJson,
@@ -1005,6 +1275,9 @@ public sealed class OpportunityPriorityApplicationService(
         int SampleSize,
         string ActionCode,
         string ActionLabel,
+        decimal? ExpectedCommercialValue,
+        string? ExpectedCommercialValueCurrency,
+        string ComponentsJson,
         string RationaleJson,
         string CohortKey)
     {
@@ -1033,6 +1306,9 @@ public sealed class OpportunityPriorityApplicationService(
                 SampleSize = SampleSize,
                 RecommendedActionCode = ActionCode,
                 RecommendedActionLabel = ActionLabel,
+                ExpectedCommercialValue = ExpectedCommercialValue,
+                ExpectedCommercialValueCurrency = ExpectedCommercialValueCurrency,
+                ComponentsJson = ComponentsJson,
                 RationaleJson = RationaleJson,
                 CohortKey = CohortKey,
                 Mode = OpportunityPriorityMode.Shadow,

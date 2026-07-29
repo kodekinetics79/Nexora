@@ -148,6 +148,7 @@ const CommercialCaseWorkspacePage: React.FC = () => {
   const [feedbackReason, setFeedbackReason] = React.useState('');
   const [replacementActionCode, setReplacementActionCode] = React.useState('');
   const [feedbackRecorded, setFeedbackRecorded] = React.useState(false);
+  const feedbackReasonInputRef = React.useRef<HTMLTextAreaElement | null>(null);
 
   const searchTerm = query.trim();
   const { data: searchResults, isLoading: searchLoading, isError: searchError, refetch: retrySearch } = useQuery({
@@ -388,6 +389,31 @@ const CommercialCaseWorkspacePage: React.FC = () => {
               <Grid size={{ xs: 6, md: 2.4 }}><DataField label="Sample size" value={opportunityPriority.data.sampleSize} /></Grid>
             </Grid>
             <Divider sx={{ my: 2 }} />
+            <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>Expected Commercial Value components</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+              {opportunityPriority.data.expectedCommercialValue == null
+                ? `Not measured: ${opportunityPriority.data.currentBlocker}`
+                : `${opportunityPriority.data.expectedCommercialValueCurrency ?? ''} ${opportunityPriority.data.expectedCommercialValue.toLocaleString(undefined, { maximumFractionDigits: 2 })} in shadow mode.`}
+            </Typography>
+            <Typography variant="body2" sx={{ mt: 0.75 }}><strong>Current blocker:</strong> {opportunityPriority.data.currentBlocker}</Typography>
+            <Typography variant="body2"><strong>Response deadline:</strong> {opportunityPriority.data.responseDeadline ? formatDateSafe(opportunityPriority.data.responseDeadline) : 'Not available'}</Typography>
+            <Typography variant="caption" color="text.secondary">Expected Commercial Value is not used to rank opportunities across currencies.</Typography>
+            <Grid container spacing={1.5} sx={{ mt: 0.5 }}>
+              {opportunityPriority.data.components.map(component => (
+                <Grid key={component.code} size={{ xs: 12, sm: 6, md: 4 }}>
+                  <Box sx={{ p: 1.5, height: '100%', border: '1px solid', borderColor: 'divider' }}>
+                    <Typography variant="caption" color="text.secondary">{component.label}</Typography>
+                    <Typography sx={{ fontWeight: 900 }}>
+                      {component.value == null ? 'Not measured' : `${component.value.toLocaleString(undefined, { maximumFractionDigits: 2 })}${component.unit === 'percent' ? '%' : component.unit === 'ratio' ? '' : ` ${component.unit ?? ''}`}`}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">Sample {component.sampleSize} | Confidence {percent(component.confidence)} | {component.status.replaceAll('_', ' ')}</Typography>
+                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>{component.sourceType} | {component.sourceReference} | {formatDateSafe(component.evidenceAsOfUtc)}</Typography>
+                    <Typography variant="body2" sx={{ mt: 0.75 }}>{component.evidence}</Typography>
+                  </Box>
+                </Grid>
+              ))}
+            </Grid>
+            <Divider sx={{ my: 2 }} />
             <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>Recommendation rationale</Typography>
             {opportunityPriority.data.reasons.length ? (
               <Stack component="ul" spacing={0.75} sx={{ pl: 2.5, my: 1 }}>
@@ -538,7 +564,13 @@ const CommercialCaseWorkspacePage: React.FC = () => {
         </Stack>
       )}
 
-      <Dialog open={feedbackOpen} onClose={() => !feedbackMutation.isPending && setFeedbackOpen(false)} fullWidth maxWidth="sm">
+      <Dialog
+        open={feedbackOpen}
+        onClose={() => !feedbackMutation.isPending && setFeedbackOpen(false)}
+        fullWidth
+        maxWidth="sm"
+        slotProps={{ transition: { onEntered: () => feedbackReasonInputRef.current?.focus() } }}
+      >
         <DialogTitle>Record recommendation feedback</DialogTitle>
         <DialogContent dividers>
           <Stack spacing={2}>
@@ -556,17 +588,24 @@ const CommercialCaseWorkspacePage: React.FC = () => {
               </Select>
             </FormControl>
             {feedbackCode === 'Replaced' && (
-              <TextField
-                required
-                label="Suggested action code"
-                value={replacementActionCode}
-                onChange={(event) => setReplacementActionCode(event.target.value)}
-                slotProps={{ htmlInput: { maxLength: 100 } }}
-              />
+              <FormControl required fullWidth>
+                <InputLabel id="replacement-action-label">Suggested action</InputLabel>
+                <Select
+                  labelId="replacement-action-label"
+                  label="Suggested action"
+                  value={replacementActionCode}
+                  onChange={(event) => setReplacementActionCode(event.target.value)}
+                >
+                  {opportunityPriority.data?.availableActions.map(action => (
+                    <MenuItem key={action.code} value={action.code}>{action.label}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
             )}
             <TextField
               required
               autoFocus
+              inputRef={feedbackReasonInputRef}
               multiline
               minRows={3}
               label="Reason"

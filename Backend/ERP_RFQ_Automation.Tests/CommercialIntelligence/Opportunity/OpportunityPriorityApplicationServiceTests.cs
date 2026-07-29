@@ -1,6 +1,8 @@
 using System.Text.Json;
 using ERP_RFQ_Automation.CommercialIntelligence.Opportunity;
 using ERP_RFQ_Automation.Intelligence.Decision;
+using ERP_RFQ_Automation.Inventory.Commercial;
+using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
@@ -47,12 +49,16 @@ public sealed class OpportunityPriorityApplicationServiceTests
         Assert.Equal(50m, evidence.RootElement.GetProperty("exactCoveragePct").GetDecimal());
         Assert.Single(evidence.RootElement.GetProperty("exactMatchedItems").EnumerateArray());
         Assert.Equal(
-            ["ambiguous_name_match", "raw_qty_on_hand", "mixed_currency_value", "margin"],
+            ["ambiguous_name_match", "raw_qty_on_hand", "mixed_currency_value", "unverified_margin"],
             evidence.RootElement.GetProperty("excludedSignals").EnumerateArray()
                 .Select(x => x.GetString()!).ToArray());
         Assert.DoesNotContain("catalogQtyOnHand", recommendation.EvidenceSnapshotJson, StringComparison.Ordinal);
         Assert.DoesNotContain("unitPrice", recommendation.EvidenceSnapshotJson, StringComparison.Ordinal);
         Assert.DoesNotContain("marginPotential", recommendation.EvidenceSnapshotJson, StringComparison.Ordinal);
+        using var componentDocument = JsonDocument.Parse(recommendation.ComponentsJson);
+        Assert.Equal(7, componentDocument.RootElement.GetProperty("signals").GetArrayLength());
+        Assert.Equal("insufficient_evidence", componentDocument.RootElement.GetProperty("status").GetString());
+        Assert.Null(recommendation.ExpectedCommercialValue);
     }
 
     [Fact]
@@ -98,6 +104,196 @@ public sealed class OpportunityPriorityApplicationServiceTests
     }
 
     [Fact]
+    public async Task Reconcile_DoesNotRewardInvalidCanonicalCustomerIdentity()
+    {
+        using var database = new TestDb();
+        await using var context = database.ContextFor(TenantId);
+        var lead = SeedLead(context, 109, ownerId: 209, canonicalCustomerId: 309);
+        await context.SaveChangesAsync();
+
+        var brief = Brief(1, ExactItem(1690, 1691));
+        brief.Customer = new CustomerHistory
+        {
+            IdentityEvidence = CustomerIdentityEvidence.CanonicalInvalid,
+            IsDecisionGradeIdentity = false
+        };
+        var decisions = new StubLeadDecisionService();
+        decisions.Set(lead.Id, brief);
+        var service = Service(context, decisions);
+
+        await service.ReconcileAsync(TenantId, Reconcile("invalid-canonical-customer"), default);
+        var item = Assert.Single((await service.QueryAsync(
+            TenantId, new OpportunityPriorityQuery(), OpportunityPriorityAccessScope.ForTenant(), default)).Items);
+
+        Assert.Equal(55, item.PriorityScore);
+        Assert.Equal("RESOLVE_CUSTOMER_IDENTITY", item.RecommendedActionCode);
+        Assert.Contains("unresolved or invalid", item.CurrentBlocker, StringComparison.Ordinal);
+        Assert.Contains(item.Reasons, reason => reason.Contains("unresolved or invalid", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Reconcile_WithExactPartsButMissingFulfilmentRecommendsEvidenceRefresh()
+    {
+        using var database = new TestDb();
+        await using var context = database.ContextFor(TenantId);
+        var lead = SeedLead(context, 108, ownerId: 208, canonicalCustomerId: 308);
+        await context.SaveChangesAsync();
+
+        var brief = Brief(1, ExactItem(1680, 1681));
+        brief.Customer = new CustomerHistory
+        {
+            CustomerId = 308,
+            IdentityEvidence = CustomerIdentityEvidence.Canonical,
+            IsDecisionGradeIdentity = true
+        };
+        var decisions = new StubLeadDecisionService();
+        decisions.Set(lead.Id, brief);
+        var service = Service(context, decisions);
+
+        await service.ReconcileAsync(TenantId, Reconcile("missing-fulfilment-action"), default);
+        var item = Assert.Single((await service.QueryAsync(
+            TenantId, new OpportunityPriorityQuery(), OpportunityPriorityAccessScope.ForTenant(), default)).Items);
+
+        Assert.Equal("REFRESH_FULFILMENT_EVIDENCE", item.RecommendedActionCode);
+        Assert.Contains("current immutable revision", item.CurrentBlocker, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Reconcile_ComputesCurrencySafeShadowValueFromCompletePersistedEvidence()
+    {
+        using var database = new TestDb();
+        await using var context = database.ContextFor(TenantId);
+        var lead = SeedLead(context, 110, ownerId: 210, canonicalCustomerId: 310);
+        lead.BidClosingDate = new DateTime(2035, 2, 1, 0, 0, 0, DateTimeKind.Utc);
+        await context.SaveChangesAsync();
+        await SeedCompleteFulfilmentAsync(context, lead, leadLineId: 1710, requested: 10m, available: 10m);
+
+        var brief = Brief(1, ExactItem(1710, 1711));
+        brief.EstimatedValue = 1_000m;
+        brief.Currency = "USD";
+        brief.ValueConfidence = "high";
+        brief.MarginPotentialPct = 20m;
+        brief.MarginCostedItems = 1;
+        brief.IsMarginComplete = true;
+        brief.Customer = new CustomerHistory
+        {
+            CustomerId = 310,
+            IsExistingCustomer = true,
+            IsDecisionGradeIdentity = true,
+            IdentityEvidence = CustomerIdentityEvidence.Canonical,
+            Quotes = 4,
+            Orders = 2
+        };
+        var decisions = new StubLeadDecisionService();
+        decisions.Set(lead.Id, brief);
+        var service = Service(context, decisions);
+
+        await service.ReconcileAsync(TenantId, Reconcile("measured-components"), default);
+        var item = Assert.Single((await service.QueryAsync(
+            TenantId, new OpportunityPriorityQuery(), OpportunityPriorityAccessScope.ForTenant(), default)).Items);
+
+        Assert.Equal(70m, item.ExpectedCommercialValue);
+        Assert.Equal("USD", item.ExpectedCommercialValueCurrency);
+        Assert.Equal("shadow_unvalidated", item.ExpectedCommercialValueStatus);
+        Assert.Equal("No evidence blocker is active.", item.CurrentBlocker);
+        Assert.Equal("OPEN_OPPORTUNITY", item.RecommendedActionCode);
+        Assert.Equal(7, item.Components.Count);
+        Assert.Equal(11, item.AvailableActions.Count);
+        Assert.Equal("evidenced_proxy", item.Components.Single(x => x.Code == "win_likelihood").Status);
+        Assert.Equal(1m, item.Components.Single(x => x.Code == "fulfilment_confidence").Value);
+
+        brief.MarginPotentialPct = 10m;
+        decisions.Set(lead.Id, brief);
+        await service.ReconcileAsync(TenantId, Reconcile("measured-low-margin"), default);
+        var lowMargin = Assert.Single((await service.QueryAsync(
+            TenantId, new OpportunityPriorityQuery(), OpportunityPriorityAccessScope.ForTenant(), default)).Items);
+        Assert.Equal("ESCALATE_APPROVAL", lowMargin.RecommendedActionCode);
+        Assert.Equal(35m, lowMargin.ExpectedCommercialValue);
+    }
+
+    [Fact]
+    public async Task Reconcile_DoesNotUseFulfilmentEvidenceFromSupersededLeadRevision()
+    {
+        using var database = new TestDb();
+        await using var context = database.ContextFor(TenantId);
+        var lead = SeedLead(context, 111, ownerId: 211, canonicalCustomerId: 311);
+        lead.BidClosingDate = new DateTime(2035, 2, 2, 0, 0, 0, DateTimeKind.Utc);
+        await context.SaveChangesAsync();
+        await SeedCompleteFulfilmentAsync(context, lead, leadLineId: 1810, requested: 10m, available: 10m);
+        await SeedCompleteFulfilmentAsync(context, lead, leadLineId: 1811, requested: 10m, available: null);
+
+        var brief = Brief(1, ExactItem(1811, 1812));
+        brief.EstimatedValue = 1_000m;
+        brief.Currency = "USD";
+        brief.ValueConfidence = "high";
+        brief.MarginPotentialPct = 20m;
+        brief.MarginCostedItems = 1;
+        brief.IsMarginComplete = true;
+        brief.Customer = new CustomerHistory
+        {
+            CustomerId = 311,
+            IsExistingCustomer = true,
+            IsDecisionGradeIdentity = true,
+            IdentityEvidence = CustomerIdentityEvidence.Canonical,
+            Quotes = 4,
+            Orders = 2
+        };
+        var decisions = new StubLeadDecisionService();
+        decisions.Set(lead.Id, brief);
+        var service = Service(context, decisions);
+
+        await service.ReconcileAsync(TenantId, Reconcile("current-revision-only"), default);
+        var item = Assert.Single((await service.QueryAsync(
+            TenantId, new OpportunityPriorityQuery(), OpportunityPriorityAccessScope.ForTenant(), default)).Items);
+
+        Assert.Null(item.ExpectedCommercialValue);
+        var fulfilment = item.Components.Single(x => x.Code == "fulfilment_confidence");
+        Assert.Equal("unavailable", fulfilment.Status);
+        Assert.Contains("has not been created", fulfilment.Evidence, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Reconcile_DoesNotTreatUnqualifiedIncomingSupplyAsDeadlineReady()
+    {
+        using var database = new TestDb();
+        await using var context = database.ContextFor(TenantId);
+        var lead = SeedLead(context, 112, ownerId: 212, canonicalCustomerId: 312);
+        lead.BidClosingDate = new DateTime(2035, 2, 3, 0, 0, 0, DateTimeKind.Utc);
+        await context.SaveChangesAsync();
+        await SeedCompleteFulfilmentAsync(
+            context, lead, leadLineId: 1910, requested: 10m, available: 0m,
+            incoming: 10m, classification: CommercialResolutionClassification.KnownIncoming);
+
+        var brief = Brief(1, ExactItem(1910, 1911));
+        brief.EstimatedValue = 1_000m;
+        brief.Currency = "USD";
+        brief.ValueConfidence = "high";
+        brief.MarginPotentialPct = 20m;
+        brief.MarginCostedItems = 1;
+        brief.IsMarginComplete = true;
+        brief.Customer = new CustomerHistory
+        {
+            CustomerId = 312,
+            IsDecisionGradeIdentity = true,
+            IdentityEvidence = CustomerIdentityEvidence.Canonical,
+            Quotes = 4,
+            Orders = 2
+        };
+        var decisions = new StubLeadDecisionService();
+        decisions.Set(lead.Id, brief);
+        var service = Service(context, decisions);
+
+        await service.ReconcileAsync(TenantId, Reconcile("incoming-not-qualified"), default);
+        var item = Assert.Single((await service.QueryAsync(
+            TenantId, new OpportunityPriorityQuery(), OpportunityPriorityAccessScope.ForTenant(), default)).Items);
+
+        Assert.Equal(0m, item.ExpectedCommercialValue);
+        Assert.Equal("SEARCH_KNOWN_SUPPLIERS", item.RecommendedActionCode);
+        Assert.Contains("incoming supply is excluded", item.Components
+            .Single(x => x.Code == "fulfilment_confidence").Evidence, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Reconcile_WithUnchangedEvidenceKeepsOneImmutableStableRecommendation()
     {
         using var database = new TestDb();
@@ -124,6 +320,37 @@ public sealed class OpportunityPriorityApplicationServiceTests
         Assert.Equal(persisted.GeneratedAtUtc, replayed.GeneratedAtUtc);
         Assert.Single(await context.OpportunityEvents.AsNoTracking()
             .Where(x => x.EventType == "OpportunityRecommendation.Generated").ToListAsync());
+    }
+
+    [Fact]
+    public async Task Reconcile_SupersedesLegacyBackfillEvenWhenEvidenceHashIsUnchanged()
+    {
+        using var database = new TestDb();
+        await using var context = database.ContextFor(TenantId);
+        var lead = SeedLead(context, 113, ownerId: 213, canonicalCustomerId: 313);
+        await context.SaveChangesAsync();
+
+        var decisions = new StubLeadDecisionService();
+        decisions.Set(lead.Id, Brief(1, ExactItem(2010, 2011)));
+        var service = Service(context, decisions);
+        await service.ReconcileAsync(TenantId, Reconcile("legacy-component-initial"), default);
+        var original = await context.OpportunityRecommendations.SingleAsync();
+        original.PolicyVersion = "opportunity-priority-shadow-v2";
+        original.RecommendationKey = $"{original.CommercialCaseId}:opportunity-priority-shadow-v2:{original.EvidenceHash}";
+        original.ComponentsJson = """
+            {"signals":[],"expectedCommercialValue":null,"currency":null,"status":"legacy_reconcile_required","responseDeadline":null,"currentBlocker":"Reconcile to generate commercial components."}
+            """;
+        await context.SaveChangesAsync();
+
+        var result = await service.ReconcileAsync(TenantId, Reconcile("legacy-component-reconcile"), default);
+        var current = Assert.Single((await service.QueryAsync(
+            TenantId, new OpportunityPriorityQuery(), OpportunityPriorityAccessScope.ForTenant(), default)).Items);
+
+        Assert.Equal(1, result.Created);
+        Assert.Equal(0, result.Replayed);
+        Assert.NotEqual(original.Id, current.RecommendationId);
+        Assert.Equal(7, current.Components.Count);
+        Assert.Equal(2, await context.OpportunityRecommendations.CountAsync());
     }
 
     [Fact]
@@ -154,6 +381,13 @@ public sealed class OpportunityPriorityApplicationServiceTests
             default));
 
         var command = Feedback(current.Id, "accepted-feedback");
+        var invalidReplacement = command with
+        {
+            Decision = OpportunityFeedbackDecision.Replaced,
+            ReplacementActionCode = "FREE_TEXT_ACTION"
+        };
+        await Assert.ThrowsAsync<ArgumentException>(() => service.RecordFeedbackAsync(
+            TenantId, current.Id, invalidReplacement, OpportunityPriorityAccessScope.ForOwner(204), default));
         var first = await service.RecordFeedbackAsync(
             TenantId, current.Id, command, OpportunityPriorityAccessScope.ForOwner(204), default);
         var replay = await service.RecordFeedbackAsync(
@@ -360,6 +594,89 @@ public sealed class OpportunityPriorityApplicationServiceTests
             key,
             "owner-204",
             false);
+
+    private static async Task SeedCompleteFulfilmentAsync(
+        ErpRfqAutomationContext context,
+        Lead lead,
+        long leadLineId,
+        decimal requested,
+        decimal? available,
+        decimal incoming = 0m,
+        CommercialResolutionClassification classification = CommercialResolutionClassification.KnownInStock)
+    {
+        var now = DateTime.UtcNow;
+        var revisionNumber = Math.Max(1, lead.CurrentRevisionNumber + 1);
+        var batch = new LeadIngestionBatch
+        {
+            Id = Guid.NewGuid(),
+            BusinessUnitId = TenantId,
+            SourceChannel = "Test",
+            CreatedBy = "opportunity-priority-tests",
+            CreatedAtUtc = DateTimeOffset.UtcNow,
+            UpdatedAtUtc = DateTimeOffset.UtcNow
+        };
+        var occurrence = new LeadIngestionOccurrence
+        {
+            BusinessUnitId = TenantId,
+            Batch = batch,
+            SourceChannel = "Test",
+            IdempotencyKey = $"opportunity-occurrence-{lead.Id}-{revisionNumber}",
+            LogicalInquiryFingerprint = new string((char)('a' + revisionNumber), 64),
+            Classification = LeadOccurrenceClassification.New,
+            ProcessingPath = LeadProcessingPath.Deterministic,
+            IngestedAtUtc = DateTimeOffset.UtcNow,
+            CreatedAtUtc = DateTimeOffset.UtcNow,
+            ActorId = "opportunity-priority-tests",
+            CorrelationId = $"opportunity-correlation-{lead.Id}-{revisionNumber}"
+        };
+        var revision = new LeadRevision
+        {
+            BusinessUnitId = TenantId,
+            Lead = lead,
+            RevisionNumber = revisionNumber,
+            EstablishedByOccurrence = occurrence,
+            LogicalInquiryFingerprint = new string((char)('b' + revisionNumber), 64),
+            SnapshotJson = "{}",
+            CreatedAtUtc = DateTimeOffset.UtcNow,
+            CreatedBy = "opportunity-priority-tests",
+            ProcessingPath = LeadProcessingPath.Deterministic
+        };
+        var line = new LeadItemRevision
+        {
+            Id = leadLineId,
+            BusinessUnitId = TenantId,
+            LineNumber = 1,
+            LineFingerprint = new string('c', 64),
+            SnapshotJson = JsonSerializer.Serialize(new { part = "TEST-1710", quantity = requested })
+        };
+        revision.Items.Add(line);
+        context.Add(revision);
+        await context.SaveChangesAsync();
+        lead.CurrentRevisionId = revision.Id;
+        lead.CurrentRevisionNumber = revisionNumber;
+        if (available.HasValue)
+            context.Set<LeadLineCommercialResolution>().Add(new LeadLineCommercialResolution
+        {
+            BusinessUnitId = TenantId,
+            LeadId = lead.Id,
+            LeadRevisionId = revision.Id,
+            LeadLineId = line.Id,
+            ResolutionBatchId = Guid.NewGuid(),
+            ResourceLimit = 10,
+            RequestedPartNumber = "TEST-1710",
+            RequestedQuantity = requested,
+            Classification = classification,
+            AvailableToPromise = available.Value,
+            IncomingAvailable = incoming,
+            FulfilmentJson = "{}",
+            RelatedResourcesJson = "[]",
+            ProductResolutionJson = "{}",
+            ResolutionMethod = "LocalDeterministicTest",
+            InventoryAsOfUtc = now,
+            ResolvedOn = now
+        });
+        await context.SaveChangesAsync();
+    }
 
     private sealed class StubLeadDecisionService : ILeadDecisionService
     {

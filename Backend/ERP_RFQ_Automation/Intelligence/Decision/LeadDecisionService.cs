@@ -101,8 +101,7 @@ public sealed class LeadDecisionService : ILeadDecisionService
         var estimatedValue = 0m;
         var pricedLines = 0;
         var pricedLinesWithKnownCurrency = 0;
-        var marginRevenue = 0m;
-        var marginProfit = 0m;
+        var marginCostedItems = 0;
 
         foreach (var li in items)
         {
@@ -121,7 +120,9 @@ public sealed class LeadDecisionService : ILeadDecisionService
                 if (catalogPrice.HasValue) { price = catalogPrice; priceSource = "catalog"; }
             }
 
-            if (price.HasValue)
+            // Product master prices have no currency field. They remain visible as
+            // catalog evidence but cannot contribute to an authoritative total.
+            if (price.HasValue && priceSource == "lead")
             {
                 pricedLines++;
                 if (!string.IsNullOrWhiteSpace(li.Currency)) pricedLinesWithKnownCurrency++;
@@ -129,16 +130,9 @@ public sealed class LeadDecisionService : ILeadDecisionService
                     estimatedValue += price.Value * li.Quantity;
             }
 
-            if (match is not null && price is > 0m)
-            {
-                var cost = FirstPositive(match.Product.FinalLandedCost, match.Product.UnitCost);
-                if (cost.HasValue && li.Quantity > 0)
-                {
-                    var lineRevenue = price.Value * li.Quantity;
-                    marginRevenue += lineRevenue;
-                    marginProfit += lineRevenue - (cost.Value * li.Quantity);
-                }
-            }
+            // Product master costs are not currency-qualified. Margin therefore
+            // remains unavailable until an authoritative currency-bearing cost
+            // source is wired into the decision brief.
 
             var catalogQtyOnHand = match?.Product.QtyOnHand;
             var hasCatalogOnHand = catalogQtyOnHand is > 0m;
@@ -177,7 +171,7 @@ public sealed class LeadDecisionService : ILeadDecisionService
         var valueConfidence = totalItems > 0 && pricedLines * 2 > totalItems ? "high" : "low";
 
         var currencies = items
-            .Where(i => i.UnitPrice is > 0m || matches.ContainsKey(i.Id))
+            .Where(i => i.UnitPrice is > 0m)
             .Select(i => i.Currency?.Trim().ToUpperInvariant())
             .Where(c => !string.IsNullOrEmpty(c))
             .Distinct()
@@ -187,9 +181,7 @@ public sealed class LeadDecisionService : ILeadDecisionService
                                   && currencies.Count == 1;
         var currency = hasOneKnownCurrency ? currencies[0] : null;
         decimal? aggregateEstimatedValue = hasOneKnownCurrency ? Round2(estimatedValue) : null;
-        decimal? marginPotentialPct = hasOneKnownCurrency && marginRevenue > 0m
-            ? Math.Round(100m * marginProfit / marginRevenue, 1, MidpointRounding.AwayFromZero)
-            : null;
+        decimal? marginPotentialPct = null;
 
         // ---- 4. customer history -------------------------------------------
         var customer = await ResolveCustomerHistoryAsync(
@@ -211,6 +203,8 @@ public sealed class LeadDecisionService : ILeadDecisionService
             ValueConfidence = aggregateEstimatedValue.HasValue ? valueConfidence : "unknown",
             Currency = currency,
             MarginPotentialPct = marginPotentialPct,
+            MarginCostedItems = marginCostedItems,
+            IsMarginComplete = totalItems > 0 && marginCostedItems == totalItems,
             Customer = customer,
             Deadline = deadline
         };
@@ -355,24 +349,31 @@ public sealed class LeadDecisionService : ILeadDecisionService
                     p.QtyOnHand, p.UnitCost, p.SellingPrice, p.FinalLandedCost, p.FinalSalesPrice))
                 .ToListAsync(ct);
 
-            foreach (var p in exactRows)
-            {
-                byPartNo.TryAdd(p.PartNo.Trim().ToLowerInvariant(), p);
-                if (!string.IsNullOrWhiteSpace(p.ModelNo))
-                    byModelNo.TryAdd(p.ModelNo.Trim().ToLowerInvariant(), p);
-            }
+            foreach (var group in exactRows.GroupBy(
+                         p => p.PartNo.Trim().ToLowerInvariant(), StringComparer.Ordinal))
+                if (group.Count() == 1) byPartNo[group.Key] = group.Single();
+
+            foreach (var group in exactRows
+                         .Where(p => !string.IsNullOrWhiteSpace(p.ModelNo))
+                         .GroupBy(p => p.ModelNo!.Trim().ToLowerInvariant(), StringComparer.Ordinal))
+                if (group.Count() == 1) byModelNo[group.Key] = group.Single();
         }
 
         foreach (var li in items)
         {
             var code = li.ItemMaterialCode?.Trim().ToLowerInvariant();
             var mpn = li.ManufacturerPartNumber?.Trim().ToLowerInvariant();
-
+            var candidates = new List<CatalogMatch>(3);
             if (!string.IsNullOrEmpty(code) && byPartNo.TryGetValue(code!, out var byCode))
-                result[li.Id] = new CatalogMatch(byCode, "code");
-            else if (!string.IsNullOrEmpty(mpn)
-                     && (byModelNo.TryGetValue(mpn!, out var byMpn) || byPartNo.TryGetValue(mpn!, out byMpn)))
-                result[li.Id] = new CatalogMatch(byMpn, "mpn");
+                candidates.Add(new CatalogMatch(byCode, "code"));
+            if (!string.IsNullOrEmpty(mpn) && byModelNo.TryGetValue(mpn!, out var byModel))
+                candidates.Add(new CatalogMatch(byModel, "mpn"));
+            if (!string.IsNullOrEmpty(mpn) && byPartNo.TryGetValue(mpn!, out var byPart))
+                candidates.Add(new CatalogMatch(byPart, "mpn"));
+
+            var exactProducts = candidates.GroupBy(candidate => candidate.Product.Id).ToArray();
+            if (exactProducts.Length == 1)
+                result[li.Id] = exactProducts[0].OrderBy(candidate => candidate.MatchType == "code" ? 0 : 1).First();
         }
 
         return result;
@@ -465,18 +466,38 @@ public sealed class LeadDecisionService : ILeadDecisionService
                              && l.Id != leadId
                              && l.CustomerId == resolvedCustomerId, ct);
 
-        history.Quotes = await _db.Quotes.AsNoTracking()
-            .CountAsync(q => q.CustomerId == resolvedCustomerId && q.BusinessUnitId == businessUnitId, ct);
-
         var since = now.AddMonths(-OrderLookbackMonths);
+        var recentQuotes = await _db.Quotes.AsNoTracking()
+            .Where(q => q.CustomerId == resolvedCustomerId
+                        && q.BusinessUnitId == businessUnitId
+                        && q.SentOn.HasValue
+                        && q.SentOn >= since)
+            .Select(q => new { q.Id, SentOn = q.SentOn!.Value })
+            .ToListAsync(ct);
+        history.Quotes = recentQuotes.Count;
+        var recentQuoteIds = recentQuotes.Select(q => q.Id).ToArray();
         var recentOrders = await _db.Orders.AsNoTracking()
             .Where(o => o.CustomerId == resolvedCustomerId
                         && o.BusinessUnitId == businessUnitId
+                        && o.QuoteId.HasValue
+                        && recentQuoteIds.Contains(o.QuoteId.Value)
                         && o.OrderDate >= since)
             .Select(o => new { o.TotalAmount, Currency = o.Currency == null ? null : o.Currency.Code })
             .ToListAsync(ct);
 
         history.Orders = recentOrders.Count;
+        var latestQuoteEvidence = recentQuotes.Select(q => (DateTime?)q.SentOn).Max();
+        var latestOrderEvidence = await _db.Orders.AsNoTracking()
+            .Where(o => o.CustomerId == resolvedCustomerId
+                        && o.BusinessUnitId == businessUnitId
+                        && o.QuoteId.HasValue
+                        && recentQuoteIds.Contains(o.QuoteId.Value)
+                        && o.OrderDate >= since)
+            .Select(o => (DateTime?)o.OrderDate)
+            .MaxAsync(ct);
+        history.EvidenceAsOfUtc = new[] { latestQuoteEvidence, latestOrderEvidence }
+            .Where(value => value.HasValue)
+            .Max();
         var orderCurrencies = recentOrders.Select(x => x.Currency?.Trim().ToUpperInvariant())
             .Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().ToArray();
         if (recentOrders.Count > 0 && recentOrders.All(x => !string.IsNullOrWhiteSpace(x.Currency))

@@ -170,7 +170,7 @@ public partial class ErpRfqAutomationContext
         modelBuilder.ApplyCommercialRoutingModel();
         modelBuilder.ApplyCommercialSalesModel();
         modelBuilder.ApplyCommercialExceptionModel();
-        modelBuilder.ApplyOpportunityPriorityModel();
+        modelBuilder.ApplyOpportunityPriorityModel(Database.IsNpgsql());
         modelBuilder.ApplyQuoteDeliveryModel();
 
         // Stock reservation ledger (portable relational model; enabled for the SQLite suite).
