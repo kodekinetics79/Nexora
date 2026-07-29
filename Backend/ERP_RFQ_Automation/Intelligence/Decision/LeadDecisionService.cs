@@ -9,17 +9,16 @@ namespace ERP_RFQ_Automation.Intelligence.Decision;
 ///
 /// SIGNALS
 ///   coverage — lead items matched against Products with cheap batched queries:
-///              exact ItemMaterialCode == PartNo, ManufacturerPartNumber ==
-///              ModelNo/PartNo (single IN query, case-insensitive), then a bounded
-///              name-contains ILIKE fallback for still-unmatched lines.
+///              exact ItemMaterialCode == PartNo or ManufacturerPartNumber ==
+///              ModelNo/PartNo (single IN query, case-insensitive). Names are not
+///              decision-grade product identities.
 ///   value    — per line: the lead's own UnitPrice, else the matched product's
 ///              FinalSalesPrice/SellingPrice, × quantity. Confidence is "high"
 ///              only when most lines were priced from real numbers.
-///   margin   — avg (price − cost)/price over matched+costed lines, where cost is
-///              FinalLandedCost ?? UnitCost. Null when unknowable.
-///   customer — buyer resolved against Customers by name (ILIKE) and by the
-///              ingest sender / client email; then past leads, quotes, and last-
-///              24-month orders + value.
+///   margin   — quantity/revenue-weighted (price - cost)/price over exact,
+///              matched+costed lines. Null when currency or cost is unknowable.
+///   customer — canonical tenant-qualified Lead.CustomerId first. Name/email
+///              fallback is explicitly weaker and never decision-grade.
 ///   deadline — BidClosingDate vs now, sentinel dates (&lt; year 2000) ignored.
 ///
 /// RECOMMENDATION (transparent rules, always explained in plain language):
@@ -44,9 +43,6 @@ public sealed class LeadDecisionService : ILeadDecisionService
     // Lead.Aiconfidence below this adds a "verify first" reason.
     private const decimal LowExtractionConfidence = 0.70m;
 
-    // Name-contains fallback bounds — never scan the catalog wholesale.
-    private const int MaxNameFallbackQueries = 10;
-    private const int MaxNameCandidatesPerQuery = 15;
     private const int MinNameTokenLength = 4;
 
     private const int OrderLookbackMonths = 24;
@@ -74,6 +70,7 @@ public sealed class LeadDecisionService : ILeadDecisionService
                 l.Clientemail,
                 l.BidClosingDate,
                 l.Aiconfidence,
+                l.CustomerId,
                 SenderEmail = l.EmailIngests != null ? l.EmailIngests.FromEmail : l.Clientemail,
                 Items = l.LeadItems
                     .OrderBy(li => li.Id)
@@ -103,7 +100,9 @@ public sealed class LeadDecisionService : ILeadDecisionService
         var coverageItems = new List<CoverageItem>(items.Count);
         var estimatedValue = 0m;
         var pricedLines = 0;
-        var marginSamples = new List<decimal>();
+        var pricedLinesWithKnownCurrency = 0;
+        var marginRevenue = 0m;
+        var marginProfit = 0m;
 
         foreach (var li in items)
         {
@@ -125,6 +124,7 @@ public sealed class LeadDecisionService : ILeadDecisionService
             if (price.HasValue)
             {
                 pricedLines++;
+                if (!string.IsNullOrWhiteSpace(li.Currency)) pricedLinesWithKnownCurrency++;
                 if (li.Quantity > 0)
                     estimatedValue += price.Value * li.Quantity;
             }
@@ -132,9 +132,16 @@ public sealed class LeadDecisionService : ILeadDecisionService
             if (match is not null && price is > 0m)
             {
                 var cost = FirstPositive(match.Product.FinalLandedCost, match.Product.UnitCost);
-                if (cost.HasValue)
-                    marginSamples.Add((price.Value - cost.Value) / price.Value);
+                if (cost.HasValue && li.Quantity > 0)
+                {
+                    var lineRevenue = price.Value * li.Quantity;
+                    marginRevenue += lineRevenue;
+                    marginProfit += lineRevenue - (cost.Value * li.Quantity);
+                }
             }
+
+            var catalogQtyOnHand = match?.Product.QtyOnHand;
+            var hasCatalogOnHand = catalogQtyOnHand is > 0m;
 
             coverageItems.Add(new CoverageItem
             {
@@ -144,7 +151,9 @@ public sealed class LeadDecisionService : ILeadDecisionService
                 Matched = match is not null,
                 MatchType = match?.MatchType,
                 ProductId = match?.Product.Id,
-                InStock = match is not null && match.Product.QtyOnHand > 0,
+                InStock = hasCatalogOnHand,
+                HasCatalogOnHand = hasCatalogOnHand,
+                CatalogQtyOnHand = catalogQtyOnHand,
                 UnitPrice = price,
                 PriceSource = priceSource
             });
@@ -158,6 +167,8 @@ public sealed class LeadDecisionService : ILeadDecisionService
             CoveredItems = coveredItems,
             CoveragePct = Pct(coveredItems, totalItems),
             InStockItems = coverageItems.Count(i => i.InStock),
+            CatalogOnHandItems = coverageItems.Count(i => i.HasCatalogOnHand),
+            CatalogOnHandQuantity = coverageItems.Sum(i => i.CatalogQtyOnHand ?? 0m),
             Items = coverageItems
         };
 
@@ -165,21 +176,25 @@ public sealed class LeadDecisionService : ILeadDecisionService
         // own price or a matched product's price) — honest about sparse data.
         var valueConfidence = totalItems > 0 && pricedLines * 2 > totalItems ? "high" : "low";
 
-        var marginPotentialPct = marginSamples.Count > 0
-            ? (decimal?)Math.Round(marginSamples.Average() * 100m, 1, MidpointRounding.AwayFromZero)
-            : null;
-
-        // Mixed currencies are reported honestly as null, never guessed.
         var currencies = items
+            .Where(i => i.UnitPrice is > 0m || matches.ContainsKey(i.Id))
             .Select(i => i.Currency?.Trim().ToUpperInvariant())
             .Where(c => !string.IsNullOrEmpty(c))
             .Distinct()
             .ToList();
-        var currency = currencies.Count == 1 ? currencies[0] : null;
+        var hasOneKnownCurrency = pricedLines > 0
+                                  && pricedLinesWithKnownCurrency == pricedLines
+                                  && currencies.Count == 1;
+        var currency = hasOneKnownCurrency ? currencies[0] : null;
+        decimal? aggregateEstimatedValue = hasOneKnownCurrency ? Round2(estimatedValue) : null;
+        decimal? marginPotentialPct = hasOneKnownCurrency && marginRevenue > 0m
+            ? Math.Round(100m * marginProfit / marginRevenue, 1, MidpointRounding.AwayFromZero)
+            : null;
 
         // ---- 4. customer history -------------------------------------------
         var customer = await ResolveCustomerHistoryAsync(
-            lead.Id, lead.BuyersName, lead.Clientemail ?? lead.SenderEmail, businessUnitId, now, ct);
+            lead.Id, lead.CustomerId, lead.BuyersName, lead.Clientemail ?? lead.SenderEmail,
+            businessUnitId, now, ct);
 
         // ---- 5. deadline feasibility ---------------------------------------
         var deadline = BuildDeadline(lead.BidClosingDate, totalItems, now);
@@ -192,8 +207,8 @@ public sealed class LeadDecisionService : ILeadDecisionService
             BuyersName = lead.BuyersName,
             ExtractionConfidence = lead.Aiconfidence,
             Coverage = coverage,
-            EstimatedValue = Round2(estimatedValue),
-            ValueConfidence = valueConfidence,
+            EstimatedValue = aggregateEstimatedValue,
+            ValueConfidence = aggregateEstimatedValue.HasValue ? valueConfidence : "unknown",
             Currency = currency,
             MarginPotentialPct = marginPotentialPct,
             Customer = customer,
@@ -219,7 +234,13 @@ public sealed class LeadDecisionService : ILeadDecisionService
             {
                 l.Id,
                 l.BidClosingDate,
-                Items = l.LeadItems.Select(li => new { li.ItemMaterialCode, li.UnitPrice, li.Quantity }).ToList()
+                Items = l.LeadItems.Select(li => new
+                {
+                    li.ItemMaterialCode,
+                    li.UnitPrice,
+                    li.Quantity,
+                    li.Currency
+                }).ToList()
             })
             .ToListAsync(ct);
         if (leads.Count == 0) return result;
@@ -252,28 +273,39 @@ public sealed class LeadDecisionService : ILeadDecisionService
             });
             var coveragePct = Pct(covered, total);
 
-            var estimatedValue = lead.Items
-                .Where(i => i.UnitPrice is > 0m && i.Quantity > 0)
-                .Sum(i => i.UnitPrice!.Value * i.Quantity);
+            var pricedItems = lead.Items.Where(i => i.UnitPrice is > 0m && i.Quantity > 0).ToList();
+            var pricedCurrencies = pricedItems
+                .Select(i => i.Currency?.Trim().ToUpperInvariant())
+                .Where(c => !string.IsNullOrEmpty(c))
+                .Distinct()
+                .ToList();
+            var canAggregateValue = pricedItems.Count > 0
+                                    && pricedItems.All(i => !string.IsNullOrWhiteSpace(i.Currency))
+                                    && pricedCurrencies.Count == 1;
+            decimal? estimatedValue = canAggregateValue
+                ? Round2(pricedItems.Sum(i => i.UnitPrice!.Value * i.Quantity))
+                : null;
 
             var (daysLeft, urgency) = DeadlineBand(lead.BidClosingDate, now);
 
-            // Coarse recommendation: same coverage/overdue gates as the full
-            // brief, but no customer or margin signals are consulted here.
+            // Summaries intentionally cannot emit actionable Bid because customer
+            // identity and weighted margin evidence are not evaluated in this path.
             var overdue = urgency == LeadDecisionUrgency.Overdue;
             var recommendation =
                 coveragePct < SkipCoveragePct || overdue ? LeadDecisionRecommendations.Skip
-                : coveragePct >= BidCoveragePct ? LeadDecisionRecommendations.Bid
                 : LeadDecisionRecommendations.Review;
 
             result[lead.Id] = new LeadDecisionSummary
             {
                 LeadId = lead.Id,
                 CoveragePct = coveragePct,
-                EstimatedValue = Round2(estimatedValue),
+                EstimatedValue = estimatedValue,
                 DaysLeft = daysLeft,
                 Urgency = urgency,
-                Recommendation = recommendation
+                Recommendation = recommendation,
+                PolicyVersion = LeadDecisionPolicy.Version,
+                Completeness = LeadDecisionCompleteness.Partial,
+                IsActionable = false
             };
         }
 
@@ -295,9 +327,9 @@ public sealed class LeadDecisionService : ILeadDecisionService
     private sealed record CatalogMatch(ProductLite Product, string MatchType);
 
     /// <summary>
-    /// Cheap batched matching: one IN query for every material code / MPN, then a
-    /// bounded ILIKE name-contains fallback ONLY for still-unmatched lines
-    /// (capped queries, capped candidates — the catalog is never scanned).
+    /// Cheap batched matching using exact product identifiers only. Product names
+    /// may be useful review evidence elsewhere but never contribute commercial
+    /// coverage, price, cost, stock, margin, or Bid signals here.
     /// </summary>
     private async Task<Dictionary<long, CatalogMatch>> MatchCatalogAsync(
         IReadOnlyList<ItemRow> items, long businessUnitId, CancellationToken ct)
@@ -343,37 +375,6 @@ public sealed class LeadDecisionService : ILeadDecisionService
                 result[li.Id] = new CatalogMatch(byMpn, "mpn");
         }
 
-        // ---- bounded name-contains fallback for the leftovers ----
-        var fallbackQueriesRun = 0;
-        var candidatesByToken = new Dictionary<string, List<ProductLite>>(StringComparer.Ordinal);
-
-        foreach (var li in items)
-        {
-            if (result.ContainsKey(li.Id)) continue;
-
-            var token = MostSignificantToken(li.ProductShortName ?? li.ProductShortDescription);
-            if (token is null) continue;
-
-            if (!candidatesByToken.TryGetValue(token, out var candidates))
-            {
-                if (fallbackQueriesRun >= MaxNameFallbackQueries) continue; // hard bound
-                fallbackQueriesRun++;
-
-                var pattern = $"%{EscapeLike(token)}%";
-                candidates = await ActiveProducts(businessUnitId)
-                    .Where(p => p.ProductName != null && EF.Functions.ILike(p.ProductName, pattern, "\\"))
-                    .OrderBy(p => p.Id)
-                    .Take(MaxNameCandidatesPerQuery)
-                    .Select(p => new ProductLite(p.Id, p.PartNo, p.ModelNo, p.ProductName,
-                        p.QtyOnHand, p.UnitCost, p.SellingPrice, p.FinalLandedCost, p.FinalSalesPrice))
-                    .ToListAsync(ct);
-                candidatesByToken[token] = candidates;
-            }
-
-            if (candidates.Count > 0)
-                result[li.Id] = new CatalogMatch(candidates[0], "name");
-        }
-
         return result;
     }
 
@@ -390,62 +391,100 @@ public sealed class LeadDecisionService : ILeadDecisionService
     // ================================================================ customer history
 
     private async Task<CustomerHistory> ResolveCustomerHistoryAsync(
-        long leadId, string? buyersName, string? rawEmail, long businessUnitId, DateTime now, CancellationToken ct)
+        long leadId, long? canonicalCustomerId, string? buyersName, string? rawEmail,
+        long businessUnitId, DateTime now, CancellationToken ct)
     {
         var history = new CustomerHistory();
 
         var name = string.IsNullOrWhiteSpace(buyersName) ? null : buyersName.Trim();
         var email = ExtractEmailAddress(rawEmail);
 
-        // Past leads from the same buyer name (cheap signal even when no customer
-        // record exists yet).
-        if (name is not null)
+        if (canonicalCustomerId.HasValue)
         {
-            var namePattern = EscapeLike(name);
-            history.PastLeads = await _db.Leads.AsNoTracking()
-                .CountAsync(l => l.BusinessUnitId == businessUnitId
-                                 && l.Id != leadId
-                                 && l.BuyersName != null
-                                 && EF.Functions.ILike(l.BuyersName, namePattern, "\\"), ct);
+            var canonical = await _db.Customers.AsNoTracking()
+                .Where(c => c.Id == canonicalCustomerId.Value
+                            && c.Buid == businessUnitId
+                            && (c.IsActive == null || c.IsActive == true))
+                .Select(c => new { c.Id, c.Name })
+                .SingleOrDefaultAsync(ct);
+
+            if (canonical is null)
+            {
+                history.IdentityEvidence = CustomerIdentityEvidence.CanonicalInvalid;
+                return history;
+            }
+
+            history.CustomerId = canonical.Id;
+            history.CustomerName = canonical.Name;
+            history.IsExistingCustomer = true;
+            history.IsDecisionGradeIdentity = true;
+            history.IdentityEvidence = CustomerIdentityEvidence.Canonical;
+        }
+        else
+        {
+            if (name is null && email is null) return history;
+
+            var nameLower = name?.ToLowerInvariant();
+            var emailLower = email?.ToLowerInvariant();
+            var candidates = await _db.Customers.AsNoTracking()
+                .Where(c => c.Buid == businessUnitId && (c.IsActive == null || c.IsActive == true))
+                .Where(c => (nameLower != null && c.Name.ToLower() == nameLower)
+                            || (emailLower != null && c.ContactEmail != null && c.ContactEmail.ToLower() == emailLower))
+                .Select(c => new { c.Id, c.Name, c.ContactEmail })
+                .Take(6)
+                .ToListAsync(ct);
+
+            var emailMatches = candidates
+                .Where(c => emailLower != null
+                            && string.Equals(c.ContactEmail, email, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            var strongest = emailMatches.Count > 0
+                ? emailMatches
+                : candidates.Where(c => nameLower != null
+                                        && string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase)).ToList();
+
+            if (strongest.Count != 1)
+            {
+                if (strongest.Count > 1) history.IdentityEvidence = CustomerIdentityEvidence.HeuristicAmbiguous;
+                return history;
+            }
+
+            var resolvedFallback = strongest[0];
+            history.CustomerId = resolvedFallback.Id;
+            history.CustomerName = resolvedFallback.Name;
+            history.IsExistingCustomer = true;
+            history.IsDecisionGradeIdentity = false;
+            history.IdentityEvidence = emailMatches.Count == 1
+                ? CustomerIdentityEvidence.HeuristicEmail
+                : CustomerIdentityEvidence.HeuristicName;
         }
 
-        if (name is null && email is null) return history; // nothing to resolve — graceful
-
-        // Resolve the buyer against Customers: exact-but-case-insensitive name
-        // (ILIKE with escaped pattern = equality, not a scan) or contact email.
-        var nameEq = name is null ? null : EscapeLike(name);
-        var emailLower = email?.ToLowerInvariant();
-
-        var candidates = await _db.Customers.AsNoTracking()
-            .Where(c => c.Buid == null || c.Buid == businessUnitId)
-            .Where(c => (c.IsActive == null || c.IsActive == true))
-            .Where(c => (nameEq != null && EF.Functions.ILike(c.Name, nameEq, "\\"))
-                        || (emailLower != null && c.ContactEmail != null && c.ContactEmail.ToLower() == emailLower))
-            .Select(c => new { c.Id, c.Name, c.ContactEmail })
-            .Take(5)
-            .ToListAsync(ct);
-
-        var resolved = candidates
-            .OrderByDescending(c => emailLower != null
-                                    && string.Equals(c.ContactEmail, email, StringComparison.OrdinalIgnoreCase))
-            .FirstOrDefault();
-        if (resolved is null) return history;
-
-        history.IsExistingCustomer = true;
-        history.CustomerName = resolved.Name;
+        var resolvedCustomerId = history.CustomerId!.Value;
+        history.PastLeads = await _db.Leads.AsNoTracking()
+            .CountAsync(l => l.BusinessUnitId == businessUnitId
+                             && l.Id != leadId
+                             && l.CustomerId == resolvedCustomerId, ct);
 
         history.Quotes = await _db.Quotes.AsNoTracking()
-            .CountAsync(q => q.CustomerId == resolved.Id && q.BusinessUnitId == businessUnitId, ct);
+            .CountAsync(q => q.CustomerId == resolvedCustomerId && q.BusinessUnitId == businessUnitId, ct);
 
         var since = now.AddMonths(-OrderLookbackMonths);
-        var recentOrders = _db.Orders.AsNoTracking()
-            .Where(o => o.CustomerId == resolved.Id
+        var recentOrders = await _db.Orders.AsNoTracking()
+            .Where(o => o.CustomerId == resolvedCustomerId
                         && o.BusinessUnitId == businessUnitId
-                        && o.OrderDate >= since);
+                        && o.OrderDate >= since)
+            .Select(o => new { o.TotalAmount, Currency = o.Currency == null ? null : o.Currency.Code })
+            .ToListAsync(ct);
 
-        history.Orders = await recentOrders.CountAsync(ct);
-        // Nullable projection so SUM over an empty set materializes as null, not a throw.
-        history.TotalOrderValue = Round2(await recentOrders.SumAsync(o => (decimal?)o.TotalAmount, ct) ?? 0m);
+        history.Orders = recentOrders.Count;
+        var orderCurrencies = recentOrders.Select(x => x.Currency?.Trim().ToUpperInvariant())
+            .Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().ToArray();
+        if (recentOrders.Count > 0 && recentOrders.All(x => !string.IsNullOrWhiteSpace(x.Currency))
+                                   && orderCurrencies.Length == 1)
+        {
+            history.TotalOrderValue = Round2(recentOrders.Sum(x => x.TotalAmount));
+            history.TotalOrderCurrency = orderCurrencies[0];
+        }
         return history;
     }
 
@@ -512,19 +551,21 @@ public sealed class LeadDecisionService : ILeadDecisionService
         else if (c.CoveredItems == 0)
             reasons.Add($"None of the {N0(c.TotalItems)} items match our catalog.");
         else
-            reasons.Add($"We stock {N0(c.CoveredItems)} of {N0(c.TotalItems)} items " +
-                        $"({Fmt(c.CoveragePct)}% coverage, {N0(c.InStockItems)} on hand).");
+            reasons.Add($"Exact catalog identities found for {N0(c.CoveredItems)} of {N0(c.TotalItems)} items " +
+                        $"({Fmt(c.CoveragePct)}% coverage; {N0(c.CatalogOnHandItems)} show catalog quantity on hand, not ATP).");
 
         // -- value --
-        if (b.EstimatedValue > 0)
+        if (b.EstimatedValue is > 0m)
         {
             var cur = b.Currency is null ? "" : $" {b.Currency}";
             reasons.Add(b.ValueConfidence == "high"
-                ? $"Estimated value {N0Dec(b.EstimatedValue)}{cur}."
-                : $"Rough estimated value {N0Dec(b.EstimatedValue)}{cur} — most lines had no usable price.");
+                ? $"Estimated value {N0Dec(b.EstimatedValue.Value)}{cur}."
+                : $"Rough estimated value {N0Dec(b.EstimatedValue.Value)}{cur} — most lines had no usable price.");
         }
         else
-            reasons.Add("No price information on any line — value unknown.");
+            reasons.Add(b.Currency is null
+                ? "Aggregate value is unavailable without one known currency for all priced lines."
+                : "No price information on any line — value unknown.");
 
         // -- margin --
         if (b.MarginPotentialPct is decimal margin)
@@ -537,10 +578,12 @@ public sealed class LeadDecisionService : ILeadDecisionService
         // -- customer --
         if (b.Customer.IsExistingCustomer)
         {
-            var spend = b.Customer.TotalOrderValue > 0
-                ? $" — {N0Dec(b.Customer.TotalOrderValue)} in orders over the last {OrderLookbackMonths} months"
+            var spend = b.Customer.TotalOrderValue is > 0m
+                ? $" — {N0Dec(b.Customer.TotalOrderValue.Value)} {b.Customer.TotalOrderCurrency} in orders over the last {OrderLookbackMonths} months"
                 : "";
             reasons.Add($"Existing customer ({b.Customer.CustomerName}){spend}.");
+            if (!b.Customer.IsDecisionGradeIdentity)
+                reasons.Add("Customer identity came from a weaker name/email match and requires confirmation.");
         }
         else if (b.Customer.PastLeads > 0)
             reasons.Add($"Buyer has sent us {N0(b.Customer.PastLeads)} lead(s) before but has never become a customer.");
@@ -575,7 +618,7 @@ public sealed class LeadDecisionService : ILeadDecisionService
         if (c.CoveragePct < SkipCoveragePct || overdue)
             recommendation = LeadDecisionRecommendations.Skip;
         else if (c.CoveragePct >= BidCoveragePct
-                 && (b.Customer.IsExistingCustomer || b.MarginPotentialPct >= BidMarginPct))
+                 && (b.Customer.IsDecisionGradeIdentity || b.MarginPotentialPct >= BidMarginPct))
             recommendation = LeadDecisionRecommendations.Bid;
         else
             recommendation = LeadDecisionRecommendations.Review;

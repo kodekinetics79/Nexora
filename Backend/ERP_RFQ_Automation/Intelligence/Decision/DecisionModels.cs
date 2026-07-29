@@ -10,6 +10,9 @@ namespace ERP_RFQ_Automation.Intelligence.Decision;
 /// </summary>
 public sealed class LeadDecisionBrief
 {
+    public string PolicyVersion { get; set; } = LeadDecisionPolicy.Version;
+    public string Completeness { get; set; } = LeadDecisionCompleteness.Complete;
+    public bool IsActionable { get; set; } = true;
     public long LeadId { get; set; }
     public string? Rfqno { get; set; }
     public string? BuyersName { get; set; }
@@ -19,8 +22,8 @@ public sealed class LeadDecisionBrief
 
     public CatalogCoverage Coverage { get; set; } = new();
 
-    /// <summary>Sum of best-available line prices × quantities (0 when nothing is priceable).</summary>
-    public decimal EstimatedValue { get; set; }
+    /// <summary>Sum of priced lines when all priced lines share one known currency; otherwise null.</summary>
+    public decimal? EstimatedValue { get; set; }
 
     /// <summary>"high" when most lines were priced from real numbers, else "low".</summary>
     public string ValueConfidence { get; set; } = "low";
@@ -29,8 +32,8 @@ public sealed class LeadDecisionBrief
     public string? Currency { get; set; }
 
     /// <summary>
-    /// Average (price − cost) / price across matched+costed lines, as a percentage
-    /// (0–100). Null when no line has both a usable price and a known cost.
+    /// Quantity/revenue-weighted (revenue - cost) / revenue, as a percentage
+    /// (0-100). Null without costed lines or one known currency.
     /// </summary>
     public decimal? MarginPotentialPct { get; set; }
 
@@ -45,7 +48,7 @@ public sealed class LeadDecisionBrief
     public List<string> Reasons { get; set; } = new();
 }
 
-/// <summary>How much of the lead we can actually supply from the catalog.</summary>
+/// <summary>How much of the lead has an exact, decision-grade catalog identity.</summary>
 public sealed class CatalogCoverage
 {
     public int TotalItems { get; set; }
@@ -54,8 +57,17 @@ public sealed class CatalogCoverage
     /// <summary>coveredItems / totalItems as a percentage 0–100 (0 for empty leads).</summary>
     public decimal CoveragePct { get; set; }
 
-    /// <summary>Matched items whose catalog product has QtyOnHand &gt; 0.</summary>
+    /// <summary>
+    /// Compatibility field: exact matches whose product master reports QtyOnHand &gt; 0.
+    /// This is catalog-on-hand evidence, not authoritative ATP or full supply coverage.
+    /// </summary>
     public int InStockItems { get; set; }
+
+    /// <summary>Exact matches whose product master reports catalog quantity on hand.</summary>
+    public int CatalogOnHandItems { get; set; }
+
+    /// <summary>Total raw product-master QtyOnHand across exact matches; not ATP.</summary>
+    public decimal CatalogOnHandQuantity { get; set; }
 
     public List<CoverageItem> Items { get; set; } = new();
 }
@@ -68,13 +80,19 @@ public sealed class CoverageItem
     public int Quantity { get; set; }
     public bool Matched { get; set; }
 
-    /// <summary>"code" | "mpn" | "name" — how the catalog match was made (null when unmatched).</summary>
+    /// <summary>"code" | "mpn" - how the exact catalog match was made (null when unmatched).</summary>
     public string? MatchType { get; set; }
 
     public long? ProductId { get; set; }
 
-    /// <summary>Matched product has QtyOnHand &gt; 0.</summary>
+    /// <summary>Compatibility field for catalog-on-hand evidence; not ATP.</summary>
     public bool InStock { get; set; }
+
+    /// <summary>Whether the exact match has positive product-master QtyOnHand; not ATP.</summary>
+    public bool HasCatalogOnHand { get; set; }
+
+    /// <summary>Raw product-master QtyOnHand for the exact match; not reserved/available quantity.</summary>
+    public decimal? CatalogQtyOnHand { get; set; }
 
     /// <summary>The unit price used for the value estimate (null when unpriceable).</summary>
     public decimal? UnitPrice { get; set; }
@@ -86,8 +104,15 @@ public sealed class CoverageItem
 /// <summary>Do we already know this buyer, and what are they worth to us?</summary>
 public sealed class CustomerHistory
 {
+    public long? CustomerId { get; set; }
     public bool IsExistingCustomer { get; set; }
     public string? CustomerName { get; set; }
+
+    /// <summary>"canonical" | "heuristic-email" | "heuristic-name" | "heuristic-ambiguous" | "unresolved".</summary>
+    public string IdentityEvidence { get; set; } = CustomerIdentityEvidence.Unresolved;
+
+    /// <summary>Only a tenant-qualified Lead.CustomerId is decision-grade.</summary>
+    public bool IsDecisionGradeIdentity { get; set; }
 
     /// <summary>Past leads from the same buyer name in this business unit (excluding this one).</summary>
     public int PastLeads { get; set; }
@@ -98,8 +123,10 @@ public sealed class CustomerHistory
     /// <summary>Orders from the resolved customer in the last 24 months.</summary>
     public int Orders { get; set; }
 
-    /// <summary>Summed Order.TotalAmount over the last 24 months.</summary>
-    public decimal TotalOrderValue { get; set; }
+    /// <summary>Summed Order.TotalAmount only when every sampled order has one currency.</summary>
+    public decimal? TotalOrderValue { get; set; }
+
+    public string? TotalOrderCurrency { get; set; }
 }
 
 /// <summary>Can we realistically respond before the bid closes?</summary>
@@ -124,12 +151,36 @@ public sealed class DeadlineFeasibility
 /// </summary>
 public sealed class LeadDecisionSummary
 {
+    public string PolicyVersion { get; set; } = LeadDecisionPolicy.Version;
+    public string Completeness { get; set; } = LeadDecisionCompleteness.Partial;
+    public bool IsActionable { get; set; }
     public long LeadId { get; set; }
     public decimal CoveragePct { get; set; }
-    public decimal EstimatedValue { get; set; }
+    public decimal? EstimatedValue { get; set; }
     public int? DaysLeft { get; set; }
     public string Urgency { get; set; } = LeadDecisionUrgency.Unknown;
     public string Recommendation { get; set; } = LeadDecisionRecommendations.Review;
+}
+
+public static class LeadDecisionPolicy
+{
+    public const string Version = "lead-decision/v1.1";
+}
+
+public static class LeadDecisionCompleteness
+{
+    public const string Complete = "complete";
+    public const string Partial = "partial";
+}
+
+public static class CustomerIdentityEvidence
+{
+    public const string Canonical = "canonical";
+    public const string HeuristicEmail = "heuristic-email";
+    public const string HeuristicName = "heuristic-name";
+    public const string HeuristicAmbiguous = "heuristic-ambiguous";
+    public const string CanonicalInvalid = "canonical-invalid";
+    public const string Unresolved = "unresolved";
 }
 
 /// <summary>Stable recommendation values (wire contract).</summary>

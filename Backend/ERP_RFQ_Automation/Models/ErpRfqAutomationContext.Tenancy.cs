@@ -13,6 +13,7 @@ using ERP_RFQ_Automation.QuoteDelivery;
 using ERP_RFQ_Automation.CommercialIntelligence.Sales;
 using ERP_RFQ_Automation.Inventory.Commercial;
 using ERP_RFQ_Automation.CommercialIntelligence.Exceptions;
+using ERP_RFQ_Automation.CommercialIntelligence.Opportunity;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Models;
@@ -169,6 +170,7 @@ public partial class ErpRfqAutomationContext
         modelBuilder.ApplyCommercialRoutingModel();
         modelBuilder.ApplyCommercialSalesModel();
         modelBuilder.ApplyCommercialExceptionModel();
+        modelBuilder.ApplyOpportunityPriorityModel();
         modelBuilder.ApplyQuoteDeliveryModel();
 
         // Stock reservation ledger (portable relational model; enabled for the SQLite suite).
@@ -194,6 +196,12 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<CommercialExceptionEvent>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CommercialExceptionOutboxMessage>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CommercialExceptionOperation>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<OpportunityRecommendation>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<OpportunityOutcome>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<OpportunityFeedback>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<OpportunityEvent>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<OpportunityOutbox>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<OpportunityOperation>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CommercialActivity>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<FollowUpTask>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<FollowUpTransitionEvent>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);

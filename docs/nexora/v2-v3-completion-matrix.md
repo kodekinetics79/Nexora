@@ -8,7 +8,7 @@ Status: `Not started`, `In progress`, `Green`, `Blocked`.
 |---|---|---:|---:|---|---|
 | Track 0 | Durable evidence storage and malware scanning | M2 | M3 | Blocked | Repository fails closed; deployed `/ready` remains `503` until reachable S3-compatible storage and ClamAV configuration are supplied. |
 | V2.1 | Commercial Autopilot and Exception Center | M2 | M3 | Green | Deterministic overdue-follow-up and unassigned-routing reconciliation; immutable lineage; one active case per source rule; decision events/outbox; dynamic source coverage; role scope; RLS; two-context concurrency; data-bearing upgrade; two real-backend browser scenarios. See `docs/nexora/releases/v2-gate-01-commercial-autopilot-exception-center.md`. |
-| V2.2 | Opportunity Priority and Next-Best Action | M2 | M4 shadow | Not started | Canonical evidence snapshot, deterministic baseline, persisted recommendation/outcome/override, calibrated shadow cohort. |
+| V2.2 | Opportunity Priority and Next-Best Action | M2 | M4 shadow | Green | Local deterministic, stage-aware shadow scoring; immutable evidence/recommendation/outcome/feedback; terminal-case exclusion; bounded reconciliation; owner/manager scope; RLS and lineage triggers. Accuracy remains explicitly unmeasured until an adequate later-outcome cohort exists. See `docs/nexora/releases/v2-gate-02-opportunity-priority-shadow.md`. |
 | V2.3 | Predictive Pricing and Digital Twin | M2/M3 | M4 shadow | Blocked | Canonical offer/landed-cost authority, currency-safe totals, no derived-cost floor, governed application path and calibration required. |
 | V2.4 | Supplier Bid Quality and Negotiation Intelligence | M3 | M4 shadow | Not started | Bid hygiene remains separate from fulfilment quality; authoritative delivery outcomes required before award influence. |
 | V2.5 | Coaching, Customer Health and Revenue Recovery | M3 | M4 shadow | Not started | Quote/order opportunity indicators are separated from revenue claims until accounting outcomes reconcile. |
@@ -28,3 +28,11 @@ Status: `Not started`, `In progress`, `Green`, `Blocked`.
 - Individual users see only owned follow-up exceptions; managers see tenant-wide exceptions and can reconcile. HTTP authorization and PostgreSQL RLS both remain mandatory.
 - `Acknowledge`, `Resolve`, and reason-required `Dismiss` govern the exception record only. They do not mutate source workflow state.
 - Empty results and unavailable source data are distinct. KPI counts reconcile to active source records at one generated timestamp.
+
+## Gate 2 Frozen Acceptance
+
+- Opportunity recommendations are advisory shadow records and cannot mutate commercial workflow, pricing, inventory, awards, or lifecycle state.
+- Evidence is local and deterministic. Ambiguous part names, raw stock quantity, mixed-currency value, and margin are excluded from the score.
+- Reconciliation is manager-only, permission-gated, idempotent, cursor-bounded to 100 cases, and skips terminal Quote/Order cases while retaining later outcome observation for pre-terminal recommendations.
+- Individual users see assigned recommendations only. Managers see the tenant cohort. PostgreSQL RLS and tenant-qualified immutable lineage remain mandatory.
+- Accuracy is `null` and labelled not measured until sufficient later outcomes exist; no win-probability or revenue claim is made.

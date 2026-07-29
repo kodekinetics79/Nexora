@@ -80,7 +80,10 @@ public sealed class V2Gate01CommercialExceptionPostgreSqlTests(PostgreSqlTestDat
             await using var command = verify.CreateCommand();
             command.CommandText = """
                 SELECT
-                  (SELECT max("MigrationId") FROM "__EFMigrationsHistory") = '20260729020217_V2Gate01CommercialExceptionCenter',
+                  EXISTS (
+                    SELECT 1 FROM "__EFMigrationsHistory"
+                    WHERE "MigrationId" = '20260729020217_V2Gate01CommercialExceptionCenter'
+                  ),
                   (SELECT count(*) FROM commercial_exception_cases) = 0,
                   EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'AK_unassigned_work_items_BusinessUnitId_Id');
                 """;
