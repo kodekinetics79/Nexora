@@ -14,6 +14,7 @@ using ERP_RFQ_Automation.CommercialIntelligence.Sales;
 using ERP_RFQ_Automation.Inventory.Commercial;
 using ERP_RFQ_Automation.CommercialIntelligence.Exceptions;
 using ERP_RFQ_Automation.CommercialIntelligence.Opportunity;
+using ERP_RFQ_Automation.CommercialIntelligence.Growth;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Models;
@@ -171,6 +172,8 @@ public partial class ErpRfqAutomationContext
         modelBuilder.ApplyCommercialSalesModel();
         modelBuilder.ApplyCommercialExceptionModel();
         modelBuilder.ApplyOpportunityPriorityModel(Database.IsNpgsql());
+        modelBuilder.ApplyGrowthIntelligenceModel(
+            e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.ApplyQuoteDeliveryModel();
 
         // Stock reservation ledger (portable relational model; enabled for the SQLite suite).

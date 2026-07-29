@@ -5,21 +5,35 @@ import {
   Button,
   Chip,
   Collapse,
+  CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  MenuItem,
   Paper,
   Pagination,
   Stack,
+  Tab,
   Table,
   TableBody,
   TableCell,
   TableHead,
   TableRow,
+  Tabs,
+  TextField,
   Tooltip,
   Typography,
 } from '@mui/material';
 import { ExpandLess, ExpandMore, OpenInNew, Refresh } from '@mui/icons-material';
-import { useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import commercialIntelligenceService from '../../api/services/commercialIntelligenceService';
+import commercialIntelligenceService, {
+  type CoachingFindingDTO,
+  type CoachingRecoveryDTO,
+  type CommercialIntelligenceEvidenceDTO,
+  type RecoveryOpportunityDTO,
+} from '../../api/services/commercialIntelligenceService';
 import opportunityPriorityService, {
   createOpportunityCommandIdentity,
   type OpportunityPriorityItem,
@@ -31,8 +45,90 @@ const percentage = (value: number) => `${value <= 1 ? Math.round(value * 100) : 
 const money = (value?: number | null, currency?: string | null) => value == null
   ? 'Not measured'
   : `${currency ?? ''} ${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`.trim();
-const businessLabel = (value: string) => value.replaceAll('_', ' ').replace(/\b\w/g, letter => letter.toUpperCase());
+const businessLabel = (value: string) => value.toLowerCase().replaceAll('_', ' ')
+  .replace(/\b\w/g, letter => letter.toUpperCase());
 const priorityPageSize = 10;
+
+const reportingWindow = () => {
+  const to = new Date();
+  const from = new Date(to);
+  from.setUTCDate(from.getUTCDate() - 90);
+  return { from: from.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10) };
+};
+
+const severityColor = (severity: string): 'error' | 'warning' | 'info' | 'default' => {
+  const normalized = severity.toLowerCase();
+  if (normalized === 'critical' || normalized === 'high') return 'error';
+  if (normalized === 'medium') return 'warning';
+  if (normalized === 'low') return 'info';
+  return 'default';
+};
+
+function SourceEvidence({ evidence, identity }: { evidence: CommercialIntelligenceEvidenceDTO[]; identity: string }) {
+  const [open, setOpen] = useState(false);
+  const evidenceId = `commercial-evidence-${identity.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+  return <Box>
+    <Button size="small" color="inherit" endIcon={open ? <ExpandLess /> : <ExpandMore />} aria-expanded={open} aria-controls={evidenceId} onClick={() => setOpen(current => !current)}>
+      {open ? 'Hide evidence' : `Evidence (${evidence.length})`}
+    </Button>
+    <Collapse in={open}>
+      <Stack id={evidenceId} component="ul" spacing={0.75} sx={{ pl: 2.5, my: 1 }}>
+        {evidence.length ? evidence.map((item, index) => <Typography component="li" variant="body2" key={`${item.recordType}-${item.recordId}-${index}`}>
+          <strong>{item.role}:</strong> {item.reference} ({businessLabel(item.recordType)}){item.occurredOn ? `, ${formatDateTime(item.occurredOn)}` : ''}
+        </Typography>) : <Typography component="li" variant="body2" color="text.secondary">No source evidence was returned.</Typography>}
+      </Stack>
+    </Collapse>
+  </Box>;
+}
+
+function CoachingFindingRow({ item, canAcknowledge, onOpen, onAcknowledge }: {
+  item: CoachingFindingDTO;
+  canAcknowledge: boolean;
+  onOpen: () => void;
+  onAcknowledge: () => void;
+}) {
+  return <Box sx={{ py: 2, borderBottom: '1px solid', borderColor: 'divider', minWidth: 0, '&:last-child': { borderBottom: 0 } }}>
+    <Stack spacing={1}>
+      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ justifyContent: 'space-between', alignItems: { xs: 'flex-start', sm: 'center' } }}>
+        <Box sx={{ minWidth: 0 }}>
+          <Typography sx={{ fontWeight: 900, overflowWrap: 'anywhere' }}>{item.salesRepName}: {item.recommendation}</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>{item.customerName || item.reference}</Typography>
+        </Box>
+        <Chip size="small" label={businessLabel(item.severity)} color={severityColor(item.severity)} />
+      </Stack>
+      <Typography variant="body2">
+        {item.observedValue == null ? 'Observed value not available' : `Observed ${item.observedValue}${item.observedUnit ? ` ${item.observedUnit}` : ''}`}
+        {item.thresholdValue == null ? '' : `; policy threshold ${item.thresholdValue}`}. Sample {item.sampleSize}; confidence {percentage(item.confidence)}.
+      </Typography>
+      <Typography variant="caption" color="text.secondary">Policy {item.policyVersion} | Evidence through {formatDateTime(item.asOf)}</Typography>
+      {item.latestAcknowledgement && <Alert severity="success" sx={{ py: 0 }}>{businessLabel(item.latestAcknowledgement.disposition)}: {item.latestAcknowledgement.reason}</Alert>}
+      <SourceEvidence evidence={item.evidence} identity={`finding-${item.findingKey}`} />
+      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
+        <Button variant="outlined" endIcon={<OpenInNew />} onClick={onOpen} disabled={!item.actionRoute.startsWith('/')}>Open source</Button>
+        {canAcknowledge && !item.latestAcknowledgement && <Button variant="contained" onClick={onAcknowledge}>Acknowledge finding</Button>}
+      </Stack>
+    </Stack>
+  </Box>;
+}
+
+function RecoveryOpportunityRow({ item, onOpen }: { item: RecoveryOpportunityDTO; onOpen: () => void }) {
+  return <Box sx={{ py: 2, borderBottom: '1px solid', borderColor: 'divider', minWidth: 0, '&:last-child': { borderBottom: 0 } }}>
+    <Stack spacing={1}>
+      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ justifyContent: 'space-between', alignItems: { xs: 'flex-start', sm: 'center' } }}>
+        <Box sx={{ minWidth: 0 }}>
+          <Typography sx={{ fontWeight: 900, overflowWrap: 'anywhere' }}>{item.title}</Typography>
+          <Typography variant="body2" color="text.secondary">{item.customerName || item.nexoraSerial || item.sourceType} | {item.ownerName || 'Unassigned'}</Typography>
+        </Box>
+        <Chip size="small" label={businessLabel(item.severity)} color={severityColor(item.severity)} />
+      </Stack>
+      <Typography variant="body2">{item.explanation}</Typography>
+      <Typography variant="body2"><strong>Recommended action:</strong> {item.recommendedAction}</Typography>
+      <Typography variant="caption" color="text.secondary">{item.dueAt ? `Due ${formatDateTime(item.dueAt)} | ` : ''}Sample {item.sampleSize} | Confidence {percentage(item.confidence)}</Typography>
+      <SourceEvidence evidence={item.evidence} identity={`recovery-${item.recoveryKey}`} />
+      <Box><Button variant="outlined" endIcon={<OpenInNew />} onClick={onOpen} disabled={!item.actionRoute.startsWith('/')}>Open source</Button></Box>
+    </Stack>
+  </Box>;
+}
 
 function RecommendationEvidence({ item, idPrefix }: { item: OpportunityPriorityItem; idPrefix: 'mobile' | 'desktop' }) {
   const [open, setOpen] = useState(false);
@@ -100,7 +196,16 @@ export default function SalesTodayPage() {
   const { hasPermission, userData } = useAuth();
   const canReconcile = (userData.isManager === true || userData.isSuperAdmin === true)
     && hasPermission('Leads', 'edit');
+  const canAcknowledgeCoaching = (userData.isManager === true || userData.isSuperAdmin === true)
+    && (hasPermission('Sales Coaching', 'edit') || hasPermission('Leads', 'edit'));
   const [priorityPage, setPriorityPage] = useState(1);
+  const [coachingTab, setCoachingTab] = useState<'findings' | 'recovery'>('findings');
+  const [acknowledgementTarget, setAcknowledgementTarget] = useState<CoachingFindingDTO | null>(null);
+  const [acknowledgementDisposition, setAcknowledgementDisposition] = useState('ACKNOWLEDGED');
+  const [acknowledgementReason, setAcknowledgementReason] = useState('');
+  const [acknowledgementKey, setAcknowledgementKey] = useState('');
+  const acknowledgementReasonInputRef = useRef<HTMLTextAreaElement>(null);
+  const period = useMemo(reportingWindow, []);
   const query = useQuery({ queryKey: ['commercial-intelligence', 'sales-today'], queryFn: commercialIntelligenceService.getSalesToday, refetchInterval: 60_000 });
   const priorities = useQuery({
     queryKey: ['opportunity-priorities', priorityPage],
@@ -110,6 +215,42 @@ export default function SalesTodayPage() {
   const reconcile = useMutation({
     mutationFn: () => opportunityPriorityService.reconcileAll(createOpportunityCommandIdentity()),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['opportunity-priorities'] }),
+  });
+  const coaching = useQuery({
+    queryKey: ['commercial-intelligence', 'coaching-recovery', period.from, period.to],
+    queryFn: () => commercialIntelligenceService.getCoachingRecovery(period.from, period.to),
+    retry: 1,
+  });
+  const acknowledge = useMutation({
+    mutationFn: () => {
+      if (!acknowledgementTarget) throw new Error('Select a coaching finding first.');
+      return commercialIntelligenceService.acknowledgeCoachingFinding(
+        acknowledgementTarget.findingKey,
+        acknowledgementDisposition,
+        acknowledgementReason.trim(),
+        period.from,
+        period.to,
+        acknowledgementKey,
+      );
+    },
+    onSuccess: async acknowledgement => {
+      const findingKey = acknowledgementTarget?.findingKey;
+      if (findingKey) {
+        queryClient.setQueryData<CoachingRecoveryDTO>(
+          ['commercial-intelligence', 'coaching-recovery', period.from, period.to],
+          current => current ? {
+            ...current,
+            coachingFindings: current.coachingFindings.map(finding => finding.findingKey === findingKey
+              ? { ...finding, latestAcknowledgement: acknowledgement }
+              : finding),
+          } : current,
+        );
+      }
+      setAcknowledgementTarget(null);
+      setAcknowledgementReason('');
+      setAcknowledgementKey('');
+      await queryClient.invalidateQueries({ queryKey: ['commercial-intelligence', 'coaching-recovery'] });
+    },
   });
   const items = query.data?.attentionItems ?? [];
   const priorityItems = priorities.data?.items ?? [];
@@ -199,5 +340,70 @@ export default function SalesTodayPage() {
         {items.map(item => { const target = item.recordType.toLowerCase() === 'quote' ? `/sales/quotes/view/${item.recordId}` : item.recordType.toLowerCase() === 'lead' ? `/procurement/leads/view/${item.recordId}` : item.nexoraSerial ? `/commercial-cases?search=${encodeURIComponent(item.nexoraSerial)}` : null; return <TableRow hover key={`${item.recordType}-${item.id}`}><TableCell><Chip size="small" label={item.priority} color={item.priority.toLowerCase() === 'critical' ? 'error' : 'warning'} /></TableCell><TableCell>{item.nexoraSerial || item.reference}</TableCell><TableCell>{item.customerName || 'Customer unresolved'}</TableCell><TableCell>{item.ownerName || 'Unassigned'}</TableCell><TableCell>{item.reason}</TableCell><TableCell>{formatDateTime(item.dueAt)}</TableCell><TableCell align="right">{target && <Button size="small" endIcon={<OpenInNew />} onClick={() => navigate(target)}>Open</Button>}</TableCell></TableRow>; })}
       </TableBody></Table></ResponsiveTable>
     </QueryState>
+
+    <Box component="section" aria-labelledby="coaching-recovery-heading" sx={{ mt: 4, minWidth: 0 }}>
+      <Typography id="coaching-recovery-heading" variant="h6" sx={{ fontWeight: 900 }}>Coaching and recovery</Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>Evidence-backed coaching and recoverable commercial work for the selected 90-day cohort.</Typography>
+      {coaching.data && <Typography variant="caption" color="text.secondary">
+        Scope: {businessLabel(coaching.data.scope)} | Policy {coaching.data.policyVersion} | Generated {formatDateTime(coaching.data.generatedAt)}
+      </Typography>}
+      {coaching.data?.dataCompleteness.status === 'partial' && <Alert severity="warning" sx={{ mt: 1 }}>
+        This cohort is partial because the bounded source limit was reached for: {coaching.data.dataCompleteness.incompleteSources.join(', ')}.
+      </Alert>}
+      <Tabs
+        value={coachingTab}
+        onChange={(_event, value: 'findings' | 'recovery') => setCoachingTab(value)}
+        aria-label="Coaching and recovery views"
+        variant="scrollable"
+        allowScrollButtonsMobile
+        selectionFollowsFocus
+        sx={{ borderBottom: '1px solid', borderColor: 'divider', mt: 1 }}
+      >
+        <Tab value="findings" label={`Coaching findings (${coaching.data?.coachingFindings.length ?? 0})`} />
+        <Tab value="recovery" label={`Recovery opportunities (${coaching.data?.recoveryOpportunities.length ?? 0})`} />
+      </Tabs>
+      {coaching.isLoading ? <Box sx={{ minHeight: 180, display: 'grid', placeItems: 'center' }}><CircularProgress aria-label="Loading coaching and recovery" /></Box>
+        : coaching.isError ? <Alert severity="error" action={<Button color="inherit" startIcon={<Refresh />} onClick={() => void coaching.refetch()}>Retry</Button>}>This persisted view could not be loaded. No empty result has been assumed.</Alert>
+        : (coachingTab === 'findings' ? !coaching.data?.coachingFindings.length : !coaching.data?.recoveryOpportunities.length)
+          ? <Typography color="text.secondary" sx={{ py: 4, textAlign: 'center' }}>{coachingTab === 'findings' ? 'No coaching findings require attention for this cohort.' : 'No recovery opportunities require attention for this cohort.'}</Typography>
+          : (
+        <Box role="tabpanel" aria-label={coachingTab === 'findings' ? 'Coaching findings' : 'Recovery opportunities'}>
+          {coachingTab === 'findings' ? coaching.data?.coachingFindings.map(item => <CoachingFindingRow
+            key={item.findingKey}
+            item={item}
+            canAcknowledge={canAcknowledgeCoaching}
+            onOpen={() => navigate(item.actionRoute)}
+            onAcknowledge={() => {
+              setAcknowledgementTarget(item);
+              setAcknowledgementDisposition('ACKNOWLEDGED');
+              setAcknowledgementReason('');
+              setAcknowledgementKey(crypto.randomUUID());
+            }}
+          />) : coaching.data?.recoveryOpportunities.map(item => <RecoveryOpportunityRow key={item.recoveryKey} item={item} onOpen={() => navigate(item.actionRoute)} />)}
+        </Box>
+      )}
+    </Box>
+
+    <Dialog open={Boolean(acknowledgementTarget)} onClose={() => !acknowledge.isPending && setAcknowledgementTarget(null)} fullWidth maxWidth="sm" aria-labelledby="coaching-acknowledgement-title" slotProps={{ transition: { onEntered: () => acknowledgementReasonInputRef.current?.focus() } }}>
+      <DialogTitle id="coaching-acknowledgement-title">Acknowledge coaching finding</DialogTitle>
+      <DialogContent>
+        <Stack spacing={2} sx={{ pt: 1 }}>
+          <Typography variant="body2">This records a manager decision against the evidence. It does not change commercial workflow state.</Typography>
+          <TextField label="Decision reason" value={acknowledgementReason} onChange={event => setAcknowledgementReason(event.target.value)} multiline minRows={3} autoFocus inputRef={acknowledgementReasonInputRef} required slotProps={{ htmlInput: { maxLength: 1000 } }} />
+          <TextField select label="Disposition" value={acknowledgementDisposition} onChange={event => setAcknowledgementDisposition(event.target.value)} fullWidth>
+            <MenuItem value="ACKNOWLEDGED">Acknowledged</MenuItem>
+            <MenuItem value="RESOLVED">Resolved</MenuItem>
+            <MenuItem value="DISMISSED">Dismissed</MenuItem>
+          </TextField>
+          {acknowledge.isError && <Alert severity="error">{acknowledge.error instanceof Error ? acknowledge.error.message : 'The acknowledgement could not be recorded.'}</Alert>}
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={() => setAcknowledgementTarget(null)} disabled={acknowledge.isPending}>Cancel</Button>
+        <Button variant="contained" onClick={() => acknowledge.mutate()} disabled={acknowledge.isPending || acknowledgementReason.trim().length < 10}>
+          {acknowledge.isPending ? 'Recording...' : 'Record acknowledgement'}
+        </Button>
+      </DialogActions>
+    </Dialog>
   </PageShell>;
 }

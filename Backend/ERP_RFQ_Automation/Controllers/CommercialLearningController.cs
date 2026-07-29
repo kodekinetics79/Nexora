@@ -10,7 +10,8 @@ namespace ERP_RFQ_Automation.Controllers;
 [Authorize]
 [Route("api/commercial-learning")]
 public sealed class CommercialLearningController(CommercialLearningService service,
-    LearningGovernanceService governance) : ControllerBase
+    LearningGovernanceService governance,
+    IRoleGate roleGate) : ControllerBase
 {
     [HttpGet("products")]
     [RequireModulePermission("Products", PermissionAction.View)]
@@ -55,13 +56,29 @@ public sealed class CommercialLearningController(CommercialLearningService servi
 
     [HttpGet("sales-reps/{userId:long}")]
     [RequireModulePermission("Dashboard", PermissionAction.View)]
-    public Task<SalesRepCommercialMemory> SalesRep(long userId, CancellationToken cancellationToken) =>
-        service.GetSalesRepAsync(TenantId(), userId, cancellationToken);
+    public async Task<ActionResult<SalesRepCommercialMemory>> SalesRep(long userId,
+        CancellationToken cancellationToken)
+    {
+        var tenantId = TenantId();
+        if (!await CanReadRepAsync(tenantId, userId)) return Forbid();
+        return Ok(await service.GetSalesRepAsync(tenantId, userId, cancellationToken));
+    }
 
     [HttpGet("sales-reps")]
     [RequireModulePermission("Dashboard", PermissionAction.View)]
-    public Task<IReadOnlyCollection<SalesRepCommercialMemory>> SalesReps([FromQuery] int limit = 50,
-        CancellationToken cancellationToken = default) => service.GetSalesRepsAsync(TenantId(), limit, cancellationToken);
+    public async Task<ActionResult<IReadOnlyCollection<SalesRepCommercialMemory>>> SalesReps(
+        [FromQuery] int limit = 50,
+        CancellationToken cancellationToken = default)
+    {
+        var tenantId = TenantId();
+        var actorUserId = ActorUserId();
+        if (await IsManagerAsync(tenantId))
+            return Ok(await service.GetSalesRepsAsync(tenantId, limit, cancellationToken));
+
+        IReadOnlyCollection<SalesRepCommercialMemory> ownMemory =
+            [await service.GetSalesRepAsync(tenantId, actorUserId, cancellationToken)];
+        return Ok(ownMemory);
+    }
 
     [HttpGet("rfq-items/{rfqItemId:long}/memory-card")]
     [RequireModulePermission("RFQ Management", PermissionAction.View)]
@@ -138,6 +155,12 @@ public sealed class CommercialLearningController(CommercialLearningService servi
     private long ActorUserId() => long.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value ??
             User.FindFirst("sub")?.Value, out var actor) && actor > 0
         ? actor : throw new UnauthorizedAccessException("A valid authenticated actor claim is required.");
+    private long RoleId() => long.TryParse(User.FindFirst("roleId")?.Value, out var role) && role > 0
+        ? role : throw new UnauthorizedAccessException("A valid authenticated role claim is required.");
+    private Task<bool> IsManagerAsync(long tenantId) =>
+        roleGate.IsManagerOrAdminAsync(RoleId(), tenantId);
+    private async Task<bool> CanReadRepAsync(long tenantId, long requestedUserId) =>
+        requestedUserId == ActorUserId() || await IsManagerAsync(tenantId);
     private string IdempotencyKey()
     {
         var value = Request.Headers["Idempotency-Key"].ToString().Trim();

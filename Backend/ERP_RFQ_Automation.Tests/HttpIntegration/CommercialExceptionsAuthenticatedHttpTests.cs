@@ -83,13 +83,13 @@ public sealed class CommercialExceptionsAuthenticatedHttpTests(Release01BHttpApp
         using var managerResponse = await manager.GetAsync("/api/commercial-exceptions");
         await AssertStatusAsync(managerResponse, HttpStatusCode.OK);
         using var managerPayload = JsonDocument.Parse(await managerResponse.Content.ReadAsStringAsync());
-        Assert.Equal(2, managerPayload.RootElement.GetProperty("total").GetInt32());
-        Assert.Equal(2, managerPayload.RootElement.GetProperty("active").GetInt32());
+        Assert.Equal(3, managerPayload.RootElement.GetProperty("total").GetInt32());
+        Assert.Equal(3, managerPayload.RootElement.GetProperty("active").GetInt32());
         Assert.Equal("tenant", managerPayload.RootElement.GetProperty("scope").GetString(), ignoreCase: true);
         Assert.Equal("complete", managerPayload.RootElement.GetProperty("coverageStatus").GetString(), ignoreCase: true);
         Assert.All(managerPayload.RootElement.GetProperty("sourceCoverage").EnumerateArray(),
             source => Assert.True(source.GetProperty("isAvailable").GetBoolean()));
-        Assert.Equal(2, managerPayload.RootElement.GetProperty("items").GetArrayLength());
+        Assert.Equal(3, managerPayload.RootElement.GetProperty("items").GetArrayLength());
         Assert.All(managerPayload.RootElement.GetProperty("items").EnumerateArray(),
             item => Assert.True(item.GetProperty("sourceVersion").GetInt64() >= 1));
 

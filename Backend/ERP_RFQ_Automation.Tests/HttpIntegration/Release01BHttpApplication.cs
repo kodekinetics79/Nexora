@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Security.Claims;
 using System.Text;
 using ERP_RFQ_Automation.Agent.Models;
+using ERP_RFQ_Automation.CommercialIntelligence.Sales;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Infrastructure.Storage;
@@ -36,6 +37,9 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
     public const long AllowedRole = 82_001;
     public const long DeniedRole = 82_002;
     public const long SupplierHistoryViewerRole = 82_003;
+    public const long GrowthManagerRole = 82_004;
+    public const long GrowthManagerUser = 83_002;
+    public const long GrowthRepUser = 83_001;
     public const long TenantACustomerId = 86_001;
     public const long TenantBCustomerId = 86_002;
     public const long TenantAContactId = 86_101;
@@ -254,6 +258,7 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         const long ordersModuleId = 84_006;
         const long productsModuleId = 84_007;
         const long usersModuleId = 84_008;
+        const long quotationsModuleId = 84_009;
         var supplierNegotiationModuleId = await db.Modules.Where(x =>
             x.ModuleName == "Supplier Negotiation").Select(x => x.Id).SingleAsync();
         db.Modules.AddRange(
@@ -264,12 +269,14 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
             Module(supplierHistoryModuleId, "Supplier History"),
             Module(ordersModuleId, "Orders"),
             Module(productsModuleId, "Products"),
-            Module(usersModuleId, "Users"));
+            Module(usersModuleId, "Users"),
+            Module(quotationsModuleId, "Quotations"));
 
         db.SetupMasters.AddRange(
             Role(AllowedRole, TenantA, "Release 01B Reader"),
             Role(DeniedRole, TenantA, "Release 01B Denied"),
-            Role(SupplierHistoryViewerRole, TenantA, "Supplier History Viewer"));
+            Role(SupplierHistoryViewerRole, TenantA, "Supplier History Viewer"),
+            Role(GrowthManagerRole, TenantA, "Commercial Manager"));
 
         db.RolePermissions.AddRange(
             Permission(85_001, AllowedRole, leadsModuleId, TenantA, canEdit: true),
@@ -281,7 +288,18 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
             Permission(85_007, AllowedRole, productsModuleId, TenantA, canCreate: true, canEdit: true),
             Permission(85_008, AllowedRole, usersModuleId, TenantA),
             Permission(85_009, AllowedRole, supplierNegotiationModuleId, TenantA, canEdit: true),
-            Permission(85_010, SupplierHistoryViewerRole, supplierHistoryModuleId, TenantA));
+            Permission(85_010, SupplierHistoryViewerRole, supplierHistoryModuleId, TenantA),
+            Permission(85_011, AllowedRole, quotationsModuleId, TenantA),
+            Permission(85_012, GrowthManagerRole, leadsModuleId, TenantA, canEdit: true),
+            Permission(85_013, GrowthManagerRole, customersModuleId, TenantA),
+            Permission(85_014, GrowthManagerRole, rfqManagementModuleId, TenantA),
+            Permission(85_015, GrowthManagerRole, quotationsModuleId, TenantA),
+            Permission(85_016, GrowthManagerRole, ordersModuleId, TenantA),
+            Permission(85_017, GrowthManagerRole, supplierHistoryModuleId, TenantA));
+
+        db.Users.AddRange(
+            User(GrowthRepUser, TenantA, AllowedRole, "Rep", "growth-rep@nexora.invalid"),
+            User(GrowthManagerUser, TenantA, GrowthManagerRole, "Manager", "growth-manager@nexora.invalid"));
 
         db.Set<ExtractionJob>().AddRange(
             new ExtractionJob
@@ -337,6 +355,25 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
             TenantASupplierQuoteId, 596_110, 596_120, 596_130, 596_140, "A");
         SeedSupplierNegotiationQuote(db, TenantB, TenantBProcurementOffset,
             TenantBSupplierQuoteId, 596_210, 596_220, 596_230, 596_240, "B");
+        db.FollowUpTasks.Add(new FollowUpTask
+        {
+            Id = 596_300,
+            BusinessUnitId = TenantA,
+            AssignedToUserId = GrowthManagerUser,
+            AggregateType = "Rfq",
+            AggregateId = TenantAProcurementRfqId,
+            CustomerId = TenantACustomerId,
+            DueAtUtc = now.UtcDateTime.AddDays(-2),
+            Status = FollowUpStatus.Open,
+            Priority = 1,
+            PurposeCode = "CUSTOMER_DECISION",
+            CreatedAtUtc = now.UtcDateTime.AddDays(-5),
+            UpdatedAtUtc = now.UtcDateTime.AddDays(-5),
+            Version = 1,
+            CreatedBy = "release-01b-tests",
+            CorrelationId = "growth-http-fixture",
+            CreationIdempotencyKey = "growth-http-fixture"
+        });
 
         db.Set<LeadIngestionBatch>().AddRange(
             Batch(TenantABatchId, TenantA, now),
@@ -496,6 +533,7 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         db.Entry(rfq).Property(x => x.CommercialCaseId).CurrentValue = null;
         db.Entry(rfq).Property(x => x.NexoraSerial).CurrentValue = null;
         rfq.LeadId = leadId;
+        rfq.CustomerId = lead.CustomerId;
         rfq.InheritCommercialIdentity(lead);
     }
 
@@ -525,6 +563,21 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         SetupCode = name.Replace(' ', '_').ToUpperInvariant(),
         SetupValue = name,
         BusinessUnitId = tenantId,
+        IsActive = true,
+        CreatedBy = "release-01b-tests",
+        CreatedOn = DateTime.UtcNow
+    };
+
+    private static User User(long id, long tenantId, long roleId, string lastName, string email) => new()
+    {
+        Id = id,
+        Buid = tenantId,
+        RoleId = roleId,
+        FirstName = "Growth",
+        LastName = lastName,
+        Email = email,
+        PasswordHash = "not-used",
+        ImageUrl = "n/a",
         IsActive = true,
         CreatedBy = "release-01b-tests",
         CreatedOn = DateTime.UtcNow
