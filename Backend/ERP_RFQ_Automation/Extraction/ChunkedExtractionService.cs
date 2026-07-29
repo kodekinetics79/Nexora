@@ -169,6 +169,9 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
 
         if (expected == 0)
         {
+            if (string.IsNullOrWhiteSpace(input.HeaderText))
+                return Failed(0, "The local parser/OCR produced no readable content.", input);
+
             if (_llm.ProviderClass == AiProviderClass.External)
             {
                 return Failed(0,
@@ -186,7 +189,9 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             if (single is null)
                 return Failed(0, "LLM returned no result for the document.", input);
             var items0 = single.Items ?? new List<LeadItemData>();
-            var status0 = single.OverallConfidence is < MinAcceptableConfidence
+            var incompleteOcr = input.OcrTruncated
+                                || input.OcrStatus is ExtractionOcrStatus.Partial or ExtractionOcrStatus.Failed;
+            var status0 = single.OverallConfidence is < MinAcceptableConfidence || incompleteOcr
                 ? ExtractionOutcomeStatus.NeedsReview
                 : ExtractionOutcomeStatus.Ok;
 
@@ -206,7 +211,11 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                 Result = single,
                 ExpectedItemCount = items0.Count,
                 ExtractedItemCount = items0.Count,
-                ReviewReason = status0 == ExtractionOutcomeStatus.NeedsReview ? "Overall confidence below threshold." : null,
+                ReviewReason = incompleteOcr
+                    ? "OCR was incomplete; omitted content requires review."
+                    : status0 == ExtractionOutcomeStatus.NeedsReview
+                        ? "Overall confidence below threshold."
+                        : null,
                 Diagnostics = diagnostics,
                 SplitResults = split0,
                 AiProviderClass = _llm.ProviderClass,
@@ -267,7 +276,9 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         var merged = WithItems(headerSource, mergedItems, overall);
 
         string? reviewReason = null;
-        if (failedChunks > 0)
+        if (input.OcrTruncated || input.OcrStatus is ExtractionOcrStatus.Partial or ExtractionOcrStatus.Failed)
+            reviewReason = "OCR was incomplete; omitted content requires review.";
+        else if (failedChunks > 0)
             reviewReason = $"{failedChunks} chunk(s) failed to extract.";
         else if (extracted != expected)
             reviewReason = $"Item count mismatch: expected {expected}, extracted {extracted}.";

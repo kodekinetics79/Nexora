@@ -225,6 +225,11 @@ export interface BatchReconciliationItemDTO {
   intakeStatus?: string;
   errorCode?: string | null;
   sourceDocumentOccurrenceId?: number | null;
+  securityStatus?: string | null;
+  securityScanUpdatedAtUtc?: string | null;
+  lastUpdatedAtUtc?: string | null;
+  extractionStatus?: string | null;
+  extractionUpdatedAtUtc?: string | null;
 }
 
 export interface LeadMatchCandidateDTO {
@@ -251,7 +256,24 @@ export interface BatchReconciliationDTO {
   rejected: number;
   externalOccurrences: number;
   externalCost?: number | null;
+  awaitingSecurityScan: number;
+  localFirstOccurrences: number;
   items: BatchReconciliationItemDTO[];
+}
+
+export interface SecurityScanRetryResultDTO {
+  batchId: string;
+  eligible: number;
+  queued: number;
+  stillAwaiting: number;
+  rejected: number;
+  items: Array<{
+    sourceDocumentOccurrenceId: number;
+    fileName: string;
+    status: string;
+    errorCode?: string | null;
+    extractionJobId?: number | null;
+  }>;
 }
 
 export interface PossibleMatchQueueItemDTO {
@@ -326,6 +348,13 @@ const leadService = {
 
   getIngestionBatch: async (batchId: string): Promise<BatchReconciliationDTO> => {
     const r = await axiosInstance.get<BatchReconciliationDTO>(`/api/LeadIngestion/batches/${encodeURIComponent(batchId)}`);
+    return r.data;
+  },
+
+  retryBlockedFiles: async (batchId: string): Promise<SecurityScanRetryResultDTO> => {
+    const r = await axiosInstance.post<SecurityScanRetryResultDTO>(
+      `/api/LeadIngestion/batches/${encodeURIComponent(batchId)}/retry-blocked-files`,
+    );
     return r.data;
   },
 

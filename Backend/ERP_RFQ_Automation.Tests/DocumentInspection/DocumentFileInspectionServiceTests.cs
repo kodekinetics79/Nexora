@@ -214,6 +214,9 @@ public sealed class DocumentFileInspectionServiceTests
         Assert.Equal(FileInspectionStatus.Quarantined, result.Status);
         Assert.Equal(EicarMalwareScanner.EngineName, result.ScannerEngine);
         Assert.Equal(EicarMalwareScanner.SignatureName, result.ScannerSignature);
+        Assert.Equal(MalwareScanStatus.Infected, result.MalwareStatus);
+        Assert.False(result.IsRetryable);
+        Assert.Equal("malware_detected", result.ErrorCode);
     }
 
     [Fact]
@@ -226,6 +229,9 @@ public sealed class DocumentFileInspectionServiceTests
 
         Assert.Equal(FileInspectionStatus.Quarantined, result.Status);
         Assert.Contains("failed", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(MalwareScanStatus.Error, result.MalwareStatus);
+        Assert.True(result.IsRetryable);
+        Assert.Equal("security_scanner_unavailable", result.ErrorCode);
     }
 
     [Fact]

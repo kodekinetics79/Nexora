@@ -29,6 +29,11 @@ public sealed record FileInspectionResult(
     string? ScannerSignature)
 {
     public bool IsCleared => Status == FileInspectionStatus.Cleared;
+    public MalwareScanStatus? MalwareStatus { get; init; }
+    public bool IsRetryable { get; init; }
+    public string ErrorCode { get; init; } = Status == FileInspectionStatus.Rejected
+        ? "document_rejected"
+        : "document_quarantined";
 }
 
 public sealed record MalwareScanResult(

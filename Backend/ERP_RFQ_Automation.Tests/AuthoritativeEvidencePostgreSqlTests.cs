@@ -230,7 +230,7 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task ScannerOutageQuarantine_IsReleasedByLaterCleanScan()
+    public async Task ScannerOutageQuarantine_RetriesStoredBytesInSameBatchAndOccurrence()
     {
         var tenantId = NewTenantId();
         var bytes = ValidCsv();
@@ -241,34 +241,89 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
             SeedTenant(context, tenantId);
             await context.SaveChangesAsync();
             var queue = NewQueue(context);
+            var storage = new LocalEvidenceObjectStorage(new LocalFileStorage(root, root));
 
-            var quarantined = NewIngestion(context, queue, root, new FileInspectionResult(
+            var unavailableInspection = new FileInspectionResult(
                 FileInspectionStatus.Quarantined, "text/csv", bytes.Length,
-                "Scanner unavailable.", "clamav", null));
+                "Scanner unavailable.", "clamav", null)
+            {
+                MalwareStatus = MalwareScanStatus.Unavailable,
+                IsRetryable = true,
+                ErrorCode = "security_scanner_unavailable"
+            };
+            var quarantined = new DocumentIngestionService(queue, storage,
+                new FixedInspectionService(unavailableInspection), context,
+                new NoopLogger<DocumentIngestionService>());
             var occurrence = new ExtractionJobMetadata { SourceOccurrenceId = "quarantined-retry" };
-            await Assert.ThrowsAsync<DocumentInspectionException>(() => quarantined.IngestAsync(
+            var outage = await Assert.ThrowsAsync<DocumentInspectionException>(() => quarantined.IngestAsync(
                 bytes, "customer-rfq.csv", tenantId, ExtractionSourceType.ManualUpload, metadata: occurrence));
+            Assert.NotNull(outage.BatchId);
+            Assert.NotNull(outage.SourceDocumentOccurrenceId);
+            Assert.Equal(IntakeOccurrenceStatus.AwaitingSecurityScan,
+                (await context.Set<SourceDocumentOccurrence>()
+                    .SingleAsync(x => x.BusinessUnitId == tenantId)).IntakeStatus);
+            Assert.Empty(await context.Set<ExtractionJob>().Where(x => x.BusinessUnitId == tenantId).ToListAsync());
 
             context.ChangeTracker.Clear();
-            var exactRetry = NewIngestion(context, queue, root, new FileInspectionResult(
-                FileInspectionStatus.Quarantined, "text/csv", bytes.Length,
-                "Scanner unavailable.", "clamav", null));
-            var retryError = await Assert.ThrowsAsync<DocumentInspectionException>(() => exactRetry.IngestAsync(
-                bytes, "customer-rfq.csv", tenantId, ExtractionSourceType.ManualUpload, metadata: occurrence));
-            Assert.Equal(FileInspectionStatus.Quarantined, retryError.Inspection.Status);
+            var cleanIngestion = new DocumentIngestionService(queue, storage,
+                new FixedInspectionService(ClearedInspection()), context,
+                new NoopLogger<DocumentIngestionService>());
+            var recovery = new SecurityScanRecoveryService(context, storage, cleanIngestion);
+            var released = await recovery.RetryBatchAsync(tenantId, outage.BatchId.Value);
 
-            context.ChangeTracker.Clear();
-            var replay = NewIngestion(context, queue, root, ClearedInspection());
-            var released = await replay.IngestAsync(
-                bytes, "customer-rfq.csv", tenantId, ExtractionSourceType.ExcelTemplate);
-
-            Assert.True(released.JobId > 0);
+            Assert.Equal(1, released.Eligible);
+            Assert.Equal(1, released.Queued);
+            Assert.Equal(0, released.StillAwaiting);
             var source = await context.Set<SourceDocument>()
                 .SingleAsync(x => x.BusinessUnitId == tenantId);
             Assert.Equal(DocumentSecurityStatus.Cleared, source.SecurityStatus);
             Assert.Contains("/cleared/", source.ObjectKey, StringComparison.Ordinal);
-            Assert.Equal(2, await context.Set<SourceDocumentOccurrence>()
-                .CountAsync(x => x.BusinessUnitId == tenantId));
+            var storedOccurrence = await context.Set<SourceDocumentOccurrence>()
+                .SingleAsync(x => x.BusinessUnitId == tenantId);
+            Assert.Equal(outage.SourceDocumentOccurrenceId, storedOccurrence.Id);
+            Assert.Equal(IntakeOccurrenceStatus.Queued, storedOccurrence.IntakeStatus);
+            var queuedJob = Assert.Single(await context.Set<ExtractionJob>()
+                .Where(x => x.BusinessUnitId == tenantId).ToListAsync());
+            queuedJob.Status = ExtractionStatus.Leased;
+            queuedJob.LeasedBy = "security-recovery-sit";
+            queuedJob.Attempts = 1;
+            queuedJob.LeaseExpiresAt = DateTime.UtcNow.AddMinutes(2);
+            queuedJob.UpdatedOn = DateTime.UtcNow;
+            await context.SaveChangesAsync();
+            context.ChangeTracker.Clear();
+            var claimed = await context.Set<ExtractionJob>()
+                .SingleAsync(x => x.BusinessUnitId == tenantId && x.Id == queuedJob.Id);
+            Assert.True(await queue.SetStatusAsync(claimed.Id, "security-recovery-sit", claimed.Attempts,
+                ExtractionStatus.Extracting));
+            Assert.True(await queue.SetStatusAsync(claimed.Id, "security-recovery-sit", claimed.Attempts,
+                ExtractionStatus.Persisting));
+            var localOutcome = new ChunkedExtractionOutcome
+            {
+                Status = ExtractionOutcomeStatus.Ok,
+                Result = Ext.Result(Ext.Items(2, 0.95), 0.95) with { Rfqno = "RFQ-SCANNER-RECOVERY" },
+                ExpectedItemCount = 2,
+                ExtractedItemCount = 2,
+                AiProviderClass = ERP_RFQ_Automation.AI.AiProviderClass.Local,
+                ProcessingPath = ExtractionProcessingPath.LocalModel
+            };
+            var identity = new LeadIdentityApplicationService(context);
+            Assert.NotNull(await new LeadPersister(context, new NoopLogger<LeadPersister>(),
+                    leadIdentity: identity)
+                .PersistAndCompleteAsync(claimed, localOutcome, queue, "security-recovery-sit",
+                    claimed.Attempts, TimeSpan.FromMinutes(2)));
+
+            context.ChangeTracker.Clear();
+            var duplicateRetry = await recovery.RetryBatchAsync(tenantId, outage.BatchId.Value);
+            Assert.Equal(0, duplicateRetry.Eligible);
+            Assert.Single(await context.Set<ExtractionJob>().Where(x => x.BusinessUnitId == tenantId).ToListAsync());
+            Assert.Single(await context.Set<ExtractionRun>().Where(x => x.BusinessUnitId == tenantId).ToListAsync());
+            Assert.Single(await context.Set<LeadIngestionOccurrence>().Where(x => x.BusinessUnitId == tenantId).ToListAsync());
+            var batch = await identity.GetBatchAsync(tenantId, outage.BatchId.Value);
+            Assert.NotNull(batch);
+            Assert.Equal(1, batch.FilesReceived);
+            Assert.Equal(1, batch.LogicalInquiries);
+            Assert.Equal(0, batch.Rejected);
+            Assert.Equal(0, batch.ExternalOccurrences);
         }
         finally
         {

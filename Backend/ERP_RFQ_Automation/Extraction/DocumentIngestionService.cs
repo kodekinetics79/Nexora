@@ -208,6 +208,10 @@ public sealed class DocumentIngestionService : IDocumentIngestion
             _context.Add(occurrence);
             await _context.SaveChangesAsync(ct);
         }
+        else if (occurrence.SourceDocumentId != source.Id)
+        {
+            throw new InvalidOperationException("The intake idempotency key is already bound to different document content.");
+        }
 
         var sourceIsCleared = source.SecurityStatus == DocumentSecurityStatus.Cleared;
         if (!inspection.IsCleared || !sourceIsCleared)
@@ -225,17 +229,26 @@ public sealed class DocumentIngestionService : IDocumentIngestion
                     "The authoritative source document has not passed security inspection.",
                     "evidence-ledger",
                     null);
-            if (occurrence.IntakeStatus == IntakeOccurrenceStatus.Accepted)
+            var detailsJson = JsonSerializer.Serialize(new
+            {
+                status = rejectedInspection.Status.ToString(),
+                reason = rejectedInspection.Reason,
+                scanner = rejectedInspection.ScannerEngine,
+                signature = rejectedInspection.ScannerSignature,
+                retryable = rejectedInspection.IsRetryable
+            });
+            if (rejectedInspection.IsRetryable)
+            {
+                occurrence.MarkAwaitingSecurityScan(rejectedInspection.ErrorCode, detailsJson);
+            }
+            else if (occurrence.IntakeStatus is IntakeOccurrenceStatus.Accepted
+                     or IntakeOccurrenceStatus.AwaitingSecurityScan)
+            {
                 occurrence.MarkRejected(
                     "SecurityInspection",
-                    rejectedInspection.Status == FileInspectionStatus.Rejected ? "document_rejected" : "document_quarantined",
-                    JsonSerializer.Serialize(new
-                    {
-                        status = rejectedInspection.Status.ToString(),
-                        reason = rejectedInspection.Reason,
-                        scanner = rejectedInspection.ScannerEngine,
-                        signature = rejectedInspection.ScannerSignature
-                    }));
+                    rejectedInspection.ErrorCode,
+                    detailsJson);
+            }
             await _context.SaveChangesAsync(ct);
             await transaction.CommitAsync(ct);
             throw new DocumentInspectionException(rejectedInspection, occurrence.Id, actualBatchId);
@@ -343,10 +356,13 @@ public sealed class DocumentIngestionService : IDocumentIngestion
         inspection = new
         {
             status = inspection.Status.ToString(),
+            malwareStatus = inspection.MalwareStatus?.ToString(),
             inspection.DetectedContentType,
             inspection.Reason,
             inspection.ScannerEngine,
-            inspection.ScannerSignature
+            inspection.ScannerSignature,
+            inspection.IsRetryable,
+            inspection.ErrorCode
         }
     });
 

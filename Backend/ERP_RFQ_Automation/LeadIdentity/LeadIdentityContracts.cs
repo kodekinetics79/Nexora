@@ -53,13 +53,24 @@ public sealed record BatchReconciliationItemDto(long OccurrenceId, long? LeadId,
     string ProcessingPath, bool ExternalAiUsed, decimal Confidence, IReadOnlyList<string> Reasons,
     IReadOnlyList<LeadMatchCandidateDto> MatchCandidates,
     string CustomerResolutionStatus, string? AssignedOpportunityOwner,
-    string IntakeStatus, string? ErrorCode, long? SourceDocumentOccurrenceId);
+    string IntakeStatus, string? ErrorCode, long? SourceDocumentOccurrenceId)
+{
+    public string? SecurityStatus { get; init; }
+    public DateTimeOffset? SecurityScanUpdatedAtUtc { get; init; }
+    public DateTimeOffset? LastUpdatedAtUtc { get; init; }
+    public string? ExtractionStatus { get; init; }
+    public DateTimeOffset? ExtractionUpdatedAtUtc { get; init; }
+}
 public sealed record LeadMatchCandidateDto(long CandidateId, long CandidateLeadId, string NexoraSerial,
     string? CustomerRfqReference, decimal Confidence, string MatchEvidenceJson, string DifferencesJson,
     string DownstreamImpactJson, string ReviewState, int Version);
 public sealed record BatchReconciliationDto(Guid BatchId, int FilesReceived, int LogicalInquiries,
     int NewLeads, int ExactDuplicates, int Revisions, int PossibleMatches, int Rejected,
-    int ExternalOccurrences, decimal? ExternalCost, IReadOnlyList<BatchReconciliationItemDto> Items);
+    int ExternalOccurrences, decimal? ExternalCost, IReadOnlyList<BatchReconciliationItemDto> Items)
+{
+    public int AwaitingSecurityScan { get; init; }
+    public int LocalFirstOccurrences { get; init; }
+}
 public sealed record PossibleMatchQueueItemDto(Guid BatchId, long OccurrenceId, string? FileName,
     DateTimeOffset IngestedAtUtc, decimal Confidence, IReadOnlyList<LeadMatchCandidateDto> MatchCandidates);
 

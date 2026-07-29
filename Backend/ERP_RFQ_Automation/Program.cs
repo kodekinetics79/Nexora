@@ -391,6 +391,7 @@ builder.Services.AddHostedService<ExtractionWorker>();
 // modern upload endpoint, the email poller, the folder watcher and manual upload
 // (each door still honours Ingestion:UseUnifiedQueue, default true).
 builder.Services.AddScoped<IDocumentIngestion, DocumentIngestionService>();
+builder.Services.AddScoped<ISecurityScanRecoveryService, SecurityScanRecoveryService>();
 
 // Transactional email / notifications (Notifications/): provider-agnostic sender
 // (defaults to the safe console provider until an SMTP/SendGrid provider is

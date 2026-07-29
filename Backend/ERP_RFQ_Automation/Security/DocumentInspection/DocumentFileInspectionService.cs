@@ -126,14 +126,22 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
                 bytes.LongLength,
                 "File signature, archive safety, and malware checks passed.",
                 scan.Engine,
-                scan.Signature),
+                scan.Signature)
+            {
+                MalwareStatus = scan.Status,
+                ErrorCode = "security_scan_cleared"
+            },
             MalwareScanStatus.Infected => new FileInspectionResult(
                 FileInspectionStatus.Quarantined,
                 detection.ContentType,
                 bytes.LongLength,
                 scan.Reason,
                 scan.Engine,
-                scan.Signature),
+                scan.Signature)
+            {
+                MalwareStatus = scan.Status,
+                ErrorCode = "malware_detected"
+            },
             _ => new FileInspectionResult(
                 FileInspectionStatus.Quarantined,
                 detection.ContentType,
@@ -141,6 +149,11 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
                 scan.Reason,
                 scan.Engine,
                 scan.Signature)
+            {
+                MalwareStatus = scan.Status,
+                IsRetryable = true,
+                ErrorCode = "security_scanner_unavailable"
+            }
         };
     }
 

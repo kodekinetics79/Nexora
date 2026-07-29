@@ -279,7 +279,7 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
             Role(GrowthManagerRole, TenantA, "Commercial Manager"));
 
         db.RolePermissions.AddRange(
-            Permission(85_001, AllowedRole, leadsModuleId, TenantA, canEdit: true),
+            Permission(85_001, AllowedRole, leadsModuleId, TenantA, canCreate: true, canEdit: true),
             Permission(85_002, AllowedRole, dashboardModuleId, TenantA),
             Permission(85_003, AllowedRole, customersModuleId, TenantA),
             Permission(85_004, AllowedRole, rfqManagementModuleId, TenantA, canCreate: true, canEdit: true),

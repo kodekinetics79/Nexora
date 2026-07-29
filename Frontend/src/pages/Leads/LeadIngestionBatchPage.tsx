@@ -27,6 +27,8 @@ import {
   History as RevisionIcon,
   OpenInNew as OpenIcon,
   Refresh as RefreshIcon,
+  Replay as RetryIcon,
+  Security as SecurityIcon,
   UploadFile as FilesIcon,
 } from '@mui/icons-material';
 import dayjs from 'dayjs';
@@ -51,6 +53,12 @@ const classificationMeta = (classification: string): { label: string; color: Chi
 };
 
 const confidenceLabel = (confidence: number): string => `${Math.round(confidence * 100)}% confidence`;
+
+const timestampLabel = (value?: string | null): string => {
+  if (!value || !dayjs(value).isValid()) return 'time unavailable';
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local time';
+  return `${dayjs(value).format('DD MMM YYYY, HH:mm')} (${zone})`;
+};
 
 const evidenceObject = (value: string): Record<string, unknown> | null => {
   try {
@@ -173,7 +181,10 @@ const MatchReviewPanel = ({ occurrenceId, candidate }: { occurrenceId: number; c
 
 const ReconciliationRow = ({ item }: { item: BatchReconciliationItemDTO }) => {
   const navigate = useNavigate();
-  const meta = classificationMeta(item.classification);
+  const awaitingScan = item.intakeStatus === 'AwaitingSecurityScan';
+  const meta = awaitingScan
+    ? { label: 'Awaiting Security Scan', color: 'warning' as ChipColor }
+    : classificationMeta(item.classification);
   const canOpenLead = typeof item.leadId === 'number' && item.leadId > 0;
 
   return (
@@ -195,8 +206,12 @@ const ReconciliationRow = ({ item }: { item: BatchReconciliationItemDTO }) => {
             {item.fileName || `Ingestion occurrence ${item.occurrenceId}`}
           </Typography>
           <Typography variant="caption" color="text.secondary">
-            Ingested {dayjs(item.ingestedAtUtc).isValid() ? dayjs(item.ingestedAtUtc).format('DD MMM YYYY, HH:mm') : 'time unavailable'}
+            Received {timestampLabel(item.ingestedAtUtc)}
             {' | '}{readable(item.processingPath)}{' | '}{confidenceLabel(item.confidence)}
+          </Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+            Security {readable(item.securityStatus || 'Pending')} updated {timestampLabel(item.securityScanUpdatedAtUtc || item.lastUpdatedAtUtc)}
+            {item.extractionStatus ? ` | Extraction ${readable(item.extractionStatus)} updated ${timestampLabel(item.extractionUpdatedAtUtc)}` : ''}
           </Typography>
           {item.intakeStatus && item.intakeStatus !== 'Reconciled' && (
             <Typography variant="body2" color={meta.color === 'error' ? 'error.main' : 'text.secondary'} sx={{ mt: 0.75 }}>
@@ -221,7 +236,7 @@ const ReconciliationRow = ({ item }: { item: BatchReconciliationItemDTO }) => {
         <Stack direction="row" spacing={1} sx={{ alignItems: 'center', justifyContent: { xs: 'space-between', md: 'flex-end' } }}>
           <Chip
             size="small"
-            label={item.externalAiUsed ? 'External processing used' : 'No external processing'}
+            label={item.externalAiUsed ? 'External provider used' : 'Local-first'}
             color={item.externalAiUsed ? 'warning' : 'default'}
             variant="outlined"
           />
@@ -253,6 +268,7 @@ const ReconciliationRow = ({ item }: { item: BatchReconciliationItemDTO }) => {
 export default function LeadIngestionBatchPage() {
   const { batchId = '' } = useParams<{ batchId: string }>();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [activeClassification, setActiveClassification] = useState<string | null>(null);
   const batchQuery = useQuery({
     queryKey: ['lead-ingestion-batch', batchId],
@@ -267,7 +283,14 @@ export default function LeadIngestionBatchPage() {
       const batch = query.state.data;
       if (!batch) return 2000;
       return batch.items.length < batch.filesReceived || batch.items.some((item) =>
-        item.classification.replaceAll('_', '').toLowerCase() === 'pending') ? 2000 : false;
+        item.classification.replaceAll('_', '').toLowerCase() === 'pending'
+        || item.intakeStatus === 'AwaitingSecurityScan') ? 2000 : false;
+    },
+  });
+  const retryMutation = useMutation({
+    mutationFn: () => leadService.retryBlockedFiles(batchId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['lead-ingestion-batch', batchId] });
     },
   });
 
@@ -296,6 +319,7 @@ export default function LeadIngestionBatchPage() {
   }
 
   const batch = batchQuery.data;
+  const awaitingSecurityScan = batch.awaitingSecurityScan ?? 0;
   const metrics = [
     { label: 'Files received', value: batch.filesReceived, classification: null, icon: <FilesIcon color="action" /> },
     { label: 'Logical inquiries', value: batch.logicalInquiries, classification: null, icon: <ReviewIcon color="action" /> },
@@ -303,12 +327,15 @@ export default function LeadIngestionBatchPage() {
     { label: 'Exact duplicates', value: batch.exactDuplicates, classification: 'exactduplicate', icon: <DuplicateIcon color="info" /> },
     { label: 'Revisions', value: batch.revisions, classification: 'revision', icon: <RevisionIcon color="primary" /> },
     { label: 'Possible matches', value: batch.possibleMatches, classification: 'possiblematchreviewrequired', icon: <ReviewIcon color="warning" /> },
+    { label: 'Awaiting security scan', value: awaitingSecurityScan, classification: 'awaitingsecurityscan', icon: <SecurityIcon color="warning" /> },
     { label: 'Rejected', value: batch.rejected, classification: 'rejectedorunprocessable', icon: <RejectedIcon color="error" /> },
   ];
   const pendingCount = Math.max(batch.filesReceived - batch.items.length, 0) + batch.items.filter((item) =>
     item.classification.replaceAll('_', '').toLowerCase() === 'pending').length;
   const visibleItems = activeClassification === null ? batch.items : batch.items.filter((item) =>
-    item.classification.replaceAll('_', '').toLowerCase() === activeClassification);
+    activeClassification === 'awaitingsecurityscan'
+      ? item.intakeStatus === 'AwaitingSecurityScan'
+      : item.classification.replaceAll('_', '').toLowerCase() === activeClassification);
 
   return (
     <Box sx={{ maxWidth: 1400, mx: 'auto', p: { xs: 2, md: 3 } }}>
@@ -319,6 +346,17 @@ export default function LeadIngestionBatchPage() {
         </Box>
         <Stack direction="row" spacing={1}>
           <Button startIcon={<BackIcon />} onClick={() => navigate('/procurement/leads/manual-upload')}>New upload</Button>
+          {awaitingSecurityScan > 0 && (
+            <Button
+              variant="contained"
+              color="warning"
+              startIcon={retryMutation.isPending ? <CircularProgress size={16} /> : <RetryIcon />}
+              onClick={() => retryMutation.mutate()}
+              disabled={retryMutation.isPending}
+            >
+              Retry Blocked Files
+            </Button>
+          )}
           <Button variant="outlined" startIcon={batchQuery.isFetching ? <CircularProgress size={16} /> : <RefreshIcon />} onClick={() => batchQuery.refetch()} disabled={batchQuery.isFetching}>
             Refresh
           </Button>
@@ -327,7 +365,7 @@ export default function LeadIngestionBatchPage() {
 
       <Grid container spacing={1.5} sx={{ mb: 3 }}>
         {metrics.map((metric) => (
-          <Grid key={metric.label} size={{ xs: 6, sm: 4, lg: 12 / 7 }}>
+          <Grid key={metric.label} size={{ xs: 6, sm: 4, lg: 1.5 }}>
             <Paper component="button" type="button" variant="outlined" onClick={() => setActiveClassification(metric.classification)}
               aria-pressed={activeClassification === metric.classification}
               sx={{ p: 2, borderRadius: 2, minHeight: 104, width: '100%', textAlign: 'left', cursor: 'pointer', bgcolor: activeClassification === metric.classification ? 'action.selected' : 'background.paper' }}>
@@ -341,6 +379,17 @@ export default function LeadIngestionBatchPage() {
         ))}
       </Grid>
 
+      <Box aria-live="polite" sx={{ mb: retryMutation.isSuccess || retryMutation.isError ? 2 : 0 }}>
+        {retryMutation.isSuccess && (
+          <Alert severity={retryMutation.data.stillAwaiting > 0 ? 'warning' : 'success'}>
+            Retry complete: {retryMutation.data.queued} queued, {retryMutation.data.stillAwaiting} still awaiting security scan, {retryMutation.data.rejected} rejected.
+          </Alert>
+        )}
+        {retryMutation.isError && (
+          <Alert severity="error">Blocked files could not be retried. Their stored evidence and current status are unchanged.</Alert>
+        )}
+      </Box>
+
       <Alert severity={pendingCount > 0 ? 'info' : batch.rejected > 0 ? 'warning' : 'success'} sx={{ mb: 2 }}>
         {pendingCount > 0
           ? `${pendingCount} occurrence${pendingCount === 1 ? '' : 's'} still processing. Refresh to see completed classifications.`
@@ -349,8 +398,8 @@ export default function LeadIngestionBatchPage() {
 
       <Alert severity={batch.externalOccurrences > 0 ? 'warning' : 'success'} sx={{ mb: 3 }}>
         {batch.externalOccurrences > 0
-          ? `${batch.externalOccurrences} occurrence${batch.externalOccurrences === 1 ? '' : 's'} used external processing. ${batch.externalCost == null ? 'Provider cost is not priced.' : `Recorded external cost: ${batch.externalCost.toFixed(4)}.`}`
-          : 'No external processing is recorded for this batch.'}
+          ? `${batch.localFirstOccurrences ?? 0} local-first and ${batch.externalOccurrences} external occurrence${batch.externalOccurrences === 1 ? '' : 's'}. ${batch.externalCost == null ? 'Provider cost is not priced.' : `Recorded external cost: ${batch.externalCost.toFixed(4)}.`}`
+          : `${batch.localFirstOccurrences ?? 0} reconciled occurrence${batch.localFirstOccurrences === 1 ? '' : 's'} used local-first processing. No external provider use is recorded.`}
       </Alert>
 
       <Stack direction={{ xs: 'column', sm: 'row' }} sx={{ justifyContent: 'space-between', alignItems: { xs: 'stretch', sm: 'center' }, mb: 1.5 }}>

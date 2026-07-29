@@ -354,7 +354,21 @@ public sealed class SourceDocumentOccurrence
             throw new InvalidOperationException("The occurrence is already bound to another extraction job.");
         ExtractionJobId = id;
         IntakeStatus = IntakeOccurrenceStatus.Queued;
+        LastErrorCategory = null;
+        LastErrorCode = null;
+        LastErrorDetailsJson = null;
         UpdatedOn = DateTimeOffset.UtcNow;
+    }
+
+    public void MarkAwaitingSecurityScan(string errorCode, string detailsJson, DateTimeOffset? changedOn = null)
+    {
+        LastErrorCategory = "SecurityInspection";
+        LastErrorCode = EvidenceLedgerGuard.Required(errorCode, 128, nameof(errorCode));
+        LastErrorDetailsJson = EvidenceLedgerGuard.Json(detailsJson, nameof(detailsJson));
+        Transition(IntakeOccurrenceStatus.AwaitingSecurityScan, changedOn,
+            IntakeOccurrenceStatus.Accepted,
+            IntakeOccurrenceStatus.AwaitingSecurityScan,
+            IntakeOccurrenceStatus.Rejected);
     }
 
     public void MarkProcessing(DateTimeOffset? changedOn = null) => Transition(IntakeOccurrenceStatus.Processing, changedOn,
@@ -389,7 +403,9 @@ public sealed class SourceDocumentOccurrence
         LastErrorCategory = EvidenceLedgerGuard.Required(category, 64, nameof(category));
         LastErrorCode = EvidenceLedgerGuard.Required(errorCode, 128, nameof(errorCode));
         LastErrorDetailsJson = EvidenceLedgerGuard.Json(detailsJson, nameof(detailsJson));
-        Transition(IntakeOccurrenceStatus.Rejected, changedOn, IntakeOccurrenceStatus.Accepted);
+        Transition(IntakeOccurrenceStatus.Rejected, changedOn,
+            IntakeOccurrenceStatus.Accepted,
+            IntakeOccurrenceStatus.AwaitingSecurityScan);
     }
 
     private void Transition(IntakeOccurrenceStatus next, DateTimeOffset? changedOn, params IntakeOccurrenceStatus[] allowed)
@@ -400,7 +416,7 @@ public sealed class SourceDocumentOccurrence
     }
 }
 
-public enum IntakeOccurrenceStatus { Accepted, Queued, Processing, Retryable, Resolved, ReviewRequired, Rejected, DeadLetter }
+public enum IntakeOccurrenceStatus { Accepted, AwaitingSecurityScan, Queued, Processing, Retryable, Resolved, ReviewRequired, Rejected, DeadLetter }
 
 public sealed class ExtractionRun
 {

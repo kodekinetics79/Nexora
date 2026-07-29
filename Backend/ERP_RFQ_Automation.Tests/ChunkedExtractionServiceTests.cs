@@ -132,6 +132,37 @@ public class ChunkedExtractionServiceTests
     }
 
     [Fact]
+    public async Task EmptyParserOrOcrResult_FailsBeforeAnyModelCall()
+    {
+        var llm = new StubLlm(Ext.Result(Ext.Items(1, 0.9), 0.9));
+
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Array.Empty<string>(), "  "));
+
+        Assert.Equal(ExtractionOutcomeStatus.Failed, outcome.Status);
+        Assert.Equal(0, llm.CallCount);
+        Assert.Contains("no readable content", outcome.ReviewReason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task TruncatedOcr_CannotReportComplete()
+    {
+        var llm = new StubLlm(Ext.Result(Ext.Items(1, 0.95), 0.95));
+        var input = new DocumentExtractionInput
+        {
+            BusinessUnitId = 1,
+            HeaderText = "buyer: Acme",
+            LineItemRegions = Array.Empty<string>(),
+            OcrStatus = ExtractionOcrStatus.Partial,
+            OcrTruncated = true
+        };
+
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(input);
+
+        Assert.Equal(ExtractionOutcomeStatus.NeedsReview, outcome.Status);
+        Assert.Contains("OCR was incomplete", outcome.ReviewReason);
+    }
+
+    [Fact]
     public async Task NoDetectedRows_LowConfidence_RoutesToNeedsReview()
     {
         var llm = new StubLlm(Ext.Result(Ext.Items(1, 0.2), 0.2));

@@ -88,6 +88,27 @@ public sealed class AuthenticatedHttpRlsTests(Release01BHttpApplication app)
     }
 
     [Fact]
+    public async Task Security_scan_retry_requires_create_permission_and_authenticated_tenant_scope()
+    {
+        using var anonymous = app.CreateClient();
+        using var denied = Client(Release01BHttpApplication.DeniedRole, Release01BHttpApplication.TenantA);
+        using var allowed = Client(Release01BHttpApplication.AllowedRole, Release01BHttpApplication.TenantA);
+        var ownPath = $"{BatchPath(app.TenantABatchId)}/retry-blocked-files";
+        var crossTenantPath = $"{BatchPath(app.TenantBBatchId)}/retry-blocked-files";
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.PostAsync(ownPath, null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await denied.PostAsync(ownPath, null)).StatusCode);
+
+        var own = await allowed.PostAsync(ownPath, null);
+        Assert.Equal(HttpStatusCode.OK, own.StatusCode);
+        using var payload = JsonDocument.Parse(await own.Content.ReadAsStringAsync());
+        Assert.Equal(app.TenantABatchId, payload.RootElement.GetProperty("batchId").GetGuid());
+
+        Assert.Equal(HttpStatusCode.NotFound,
+            (await allowed.PostAsync(crossTenantPath, null)).StatusCode);
+    }
+
+    [Fact]
     public async Task Query_tenant_forgery_cannot_change_analytics_scope()
     {
         using var client = Client(Release01BHttpApplication.AllowedRole, Release01BHttpApplication.TenantA);

@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.LeadIdentity;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -13,9 +14,13 @@ namespace ERP_RFQ_Automation.Controllers;
 public sealed class LeadIngestionController : ControllerBase
 {
     private readonly ILeadIdentityApplicationService _service;
+    private readonly ISecurityScanRecoveryService _securityScanRecovery;
     private readonly ILogger<LeadIngestionController> _log;
-    public LeadIngestionController(ILeadIdentityApplicationService service, ILogger<LeadIngestionController> log)
-    { _service = service; _log = log; }
+    public LeadIngestionController(
+        ILeadIdentityApplicationService service,
+        ISecurityScanRecoveryService securityScanRecovery,
+        ILogger<LeadIngestionController> log)
+    { _service = service; _securityScanRecovery = securityScanRecovery; _log = log; }
 
     [HttpGet("batches/{batchId:guid}")]
     [RequireModulePermission("Leads", PermissionAction.View)]
@@ -24,6 +29,16 @@ public sealed class LeadIngestionController : ControllerBase
         if (!TryTenant(out var bu)) return BadRequest(new { message = "A valid businessUnitId claim is required." });
         var result = await _service.GetBatchAsync(bu, batchId, ct);
         return result is null ? NotFound() : Ok(result);
+    }
+
+    [HttpPost("batches/{batchId:guid}/retry-blocked-files")]
+    [RequireModulePermission("Leads", PermissionAction.Create)]
+    public async Task<IActionResult> RetryBlockedFiles(Guid batchId, CancellationToken ct)
+    {
+        if (!TryTenant(out var bu)) return BadRequest(new { message = "A valid businessUnitId claim is required." });
+        if (await _service.GetBatchAsync(bu, batchId, ct) is null)
+            return NotFound();
+        return Ok(await _securityScanRecovery.RetryBatchAsync(bu, batchId, ct));
     }
 
     [HttpGet("match-reviews")]
