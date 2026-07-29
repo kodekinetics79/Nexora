@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import {
   Alert,
@@ -36,6 +36,10 @@ export default function DuplicateUploadsPage() {
       || row.duplicateType === 'DUPLICATE_RESCAN_REQUIRED'
       || row.duplicateType === 'SECURITY_SCAN_BLOCKED') ? 5000 : false,
   });
+  const retryMutation = useMutation({
+    mutationFn: (batchId: string) => leadService.retryBlockedFiles(batchId),
+    onSuccess: () => query.refetch(),
+  });
 
   if (query.isLoading) return <Box sx={{ p: 4, textAlign: 'center' }}><CircularProgress /></Box>;
   if (query.isError) return <Alert severity="error">Duplicate uploads could not be loaded.</Alert>;
@@ -54,6 +58,16 @@ export default function DuplicateUploadsPage() {
           Refresh
         </Button>
       </Stack>
+
+      {retryMutation.isError && (
+        <Alert severity="error" sx={{ mb: 2 }}>The blocked files could not be retried.</Alert>
+      )}
+      {retryMutation.data && (
+        <Alert severity="success" sx={{ mb: 2 }}>
+          Retry complete: {retryMutation.data.queued} queued, {retryMutation.data.stillAwaiting} awaiting scan,
+          {' '}{retryMutation.data.rejected} rejected.
+        </Alert>
+      )}
 
       {rows.length === 0 ? (
         <Alert severity="info">No duplicate upload occurrences are recorded for this tenant.</Alert>
@@ -133,6 +147,13 @@ export default function DuplicateUploadsPage() {
                         onClick={() => navigate(`/procurement/leads/ingestion/${row.uploadBatch}`)}>
                         Batch
                       </Button>
+                      {row.actions.includes('Retry security scan') && (
+                        <Button size="small" startIcon={<Refresh />}
+                          disabled={retryMutation.isPending && retryMutation.variables === row.uploadBatch}
+                          onClick={() => retryMutation.mutate(row.uploadBatch)}>
+                          Retry scan
+                        </Button>
+                      )}
                       {row.canonicalLeadId && (
                         <Button size="small" onClick={() => navigate(`/procurement/leads/view/${row.canonicalLeadId}`)}>
                           Lead
