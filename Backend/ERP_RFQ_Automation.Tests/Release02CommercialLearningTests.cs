@@ -446,8 +446,233 @@ public sealed class Release02CommercialLearningTests
         await using var context = fixture.Context();
         var supplier = await new CommercialLearningService(context)
             .GetSupplierAsync(fixture.BusinessUnitId, ProcurementTestData.Supplier);
+        Assert.Equal(0, supplier.BidQuality.CompleteOfferCount);
         Assert.Equal(1, supplier.BidQuality.EligibleOfferCount);
         Assert.Contains(supplier.BidQuality.Flags, x => x.Code == "INCOMPLETE_TERMS" && x.Severity == "WARNING");
+    }
+
+    [Fact]
+    public async Task Bid_quality_uses_a_cross_supplier_same_line_and_currency_price_cohort()
+    {
+        using var fixture = new ProcurementScenario();
+        await AddVerifiedSupplierAsync(fixture, 96_051, "Cohort Supplier 2");
+        await AddVerifiedSupplierAsync(fixture, 96_052, "Cohort Supplier 3");
+
+        var first = await fixture.CreateEligibleQuoteAsync("outlier-cohort-base");
+        var second = await CaptureOfferAsync(fixture, 96_051, "outlier-cohort-second", 11m);
+        var outlier = await CaptureOfferAsync(fixture, 96_052, "outlier-cohort-third", 40m);
+
+        await using var context = fixture.Context();
+        var result = await new CommercialLearningService(context)
+            .GetRfqIntelligenceAsync(fixture.BusinessUnitId, fixture.RfqId);
+        var flags = Assert.Single(result.Lines).BidQualityFlags;
+
+        Assert.DoesNotContain(flags, x => x.SupplierQuotedItemId == first && x.Code == "PRICE_OUTLIER");
+        Assert.DoesNotContain(flags, x => x.SupplierQuotedItemId == second && x.Code == "PRICE_OUTLIER");
+        var finding = Assert.Single(flags, x => x.SupplierQuotedItemId == outlier && x.Code == "PRICE_OUTLIER");
+        Assert.Contains("3-Supplier median", finding.Explanation);
+        Assert.Contains("review signal, not proof", finding.Explanation);
+    }
+
+    [Fact]
+    public async Task Bid_quality_excludes_an_unverified_supplier_from_the_price_cohort()
+    {
+        using var fixture = new ProcurementScenario();
+        await AddVerifiedSupplierAsync(fixture, 96_051, "Cohort Supplier 2");
+        await AddVerifiedSupplierAsync(fixture, 96_052, "Cohort Supplier 3");
+        await fixture.CreateEligibleQuoteAsync("governed-cohort-base");
+        await CaptureOfferAsync(fixture, 96_051, "governed-cohort-second", 11m);
+        await CaptureOfferAsync(fixture, 96_052, "governed-cohort-unverified", 40m);
+        await using (var setup = fixture.Context())
+        {
+            var supplier = await setup.Suppliers.SingleAsync(x => x.Id == 96_052);
+            supplier.VerificationStatus = ERP_RFQ_Automation.Models.SupplierVerificationStatuses.Pending;
+            await setup.SaveChangesAsync();
+        }
+
+        await using var context = fixture.Context();
+        var result = await new CommercialLearningService(context)
+            .GetRfqIntelligenceAsync(fixture.BusinessUnitId, fixture.RfqId);
+
+        Assert.DoesNotContain(Assert.Single(result.Lines).BidQualityFlags,
+            x => x.Code == "PRICE_OUTLIER");
+    }
+
+    [Fact]
+    public async Task Approved_alternate_route_requires_the_latest_authoritative_review_value()
+    {
+        using var fixture = new ProcurementScenario();
+        await fixture.CreateEligibleQuoteAsync("approved-alternate-twin");
+        long evidenceId;
+        await using (var setup = fixture.Context())
+        {
+            var line = await setup.SupplierQuoteLines.SingleAsync();
+            line.IsAlternate = true;
+            var evidence = new ERP_RFQ_Automation.SupplierQuotes.SupplierQuoteFieldEvidence
+            {
+                BusinessUnitId = fixture.BusinessUnitId,
+                SupplierQuoteRevisionId = line.SupplierQuoteRevisionId,
+                SupplierQuoteLineId = line.Id,
+                FieldName = "AlternateAuthorization",
+                OriginalValue = "No",
+                NormalizedValue = "NO",
+                Confidence = 1m,
+                Method = "MANUAL_REVIEW",
+                Critical = true,
+                ReviewRequired = true,
+                CreatedOn = DateTime.UtcNow
+            };
+            setup.SupplierQuoteFieldEvidence.Add(evidence);
+            await setup.SaveChangesAsync();
+            evidenceId = evidence.Id;
+            setup.SupplierQuoteReviewDecisions.Add(new ERP_RFQ_Automation.SupplierQuotes.SupplierQuoteReviewDecision
+            {
+                BusinessUnitId = fixture.BusinessUnitId,
+                SupplierQuoteRevisionId = line.SupplierQuoteRevisionId,
+                SupplierQuoteFieldEvidenceId = evidence.Id,
+                Status = ERP_RFQ_Automation.SupplierQuotes.SupplierQuoteReviewStatuses.Corrected,
+                CorrectedValue = "APPROVED",
+                Reason = "Engineering approved the alternate",
+                ReviewedBy = "reviewer@example.test",
+                ReviewedOn = DateTime.UtcNow,
+                CorrelationId = "approved-alternate-twin"
+            });
+            await setup.SaveChangesAsync();
+        }
+
+        await using (var context = fixture.Context())
+        {
+            var result = await new CommercialLearningService(context)
+                .GetRfqIntelligenceAsync(fixture.BusinessUnitId, fixture.RfqId);
+            Assert.True(Assert.Single(result.DigitalTwin.Scenarios,
+                x => x.Code == "APPROVED_ALTERNATE").Eligible);
+        }
+
+        await using (var revoke = fixture.Context())
+        {
+            var revisionId = await revoke.SupplierQuoteFieldEvidence.Where(x => x.Id == evidenceId)
+                .Select(x => x.SupplierQuoteRevisionId).SingleAsync();
+            revoke.SupplierQuoteReviewDecisions.Add(new ERP_RFQ_Automation.SupplierQuotes.SupplierQuoteReviewDecision
+            {
+                BusinessUnitId = fixture.BusinessUnitId,
+                SupplierQuoteRevisionId = revisionId,
+                SupplierQuoteFieldEvidenceId = evidenceId,
+                Status = ERP_RFQ_Automation.SupplierQuotes.SupplierQuoteReviewStatuses.Corrected,
+                CorrectedValue = "NO",
+                Reason = "Engineering withdrew alternate approval",
+                ReviewedBy = "reviewer@example.test",
+                ReviewedOn = DateTime.UtcNow.AddSeconds(1),
+                CorrelationId = "approved-alternate-twin-revoked"
+            });
+            await revoke.SaveChangesAsync();
+        }
+
+        await using var verify = fixture.Context();
+        var revoked = await new CommercialLearningService(verify)
+            .GetRfqIntelligenceAsync(fixture.BusinessUnitId, fixture.RfqId);
+        Assert.False(Assert.Single(revoked.DigitalTwin.Scenarios,
+            x => x.Code == "APPROVED_ALTERNATE").Eligible);
+    }
+
+    [Fact]
+    public async Task Bid_quality_flags_material_revision_change_but_not_revision_count_alone()
+    {
+        using var fixture = new ProcurementScenario();
+        var solicitation = await fixture.Execute(service =>
+            service.CreateSolicitationAsync(fixture.Solicitation("material-revision-sol")));
+        await fixture.MarkSolicitationSentAsync(solicitation.Id);
+        await fixture.Execute(service => service.CaptureSupplierQuoteAsync(
+            fixture.Quote(solicitation.Id, "material-revision-one")));
+        await fixture.Execute(service => service.CaptureSupplierQuoteAsync(
+            fixture.Quote(solicitation.Id, "material-revision-two") with { Revision = 2 }));
+
+        await using (var unchangedContext = fixture.Context())
+        {
+            var unchanged = await new CommercialLearningService(unchangedContext)
+                .GetRfqIntelligenceAsync(fixture.BusinessUnitId, fixture.RfqId);
+            Assert.DoesNotContain(Assert.Single(unchanged.Lines).BidQualityFlags,
+                x => x.Code == "REVISION_VOLATILITY");
+        }
+
+        var changed = await fixture.Execute(service => service.CaptureSupplierQuoteAsync(
+            fixture.Quote(solicitation.Id, "material-revision-three") with
+            {
+                Revision = 3,
+                Lines = [fixture.QuoteLine() with { UnitPrice = 15m }]
+            }));
+        await using var changedContext = fixture.Context();
+        var result = await new CommercialLearningService(changedContext)
+            .GetRfqIntelligenceAsync(fixture.BusinessUnitId, fixture.RfqId);
+        var finding = Assert.Single(Assert.Single(result.Lines).BidQualityFlags,
+            x => x.SupplierQuotedItemId == Assert.Single(changed.LineIds) && x.Code == "REVISION_VOLATILITY");
+        Assert.Contains("unit price", finding.Explanation);
+        Assert.Contains("landed cost", finding.Explanation);
+    }
+
+    [Fact]
+    public async Task Bid_quality_exposes_explicit_completeness_authorization_and_alternate_blockers()
+    {
+        using var fixture = new ProcurementScenario();
+        var offerId = await fixture.CreateEligibleQuoteAsync("quality-diagnostics");
+        await using (var setup = fixture.Context())
+        {
+            var offer = await setup.SupplierQuotedItems.SingleAsync(x => x.Id == offerId);
+            offer.UnitPrice = null;
+            offer.CurrencyId = null;
+            offer.AvailableQuantity = 1m;
+            offer.LeadTimeDays = null;
+            offer.ValidUntil = null;
+            var supplier = await setup.Suppliers.SingleAsync(x => x.Id == ProcurementTestData.Supplier);
+            supplier.VerificationStatus = ERP_RFQ_Automation.Models.SupplierVerificationStatuses.Pending;
+            (await setup.SupplierQuoteLines.SingleAsync()).IsAlternate = true;
+            (await setup.SupplierQuotes.SingleAsync()).InboxStatus =
+                ERP_RFQ_Automation.SupplierQuotes.SupplierQuoteInboxStatuses.ReviewRequired;
+            await setup.SaveChangesAsync();
+        }
+
+        await using var context = fixture.Context();
+        var result = await new CommercialLearningService(context)
+            .GetRfqIntelligenceAsync(fixture.BusinessUnitId, fixture.RfqId);
+        var flags = Assert.Single(result.Lines).BidQualityFlags
+            .Where(x => x.SupplierQuotedItemId == offerId).ToArray();
+
+        Assert.Contains(flags, x => x.Code == "MISSING_PRICE" && x.Severity == "BLOCKER");
+        Assert.Contains(flags, x => x.Code == "MISSING_CURRENCY" && x.Severity == "BLOCKER");
+        Assert.Contains(flags, x => x.Code == "MISSING_VALIDITY" && x.Severity == "BLOCKER");
+        Assert.Contains(flags, x => x.Code == "MISSING_LEAD_TIME" && x.Severity == "BLOCKER");
+        Assert.Contains(flags, x => x.Code == "INSUFFICIENT_STOCK" && x.Severity == "BLOCKER");
+        Assert.Contains(flags, x => x.Code == "CANONICAL_AUTHORIZATION_REQUIRED" && x.Severity == "BLOCKER");
+        Assert.Contains(flags, x => x.Code == "ALTERNATE_APPROVAL_REQUIRED" && x.Severity == "BLOCKER");
+        Assert.Contains(flags, x => x.Code == "SUPPLIER_UNVERIFIED" && x.Severity == "BLOCKER");
+        Assert.Equal(0, Assert.Single(result.Lines).EligibleOfferCount);
+    }
+
+    private static async Task AddVerifiedSupplierAsync(ProcurementScenario fixture, long supplierId, string name)
+    {
+        await using var context = fixture.Context();
+        var supplier = AgentSeed.Supplier(context, supplierId, fixture.BusinessUnitId, name,
+            $"supplier-{supplierId}@example.test");
+        supplier.GovernanceStatus = ERP_RFQ_Automation.Models.SupplierGovernanceStatuses.Approved;
+        supplier.VerificationStatus = ERP_RFQ_Automation.Models.SupplierVerificationStatuses.Verified;
+        supplier.ComplianceStatus = ERP_RFQ_Automation.Models.SupplierComplianceStatuses.Cleared;
+        supplier.RiskStatus = ERP_RFQ_Automation.Models.SupplierRiskStatuses.Low;
+        supplier.ReadinessStatus = ERP_RFQ_Automation.Models.SupplierReadinessStatuses.Ready;
+        supplier.ConcurrencyToken = Guid.NewGuid();
+        await context.SaveChangesAsync();
+    }
+
+    private static async Task<long> CaptureOfferAsync(ProcurementScenario fixture, long supplierId,
+        string key, decimal unitPrice)
+    {
+        var solicitation = await fixture.Execute(service => service.CreateSolicitationAsync(
+            fixture.Solicitation($"{key}-sol") with { SupplierId = supplierId }));
+        await fixture.MarkSolicitationSentAsync(solicitation.Id);
+        var result = await fixture.Execute(service => service.CaptureSupplierQuoteAsync(
+            fixture.Quote(solicitation.Id, $"{key}-quote") with
+            {
+                Lines = [fixture.QuoteLine() with { UnitPrice = unitPrice }]
+            }));
+        return Assert.Single(result.LineIds);
     }
 
     private static void AssertPermission(string methodName, string module)

@@ -3,12 +3,15 @@ using System.Text;
 using ERP_RFQ_Automation.CommercialIntelligence.Sales;
 using ERP_RFQ_Automation.CommercialRouting;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
+using ERP_RFQ_Automation.Agent.Models;
 using ERP_RFQ_Automation.Inventory;
 using ERP_RFQ_Automation.Inventory.Commercial;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.OrderToCash;
+using ERP_RFQ_Automation.Procurement;
 using ERP_RFQ_Automation.ProductIntelligence;
+using ERP_RFQ_Automation.SupplierQuotes;
 using Microsoft.EntityFrameworkCore;
 using Models = ERP_RFQ_Automation.Models;
 using PlatformModels = ERP_RFQ_Automation.Platform.Models;
@@ -48,7 +51,7 @@ await EnsureUserAsync(otherTenantId, otherRole.SetupId, "other@release01c1.local
 var permissionModules = new[]
 {
     "Leads", "Dashboard", "Users", "Customers", "Products", "Product Categories",
-    "Supplier History", "RFQ Management", "Quotations", "Orders", "Customer Awards"
+    "Supplier History", "Supplier Negotiation", "RFQ Management", "Quotations", "Orders", "Customer Awards"
 };
 foreach (var moduleName in permissionModules)
 {
@@ -283,6 +286,8 @@ if (resolutionPersistenceAvailable)
     await EnsureLineResolutionsAsync(sixLineLead, mainRfq, sufficient, partial, outOfStock, incomingProduct);
     await EnsureLineResolutionsAsync(quoteDraftLead, quoteDraftRfq, sufficient, partial, outOfStock, incomingProduct);
 }
+var negotiationSupplierQuoteId = await EnsureNegotiationSupplierQuoteAsync(
+    mainRfq, outOfStock, supplier, currency);
 
 var draftStatus = await EnsureSetupAsync("QuoteStatus", "DRAFT", "Draft");
 var sentStatus = await EnsureSetupAsync("QuoteStatus", "SENT", "Sent");
@@ -723,6 +728,153 @@ async Task EnsureSupplierQuoteAsync(long supplierId, string itemName, decimal qu
         QuoteReference = reference, QuoteDate = now.AddDays(-15), ValidUntil = now.AddDays(30), IsActive = true,
         CreatedBy = fixtureActor, CreatedDate = now.AddDays(-15) });
     await db.SaveChangesAsync();
+}
+
+async Task<long> EnsureNegotiationSupplierQuoteAsync(
+    Rfq rfq, Product product, Supplier quoteSupplier, Currency quoteCurrency)
+{
+    const string quoteReference = "CORE-SQ-NEGOTIATION-V24";
+    var rfqItem = rfq.Rfqitems.Single(x => x.ProductId == product.Id);
+    var expectedIdentityKey = $"rfq:{rfq.Id}:line:{rfqItem.Id}";
+    var demandLine = await db.CommercialDemandLines.SingleOrDefaultAsync(x =>
+        x.BusinessUnitId == tenantId && x.RfqItemId == rfqItem.Id);
+    if (demandLine is null)
+    {
+        demandLine = new CommercialDemandLine
+        {
+            BusinessUnitId = tenantId,
+            RfqId = rfq.Id,
+            RfqItemId = rfqItem.Id,
+            NexoraSerial = rfq.NexoraSerial!,
+            IdentityKey = $"rfq:{rfq.Id}:line:{rfqItem.Id}",
+            CreatedOn = now,
+            CreatedBy = fixtureActor
+        };
+        db.CommercialDemandLines.Add(demandLine);
+        await db.SaveChangesAsync();
+    }
+    else if (demandLine.RfqId != rfq.Id || demandLine.NexoraSerial != rfq.NexoraSerial ||
+        demandLine.IdentityKey != expectedIdentityKey)
+    {
+        throw new InvalidOperationException(
+            $"Acceptance fixture Demand Line {demandLine.Id} does not match RFQ {rfq.Id} and its Nexora Serial.");
+    }
+
+    var sourcingCase = await db.SourcingCases.SingleOrDefaultAsync(x =>
+        x.BusinessUnitId == tenantId && x.CommercialDemandLineId == demandLine.Id);
+    if (sourcingCase is null)
+    {
+        sourcingCase = new SourcingCase
+        {
+            BusinessUnitId = tenantId,
+            CommercialDemandLineId = demandLine.Id,
+            RfqId = rfq.Id,
+            RfqItemId = rfqItem.Id,
+            LeadId = rfq.LeadId,
+            CustomerId = rfq.CustomerId,
+            ProductId = product.Id,
+            NexoraSerial = rfq.NexoraSerial!,
+            RequestedPartNumber = product.PartNo,
+            Description = rfqItem.ProductShortDescription ?? product.ProductName ?? product.PartNo ?? "Acceptance product",
+            UnitOfMeasure = rfqItem.UnitOfMeasure ?? "EA",
+            RequestedQuantity = rfqItem.Quantity,
+            StockQuantity = 0,
+            UnfulfilledQuantity = rfqItem.Quantity,
+            SearchLimit = 10,
+            Status = SourcingCaseStatuses.ComparisonReady,
+            NextAction = "Review supplier bid quality and prepare negotiation",
+            ShortageDecisionKey = "core-v24-shortage-decision",
+            IdempotencyKey = "core-v24-sourcing-case",
+            RequestHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("core-v24-sourcing-case"))),
+            CreatedOn = now,
+            CreatedBy = fixtureActor,
+            UpdatedOn = now,
+            UpdatedBy = fixtureActor
+        };
+        db.SourcingCases.Add(sourcingCase);
+        await db.SaveChangesAsync();
+    }
+    else if (sourcingCase.RfqId != rfq.Id || sourcingCase.RfqItemId != rfqItem.Id ||
+        sourcingCase.NexoraSerial != rfq.NexoraSerial ||
+        sourcingCase.CommercialDemandLineId != demandLine.Id)
+    {
+        throw new InvalidOperationException(
+            $"Acceptance fixture Sourcing Case {sourcingCase.Id} does not match the canonical Demand Line.");
+    }
+
+    var solicitation = await db.Set<SupplierSolicitation>().SingleOrDefaultAsync(x =>
+        x.BusinessUnitId == tenantId && x.SourcingCaseId == sourcingCase.Id &&
+        x.SupplierId == quoteSupplier.Id);
+    if (solicitation is null)
+    {
+        solicitation = new SupplierSolicitation
+        {
+            BusinessUnitId = tenantId,
+            RfqId = rfq.Id,
+            SupplierId = quoteSupplier.Id,
+            SourcingCaseId = sourcingCase.Id,
+            CommercialDemandLineId = demandLine.Id,
+            NexoraSerial = rfq.NexoraSerial!,
+            SupplierRfqNumber = "CORE-SRFQ-NEGOTIATION-V24",
+            IdempotencyKey = "core-v24-supplier-solicitation",
+            RequestHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("core-v24-supplier-solicitation"))),
+            RequestedRfqItemIdsJson = $"[{rfqItem.Id}]",
+            Status = SolicitationStatus.Responded,
+            SentOn = now.AddDays(-3),
+            RespondedOn = now.AddDays(-2),
+            CreatedOn = now.AddDays(-3),
+            UpdatedOn = now.AddDays(-2)
+        };
+        db.Add(solicitation);
+        await db.SaveChangesAsync();
+    }
+    else if (solicitation.RfqId != rfq.Id || solicitation.SupplierId != quoteSupplier.Id ||
+        solicitation.CommercialDemandLineId != demandLine.Id ||
+        solicitation.NexoraSerial != rfq.NexoraSerial)
+    {
+        throw new InvalidOperationException(
+            $"Acceptance fixture Supplier RFQ {solicitation.Id} does not match the canonical commercial journey.");
+    }
+
+    var existingQuote = await db.SupplierQuotes.AsNoTracking()
+        .Include(x => x.Revisions).ThenInclude(x => x.Lines)
+        .SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId &&
+            x.SupplierQuoteReference == quoteReference);
+    if (existingQuote is not null)
+    {
+        var currentRevision = existingQuote.Revisions.SingleOrDefault(x =>
+            x.RevisionNumber == existingQuote.CurrentRevisionNumber);
+        if (existingQuote.SupplierId != quoteSupplier.Id || existingQuote.RfqId != rfq.Id ||
+            existingQuote.SupplierSolicitationId != solicitation.Id ||
+            existingQuote.SourcingCaseId != sourcingCase.Id ||
+            existingQuote.NexoraSerial != rfq.NexoraSerial || currentRevision is null ||
+            currentRevision.Lines.Any(x => x.RfqItemId != rfqItem.Id ||
+                x.CommercialDemandLineId != demandLine.Id))
+        {
+            throw new InvalidOperationException(
+                $"Acceptance fixture Supplier Quote {existingQuote.Id} has stale or conflicting lineage.");
+        }
+        return existingQuote.Id;
+    }
+
+    var sourceIdentity = "acceptance-fixture:core-sq-negotiation-v24";
+    var sourceHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sourceIdentity)));
+    var result = await new SupplierQuoteInboxService(db).CaptureAsync(new ERP_RFQ_Automation.SupplierQuotes.CaptureSupplierQuoteCommand(
+        tenantId, quoteSupplier.Id, solicitation.Id, sourcingCase.Id, rfq.NexoraSerial!,
+        quoteReference, 1, SupplierQuoteCaptureChannels.Manual, null, sourceIdentity, sourceHash,
+        quoteCurrency.Id, now.AddDays(30), "FCA", 30m, 0m, "Net 30",
+        "Authorized synthetic quote for authenticated V2.4 browser acceptance.",
+        new[]
+        {
+            new ERP_RFQ_Automation.SupplierQuotes.CaptureSupplierQuoteLine(1, rfqItem.Id, demandLine.Id, product.PartNo, null,
+                "PCS-TX-300", product.ProductName ?? product.PartNo ?? "Acceptance product",
+                rfqItem.Quantity, rfqItem.Quantity,
+                rfqItem.UnitOfMeasure ?? "EA", 452m, 4m, 14, "IN_STOCK", "US", "12 months",
+                false, null, Array.Empty<CaptureSupplierQuoteEvidence>())
+        },
+        Array.Empty<CaptureSupplierQuoteEvidence>(), "core-v24-supplier-quote-revision-1",
+        fixtureActor, "core-v24-browser-acceptance"));
+    return result.SupplierQuoteId;
 }
 
 async Task<Lead> EnsureReconciledOccurrenceAsync(Lead canonicalLead, Guid batchId, string key, string file,
@@ -1215,6 +1367,7 @@ async Task PrintFixtureAsync()
     Console.WriteLine($"E2E_CORE_RFQ_CREATION_LEAD_ID={rfqCreationLead.Id}");
     Console.WriteLine($"E2E_CORE_RFQ_CREATION_NEXORA_SERIAL={rfqCreationLead.CommercialCaseReference}");
     Console.WriteLine($"E2E_CORE_RFQ_ID={mainRfq.Id}");
+    Console.WriteLine($"E2E_V24_SUPPLIER_QUOTE_ID={negotiationSupplierQuoteId}");
     Console.WriteLine($"E2E_CORE_QUOTE_DRAFT_RFQ_ID={quoteDraftRfq.Id}");
     Console.WriteLine($"E2E_CORE_QUOTE_ID={mainQuote.Id}");
     Console.WriteLine($"E2E_CORE_SEND_QUOTE_ID={sendQuote.Id}");

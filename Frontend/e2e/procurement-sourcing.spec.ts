@@ -211,7 +211,7 @@ test('authenticated buyer completes shortage to receipt with immutable commercia
 
   await expect(page.getByText('SUP-Q-9001')).toBeVisible();
   await expect(page.getByText('94%')).toBeVisible();
-  await expect(page.getByText('Recommended')).toBeVisible();
+  await expect(page.getByText('Lowest eligible landed cost')).toBeVisible();
   await expect(page.getByText('Complete', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Approve' }).click();
   await page.getByRole('button', { name: 'Approve award' }).click();
@@ -302,7 +302,7 @@ test('authoritative comparison exposes blockers and prevents an invalid award', 
   await expect(page.getByText('minimum order quantity cannot be satisfied')).toBeVisible();
   await expect(page.getByText('61%')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Approve' })).toBeDisabled();
-  await expect(page.getByText('Recommended')).toHaveCount(0);
+  await expect(page.getByText('Lowest eligible landed cost')).toHaveCount(0);
 });
 
 test('responded solicitation accepts an immutable supplier quote revision', async ({ page }) => {

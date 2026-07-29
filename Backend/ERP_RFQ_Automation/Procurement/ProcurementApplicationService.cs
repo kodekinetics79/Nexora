@@ -383,6 +383,13 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var quoteRows = await _db.SupplierQuotedItems.AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && x.RfqItemId != null && itemIds.Contains(x.RfqItemId.Value) && x.IsActive)
             .ToListAsync(ct);
+        var workbenchRevisionIds = quoteRows.Where(x => x.SourceSupplierQuoteRevisionId.HasValue)
+            .Select(x => x.SourceSupplierQuoteRevisionId!.Value).Distinct().ToArray();
+        var workbenchRevisions = await _db.SupplierQuoteRevisions.AsNoTracking()
+            .Include(x => x.SupplierQuote).Include(x => x.Lines)
+            .Include(x => x.Evidence).Include(x => x.ReviewDecisions)
+            .Where(x => x.BusinessUnitId == businessUnitId && workbenchRevisionIds.Contains(x.Id))
+            .ToDictionaryAsync(x => x.Id, ct);
         var awards = await _db.Set<SourcingAward>().AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && x.RfqId == rfqId
                 && x.Status != "CANCELLED" && x.Status != "REJECTED")
@@ -413,7 +420,13 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var incomingByItem = purchaseOrders.SelectMany(x => x.Lines)
             .GroupBy(x => x.RfqItemId)
             .ToDictionary(x => x.Key, x => x.Sum(line => Math.Max(0m, line.OrderedQuantity - line.ReceivedQuantity)));
-        var approvedNotOrderedByItem = awards.Where(x => !poByAward.ContainsKey(x.Id))
+        var authoritativeOfferIds = quoteRows.Where(x =>
+                x.SourceSupplierQuoteRevisionId.HasValue &&
+                workbenchRevisions.TryGetValue(x.SourceSupplierQuoteRevisionId.Value, out var revision) &&
+                HasCurrentCanonicalAuthorization(x, revision))
+            .Select(x => x.Id).ToHashSet();
+        var approvedNotOrderedByItem = awards.Where(x => !poByAward.ContainsKey(x.Id) &&
+                x.SupplierQuotedItemId.HasValue && authoritativeOfferIds.Contains(x.SupplierQuotedItemId.Value))
             .GroupBy(x => x.RfqItemId ?? 0)
             .ToDictionary(x => x.Key, x => x.Sum(award => Math.Max(0m, award.Quantity ?? 0m)));
         var allocatedStockByItem = new Dictionary<long, decimal>();
@@ -456,7 +469,8 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             var supplier = supplierNames.GetValueOrDefault(row.SupplierId);
             var sourceLine = lines.SingleOrDefault(x => x.Id == row.RfqItemId);
             var comparison = ToComparisonLine(row, sourceLine?.ShortfallQuantity ?? 0m, supplier,
-                HasCanonicalLineage(row), sourceLine?.RequiredOn);
+                workbenchRevisions.GetValueOrDefault(row.SourceSupplierQuoteRevisionId ?? 0),
+                sourceLine?.RequiredOn);
             return new SupplierOfferView(row.Id, row.SupplierSolicitationId ?? 0, row.RfqItemId ?? 0, row.SupplierId,
                 supplier?.Name ?? $"Supplier {row.SupplierId}", row.QuoteReference, row.QuoteRevision,
                 row.CurrencyId ?? 0, currencyCodes.GetValueOrDefault(row.CurrencyId ?? 0) ?? "N/A", row.Quantity,
@@ -892,13 +906,15 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             supplierIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
         var sourceRevisionIds = rows.Where(x => x.SourceSupplierQuoteRevisionId.HasValue)
             .Select(x => x.SourceSupplierQuoteRevisionId!.Value).Distinct().ToArray();
-        var readyRevisionIds = await _db.SupplierQuoteRevisions.AsNoTracking().Where(x =>
-                x.BusinessUnitId == businessUnitId && sourceRevisionIds.Contains(x.Id) &&
-                x.SupplierQuote.InboxStatus == SupplierQuotes.SupplierQuoteInboxStatuses.ReadyForComparison)
-            .Select(x => x.Id).ToArrayAsync(ct);
+        var canonicalRevisions = await _db.SupplierQuoteRevisions.AsNoTracking()
+            .Include(x => x.SupplierQuote).Include(x => x.Lines)
+            .Include(x => x.Evidence).Include(x => x.ReviewDecisions)
+            .Where(x => x.BusinessUnitId == businessUnitId && sourceRevisionIds.Contains(x.Id))
+            .ToDictionaryAsync(x => x.Id, ct);
         var lines = rows.Select(row => ToComparisonLine(row, remainingRequirement,
-                suppliers.GetValueOrDefault(row.SupplierId), row.SourceSupplierQuoteRevisionId.HasValue &&
-                readyRevisionIds.Contains(row.SourceSupplierQuoteRevisionId.Value), rfqItem.RequiredDesiredDate))
+                suppliers.GetValueOrDefault(row.SupplierId),
+                canonicalRevisions.GetValueOrDefault(row.SourceSupplierQuoteRevisionId ?? 0),
+                rfqItem.RequiredDesiredDate))
             .OrderBy(x => x.LandedUnitCost ?? decimal.MaxValue).ToArray();
         var eligible = lines.Where(x => x.Eligible).ToArray();
         var currencies = eligible.Select(x => x.CurrencyId).Distinct().ToArray();
@@ -941,11 +957,13 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             var rfqItem = await _db.Rfqitems.SingleAsync(x => x.Rfqid == quote.RfqId && x.Id == quote.RfqItemId, ct);
             var remainingRequirement = await GetNetSourcingRequirementAsync(command.BusinessUnitId, rfqItem, ct);
             var supplier = await RequireSupplierAsync(command.BusinessUnitId, quote.SupplierId, ct);
-            var canonicalReady = quote.SourceSupplierQuoteRevisionId.HasValue &&
-                await _db.SupplierQuoteRevisions.AsNoTracking().AnyAsync(x => x.BusinessUnitId == command.BusinessUnitId &&
-                    x.Id == quote.SourceSupplierQuoteRevisionId.Value &&
-                    x.SupplierQuote.InboxStatus == SupplierQuotes.SupplierQuoteInboxStatuses.ReadyForComparison, ct);
-            var comparison = ToComparisonLine(quote, remainingRequirement, supplier, canonicalReady,
+            var canonicalRevision = quote.SourceSupplierQuoteRevisionId.HasValue
+                ? await _db.SupplierQuoteRevisions.AsNoTracking().Include(x => x.SupplierQuote).Include(x => x.Lines)
+                    .Include(x => x.Evidence).Include(x => x.ReviewDecisions)
+                    .SingleOrDefaultAsync(x => x.BusinessUnitId == command.BusinessUnitId &&
+                        x.Id == quote.SourceSupplierQuoteRevisionId.Value, ct)
+                : null;
+            var comparison = ToComparisonLine(quote, remainingRequirement, supplier, canonicalRevision,
                 rfqItem.RequiredDesiredDate);
             if (!comparison.Eligible) throw new ProcurementValidationException($"The supplier quote cannot be awarded: {string.Join(", ", comparison.Blockers)}.");
             var comparableCurrencies = await _db.SupplierQuotedItems.AsNoTracking().Where(x =>
@@ -1024,7 +1042,11 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 return new PurchaseOrderResult(replay.Id, replay.PurchaseOrderNumber, replay.Status, true);
             }
             await RequireRfqAsync(command.BusinessUnitId, command.RfqId, ct);
-            await RequireSupplierAsync(command.BusinessUnitId, command.SupplierId, ct);
+            var supplier = await RequireSupplierAsync(command.BusinessUnitId, command.SupplierId, ct);
+            var supplierBlockers = SupplierRfqBlockingReasons(supplier);
+            if (supplierBlockers.Count > 0)
+                throw new ProcurementValidationException(
+                    $"The PO supplier is not eligible: {string.Join("; ", supplierBlockers)}.");
             var warehouse = await _db.Warehouses.AsNoTracking().SingleOrDefaultAsync(x => x.Id == command.WarehouseId
                 && x.BusinessUnitId == command.BusinessUnitId, ct) ?? throw new ProcurementValidationException("Warehouse was not found in the authenticated tenant.");
             var awards = await _db.Set<SourcingAward>().Where(x => x.BusinessUnitId == command.BusinessUnitId
@@ -1040,25 +1062,22 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 .Select(x => x.SourceSupplierQuoteId!.Value).Distinct().ToArray();
             var sourceRevisionIds = quotes.Values.Where(x => x.SourceSupplierQuoteRevisionId.HasValue)
                 .Select(x => x.SourceSupplierQuoteRevisionId!.Value).Distinct().ToArray();
-            var readySourceQuoteIds = await _db.SupplierQuotes.AsNoTracking().Where(x =>
-                    x.BusinessUnitId == command.BusinessUnitId && sourceQuoteIds.Contains(x.Id) &&
-                    x.InboxStatus == SupplierQuotes.SupplierQuoteInboxStatuses.ReadyForComparison)
-                .Select(x => x.Id).ToArrayAsync(ct);
-            var reviewDecisions = await _db.SupplierQuoteReviewDecisions.AsNoTracking().Where(x =>
-                    x.BusinessUnitId == command.BusinessUnitId && sourceRevisionIds.Contains(x.SupplierQuoteRevisionId))
-                .OrderByDescending(x => x.ReviewedOn).ThenByDescending(x => x.Id).ToArrayAsync(ct);
-            var latestCorrectionByRevision = reviewDecisions.GroupBy(x => x.SupplierQuoteRevisionId)
-                .ToDictionary(revision => revision.Key, revision => revision
-                    .GroupBy(x => x.SupplierQuoteFieldEvidenceId).Select(x => x.First())
-                    .Where(x => x.Status == SupplierQuotes.SupplierQuoteReviewStatuses.Corrected)
-                    .Select(x => (DateTime?)x.ReviewedOn).Max());
+            var canonicalRevisions = await _db.SupplierQuoteRevisions.AsNoTracking()
+                .Include(x => x.SupplierQuote).Include(x => x.Lines)
+                .Include(x => x.Evidence).Include(x => x.ReviewDecisions)
+                .Where(x => x.BusinessUnitId == command.BusinessUnitId &&
+                    sourceRevisionIds.Contains(x.Id) && sourceQuoteIds.Contains(x.SupplierQuoteId))
+                .ToDictionaryAsync(x => x.Id, ct);
+            var latestCorrectionByRevision = canonicalRevisions.ToDictionary(
+                x => x.Key, x => LatestProjectionCorrectionOn(x.Value));
             var rfqItemIds = awards.Select(x => x.RfqItemId!.Value).Distinct().ToArray();
             var requiredDates = await _db.Rfqitems.AsNoTracking().Where(x => x.Rfq.BusinessUnitId == command.BusinessUnitId &&
                     rfqItemIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, x => x.RequiredDesiredDate, ct);
-            if (quotes.Count != quoteIds.Distinct().Count() || readySourceQuoteIds.Length != sourceQuoteIds.Length ||
-                requiredDates.Count != rfqItemIds.Length || quotes.Values.Any(x => x.ProductId is null ||
-                    x.ValidUntil <= DateTime.UtcNow || !HasCanonicalLineage(x) ||
-                    !readySourceQuoteIds.Contains(x.SourceSupplierQuoteId!.Value) ||
+            if (quotes.Count != quoteIds.Distinct().Count() || requiredDates.Count != rfqItemIds.Length ||
+                quotes.Values.Any(x => !x.IsActive || x.ProductId is null ||
+                    x.ValidUntil <= DateTime.UtcNow ||
+                    !canonicalRevisions.TryGetValue(x.SourceSupplierQuoteRevisionId ?? 0, out var revision) ||
+                    !HasCurrentCanonicalAuthorization(x, revision) ||
                     latestCorrectionByRevision.GetValueOrDefault(x.SourceSupplierQuoteRevisionId!.Value) >
                         (x.ModifiedDate ?? x.CreatedDate) ||
                     requiredDates[x.RfqItemId!.Value].HasValue &&
@@ -1375,22 +1394,6 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                     "Prior persisted Supplier Quote for this Product", 90m, quote.FreshOn,
                     new { productId = sourcingCase.ProductId.Value, quote.Count, quote.LastQuoteId });
 
-            var purchases = await _db.SupplierPurchaseHistories.AsNoTracking()
-                .Where(x => x.ProductId == sourcingCase.ProductId.Value
-                    && x.Supplier.Buid == sourcingCase.BusinessUnitId && supplierIds.Contains(x.SupplierId))
-                .GroupBy(x => x.SupplierId)
-                .Select(group => new
-                {
-                    SupplierId = group.Key,
-                    Count = group.Count(),
-                    FreshOn = group.Max(x => x.PurchaseDate),
-                    LastHistoryId = group.Max(x => x.Id)
-                }).ToListAsync(ct);
-            foreach (var purchase in purchases)
-                AddCandidateEvidence(evidence, purchase.SupplierId, SourcingCandidateEvidenceTypes.PurchaseHistory,
-                    "Prior persisted purchase history for this Product", 80m, purchase.FreshOn,
-                    new { productId = sourcingCase.ProductId.Value, purchase.Count, purchase.LastHistoryId });
-
             var purchaseOrders = await (
                 from line in _db.SupplierPurchaseOrderLines.AsNoTracking()
                 join po in _db.SupplierPurchaseOrders.AsNoTracking()
@@ -1492,6 +1495,8 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         if (supplier.GovernanceStatus is not (SupplierGovernanceStatuses.Approved
             or SupplierGovernanceStatuses.Preferred or SupplierGovernanceStatuses.Provisional))
             reasons.Add("Supplier approval or explicit provisional approval is required");
+        if (supplier.VerificationStatus != SupplierVerificationStatuses.Verified)
+            reasons.Add("Supplier verification status must be VERIFIED");
         if (supplier.ReadinessStatus != SupplierReadinessStatuses.Ready)
             reasons.Add("Supplier outreach readiness must be READY");
         if (supplier.ComplianceStatus is "BLOCKED" or "FAILED" or "RESTRICTED")
@@ -1568,11 +1573,18 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
     }
 
     private static QuoteComparisonLine ToComparisonLine(SupplierQuotedItem row, decimal remainingRequirement,
-        Supplier? supplier, bool canonicalEvidenceReady, DateTime? requiredOn)
+        Supplier? supplier, SupplierQuotes.SupplierQuoteRevision? canonicalRevision, DateTime? requiredOn)
     {
         var blockers = new List<string>();
-        if (!HasCanonicalLineage(row) || !canonicalEvidenceReady)
+        if (canonicalRevision is null || !HasCurrentCanonicalLineage(row, canonicalRevision))
             blockers.Add("canonical evidence missing or unresolved");
+        else
+        {
+            var canonicalLine = canonicalRevision.Lines.Single(x => x.Id == row.SourceSupplierQuoteLineId);
+            if (canonicalLine.IsAlternate &&
+                !HasAcceptedAlternateAuthorization(canonicalRevision, canonicalLine.Id))
+                blockers.Add("alternate approval is unresolved");
+        }
         if (supplier is null || SupplierRfqBlockingReasons(supplier).Count > 0)
             blockers.Add("supplier is not award eligible");
         if (row.ProductId is null or <= 0) blockers.Add("product unresolved");
@@ -1597,6 +1609,64 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
     private static bool HasCanonicalLineage(SupplierQuotedItem row) => row.SourceSupplierQuoteId.HasValue &&
         row.SourceSupplierQuoteRevisionId.HasValue && row.SourceSupplierQuoteLineId.HasValue &&
         row.CommercialDemandLineId.HasValue && row.SourcingCaseId.HasValue;
+
+    private static bool HasCurrentCanonicalAuthorization(SupplierQuotedItem row,
+        SupplierQuotes.SupplierQuoteRevision revision)
+    {
+        if (!HasCurrentCanonicalLineage(row, revision)) return false;
+
+        var line = revision.Lines.Single(x => x.Id == row.SourceSupplierQuoteLineId);
+        return !line.IsAlternate || HasAcceptedAlternateAuthorization(revision, line.Id);
+    }
+
+    private static bool HasCurrentCanonicalLineage(SupplierQuotedItem row,
+        SupplierQuotes.SupplierQuoteRevision revision) =>
+        HasCanonicalLineage(row) && revision.Id == row.SourceSupplierQuoteRevisionId &&
+            revision.SupplierQuoteId == row.SourceSupplierQuoteId &&
+            revision.SupplierQuote.SupplierId == row.SupplierId &&
+            revision.SupplierQuote.RfqId == row.RfqId &&
+            revision.RevisionNumber == row.QuoteRevision &&
+            revision.SupplierQuote.CurrentRevisionNumber == revision.RevisionNumber &&
+            revision.SupplierQuote.InboxStatus == SupplierQuotes.SupplierQuoteInboxStatuses.ReadyForComparison &&
+            revision.Lines.Any(x => x.Id == row.SourceSupplierQuoteLineId && x.RfqItemId == row.RfqItemId);
+
+    private static bool HasAcceptedAlternateAuthorization(
+        SupplierQuotes.SupplierQuoteRevision revision, long lineId)
+    {
+        var latestDecisions = revision.ReviewDecisions.GroupBy(x => x.SupplierQuoteFieldEvidenceId)
+            .ToDictionary(x => x.Key, x => x.OrderByDescending(y => y.ReviewedOn)
+                .ThenByDescending(y => y.Id).First());
+        return revision.Evidence.Where(x => x.SupplierQuoteLineId == lineId &&
+                NormalizeAlternateField(x.FieldName) is "ALTERNATEAUTHORIZATION" or
+                    "ALTERNATEAPPROVAL" or "APPROVEDALTERNATE")
+            .Any(x => latestDecisions.TryGetValue(x.Id, out var decision) &&
+                IsAffirmativeAlternateValue(decision.Status switch
+                {
+                    SupplierQuotes.SupplierQuoteReviewStatuses.Accepted => x.NormalizedValue,
+                    SupplierQuotes.SupplierQuoteReviewStatuses.Corrected => decision.CorrectedValue,
+                    _ => null
+                }));
+    }
+
+    private static string NormalizeAlternateField(string value) => new(value
+        .Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+
+    private static bool IsAffirmativeAlternateValue(string? value) =>
+        value?.Trim().ToUpperInvariant() is "TRUE" or "YES" or "APPROVED" or "AUTHORIZED" or "1";
+
+    private static DateTime? LatestProjectionCorrectionOn(
+        SupplierQuotes.SupplierQuoteRevision revision)
+    {
+        var approvalEvidence = revision.Evidence.Where(x =>
+                NormalizeAlternateField(x.FieldName) is "ALTERNATEAUTHORIZATION" or
+                    "ALTERNATEAPPROVAL" or "APPROVEDALTERNATE")
+            .Select(x => x.Id).ToHashSet();
+        return revision.ReviewDecisions.GroupBy(x => x.SupplierQuoteFieldEvidenceId)
+            .Select(x => x.OrderByDescending(y => y.ReviewedOn).ThenByDescending(y => y.Id).First())
+            .Where(x => x.Status == SupplierQuotes.SupplierQuoteReviewStatuses.Corrected &&
+                !approvalEvidence.Contains(x.SupplierQuoteFieldEvidenceId))
+            .Select(x => (DateTime?)x.ReviewedOn).Max();
+    }
 
     private static void ValidateDeliveryEvidence(string evidenceReference, string? evidenceSha256, DateTime? deliveredOn)
     {
@@ -1648,14 +1718,32 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             .GroupBy(x => x.RfqItemId)
             .Select(x => new { RfqItemId = x.Key, Quantity = x.Sum(line => line.OrderedQuantity - line.ReceivedQuantity) })
             .ToDictionaryAsync(x => x.RfqItemId, x => Math.Max(0m, x.Quantity), ct);
-        var unconvertedAwardsByItem = await _db.Set<SourcingAward>().AsNoTracking()
+        var unconvertedAwards = await _db.Set<SourcingAward>().AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && x.RfqItemId != null && siblingIds.Contains(x.RfqItemId.Value)
                 && x.Status != "CANCELLED" && x.Status != "REJECTED"
                 && !_db.SupplierPurchaseOrderLines.Any(line => line.BusinessUnitId == businessUnitId
                     && line.SourcingAwardId == x.Id))
+            .ToArrayAsync(ct);
+        var awardedOfferIds = unconvertedAwards.Where(x => x.SupplierQuotedItemId.HasValue)
+            .Select(x => x.SupplierQuotedItemId!.Value).Distinct().ToArray();
+        var awardedOffers = await _db.SupplierQuotedItems.AsNoTracking().Where(x =>
+                x.BusinessUnitId == businessUnitId && awardedOfferIds.Contains(x.Id) && x.IsActive)
+            .ToDictionaryAsync(x => x.Id, ct);
+        var awardedRevisionIds = awardedOffers.Values.Where(x => x.SourceSupplierQuoteRevisionId.HasValue)
+            .Select(x => x.SourceSupplierQuoteRevisionId!.Value).Distinct().ToArray();
+        var awardedRevisions = await _db.SupplierQuoteRevisions.AsNoTracking()
+            .Include(x => x.SupplierQuote).Include(x => x.Lines)
+            .Include(x => x.Evidence).Include(x => x.ReviewDecisions)
+            .Where(x => x.BusinessUnitId == businessUnitId && awardedRevisionIds.Contains(x.Id))
+            .ToDictionaryAsync(x => x.Id, ct);
+        var unconvertedAwardsByItem = unconvertedAwards.Where(award =>
+                award.SupplierQuotedItemId.HasValue &&
+                awardedOffers.TryGetValue(award.SupplierQuotedItemId.Value, out var offer) &&
+                offer.SourceSupplierQuoteRevisionId.HasValue &&
+                awardedRevisions.TryGetValue(offer.SourceSupplierQuoteRevisionId.Value, out var revision) &&
+                HasCurrentCanonicalAuthorization(offer, revision))
             .GroupBy(x => x.RfqItemId!.Value)
-            .Select(x => new { RfqItemId = x.Key, Quantity = x.Sum(award => award.Quantity ?? 0m) })
-            .ToDictionaryAsync(x => x.RfqItemId, x => Math.Max(0m, x.Quantity), ct);
+            .ToDictionary(x => x.Key, x => Math.Max(0m, x.Sum(award => award.Quantity ?? 0m)));
 
         var remainingStock = available;
         foreach (var sibling in siblingItems)

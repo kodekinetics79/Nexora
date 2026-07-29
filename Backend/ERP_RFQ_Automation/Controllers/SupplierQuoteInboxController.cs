@@ -12,6 +12,7 @@ namespace ERP_RFQ_Automation.Controllers;
 [Route("api/supplier-quote-inbox")]
 public sealed class SupplierQuoteInboxController(
     SupplierQuoteInboxService service,
+    SupplierNegotiationService negotiation,
     SupplierQuoteCommercialService commercial,
     SupplierQuoteDocumentIntakeService documentIntake,
     ILogger<SupplierQuoteInboxController> logger) : ControllerBase
@@ -25,6 +26,20 @@ public sealed class SupplierQuoteInboxController(
     [RequireModulePermission("Supplier History", PermissionAction.View)]
     public Task<IActionResult> Get(long supplierQuoteId) => ExecuteAsync(async () =>
         Ok(await service.GetAsync(TenantId(), supplierQuoteId, RequestAborted)));
+
+    [HttpGet("{supplierQuoteId:long}/negotiation")]
+    [RequireModulePermission("Supplier History", PermissionAction.View)]
+    public Task<IActionResult> GetNegotiation(long supplierQuoteId) => ExecuteAsync(async () =>
+        Ok(await negotiation.GetAsync(TenantId(), supplierQuoteId, RequestAborted)));
+
+    [HttpPost("{supplierQuoteId:long}/negotiation-decisions")]
+    [RequireModulePermission("Supplier Negotiation", PermissionAction.Edit)]
+    public Task<IActionResult> DecideNegotiation(long supplierQuoteId,
+        [FromBody] SupplierNegotiationDecisionRequest request) => ExecuteAsync(async () =>
+        Ok(await negotiation.DecideAsync(new SupplierNegotiationCommand(TenantId(), supplierQuoteId,
+            request.ExpectedQuoteVersion, request.RecommendationCode, request.Disposition, request.Reason,
+            RequiredHeader("Idempotency-Key"), Actor(), RequiredHeader("X-Correlation-ID")),
+            RequestAborted)));
 
     [HttpPost]
     [RequireModulePermission("Supplier History", PermissionAction.Create)]
@@ -176,6 +191,8 @@ public sealed record CaptureSupplierQuoteInboxRequest(
     IReadOnlyCollection<CaptureSupplierQuoteEvidence> Evidence);
 
 public sealed record ProjectSupplierQuoteRequest(long ExpectedVersion);
+public sealed record SupplierNegotiationDecisionRequest(long ExpectedQuoteVersion,
+    string RecommendationCode, string Disposition, string Reason);
 public sealed record ApplyCustomerQuotePricingRequest(long QuoteItemId, long SourcingAwardId,
     decimal TargetMarginPercent, string Rationale);
 

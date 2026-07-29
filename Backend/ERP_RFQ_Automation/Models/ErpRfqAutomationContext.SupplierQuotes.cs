@@ -10,6 +10,7 @@ public partial class ErpRfqAutomationContext
     public DbSet<SupplierQuoteLine> SupplierQuoteLines => Set<SupplierQuoteLine>();
     public DbSet<SupplierQuoteFieldEvidence> SupplierQuoteFieldEvidence => Set<SupplierQuoteFieldEvidence>();
     public DbSet<SupplierQuoteReviewDecision> SupplierQuoteReviewDecisions => Set<SupplierQuoteReviewDecision>();
+    public DbSet<SupplierNegotiationDecision> SupplierNegotiationDecisions => Set<SupplierNegotiationDecision>();
     public DbSet<CustomerQuoteSourcingDecision> CustomerQuoteSourcingDecisions => Set<CustomerQuoteSourcingDecision>();
 
     partial void ConfigureSupplierQuotesModel(ModelBuilder modelBuilder);
@@ -26,6 +27,8 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<SupplierQuoteFieldEvidence>()
             .HasQueryFilter(x => CurrentTenantId == null || x.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<SupplierQuoteReviewDecision>()
+            .HasQueryFilter(x => CurrentTenantId == null || x.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<SupplierNegotiationDecision>()
             .HasQueryFilter(x => CurrentTenantId == null || x.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CustomerQuoteSourcingDecision>()
             .HasQueryFilter(x => CurrentTenantId == null || x.BusinessUnitId == CurrentTenantId);

@@ -185,6 +185,7 @@ builder.Services.AddScoped<IProcurementHandoffService, ProcurementHandoffService
 builder.Services.AddScoped<IProcurementIntegrationService, ProcurementIntegrationService>();
 builder.Services.AddSingleton<IProcurementDeliveryConfiguration, ProcurementDeliveryConfiguration>();
 builder.Services.AddScoped<SupplierQuoteInboxService>();
+builder.Services.AddScoped<SupplierNegotiationService>();
 builder.Services.AddScoped<SupplierQuoteCommercialService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialLearning.CommercialLearningService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialLearning.LearningGovernanceService>();

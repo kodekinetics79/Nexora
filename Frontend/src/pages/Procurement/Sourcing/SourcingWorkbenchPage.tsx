@@ -670,7 +670,7 @@ function SourcingWorkbenchPage() {
                         <Chip
                           size="small"
                           color="info"
-                          label="Recommended"
+                          label="Lowest eligible landed cost"
                         />
                       )}
                       <Button

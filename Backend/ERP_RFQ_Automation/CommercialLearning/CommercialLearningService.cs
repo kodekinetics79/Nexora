@@ -117,12 +117,20 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
         var handoffs = await context.ProcurementHandoffs.AsNoTracking().Where(x =>
             x.BusinessUnitId == businessUnitId && x.SupplierId == supplierId)
             .OrderByDescending(x => x.CreatedOn).Take(50).ToListAsync(cancellationToken);
-        var revisionIds = projected.Where(x => x.SourceSupplierQuoteRevisionId.HasValue)
+        var currentProjected = projected.Where(x => x.IsActive).ToArray();
+        var cohortRfqItemIds = currentProjected.Where(x => x.RfqItemId.HasValue)
+            .Select(x => x.RfqItemId!.Value).Distinct().ToArray();
+        var comparisonOffers = await context.SupplierQuotedItems.AsNoTracking().Where(x =>
+                x.BusinessUnitId == businessUnitId && x.IsActive && x.RfqItemId.HasValue &&
+                cohortRfqItemIds.Contains(x.RfqItemId.Value) && x.SourceSupplierQuoteId.HasValue)
+            .ToArrayAsync(cancellationToken);
+        var revisionIds = projected.Concat(comparisonOffers).Where(x => x.SourceSupplierQuoteRevisionId.HasValue)
             .Select(x => x.SourceSupplierQuoteRevisionId!.Value).Distinct().ToArray();
         var canonicalRevisions = await context.SupplierQuoteRevisions.AsNoTracking().Include(x => x.Lines)
+            .Include(x => x.Evidence)
+            .Include(x => x.ReviewDecisions)
             .Where(x => x.BusinessUnitId == businessUnitId && revisionIds.Contains(x.Id))
             .ToDictionaryAsync(x => x.Id, cancellationToken);
-        var bidQuality = BuildBidQuality(projected, canonicalRevisions);
         var supportedAwardIds = await context.CustomerQuoteSourcingDecisions.AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && awardIds.Contains(x.SourcingAwardId))
             .Join(context.Orders.AsNoTracking().Where(x => x.BusinessUnitId == businessUnitId &&
@@ -130,9 +138,20 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
                 decision => decision.QuoteId, order => order.QuoteId!.Value, (decision, _) => decision.SourcingAwardId)
             .Distinct().ToArrayAsync(cancellationToken);
         var supportedAwardSet = supportedAwardIds.ToHashSet();
-        var quoteStatuses = await context.SupplierQuotes.AsNoTracking().Where(x => x.BusinessUnitId == businessUnitId &&
-                x.SupplierId == supplierId).ToDictionaryAsync(x => x.Id, x => x.InboxStatus, cancellationToken);
-        bidQuality = BuildBidQuality(projected, canonicalRevisions, quoteStatuses, supplier);
+        var sourceQuoteIds = projected.Concat(comparisonOffers).Where(x => x.SourceSupplierQuoteId.HasValue)
+            .Select(x => x.SourceSupplierQuoteId!.Value).Distinct().ToArray();
+        var quoteStates = await context.SupplierQuotes.AsNoTracking().Where(x => x.BusinessUnitId == businessUnitId &&
+                sourceQuoteIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id,
+                x => new SupplierQuoteState(x.InboxStatus, x.CurrentRevisionNumber, x.SupplierId, x.RfqId),
+                cancellationToken);
+        var comparisonSupplierIds = comparisonOffers.Select(x => x.SupplierId).Append(supplierId).Distinct().ToArray();
+        var comparisonSuppliers = await context.Suppliers.AsNoTracking().Where(x => x.Buid == businessUnitId &&
+                comparisonSupplierIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, cancellationToken);
+        var requiredDates = await context.Rfqitems.AsNoTracking().Where(x =>
+                x.Rfq.BusinessUnitId == businessUnitId && cohortRfqItemIds.Contains(x.Id))
+            .ToDictionaryAsync(x => x.Id, x => x.RequiredDesiredDate, cancellationToken);
+        var bidQuality = BuildBidQuality(currentProjected, comparisonOffers, projected, canonicalRevisions,
+            quoteStates, comparisonSuppliers, requiredDates);
         return new SupplierCommercialEvaluation(supplierId, supplier.Name, revisions.Count, awards.Count,
             supportedAwardSet.Count, bidQuality.EligibleOfferCount,
             responseDays.Length == 0 ? null : decimal.Round(responseDays.Average(), 2),
@@ -416,17 +435,24 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
         var revisionIds = offers.Where(x => x.SourceSupplierQuoteRevisionId.HasValue)
             .Select(x => x.SourceSupplierQuoteRevisionId!.Value).Distinct().ToArray();
         var revisions = await context.SupplierQuoteRevisions.AsNoTracking().Include(x => x.Lines)
+            .Include(x => x.Evidence)
             .Include(x => x.ReviewDecisions)
             .Where(x => x.BusinessUnitId == businessUnitId && revisionIds.Contains(x.Id))
             .ToDictionaryAsync(x => x.Id, cancellationToken);
         var sourceQuoteIds = offers.Where(x => x.SourceSupplierQuoteId.HasValue)
             .Select(x => x.SourceSupplierQuoteId!.Value).Distinct().ToArray();
-        var quoteStatuses = await context.SupplierQuotes.AsNoTracking().Where(x =>
+        var quoteStates = await context.SupplierQuotes.AsNoTracking().Where(x =>
                 x.BusinessUnitId == businessUnitId && sourceQuoteIds.Contains(x.Id))
-            .ToDictionaryAsync(x => x.Id, x => x.InboxStatus, cancellationToken);
-        var bidFlags = offers.GroupBy(x => x.SupplierId)
-            .SelectMany(group => BuildBidQuality(group.ToArray(), revisions, quoteStatuses,
-                suppliers.GetValueOrDefault(group.Key)).Flags)
+            .ToDictionaryAsync(x => x.Id,
+                x => new SupplierQuoteState(x.InboxStatus, x.CurrentRevisionNumber, x.SupplierId, x.RfqId),
+                cancellationToken);
+        var offerHistory = await context.SupplierQuotedItems.AsNoTracking().Where(x =>
+                x.BusinessUnitId == businessUnitId && x.SourceSupplierQuoteId.HasValue &&
+                sourceQuoteIds.Contains(x.SourceSupplierQuoteId.Value))
+            .ToArrayAsync(cancellationToken);
+        var requiredDates = lines.ToDictionary(x => x.Id, x => x.RequiredDesiredDate);
+        var bidFlags = BuildBidQuality(offers, offers, offerHistory, revisions, quoteStates, suppliers,
+                requiredDates).Flags
             .GroupBy(x => x.SupplierQuotedItemId).ToDictionary(x => x.Key, x => (IReadOnlyCollection<BidQualityFlag>)x.ToArray());
         var awardRows = await context.Set<ERP_RFQ_Automation.Agent.Models.SourcingAward>().AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && x.RfqId == rfqId && x.RfqItemId.HasValue &&
@@ -438,7 +464,7 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
                 offersById.TryGetValue(award.SupplierQuotedItemId.Value, out var offer) &&
                 linesById.TryGetValue(award.RfqItemId!.Value, out var line) &&
                 IsOfferEvidenceCurrent(offer, suppliers.GetValueOrDefault(offer.SupplierId), revisions,
-                    quoteStatuses, line.RequiredDesiredDate) &&
+                    quoteStates, line.RequiredDesiredDate) &&
                 Math.Min(offer.Quantity, offer.AvailableQuantity ?? 0m) >= award.Quantity.Value)
             .GroupBy(x => x.RfqItemId!.Value)
             .ToDictionary(x => x.Key, x => x.Sum(y => y.Quantity ?? 0m));
@@ -456,7 +482,7 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
             var unfulfilled = Math.Max(0m, requested - stock - awardQuantity);
             var lineOffers = offers.Where(x => x.RfqItemId == line.Id).ToArray();
             var eligibleOffers = lineOffers.Where(x => IsOfferDecisionReady(x, suppliers.GetValueOrDefault(x.SupplierId),
-                revisions, quoteStatuses, unfulfilled, line.RequiredDesiredDate)).ToArray();
+                revisions, quoteStates, unfulfilled, line.RequiredDesiredDate)).ToArray();
             var blockers = new List<string>();
             if (!line.ProductId.HasValue) blockers.Add("Product identity requires review");
             if (requested <= 0m) blockers.Add("Requested quantity is invalid");
@@ -524,8 +550,8 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
             lines, currencyCodes, cancellationToken);
         return new RfqCommercialIntelligence(rfq.Id, rfq.Rfqno, rfq.NexoraSerial ?? $"RFQ-{rfq.Id}",
             readiness, decision, slaRisk, clarification, next, lineResults,
-            BuildDigitalTwin(lineResults, lines.ToDictionary(x => x.Id, x => x.RequiredDesiredDate),
-                offers, suppliers, revisions, quoteStatuses, pricingDecisions, predictivePricing, evidence,
+            BuildDigitalTwin(lineResults, requiredDates,
+                offers, suppliers, revisions, quoteStates, pricingDecisions, predictivePricing, evidence,
                 currencyCodes));
     }
 
@@ -552,25 +578,30 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
 
     private static bool IsOfferEvidenceCurrent(SupplierQuotedItem offer, Supplier? supplier,
         IReadOnlyDictionary<long, SupplierQuoteRevision> revisions,
-        IReadOnlyDictionary<long, string> quoteStatuses, DateTime? requiredOn)
+        IReadOnlyDictionary<long, SupplierQuoteState> quoteStates, DateTime? requiredOn)
     {
         if (offer.SourceSupplierQuoteId is null || offer.SourceSupplierQuoteRevisionId is null ||
             offer.SourceSupplierQuoteLineId is null ||
             !revisions.TryGetValue(offer.SourceSupplierQuoteRevisionId.Value, out var revision) ||
-            !quoteStatuses.TryGetValue(offer.SourceSupplierQuoteId.Value, out var quoteStatus) ||
-            quoteStatus != SupplierQuoteInboxStatuses.ReadyForComparison ||
-            !revision.Lines.Any(x => x.Id == offer.SourceSupplierQuoteLineId)) return false;
+            !quoteStates.TryGetValue(offer.SourceSupplierQuoteId.Value, out var quoteState) ||
+            quoteState.InboxStatus != SupplierQuoteInboxStatuses.ReadyForComparison ||
+            quoteState.CurrentRevisionNumber != revision.RevisionNumber ||
+            revision.SupplierQuoteId != offer.SourceSupplierQuoteId ||
+            quoteState.SupplierId != offer.SupplierId ||
+            quoteState.RfqId != offer.RfqId ||
+            offer.QuoteRevision != revision.RevisionNumber ||
+            !revision.Lines.Any(x => x.Id == offer.SourceSupplierQuoteLineId &&
+                x.RfqItemId == offer.RfqItemId && (!x.IsAlternate ||
+                    HasAcceptedAlternateAuthorization(revision, x.Id)))) return false;
         if (supplier is null || supplier.GovernanceStatus is not (SupplierGovernanceStatuses.Approved or
             SupplierGovernanceStatuses.Preferred or SupplierGovernanceStatuses.Provisional) ||
+            supplier.VerificationStatus != SupplierVerificationStatuses.Verified ||
             supplier.ReadinessStatus != SupplierReadinessStatuses.Ready ||
             supplier.ComplianceStatus is "BLOCKED" or "FAILED" or "RESTRICTED" ||
             supplier.RiskStatus is "BLOCKED" or "HIGH") return false;
         if (requiredOn.HasValue && (!offer.QuoteDate.HasValue || !offer.LeadTimeDays.HasValue ||
                 offer.QuoteDate.Value.AddDays(offer.LeadTimeDays.Value) > requiredOn.Value)) return false;
-        var latestCorrection = revision.ReviewDecisions.GroupBy(x => x.SupplierQuoteFieldEvidenceId)
-            .Select(x => x.OrderByDescending(y => y.ReviewedOn).ThenByDescending(y => y.Id).First())
-            .Where(x => x.Status == SupplierQuoteReviewStatuses.Corrected)
-            .Select(x => (DateTime?)x.ReviewedOn).Max();
+        var latestCorrection = LatestProjectionCorrectionOn(revision);
         if (latestCorrection > (offer.ModifiedDate ?? offer.CreatedDate)) return false;
         return offer.UnitPrice > 0m && offer.CurrencyId > 0 && offer.LandedUnitCost > 0m &&
             offer.LeadTimeDays is >= 0 && offer.ValidUntil > DateTime.UtcNow;
@@ -578,9 +609,9 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
 
     private static bool IsOfferDecisionReady(SupplierQuotedItem offer, Supplier? supplier,
         IReadOnlyDictionary<long, SupplierQuoteRevision> revisions,
-        IReadOnlyDictionary<long, string> quoteStatuses, decimal requiredQuantity, DateTime? requiredOn = null)
+        IReadOnlyDictionary<long, SupplierQuoteState> quoteStates, decimal requiredQuantity, DateTime? requiredOn = null)
     {
-        if (requiredQuantity <= 0m || !IsOfferEvidenceCurrent(offer, supplier, revisions, quoteStatuses, requiredOn))
+        if (requiredQuantity <= 0m || !IsOfferEvidenceCurrent(offer, supplier, revisions, quoteStates, requiredOn))
             return false;
         return Math.Min(offer.Quantity, offer.AvailableQuantity ?? 0m) >= requiredQuantity;
     }
@@ -698,7 +729,7 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
         IReadOnlyDictionary<long, DateTime?> requiredDates,
         IReadOnlyCollection<SupplierQuotedItem> offers, IReadOnlyDictionary<long, Supplier> suppliers,
         IReadOnlyDictionary<long, SupplierQuoteRevision> revisions,
-        IReadOnlyDictionary<long, string> quoteStatuses,
+        IReadOnlyDictionary<long, SupplierQuoteState> quoteStates,
         IReadOnlyCollection<CustomerQuoteSourcingDecision> pricingDecisions,
         IReadOnlyCollection<PredictivePriceLine> predictivePricing,
         IReadOnlyCollection<CommercialEvidenceLink> rfqEvidence,
@@ -734,7 +765,7 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
                 if (required == 0m) continue;
                 var choices = offers.Where(x => x.RfqItemId == line.RfqItemId &&
                     IsOfferDecisionReady(x, suppliers.GetValueOrDefault(x.SupplierId), revisions,
-                        quoteStatuses, required, requiredDates.GetValueOrDefault(line.RfqItemId)));
+                        quoteStates, required, requiredDates.GetValueOrDefault(line.RfqItemId)));
                 if (requireReliability) choices = choices.Where(x => x.ReliabilitySnapshot.HasValue);
                 if (requireAuthorizedMargin) choices = choices.Where(x => latestDecisionByOffer.ContainsKey(x.Id));
                 if (lineFilter is not null) choices = choices.Where(offer =>
@@ -828,12 +859,9 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
         scenarios.Add(OfferScenario("LOWEST_RISK", "Lowest verified risk", true,
             rows => rows.OrderByDescending(x => x.ReliabilitySnapshot).ThenBy(x => x.LandedUnitCost),
             requireReliability: true));
-        scenarios.Add(new OpportunityScenario("APPROVED_ALTERNATE", "Approved alternate", false,
-            "No authoritative alternate-product approval evidence is recorded for this RFQ.",
-            null, null, null, null, null, null, "BLOCKED",
-            "Supplier alternate declarations are evidence, not Customer or engineering approval.", 1m, [], [],
-            ["An alternate is never treated as approved from Supplier data alone."],
-            ["Capture explicit alternate approval before recommendation."], []));
+        scenarios.Add(OfferScenario("APPROVED_ALTERNATE", "Approved alternate", false,
+            rows => rows.OrderBy(x => x.LandedUnitCost).ThenBy(x => x.LeadTimeDays),
+            lineFilter: line => line.IsAlternate));
         scenarios.Add(OfferScenario("PARTIAL_IMMEDIATE", "Partial immediate delivery", true,
             rows => rows.OrderBy(x => x.LeadTimeDays).ThenBy(x => x.LandedUnitCost),
             requirePartialImmediate: true));
@@ -849,7 +877,7 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
                     offer.Quantity > 0m && decision.CustomerUnitPrice > 0m &&
                     decision.TargetMarginPercent is >= 0m and < 100m &&
                     IsOfferEvidenceCurrent(offer, suppliers.GetValueOrDefault(offer.SupplierId), revisions,
-                        quoteStatuses, requiredDates.GetValueOrDefault(decision.RfqItemId));
+                        quoteStates, requiredDates.GetValueOrDefault(decision.RfqItemId));
                 if (!validOffer)
                     return new CustomerTargetBridge(decision.RfqItemId, "STALE_OR_INVALID_EVIDENCE",
                         decision.CustomerUnitPrice, decision.TargetMarginPercent, null, null, null,
@@ -883,26 +911,41 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
     }
 
     private static SupplierBidQualitySummary BuildBidQuality(
-        IReadOnlyCollection<SupplierQuotedItem> offers,
+        IReadOnlyCollection<SupplierQuotedItem> assessedOffers,
+        IReadOnlyCollection<SupplierQuotedItem> comparisonOffers,
+        IReadOnlyCollection<SupplierQuotedItem> offerHistory,
         IReadOnlyDictionary<long, SupplierQuoteRevision> revisions,
-        IReadOnlyDictionary<long, string>? quoteStatuses = null,
-        Supplier? supplier = null)
+        IReadOnlyDictionary<long, SupplierQuoteState> quoteStates,
+        IReadOnlyDictionary<long, Supplier> suppliers,
+        IReadOnlyDictionary<long, DateTime?> requiredDates)
     {
         var now = DateTime.UtcNow;
-        var medians = offers.Where(x => x.LandedUnitCost.HasValue)
+        var comparable = comparisonOffers.Where(x => x.IsActive && x.LandedUnitCost > 0m &&
+                x.RfqItemId.HasValue && x.CurrencyId.HasValue &&
+                suppliers.TryGetValue(x.SupplierId, out var supplier) &&
+                IsOfferEvidenceCurrent(x, supplier, revisions, quoteStates,
+                    requiredDates.GetValueOrDefault(x.RfqItemId.Value)) &&
+                x.AvailableQuantity >= x.Quantity)
             .GroupBy(x => new { x.RfqItemId, x.CurrencyId })
-            .Where(group => group.Count() >= 3)
+            .Select(group => new
+            {
+                group.Key,
+                Offers = group.GroupBy(x => x.SupplierId)
+                    .Select(supplierGroup => supplierGroup.OrderByDescending(x => x.QuoteRevision)
+                        .ThenByDescending(x => x.Id).First()).ToArray()
+            })
+            .Where(group => group.Offers.Length >= 3)
             .ToDictionary(group => group.Key,
-                group => Median(group.Select(x => x.LandedUnitCost!.Value).OrderBy(x => x).ToArray()));
-        var quoteRevisionCounts = offers.Where(x => x.SourceSupplierQuoteId.HasValue)
-            .GroupBy(x => x.SourceSupplierQuoteId!.Value).ToDictionary(x => x.Key, x => x.Max(y => y.QuoteRevision));
+                group => new PriceCohort(Median(group.Offers.Select(x => x.LandedUnitCost!.Value)
+                    .OrderBy(x => x).ToArray()), group.Offers.Length));
         var flags = new List<BidQualityFlag>();
         var complete = 0;
         var eligible = 0;
-        foreach (var offer in offers.OrderByDescending(x => x.QuoteDate).ThenBy(x => x.Id))
+        foreach (var offer in assessedOffers.OrderByDescending(x => x.QuoteDate).ThenBy(x => x.Id))
         {
             revisions.TryGetValue(offer.SourceSupplierQuoteRevisionId ?? 0, out var revision);
             var line = revision?.Lines.SingleOrDefault(x => x.Id == offer.SourceSupplierQuoteLineId);
+            suppliers.TryGetValue(offer.SupplierId, out var supplier);
             var evidence = new CommercialEvidenceLink("SupplierQuotedItem", offer.Id,
                 offer.QuoteReference ?? $"Offer {offer.Id}", offer.QuoteDate ?? offer.CreatedDate, "BID_QUALITY");
             void Flag(string code, string severity, string reason, decimal confidence) => flags.Add(
@@ -911,43 +954,172 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
                         ? $"/procurement/supplier-quotes/{offer.SourceSupplierQuoteId.Value}"
                         : $"/procurement/sourcing/{offer.RfqId}"));
 
-            if (!offer.ValidUntil.HasValue) Flag("MISSING_VALIDITY", "WARNING",
-                "Supplier validity was not confirmed in the captured Quote.", 1m);
+            if (offer.UnitPrice is null or <= 0m) Flag("MISSING_PRICE", "BLOCKER",
+                "Observed fact: Supplier unit price is missing or non-positive.", 1m);
+            if (offer.CurrencyId is null or <= 0) Flag("MISSING_CURRENCY", "BLOCKER",
+                "Observed fact: Supplier Quote currency is missing.", 1m);
+            if (!offer.ValidUntil.HasValue) Flag("MISSING_VALIDITY", "BLOCKER",
+                "Observed fact: Supplier validity was not confirmed in the captured Quote.", 1m);
             else if (offer.ValidUntil.Value <= now) Flag("STALE_EVIDENCE", "BLOCKER",
-                "Supplier validity has expired; refresh the offer before selection.", 1m);
+                "Observed fact: Supplier validity has expired; refresh the offer before selection.", 1m);
             if (!offer.AvailableQuantity.HasValue) Flag("UNCONFIRMED_STOCK", "BLOCKER",
-                "Available quantity was not confirmed by the Supplier.", 1m);
-            if (!offer.LeadTimeDays.HasValue) Flag("MISSING_LEAD_TIME", "WARNING",
-                "Supplier lead time was not captured.", 1m);
+                "Observed fact: Available quantity was not confirmed by the Supplier.", 1m);
+            else if (offer.AvailableQuantity.Value < offer.Quantity) Flag("INSUFFICIENT_STOCK", "BLOCKER",
+                $"Observed fact: available quantity {offer.AvailableQuantity.Value:0.####} is below quoted quantity {offer.Quantity:0.####}.", 1m);
+            if (!offer.LeadTimeDays.HasValue) Flag("MISSING_LEAD_TIME", "BLOCKER",
+                "Observed fact: Supplier lead time was not captured.", 1m);
             else if (offer.LeadTimeDays.Value == 0) Flag("UNREALISTIC_LEAD_TIME", "WARNING",
-                "Zero-day lead time requires verification before commitment.", .9m);
+                "Inferred risk: zero-day lead time requires verification before commitment.", .9m);
             if (revision is null || string.IsNullOrWhiteSpace(revision.PaymentTerms) ||
                 string.IsNullOrWhiteSpace(revision.Incoterms))
-                Flag("INCOMPLETE_TERMS", "WARNING", "Payment terms or Incoterms are missing.", 1m);
-            if (line?.IsAlternate == true && (string.IsNullOrWhiteSpace(line.Manufacturer) ||
-                string.IsNullOrWhiteSpace(line.SupplierPartNumber)))
-                Flag("SUSPICIOUS_ALTERNATE", "BLOCKER",
-                    "An alternate was offered without complete manufacturer and part evidence.", 1m);
-            if (offer.SourceSupplierQuoteId.HasValue &&
-                quoteRevisionCounts.GetValueOrDefault(offer.SourceSupplierQuoteId.Value) >= 3)
+                Flag("INCOMPLETE_TERMS", "WARNING",
+                    "Observed fact: payment terms or Incoterms are missing.", 1m);
+
+            if (!HasCurrentCanonicalAuthorization(offer, revisions, quoteStates))
+                Flag("CANONICAL_AUTHORIZATION_REQUIRED", "BLOCKER",
+                    "Observed fact: this projection is not linked to the current review-authorized canonical Supplier Quote revision.", 1m);
+            if (line?.IsAlternate == true && revision is not null &&
+                !HasAcceptedAlternateAuthorization(revision, line.Id))
+                Flag("ALTERNATE_APPROVAL_REQUIRED", "BLOCKER",
+                    "Observed fact: the Supplier declared an alternate and no authoritative alternate approval is persisted.", 1m);
+            if (supplier is null || supplier.VerificationStatus != SupplierVerificationStatuses.Verified)
+                Flag("SUPPLIER_UNVERIFIED", "BLOCKER",
+                    "Observed fact: Supplier verification status is not VERIFIED.", 1m);
+            if (supplier is null || supplier.GovernanceStatus is not (SupplierGovernanceStatuses.Approved or
+                    SupplierGovernanceStatuses.Preferred or SupplierGovernanceStatuses.Provisional) ||
+                supplier.ReadinessStatus != SupplierReadinessStatuses.Ready ||
+                supplier.ComplianceStatus is "BLOCKED" or "FAILED" or "RESTRICTED" ||
+                supplier.RiskStatus is "BLOCKED" or "HIGH")
+                Flag("SUPPLIER_AUTHORIZATION_REQUIRED", "BLOCKER",
+                    "Observed fact: Supplier governance, readiness, compliance, or risk status does not authorize selection.", 1m);
+
+            if (offer.RfqItemId.HasValue && requiredDates.GetValueOrDefault(offer.RfqItemId.Value).HasValue &&
+                (!offer.QuoteDate.HasValue || !offer.LeadTimeDays.HasValue ||
+                 offer.QuoteDate.Value.AddDays(offer.LeadTimeDays.Value) >
+                    requiredDates[offer.RfqItemId.Value]!.Value))
+                Flag("DELIVERY_DATE_MISSED", "BLOCKER",
+                    "Observed fact: the Supplier commitment does not meet the RFQ required date.", 1m);
+
+            var latestCorrection = revision is null ? null : LatestProjectionCorrectionOn(revision);
+            if (latestCorrection > (offer.ModifiedDate ?? offer.CreatedDate))
+                Flag("UNRESOLVED_CORRECTION", "BLOCKER",
+                    "Observed fact: a newer reviewer correction has not been projected into this offer.", 1m);
+
+            var materialChanges = MaterialRevisionChanges(offer, offerHistory);
+            if (materialChanges.Count > 0)
                 Flag("REVISION_VOLATILITY", "WARNING",
-                    "This Supplier Quote has three or more commercial revisions.", .95m);
+                    $"Observed material change from the prior revision: {string.Join(", ", materialChanges)}. Review impact before selection.", 1m);
             var key = new { offer.RfqItemId, offer.CurrencyId };
-            if (offer.LandedUnitCost.HasValue && medians.TryGetValue(key, out var median) && median > 0m &&
-                (offer.LandedUnitCost.Value > median * 1.5m || offer.LandedUnitCost.Value < median * .5m))
+            if (offer.LandedUnitCost.HasValue && comparable.TryGetValue(key, out var cohort) && cohort.Median > 0m &&
+                (offer.LandedUnitCost.Value > cohort.Median * 1.5m || offer.LandedUnitCost.Value < cohort.Median * .5m))
                 Flag("PRICE_OUTLIER", "WARNING",
-                    "Landed cost differs by more than 50% from at least three comparable offers.", .85m);
+                    $"Observed landed cost {offer.LandedUnitCost.Value:0.####} differs by more than 50% from the {cohort.SupplierCount}-Supplier median {cohort.Median:0.####} for the same RFQ line and currency; this is a review signal, not proof of error.", 1m);
 
             var isComplete = offer.UnitPrice.HasValue && offer.CurrencyId.HasValue && offer.AvailableQuantity.HasValue &&
-                offer.LeadTimeDays.HasValue && offer.ValidUntil.HasValue;
+                offer.LeadTimeDays.HasValue && offer.ValidUntil.HasValue && revision is not null &&
+                !string.IsNullOrWhiteSpace(revision.PaymentTerms) && !string.IsNullOrWhiteSpace(revision.Incoterms);
             if (isComplete) complete++;
-            if (isComplete && supplier is not null && quoteStatuses is not null &&
-                IsOfferDecisionReady(offer, supplier, revisions, quoteStatuses, .0001m)) eligible++;
+            if (supplier is not null && IsOfferDecisionReady(offer, supplier, revisions, quoteStates, .0001m,
+                    offer.RfqItemId.HasValue ? requiredDates.GetValueOrDefault(offer.RfqItemId.Value) : null))
+                eligible++;
         }
-        return new SupplierBidQualitySummary(offers.Count, complete, eligible,
-            offers.Count == 0 ? null : decimal.Round(100m * complete / offers.Count, 2),
-            flags.Count(x => x.Code is "MISSING_VALIDITY" or "MISSING_LEAD_TIME" or "INCOMPLETE_TERMS"),
+        return new SupplierBidQualitySummary(assessedOffers.Count, complete, eligible,
+            assessedOffers.Count == 0 ? null : decimal.Round(100m * complete / assessedOffers.Count, 2),
+            flags.Count(x => x.Code is "MISSING_PRICE" or "MISSING_CURRENCY" or "MISSING_VALIDITY" or
+                "MISSING_LEAD_TIME" or "INCOMPLETE_TERMS" or "UNCONFIRMED_STOCK" or "INSUFFICIENT_STOCK"),
             flags.Count(x => x.Code == "PRICE_OUTLIER"), flags.Count(x => x.Code == "REVISION_VOLATILITY"), flags);
+    }
+
+    private static bool HasCurrentCanonicalAuthorization(SupplierQuotedItem offer,
+        IReadOnlyDictionary<long, SupplierQuoteRevision> revisions,
+        IReadOnlyDictionary<long, SupplierQuoteState> quoteStates)
+    {
+        if (offer.SourceSupplierQuoteId is null || offer.SourceSupplierQuoteRevisionId is null ||
+            offer.SourceSupplierQuoteLineId is null ||
+            !revisions.TryGetValue(offer.SourceSupplierQuoteRevisionId.Value, out var revision) ||
+            !quoteStates.TryGetValue(offer.SourceSupplierQuoteId.Value, out var quoteState)) return false;
+        return revision.SupplierQuoteId == offer.SourceSupplierQuoteId &&
+            quoteState.SupplierId == offer.SupplierId && quoteState.RfqId == offer.RfqId &&
+            revision.RevisionNumber == offer.QuoteRevision &&
+            quoteState.InboxStatus == SupplierQuoteInboxStatuses.ReadyForComparison &&
+            quoteState.CurrentRevisionNumber == revision.RevisionNumber &&
+            revision.Lines.Any(x => x.Id == offer.SourceSupplierQuoteLineId && x.RfqItemId == offer.RfqItemId &&
+                (!x.IsAlternate || HasAcceptedAlternateAuthorization(revision, x.Id)));
+    }
+
+    private static bool HasAcceptedAlternateAuthorization(SupplierQuoteRevision revision, long lineId)
+    {
+        var latest = revision.ReviewDecisions.GroupBy(x => x.SupplierQuoteFieldEvidenceId)
+            .ToDictionary(x => x.Key, x => x.OrderByDescending(y => y.ReviewedOn)
+                .ThenByDescending(y => y.Id).First());
+        return revision.Evidence.Where(x => x.SupplierQuoteLineId == lineId &&
+                NormalizeAlternateField(x.FieldName) is "ALTERNATEAUTHORIZATION" or
+                    "ALTERNATEAPPROVAL" or "APPROVEDALTERNATE")
+            .Any(x => latest.TryGetValue(x.Id, out var decision) &&
+                IsAffirmativeAlternateValue(decision.Status switch
+                {
+                    SupplierQuoteReviewStatuses.Accepted => x.NormalizedValue,
+                    SupplierQuoteReviewStatuses.Corrected => decision.CorrectedValue,
+                    _ => null
+                }));
+    }
+
+    private static string NormalizeAlternateField(string value) => new(value.Where(char.IsLetterOrDigit)
+        .Select(char.ToUpperInvariant).ToArray());
+    private static bool IsAffirmativeAlternateValue(string? value) => value?.Trim().ToUpperInvariant() is
+        "TRUE" or "YES" or "APPROVED" or "AUTHORIZED" or "1";
+
+    private static DateTime? LatestProjectionCorrectionOn(SupplierQuoteRevision revision)
+    {
+        var approvalEvidence = revision.Evidence.Where(x =>
+                NormalizeAlternateField(x.FieldName) is "ALTERNATEAUTHORIZATION" or
+                    "ALTERNATEAPPROVAL" or "APPROVEDALTERNATE")
+            .Select(x => x.Id).ToHashSet();
+        return revision.ReviewDecisions.GroupBy(x => x.SupplierQuoteFieldEvidenceId)
+            .Select(x => x.OrderByDescending(y => y.ReviewedOn).ThenByDescending(y => y.Id).First())
+            .Where(x => x.Status == SupplierQuoteReviewStatuses.Corrected &&
+                !approvalEvidence.Contains(x.SupplierQuoteFieldEvidenceId))
+            .Select(x => (DateTime?)x.ReviewedOn).Max();
+    }
+
+    private static IReadOnlyCollection<string> MaterialRevisionChanges(SupplierQuotedItem current,
+        IReadOnlyCollection<SupplierQuotedItem> history)
+    {
+        if (!current.SourceSupplierQuoteId.HasValue || !current.RfqItemId.HasValue) return [];
+        var previous = history.Where(x => x.Id != current.Id &&
+                x.SourceSupplierQuoteId == current.SourceSupplierQuoteId &&
+                x.RfqItemId == current.RfqItemId && x.QuoteRevision < current.QuoteRevision)
+            .OrderByDescending(x => x.QuoteRevision).ThenByDescending(x => x.Id).FirstOrDefault();
+        if (previous is null) return [];
+
+        var changes = new List<string>();
+        if (MaterialPercentChange(previous.UnitPrice, current.UnitPrice, .10m)) changes.Add("unit price");
+        if (previous.CurrencyId != current.CurrencyId) changes.Add("currency");
+        if (MaterialPercentChange(previous.Quantity, current.Quantity, .10m)) changes.Add("quoted quantity");
+        if (MaterialPercentChange(previous.AvailableQuantity, current.AvailableQuantity, .10m)) changes.Add("available quantity");
+        if (MaterialPercentChange(previous.LandedUnitCost, current.LandedUnitCost, .10m)) changes.Add("landed cost");
+        if (MaterialLeadTimeChange(previous.LeadTimeDays, current.LeadTimeDays)) changes.Add("lead time");
+        if (MaterialDateChange(previous.ValidUntil, current.ValidUntil, 7)) changes.Add("validity");
+        return changes;
+    }
+
+    private static bool MaterialPercentChange(decimal? previous, decimal? current, decimal threshold)
+    {
+        if (!previous.HasValue || !current.HasValue) return previous != current;
+        if (previous.Value == 0m) return current.Value != 0m;
+        return Math.Abs(current.Value - previous.Value) / Math.Abs(previous.Value) >= threshold;
+    }
+
+    private static bool MaterialLeadTimeChange(int? previous, int? current)
+    {
+        if (!previous.HasValue || !current.HasValue) return previous != current;
+        return Math.Abs(current.Value - previous.Value) >= Math.Max(2, (int)Math.Ceiling(Math.Abs(previous.Value) * .2m));
+    }
+
+    private static bool MaterialDateChange(DateTime? previous, DateTime? current, int days)
+    {
+        if (!previous.HasValue || !current.HasValue) return previous != current;
+        return Math.Abs((current.Value - previous.Value).TotalDays) >= days;
     }
 
     private void EnsureTenant(long businessUnitId)
@@ -969,6 +1141,9 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
 
     private static decimal Median(IReadOnlyList<decimal> values) => values.Count % 2 == 1
         ? values[values.Count / 2] : (values[values.Count / 2 - 1] + values[values.Count / 2]) / 2m;
+    private sealed record SupplierQuoteState(string InboxStatus, int CurrentRevisionNumber,
+        long SupplierId, long RfqId);
+    private sealed record PriceCohort(decimal Median, int SupplierCount);
     private sealed record ValuePoint(long CurrencyId, decimal Value, DateTime OccurredOn, long RecordId);
     private sealed record PricingHistoryRow(long QuoteId, long ProductId, long? CustomerId, long CurrencyId,
         decimal Quantity, decimal UnitPrice, int? DeliveryLeadTimeDays, DateTime OccurredOn, string QuoteNumber,

@@ -9,6 +9,7 @@ using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Procurement;
+using ERP_RFQ_Automation.SupplierQuotes;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
@@ -17,6 +18,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.IdentityModel.Tokens;
+using Npgsql;
 using Testcontainers.PostgreSql;
 
 namespace ERP_RFQ_Automation.Tests.HttpIntegration;
@@ -33,6 +35,7 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
     public const long TenantB = 81_002;
     public const long AllowedRole = 82_001;
     public const long DeniedRole = 82_002;
+    public const long SupplierHistoryViewerRole = 82_003;
     public const long TenantACustomerId = 86_001;
     public const long TenantBCustomerId = 86_002;
     public const long TenantAContactId = 86_101;
@@ -49,6 +52,8 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
     public const long TenantAProcurementRfqId = 396_060;
     public const long TenantAProcurementRfqItemId = 396_070;
     public const long TenantBProcurementRfqId = 406_060;
+    public const long TenantASupplierQuoteId = 596_100;
+    public const long TenantBSupplierQuoteId = 596_200;
 
     private const long TenantAProcurementOffset = 300_000;
     private const long TenantBProcurementOffset = 310_000;
@@ -93,8 +98,12 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
+        var runtimeConnection = new NpgsqlConnectionStringBuilder(_postgres.GetConnectionString())
+        {
+            Options = "-c role=nexora_tenant_app"
+        }.ConnectionString;
         builder.UseEnvironment("Testing");
-        builder.UseSetting("ConnectionStrings:DefaultConnection", _postgres.GetConnectionString());
+        builder.UseSetting("ConnectionStrings:DefaultConnection", runtimeConnection);
         builder.UseSetting("ConnectionStrings:MigrationConnection", _postgres.GetConnectionString());
         builder.UseSetting("Database:ApplyMigrationsOnStartup", "false");
         builder.UseSetting("Jwt:Key", JwtKey);
@@ -245,6 +254,8 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         const long ordersModuleId = 84_006;
         const long productsModuleId = 84_007;
         const long usersModuleId = 84_008;
+        var supplierNegotiationModuleId = await db.Modules.Where(x =>
+            x.ModuleName == "Supplier Negotiation").Select(x => x.Id).SingleAsync();
         db.Modules.AddRange(
             Module(leadsModuleId, "Leads"),
             Module(dashboardModuleId, "Dashboard"),
@@ -257,7 +268,8 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
 
         db.SetupMasters.AddRange(
             Role(AllowedRole, TenantA, "Release 01B Reader"),
-            Role(DeniedRole, TenantA, "Release 01B Denied"));
+            Role(DeniedRole, TenantA, "Release 01B Denied"),
+            Role(SupplierHistoryViewerRole, TenantA, "Supplier History Viewer"));
 
         db.RolePermissions.AddRange(
             Permission(85_001, AllowedRole, leadsModuleId, TenantA, canEdit: true),
@@ -267,7 +279,9 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
             Permission(85_005, AllowedRole, supplierHistoryModuleId, TenantA, canCreate: true, canEdit: true),
             Permission(85_006, AllowedRole, ordersModuleId, TenantA, canCreate: true, canEdit: true),
             Permission(85_007, AllowedRole, productsModuleId, TenantA, canCreate: true, canEdit: true),
-            Permission(85_008, AllowedRole, usersModuleId, TenantA));
+            Permission(85_008, AllowedRole, usersModuleId, TenantA),
+            Permission(85_009, AllowedRole, supplierNegotiationModuleId, TenantA, canEdit: true),
+            Permission(85_010, SupplierHistoryViewerRole, supplierHistoryModuleId, TenantA));
 
         db.Set<ExtractionJob>().AddRange(
             new ExtractionJob
@@ -319,6 +333,10 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         ProcurementTestData.SeedGraph(db, TenantB, TenantBProcurementOffset);
         LinkRfqToLead(db, TenantAProcurementRfqId, TenantALeadId);
         LinkRfqToLead(db, TenantBProcurementRfqId, TenantBLeadId);
+        SeedSupplierNegotiationQuote(db, TenantA, TenantAProcurementOffset,
+            TenantASupplierQuoteId, 596_110, 596_120, 596_130, 596_140, "A");
+        SeedSupplierNegotiationQuote(db, TenantB, TenantBProcurementOffset,
+            TenantBSupplierQuoteId, 596_210, 596_220, 596_230, 596_240, "B");
 
         db.Set<LeadIngestionBatch>().AddRange(
             Batch(TenantABatchId, TenantA, now),
@@ -391,6 +409,84 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
             Attachment(TenantAAttachmentId, TenantALeadId, "tenant-a.txt", tenantABytes.Length),
             Attachment(TenantBAttachmentId, TenantBLeadId, "tenant-b.txt", tenantBBytes.Length));
         await db.SaveChangesAsync();
+    }
+
+    private static void SeedSupplierNegotiationQuote(ErpRfqAutomationContext db, long tenantId,
+        long procurementOffset, long quoteId, long demandId, long caseId, long solicitationId,
+        long revisionId, string suffix)
+    {
+        var now = DateTime.UtcNow;
+        var rfqId = ProcurementTestData.Rfq + procurementOffset;
+        var rfqItemId = ProcurementTestData.RfqItem + procurementOffset;
+        var nexoraSerial = db.Rfqs.Local.Single(x => x.Id == rfqId).NexoraSerial
+            ?? throw new InvalidOperationException("The fixture RFQ must inherit a Nexora Serial before negotiation seeding.");
+        var demand = new CommercialDemandLine
+        {
+            Id = demandId, BusinessUnitId = tenantId,
+            RfqId = rfqId, RfqItemId = rfqItemId, NexoraSerial = nexoraSerial,
+            IdentityKey = $"rfq:{rfqId}:line:{rfqItemId}",
+            CreatedBy = "release-01b-tests", CreatedOn = now
+        };
+        var sourcingCase = new SourcingCase
+        {
+            Id = caseId, BusinessUnitId = tenantId, CommercialDemandLineId = demand.Id,
+            RfqId = demand.RfqId, RfqItemId = demand.RfqItemId,
+            ProductId = ProcurementTestData.Product + procurementOffset,
+            NexoraSerial = demand.NexoraSerial, Description = "HTTP negotiation component",
+            RequestedQuantity = 10, StockQuantity = 0, UnfulfilledQuantity = 10,
+            SearchLimit = 10, Status = SourcingCaseStatuses.ComparisonReady,
+            NextAction = "Review offers", ShortageDecisionKey = $"http-neg-shortage-{suffix}",
+            IdempotencyKey = $"http-neg-case-{suffix}", RequestHash = new string('A', 64),
+            CreatedBy = "release-01b-tests", UpdatedBy = "release-01b-tests",
+            CreatedOn = now, UpdatedOn = now
+        };
+        var solicitation = new SupplierSolicitation
+        {
+            Id = solicitationId, BusinessUnitId = tenantId, RfqId = demand.RfqId,
+            SupplierId = ProcurementTestData.Supplier + procurementOffset,
+            SourcingCaseId = sourcingCase.Id, CommercialDemandLineId = demand.Id,
+            NexoraSerial = demand.NexoraSerial, SupplierRfqNumber = $"SRFQ-HTTP-NEG-{suffix}",
+            IdempotencyKey = $"http-neg-sol-{suffix}", RequestHash = new string('B', 64),
+            RequestedRfqItemIdsJson = $"[{demand.RfqItemId}]", Status = SolicitationStatus.Responded,
+            SentOn = now.AddDays(-1), RespondedOn = now,
+            CreatedOn = now.AddDays(-1), UpdatedOn = now
+        };
+        var quote = new SupplierQuote
+        {
+            Id = quoteId, BusinessUnitId = tenantId, SupplierId = solicitation.SupplierId,
+            SupplierSolicitationId = solicitation.Id, SourcingCaseId = sourcingCase.Id,
+            RfqId = demand.RfqId, NexoraSerial = demand.NexoraSerial,
+            SupplierQuoteReference = $"SQ-HTTP-NEG-{suffix}", CurrentRevisionNumber = 1,
+            InboxStatus = SupplierQuoteInboxStatuses.ReadyForComparison, Version = 1,
+            CreatedBy = "release-01b-tests", UpdatedBy = "release-01b-tests",
+            CreatedOn = now, UpdatedOn = now
+        };
+        var revision = new SupplierQuoteRevision
+        {
+            Id = revisionId, BusinessUnitId = tenantId, SupplierQuoteId = quote.Id,
+            RevisionNumber = 1, CaptureChannel = SupplierQuoteCaptureChannels.Manual,
+            SourceIdentity = $"http-neg-source-{suffix}", SourceSha256 = new string('C', 64),
+            CurrencyId = ProcurementTestData.Currency + procurementOffset,
+            ValidUntil = now.AddDays(30), Incoterms = "FCA", FreightAmount = 10m,
+            PaymentTerms = "NET 30", IdempotencyKey = $"http-neg-revision-{suffix}",
+            RequestHash = new string('D', 64), CapturedOn = now,
+            CapturedBy = "release-01b-tests", CorrelationId = $"http-neg-{suffix}",
+            SupplierQuote = quote
+        };
+        revision.Lines.Add(new SupplierQuoteLine
+        {
+            Id = revisionId + 1, BusinessUnitId = tenantId,
+            SupplierQuoteRevisionId = revision.Id, LineNumber = 1,
+            RfqItemId = demand.RfqItemId, CommercialDemandLineId = demand.Id,
+            PartNumber = $"HTTP-PART-{suffix}", Description = "HTTP negotiation component",
+            Quantity = 10, AvailableQuantity = 10, UnitOfMeasure = "EA", UnitPrice = 10,
+            LeadTimeDays = 5, AvailabilityType = "IN_STOCK"
+        });
+        quote.Revisions.Add(revision);
+        db.CommercialDemandLines.Add(demand);
+        db.SourcingCases.Add(sourcingCase);
+        db.Set<SupplierSolicitation>().Add(solicitation);
+        db.SupplierQuotes.Add(quote);
     }
 
     private static void LinkRfqToLead(ErpRfqAutomationContext db, long rfqId, long leadId)

@@ -151,6 +151,149 @@ public sealed class ProcurementApplicationServiceTests
         Assert.Single(await verify.SupplierPurchaseOrderLines.ToListAsync());
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Purchase_order_rejects_an_award_from_a_superseded_supplier_quote_revision(
+        bool reactivateSupersededProjection)
+    {
+        using var fixture = new ProcurementScenario();
+        var suffix = reactivateSupersededProjection ? "reactivated" : "inactive";
+        var quoteId = await fixture.CreateEligibleQuoteAsync($"po-superseded-{suffix}");
+        var award = await fixture.Execute(service => service.ApproveAwardAsync(
+            fixture.Award(quoteId, $"po-superseded-{suffix}-award")));
+        long solicitationId;
+        await using (var read = fixture.Context())
+            solicitationId = (await read.SupplierQuotedItems.SingleAsync(x => x.Id == quoteId))
+                .SupplierSolicitationId!.Value;
+
+        await fixture.Execute(service => service.CaptureSupplierQuoteAsync(
+            fixture.Quote(solicitationId, $"po-superseded-{suffix}-revision") with
+            {
+                Revision = 2,
+                Lines = [fixture.QuoteLine() with { UnitPrice = 14m }]
+            }));
+        if (reactivateSupersededProjection)
+        {
+            await using var mutate = fixture.Context();
+            var superseded = await mutate.SupplierQuotedItems.SingleAsync(x => x.Id == quoteId);
+            superseded.IsActive = true;
+            await mutate.SaveChangesAsync();
+        }
+
+        var workbench = await fixture.Execute(service =>
+            service.GetWorkbenchAsync(fixture.BusinessUnitId, fixture.RfqId));
+        Assert.True(Assert.Single(workbench.Lines).ShortfallQuantity > 0m);
+
+        var exception = await Assert.ThrowsAsync<ProcurementValidationException>(() => fixture.Execute(service =>
+            service.CreatePurchaseOrderAsync(fixture.PurchaseOrder([award.Id],
+                $"po-superseded-{suffix}-create"))));
+
+        Assert.Contains("authoritative supplier quote", exception.Message, StringComparison.OrdinalIgnoreCase);
+        await using var verify = fixture.Context();
+        Assert.Empty(await verify.SupplierPurchaseOrders.ToListAsync());
+        Assert.Empty(await verify.SupplierPurchaseOrderLines.ToListAsync());
+    }
+
+    [Fact]
+    public async Task Comparison_and_award_require_verified_supplier_and_resolved_alternate_approval()
+    {
+        using var fixture = new ProcurementScenario();
+        var quoteId = await fixture.CreateEligibleQuoteAsync("supplier-verification-alternate");
+        await using (var setup = fixture.Context())
+        {
+            var supplier = await setup.Suppliers.SingleAsync(x => x.Id == ProcurementTestData.Supplier);
+            supplier.VerificationStatus = SupplierVerificationStatuses.Pending;
+            var canonicalLine = await setup.SupplierQuoteLines.SingleAsync();
+            canonicalLine.IsAlternate = true;
+            await setup.SaveChangesAsync();
+        }
+
+        var comparison = await fixture.Execute(service =>
+            service.CompareQuotesAsync(fixture.BusinessUnitId, fixture.RfqItemId));
+        var line = Assert.Single(comparison.Lines);
+        Assert.False(line.Eligible);
+        Assert.Contains("supplier is not award eligible", line.Blockers);
+        Assert.Contains("alternate approval is unresolved", line.Blockers);
+
+        var exception = await Assert.ThrowsAsync<ProcurementValidationException>(() => fixture.Execute(service =>
+            service.ApproveAwardAsync(fixture.Award(quoteId, "supplier-verification-alternate-award"))));
+        Assert.Contains("not eligible", exception.Message, StringComparison.OrdinalIgnoreCase);
+
+        long alternateEvidenceId;
+        await using (var authorize = fixture.Context())
+        {
+            var supplier = await authorize.Suppliers.SingleAsync(x => x.Id == ProcurementTestData.Supplier);
+            supplier.VerificationStatus = SupplierVerificationStatuses.Verified;
+            var alternateLine = await authorize.SupplierQuoteLines.SingleAsync();
+            var evidence = new ERP_RFQ_Automation.SupplierQuotes.SupplierQuoteFieldEvidence
+            {
+                BusinessUnitId = fixture.BusinessUnitId,
+                SupplierQuoteRevisionId = alternateLine.SupplierQuoteRevisionId,
+                SupplierQuoteLineId = alternateLine.Id,
+                FieldName = "AlternateAuthorization",
+                OriginalValue = "Not approved",
+                NormalizedValue = "NO",
+                Confidence = 1m,
+                Method = "MANUAL_ENTRY",
+                Critical = true,
+                ReviewRequired = true,
+                CreatedOn = DateTime.UtcNow
+            };
+            authorize.SupplierQuoteFieldEvidence.Add(evidence);
+            await authorize.SaveChangesAsync();
+            alternateEvidenceId = evidence.Id;
+        }
+
+        var manualOnlyComparison = await fixture.Execute(service =>
+            service.CompareQuotesAsync(fixture.BusinessUnitId, fixture.RfqItemId));
+        Assert.False(Assert.Single(manualOnlyComparison.Lines).Eligible);
+
+        await using (var review = fixture.Context())
+        {
+            review.SupplierQuoteReviewDecisions.Add(new ERP_RFQ_Automation.SupplierQuotes.SupplierQuoteReviewDecision
+            {
+                BusinessUnitId = fixture.BusinessUnitId,
+                SupplierQuoteRevisionId = await review.SupplierQuoteFieldEvidence
+                    .Where(x => x.Id == alternateEvidenceId)
+                    .Select(x => x.SupplierQuoteRevisionId).SingleAsync(),
+                SupplierQuoteFieldEvidenceId = alternateEvidenceId,
+                Status = ERP_RFQ_Automation.SupplierQuotes.SupplierQuoteReviewStatuses.Corrected,
+                CorrectedValue = "APPROVED",
+                Reason = "Engineering approved the alternate",
+                ReviewedBy = "reviewer@example.test",
+                ReviewedOn = DateTime.UtcNow,
+                CorrelationId = "alternate-review"
+            });
+            await review.SaveChangesAsync();
+        }
+        var authorizedComparison = await fixture.Execute(service =>
+            service.CompareQuotesAsync(fixture.BusinessUnitId, fixture.RfqItemId));
+        Assert.True(Assert.Single(authorizedComparison.Lines).Eligible);
+
+        await using (var revoke = fixture.Context())
+        {
+            revoke.SupplierQuoteReviewDecisions.Add(new ERP_RFQ_Automation.SupplierQuotes.SupplierQuoteReviewDecision
+            {
+                BusinessUnitId = fixture.BusinessUnitId,
+                SupplierQuoteRevisionId = await revoke.SupplierQuoteFieldEvidence
+                    .Where(x => x.Id == alternateEvidenceId)
+                    .Select(x => x.SupplierQuoteRevisionId).SingleAsync(),
+                SupplierQuoteFieldEvidenceId = alternateEvidenceId,
+                Status = ERP_RFQ_Automation.SupplierQuotes.SupplierQuoteReviewStatuses.Corrected,
+                CorrectedValue = "NO",
+                Reason = "Engineering withdrew alternate approval",
+                ReviewedBy = "reviewer@example.test",
+                ReviewedOn = DateTime.UtcNow.AddSeconds(1),
+                CorrelationId = "alternate-review-revoked"
+            });
+            await revoke.SaveChangesAsync();
+        }
+        var revokedComparison = await fixture.Execute(service =>
+            service.CompareQuotesAsync(fixture.BusinessUnitId, fixture.RfqItemId));
+        Assert.False(Assert.Single(revokedComparison.Lines).Eligible);
+    }
+
     [Fact]
     public async Task Partial_over_and_final_receipts_reconcile_inventory_and_replay_idempotently()
     {
