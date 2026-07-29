@@ -45,6 +45,9 @@ public sealed class ExtractionJobMetadata
 
     public DateTimeOffset? SourceReceivedAtUtc { get; set; }
 
+    /// <summary>Authenticated uploader or governed source actor recorded for audit display.</summary>
+    public string? UploadedBy { get; set; }
+
     /// <summary>Legacy mailbox metadata. Customer identity must use <see cref="FromEmail"/>.</summary>
     public string? ClientEmail { get; set; }
 

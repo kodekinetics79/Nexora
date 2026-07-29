@@ -74,6 +74,39 @@ public sealed record BatchReconciliationDto(Guid BatchId, int FilesReceived, int
 public sealed record PossibleMatchQueueItemDto(Guid BatchId, long OccurrenceId, string? FileName,
     DateTimeOffset IngestedAtUtc, decimal Confidence, IReadOnlyList<LeadMatchCandidateDto> MatchCandidates);
 
+public sealed record DuplicateResourceAccountingDto(
+    long BytesUploaded,
+    long HashingDurationMs,
+    long StoragePhysicalBytes,
+    long StorageLogicalBytes,
+    bool MalwareScanReused,
+    bool MalwareScanRerun,
+    bool ParserReused,
+    bool OcrReused,
+    bool LocalModelReused,
+    bool ExternalModelReused,
+    decimal LocalComputeCost,
+    decimal ExternalCost,
+    decimal TotalActualCost,
+    decimal EstimatedProcessingAvoided,
+    string CostStatus);
+
+public sealed record DuplicateUploadDto(
+    long OccurrenceId,
+    string FileName,
+    Guid UploadBatch,
+    DateTimeOffset IngestedAt,
+    string UploadedBy,
+    string Source,
+    string DuplicateType,
+    long? OriginalOccurrenceId,
+    long? CanonicalLeadId,
+    string? NexoraSerial,
+    string SecurityStatus,
+    bool ProcessingReused,
+    DuplicateResourceAccountingDto Resources,
+    IReadOnlyList<string> Actions);
+
 public sealed record MatchDecisionRequest(string Action, long? CandidateLeadId, int ExpectedVersion,
     string Reason, string IdempotencyKey);
 public sealed record LeadIdentityMetricDto(string Key, decimal Value, int Numerator, int? Denominator,

@@ -100,8 +100,14 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
         }
 
         MalwareScanResult scan;
-        await using (var scanStream = new MemoryStream(bytes, writable: false))
+        var verdictReused = request.ReusableMalwareVerdict is not null;
+        if (request.ReusableMalwareVerdict is { } reusable)
         {
+            scan = MalwareScanResult.Clean(reusable.Engine, reusable.SignatureVersion);
+        }
+        else
+        {
+            await using var scanStream = new MemoryStream(bytes, writable: false);
             try
             {
                 scan = await _malwareScanner.ScanAsync(scanStream, cancellationToken);
@@ -129,7 +135,8 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
                 scan.Signature)
             {
                 MalwareStatus = scan.Status,
-                ErrorCode = "security_scan_cleared"
+                ErrorCode = "security_scan_cleared",
+                MalwareVerdictReused = verdictReused
             },
             MalwareScanStatus.Infected => new FileInspectionResult(
                 FileInspectionStatus.Quarantined,

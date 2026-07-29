@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -11,6 +12,7 @@ using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Security.DocumentInspection;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace ERP_RFQ_Automation.Extraction;
 
@@ -73,6 +75,7 @@ public sealed class DocumentIngestionService : IDocumentIngestion
     private readonly IEvidenceObjectStorage _storage;
     private readonly IFileInspectionService _inspection;
     private readonly ErpRfqAutomationContext _context;
+    private readonly MalwareVerdictPolicyOptions _verdictPolicy;
 
     public DocumentIngestionService(
         IExtractionQueue queue,
@@ -80,12 +83,27 @@ public sealed class DocumentIngestionService : IDocumentIngestion
         IFileInspectionService inspection,
         ErpRfqAutomationContext context,
         ILogger<DocumentIngestionService> log)
+        : this(queue, storage, inspection, context, log,
+            Options.Create(new MalwareVerdictPolicyOptions()))
+    {
+    }
+
+    public DocumentIngestionService(
+        IExtractionQueue queue,
+        IEvidenceObjectStorage storage,
+        IFileInspectionService inspection,
+        ErpRfqAutomationContext context,
+        ILogger<DocumentIngestionService> log,
+        IOptions<MalwareVerdictPolicyOptions> verdictPolicy)
     {
         _queue = queue;
         _log = log;
         _storage = storage;
         _inspection = inspection;
         _context = context;
+        _verdictPolicy = verdictPolicy.Value;
+        if (_verdictPolicy.MaximumCleanVerdictAge <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(verdictPolicy), "The malware-verdict maximum age must be positive.");
     }
 
     public Task<IngestedDocument> IngestAsync(
@@ -117,17 +135,132 @@ public sealed class DocumentIngestionService : IDocumentIngestion
         if (businessUnitId <= 0)
             throw new ArgumentException("A valid businessUnitId is required.", nameof(businessUnitId));
 
+        var hashTimer = Stopwatch.StartNew();
         var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        hashTimer.Stop();
         var actualBatchId = batchId ?? SourceOccurrenceIdentity.BuildFallbackBatchId(
             businessUnitId, sourceType, fileName, hash, metadata);
         var suppliedExtension = Path.GetExtension(fileName).ToLowerInvariant();
         var quarantineObject = await _storage.WriteImmutableAsync(
             businessUnitId, "quarantine", hash, suppliedExtension, bytes, ct);
 
+        DocumentCorpus corpus;
+        SourceDocument source;
+        SourceDocumentOccurrence occurrence;
+        SourceDocumentOccurrence? originalOccurrence;
+        bool sourceWasExisting;
+        bool occurrenceWasExisting;
+        var occurrenceKey = SourceOccurrenceIdentity.BuildKey(actualBatchId, sourceType, metadata);
+        var lockIdentity = $"evidence-ingest:{businessUnitId}:{hash}";
+
+        await using (var intakeTransaction = await _context.Database.BeginTransactionAsync(ct))
+        {
+            if (_context.Database.IsNpgsql())
+            {
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock(hashtextextended({lockIdentity}, 0))", ct);
+            }
+
+            corpus = await _context.Set<DocumentCorpus>()
+                .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.BatchId == actualBatchId, ct)
+                ?? DocumentCorpus.Create(businessUnitId, actualBatchId, MapSourceType(sourceType));
+            if (corpus.Id == 0)
+            {
+                _context.Add(corpus);
+                _context.Add(new LeadIngestionBatch
+                {
+                    Id = actualBatchId,
+                    BusinessUnitId = businessUnitId,
+                    SourceChannel = sourceType.ToString(),
+                    CreatedBy = string.IsNullOrWhiteSpace(metadata?.UploadedBy)
+                        ? "document-ingestion"
+                        : metadata.UploadedBy.Trim(),
+                    CreatedAtUtc = DateTimeOffset.UtcNow,
+                    UpdatedAtUtc = DateTimeOffset.UtcNow
+                });
+                await _context.SaveChangesAsync(ct);
+            }
+
+            source = await _context.Set<SourceDocument>()
+                .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.ContentHash == hash, ct);
+            sourceWasExisting = source is not null;
+            if (source is null)
+            {
+                source = SourceDocument.Create(
+                    businessUnitId, corpus.Id, hash, fileName,
+                    ProvisionalMime(suppliedExtension), quarantineObject.Bucket,
+                    quarantineObject.Key, quarantineObject.Version, bytes.LongLength);
+                _context.Add(source);
+                await _context.SaveChangesAsync(ct);
+            }
+
+            occurrence = await _context.Set<SourceDocumentOccurrence>()
+                .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.IdempotencyKey == occurrenceKey, ct);
+            occurrenceWasExisting = occurrence is not null;
+            if (occurrence is null)
+            {
+                occurrence = SourceDocumentOccurrence.Create(
+                    businessUnitId, source.Id, corpus.Id, occurrenceKey,
+                    BuildSourceMetadata(fileName, sourceType, metadata, null,
+                        quarantineObject, quarantineObject));
+                occurrence.SetLogicalGroup(metadata?.LogicalGroupKey);
+                occurrence.RecordUploadResources(bytes.LongLength, hashTimer.ElapsedMilliseconds,
+                    sourceWasExisting ? 0 : bytes.LongLength);
+                _context.Add(occurrence);
+                await _context.SaveChangesAsync(ct);
+            }
+            else if (occurrence.SourceDocumentId != source.Id)
+            {
+                throw new InvalidOperationException("The intake idempotency key is already bound to different document content.");
+            }
+
+            originalOccurrence = await _context.Set<SourceDocumentOccurrence>()
+                .Where(x => x.BusinessUnitId == businessUnitId
+                            && x.SourceDocumentId == source.Id
+                            && x.Id != occurrence.Id)
+                .OrderBy(x => x.ReceivedOn).ThenBy(x => x.Id)
+                .FirstOrDefaultAsync(ct);
+            if (originalOccurrence is not null && !occurrence.OriginalOccurrenceId.HasValue)
+            {
+                occurrence.MarkExactDuplicateCandidate(originalOccurrence.Id,
+                    !source.HasFreshCleanMalwareVerdict(DateTimeOffset.UtcNow,
+                        _verdictPolicy.MaximumCleanVerdictAge));
+            }
+
+            await _context.SaveChangesAsync(ct);
+            await intakeTransaction.CommitAsync(ct);
+        }
+
+        if (occurrenceWasExisting && occurrence.ExtractionJobId is { } replayJobId)
+        {
+            var replayStatus = await _context.Set<ExtractionJob>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.Id == replayJobId)
+                .Select(x => (ExtractionStatus?)x.Status)
+                .SingleOrDefaultAsync(ct);
+            return new IngestedDocument
+            {
+                JobId = replayJobId,
+                SourceDocumentOccurrenceId = occurrence.Id,
+                BatchId = actualBatchId,
+                ContentHash = hash,
+                StoragePath = quarantineObject.StorageUri,
+                Outcome = EnqueueOutcome.Duplicate,
+                ExistingStatus = replayStatus
+            };
+        }
+
+        var reusableVerdict = source.HasFreshCleanMalwareVerdict(
+            DateTimeOffset.UtcNow, _verdictPolicy.MaximumCleanVerdictAge)
+            ? new ReusableMalwareVerdict(
+                source.MalwareScannerEngine ?? "recorded-verdict",
+                source.MalwareSignatureVersion,
+                source.MalwareScannedOn!.Value)
+            : null;
         FileInspectionResult inspection;
         await using (var content = new MemoryStream(bytes, writable: false))
             inspection = await _inspection.InspectAsync(
-                new FileInspectionRequest(content, fileName, DeclaredLength: bytes.LongLength), ct);
+                new FileInspectionRequest(content, fileName, DeclaredLength: bytes.LongLength,
+                    ReusableMalwareVerdict: reusableVerdict), ct);
 
         var selectedObject = inspection.IsCleared
             ? await _storage.WriteImmutableAsync(
@@ -137,81 +270,32 @@ public sealed class DocumentIngestionService : IDocumentIngestion
         await using var transaction = await _context.Database.BeginTransactionAsync(ct);
         if (_context.Database.IsNpgsql())
         {
-            var lockIdentity = $"evidence-ingest:{businessUnitId}:{hash}";
             await _context.Database.ExecuteSqlInterpolatedAsync(
                 $"SELECT pg_advisory_xact_lock(hashtextextended({lockIdentity}, 0))", ct);
+            await _context.Entry(source).ReloadAsync(ct);
+            await _context.Entry(occurrence).ReloadAsync(ct);
         }
+        if (!string.IsNullOrWhiteSpace(inspection.DetectedContentType))
+            source.RecordInspection(inspection.DetectedContentType);
+        occurrence.RecordSecurityWork(inspection.MalwareVerdictReused, !inspection.MalwareVerdictReused);
+        occurrence.RecordUploadResources(bytes.LongLength, hashTimer.ElapsedMilliseconds,
+            sourceWasExisting ? 0 : bytes.LongLength + (inspection.IsCleared ? bytes.LongLength : 0));
+        occurrence.RecordActualCost(0m, 0m, "LOCAL_COMPUTE_UNPRICED");
+        if (!inspection.MalwareVerdictReused && inspection.MalwareStatus.HasValue)
+            source.RecordMalwareVerdict(inspection.MalwareStatus.Value,
+                inspection.ScannerEngine, inspection.ScannerSignature);
 
-        var corpus = await _context.Set<DocumentCorpus>()
-            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.BatchId == actualBatchId, ct);
-        if (corpus is null)
-        {
-            corpus = DocumentCorpus.Create(businessUnitId, actualBatchId, MapSourceType(sourceType));
-            _context.Add(corpus);
-            _context.Add(new LeadIngestionBatch
-            {
-                Id = actualBatchId,
-                BusinessUnitId = businessUnitId,
-                SourceChannel = sourceType.ToString(),
-                CreatedBy = "document-ingestion",
-                CreatedAtUtc = DateTimeOffset.UtcNow,
-                UpdatedAtUtc = DateTimeOffset.UtcNow
-            });
-            await _context.SaveChangesAsync(ct);
-        }
-
-        var source = await _context.Set<SourceDocument>()
-            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.ContentHash == hash, ct);
-        if (source is null)
-        {
-            source = SourceDocument.Create(
-                businessUnitId,
-                corpus.Id,
-                hash,
-                fileName,
-                inspection.DetectedContentType ?? "application/octet-stream",
-                selectedObject.Bucket,
-                selectedObject.Key,
-                selectedObject.Version,
-                bytes.LongLength);
-            source.MarkSecurityStatus(MapSecurityStatus(inspection.Status));
-            _context.Add(source);
-            await _context.SaveChangesAsync(ct);
-        }
-        else if (inspection.IsCleared
-                 && source.SecurityStatus == DocumentSecurityStatus.Quarantined
+        if (inspection.IsCleared
+                 && source.SecurityStatus is DocumentSecurityStatus.Pending or DocumentSecurityStatus.Quarantined
                  && await CanReleaseAfterScannerRecoveryAsync(source.Id, ct))
-        {
-            source.ReleaseFromQuarantine(
-                selectedObject.Bucket,
-                selectedObject.Key,
-                selectedObject.Version);
-            _log.LogInformation(
-                "Released source document {SourceDocumentId} for tenant {BusinessUnitId} after a clean security rescan.",
-                source.Id, businessUnitId);
-            await _context.SaveChangesAsync(ct);
-        }
-
-        var occurrenceKey = SourceOccurrenceIdentity.BuildKey(actualBatchId, sourceType, metadata);
-        var occurrence = await _context.Set<SourceDocumentOccurrence>()
-            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.IdempotencyKey == occurrenceKey, ct);
-        if (occurrence is null)
-        {
-            occurrence = SourceDocumentOccurrence.Create(
-                businessUnitId,
-                source.Id,
-                corpus.Id,
-                occurrenceKey,
-                BuildSourceMetadata(fileName, sourceType, metadata, inspection,
-                    quarantineObject, selectedObject));
-            occurrence.SetLogicalGroup(metadata?.LogicalGroupKey);
-            _context.Add(occurrence);
-            await _context.SaveChangesAsync(ct);
-        }
-        else if (occurrence.SourceDocumentId != source.Id)
-        {
-            throw new InvalidOperationException("The intake idempotency key is already bound to different document content.");
-        }
+            source.ReleaseFromQuarantine(selectedObject.Bucket, selectedObject.Key, selectedObject.Version);
+        else if (!inspection.IsCleared && source.SecurityStatus == DocumentSecurityStatus.Pending)
+            source.MarkSecurityStatus(inspection.MalwareStatus == MalwareScanStatus.Infected
+                ? DocumentSecurityStatus.Rejected
+                : MapSecurityStatus(inspection.Status));
+        else if (inspection.MalwareStatus == MalwareScanStatus.Infected
+                 && source.SecurityStatus != DocumentSecurityStatus.Rejected)
+            source.MarkSecurityStatus(DocumentSecurityStatus.Rejected);
 
         var sourceIsCleared = source.SecurityStatus == DocumentSecurityStatus.Cleared;
         if (!inspection.IsCleared || !sourceIsCleared)
@@ -255,24 +339,50 @@ public sealed class DocumentIngestionService : IDocumentIngestion
         }
 
         var fileType = ExtensionForMime(inspection.DetectedContentType, suppliedExtension);
-        var enqueue = await _queue.EnqueueAsync(new EnqueueExtractionRequest
+        EnqueueResult enqueue;
+        if (source.ExtractionJobId is { } existingJobId)
         {
-            BusinessUnitId = businessUnitId,
-            SourceDocumentOccurrenceId = occurrence.Id,
-            SourceType = sourceType,
-            StoragePath = selectedObject.StorageUri,
-            FileName = fileName,
-            FileType = string.IsNullOrEmpty(fileType) ? null : fileType,
-            ContentHash = hash,
-            BatchId = actualBatchId,
-            Priority = priority
-        }, ct);
-
-        occurrence.BindExtractionJob(enqueue.JobId);
-        if (!source.ExtractionJobId.HasValue)
+            var existingStatus = await _context.Set<ExtractionJob>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.Id == existingJobId)
+                .Select(x => (ExtractionStatus?)x.Status)
+                .SingleOrDefaultAsync(ct);
+            enqueue = new EnqueueResult
+            {
+                JobId = existingJobId,
+                BatchId = actualBatchId,
+                ContentHash = hash,
+                Outcome = EnqueueOutcome.Duplicate,
+                ExistingStatus = existingStatus
+            };
+            occurrence.ResolveByProcessingReuse(existingJobId);
+            if (occurrence.OriginalOccurrenceId.HasValue)
+                occurrence.ConfirmExactDuplicate(processingReused: true);
+        }
+        else
+        {
+            enqueue = await _queue.EnqueueAsync(new EnqueueExtractionRequest
+            {
+                BusinessUnitId = businessUnitId,
+                SourceDocumentOccurrenceId = occurrence.Id,
+                SourceType = sourceType,
+                StoragePath = selectedObject.StorageUri,
+                FileName = fileName,
+                FileType = string.IsNullOrEmpty(fileType) ? null : fileType,
+                ContentHash = hash,
+                BatchId = actualBatchId,
+                Priority = priority
+            }, ct);
+            occurrence.BindExtractionJob(enqueue.JobId);
             source.BindExtractionJob(enqueue.JobId);
+            if (occurrence.OriginalOccurrenceId.HasValue)
+                occurrence.ConfirmExactDuplicate(processingReused: false);
+        }
         if (corpus.Status == CorpusStatus.Received)
+        {
             corpus.StartProcessing();
+            if (enqueue.Outcome == EnqueueOutcome.Duplicate)
+                corpus.Complete();
+        }
         await _context.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
 
@@ -321,9 +431,11 @@ public sealed class DocumentIngestionService : IDocumentIngestion
             {
                 using var document = JsonDocument.Parse(value);
                 if (document.RootElement.TryGetProperty("inspection", out var inspection)
-                    && inspection.TryGetProperty("ScannerSignature", out var signature)
-                    && signature.ValueKind == JsonValueKind.String
-                    && !string.IsNullOrWhiteSpace(signature.GetString()))
+                    && inspection.ValueKind == JsonValueKind.Object
+                    && inspection.TryGetProperty("malwareStatus", out var malwareStatus)
+                    && malwareStatus.ValueKind == JsonValueKind.String
+                    && string.Equals(malwareStatus.GetString(), MalwareScanStatus.Infected.ToString(),
+                        StringComparison.OrdinalIgnoreCase))
                 {
                     return false;
                 }
@@ -341,7 +453,7 @@ public sealed class DocumentIngestionService : IDocumentIngestion
         string fileName,
         ExtractionSourceType sourceType,
         ExtractionJobMetadata? metadata,
-        FileInspectionResult inspection,
+        FileInspectionResult? inspection,
         EvidenceObject quarantineObject,
         EvidenceObject selectedObject) => JsonSerializer.Serialize(new
     {
@@ -353,7 +465,7 @@ public sealed class DocumentIngestionService : IDocumentIngestion
             quarantine = ObjectIdentity(quarantineObject),
             selected = ObjectIdentity(selectedObject)
         },
-        inspection = new
+        inspection = inspection is null ? null : new
         {
             status = inspection.Status.ToString(),
             malwareStatus = inspection.MalwareStatus?.ToString(),
@@ -362,7 +474,8 @@ public sealed class DocumentIngestionService : IDocumentIngestion
             inspection.ScannerEngine,
             inspection.ScannerSignature,
             inspection.IsRetryable,
-            inspection.ErrorCode
+            inspection.ErrorCode,
+            inspection.MalwareVerdictReused
         }
     });
 
@@ -374,6 +487,21 @@ public sealed class DocumentIngestionService : IDocumentIngestion
         value.Version,
         value.ETag,
         value.ByteSize
+    };
+
+    private static string ProvisionalMime(string extension) => extension switch
+    {
+        ".pdf" => "application/pdf",
+        ".doc" => "application/msword",
+        ".docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".xls" => "application/vnd.ms-excel",
+        ".xlsx" or ".xlsm" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".csv" => "text/csv",
+        ".txt" => "text/plain",
+        ".jpg" or ".jpeg" => "image/jpeg",
+        ".png" => "image/png",
+        ".tif" or ".tiff" => "image/tiff",
+        _ => "application/octet-stream"
     };
 
     private static string ExtensionForMime(string? mime, string suppliedExtension) => mime switch

@@ -100,8 +100,12 @@ public sealed class EvidenceLedgerModelTests
 
         Assert.True(index.IsUnique);
         Assert.Equal(new[] { "BusinessUnitId", "IdempotencyKey" }, index.Properties.Select(x => x.Name));
-        Assert.Equal(2, entity.GetForeignKeys().Count());
+        Assert.Equal(3, entity.GetForeignKeys().Count());
         Assert.All(entity.GetForeignKeys(), foreignKey => Assert.Equal(DeleteBehavior.Restrict, foreignKey.DeleteBehavior));
+        Assert.Contains(entity.GetForeignKeys(), foreignKey =>
+            foreignKey.PrincipalEntityType.ClrType == typeof(SourceDocumentOccurrence)
+            && foreignKey.Properties.Select(x => x.Name)
+                .SequenceEqual(new[] { "BusinessUnitId", "OriginalOccurrenceId" }));
         Assert.Equal("jsonb", entity.FindProperty(nameof(SourceDocumentOccurrence.SourceMetadataJson))!.GetColumnType());
     }
 

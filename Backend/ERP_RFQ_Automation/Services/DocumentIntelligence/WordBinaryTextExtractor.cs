@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
+using Spire.Doc;
 
 namespace ERP_RFQ_Automation.Services.DocumentIntelligence;
 
@@ -24,6 +25,14 @@ public static class WordBinaryTextExtractor
     /// <summary>Returns the extracted text, or "" when the bytes are not a readable
     /// Word binary document. Never throws.</summary>
     public static string Extract(byte[] bytes, ILogger? logger = null)
+    {
+        var native = ExtractNative(bytes, logger);
+        return string.IsNullOrWhiteSpace(native)
+            ? ExtractWithLocalLibrary(bytes, logger)
+            : native;
+    }
+
+    private static string ExtractNative(byte[] bytes, ILogger? logger)
     {
         try
         {
@@ -210,7 +219,23 @@ public static class WordBinaryTextExtractor
         }
         catch (Exception ex)
         {
-            logger?.LogError(ex, "OLE/Word Binary DOC extraction failed");
+            logger?.LogWarning(ex, "Native OLE/Word Binary DOC extraction failed.");
+            return string.Empty;
+        }
+    }
+
+    private static string ExtractWithLocalLibrary(byte[] bytes, ILogger? logger)
+    {
+        try
+        {
+            using var input = new MemoryStream(bytes, writable: false);
+            using var document = new Document();
+            document.LoadFromStream(input, FileFormat.Doc);
+            return CleanExtractedText(document.GetText());
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(ex, "The local legacy DOC library could not parse the security-cleared document.");
             return string.Empty;
         }
     }

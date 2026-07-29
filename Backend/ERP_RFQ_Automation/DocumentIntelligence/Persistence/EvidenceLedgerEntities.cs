@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using ERP_RFQ_Automation.Extraction;
+using ERP_RFQ_Automation.Security.DocumentInspection;
 
 namespace ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 
@@ -28,6 +29,20 @@ public enum DocumentSecurityStatus
     Quarantined,
     Cleared,
     Rejected
+}
+
+public enum IngestionOutcomeState
+{
+    NONE,
+    EXACT_DUPLICATE_PENDING_SECURITY,
+    EXACT_DUPLICATE_CONFIRMED,
+    BUSINESS_DUPLICATE_CONFIRMED,
+    DUPLICATE_RESCAN_REQUIRED,
+    REVISION,
+    POSSIBLE_MATCH,
+    SECURITY_SCAN_BLOCKED,
+    MALWARE_DETECTED,
+    UNSUPPORTED_FORMAT
 }
 
 public enum DocumentProcessingStatus
@@ -211,6 +226,10 @@ public sealed class SourceDocument
     public DocumentProcessingStatus ProcessingStatus { get; private set; }
     public DateTimeOffset CreatedOn { get; private set; }
     public DateTimeOffset UpdatedOn { get; private set; }
+    public string? MalwareVerdictStatus { get; private set; }
+    public string? MalwareScannerEngine { get; private set; }
+    public string? MalwareSignatureVersion { get; private set; }
+    public DateTimeOffset? MalwareScannedOn { get; private set; }
     public DocumentCorpus Corpus { get; private set; } = null!;
     public ICollection<DocumentPage> Pages { get; } = new List<DocumentPage>();
     public ICollection<SourceDocumentOccurrence> Occurrences { get; } = new List<SourceDocumentOccurrence>();
@@ -231,6 +250,33 @@ public sealed class SourceDocument
         UpdatedOn = changedOn ?? DateTimeOffset.UtcNow;
     }
 
+    public bool HasFreshCleanMalwareVerdict(DateTimeOffset now, TimeSpan maximumAge) =>
+        string.Equals(MalwareVerdictStatus, "Clean", StringComparison.Ordinal)
+        && MalwareScannedOn.HasValue
+        && maximumAge > TimeSpan.Zero
+        && MalwareScannedOn.Value >= now.Subtract(maximumAge);
+
+    public void RecordInspection(string detectedMimeType, DateTimeOffset? changedOn = null)
+    {
+        DetectedMimeType = EvidenceLedgerGuard.Required(detectedMimeType, 255, nameof(detectedMimeType));
+        UpdatedOn = changedOn ?? DateTimeOffset.UtcNow;
+    }
+
+    public void RecordMalwareVerdict(
+        MalwareScanStatus status,
+        string engine,
+        string? signatureVersion,
+        DateTimeOffset? scannedOn = null)
+    {
+        MalwareVerdictStatus = status.ToString();
+        MalwareScannerEngine = EvidenceLedgerGuard.Required(engine, 128, nameof(engine));
+        MalwareSignatureVersion = string.IsNullOrWhiteSpace(signatureVersion)
+            ? null
+            : EvidenceLedgerGuard.Required(signatureVersion, 256, nameof(signatureVersion));
+        MalwareScannedOn = scannedOn ?? DateTimeOffset.UtcNow;
+        UpdatedOn = MalwareScannedOn.Value;
+    }
+
     public void MarkSecurityStatus(DocumentSecurityStatus status, DateTimeOffset? changedOn = null)
     {
         var allowed = SecurityStatus switch
@@ -239,6 +285,7 @@ public sealed class SourceDocument
                 or DocumentSecurityStatus.Cleared or DocumentSecurityStatus.Rejected,
             DocumentSecurityStatus.Quarantined => status is DocumentSecurityStatus.Cleared
                 or DocumentSecurityStatus.Rejected,
+            DocumentSecurityStatus.Cleared => status is DocumentSecurityStatus.Rejected,
             _ => false
         };
         if (!allowed)
@@ -253,8 +300,8 @@ public sealed class SourceDocument
         string objectVersion,
         DateTimeOffset? changedOn = null)
     {
-        if (SecurityStatus != DocumentSecurityStatus.Quarantined)
-            throw new InvalidOperationException("Only a quarantined source document can be released.");
+        if (SecurityStatus is not (DocumentSecurityStatus.Pending or DocumentSecurityStatus.Quarantined))
+            throw new InvalidOperationException("Only a pending or quarantined source document can be cleared.");
 
         ObjectBucket = EvidenceLedgerGuard.Required(objectBucket, 255, nameof(objectBucket));
         ObjectKey = EvidenceLedgerGuard.Required(objectKey, 1024, nameof(objectKey));
@@ -323,6 +370,7 @@ public sealed class SourceDocumentOccurrence
     public long SourceDocumentId { get; private set; }
     public long CorpusId { get; private set; }
     public long? ExtractionJobId { get; private set; }
+    public long? OriginalOccurrenceId { get; private set; }
     public string IdempotencyKey { get; private set; } = null!;
     public string SourceMetadataJson { get; private set; } = null!;
     public string? LogicalGroupKey { get; private set; }
@@ -332,8 +380,27 @@ public sealed class SourceDocumentOccurrence
     public string? LastErrorDetailsJson { get; private set; }
     public DateTimeOffset UpdatedOn { get; private set; }
     public DateTimeOffset ReceivedOn { get; private set; }
+    public IngestionOutcomeState OutcomeState { get; private set; } = IngestionOutcomeState.NONE;
+    public long BytesUploaded { get; private set; }
+    public long HashingDurationMs { get; private set; }
+    public long StoragePhysicalBytes { get; private set; }
+    public long StorageLogicalBytes { get; private set; }
+    public bool MalwareScanReused { get; private set; }
+    public bool MalwareScanRerun { get; private set; }
+    public bool ParserReused { get; private set; }
+    public bool OcrReused { get; private set; }
+    public bool LocalModelReused { get; private set; }
+    public bool ExternalModelReused { get; private set; }
+    public bool ProcessingReused { get; private set; }
+    public decimal LocalComputeCost { get; private set; }
+    public decimal ExternalProcessingCost { get; private set; }
+    public decimal TotalActualCost { get; private set; }
+    public decimal EstimatedProcessingAvoided { get; private set; }
+    public string CostStatus { get; private set; } = "LOCAL_COMPUTE_UNPRICED";
     public SourceDocument SourceDocument { get; private set; } = null!;
     public DocumentCorpus Corpus { get; private set; } = null!;
+    public SourceDocumentOccurrence? OriginalOccurrence { get; private set; }
+    public ICollection<SourceDocumentOccurrence> DuplicateOccurrences { get; } = new List<SourceDocumentOccurrence>();
 
     public static SourceDocumentOccurrence Create(long businessUnitId, long sourceDocumentId, long corpusId,
         string idempotencyKey, string sourceMetadataJson, long? extractionJobId = null,
@@ -345,6 +412,68 @@ public sealed class SourceDocumentOccurrence
     {
         LogicalGroupKey = string.IsNullOrWhiteSpace(groupKey) ? null
             : EvidenceLedgerGuard.Required(groupKey.Trim(), 256, nameof(groupKey));
+    }
+
+    public void RecordUploadResources(long bytesUploaded, long hashingDurationMs, long physicalBytes)
+    {
+        BytesUploaded = EvidenceLedgerGuard.NonNegative(bytesUploaded, nameof(bytesUploaded));
+        HashingDurationMs = EvidenceLedgerGuard.NonNegative(hashingDurationMs, nameof(hashingDurationMs));
+        StorageLogicalBytes = bytesUploaded;
+        StoragePhysicalBytes = EvidenceLedgerGuard.NonNegative(physicalBytes, nameof(physicalBytes));
+        UpdatedOn = DateTimeOffset.UtcNow;
+    }
+
+    public void MarkExactDuplicateCandidate(long originalOccurrenceId, bool requiresRescan)
+    {
+        OriginalOccurrenceId = EvidenceLedgerGuard.Positive(originalOccurrenceId, nameof(originalOccurrenceId));
+        OutcomeState = requiresRescan
+            ? IngestionOutcomeState.DUPLICATE_RESCAN_REQUIRED
+            : IngestionOutcomeState.EXACT_DUPLICATE_PENDING_SECURITY;
+        UpdatedOn = DateTimeOffset.UtcNow;
+    }
+
+    public void RecordSecurityWork(bool reused, bool rerun)
+    {
+        MalwareScanReused = reused;
+        MalwareScanRerun = rerun;
+        UpdatedOn = DateTimeOffset.UtcNow;
+    }
+
+    public void ConfirmExactDuplicate(bool processingReused, decimal estimatedProcessingAvoided = 0m)
+    {
+        if (!OriginalOccurrenceId.HasValue)
+            throw new InvalidOperationException("An exact duplicate must reference its original occurrence.");
+        OutcomeState = IngestionOutcomeState.EXACT_DUPLICATE_CONFIRMED;
+        ProcessingReused = processingReused;
+        ParserReused = processingReused;
+        OcrReused = processingReused;
+        LocalModelReused = processingReused;
+        ExternalModelReused = processingReused;
+        EstimatedProcessingAvoided = NonNegativeMoney(estimatedProcessingAvoided, nameof(estimatedProcessingAvoided));
+        UpdatedOn = DateTimeOffset.UtcNow;
+    }
+
+    public void ResolveByProcessingReuse(long extractionJobId)
+    {
+        BindExtractionJob(extractionJobId);
+        IntakeStatus = IntakeOccurrenceStatus.Resolved;
+        ProcessingReused = true;
+        UpdatedOn = DateTimeOffset.UtcNow;
+    }
+
+    public void RecordActualCost(decimal localComputeCost, decimal externalCost, string costStatus = "RECORDED")
+    {
+        LocalComputeCost = NonNegativeMoney(localComputeCost, nameof(localComputeCost));
+        ExternalProcessingCost = NonNegativeMoney(externalCost, nameof(externalCost));
+        TotalActualCost = LocalComputeCost + ExternalProcessingCost;
+        CostStatus = EvidenceLedgerGuard.Required(costStatus, 48, nameof(costStatus));
+        UpdatedOn = DateTimeOffset.UtcNow;
+    }
+
+    public void MarkOutcome(IngestionOutcomeState state)
+    {
+        OutcomeState = state;
+        UpdatedOn = DateTimeOffset.UtcNow;
     }
 
     public void BindExtractionJob(long extractionJobId)
@@ -369,6 +498,7 @@ public sealed class SourceDocumentOccurrence
             IntakeOccurrenceStatus.Accepted,
             IntakeOccurrenceStatus.AwaitingSecurityScan,
             IntakeOccurrenceStatus.Rejected);
+        OutcomeState = IngestionOutcomeState.SECURITY_SCAN_BLOCKED;
     }
 
     public void MarkProcessing(DateTimeOffset? changedOn = null) => Transition(IntakeOccurrenceStatus.Processing, changedOn,
@@ -406,7 +536,13 @@ public sealed class SourceDocumentOccurrence
         Transition(IntakeOccurrenceStatus.Rejected, changedOn,
             IntakeOccurrenceStatus.Accepted,
             IntakeOccurrenceStatus.AwaitingSecurityScan);
+        OutcomeState = string.Equals(errorCode, "malware_detected", StringComparison.OrdinalIgnoreCase)
+            ? IngestionOutcomeState.MALWARE_DETECTED
+            : IngestionOutcomeState.UNSUPPORTED_FORMAT;
     }
+
+    private static decimal NonNegativeMoney(decimal value, string name) =>
+        value < 0m ? throw new ArgumentOutOfRangeException(name) : value;
 
     private void Transition(IntakeOccurrenceStatus next, DateTimeOffset? changedOn, params IntakeOccurrenceStatus[] allowed)
     {

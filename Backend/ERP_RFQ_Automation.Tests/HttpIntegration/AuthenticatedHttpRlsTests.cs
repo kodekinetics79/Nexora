@@ -88,6 +88,28 @@ public sealed class AuthenticatedHttpRlsTests(Release01BHttpApplication app)
     }
 
     [Fact]
+    public async Task Duplicate_uploads_requires_permission_and_never_discloses_other_tenant_metadata()
+    {
+        using var anonymous = app.CreateClient();
+        using var denied = Client(Release01BHttpApplication.DeniedRole, Release01BHttpApplication.TenantA);
+        using var allowed = Client(Release01BHttpApplication.AllowedRole, Release01BHttpApplication.TenantA);
+        const string path = "/api/LeadIngestion/duplicates";
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.GetAsync(path)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await denied.GetAsync(path)).StatusCode);
+
+        var response = await allowed.GetAsync(path);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var row = Assert.Single(payload.RootElement.EnumerateArray());
+        Assert.Equal("tenant-a.txt", row.GetProperty("fileName").GetString());
+        Assert.Equal("tenant-a-uploader@nexora.invalid", row.GetProperty("uploadedBy").GetString());
+        Assert.Equal("EXACT_DUPLICATE_CONFIRMED", row.GetProperty("duplicateType").GetString());
+        Assert.True(row.GetProperty("originalOccurrenceId").GetInt64() > 0);
+        Assert.DoesNotContain("tenant-b", payload.RootElement.GetRawText(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Security_scan_retry_requires_create_permission_and_authenticated_tenant_scope()
     {
         using var anonymous = app.CreateClient();

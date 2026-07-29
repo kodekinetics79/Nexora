@@ -181,7 +181,13 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
     {
         var text = WordBinaryTextExtractor.Extract(bytes, _log);
         // A file named .doc that is actually OOXML has no OLE signature — try OpenXML.
-        return string.IsNullOrWhiteSpace(text) ? ExtractTextFromDocx(bytes) : text;
+        if (!string.IsNullOrWhiteSpace(text))
+            return text;
+        var openXmlText = ExtractTextFromDocx(bytes);
+        if (!string.IsNullOrWhiteSpace(openXmlText))
+            return openXmlText;
+        throw new UnsupportedDocumentFormatException(
+            "The legacy .doc file passed security inspection but the local binary reader could not parse it; an isolated converter is not configured.");
     }
 
     private string ExtractTextFromDocx(byte[] bytes)
@@ -436,8 +442,13 @@ public sealed class EvidenceIntegrityException : IOException
     public string Code { get; }
 }
 
-public sealed class DocumentParsingException : IOException
+public class DocumentParsingException : IOException
 {
     public DocumentParsingException(string message, Exception? innerException = null)
         : base(message, innerException) { }
+}
+
+public sealed class UnsupportedDocumentFormatException : DocumentParsingException
+{
+    public UnsupportedDocumentFormatException(string message) : base(message) { }
 }

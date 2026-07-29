@@ -295,7 +295,9 @@ public sealed class ExtractionWorker : BackgroundService
                         ex.Message, CancellationToken.None))
                     LogLeaseLost(job.Id, workerId, "recording document parse failure");
                 else
-                    await MarkIntakeFailureAsync(job, "document_parse_failed", CancellationToken.None, permanent: true);
+                    await MarkIntakeFailureAsync(job,
+                        ex is UnsupportedDocumentFormatException ? "unsupported_format" : "document_parse_failed",
+                        CancellationToken.None, permanent: true);
             }
             catch (Exception failEx)
             {
@@ -501,6 +503,8 @@ public sealed class ExtractionWorker : BackgroundService
             .SingleAsync(x => x.BusinessUnitId == job.BusinessUnitId && x.Id == job.SourceDocumentOccurrenceId, ct);
         if (occurrence.IntakeStatus == IntakeOccurrenceStatus.Processing)
         {
+            if (string.Equals(errorCode, "unsupported_format", StringComparison.OrdinalIgnoreCase))
+                occurrence.MarkOutcome(IngestionOutcomeState.UNSUPPORTED_FORMAT);
             if (permanent || job.Attempts >= job.MaxAttempts) occurrence.MarkDeadLetter(errorCode);
             else occurrence.MarkRetryable(errorCode);
             await db.SaveChangesAsync(ct);
@@ -815,6 +819,23 @@ public sealed class LeadPersister : ILeadPersister
                         SourceDocumentOccurrenceId = job.SourceDocumentOccurrenceId,
                         LogicalGroupKey = logicalGroupKey ?? metadata?.LogicalGroupKey
                     }, ct));
+            }
+            if (job.SourceDocumentOccurrenceId.HasValue)
+            {
+                var intakeOccurrence = await _context.Set<SourceDocumentOccurrence>()
+                    .SingleAsync(x => x.BusinessUnitId == job.BusinessUnitId
+                                      && x.Id == job.SourceDocumentOccurrenceId.Value, ct);
+                var state = reconciliation.All(x => x.Classification == ERP_RFQ_Automation.LeadIdentity.LeadOccurrenceClassification.ExactDuplicate)
+                    ? IngestionOutcomeState.BUSINESS_DUPLICATE_CONFIRMED
+                    : reconciliation.Any(x => x.Classification == ERP_RFQ_Automation.LeadIdentity.LeadOccurrenceClassification.Revision)
+                        ? IngestionOutcomeState.REVISION
+                        : reconciliation.Any(x => x.Classification == ERP_RFQ_Automation.LeadIdentity.LeadOccurrenceClassification.PossibleMatchReviewRequired)
+                            ? IngestionOutcomeState.POSSIBLE_MATCH
+                            : IngestionOutcomeState.NONE;
+                intakeOccurrence.MarkOutcome(state);
+                intakeOccurrence.RecordActualCost(0m, attributedExternalCost ?? 0m,
+                    attributedExternalCost.HasValue ? "RECORDED" : "LOCAL_COMPUTE_UNPRICED");
+                await _context.SaveChangesAsync(ct);
             }
             var canonicalIds = reconciliation.Where(x => x.LeadId > 0).Select(x => x.LeadId).Distinct().ToArray();
             leads = await _context.Leads.Include(x => x.LeadItems).Where(x => canonicalIds.Contains(x.Id)).ToListAsync(ct);

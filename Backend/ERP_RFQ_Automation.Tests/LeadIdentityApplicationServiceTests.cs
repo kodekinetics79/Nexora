@@ -79,7 +79,7 @@ public sealed class LeadIdentityApplicationServiceTests
         await context.SaveChangesAsync();
         var intake = SourceDocumentOccurrence.Create(72, source.Id, corpus.Id, "legacy-rejected",
             "{\"fileName\":\"legacy-rfq.pdf\",\"inspection\":{\"ScannerSignature\":null}}");
-        intake.MarkRejected("document_quarantined",
+        intake.MarkRejected("SecurityInspection", "document_quarantined",
             "{\"status\":\"Quarantined\",\"reason\":\"Malware scanner unavailable.\"}");
         context.Add(intake);
         await context.SaveChangesAsync();

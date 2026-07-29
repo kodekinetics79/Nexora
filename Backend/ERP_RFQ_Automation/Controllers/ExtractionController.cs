@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
+using System.Security.Claims;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -100,7 +101,10 @@ namespace ERP_RFQ_Automation.Controllers
                         {
                             SourceOccurrenceId = string.IsNullOrWhiteSpace(idempotencyKey)
                                 ? null
-                                : $"{idempotencyKey}:{fileIndex}:{file.FileName}"
+                                : $"{idempotencyKey}:{fileIndex}:{file.FileName}",
+                            UploadedBy = User.FindFirst(ClaimTypes.Email)?.Value
+                                ?? User.Identity?.Name
+                                ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value
                         },
                         ct);
 

@@ -10,6 +10,7 @@ using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Procurement;
+using ERP_RFQ_Automation.Security.DocumentInspection;
 using ERP_RFQ_Automation.SupplierQuotes;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -419,6 +420,10 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
             "text/plain", "acceptance", "tenant-a", "v1", tenantABytes.Length, now);
         var sourceB = SourceDocument.Create(TenantB, corpusB.Id, hashB, "tenant-b.txt",
             "text/plain", "acceptance", "tenant-b", "v1", tenantBBytes.Length, now);
+        sourceA.RecordMalwareVerdict(MalwareScanStatus.Clean, "http-test-scanner", "daily-test", now);
+        sourceB.RecordMalwareVerdict(MalwareScanStatus.Clean, "http-test-scanner", "daily-test", now);
+        sourceA.MarkSecurityStatus(DocumentSecurityStatus.Cleared, now);
+        sourceB.MarkSecurityStatus(DocumentSecurityStatus.Cleared, now);
         db.Set<SourceDocument>().AddRange(sourceA, sourceB);
         await db.SaveChangesAsync();
 
@@ -435,6 +440,25 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         sourceB.BindExtractionJob(jobB.Id, now);
         sourceOccurrenceA.BindExtractionJob(jobA.Id);
         sourceOccurrenceB.BindExtractionJob(jobB.Id);
+
+        var duplicateA = SourceDocumentOccurrence.Create(TenantA, sourceA.Id, corpusA.Id,
+            "http:tenant-a:duplicate", "{\"metadata\":{\"UploadedBy\":\"tenant-a-uploader@nexora.invalid\"}}",
+            receivedOn: now.AddMinutes(1));
+        var duplicateB = SourceDocumentOccurrence.Create(TenantB, sourceB.Id, corpusB.Id,
+            "http:tenant-b:duplicate", "{\"metadata\":{\"UploadedBy\":\"tenant-b-uploader@nexora.invalid\"}}",
+            receivedOn: now.AddMinutes(1));
+        duplicateA.RecordUploadResources(tenantABytes.Length, 1, 0);
+        duplicateB.RecordUploadResources(tenantBBytes.Length, 1, 0);
+        duplicateA.MarkExactDuplicateCandidate(sourceOccurrenceA.Id, requiresRescan: false);
+        duplicateB.MarkExactDuplicateCandidate(sourceOccurrenceB.Id, requiresRescan: false);
+        duplicateA.RecordSecurityWork(reused: true, rerun: false);
+        duplicateB.RecordSecurityWork(reused: true, rerun: false);
+        db.Set<SourceDocumentOccurrence>().AddRange(duplicateA, duplicateB);
+        await db.SaveChangesAsync();
+        duplicateA.ResolveByProcessingReuse(jobA.Id);
+        duplicateB.ResolveByProcessingReuse(jobB.Id);
+        duplicateA.ConfirmExactDuplicate(processingReused: true);
+        duplicateB.ConfirmExactDuplicate(processingReused: true);
 
         db.Set<LeadOccurrenceDocument>().AddRange(
             new LeadOccurrenceDocument { BusinessUnitId = TenantA, OccurrenceId = tenantAOccurrence.Id,

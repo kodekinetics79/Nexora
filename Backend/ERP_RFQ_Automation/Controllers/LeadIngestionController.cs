@@ -49,6 +49,14 @@ public sealed class LeadIngestionController : ControllerBase
         return Ok(await _service.GetPossibleMatchesAsync(bu, ct));
     }
 
+    [HttpGet("duplicates")]
+    [RequireModulePermission("Leads", PermissionAction.View)]
+    public async Task<IActionResult> DuplicateUploads(CancellationToken ct)
+    {
+        if (!TryTenant(out var bu)) return BadRequest(new { message = "A valid businessUnitId claim is required." });
+        return Ok(await _service.GetDuplicateUploadsAsync(bu, ct));
+    }
+
     [HttpGet("leads/{leadId:long}/revisions")]
     [RequireModulePermission("Leads", PermissionAction.View)]
     public async Task<IActionResult> Revisions(long leadId, CancellationToken ct)

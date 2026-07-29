@@ -28,6 +28,8 @@ services:
         sync: false
       - key: DocumentInspection__ClamAV__Port
         value: "3310"
+      - key: DocumentInspection__MalwareVerdictPolicy__MaximumCleanVerdictAge
+        value: "24:00:00"
       - key: ConnectionStrings__DefaultConnection
         sync: false
       - key: ConnectionStrings__MigrationConnection

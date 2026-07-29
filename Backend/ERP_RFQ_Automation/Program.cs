@@ -112,6 +112,8 @@ builder.Services.AddScoped<ERP_RFQ_Automation.MultiTenancy.ITenantContext, ERP_R
 builder.Services.AddSingleton<IFileStorage, LocalFileStorage>();
 builder.Services.Configure<S3EvidenceStorageOptions>(
     builder.Configuration.GetSection(S3EvidenceStorageOptions.SectionName));
+builder.Services.Configure<MalwareVerdictPolicyOptions>(
+    builder.Configuration.GetSection(MalwareVerdictPolicyOptions.SectionName));
 builder.Services.AddSingleton<IEvidenceObjectStorage>(services =>
 {
     var options = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<S3EvidenceStorageOptions>>();

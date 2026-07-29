@@ -14,11 +14,23 @@ public enum MalwareScanStatus
     Error
 }
 
+public sealed class MalwareVerdictPolicyOptions
+{
+    public const string SectionName = "DocumentInspection:MalwareVerdictPolicy";
+    public TimeSpan MaximumCleanVerdictAge { get; init; } = TimeSpan.FromHours(24);
+}
+
 public sealed record FileInspectionRequest(
     Stream Content,
     string FileName,
     string? DeclaredContentType = null,
-    long? DeclaredLength = null);
+    long? DeclaredLength = null,
+    ReusableMalwareVerdict? ReusableMalwareVerdict = null);
+
+public sealed record ReusableMalwareVerdict(
+    string Engine,
+    string? SignatureVersion,
+    DateTimeOffset ScannedOn);
 
 public sealed record FileInspectionResult(
     FileInspectionStatus Status,
@@ -34,6 +46,7 @@ public sealed record FileInspectionResult(
     public string ErrorCode { get; init; } = Status == FileInspectionStatus.Rejected
         ? "document_rejected"
         : "document_quarantined";
+    public bool MalwareVerdictReused { get; init; }
 }
 
 public sealed record MalwareScanResult(

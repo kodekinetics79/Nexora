@@ -276,6 +276,39 @@ export interface SecurityScanRetryResultDTO {
   }>;
 }
 
+export interface DuplicateUploadDTO {
+  occurrenceId: number;
+  fileName: string;
+  uploadBatch: string;
+  ingestedAt: string;
+  uploadedBy: string;
+  source: string;
+  duplicateType: string;
+  originalOccurrenceId?: number | null;
+  canonicalLeadId?: number | null;
+  nexoraSerial?: string | null;
+  securityStatus: string;
+  processingReused: boolean;
+  resources: {
+    bytesUploaded: number;
+    hashingDurationMs: number;
+    storagePhysicalBytes: number;
+    storageLogicalBytes: number;
+    malwareScanReused: boolean;
+    malwareScanRerun: boolean;
+    parserReused: boolean;
+    ocrReused: boolean;
+    localModelReused: boolean;
+    externalModelReused: boolean;
+    localComputeCost: number;
+    externalCost: number;
+    totalActualCost: number;
+    estimatedProcessingAvoided: number;
+    costStatus: string;
+  };
+  actions: string[];
+}
+
 export interface PossibleMatchQueueItemDTO {
   batchId: string;
   occurrenceId: number;
@@ -355,6 +388,11 @@ const leadService = {
     const r = await axiosInstance.post<SecurityScanRetryResultDTO>(
       `/api/LeadIngestion/batches/${encodeURIComponent(batchId)}/retry-blocked-files`,
     );
+    return r.data;
+  },
+
+  getDuplicateUploads: async (): Promise<DuplicateUploadDTO[]> => {
+    const r = await axiosInstance.get<DuplicateUploadDTO[]>('/api/LeadIngestion/duplicates');
     return r.data;
   },
 

@@ -378,6 +378,24 @@ public sealed class DocumentFileInspectionServiceTests
         Assert.Equal("ClamAV", result.Engine);
     }
 
+    [Fact]
+    public async Task FreshReusableVerdict_StillValidatesEnvelopeWithoutCallingScanner()
+    {
+        var scanner = new RecordingScanner();
+        var service = new DocumentFileInspectionService(scanner);
+        var bytes = Encoding.UTF8.GetBytes("RFQ No,Part Number,Quantity\nRFQ-1,ABC-100,5\n");
+        await using var stream = new MemoryStream(bytes, writable: false);
+
+        var result = await service.InspectAsync(new FileInspectionRequest(
+            stream, "rfq.csv", "text/csv", bytes.Length,
+            new ReusableMalwareVerdict("ClamAV", "daily-123", DateTimeOffset.UtcNow)));
+
+        Assert.True(result.IsCleared);
+        Assert.True(result.MalwareVerdictReused);
+        Assert.False(scanner.WasCalled);
+        Assert.Equal("text/csv", result.DetectedContentType);
+    }
+
     private static async Task<FileInspectionResult> InspectAsync(
         byte[] bytes,
         string fileName,
