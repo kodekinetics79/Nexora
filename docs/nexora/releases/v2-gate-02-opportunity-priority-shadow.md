@@ -1,6 +1,6 @@
 # V2 Gate 02: Opportunity Priority Shadow
 
-Status: **GREEN for the local development checkpoint.** Production deployment is outside this gate and remains blocked by Track 0 storage and malware-scanner readiness.
+Status: **GREEN M3 foundation; NO-GO for final M4 Gate 2 acceptance.** Production deployment is outside this gate and remains blocked by Track 0 storage and malware-scanner readiness.
 
 ## Frozen Scope
 
@@ -51,3 +51,5 @@ Browser paths: `Login -> Sales -> Today -> Reconcile -> Open opportunity -> Reco
 ## Truthful Limits
 
 The cohort reports accuracy as `null` with an explicit not-measured status. Calibration, expected commercial value, win probability, and autonomous action remain blocked until adequate authoritative later outcomes, currency-safe value, cost authority, and drift evidence exist.
+
+The master-program Gate 2 contract additionally requires separately visible opportunity value, evidenced win likelihood, margin, urgency, customer quality, fulfilment confidence, sourcing effort, response deadline, current blocker, and Expected Commercial Value. Those M4 components are not present in this checkpoint. Gate 2 therefore remains in progress and Gate V2.3 must not begin.
