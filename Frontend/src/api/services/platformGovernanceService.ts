@@ -1,7 +1,7 @@
 import axiosInstance from '../axiosInstance';
 
 export type GovernedArtifactType = 'CommercialTaxonomy' | 'DocumentSkill' | 'Model' | 'Rule' |
-  'Dataset' | 'Connector' | 'TestSuite' | 'ReleaseCandidate';
+  'Dataset' | 'Connector' | 'TestSuite' | 'ReleaseCandidate' | 'ArchivePolicy';
 export type GovernedLifecycleStatus = 'Draft' | 'Test' | 'Production' | 'Archived';
 export type HumanActionStatus = 'Open' | 'InReview' | 'Escalated' | 'Completed' | 'Rejected';
 export type HumanActionPriority = 'Low' | 'Medium' | 'High' | 'Critical';
@@ -111,6 +111,20 @@ export interface ReleaseSimulationResult {
   tests: Array<{ name: string; passed: boolean; difference?: string | null }>;
   completedOn: string;
   idempotentReplay: boolean;
+}
+
+export interface ArchiveDocumentItem {
+  occurrenceId: number; sourceDocumentId: number; fileName: string; mimeType: string;
+  byteSize: number; contentHash: string; ingestedOn: string; intakeStatus: string;
+  securityStatus: string; processingStatus: string; documentType: string; reviewStatus: string;
+  classificationConfidence?: number | null; leadId?: number | null; nexoraSerial?: string | null;
+  customerRfq?: string | null; customerId?: number | null; contactId?: number | null;
+  commercialLinks: string[]; legalHold: boolean; deletionRequested: boolean; governanceVersion: number;
+}
+
+export interface ArchiveSearchResult {
+  items: ArchiveDocumentItem[]; page: number; pageSize: number; total: number;
+  searchScope: string; definitionVersion: string;
 }
 
 export interface GovernedArtifactSummary {
@@ -243,6 +257,18 @@ export const platformGovernanceService = {
   simulateTestSuite: async (id: number) => {
     const { data } = await axiosInstance.post<ReleaseSimulationResult>(
       `/api/platform-governance/test-suites/${id}/simulate`, {},
+      { headers: { 'Idempotency-Key': key() } });
+    return data;
+  },
+  searchArchive: async (params: { search?: string; documentType?: string; status?: string; sort?: string }) => {
+    const { data } = await axiosInstance.get<ArchiveSearchResult>('/api/platform-governance/archive',
+      { params: { ...params, page: 1, pageSize: 100 } });
+    return data;
+  },
+  governArchiveDocument: async (item: ArchiveDocumentItem, action: string, reason: string) => {
+    const { data } = await axiosInstance.post(
+      `/api/platform-governance/archive/${item.occurrenceId}/govern`,
+      { expectedVersion: item.governanceVersion, action, reason },
       { headers: { 'Idempotency-Key': key() } });
     return data;
   },

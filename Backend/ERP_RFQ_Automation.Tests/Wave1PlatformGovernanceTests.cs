@@ -7,6 +7,28 @@ namespace ERP_RFQ_Automation.Tests;
 public sealed class Wave1PlatformGovernanceTests
 {
     [Fact]
+    public async Task Archive_policy_is_versioned_tested_published_and_rollback_ready()
+    {
+        using var database = new TestDb();
+        await using var context = database.ContextFor(60_991);
+        Seed.BusinessUnit(context, 60_991);
+        await context.SaveChangesAsync();
+        var service = new PlatformGovernanceService(context);
+        var created = await service.CreateAsync(60_991, 9, "archive-policy-create",
+            new(GovernedArtifactType.ArchivePolicy, "commercial-evidence", "Commercial evidence",
+                "Retention and legal hold controls",
+                "{\"retentionDays\":2555,\"legalHoldEnabled\":true,\"exportApprovalRequired\":true,\"deletionApprovalRequired\":true,\"evidenceAccessAuditRequired\":true}",
+                "Initial archive policy"), default);
+        var tested = await service.TransitionAsync(60_991, created.Artifact.Id, 9, "archive-policy-test",
+            new(created.Artifact.Version, "TEST", "Policy controls verified"), default);
+        var published = await service.TransitionAsync(60_991, created.Artifact.Id, 9, "archive-policy-publish",
+            new(tested.Artifact.Version, "PUBLISH", "Compliance approval recorded"), default);
+
+        Assert.Equal(GovernedLifecycleStatus.Production, published.Artifact.Status);
+        Assert.Equal(1, published.Artifact.ProductionVersionNumber);
+    }
+
+    [Fact]
     public async Task Artifact_versions_promote_and_rollback_with_append_only_history()
     {
         using var database = new TestDb();

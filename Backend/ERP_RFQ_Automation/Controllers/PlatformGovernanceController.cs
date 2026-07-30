@@ -13,7 +13,8 @@ public sealed class PlatformGovernanceController(
     PlatformGovernanceService artifacts,
     HumanActionService actions,
     AiTrustCenterService aiTrust,
-    ReleaseSimulationService simulations) : ControllerBase
+    ReleaseSimulationService simulations,
+    CommercialDocumentArchiveService archive) : ControllerBase
 {
     [HttpGet("artifacts")]
     [RequireModulePermission("Users", PermissionAction.View)]
@@ -123,6 +124,18 @@ public sealed class PlatformGovernanceController(
     public Task<ActionResult<ReleaseSimulationResult>> SimulateTestSuite(long testSuiteId,
         CancellationToken ct) => Execute(() => simulations.RunAsync(TenantId(), ActorUserId(),
             testSuiteId, IdempotencyKey(), ct));
+
+    [HttpGet("archive")]
+    [RequireModulePermission("Users", PermissionAction.View)]
+    public Task<ArchiveSearchResult> SearchArchive([FromQuery] ArchiveSearchRequest request,
+        CancellationToken ct) => archive.SearchAsync(TenantId(), request, ct);
+
+    [HttpPost("archive/{occurrenceId:long}/govern")]
+    [RequireModulePermission("Users", PermissionAction.Edit)]
+    public Task<ActionResult<ArchiveGovernanceResult>> GovernArchiveDocument(long occurrenceId,
+        [FromBody] ArchiveGovernanceCommand command, CancellationToken ct) =>
+        Execute(() => archive.GovernAsync(TenantId(), ActorUserId(), occurrenceId,
+            IdempotencyKey(), command, ct));
 
     private async Task<ActionResult<T>> Execute<T>(Func<Task<T>> operation)
     {

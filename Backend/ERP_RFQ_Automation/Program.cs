@@ -457,6 +457,7 @@ builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.PlatformGoverna
 builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.HumanActionService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.AiTrustCenterService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.ReleaseSimulationService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.CommercialDocumentArchiveService>();
 
 var app = builder.Build();
 

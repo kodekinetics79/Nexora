@@ -273,6 +273,7 @@ public sealed class PlatformGovernanceService(ErpRfqAutomationContext db)
                 GovernedArtifactType.Connector => "connectorType",
                 GovernedArtifactType.TestSuite => "requirements",
                 GovernedArtifactType.ReleaseCandidate => "releaseVersion",
+                GovernedArtifactType.ArchivePolicy => "retentionDays",
                 _ => throw new PlatformGovernanceValidationException("Unsupported artifact type.")
             };
             if (!document.RootElement.TryGetProperty(required, out _))
@@ -289,6 +290,8 @@ public sealed class PlatformGovernanceService(ErpRfqAutomationContext db)
                 GovernedArtifactType.TestSuite => new[] { "tests", "environment", "passThreshold" },
                 GovernedArtifactType.ReleaseCandidate => new[] { "requirements", "testSuiteKeys",
                     "rollbackArtifactVersion" },
+                GovernedArtifactType.ArchivePolicy => new[] { "legalHoldEnabled", "exportApprovalRequired",
+                    "deletionApprovalRequired", "evidenceAccessAuditRequired" },
                 _ => Array.Empty<string>()
             };
             foreach (var property in additional)

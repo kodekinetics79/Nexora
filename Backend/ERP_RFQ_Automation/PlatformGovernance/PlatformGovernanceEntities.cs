@@ -12,7 +12,8 @@ public enum GovernedArtifactType
     Dataset,
     Connector,
     TestSuite,
-    ReleaseCandidate
+    ReleaseCandidate,
+    ArchivePolicy
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]

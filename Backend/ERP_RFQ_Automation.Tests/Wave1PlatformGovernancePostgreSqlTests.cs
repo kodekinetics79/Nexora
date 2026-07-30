@@ -1,4 +1,7 @@
 using ERP_RFQ_Automation.Tests.Support;
+using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
+using ERP_RFQ_Automation.PlatformGovernance;
+using Microsoft.EntityFrameworkCore;
 using Npgsql;
 
 namespace ERP_RFQ_Automation.Tests;
@@ -6,6 +9,58 @@ namespace ERP_RFQ_Automation.Tests;
 [Collection(PostgreSqlIntegrationCollection.Name)]
 public sealed class Wave1PlatformGovernancePostgreSqlTests(PostgreSqlTestDatabase database)
 {
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Archive_search_and_legal_hold_are_tenant_safe_audited_and_idempotent()
+    {
+        const long tenantA = 60_981;
+        const long tenantB = 60_982;
+        await using (var seed = database.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(seed, tenantA);
+            Seed.EnsureBusinessUnit(seed, tenantB);
+            await seed.SaveChangesAsync();
+        }
+        long occurrenceId;
+        await using (var context = database.ContextFor(tenantA))
+        {
+            var corpus = DocumentCorpus.Create(tenantA, Guid.NewGuid(), CorpusSourceType.ManualUpload);
+            context.Add(corpus);
+            await context.SaveChangesAsync();
+            var document = SourceDocument.Create(tenantA, corpus.Id, new string('a', 64),
+                "customer-rfq-archive.pdf", "application/pdf", "evidence", "tenant-a/archive.pdf",
+                "v1", 4096);
+            context.Add(document);
+            await context.SaveChangesAsync();
+            var occurrence = SourceDocumentOccurrence.Create(tenantA, document.Id, corpus.Id,
+                "archive-occurrence", "{\"source\":\"test\"}");
+            context.Add(occurrence);
+            await context.SaveChangesAsync();
+            occurrenceId = occurrence.Id;
+
+            var service = new CommercialDocumentArchiveService(context);
+            var result = await service.SearchAsync(tenantA,
+                new("customer-rfq", null, "Accepted", null, null, "newest"), default);
+            Assert.Contains(result.Items, x => x.OccurrenceId == occurrenceId
+                && x.ContentHash == new string('a', 64));
+            var hold = await service.GovernAsync(tenantA, 91, occurrenceId, "archive-hold",
+                new(0, "HOLD_APPLIED", "Legal review requested"), default);
+            var replay = await service.GovernAsync(tenantA, 91, occurrenceId, "archive-hold",
+                new(0, "HOLD_APPLIED", "Legal review requested"), default);
+            Assert.True(hold.LegalHold);
+            Assert.True(replay.IdempotentReplay);
+            await Assert.ThrowsAsync<PlatformGovernanceConflictException>(() => service.GovernAsync(
+                tenantA, 91, occurrenceId, "archive-delete", new(hold.GovernanceVersion,
+                    "DELETION_REQUESTED", "Retention review"), default));
+        }
+        await using var tenantBContext = database.ContextFor(tenantB);
+        var tenantBResult = await new CommercialDocumentArchiveService(tenantBContext).SearchAsync(tenantB,
+            new(null, null, null, null, null, "newest"), default);
+        Assert.DoesNotContain(tenantBResult.Items, x => x.OccurrenceId == occurrenceId);
+        Assert.Empty(await tenantBContext.TenantGovernanceAuditEvents
+            .Where(x => x.AggregateReference == $"occurrence:{occurrenceId}").ToListAsync());
+    }
+
     [Fact]
     [Trait("Category", "PostgreSQL")]
     public async Task Wave1_schema_is_forced_rls_least_privilege_and_event_ledgers_are_append_only()
