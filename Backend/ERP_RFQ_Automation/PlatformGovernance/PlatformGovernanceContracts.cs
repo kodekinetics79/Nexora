@@ -130,6 +130,16 @@ public sealed record BulkHumanActionTransitionResult(
     IReadOnlyList<HumanActionItemDto> Items,
     bool IdempotentReplay);
 
+public sealed record ConnectorSdkContract(
+    string ContractVersion,
+    IReadOnlyList<string> ConnectorTypes,
+    IReadOnlyList<string> AuthenticationModes,
+    IReadOnlyList<string> CommercialOperations,
+    IReadOnlyList<string> RequiredDefinitionFields,
+    IReadOnlyList<string> DeliveryGuarantees,
+    string WebhookEnvelope,
+    string SecretRule);
+
 public sealed class PlatformGovernanceValidationException(string message) : ArgumentException(message);
 public sealed class PlatformGovernanceConflictException(string message) : InvalidOperationException(message);
 public sealed class PlatformGovernanceNotFoundException(string message) : KeyNotFoundException(message);

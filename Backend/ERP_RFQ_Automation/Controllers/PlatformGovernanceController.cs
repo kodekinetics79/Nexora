@@ -98,6 +98,25 @@ public sealed class PlatformGovernanceController(
         [FromBody] RollbackAiTrustPolicyCommand command, CancellationToken ct) =>
         Execute(() => aiTrust.RollbackAsync(TenantId(), ActorUserId(), IdempotencyKey(), command, ct));
 
+    [HttpGet("connector-sdk")]
+    [RequireModulePermission("Users", PermissionAction.View)]
+    public ActionResult<ConnectorSdkContract> GetConnectorSdk() => Ok(new ConnectorSdkContract(
+        "1.0",
+        ["Microsoft365", "IMAP/SMTP", "Dynamics365", "SAP", "Oracle", "NetSuite",
+            "Salesforce", "HubSpot", "REST", "Webhook", "CSV/SFTP", "ERPInventory",
+            "ProcurementHandoff", "OperationalStatus"],
+        ["OAuth2", "OIDC", "ApiKeyReference", "mTLSReference", "None"],
+        ["CustomerUpsert", "ContactUpsert", "InventoryRead", "SupplierRead", "RfqExport",
+            "SupplierRfqSend", "QuoteImport", "OrderExport", "ProcurementHandoff",
+            "OperationalStatusRead"],
+        ["connectorType", "contractVersion", "authMode", "credentialReference", "actions",
+            "eventTriggers", "webhooks", "polling", "fieldMappings", "idempotency",
+            "retryPolicy", "deadLetterPolicy", "rateLimit", "health", "sandbox"],
+        ["Tenant-scoped idempotency", "Bounded retry", "Dead-letter retention",
+            "Explicit replay", "Rate-limit compliance", "Immutable lifecycle audit"],
+        "{eventId,tenantReference,eventType,contractVersion,occurredOn,payloadHash,payload}",
+        "Persist secret or certificate references only; credentials are resolved from approved runtime configuration."));
+
     private async Task<ActionResult<T>> Execute<T>(Func<Task<T>> operation)
     {
         try { return Ok(await operation()); }

@@ -88,6 +88,17 @@ export interface AiTrustCenterView {
   audit: Array<{ id: number; action: string; reason: string; actorUserId: number; occurredOn: string }>;
 }
 
+export interface ConnectorSdkContract {
+  contractVersion: string;
+  connectorTypes: string[];
+  authenticationModes: string[];
+  commercialOperations: string[];
+  requiredDefinitionFields: string[];
+  deliveryGuarantees: string[];
+  webhookEnvelope: string;
+  secretRule: string;
+}
+
 export interface GovernedArtifactSummary {
   id: number;
   artifactType: GovernedArtifactType;
@@ -209,6 +220,10 @@ export const platformGovernanceService = {
     const { data } = await axiosInstance.post('/api/platform-governance/ai-trust/policy/rollback',
       { expectedVersion: policy.version, auditEventId, reason },
       { headers: { 'Idempotency-Key': key() } });
+    return data;
+  },
+  getConnectorSdk: async () => {
+    const { data } = await axiosInstance.get<ConnectorSdkContract>('/api/platform-governance/connector-sdk');
     return data;
   },
 };

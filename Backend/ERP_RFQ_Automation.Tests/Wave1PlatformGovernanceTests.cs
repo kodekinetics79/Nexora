@@ -149,4 +149,28 @@ public sealed class Wave1PlatformGovernanceTests
             new PlatformGovernanceService(context).CreateAsync(61_041, 50, Guid.NewGuid().ToString("N"),
                 new(type, $"test-{type}", $"Test {type}", "Contract test", definition, "Initial"), default));
     }
+
+    [Fact]
+    public async Task Connector_contract_is_versioned_and_uses_secret_references_only()
+    {
+        using var database = new TestDb();
+        await using var context = database.ContextFor(61_051);
+        Seed.BusinessUnit(context, 61_051);
+        await context.SaveChangesAsync();
+        var definition = """
+            {"connectorType":"REST","contractVersion":"1.0","authMode":"OAuth2",
+             "credentialReference":"vault:nexora/rest","actions":["InventoryRead"],
+             "eventTriggers":[],"webhooks":[],"polling":{"enabled":true,"minutes":15},
+             "fieldMappings":[],"idempotency":{"required":true},
+             "retryPolicy":{"maxAttempts":3},"deadLetterPolicy":{"retentionDays":30},
+             "rateLimit":{"requestsPerMinute":60},"health":{"freshnessMinutes":30},
+             "sandbox":true}
+            """;
+        var created = await new PlatformGovernanceService(context).CreateAsync(61_051, 60,
+            "connector-create", new(GovernedArtifactType.Connector, "erp-inventory",
+                "ERP Inventory", "Inventory read connector", definition, "Initial sandbox contract"), default);
+
+        Assert.Equal(GovernedLifecycleStatus.Draft, created.Artifact.Status);
+        Assert.Equal(1, created.Artifact.CurrentVersionNumber);
+    }
 }

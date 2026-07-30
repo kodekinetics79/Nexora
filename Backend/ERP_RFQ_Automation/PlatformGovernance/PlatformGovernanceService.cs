@@ -280,6 +280,10 @@ public sealed class PlatformGovernanceService(ErpRfqAutomationContext db)
                 GovernedArtifactType.Model => new[] { "purpose", "evaluationDatasetKey", "external" },
                 GovernedArtifactType.Rule => new[] { "outcome", "evidenceRequired" },
                 GovernedArtifactType.Dataset => new[] { "scope", "retentionDays", "sourceReferences" },
+                GovernedArtifactType.Connector => new[] { "contractVersion", "authMode",
+                    "credentialReference", "actions", "eventTriggers", "webhooks", "polling",
+                    "fieldMappings", "idempotency", "retryPolicy", "deadLetterPolicy",
+                    "rateLimit", "health", "sandbox" },
                 _ => Array.Empty<string>()
             };
             foreach (var property in additional)

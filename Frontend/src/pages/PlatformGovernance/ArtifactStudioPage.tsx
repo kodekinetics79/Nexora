@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions, DialogContent,
@@ -17,7 +17,7 @@ const definitions: Record<GovernedArtifactType, string> = {
   Model: JSON.stringify({ modelKind: 'LocalSpecialist', purpose: 'DocumentClassification', endpointReference: '', evaluationDatasetKey: '', external: false }, null, 2),
   Rule: JSON.stringify({ condition: 'confidence < 0.85', outcome: 'HumanReview', evidenceRequired: true }, null, 2),
   Dataset: JSON.stringify({ purpose: 'Evaluation', scope: 'Tenant', retentionDays: 365, sourceReferences: [] }, null, 2),
-  Connector: JSON.stringify({ connectorType: 'REST', contractVersion: '1.0', baseUrlReference: '', secretReference: '', actions: [], sandbox: true }, null, 2),
+  Connector: JSON.stringify({ connectorType: 'REST', contractVersion: '1.0', baseUrlReference: '', authMode: 'OAuth2', credentialReference: '', actions: [], eventTriggers: [], webhooks: [], polling: { enabled: false, minutes: 15 }, fieldMappings: [], idempotency: { required: true }, retryPolicy: { maxAttempts: 3, backoff: 'Exponential' }, deadLetterPolicy: { retentionDays: 30 }, rateLimit: { requestsPerMinute: 60 }, health: { freshnessMinutes: 30 }, sandbox: true }, null, 2),
   TestSuite: JSON.stringify({ requirements: [], tests: [], environment: 'Sandbox', passThreshold: 1 }, null, 2),
   ReleaseCandidate: JSON.stringify({ releaseVersion: '1.0.0', requirements: [], testSuiteKeys: [], rollbackArtifactVersion: null }, null, 2),
 };
@@ -29,9 +29,10 @@ interface Props {
   title: string;
   subtitle: string;
   types: GovernedArtifactType[];
+  beforeContent?: ReactNode;
 }
 
-export default function ArtifactStudioPage({ title, subtitle, types }: Props) {
+export default function ArtifactStudioPage({ title, subtitle, types, beforeContent }: Props) {
   const client = useQueryClient();
   const [search, setSearch] = useState('');
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -114,6 +115,8 @@ export default function ArtifactStudioPage({ title, subtitle, types }: Props) {
         </Box>
         <Button variant="contained" startIcon={<Add />} onClick={startCreate}>Create governed artifact</Button>
       </Stack>
+
+      {beforeContent}
 
       {(list.isError || create.isError || createVersion.isError || transition.isError) && (
         <Alert severity="error" sx={{ mb: 2 }}>The governance request could not be completed. Review the definition, permissions, and current version.</Alert>
