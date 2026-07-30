@@ -237,6 +237,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
           { key: 'platform-integrations', label: 'Integration Hub', path: '/admin/platform/integrations', moduleName: 'Users' },
           { key: 'platform-releases', label: 'Test & Release', path: '/admin/platform/releases', moduleName: 'Users' },
           { key: 'platform-archive', label: 'Document Archive', path: '/admin/platform/archive', moduleName: 'Users' },
+          { key: 'platform-quality', label: 'Quality Analytics', path: '/admin/platform/quality', moduleName: 'Users' },
         ],
       },
       {

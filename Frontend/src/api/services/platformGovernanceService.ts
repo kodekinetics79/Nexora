@@ -1,7 +1,7 @@
 import axiosInstance from '../axiosInstance';
 
 export type GovernedArtifactType = 'CommercialTaxonomy' | 'DocumentSkill' | 'Model' | 'Rule' |
-  'Dataset' | 'Connector' | 'TestSuite' | 'ReleaseCandidate' | 'ArchivePolicy';
+  'Dataset' | 'Connector' | 'TestSuite' | 'ReleaseCandidate' | 'ArchivePolicy' | 'QualityMetricSet';
 export type GovernedLifecycleStatus = 'Draft' | 'Test' | 'Production' | 'Archived';
 export type HumanActionStatus = 'Open' | 'InReview' | 'Escalated' | 'Completed' | 'Rejected';
 export type HumanActionPriority = 'Low' | 'Medium' | 'High' | 'Critical';
@@ -125,6 +125,22 @@ export interface ArchiveDocumentItem {
 export interface ArchiveSearchResult {
   items: ArchiveDocumentItem[]; page: number; pageSize: number; total: number;
   searchScope: string; definitionVersion: string;
+}
+
+export interface QualityMetric {
+  key: string; label: string; value?: number | null; unit: string; numerator: number;
+  denominator: number; definition: string; evidenceStatus: string; drilldownKey: string;
+}
+export interface QualityAnalyticsView {
+  from: string; to: string; metrics: QualityMetric[];
+  exceptionCauses: Array<{ category: string; code: string; count: number }>;
+  records: Array<{ occurrenceId: number; fileName: string; ingestedOn: string; intakeStatus: string;
+    processingStatus: string; processingPath: string; humanReview: boolean;
+    localProcessing: boolean; externalProcessing: boolean; processingReused: boolean;
+    actualCost: number; costStatus: string }>;
+  recommendations: Array<{ priority: string; title: string; recommendation: string;
+    evidence: string; drilldownKey: string }>;
+  definitionVersion: string; accuracyLimitation: string;
 }
 
 export interface GovernedArtifactSummary {
@@ -270,6 +286,11 @@ export const platformGovernanceService = {
       `/api/platform-governance/archive/${item.occurrenceId}/govern`,
       { expectedVersion: item.governanceVersion, action, reason },
       { headers: { 'Idempotency-Key': key() } });
+    return data;
+  },
+  getQualityAnalytics: async (windowDays: number, drilldown?: string) => {
+    const { data } = await axiosInstance.get<QualityAnalyticsView>('/api/platform-governance/quality',
+      { params: { windowDays, drilldown } });
     return data;
   },
 };

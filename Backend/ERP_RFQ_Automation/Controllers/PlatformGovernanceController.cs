@@ -14,7 +14,8 @@ public sealed class PlatformGovernanceController(
     HumanActionService actions,
     AiTrustCenterService aiTrust,
     ReleaseSimulationService simulations,
-    CommercialDocumentArchiveService archive) : ControllerBase
+    CommercialDocumentArchiveService archive,
+    QualityAnalyticsService quality) : ControllerBase
 {
     [HttpGet("artifacts")]
     [RequireModulePermission("Users", PermissionAction.View)]
@@ -136,6 +137,12 @@ public sealed class PlatformGovernanceController(
         [FromBody] ArchiveGovernanceCommand command, CancellationToken ct) =>
         Execute(() => archive.GovernAsync(TenantId(), ActorUserId(), occurrenceId,
             IdempotencyKey(), command, ct));
+
+    [HttpGet("quality")]
+    [RequireModulePermission("Users", PermissionAction.View)]
+    public Task<QualityAnalyticsView> GetQualityAnalytics([FromQuery] int windowDays = 30,
+        [FromQuery] string? drilldown = null, CancellationToken ct = default) =>
+        quality.GetAsync(TenantId(), windowDays, drilldown, ct);
 
     private async Task<ActionResult<T>> Execute<T>(Func<Task<T>> operation)
     {

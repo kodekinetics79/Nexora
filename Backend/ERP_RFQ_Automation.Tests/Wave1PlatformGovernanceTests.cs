@@ -1,11 +1,28 @@
 using ERP_RFQ_Automation.PlatformGovernance;
 using ERP_RFQ_Automation.Tests.Support;
+using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.Controllers;
 using Microsoft.EntityFrameworkCore;
+using System.Reflection;
 
 namespace ERP_RFQ_Automation.Tests;
 
 public sealed class Wave1PlatformGovernanceTests
 {
+    [Theory]
+    [InlineData(nameof(PlatformGovernanceController.SearchArchive), PermissionAction.View)]
+    [InlineData(nameof(PlatformGovernanceController.GovernArchiveDocument), PermissionAction.Edit)]
+    [InlineData(nameof(PlatformGovernanceController.GetQualityAnalytics), PermissionAction.View)]
+    public void Archive_and_quality_http_routes_require_tenant_admin_permission(string actionName,
+        PermissionAction expectedAction)
+    {
+        var method = typeof(PlatformGovernanceController).GetMethod(actionName)
+            ?? throw new InvalidOperationException($"Missing action {actionName}.");
+        var permission = Assert.Single(method.GetCustomAttributes<RequireModulePermissionAttribute>());
+        Assert.Equal("Users", permission.ModuleName);
+        Assert.Equal(expectedAction, permission.Action);
+    }
+
     [Fact]
     public async Task Archive_policy_is_versioned_tested_published_and_rollback_ready()
     {
@@ -26,6 +43,27 @@ public sealed class Wave1PlatformGovernanceTests
 
         Assert.Equal(GovernedLifecycleStatus.Production, published.Artifact.Status);
         Assert.Equal(1, published.Artifact.ProductionVersionNumber);
+    }
+
+    [Fact]
+    public async Task Quality_metric_definition_requires_explicit_reconciliation_thresholds()
+    {
+        using var database = new TestDb();
+        await using var context = database.ContextFor(60_992);
+        Seed.BusinessUnit(context, 60_992);
+        await context.SaveChangesAsync();
+        var service = new PlatformGovernanceService(context);
+        var created = await service.CreateAsync(60_992, 9, "quality-metrics-create",
+            new(GovernedArtifactType.QualityMetricSet, "document-quality", "Document quality",
+                "Reconciled quality cohort definitions",
+                "{\"windowDays\":30,\"minimumSampleSize\":30,\"reviewRateWarningPercent\":20,\"externalDependencyCeilingPercent\":10,\"turnaroundP95WarningMinutes\":15}",
+                "Initial measured definitions"), default);
+
+        Assert.Equal(GovernedLifecycleStatus.Draft, created.Artifact.Status);
+        await Assert.ThrowsAsync<PlatformGovernanceValidationException>(() => service.CreateAsync(
+            60_992, 9, "quality-metrics-invalid", new(GovernedArtifactType.QualityMetricSet,
+                "invalid-quality", "Invalid quality", "Missing denominators", "{\"windowDays\":30}",
+                "Invalid"), default));
     }
 
     [Fact]

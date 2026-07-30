@@ -13,7 +13,8 @@ public enum GovernedArtifactType
     Connector,
     TestSuite,
     ReleaseCandidate,
-    ArchivePolicy
+    ArchivePolicy,
+    QualityMetricSet
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]

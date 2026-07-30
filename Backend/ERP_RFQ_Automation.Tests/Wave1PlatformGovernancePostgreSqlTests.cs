@@ -11,6 +11,45 @@ public sealed class Wave1PlatformGovernancePostgreSqlTests(PostgreSqlTestDatabas
 {
     [Fact]
     [Trait("Category", "PostgreSQL")]
+    public async Task Quality_analytics_reconciles_tenant_records_and_discloses_missing_accuracy_evidence()
+    {
+        const long tenantA = 60_971;
+        const long tenantB = 60_972;
+        await using (var seed = database.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(seed, tenantA);
+            Seed.EnsureBusinessUnit(seed, tenantB);
+            await seed.SaveChangesAsync();
+        }
+        await using (var context = database.ContextFor(tenantA))
+        {
+            var corpus = DocumentCorpus.Create(tenantA, Guid.NewGuid(), CorpusSourceType.Api);
+            context.Add(corpus);
+            await context.SaveChangesAsync();
+            var document = SourceDocument.Create(tenantA, corpus.Id, new string('b', 64),
+                "quality-rfq.pdf", "application/pdf", "evidence", "tenant-a/quality-rfq.pdf", "v1", 1024);
+            context.Add(document);
+            await context.SaveChangesAsync();
+            context.Add(SourceDocumentOccurrence.Create(tenantA, document.Id, corpus.Id,
+                "quality-occurrence", "{\"source\":\"test\"}"));
+            await context.SaveChangesAsync();
+
+            var view = await new QualityAnalyticsService(context).GetAsync(tenantA, 30, null, default);
+            var reuse = Assert.Single(view.Metrics, x => x.Key == "correction-reuse");
+            var fieldAccuracy = Assert.Single(view.Metrics, x => x.Key == "field-validation");
+            Assert.Equal(1, reuse.Denominator);
+            Assert.Equal(0m, reuse.Value);
+            Assert.Null(fieldAccuracy.Value);
+            Assert.Equal("InsufficientEvidence", fieldAccuracy.EvidenceStatus);
+            Assert.Contains("independently labeled", view.AccuracyLimitation);
+        }
+        await using var tenantBContext = database.ContextFor(tenantB);
+        var tenantBView = await new QualityAnalyticsService(tenantBContext).GetAsync(tenantB, 30, null, default);
+        Assert.DoesNotContain(tenantBView.Records, x => x.FileName == "quality-rfq.pdf");
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
     public async Task Archive_search_and_legal_hold_are_tenant_safe_audited_and_idempotent()
     {
         const long tenantA = 60_981;

@@ -21,6 +21,7 @@ const definitions: Record<GovernedArtifactType, string> = {
   TestSuite: JSON.stringify({ requirements: [], tests: [{ name: 'Contract expectation', actual: true, expected: true }], environment: 'Sandbox', passThreshold: 1 }, null, 2),
   ReleaseCandidate: JSON.stringify({ releaseVersion: '1.0.0', requirements: [], testSuiteKeys: [], rollbackArtifactVersion: null }, null, 2),
   ArchivePolicy: JSON.stringify({ retentionDays: 2555, legalHoldEnabled: true, exportApprovalRequired: true, deletionApprovalRequired: true, evidenceAccessAuditRequired: true }, null, 2),
+  QualityMetricSet: JSON.stringify({ windowDays: 30, minimumSampleSize: 30, reviewRateWarningPercent: 20, externalDependencyCeilingPercent: 10, turnaroundP95WarningMinutes: 15 }, null, 2),
 };
 
 const statusColor = (status: string): 'default' | 'info' | 'success' | 'warning' =>
