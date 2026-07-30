@@ -232,6 +232,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
         activePrefixes: ['/admin/platform/'],
         children: [
           { key: 'platform-taxonomy', label: 'Taxonomy & Skills', path: '/admin/platform/taxonomy', moduleName: 'Users' },
+          { key: 'platform-ai-trust', label: 'AI Trust', path: '/admin/platform/ai-trust', moduleName: 'Users' },
         ],
       },
       {

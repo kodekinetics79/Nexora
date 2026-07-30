@@ -47,6 +47,17 @@ public sealed class AiProcessingPolicy
     public decimal? ExternalOutputCostPerMillionTokens { get; set; }
     public string? ExternalCostCurrency { get; set; }
     public string? ExternalPricingVersion { get; set; }
+    public decimal ExternalDependencyCeilingPercent { get; set; } = 10m;
+    public bool RedactionRequired { get; set; } = true;
+    public string AllowedDataClassifications { get; set; } = "Public,Internal";
+    public string EgressPolicy { get; set; } = "RedactedFieldsOnly";
+    public string DataResidency { get; set; } = "TenantApprovedRegion";
+    public int RetentionDays { get; set; } = 30;
+    public bool InputOutputAuditAllowed { get; set; }
+    public bool PrivacyReviewRequired { get; set; } = true;
+    public decimal? LocalComputeCostPerHour { get; set; }
+    public decimal? OcrCostPerPage { get; set; }
+    public string? LocalCostCurrency { get; set; }
     public long Version { get; set; } = 1;
     public DateTime UpdatedOn { get; set; }
     public string UpdatedBy { get; set; } = null!;

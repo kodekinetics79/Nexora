@@ -24,6 +24,13 @@ public partial class ErpRfqAutomationContext
             entity.Property(e => e.ExternalOutputCostPerMillionTokens).HasPrecision(18, 6);
             entity.Property(e => e.ExternalCostCurrency).HasMaxLength(3);
             entity.Property(e => e.ExternalPricingVersion).HasMaxLength(100);
+            entity.Property(e => e.ExternalDependencyCeilingPercent).HasPrecision(5, 2);
+            entity.Property(e => e.AllowedDataClassifications).HasMaxLength(300).IsRequired();
+            entity.Property(e => e.EgressPolicy).HasMaxLength(100).IsRequired();
+            entity.Property(e => e.DataResidency).HasMaxLength(100).IsRequired();
+            entity.Property(e => e.LocalComputeCostPerHour).HasPrecision(18, 6);
+            entity.Property(e => e.OcrCostPerPage).HasPrecision(18, 6);
+            entity.Property(e => e.LocalCostCurrency).HasMaxLength(3);
             entity.Property(e => e.Version).HasDefaultValue(1L).IsConcurrencyToken();
             entity.Property(e => e.UpdatedBy).HasMaxLength(255).IsRequired();
             entity.HasOne<BusinessUnit>().WithOne()

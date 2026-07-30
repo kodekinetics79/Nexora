@@ -11,7 +11,8 @@ namespace ERP_RFQ_Automation.Controllers;
 [Route("api/platform-governance")]
 public sealed class PlatformGovernanceController(
     PlatformGovernanceService artifacts,
-    HumanActionService actions) : ControllerBase
+    HumanActionService actions,
+    AiTrustCenterService aiTrust) : ControllerBase
 {
     [HttpGet("artifacts")]
     [RequireModulePermission("Users", PermissionAction.View)]
@@ -80,6 +81,22 @@ public sealed class PlatformGovernanceController(
         [FromBody] BulkTransitionHumanActionCommand command, CancellationToken ct) =>
         Execute(() => actions.BulkTransitionAsync(TenantId(), ActorUserId(),
             IdempotencyKey(), command, ct));
+
+    [HttpGet("ai-trust")]
+    [RequireModulePermission("Users", PermissionAction.View)]
+    public Task<AiTrustCenterView> GetAiTrust(CancellationToken ct) => aiTrust.GetAsync(TenantId(), ct);
+
+    [HttpPut("ai-trust/policy")]
+    [RequireModulePermission("Users", PermissionAction.Edit)]
+    public Task<ActionResult<AiTrustPolicyMutationResult>> UpdateAiTrustPolicy(
+        [FromBody] UpdateAiTrustPolicyCommand command, CancellationToken ct) =>
+        Execute(() => aiTrust.UpdateAsync(TenantId(), ActorUserId(), IdempotencyKey(), command, ct));
+
+    [HttpPost("ai-trust/policy/rollback")]
+    [RequireModulePermission("Users", PermissionAction.Edit)]
+    public Task<ActionResult<AiTrustPolicyMutationResult>> RollbackAiTrustPolicy(
+        [FromBody] RollbackAiTrustPolicyCommand command, CancellationToken ct) =>
+        Execute(() => aiTrust.RollbackAsync(TenantId(), ActorUserId(), IdempotencyKey(), command, ct));
 
     private async Task<ActionResult<T>> Execute<T>(Func<Task<T>> operation)
     {

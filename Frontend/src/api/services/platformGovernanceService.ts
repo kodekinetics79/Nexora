@@ -40,6 +40,54 @@ export interface HumanActionDetail {
   }>;
 }
 
+export interface AiTrustPolicy {
+  isEnabled: boolean;
+  externalProcessingAllowed: boolean;
+  allowedPurposes: string;
+  allowedProvider?: string | null;
+  allowedModel?: string | null;
+  monthlySoftTokenLimit?: number | null;
+  monthlyHardTokenLimit?: number | null;
+  maxTokensPerDocument?: number | null;
+  externalInputCostPerMillionTokens?: number | null;
+  externalOutputCostPerMillionTokens?: number | null;
+  externalCostCurrency?: string | null;
+  externalPricingVersion?: string | null;
+  externalDependencyCeilingPercent: number;
+  redactionRequired: boolean;
+  allowedDataClassifications: string;
+  egressPolicy: string;
+  dataResidency: string;
+  retentionDays: number;
+  inputOutputAuditAllowed: boolean;
+  privacyReviewRequired: boolean;
+  localComputeCostPerHour?: number | null;
+  ocrCostPerPage?: number | null;
+  localCostCurrency?: string | null;
+  version: number;
+  updatedOn: string;
+  updatedBy: string;
+}
+
+export interface AiTrustCenterView {
+  policy: AiTrustPolicy;
+  usage: {
+    requests: number; localRequests: number; externalRequests: number;
+    externalDependencyPercent: number; dependencyCeilingBreached: boolean;
+    deniedRequests: number; failedRequests: number; injectionDetections: number;
+    inputTokens: number; outputTokens: number; reservedTokens: number; settledTokens: number;
+    softTokenLimit?: number | null; hardTokenLimit?: number | null;
+    estimatedExternalCost: Record<string, number>;
+  };
+  requests: Array<{
+    id: string; operation: string; provider: string; providerClass: 'Unknown' | 'External' | 'Local';
+    model: string; status: string; promptVersion: string; inputTokens: number; outputTokens: number;
+    estimatedCost?: number | null; costCurrency?: string | null; costStatus: string;
+    injectionDetected: boolean; errorCode?: string | null; createdOn: string; completedOn?: string | null;
+  }>;
+  audit: Array<{ id: number; action: string; reason: string; actorUserId: number; occurredOn: string }>;
+}
+
 export interface GovernedArtifactSummary {
   id: number;
   artifactType: GovernedArtifactType;
@@ -145,6 +193,22 @@ export const platformGovernanceService = {
       action: targetStatus === 'Completed' ? 'APPROVE' : targetStatus.toUpperCase(),
       comment,
     }, { headers: { 'Idempotency-Key': key() } });
+    return data;
+  },
+  getAiTrust: async () => {
+    const { data } = await axiosInstance.get<AiTrustCenterView>('/api/platform-governance/ai-trust');
+    return data;
+  },
+  updateAiTrustPolicy: async (policy: AiTrustPolicy, reason: string) => {
+    const { data } = await axiosInstance.put('/api/platform-governance/ai-trust/policy',
+      { ...policy, expectedVersion: policy.version, reason },
+      { headers: { 'Idempotency-Key': key() } });
+    return data;
+  },
+  rollbackAiTrustPolicy: async (policy: AiTrustPolicy, auditEventId: number, reason: string) => {
+    const { data } = await axiosInstance.post('/api/platform-governance/ai-trust/policy/rollback',
+      { expectedVersion: policy.version, auditEventId, reason },
+      { headers: { 'Idempotency-Key': key() } });
     return data;
   },
 };

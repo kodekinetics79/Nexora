@@ -93,6 +93,7 @@ const RfqPricingPage = lazy(() => import('./pages/Intelligence/RfqPricingPage'))
 const CommercialMemoryPage = lazy(() => import('./pages/Intelligence/CommercialMemoryPage'));
 const TaxonomySkillStudioPage = lazy(() => import('./pages/PlatformGovernance/TaxonomySkillStudioPage'));
 const HumanActionCenterPage = lazy(() => import('./pages/PlatformGovernance/HumanActionCenterPage'));
+const AiTrustCenterPage = lazy(() => import('./pages/PlatformGovernance/AiTrustCenterPage'));
 
 // Service RFQ → BOQ engine — drafted bills of quantities for service work.
 const BoqListPage = lazy(() => import('./pages/Boq/BoqListPage'));
@@ -138,6 +139,7 @@ function App() {
       <Route path="/executive/today" element={<MainLayout><PermissionGuard moduleName="Dashboard" redirect><DashboardPage /></PermissionGuard></MainLayout>} />
       <Route path="/admin/operations" element={<MainLayout><PermissionGuard moduleName="Users" redirect><TenantAdminOperationsPage /></PermissionGuard></MainLayout>} />
       <Route path="/admin/platform/taxonomy" element={<MainLayout><PermissionGuard moduleName="Users" redirect><TaxonomySkillStudioPage /></PermissionGuard></MainLayout>} />
+      <Route path="/admin/platform/ai-trust" element={<MainLayout><PermissionGuard moduleName="Users" redirect><AiTrustCenterPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/actions" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><HumanActionCenterPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/team" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><TeamOverviewPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/reps" element={<MainLayout><PermissionGuard moduleName="Users" redirect><RepDirectoryPage /></PermissionGuard></MainLayout>} />

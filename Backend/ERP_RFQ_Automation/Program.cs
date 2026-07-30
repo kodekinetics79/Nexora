@@ -455,6 +455,7 @@ builder.Services.AddSingleton<ERP_RFQ_Automation.Sla.ISlaNotifications, ERP_RFQ_
 builder.Services.AddHostedService<ERP_RFQ_Automation.Sla.SlaSweepWorker>();
 builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.PlatformGovernanceService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.HumanActionService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.AiTrustCenterService>();
 
 var app = builder.Build();
 
