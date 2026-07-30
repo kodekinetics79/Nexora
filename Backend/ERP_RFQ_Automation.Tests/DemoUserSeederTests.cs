@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.Infrastructure;
+using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.Platform.Models;
@@ -119,6 +120,27 @@ public sealed class DemoUserSeederTests : IDisposable
             Assert.Equal(userHashAfterFirstRun, user.PasswordHash);
             Assert.Equal(ownerHashAfterFirstRun, owner.PasswordHash);
         }
+    }
+
+    [Fact]
+    public async Task Seeder_provisions_one_fail_closed_ai_policy()
+    {
+        var config = Config(new()
+        {
+            ["DemoUser:Enabled"] = "true",
+            ["DemoUser:Password"] = "FirstRunSecret!1",
+            ["PlatformOwner:Password"] = "FirstRunSecret!1",
+        });
+
+        await DemoUserSeeder.EnsureAsync(BuildProvider(), config, new FakeEnv());
+        await DemoUserSeeder.EnsureAsync(BuildProvider(), config, new FakeEnv());
+
+        await using var db = NewContext();
+        var policy = await db.Set<AiProcessingPolicy>().SingleAsync();
+        Assert.False(policy.ExternalProcessingAllowed);
+        Assert.True(policy.RedactionRequired);
+        Assert.True(policy.PrivacyReviewRequired);
+        Assert.Equal(10m, policy.ExternalDependencyCeilingPercent);
     }
 
     public void Dispose() => _connection.Dispose();

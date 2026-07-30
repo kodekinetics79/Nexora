@@ -132,6 +132,9 @@ public class TenantsController : ControllerBase
                 _context.SetupMasters.AddRange(LifecycleStatusCatalog.CreateFor(bu, actor));
                 await _context.SaveChangesAsync(ct);
 
+                _context.AiProcessingPolicies.Add(
+                    AiProcessingPolicy.CreateSecureDefault(bu.Id, actor, DateTime.UtcNow));
+
                 tenant.PrimaryBusinessUnitId = bu.Id;
                 tenant.Status = TenantStatus.Active;
                 tenant.ModifiedBy = actor;

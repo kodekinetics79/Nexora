@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Platform.Models;
 using Microsoft.EntityFrameworkCore;
@@ -63,6 +64,13 @@ public static class DemoUserSeeder
             businessUnit.IsActive = true;
             businessUnit.ModifiedBy = "system:demo-seed";
             businessUnit.ModifiedOn = now;
+            await db.SaveChangesAsync();
+        }
+
+        if (!await db.AiProcessingPolicies.AnyAsync(p => p.BusinessUnitId == businessUnit.Id))
+        {
+            db.AiProcessingPolicies.Add(
+                AiProcessingPolicy.CreateSecureDefault(businessUnit.Id, "system:demo-seed", now));
             await db.SaveChangesAsync();
         }
 

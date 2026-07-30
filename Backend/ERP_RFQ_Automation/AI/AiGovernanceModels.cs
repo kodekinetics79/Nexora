@@ -61,6 +61,25 @@ public sealed class AiProcessingPolicy
     public long Version { get; set; } = 1;
     public DateTime UpdatedOn { get; set; }
     public string UpdatedBy { get; set; } = null!;
+
+    public static AiProcessingPolicy CreateSecureDefault(long businessUnitId, string actor, DateTime now) => new()
+    {
+        BusinessUnitId = businessUnitId,
+        IsEnabled = true,
+        ExternalProcessingAllowed = false,
+        AllowedPurposes = "RfqExtraction,BoqDraft",
+        ExternalDependencyCeilingPercent = 10m,
+        RedactionRequired = true,
+        AllowedDataClassifications = "Public,Internal",
+        EgressPolicy = "RedactedFieldsOnly",
+        DataResidency = "TenantApprovedRegion",
+        RetentionDays = 30,
+        InputOutputAuditAllowed = false,
+        PrivacyReviewRequired = true,
+        Version = 1,
+        UpdatedOn = now,
+        UpdatedBy = actor
+    };
 }
 
 public sealed class AiRequest

@@ -1,6 +1,7 @@
 using System.Data.Common;
 using System.Security.Claims;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.Platform.Auth;
 using ERP_RFQ_Automation.Platform.Controllers;
@@ -160,6 +161,13 @@ public class PlatformSecurityRegressionTests
             .AnyAsync(t => t.Slug == "stale-provisioning-state"));
         Assert.True(await verification.Set<Tenant>().IgnoreQueryFilters()
             .AnyAsync(t => t.Slug == "fresh-provisioning-tenant" && t.Status == TenantStatus.Active));
+        var tenant = await verification.Set<Tenant>().IgnoreQueryFilters()
+            .SingleAsync(t => t.Slug == "fresh-provisioning-tenant");
+        var policy = await verification.Set<AiProcessingPolicy>()
+            .SingleAsync(p => p.BusinessUnitId == tenant.PrimaryBusinessUnitId);
+        Assert.False(policy.ExternalProcessingAllowed);
+        Assert.True(policy.RedactionRequired);
+        Assert.True(policy.PrivacyReviewRequired);
         Assert.Equal("tenant.provision", (await verification.Set<PlatformAuditLog>().SingleAsync()).Action);
     }
 
