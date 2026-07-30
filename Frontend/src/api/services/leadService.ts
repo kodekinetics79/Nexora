@@ -267,6 +267,7 @@ export interface SecurityScanRetryResultDTO {
   queued: number;
   stillAwaiting: number;
   rejected: number;
+  sourceObjectUnavailable: number;
   items: Array<{
     sourceDocumentOccurrenceId: number;
     fileName: string;

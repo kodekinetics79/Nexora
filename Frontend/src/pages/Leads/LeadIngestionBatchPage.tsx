@@ -381,8 +381,8 @@ export default function LeadIngestionBatchPage() {
 
       <Box aria-live="polite" sx={{ mb: retryMutation.isSuccess || retryMutation.isError ? 2 : 0 }}>
         {retryMutation.isSuccess && (
-          <Alert severity={retryMutation.data.stillAwaiting > 0 ? 'warning' : 'success'}>
-            Retry complete: {retryMutation.data.queued} queued, {retryMutation.data.stillAwaiting} still awaiting security scan, {retryMutation.data.rejected} rejected.
+          <Alert severity={retryMutation.data.stillAwaiting > 0 || retryMutation.data.sourceObjectUnavailable > 0 ? 'warning' : 'success'}>
+            Retry complete: {retryMutation.data.queued} queued, {retryMutation.data.stillAwaiting} still awaiting security scan, {retryMutation.data.rejected} rejected, {retryMutation.data.sourceObjectUnavailable} source objects unavailable.
           </Alert>
         )}
         {retryMutation.isError && (

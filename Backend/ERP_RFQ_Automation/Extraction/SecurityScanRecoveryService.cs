@@ -19,6 +19,7 @@ public sealed record SecurityScanRetryResult(
     int Queued,
     int StillAwaiting,
     int Rejected,
+    int SourceObjectUnavailable,
     IReadOnlyList<SecurityScanRetryItem> Items);
 
 public interface ISecurityScanRecoveryService
@@ -36,15 +37,18 @@ public sealed class SecurityScanRecoveryService : ISecurityScanRecoveryService
     private readonly ErpRfqAutomationContext _db;
     private readonly IEvidenceObjectStorage _storage;
     private readonly IDocumentIngestion _ingestion;
+    private readonly ILogger<SecurityScanRecoveryService>? _log;
 
     public SecurityScanRecoveryService(
         ErpRfqAutomationContext db,
         IEvidenceObjectStorage storage,
-        IDocumentIngestion ingestion)
+        IDocumentIngestion ingestion,
+        ILogger<SecurityScanRecoveryService>? log = null)
     {
         _db = db;
         _storage = storage;
         _ingestion = ingestion;
+        _log = log;
     }
 
     public async Task<SecurityScanRetryResult> RetryBatchAsync(
@@ -80,13 +84,26 @@ public sealed class SecurityScanRecoveryService : ISecurityScanRecoveryService
             if (metadata is null)
             {
                 items.Add(new(candidate.Occurrence.Id, candidate.Source.OriginalFileName,
-                    "AwaitingSecurityScan", "invalid_quarantine_metadata", null));
+                    "SOURCE_OBJECT_UNAVAILABLE", "source_object_metadata_unavailable", null));
                 continue;
             }
 
-            await using var stored = await _storage.OpenVerifiedReadAsync(
-                metadata.StorageUri, candidate.Source.ContentHash, ct);
-            var bytes = await ReadBoundedAsync(stored, ct);
+            byte[] bytes;
+            try
+            {
+                await using var stored = await _storage.OpenVerifiedReadAsync(
+                    metadata.StorageUri, candidate.Source.ContentHash, ct);
+                bytes = await ReadBoundedAsync(stored, ct);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                _log?.LogWarning(exception,
+                    "Recovery source object is unavailable for occurrence {OccurrenceId} in batch {BatchId}.",
+                    candidate.Occurrence.Id, batchId);
+                items.Add(new(candidate.Occurrence.Id, metadata.FileName,
+                    "SOURCE_OBJECT_UNAVAILABLE", SourceObjectErrorCode(exception), null));
+                continue;
+            }
             try
             {
                 var ingested = await _ingestion.IngestAsync(
@@ -115,6 +132,7 @@ public sealed class SecurityScanRecoveryService : ISecurityScanRecoveryService
             items.Count(x => x.Status == "Queued"),
             items.Count(x => x.Status == "AwaitingSecurityScan"),
             items.Count(x => x.Status == "Rejected"),
+            items.Count(x => x.Status == "SOURCE_OBJECT_UNAVAILABLE"),
             items);
     }
 
@@ -177,6 +195,14 @@ public sealed class SecurityScanRecoveryService : ISecurityScanRecoveryService
         }
         return buffer.ToArray();
     }
+
+    private static string SourceObjectErrorCode(Exception exception) => exception switch
+    {
+        InvalidDataException when exception.Message.Contains("exceeds the recovery limit", StringComparison.Ordinal) =>
+            "source_object_exceeds_recovery_limit",
+        InvalidDataException => "source_object_integrity_failed",
+        _ => "source_object_unavailable"
+    };
 
     private sealed record RecoveryMetadata(
         string FileName,

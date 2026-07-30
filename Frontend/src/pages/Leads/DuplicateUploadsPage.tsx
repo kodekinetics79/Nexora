@@ -1,3 +1,4 @@
+import { useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -14,6 +15,7 @@ import {
   TableContainer,
   TableHead,
   TableRow,
+  TableSortLabel,
   Typography,
 } from '@mui/material';
 import { OpenInNew, Refresh } from '@mui/icons-material';
@@ -26,8 +28,12 @@ const bytes = (value: number): string => value >= 1024 * 1024
   ? `${(value / (1024 * 1024)).toFixed(2)} MB`
   : `${(value / 1024).toFixed(1)} KB`;
 
+type SortKey = 'ingestedAt' | 'fileName' | 'duplicateType' | 'securityStatus';
+
 export default function DuplicateUploadsPage() {
   const navigate = useNavigate();
+  const [sortKey, setSortKey] = useState<SortKey>('ingestedAt');
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
   const query = useQuery({
     queryKey: ['duplicate-uploads'],
     queryFn: leadService.getDuplicateUploads,
@@ -41,9 +47,30 @@ export default function DuplicateUploadsPage() {
     onSuccess: () => query.refetch(),
   });
 
+  const rows = useMemo(() => {
+    const direction = sortDirection === 'asc' ? 1 : -1;
+    return [...(query.data ?? [])].sort((left, right) => {
+      if (sortKey === 'ingestedAt')
+        return (new Date(left.ingestedAt).getTime() - new Date(right.ingestedAt).getTime()) * direction;
+      return left[sortKey].localeCompare(right[sortKey], undefined, { sensitivity: 'base' }) * direction;
+    });
+  }, [query.data, sortDirection, sortKey]);
+  const changeSort = (next: SortKey) => {
+    if (next === sortKey) setSortDirection((value) => value === 'asc' ? 'desc' : 'asc');
+    else {
+      setSortKey(next);
+      setSortDirection(next === 'ingestedAt' ? 'desc' : 'asc');
+    }
+  };
+  const sortableHeader = (label: string, key: SortKey) => (
+    <TableSortLabel active={sortKey === key} direction={sortKey === key ? sortDirection : 'asc'}
+      onClick={() => changeSort(key)}>
+      {label}
+    </TableSortLabel>
+  );
+
   if (query.isLoading) return <Box sx={{ p: 4, textAlign: 'center' }}><CircularProgress /></Box>;
   if (query.isError) return <Alert severity="error">Duplicate uploads could not be loaded.</Alert>;
-  const rows = query.data ?? [];
 
   return (
     <Box sx={{ maxWidth: 1600, mx: 'auto', p: { xs: 2, md: 3 } }}>
@@ -63,9 +90,9 @@ export default function DuplicateUploadsPage() {
         <Alert severity="error" sx={{ mb: 2 }}>The blocked files could not be retried.</Alert>
       )}
       {retryMutation.data && (
-        <Alert severity="success" sx={{ mb: 2 }}>
+        <Alert severity={retryMutation.data.stillAwaiting > 0 || retryMutation.data.sourceObjectUnavailable > 0 ? 'warning' : 'success'} sx={{ mb: 2 }}>
           Retry complete: {retryMutation.data.queued} queued, {retryMutation.data.stillAwaiting} awaiting scan,
-          {' '}{retryMutation.data.rejected} rejected.
+          {' '}{retryMutation.data.rejected} rejected, {retryMutation.data.sourceObjectUnavailable} source objects unavailable.
         </Alert>
       )}
 
@@ -76,10 +103,11 @@ export default function DuplicateUploadsPage() {
           <Table size="small" sx={{ minWidth: 1500 }}>
             <TableHead>
               <TableRow>
-                <TableCell>File and receipt</TableCell>
-                <TableCell>Duplicate type</TableCell>
+                <TableCell>{sortableHeader('File and receipt', 'fileName')}</TableCell>
+                <TableCell>{sortableHeader('Ingested', 'ingestedAt')}</TableCell>
+                <TableCell>{sortableHeader('Duplicate type', 'duplicateType')}</TableCell>
                 <TableCell>Original / canonical</TableCell>
-                <TableCell>Security</TableCell>
+                <TableCell>{sortableHeader('Security', 'securityStatus')}</TableCell>
                 <TableCell>Processing reuse</TableCell>
                 <TableCell>Resources consumed</TableCell>
                 <TableCell>Resources avoided</TableCell>
@@ -92,11 +120,10 @@ export default function DuplicateUploadsPage() {
                   <TableCell>
                     <Typography variant="body2" sx={{ fontWeight: 700 }}>{row.fileName}</Typography>
                     <Typography variant="caption" sx={{ display: 'block' }}>Occurrence #{row.occurrenceId}</Typography>
-                    <Typography variant="caption" sx={{ display: 'block' }}>
-                      {new Date(row.ingestedAt).toLocaleString()} | {row.source} | {row.uploadedBy}
-                    </Typography>
+                    <Typography variant="caption" sx={{ display: 'block' }}>{row.source} | {row.uploadedBy}</Typography>
                     <Typography variant="caption" color="text.secondary">Batch {row.uploadBatch}</Typography>
                   </TableCell>
+                  <TableCell>{new Date(row.ingestedAt).toLocaleString()}</TableCell>
                   <TableCell><Chip size="small" label={readable(row.duplicateType)} color="info" variant="outlined" /></TableCell>
                   <TableCell>
                     <Typography variant="body2">Original #{row.originalOccurrenceId ?? 'Pending'}</Typography>

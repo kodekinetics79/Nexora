@@ -329,6 +329,61 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
+    public async Task ScannerRecovery_MissingSourceObjectIsClassifiedWithoutCreatingWork()
+    {
+        var tenantId = NewTenantId();
+        var bytes = ValidCsv();
+        var root = NewStorageRoot();
+        try
+        {
+            await using var context = _database.ContextFor(null);
+            SeedTenant(context, tenantId);
+            await context.SaveChangesAsync();
+            var queue = NewQueue(context);
+            var writableStorage = new LocalEvidenceObjectStorage(new LocalFileStorage(root, root));
+            var unavailableInspection = new FileInspectionResult(
+                FileInspectionStatus.Quarantined, "text/csv", bytes.Length,
+                "Scanner unavailable.", "clamav", null)
+            {
+                MalwareStatus = MalwareScanStatus.Unavailable,
+                IsRetryable = true,
+                ErrorCode = "security_scanner_unavailable"
+            };
+            var blockedIngestion = new DocumentIngestionService(queue, writableStorage,
+                new FixedInspectionService(unavailableInspection), context,
+                new NoopLogger<DocumentIngestionService>());
+            var blocked = await Assert.ThrowsAsync<DocumentInspectionException>(() => blockedIngestion.IngestAsync(
+                bytes, "missing-source.csv", tenantId, ExtractionSourceType.ManualUpload,
+                metadata: new ExtractionJobMetadata { SourceOccurrenceId = "missing-source" }));
+
+            context.ChangeTracker.Clear();
+            var cleanIngestion = new DocumentIngestionService(queue, writableStorage,
+                new FixedInspectionService(ClearedInspection()), context,
+                new NoopLogger<DocumentIngestionService>());
+            var result = await new SecurityScanRecoveryService(
+                    context, new UnavailableReadEvidenceStorage(), cleanIngestion)
+                .RetryBatchAsync(tenantId, blocked.BatchId!.Value);
+
+            Assert.Equal(1, result.Eligible);
+            Assert.Equal(1, result.SourceObjectUnavailable);
+            var item = Assert.Single(result.Items);
+            Assert.Equal("SOURCE_OBJECT_UNAVAILABLE", item.Status);
+            Assert.Equal("source_object_unavailable", item.ErrorCode);
+            Assert.Null(item.ExtractionJobId);
+            Assert.Empty(await context.Set<ExtractionJob>()
+                .Where(x => x.BusinessUnitId == tenantId).ToListAsync());
+            Assert.Equal(IntakeOccurrenceStatus.AwaitingSecurityScan,
+                (await context.Set<SourceDocumentOccurrence>()
+                    .SingleAsync(x => x.BusinessUnitId == tenantId)).IntakeStatus);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
     public async Task UnstructuredSuccess_ReconcilesQueueSourceCorpusAndExtractionRun()
     {
         var tenantId = NewTenantId();
@@ -999,6 +1054,18 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
                 _ => MalwareScanResult.Error("test-clamav", "scanner error")
             });
         }
+    }
+
+    private sealed class UnavailableReadEvidenceStorage : IEvidenceObjectStorage
+    {
+        public bool IsDurable => true;
+        public Task ProbeAsync(CancellationToken ct = default) => Task.CompletedTask;
+        public Task<EvidenceObject> WriteImmutableAsync(long businessUnitId, string zone, string sha256,
+            string extension, ReadOnlyMemory<byte> content, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<Stream> OpenVerifiedReadAsync(string storageUri, string expectedSha256,
+            CancellationToken ct = default) =>
+            throw new FileNotFoundException("Authorized test object is unavailable.");
     }
 
     private sealed class CompletionRejectingQueue : IExtractionQueue

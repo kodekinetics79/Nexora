@@ -30,7 +30,7 @@ test('scanner outage remains recoverable and retries the stored occurrence', asy
   await page.route(`**/api/LeadIngestion/batches/${batchId}/retry-blocked-files`, async (route) => {
     retried = true;
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
-      batchId, eligible: 1, queued: 1, stillAwaiting: 0, rejected: 0,
+      batchId, eligible: 1, queued: 1, stillAwaiting: 0, rejected: 0, sourceObjectUnavailable: 0,
       items: [{ sourceDocumentOccurrenceId: 901, fileName: 'customer-rfq.csv', status: 'Queued', extractionJobId: 902 }],
     }) });
   });
@@ -65,7 +65,7 @@ test('scanner outage remains recoverable and retries the stored occurrence', asy
   await expect(page.getByText(/Security Quarantined updated/)).toBeVisible();
 
   await page.getByRole('button', { name: 'Retry Blocked Files' }).click();
-  await expect(page.getByText('Retry complete: 1 queued, 0 still awaiting security scan, 0 rejected.')).toBeVisible();
+  await expect(page.getByText('Retry complete: 1 queued, 0 still awaiting security scan, 0 rejected, 0 source objects unavailable.')).toBeVisible();
   await expect(page.getByText(/Intake: Queued/)).toBeVisible();
   await expect(page.getByText(/Extraction Pending updated/)).toBeVisible();
 });

@@ -60,6 +60,7 @@ const DEFAULT_COLUMN_VISIBILITY: GridColumnVisibilityModel = {
   rfqno: true,
   buyer: true,
   recDate: true,
+  ingestedAtUtc: true,
   bidClosingDate: true,
   itemCount: true,
   leadSource: true,
@@ -75,6 +76,7 @@ const HIDEABLE_COLUMNS: ReadonlyArray<{ field: string; label: string }> = [
   { field: 'rfqno', label: 'RFQ #' },
   { field: 'buyer', label: 'Buyer' },
   { field: 'recDate', label: 'Received' },
+  { field: 'ingestedAtUtc', label: 'Nexora Ingestion Date' },
   { field: 'bidClosingDate', label: 'Deadline' },
   { field: 'itemCount', label: 'Items' },
   { field: 'leadSource', label: 'Source' },
@@ -382,6 +384,23 @@ const LeadsPage: React.FC = () => {
           <Typography variant="body2" sx={{ fontSize: '0.8rem', color: label === '—' ? 'text.disabled' : 'text.primary' }}>
             {label}
           </Typography>
+        );
+      },
+    },
+    {
+      field: 'ingestedAtUtc',
+      headerName: 'Ingested',
+      width: 150,
+      valueGetter: (_value, row) => row.ingestedAtUtc || row.createdDate || '',
+      renderCell: (p) => {
+        const value = p.row.ingestedAtUtc || p.row.createdDate;
+        const label = formatDateSafe(value);
+        return (
+          <Tooltip title={value ? new Date(value).toLocaleString() : 'Not recorded'}>
+            <Typography variant="body2" sx={{ fontSize: '0.8rem', color: label === '—' ? 'text.disabled' : 'text.primary' }}>
+              {label}
+            </Typography>
+          </Tooltip>
         );
       },
     },

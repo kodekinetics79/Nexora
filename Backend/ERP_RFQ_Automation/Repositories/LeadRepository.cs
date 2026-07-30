@@ -153,6 +153,7 @@ namespace ERP_RFQ_Automation.Repositories
                 Aiconfidence = l.Aiconfidence,
                 CreatedBy = l.CreatedBy,
                 CreatedDate = l.CreatedDate,
+                IngestedAtUtc = l.IngestedAtUtc,
                 BusinessUnitId = l.BusinessUnitId,
                 BusinessUnitName = l.BusinessUnit?.BusinessUnitName,
                 EmailIngestsId = l.EmailIngestsId,
