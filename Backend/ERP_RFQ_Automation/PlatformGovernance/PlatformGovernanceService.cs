@@ -160,6 +160,8 @@ public sealed class PlatformGovernanceService(ErpRfqAutomationContext db)
             case "PUBLISH":
                 if (artifact.Status != GovernedLifecycleStatus.Test)
                     throw new PlatformGovernanceConflictException("Only a tested version can be published.");
+                if (artifact.ArtifactType == GovernedArtifactType.ReleaseCandidate)
+                    await EnsureReleaseCandidateReadyAsync(tenantId, current.DefinitionJson, ct);
                 var prior = await db.GovernedArtifactVersions.Where(x => x.BusinessUnitId == tenantId
                     && x.GovernedArtifactId == artifactId && x.Status == GovernedLifecycleStatus.Production)
                     .ToListAsync(ct);
@@ -284,6 +286,9 @@ public sealed class PlatformGovernanceService(ErpRfqAutomationContext db)
                     "credentialReference", "actions", "eventTriggers", "webhooks", "polling",
                     "fieldMappings", "idempotency", "retryPolicy", "deadLetterPolicy",
                     "rateLimit", "health", "sandbox" },
+                GovernedArtifactType.TestSuite => new[] { "tests", "environment", "passThreshold" },
+                GovernedArtifactType.ReleaseCandidate => new[] { "requirements", "testSuiteKeys",
+                    "rollbackArtifactVersion" },
                 _ => Array.Empty<string>()
             };
             foreach (var property in additional)
@@ -318,6 +323,33 @@ public sealed class PlatformGovernanceService(ErpRfqAutomationContext db)
             if (property.Value.ValueKind == JsonValueKind.Array)
                 foreach (var child in property.Value.EnumerateArray())
                     if (child.ValueKind == JsonValueKind.Object) RejectEmbeddedSecrets(child);
+        }
+    }
+
+    private async Task EnsureReleaseCandidateReadyAsync(long tenantId, string definitionJson,
+        CancellationToken ct)
+    {
+        using var definition = JsonDocument.Parse(definitionJson);
+        var keys = definition.RootElement.GetProperty("testSuiteKeys").EnumerateArray()
+            .Where(x => x.ValueKind == JsonValueKind.String)
+            .Select(x => x.GetString()!.Trim().ToLowerInvariant()).Where(x => x.Length > 0)
+            .Distinct().ToArray();
+        if (keys.Length == 0)
+            throw new PlatformGovernanceConflictException("A release candidate requires at least one test suite.");
+        var suites = await db.GovernedArtifacts.AsNoTracking().Where(x => x.BusinessUnitId == tenantId
+            && x.ArtifactType == GovernedArtifactType.TestSuite && keys.Contains(x.ArtifactKey))
+            .ToListAsync(ct);
+        if (suites.Count != keys.Length || suites.Any(x => x.Status != GovernedLifecycleStatus.Production))
+            throw new PlatformGovernanceConflictException("Every referenced test suite must be published.");
+        foreach (var suite in suites)
+        {
+            var reference = $"{suite.Id}:v{suite.CurrentVersionNumber}";
+            var passed = await db.TenantGovernanceAuditEvents.AsNoTracking().AnyAsync(x =>
+                x.BusinessUnitId == tenantId && x.Area == "ReleaseCenter"
+                && x.AggregateReference == reference && x.Action == "SIMULATION_PASSED", ct);
+            if (!passed)
+                throw new PlatformGovernanceConflictException(
+                    $"Test suite '{suite.ArtifactKey}' has no passing result for its current version.");
         }
     }
 

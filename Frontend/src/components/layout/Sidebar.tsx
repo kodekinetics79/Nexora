@@ -235,6 +235,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
           { key: 'platform-ai-trust', label: 'AI Trust', path: '/admin/platform/ai-trust', moduleName: 'Users' },
           { key: 'platform-lifecycle', label: 'Model & Rule Lifecycle', path: '/admin/platform/lifecycle', moduleName: 'Users' },
           { key: 'platform-integrations', label: 'Integration Hub', path: '/admin/platform/integrations', moduleName: 'Users' },
+          { key: 'platform-releases', label: 'Test & Release', path: '/admin/platform/releases', moduleName: 'Users' },
         ],
       },
       {

@@ -7,7 +7,7 @@ import {
   Typography,
 } from '@mui/material';
 import {
-  Add, Archive, CheckCircleOutlined, EditNote, History, Publish, Restore, Science,
+  Add, Archive, CheckCircleOutlined, EditNote, History, PlayCircleOutlined, Publish, Restore, Science,
 } from '@mui/icons-material';
 import { platformGovernanceService, type GovernedArtifactSummary, type GovernedArtifactType } from '../../api/services/platformGovernanceService';
 
@@ -18,7 +18,7 @@ const definitions: Record<GovernedArtifactType, string> = {
   Rule: JSON.stringify({ condition: 'confidence < 0.85', outcome: 'HumanReview', evidenceRequired: true }, null, 2),
   Dataset: JSON.stringify({ purpose: 'Evaluation', scope: 'Tenant', retentionDays: 365, sourceReferences: [] }, null, 2),
   Connector: JSON.stringify({ connectorType: 'REST', contractVersion: '1.0', baseUrlReference: '', authMode: 'OAuth2', credentialReference: '', actions: [], eventTriggers: [], webhooks: [], polling: { enabled: false, minutes: 15 }, fieldMappings: [], idempotency: { required: true }, retryPolicy: { maxAttempts: 3, backoff: 'Exponential' }, deadLetterPolicy: { retentionDays: 30 }, rateLimit: { requestsPerMinute: 60 }, health: { freshnessMinutes: 30 }, sandbox: true }, null, 2),
-  TestSuite: JSON.stringify({ requirements: [], tests: [], environment: 'Sandbox', passThreshold: 1 }, null, 2),
+  TestSuite: JSON.stringify({ requirements: [], tests: [{ name: 'Contract expectation', actual: true, expected: true }], environment: 'Sandbox', passThreshold: 1 }, null, 2),
   ReleaseCandidate: JSON.stringify({ releaseVersion: '1.0.0', requirements: [], testSuiteKeys: [], rollbackArtifactVersion: null }, null, 2),
 };
 
@@ -88,6 +88,9 @@ export default function ArtifactStudioPage({ title, subtitle, types, beforeConte
       await refresh(input.artifact.id);
     },
   });
+  const simulate = useMutation({
+    mutationFn: (id: number) => platformGovernanceService.simulateTestSuite(id),
+  });
   const rows = useMemo(() => list.data ?? [], [list.data]);
   const selected = detail.data?.artifact;
 
@@ -118,9 +121,12 @@ export default function ArtifactStudioPage({ title, subtitle, types, beforeConte
 
       {beforeContent}
 
-      {(list.isError || create.isError || createVersion.isError || transition.isError) && (
+      {(list.isError || create.isError || createVersion.isError || transition.isError || simulate.isError) && (
         <Alert severity="error" sx={{ mb: 2 }}>The governance request could not be completed. Review the definition, permissions, and current version.</Alert>
       )}
+      {simulate.data && <Alert severity={simulate.data.succeeded ? 'success' : 'warning'} sx={{ mb: 2 }}>
+        Suite v{simulate.data.versionNumber}: {simulate.data.passed}/{simulate.data.total} tests passed ({Math.round(simulate.data.passRate * 100)}%).
+      </Alert>}
 
       <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
         <TextField size="small" label="Search name or key" value={search}
@@ -154,6 +160,7 @@ export default function ArtifactStudioPage({ title, subtitle, types, beforeConte
               <Box><Typography variant="h6" sx={{ fontWeight: 750 }}>{selected.name}</Typography><Typography variant="body2" color="text.secondary">{selected.description || 'No description'}</Typography></Box>
               <Stack direction="row" sx={{ gap: 1, flexWrap: 'wrap' }}>
                 {selected.status !== 'Archived' && <Button size="small" variant="outlined" startIcon={<EditNote />} onClick={startVersion}>Create version</Button>}
+                {selected.artifactType === 'TestSuite' && selected.status !== 'Archived' && <Button size="small" variant="outlined" startIcon={<PlayCircleOutlined />} disabled={simulate.isPending} onClick={() => simulate.mutate(selected.id)}>Run simulation</Button>}
                 {selected.status === 'Draft' && <Button size="small" variant="outlined" startIcon={<Science />} onClick={() => transition.mutate({ artifact: selected, action: 'TEST' })}>Send to test</Button>}
                 {selected.status === 'Test' && <Button size="small" variant="contained" startIcon={<Publish />} onClick={() => transition.mutate({ artifact: selected, action: 'PUBLISH' })}>Publish</Button>}
                 {selected.status !== 'Archived' && <Button size="small" color="inherit" startIcon={<Archive />} onClick={() => transition.mutate({ artifact: selected, action: 'ARCHIVE' })}>Archive</Button>}

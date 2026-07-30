@@ -99,6 +99,20 @@ export interface ConnectorSdkContract {
   secretRule: string;
 }
 
+export interface ReleaseSimulationResult {
+  testSuiteId: number;
+  versionNumber: number;
+  total: number;
+  passed: number;
+  failed: number;
+  passRate: number;
+  passThreshold: number;
+  succeeded: boolean;
+  tests: Array<{ name: string; passed: boolean; difference?: string | null }>;
+  completedOn: string;
+  idempotentReplay: boolean;
+}
+
 export interface GovernedArtifactSummary {
   id: number;
   artifactType: GovernedArtifactType;
@@ -224,6 +238,12 @@ export const platformGovernanceService = {
   },
   getConnectorSdk: async () => {
     const { data } = await axiosInstance.get<ConnectorSdkContract>('/api/platform-governance/connector-sdk');
+    return data;
+  },
+  simulateTestSuite: async (id: number) => {
+    const { data } = await axiosInstance.post<ReleaseSimulationResult>(
+      `/api/platform-governance/test-suites/${id}/simulate`, {},
+      { headers: { 'Idempotency-Key': key() } });
     return data;
   },
 };

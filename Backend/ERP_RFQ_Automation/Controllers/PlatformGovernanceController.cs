@@ -12,7 +12,8 @@ namespace ERP_RFQ_Automation.Controllers;
 public sealed class PlatformGovernanceController(
     PlatformGovernanceService artifacts,
     HumanActionService actions,
-    AiTrustCenterService aiTrust) : ControllerBase
+    AiTrustCenterService aiTrust,
+    ReleaseSimulationService simulations) : ControllerBase
 {
     [HttpGet("artifacts")]
     [RequireModulePermission("Users", PermissionAction.View)]
@@ -116,6 +117,12 @@ public sealed class PlatformGovernanceController(
             "Explicit replay", "Rate-limit compliance", "Immutable lifecycle audit"],
         "{eventId,tenantReference,eventType,contractVersion,occurredOn,payloadHash,payload}",
         "Persist secret or certificate references only; credentials are resolved from approved runtime configuration."));
+
+    [HttpPost("test-suites/{testSuiteId:long}/simulate")]
+    [RequireModulePermission("Users", PermissionAction.Edit)]
+    public Task<ActionResult<ReleaseSimulationResult>> SimulateTestSuite(long testSuiteId,
+        CancellationToken ct) => Execute(() => simulations.RunAsync(TenantId(), ActorUserId(),
+            testSuiteId, IdempotencyKey(), ct));
 
     private async Task<ActionResult<T>> Execute<T>(Func<Task<T>> operation)
     {
