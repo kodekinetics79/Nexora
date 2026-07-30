@@ -12,8 +12,23 @@ public sealed class HumanActionService(ErpRfqAutomationContext db)
         PlatformGovernanceService.EnsureTenant(tenantId);
         var query = db.HumanActionItems.AsNoTracking().Where(x => x.BusinessUnitId == tenantId);
         if (status.HasValue) query = query.Where(x => x.Status == status);
-        return await query.OrderByDescending(x => x.Priority).ThenBy(x => x.DueOn)
-            .Select(x => Map(x)).Take(250).ToListAsync(ct);
+        var items = await query.OrderByDescending(x => x.Priority).ThenBy(x => x.DueOn)
+            .Take(250).ToListAsync(ct);
+        return items.Select(Map).ToList();
+    }
+
+    public async Task<HumanActionDetail> GetAsync(long tenantId, long itemId, CancellationToken ct)
+    {
+        PlatformGovernanceService.EnsureTenant(tenantId);
+        var item = await db.HumanActionItems.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId && x.Id == itemId, ct)
+            ?? throw new PlatformGovernanceNotFoundException("The human action was not found.");
+        var events = await db.HumanActionEvents.AsNoTracking()
+            .Where(x => x.BusinessUnitId == tenantId && x.HumanActionItemId == itemId)
+            .OrderByDescending(x => x.OccurredOn)
+            .Select(x => new HumanActionEventDto(x.Id, x.FromStatus, x.ToStatus, x.Action,
+                x.Comment, x.ActorUserId, x.OccurredOn)).ToListAsync(ct);
+        return new(Map(item), events);
     }
 
     public async Task<HumanActionTransitionResult> CreateAsync(long tenantId, long actorUserId,
@@ -104,14 +119,103 @@ public sealed class HumanActionService(ErpRfqAutomationContext db)
             ActorUserId = actorUserId,
             OccurredOn = item.UpdatedOn
         });
+        AddResumeRequest(item, actorUserId, idempotencyKey, command.Comment);
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
         return new(Map(item), false);
     }
 
+    public async Task<BulkHumanActionTransitionResult> BulkTransitionAsync(long tenantId,
+        long actorUserId, string idempotencyKey, BulkTransitionHumanActionCommand command,
+        CancellationToken ct)
+    {
+        PlatformGovernanceService.EnsureActor(tenantId, actorUserId);
+        idempotencyKey = PlatformGovernanceService.Required(idempotencyKey, 120,
+            "Idempotency-Key is required.");
+        if (command.Targets.Count is < 1 or > 100 || command.Targets.Select(x => x.Id).Distinct().Count() != command.Targets.Count)
+            throw new PlatformGovernanceValidationException("Select between one and 100 distinct actions.");
+        if (command.TargetStatus == HumanActionStatus.Open)
+            throw new PlatformGovernanceValidationException("A transitioned action cannot return to Open.");
+
+        await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+        var ids = command.Targets.Select(x => x.Id).ToArray();
+        var replayCount = await db.HumanActionEvents.AsNoTracking().CountAsync(x =>
+            x.BusinessUnitId == tenantId && ids.Contains(x.HumanActionItemId)
+                && EF.Functions.Like(x.IdempotencyKey, idempotencyKey + ":%"), ct);
+        if (replayCount == ids.Length)
+        {
+            var replayItems = await db.HumanActionItems.AsNoTracking()
+                .Where(x => x.BusinessUnitId == tenantId && ids.Contains(x.Id))
+                .ToListAsync(ct);
+            return new(replayItems.Select(Map).ToList(), true);
+        }
+        if (replayCount != 0)
+            throw new PlatformGovernanceConflictException("The bulk decision was only partially recorded; review before retrying.");
+
+        var items = await db.HumanActionItems.Where(x => x.BusinessUnitId == tenantId && ids.Contains(x.Id)).ToListAsync(ct);
+        if (items.Count != ids.Length)
+            throw new PlatformGovernanceNotFoundException("One or more human actions were not found.");
+        var expected = command.Targets.ToDictionary(x => x.Id, x => x.ExpectedVersion);
+        if (items.Any(x => x.Version != expected[x.Id]))
+            throw new PlatformGovernanceConflictException("One or more action versions changed; refresh and retry.");
+        if (items.Any(x => x.Status is HumanActionStatus.Completed or HumanActionStatus.Rejected))
+            throw new PlatformGovernanceConflictException("Completed decisions are immutable and cannot be included.");
+
+        var now = DateTime.UtcNow;
+        foreach (var item in items)
+        {
+            var prior = item.Status;
+            item.Status = command.TargetStatus;
+            item.AssignedToUserId = command.AssignedToUserId ?? item.AssignedToUserId;
+            item.Version++;
+            item.UpdatedOn = now;
+            var itemKey = $"{idempotencyKey}:{item.Id}";
+            db.HumanActionEvents.Add(new HumanActionEvent
+            {
+                BusinessUnitId = tenantId,
+                HumanActionItemId = item.Id,
+                FromStatus = prior,
+                ToStatus = command.TargetStatus,
+                Action = PlatformGovernanceService.Required(command.Action, 32, "Action is required.").ToUpperInvariant(),
+                Comment = PlatformGovernanceService.Required(command.Comment, 2000, "A decision comment is required."),
+                IdempotencyKey = itemKey,
+                ActorUserId = actorUserId,
+                OccurredOn = now
+            });
+            AddResumeRequest(item, actorUserId, itemKey, command.Comment);
+        }
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        return new(items.Select(Map).ToList(), false);
+    }
+
     private async Task<HumanActionItem> ItemAsync(long tenantId, long id, CancellationToken ct) =>
         await db.HumanActionItems.SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId && x.Id == id, ct)
         ?? throw new PlatformGovernanceNotFoundException("The human action was not found.");
+
+    private void AddResumeRequest(HumanActionItem item, long actorUserId, string idempotencyKey,
+        string reason)
+    {
+        if (item.Status != HumanActionStatus.Completed) return;
+        db.TenantGovernanceAuditEvents.Add(new TenantGovernanceAuditEvent
+        {
+            BusinessUnitId = item.BusinessUnitId,
+            Area = "HumanAction",
+            AggregateType = item.SourceType,
+            AggregateReference = item.SourceReference,
+            Action = "WORKFLOW_RESUME_REQUESTED",
+            Reason = PlatformGovernanceService.Required(reason, 2000, "A decision comment is required."),
+            EvidenceJson = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                humanActionId = item.Id,
+                item.ResumeActionCode,
+                item.ActionType
+            }),
+            IdempotencyKey = $"resume:{idempotencyKey}",
+            ActorUserId = actorUserId,
+            OccurredOn = item.UpdatedOn
+        });
+    }
 
     private static HumanActionItemDto Map(HumanActionItem x) => new(x.Id, x.ActionType,
         x.SourceType, x.SourceReference, x.Title, x.Summary, x.Recommendation, x.EvidenceJson,

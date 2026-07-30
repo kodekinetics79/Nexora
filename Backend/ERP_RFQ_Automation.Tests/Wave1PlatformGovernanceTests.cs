@@ -1,5 +1,6 @@
 using ERP_RFQ_Automation.PlatformGovernance;
 using ERP_RFQ_Automation.Tests.Support;
+using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -93,8 +94,41 @@ public sealed class Wave1PlatformGovernanceTests
             new(created.Item.Version, HumanActionStatus.Completed, "APPROVE", "Candidate one verified."),
             default);
         Assert.Equal(HumanActionStatus.Completed, completed.Item.Status);
+        Assert.Contains(await context.TenantGovernanceAuditEvents.ToListAsync(),
+            x => x.Action == "WORKFLOW_RESUME_REQUESTED" && x.AggregateReference == "NXR-TEST-1");
         await Assert.ThrowsAsync<PlatformGovernanceConflictException>(() => actions.TransitionAsync(
             61_021, created.Item.Id, 30, "action-reopen",
             new(completed.Item.Version, HumanActionStatus.InReview, "REOPEN", "Try to reopen."), default));
+    }
+
+    [Fact]
+    public async Task Human_action_bulk_decision_is_atomic_idempotent_and_audited()
+    {
+        using var database = new TestDb();
+        await using var context = database.ContextFor(61_031);
+        Seed.BusinessUnit(context, 61_031);
+        await context.SaveChangesAsync();
+        var service = new HumanActionService(context);
+        var due = DateTime.UtcNow.AddHours(2);
+        var first = await service.CreateAsync(61_031, 40, "bulk-create-1",
+            new("Extraction", "Lead", "NXR-BULK-1", "Review customer", "Ambiguous customer.",
+                "Select verified customer.", "{\"field\":\"customer\"}", .7m, "RFQ blocked.",
+                "RESUME_EXTRACTION", HumanActionPriority.High, 40, due), default);
+        var second = await service.CreateAsync(61_031, 40, "bulk-create-2",
+            new("Extraction", "Lead", "NXR-BULK-2", "Review contact", "Ambiguous contact.",
+                "Select verified contact.", "{\"field\":\"contact\"}", .75m, "RFQ blocked.",
+                "RESUME_EXTRACTION", HumanActionPriority.High, 40, due), default);
+        var command = new BulkTransitionHumanActionCommand(
+            [new(first.Item.Id, first.Item.Version), new(second.Item.Id, second.Item.Version)],
+            HumanActionStatus.Completed, "APPROVE", "Verified against customer master.");
+
+        var completed = await service.BulkTransitionAsync(61_031, 40, "bulk-approve", command, default);
+        var replay = await service.BulkTransitionAsync(61_031, 40, "bulk-approve", command, default);
+
+        Assert.All(completed.Items, x => Assert.Equal(HumanActionStatus.Completed, x.Status));
+        Assert.True(replay.IdempotentReplay);
+        Assert.Equal(2, await context.TenantGovernanceAuditEvents.CountAsync(
+            x => x.Action == "WORKFLOW_RESUME_REQUESTED"));
+        Assert.Equal(4, await context.HumanActionEvents.CountAsync());
     }
 }

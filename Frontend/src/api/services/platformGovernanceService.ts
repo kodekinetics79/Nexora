@@ -3,6 +3,42 @@ import axiosInstance from '../axiosInstance';
 export type GovernedArtifactType = 'CommercialTaxonomy' | 'DocumentSkill' | 'Model' | 'Rule' |
   'Dataset' | 'Connector' | 'TestSuite' | 'ReleaseCandidate';
 export type GovernedLifecycleStatus = 'Draft' | 'Test' | 'Production' | 'Archived';
+export type HumanActionStatus = 'Open' | 'InReview' | 'Escalated' | 'Completed' | 'Rejected';
+export type HumanActionPriority = 'Low' | 'Medium' | 'High' | 'Critical';
+
+export interface HumanActionItem {
+  id: number;
+  actionType: string;
+  sourceType: string;
+  sourceReference: string;
+  title: string;
+  summary: string;
+  recommendation: string;
+  evidenceJson: string;
+  confidence: number;
+  commercialImpact: string;
+  resumeActionCode: string;
+  priority: HumanActionPriority;
+  status: HumanActionStatus;
+  assignedToUserId?: number | null;
+  dueOn: string;
+  isOverdue: boolean;
+  version: number;
+  updatedOn: string;
+}
+
+export interface HumanActionDetail {
+  item: HumanActionItem;
+  events: Array<{
+    id: number;
+    fromStatus?: HumanActionStatus | null;
+    toStatus: HumanActionStatus;
+    action: string;
+    comment: string;
+    actorUserId: number;
+    occurredOn: string;
+  }>;
+}
 
 export interface GovernedArtifactSummary {
   id: number;
@@ -82,6 +118,33 @@ export const platformGovernanceService = {
   }) => {
     const { data } = await axiosInstance.post(`/api/platform-governance/artifacts/${id}/transition`, command,
       { headers: { 'Idempotency-Key': key() } });
+    return data;
+  },
+  listActions: async (status?: HumanActionStatus) => {
+    const { data } = await axiosInstance.get<HumanActionItem[]>('/api/platform-governance/actions',
+      { params: { status } });
+    return data;
+  },
+  getAction: async (id: number) => {
+    const { data } = await axiosInstance.get<HumanActionDetail>(`/api/platform-governance/actions/${id}`);
+    return data;
+  },
+  transitionAction: async (item: HumanActionItem, targetStatus: HumanActionStatus, comment: string) => {
+    const { data } = await axiosInstance.post(`/api/platform-governance/actions/${item.id}/transition`, {
+      expectedVersion: item.version,
+      targetStatus,
+      action: targetStatus === 'Completed' ? 'APPROVE' : targetStatus.toUpperCase(),
+      comment,
+    }, { headers: { 'Idempotency-Key': key() } });
+    return data;
+  },
+  bulkTransitionActions: async (items: HumanActionItem[], targetStatus: HumanActionStatus, comment: string) => {
+    const { data } = await axiosInstance.post('/api/platform-governance/actions/bulk-transition', {
+      targets: items.map((item) => ({ id: item.id, expectedVersion: item.version })),
+      targetStatus,
+      action: targetStatus === 'Completed' ? 'APPROVE' : targetStatus.toUpperCase(),
+      comment,
+    }, { headers: { 'Idempotency-Key': key() } });
     return data;
   },
 };

@@ -129,7 +129,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
         label: 'Sales Management',
         icon: <CustomerIcon />,
         moduleName: 'Leads',
-        activePrefixes: ['/sales/today', '/sales/team', '/sales/reps', '/sales/accounts', '/sales/routing', '/sales/follow-ups', '/sales/performance', '/sales/exceptions'],
+        activePrefixes: ['/sales/today', '/sales/team', '/sales/reps', '/sales/accounts', '/sales/routing', '/sales/follow-ups', '/sales/performance', '/sales/exceptions', '/sales/actions'],
         children: [
           { key: 'sales-today', label: 'Sales Today', path: '/sales/today', moduleName: 'Leads' },
           ...(isManager ? [{ key: 'sales-team', label: 'Team Overview', path: '/sales/team', moduleName: 'Leads' }] : []),
@@ -139,6 +139,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
           { key: 'sales-follow-ups', label: 'Follow-ups', path: '/sales/follow-ups', moduleName: 'Quotations' },
           { key: 'sales-performance', label: 'Performance', path: '/sales/performance', moduleName: 'Dashboard' },
           { key: 'sales-exceptions', label: 'Commercial Exceptions', path: '/sales/exceptions', moduleName: 'Leads', icon: <ExceptionIcon fontSize="small" /> },
+          { key: 'human-actions', label: 'Human Actions', path: '/sales/actions', moduleName: 'Leads', icon: <BoqIcon fontSize="small" /> },
           { key: 'commercial-memory', label: 'Commercial Memory', path: '/intelligence/commercial-memory', moduleName: 'Dashboard' },
         ],
       },

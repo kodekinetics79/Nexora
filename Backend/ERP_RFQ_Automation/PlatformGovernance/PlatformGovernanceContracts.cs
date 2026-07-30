@@ -104,6 +104,32 @@ public sealed record HumanActionItemDto(
 
 public sealed record HumanActionTransitionResult(HumanActionItemDto Item, bool IdempotentReplay);
 
+public sealed record HumanActionEventDto(
+    long Id,
+    HumanActionStatus? FromStatus,
+    HumanActionStatus ToStatus,
+    string Action,
+    string Comment,
+    long ActorUserId,
+    DateTime OccurredOn);
+
+public sealed record HumanActionDetail(
+    HumanActionItemDto Item,
+    IReadOnlyList<HumanActionEventDto> Events);
+
+public sealed record BulkHumanActionTarget(long Id, long ExpectedVersion);
+
+public sealed record BulkTransitionHumanActionCommand(
+    IReadOnlyList<BulkHumanActionTarget> Targets,
+    HumanActionStatus TargetStatus,
+    string Action,
+    string Comment,
+    long? AssignedToUserId = null);
+
+public sealed record BulkHumanActionTransitionResult(
+    IReadOnlyList<HumanActionItemDto> Items,
+    bool IdempotentReplay);
+
 public sealed class PlatformGovernanceValidationException(string message) : ArgumentException(message);
 public sealed class PlatformGovernanceConflictException(string message) : InvalidOperationException(message);
 public sealed class PlatformGovernanceNotFoundException(string message) : KeyNotFoundException(message);

@@ -53,6 +53,14 @@ public sealed class PlatformGovernanceController(
     public Task<IReadOnlyList<HumanActionItemDto>> ListActions([FromQuery] HumanActionStatus? status,
         CancellationToken ct) => actions.ListAsync(TenantId(), status, ct);
 
+    [HttpGet("actions/{actionId:long}")]
+    [RequireModulePermission("Leads", PermissionAction.View)]
+    public async Task<ActionResult<HumanActionDetail>> GetAction(long actionId, CancellationToken ct)
+    {
+        try { return Ok(await actions.GetAsync(TenantId(), actionId, ct)); }
+        catch (PlatformGovernanceNotFoundException exception) { return NotFound(Problem(404, exception.Message)); }
+    }
+
     [HttpPost("actions")]
     [RequireModulePermission("Leads", PermissionAction.Edit)]
     public Task<ActionResult<HumanActionTransitionResult>> CreateAction(
@@ -64,6 +72,13 @@ public sealed class PlatformGovernanceController(
     public Task<ActionResult<HumanActionTransitionResult>> TransitionAction(long actionId,
         [FromBody] TransitionHumanActionCommand command, CancellationToken ct) =>
         Execute(() => actions.TransitionAsync(TenantId(), actionId, ActorUserId(),
+            IdempotencyKey(), command, ct));
+
+    [HttpPost("actions/bulk-transition")]
+    [RequireModulePermission("Leads", PermissionAction.Edit)]
+    public Task<ActionResult<BulkHumanActionTransitionResult>> BulkTransitionActions(
+        [FromBody] BulkTransitionHumanActionCommand command, CancellationToken ct) =>
+        Execute(() => actions.BulkTransitionAsync(TenantId(), ActorUserId(),
             IdempotencyKey(), command, ct));
 
     private async Task<ActionResult<T>> Execute<T>(Func<Task<T>> operation)
