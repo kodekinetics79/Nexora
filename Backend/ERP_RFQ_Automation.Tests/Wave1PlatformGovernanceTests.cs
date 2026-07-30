@@ -131,4 +131,22 @@ public sealed class Wave1PlatformGovernanceTests
             x => x.Action == "WORKFLOW_RESUME_REQUESTED"));
         Assert.Equal(4, await context.HumanActionEvents.CountAsync());
     }
+
+    [Theory]
+    [InlineData(GovernedArtifactType.Model, "{\"modelKind\":\"Local\"}")]
+    [InlineData(GovernedArtifactType.Rule, "{\"condition\":\"confidence < .8\"}")]
+    [InlineData(GovernedArtifactType.Dataset, "{\"purpose\":\"Evaluation\"}")]
+    [InlineData(GovernedArtifactType.Model, "{\"modelKind\":\"External\",\"purpose\":\"Extraction\",\"evaluationDatasetKey\":\"rfq-eval\",\"external\":true,\"apiKey\":\"plain\"}")]
+    public async Task Lifecycle_artifact_contracts_reject_incomplete_or_secret_bearing_definitions(
+        GovernedArtifactType type, string definition)
+    {
+        using var database = new TestDb();
+        await using var context = database.ContextFor(61_041);
+        Seed.BusinessUnit(context, 61_041);
+        await context.SaveChangesAsync();
+
+        await Assert.ThrowsAsync<PlatformGovernanceValidationException>(() =>
+            new PlatformGovernanceService(context).CreateAsync(61_041, 50, Guid.NewGuid().ToString("N"),
+                new(type, $"test-{type}", $"Test {type}", "Contract test", definition, "Initial"), default));
+    }
 }

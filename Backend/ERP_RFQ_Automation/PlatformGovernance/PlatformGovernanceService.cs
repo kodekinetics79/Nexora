@@ -275,8 +275,25 @@ public sealed class PlatformGovernanceService(ErpRfqAutomationContext db)
             };
             if (!document.RootElement.TryGetProperty(required, out _))
                 throw new PlatformGovernanceValidationException($"Definition requires '{required}'.");
-            if (type == GovernedArtifactType.Connector)
-                RejectEmbeddedSecrets(document.RootElement);
+            var additional = type switch
+            {
+                GovernedArtifactType.Model => new[] { "purpose", "evaluationDatasetKey", "external" },
+                GovernedArtifactType.Rule => new[] { "outcome", "evidenceRequired" },
+                GovernedArtifactType.Dataset => new[] { "scope", "retentionDays", "sourceReferences" },
+                _ => Array.Empty<string>()
+            };
+            foreach (var property in additional)
+                if (!document.RootElement.TryGetProperty(property, out _))
+                    throw new PlatformGovernanceValidationException($"Definition requires '{property}'.");
+            if (type == GovernedArtifactType.Model
+                && document.RootElement.TryGetProperty("external", out var external)
+                && external.ValueKind == JsonValueKind.True
+                && (!document.RootElement.TryGetProperty("endpointReference", out var endpoint)
+                    || endpoint.ValueKind != JsonValueKind.String
+                    || string.IsNullOrWhiteSpace(endpoint.GetString())))
+                throw new PlatformGovernanceValidationException(
+                    "External models require a governed endpoint reference.");
+            RejectEmbeddedSecrets(document.RootElement);
             return document.RootElement.GetRawText();
         }
     }
@@ -292,7 +309,7 @@ public sealed class PlatformGovernanceService(ErpRfqAutomationContext db)
                 && property.Value.ValueKind == JsonValueKind.String
                 && !string.IsNullOrWhiteSpace(property.Value.GetString()))
                 throw new PlatformGovernanceValidationException(
-                    "Connector definitions may contain secret references, never embedded credentials.");
+                    "Governed definitions may contain secret references, never embedded credentials.");
             if (property.Value.ValueKind == JsonValueKind.Object) RejectEmbeddedSecrets(property.Value);
             if (property.Value.ValueKind == JsonValueKind.Array)
                 foreach (var child in property.Value.EnumerateArray())
