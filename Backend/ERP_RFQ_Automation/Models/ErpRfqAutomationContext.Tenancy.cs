@@ -41,6 +41,7 @@ public partial class ErpRfqAutomationContext
             modelBuilder.HasSequence<long>("CommercialCaseReferenceSequence");
 
         ConfigureAiGovernance(modelBuilder);
+        ConfigureExtractionOperations(modelBuilder);
         modelBuilder.ConfigureCommercialFinance();
         modelBuilder.ConfigureGeneralLedger();
         modelBuilder.ConfigureBankReconciliation();

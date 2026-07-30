@@ -528,6 +528,15 @@ public sealed class SourceDocumentOccurrence
         Transition(IntakeOccurrenceStatus.DeadLetter, changedOn, IntakeOccurrenceStatus.Processing, IntakeOccurrenceStatus.Retryable);
     }
 
+    public void RequeueDeadLetter(long extractionJobId, DateTimeOffset? changedOn = null)
+    {
+        ExtractionJobId = EvidenceLedgerGuard.Positive(extractionJobId, nameof(extractionJobId));
+        LastErrorCategory = null;
+        LastErrorCode = null;
+        LastErrorDetailsJson = null;
+        Transition(IntakeOccurrenceStatus.Queued, changedOn, IntakeOccurrenceStatus.DeadLetter);
+    }
+
     public void MarkRejected(string category, string errorCode, string detailsJson, DateTimeOffset? changedOn = null)
     {
         LastErrorCategory = EvidenceLedgerGuard.Required(category, 64, nameof(category));

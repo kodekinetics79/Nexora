@@ -136,6 +136,7 @@ builder.Services.AddSingleton<IFileInspectionService>(services =>
         .Get<DocumentInspectionOptions>() ?? new DocumentInspectionOptions();
     return new DocumentFileInspectionService(services.GetRequiredService<IMalwareScanner>(), options);
 });
+builder.Services.AddScoped<ExtractionDeadLetterService>();
 
 // Platform-Owner control-plane services (ADR-0005)
 builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Auth.IPlatformAuthService, ERP_RFQ_Automation.Platform.Auth.PlatformAuthService>();
