@@ -17,7 +17,8 @@ type RecoveryDialog = { jobId: number; fileName: string; idempotencyKey: string 
 export default function TenantAdminOperationsPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { userData } = useAuth();
+  const { userData, hasPermission } = useAuth();
+  const canRecoverExtraction = hasPermission('Users', 'edit') && hasPermission('Leads', 'create');
   const [recovery, setRecovery] = useState<RecoveryDialog | null>(null);
   const [recoveryReason, setRecoveryReason] = useState('');
   const [recoveryResult, setRecoveryResult] = useState<DeadLetterRecoveryResult | null>(null);
@@ -58,6 +59,7 @@ export default function TenantAdminOperationsPage() {
   ];
 
   const openRecovery = (jobId: number, fileName: string) => {
+    if (!canRecoverExtraction) return;
     setRecoveryResult(null);
     setRecoveryReason('');
     setRecovery({ jobId, fileName, idempotencyKey: crypto.randomUUID() });
@@ -96,7 +98,7 @@ export default function TenantAdminOperationsPage() {
       <Typography variant="h6" sx={{ fontWeight: 800 }}>Lead extraction exceptions</Typography>
       <QueryState loading={deadLetters.isLoading} error={deadLetters.isError} empty={!deadLetters.data?.length} onRetry={() => void deadLetters.refetch()} emptyText="No lead extraction exceptions require review.">
         <ResponsiveTable label="Lead extraction exceptions"><Table size="small"><TableHead><TableRow><TableCell>Document</TableCell><TableCell>Failure</TableCell><TableCell>Attempts</TableCell><TableCell>Disposition</TableCell><TableCell>Last updated</TableCell><TableCell align="right">Actions</TableCell></TableRow></TableHead><TableBody>
-          {deadLetters.data?.map(item => <TableRow hover key={item.jobId}><TableCell>{item.fileName}</TableCell><TableCell>{item.failureCategory.replaceAll('_', ' ')}</TableCell><TableCell>{item.attempts} / {item.maxAttempts}</TableCell><TableCell><StatusChip value={item.resolution} /></TableCell><TableCell>{new Date(item.updatedOn).toLocaleString()}</TableCell><TableCell align="right"><Stack direction="row" spacing={1} sx={{ justifyContent: 'flex-end' }}><Button size="small" onClick={() => navigate(`/procurement/leads/ingestion/${encodeURIComponent(item.batchId)}`)}>Open batch</Button><Button size="small" variant="contained" onClick={() => openRecovery(item.jobId, item.fileName)}>Verify and retry</Button></Stack></TableCell></TableRow>)}
+          {deadLetters.data?.map(item => <TableRow hover key={item.jobId}><TableCell>{item.fileName}</TableCell><TableCell>{item.failureCategory.replaceAll('_', ' ')}</TableCell><TableCell>{item.attempts} / {item.maxAttempts}</TableCell><TableCell><StatusChip value={item.resolution} /></TableCell><TableCell>{new Date(item.updatedOn).toLocaleString()}</TableCell><TableCell align="right"><Stack direction="row" spacing={1} sx={{ justifyContent: 'flex-end' }}><Button size="small" onClick={() => navigate(`/procurement/leads/ingestion/${encodeURIComponent(item.batchId)}`)}>Open batch</Button>{canRecoverExtraction && <Button size="small" variant="contained" onClick={() => openRecovery(item.jobId, item.fileName)}>Verify and retry</Button>}</Stack></TableCell></TableRow>)}
         </TableBody></Table></ResponsiveTable>
       </QueryState>
     </Stack>
@@ -105,7 +107,7 @@ export default function TenantAdminOperationsPage() {
         {rows.slice(0, 20).map(user => <TableRow hover key={user.id}><TableCell>{[user.firstName, user.lastName].filter(Boolean).join(' ')}</TableCell><TableCell>{user.email}</TableCell><TableCell>{user.roleName ?? 'Role unresolved'}</TableCell><TableCell>{user.isActive ? 'Active' : 'Inactive'}</TableCell></TableRow>)}
       </TableBody></Table></ResponsiveTable>
     </QueryState>
-    <Dialog open={Boolean(recovery)} onClose={() => !recover.isPending && setRecovery(null)} fullWidth maxWidth="sm">
+    <Dialog open={Boolean(recovery) && canRecoverExtraction} onClose={() => !recover.isPending && setRecovery(null)} fullWidth maxWidth="sm">
       <DialogTitle>Verify source and retry extraction</DialogTitle>
       <DialogContent><Stack spacing={2} sx={{ pt: 1 }}>
         <Typography variant="body2">{recovery?.fileName}</Typography>

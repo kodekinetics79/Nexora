@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Amazon.S3;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.Models;
@@ -83,6 +84,13 @@ public sealed class SecurityScanRecoveryService : ISecurityScanRecoveryService
             var metadata = ParseMetadata(candidate.Occurrence.SourceMetadataJson);
             if (metadata is null)
             {
+                await RecordTerminalEvidenceFailureAsync(
+                    businessUnitId,
+                    candidate.Occurrence.Id,
+                    "source_object_metadata_unavailable",
+                    "The immutable source-object identity is unavailable.",
+                    integrityFailure: false,
+                    ct);
                 items.Add(new(candidate.Occurrence.Id, candidate.Source.OriginalFileName,
                     "SOURCE_OBJECT_UNAVAILABLE", "source_object_metadata_unavailable", null));
                 continue;
@@ -100,8 +108,36 @@ public sealed class SecurityScanRecoveryService : ISecurityScanRecoveryService
                 _log?.LogWarning(exception,
                     "Recovery source object is unavailable for occurrence {OccurrenceId} in batch {BatchId}.",
                     candidate.Occurrence.Id, batchId);
-                items.Add(new(candidate.Occurrence.Id, metadata.FileName,
-                    "SOURCE_OBJECT_UNAVAILABLE", SourceObjectErrorCode(exception), null));
+                var errorCode = SourceObjectErrorCode(exception);
+                if (exception is InvalidDataException)
+                {
+                    await RecordTerminalEvidenceFailureAsync(
+                        businessUnitId,
+                        candidate.Occurrence.Id,
+                        errorCode,
+                        "The immutable source failed integrity or recovery-limit verification.",
+                        integrityFailure: true,
+                        ct);
+                    items.Add(new(candidate.Occurrence.Id, metadata.FileName,
+                        "Rejected", errorCode, null));
+                }
+                else if (IsMissingSource(exception))
+                {
+                    await RecordTerminalEvidenceFailureAsync(
+                        businessUnitId,
+                        candidate.Occurrence.Id,
+                        errorCode,
+                        "The immutable source object is no longer available.",
+                        integrityFailure: false,
+                        ct);
+                    items.Add(new(candidate.Occurrence.Id, metadata.FileName,
+                        "SOURCE_OBJECT_UNAVAILABLE", errorCode, null));
+                }
+                else
+                {
+                    items.Add(new(candidate.Occurrence.Id, metadata.FileName,
+                        "AwaitingSecurityScan", "evidence_storage_unavailable", null));
+                }
                 continue;
             }
             try
@@ -203,6 +239,29 @@ public sealed class SecurityScanRecoveryService : ISecurityScanRecoveryService
         InvalidDataException => "source_object_integrity_failed",
         _ => "source_object_unavailable"
     };
+
+    private async Task RecordTerminalEvidenceFailureAsync(
+        long businessUnitId,
+        long occurrenceId,
+        string errorCode,
+        string reason,
+        bool integrityFailure,
+        CancellationToken ct)
+    {
+        var occurrence = await _db.Set<SourceDocumentOccurrence>().SingleAsync(
+            x => x.BusinessUnitId == businessUnitId && x.Id == occurrenceId, ct);
+        var details = JsonSerializer.Serialize(new { errorCode, reason, retryable = false });
+        if (integrityFailure)
+            occurrence.MarkEvidenceIntegrityFailure(errorCode, details);
+        else
+            occurrence.MarkSourceObjectUnavailable(errorCode, details);
+        await _db.SaveChangesAsync(ct);
+        _db.ChangeTracker.Clear();
+    }
+
+    private static bool IsMissingSource(Exception exception) =>
+        exception is FileNotFoundException or DirectoryNotFoundException
+        || exception is AmazonS3Exception { StatusCode: System.Net.HttpStatusCode.NotFound };
 
     private sealed record RecoveryMetadata(
         string FileName,

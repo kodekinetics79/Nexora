@@ -167,17 +167,17 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         var expected = input.LineItemRegions.Count;
         var diagnostics = new List<string>();
 
+        if (_llm.ProviderClass == AiProviderClass.External)
+        {
+            return Failed(expected,
+                "External processing is blocked for unstructured documents until a locally reduced, redacted field/row payload is available; send this document to human review or configure a local model.",
+                input);
+        }
+
         if (expected == 0)
         {
             if (string.IsNullOrWhiteSpace(input.HeaderText))
                 return Failed(0, "The local parser/OCR produced no readable content.", input);
-
-            if (_llm.ProviderClass == AiProviderClass.External)
-            {
-                return Failed(0,
-                    "External processing requires locally reduced line-item regions; whole-document disclosure is blocked.",
-                    input);
-            }
 
             // No detected line-item rows: a single whole-document pass (header + any body).
             var single = await _llm.ExtractLeadDataAsync(

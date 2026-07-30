@@ -148,6 +148,7 @@ public sealed class S3EvidenceObjectStorage : IEvidenceObjectStorage, IDisposabl
             || string.IsNullOrWhiteSpace(_options.SecretAccessKey)
             || string.IsNullOrWhiteSpace(_options.Bucket))
             throw new InvalidOperationException("S3 evidence storage requires service URL, credentials, and bucket.");
+        ValidateServiceEndpoint(_options.ServiceUrl);
 
         _client = new AmazonS3Client(
             _options.AccessKeyId,
@@ -164,6 +165,9 @@ public sealed class S3EvidenceObjectStorage : IEvidenceObjectStorage, IDisposabl
 
     public async Task ProbeAsync(CancellationToken ct = default)
     {
+        ValidateServiceEndpoint(_options.ServiceUrl!);
+        await VerifyBucketVersioningAsync(ct);
+
         var payload = RandomNumberGenerator.GetBytes(32);
         var digest = Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
         var key = $"_readiness/{Guid.NewGuid():N}.probe";
@@ -245,6 +249,7 @@ public sealed class S3EvidenceObjectStorage : IEvidenceObjectStorage, IDisposabl
         CancellationToken ct = default)
     {
         var (bucket, key, versionId) = ParseUri(storageUri);
+        EnsureConfiguredBucket(bucket, _options.Bucket!);
         using var response = await _client.GetObjectAsync(new GetObjectRequest
         {
             BucketName = bucket,
@@ -289,6 +294,54 @@ public sealed class S3EvidenceObjectStorage : IEvidenceObjectStorage, IDisposabl
         var query = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(uri.Query);
         return (uri.Host, Uri.UnescapeDataString(uri.AbsolutePath.TrimStart('/')),
             query.TryGetValue("versionId", out var value) ? value.ToString() : null);
+    }
+
+    private async Task VerifyBucketVersioningAsync(CancellationToken ct)
+    {
+        GetBucketVersioningResponse response;
+        try
+        {
+            response = await _client.GetBucketVersioningAsync(new GetBucketVersioningRequest
+            {
+                BucketName = _options.Bucket
+            }, ct);
+        }
+        catch (AmazonS3Exception ex) when (ex.StatusCode is HttpStatusCode.MethodNotAllowed
+                                           or HttpStatusCode.NotImplemented)
+        {
+            // Some S3-compatible stores do not expose the versioning API. The immutable
+            // conditional-write/read verification below remains the enforceable control.
+            return;
+        }
+
+        EnsureVersioningEnabled(response.VersioningConfig?.Status);
+    }
+
+    internal static void ValidateServiceEndpoint(string serviceUrl)
+    {
+        if (!Uri.TryCreate(serviceUrl, UriKind.Absolute, out var endpoint)
+            || endpoint.Scheme is not ("http" or "https"))
+            throw new InvalidOperationException("S3 evidence storage requires a valid HTTP(S) service URL.");
+
+        if (endpoint.Scheme == Uri.UriSchemeHttps || endpoint.IsLoopback)
+            return;
+
+        throw new InvalidOperationException(
+            "S3 evidence storage requires HTTPS for non-local service endpoints.");
+    }
+
+    internal static void EnsureConfiguredBucket(string uriBucket, string configuredBucket)
+    {
+        if (!string.Equals(uriBucket, configuredBucket, StringComparison.Ordinal))
+            throw new InvalidDataException(
+                "The evidence object URI does not belong to the configured storage bucket.");
+    }
+
+    internal static void EnsureVersioningEnabled(VersionStatus? status)
+    {
+        if (status != VersionStatus.Enabled)
+            throw new InvalidOperationException(
+                "S3 evidence storage bucket versioning must be enabled before the service is ready.");
     }
 
     public void Dispose() => _client.Dispose();

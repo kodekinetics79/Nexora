@@ -190,7 +190,40 @@ public class ChunkedExtractionServiceTests
 
         Assert.Equal(ExtractionOutcomeStatus.Failed, outcome.Status);
         Assert.Equal(0, llm.CallCount);
-        Assert.Contains("whole-document disclosure is blocked", outcome.ReviewReason);
+        Assert.Contains("blocked for unstructured documents", outcome.ReviewReason);
+        Assert.Contains("human review", outcome.ReviewReason);
+    }
+
+    [Fact]
+    public async Task PopulatedRegions_ExternalProviderFailsClosedWithoutReceivingDocumentContent()
+    {
+        var llm = new StubLlm(AiProviderClass.External, Ext.Result(Ext.Items(2, 0.9), 0.9));
+        var input = Doc(
+            new[] { "CONFIDENTIAL-PART-001 qty 10", "CONFIDENTIAL-PART-002 qty 20" },
+            "confidential buyer and RFQ reference");
+
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(input);
+
+        Assert.Equal(ExtractionOutcomeStatus.Failed, outcome.Status);
+        Assert.Equal(2, outcome.ExpectedItemCount);
+        Assert.Equal(0, outcome.ExtractedItemCount);
+        Assert.Equal(0, llm.CallCount);
+        Assert.Contains("locally reduced, redacted field/row payload", outcome.ReviewReason);
+        Assert.Contains("human review", outcome.ReviewReason);
+    }
+
+    [Fact]
+    public async Task PopulatedRegions_LocalProviderStillUsesChunkedExtraction()
+    {
+        var llm = new StubLlm(AiProviderClass.Local, Ext.Result(Ext.Items(2, 0.9), 0.9));
+
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(2)));
+
+        Assert.Equal(ExtractionOutcomeStatus.Ok, outcome.Status);
+        Assert.Equal(1, llm.CallCount);
+        Assert.Equal(2, outcome.ExpectedItemCount);
+        Assert.Equal(2, outcome.ExtractedItemCount);
+        Assert.Equal(AiProviderClass.Local, outcome.AiProviderClass);
     }
 
     [Fact]

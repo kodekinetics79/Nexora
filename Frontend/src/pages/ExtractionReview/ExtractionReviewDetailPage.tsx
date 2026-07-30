@@ -26,6 +26,7 @@ import { useSnackbar } from 'notistack';
 import extractionReviewService from '../../api/services/extractionReviewService';
 import type { LeadProcessingEvidence, SubmitReviewPayload, ReviewItemPayload } from '../../api/services/extractionReviewService';
 import type { LeadItemResponseDTO } from '../../api/services/leadService';
+import { useAuth } from '../../context/AuthContext';
 import { openAuthenticatedFile } from '../../utils/authenticatedFile';
 
 // Local editable representation of a line item. `id` doubles as the DataGrid
@@ -117,6 +118,8 @@ const ExtractionReviewDetailPage: React.FC = () => {
   const location = useLocation();
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
+  const { hasPermission } = useAuth();
+  const canEditLeads = hasPermission('Leads', 'edit');
 
   // Review reason can be passed from the queue via router state; it isn't part
   // of the lead detail payload, so we fall back gracefully when navigated to
@@ -159,6 +162,17 @@ const ExtractionReviewDetailPage: React.FC = () => {
 
   const aiConfidence = Math.round((lead?.aiconfidence ?? 0) * 100);
   const confidenceColor = aiConfidence >= 70 ? 'success' : aiConfidence >= 50 ? 'warning' : 'error';
+  const hasAuthoritativeSource = (lead?.attachments?.length ?? 0) > 0
+    || (processingEvidence.data?.occurrences.some((occurrence) => occurrence.sourceDocumentId != null) ?? false);
+  const approvalBlockedReason = processingEvidence.isLoading
+      ? 'Authoritative processing evidence is still loading.'
+      : processingEvidence.isError
+        ? 'Authoritative processing evidence could not be loaded.'
+        : !processingEvidence.data
+          ? 'No authoritative processing evidence is linked to this Lead.'
+          : !hasAuthoritativeSource
+            ? 'No source attachment is available for verification.'
+          : null;
 
   const handleHeaderChange = (field: keyof ReviewHeaderState) =>
     (e: React.ChangeEvent<HTMLInputElement>) => setHeader((prev) => ({ ...prev, [field]: e.target.value }));
@@ -242,21 +256,21 @@ const ExtractionReviewDetailPage: React.FC = () => {
   const isSubmitting = mutation.isPending;
 
   const columns: GridColDef[] = useMemo(() => [
-    { field: 'lineItemNo', headerName: 'Line #', width: 90, editable: true },
-    { field: 'productShortName', headerName: 'Product', width: 200, editable: true },
-    { field: 'productShortDescription', headerName: 'Description', width: 240, editable: true },
-    { field: 'commodityProduct', headerName: 'Commodity', width: 150, editable: true },
-    { field: 'itemMaterialCode', headerName: 'Material Code', width: 150, editable: true },
-    { field: 'quantity', headerName: 'Qty', width: 90, type: 'number', editable: true },
-    { field: 'unitOfMeasure', headerName: 'UoM', width: 90, editable: true },
-    { field: 'unitPrice', headerName: 'Unit Price', width: 120, type: 'number', editable: true },
-    { field: 'currency', headerName: 'Currency', width: 100, editable: true },
-    { field: 'manufacturerName', headerName: 'Manufacturer', width: 170, editable: true },
-    { field: 'manufacturerPartNumber', headerName: 'Mfr Part #', width: 150, editable: true },
-    { field: 'alternateProductName', headerName: 'Alt Product', width: 170, editable: true },
-    { field: 'alternatePartNumber', headerName: 'Alt Part #', width: 150, editable: true },
-    { field: 'leadTime', headerName: 'Lead Time', width: 120, editable: true },
-    { field: 'itemText', headerName: 'Item Text', width: 200, editable: true },
+    { field: 'lineItemNo', headerName: 'Line #', width: 90, editable: canEditLeads },
+    { field: 'productShortName', headerName: 'Product', width: 200, editable: canEditLeads },
+    { field: 'productShortDescription', headerName: 'Description', width: 240, editable: canEditLeads },
+    { field: 'commodityProduct', headerName: 'Commodity', width: 150, editable: canEditLeads },
+    { field: 'itemMaterialCode', headerName: 'Material Code', width: 150, editable: canEditLeads },
+    { field: 'quantity', headerName: 'Qty', width: 90, type: 'number', editable: canEditLeads },
+    { field: 'unitOfMeasure', headerName: 'UoM', width: 90, editable: canEditLeads },
+    { field: 'unitPrice', headerName: 'Unit Price', width: 120, type: 'number', editable: canEditLeads },
+    { field: 'currency', headerName: 'Currency', width: 100, editable: canEditLeads },
+    { field: 'manufacturerName', headerName: 'Manufacturer', width: 170, editable: canEditLeads },
+    { field: 'manufacturerPartNumber', headerName: 'Mfr Part #', width: 150, editable: canEditLeads },
+    { field: 'alternateProductName', headerName: 'Alt Product', width: 170, editable: canEditLeads },
+    { field: 'alternatePartNumber', headerName: 'Alt Part #', width: 150, editable: canEditLeads },
+    { field: 'leadTime', headerName: 'Lead Time', width: 120, editable: canEditLeads },
+    { field: 'itemText', headerName: 'Item Text', width: 200, editable: canEditLeads },
     {
       field: 'aiconfidence',
       headerName: 'Confidence',
@@ -279,7 +293,7 @@ const ExtractionReviewDetailPage: React.FC = () => {
         );
       },
     },
-    {
+    ...(canEditLeads ? [{
       field: 'actions',
       type: 'actions',
       headerName: '',
@@ -293,8 +307,8 @@ const ExtractionReviewDetailPage: React.FC = () => {
           showInMenu={false}
         />,
       ],
-    },
-  ], []);
+    } as GridColDef] : []),
+  ], [canEditLeads]);
 
   if (isLoading) {
     return <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '60vh' }}><CircularProgress /></Box>;
@@ -355,7 +369,7 @@ const ExtractionReviewDetailPage: React.FC = () => {
           >
             Back
           </Button>
-          <Button
+          {canEditLeads && <Button
             variant="outlined"
             color="primary"
             startIcon={isSubmitting ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
@@ -364,17 +378,17 @@ const ExtractionReviewDetailPage: React.FC = () => {
             sx={{ fontWeight: 800, borderRadius: 2 }}
           >
             Save corrections
-          </Button>
-          <Button
+          </Button>}
+          {canEditLeads && <Button
             variant="contained"
             color="success"
             startIcon={<ApproveIcon />}
             onClick={() => setApproveDialogOpen(true)}
-            disabled={isSubmitting}
+            disabled={isSubmitting || approvalBlockedReason !== null}
             sx={{ fontWeight: 800, borderRadius: 2 }}
           >
             Approve
-          </Button>
+          </Button>}
         </Stack>
       </Box>
 
@@ -384,6 +398,13 @@ const ExtractionReviewDetailPage: React.FC = () => {
           ? reviewReasonFromState
           : `This document was flagged for manual review${aiConfidence < 70 ? ` (extraction confidence ${aiConfidence}%)` : ''}. Please verify the fields below before approving.`}
       </Alert>
+
+      {approvalBlockedReason && (
+        <Alert severity="error" sx={{ mb: 3 }}>
+          Approval is blocked: {approvalBlockedReason}
+          {canEditLeads ? ' You can still save corrections while the evidence issue is resolved.' : ''}
+        </Alert>
+      )}
 
       <ProcessingEvidencePanel
         evidence={processingEvidence.data}
@@ -403,23 +424,23 @@ const ExtractionReviewDetailPage: React.FC = () => {
             </Typography>
             <Grid container spacing={2}>
               <Grid size={{ xs: 12, md: 4 }}>
-                <TextField fullWidth size="small" label="RFQ #" value={header.rfqno} onChange={handleHeaderChange('rfqno')} disabled={isSubmitting} />
+                <TextField fullWidth size="small" label="RFQ #" value={header.rfqno} onChange={handleHeaderChange('rfqno')} disabled={isSubmitting || !canEditLeads} />
               </Grid>
               <Grid size={{ xs: 12, md: 4 }}>
-                <TextField fullWidth size="small" label="Buyer" value={header.buyersName} onChange={handleHeaderChange('buyersName')} disabled={isSubmitting} />
+                <TextField fullWidth size="small" label="Buyer" value={header.buyersName} onChange={handleHeaderChange('buyersName')} disabled={isSubmitting || !canEditLeads} />
               </Grid>
               <Grid size={{ xs: 12, md: 4 }}>
                 <TextField
                   fullWidth size="small" type="date" label="Bid Closing Date"
                   value={header.bidClosingDate} onChange={handleHeaderChange('bidClosingDate')}
-                  disabled={isSubmitting} slotProps={{ inputLabel: { shrink: true } }}
+                  disabled={isSubmitting || !canEditLeads} slotProps={{ inputLabel: { shrink: true } }}
                 />
               </Grid>
               <Grid size={{ xs: 12, md: 4 }}>
-                <TextField fullWidth size="small" label="Opportunity #" value={header.opportunityNo} onChange={handleHeaderChange('opportunityNo')} disabled={isSubmitting} />
+                <TextField fullWidth size="small" label="Opportunity #" value={header.opportunityNo} onChange={handleHeaderChange('opportunityNo')} disabled={isSubmitting || !canEditLeads} />
               </Grid>
               <Grid size={{ xs: 12, md: 8 }}>
-                <TextField fullWidth size="small" label="Remarks" value={header.headerRemarks} onChange={handleHeaderChange('headerRemarks')} disabled={isSubmitting} multiline maxRows={3} />
+                <TextField fullWidth size="small" label="Remarks" value={header.headerRemarks} onChange={handleHeaderChange('headerRemarks')} disabled={isSubmitting || !canEditLeads} multiline maxRows={3} />
               </Grid>
             </Grid>
           </Paper>
@@ -490,7 +511,7 @@ const ExtractionReviewDetailPage: React.FC = () => {
                 </Typography>
                 <Chip label={items.length} size="small" sx={{ fontWeight: 900, height: 18, fontSize: '0.7rem' }} />
               </Stack>
-              <Button
+              {canEditLeads && <Button
                 variant="outlined"
                 size="small"
                 startIcon={<AddIcon />}
@@ -499,10 +520,10 @@ const ExtractionReviewDetailPage: React.FC = () => {
                 sx={{ fontWeight: 800, borderRadius: 2 }}
               >
                 Add row
-              </Button>
+              </Button>}
             </Stack>
             <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-              Double-click a cell to edit. Low-confidence rows are highlighted.
+              {canEditLeads ? 'Double-click a cell to edit. Low-confidence rows are highlighted.' : 'This extraction is read-only for your role. Low-confidence rows are highlighted.'}
             </Typography>
             <Paper sx={{ borderRadius: 3, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>
               <DataGrid
@@ -563,7 +584,7 @@ const ExtractionReviewDetailPage: React.FC = () => {
       </Typography>
 
       {/* Approve confirmation */}
-      <Dialog open={approveDialogOpen} onClose={() => !isSubmitting && setApproveDialogOpen(false)} fullWidth maxWidth="xs">
+      <Dialog open={approveDialogOpen && canEditLeads && approvalBlockedReason === null} onClose={() => !isSubmitting && setApproveDialogOpen(false)} fullWidth maxWidth="xs">
         <DialogTitle sx={{ fontWeight: 800 }}>Approve extraction?</DialogTitle>
         <DialogContent dividers>
           <Typography variant="body2">
@@ -589,7 +610,7 @@ const ExtractionReviewDetailPage: React.FC = () => {
             color="success"
             startIcon={isSubmitting ? <CircularProgress size={18} color="inherit" /> : <ApproveIcon />}
             onClick={() => { setApproveDialogOpen(false); mutation.mutate('approve'); }}
-            disabled={isSubmitting || !approvalReason.trim()}
+            disabled={isSubmitting || !approvalReason.trim() || approvalBlockedReason !== null}
           >
             Approve
           </Button>

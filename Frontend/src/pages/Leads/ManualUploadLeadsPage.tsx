@@ -15,13 +15,14 @@ import {
   Inbox as InboxIcon,
 } from '@mui/icons-material';
 import leadService from '../../api/services/leadService';
+import { useAuth } from '../../context/AuthContext';
 import { useSnackbar } from 'notistack';
 
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
 const MAX_BATCH_BYTES = 200 * 1024 * 1024;
 const MAX_FILES = 50;
 const SUPPORTED_EXTENSIONS = [
-  '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.csv', '.txt',
+  '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.xlsm', '.csv', '.txt',
   '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tif', '.tiff', '.webp',
 ];
 const ACCEPTED_FILE_TYPES = SUPPORTED_EXTENSIONS.join(',');
@@ -34,11 +35,13 @@ const extensionOf = (name: string): string => {
 const ManualUploadLeadsPage: React.FC = () => {
   const { t } = useTranslation();
   const { enqueueSnackbar } = useSnackbar();
+  const { hasPermission } = useAuth();
   const navigate = useNavigate();
   const inputRef = useRef<HTMLInputElement>(null);
   const [files, setFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
   const [selectionError, setSelectionError] = useState<string | null>(null);
+  const canCreateLeads = hasPermission('Leads', 'create');
 
   const uploadMutation = useMutation({
     mutationFn: (fd: FormData) => leadService.uploadGoverned(fd),
@@ -64,6 +67,7 @@ const ManualUploadLeadsPage: React.FC = () => {
   });
 
   const addFiles = (incoming: File[]) => {
+    if (uploading || !canCreateLeads) return;
     const combined = [...files, ...incoming];
     const unsupported = incoming.filter((file) => !SUPPORTED_EXTENSIONS.includes(extensionOf(file.name)));
     const oversized = incoming.filter((file) => file.size > MAX_FILE_BYTES);
@@ -84,16 +88,17 @@ const ManualUploadLeadsPage: React.FC = () => {
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) addFiles(Array.from(e.target.files));
+    if (!uploading && canCreateLeads && e.target.files) addFiles(Array.from(e.target.files));
     e.target.value = '';
   };
 
   const removeFile = (index: number) => {
+    if (uploading || !canCreateLeads) return;
     setFiles(prev => prev.filter((_, i) => i !== index));
   };
 
   const handleUpload = () => {
-    if (files.length === 0) return;
+    if (files.length === 0 || uploading || !canCreateLeads) return;
     setUploading(true);
     const fd = new FormData();
     files.forEach(f => fd.append('files', f));
@@ -134,11 +139,14 @@ const ManualUploadLeadsPage: React.FC = () => {
           {/* Upload Area */}
           <Paper
             role="button"
-            tabIndex={0}
+            tabIndex={uploading || !canCreateLeads ? -1 : 0}
             aria-label="Select RFQ documents"
-            onClick={() => inputRef.current?.click()}
+            aria-disabled={uploading || !canCreateLeads}
+            onClick={() => {
+              if (!uploading && canCreateLeads) inputRef.current?.click();
+            }}
             onKeyDown={(event) => {
-              if (event.key === 'Enter' || event.key === ' ') {
+              if (!uploading && canCreateLeads && (event.key === 'Enter' || event.key === ' ')) {
                 event.preventDefault();
                 inputRef.current?.click();
               }
@@ -146,7 +154,7 @@ const ManualUploadLeadsPage: React.FC = () => {
             onDragOver={(event) => event.preventDefault()}
             onDrop={(event) => {
               event.preventDefault();
-              if (!uploading) addFiles(Array.from(event.dataTransfer.files));
+              if (!uploading && canCreateLeads) addFiles(Array.from(event.dataTransfer.files));
             }}
             sx={{
               p: 8,
@@ -158,13 +166,14 @@ const ManualUploadLeadsPage: React.FC = () => {
               borderColor: '#94a3b8',
               borderRadius: 2,
               bgcolor: 'white',
-              cursor: 'pointer',
+              cursor: uploading || !canCreateLeads ? 'not-allowed' : 'pointer',
+              opacity: uploading || !canCreateLeads ? 0.65 : 1,
               transition: 'all 0.2s',
               '&:hover': { borderColor: 'primary.main', bgcolor: '#f8fafc' },
               mb: 4
             }}
           >
-            <input ref={inputRef} type="file" multiple hidden accept={ACCEPTED_FILE_TYPES} onChange={handleFileChange} />
+            <input ref={inputRef} type="file" multiple hidden accept={ACCEPTED_FILE_TYPES} onChange={handleFileChange} disabled={uploading || !canCreateLeads} />
             <InboxIcon sx={{ fontSize: 56, color: '#1e293b', mb: 2 }} />
             <Typography variant="h6" sx={{ fontWeight: 700, color: '#1e293b' }}>
               Click or drag files to this area to select
@@ -184,7 +193,12 @@ const ManualUploadLeadsPage: React.FC = () => {
                   key={i}
                   divider={i < files.length - 1}
                   secondaryAction={
-                    <IconButton edge="end" onClick={() => removeFile(i)} disabled={uploading}>
+                    <IconButton
+                      edge="end"
+                      aria-label={`Remove ${file.name}`}
+                      onClick={() => removeFile(i)}
+                      disabled={uploading || !canCreateLeads}
+                    >
                       <DeleteIcon fontSize="small" color="error" />
                     </IconButton>
                   }
@@ -205,7 +219,7 @@ const ManualUploadLeadsPage: React.FC = () => {
             <Button
               fullWidth
               variant="contained"
-              disabled={files.length === 0 || uploading}
+              disabled={files.length === 0 || uploading || !canCreateLeads}
               onClick={handleUpload}
               sx={{
                 height: 52,

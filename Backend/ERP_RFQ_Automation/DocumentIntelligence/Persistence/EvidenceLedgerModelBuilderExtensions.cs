@@ -27,7 +27,7 @@ public static class EvidenceLedgerModelBuilderExtensions
             {
                 table.HasCheckConstraint("ck_source_document_occurrences_business_unit", "business_unit_id > 0");
                 table.HasCheckConstraint("ck_source_document_occurrences_outcome_state",
-                    "outcome_state IN ('NONE','EXACT_DUPLICATE_PENDING_SECURITY','EXACT_DUPLICATE_CONFIRMED','BUSINESS_DUPLICATE_CONFIRMED','DUPLICATE_RESCAN_REQUIRED','REVISION','POSSIBLE_MATCH','SECURITY_SCAN_BLOCKED','MALWARE_DETECTED','UNSUPPORTED_FORMAT')");
+                    "outcome_state IN ('NONE','EXACT_DUPLICATE_PENDING_SECURITY','EXACT_DUPLICATE_CONFIRMED','BUSINESS_DUPLICATE_CONFIRMED','DUPLICATE_RESCAN_REQUIRED','REVISION','POSSIBLE_MATCH','SECURITY_SCAN_BLOCKED','MALWARE_DETECTED','UNSUPPORTED_FORMAT','SOURCE_OBJECT_UNAVAILABLE','EVIDENCE_INTEGRITY_FAILURE')");
                 table.HasCheckConstraint("ck_source_document_occurrences_resource_counts",
                     "bytes_uploaded >= 0 AND hashing_duration_ms >= 0 AND storage_physical_bytes >= 0 AND storage_logical_bytes >= 0");
                 table.HasCheckConstraint("ck_source_document_occurrences_resource_costs",

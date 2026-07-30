@@ -354,9 +354,14 @@ public sealed class DocumentIngestionService : IDocumentIngestion
                 Outcome = EnqueueOutcome.Duplicate,
                 ExistingStatus = existingStatus
             };
-            occurrence.ResolveByProcessingReuse(existingJobId);
+            if (existingStatus == ExtractionStatus.Succeeded)
+                occurrence.ResolveByProcessingReuse(existingJobId);
+            else if (existingStatus == ExtractionStatus.DeadLetter)
+                occurrence.BindDeadLetterJob(existingJobId, "extraction_dead_letter");
+            else
+                occurrence.BindExtractionJob(existingJobId);
             if (occurrence.OriginalOccurrenceId.HasValue)
-                occurrence.ConfirmExactDuplicate(processingReused: true);
+                occurrence.ConfirmExactDuplicate(processingReused: existingStatus == ExtractionStatus.Succeeded);
         }
         else
         {
@@ -380,8 +385,11 @@ public sealed class DocumentIngestionService : IDocumentIngestion
         if (corpus.Status == CorpusStatus.Received)
         {
             corpus.StartProcessing();
-            if (enqueue.Outcome == EnqueueOutcome.Duplicate)
+            if (enqueue.Outcome == EnqueueOutcome.Duplicate
+                && enqueue.ExistingStatus == ExtractionStatus.Succeeded)
                 corpus.Complete();
+            else if (enqueue.ExistingStatus == ExtractionStatus.DeadLetter)
+                corpus.RequireReview();
         }
         await _context.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);

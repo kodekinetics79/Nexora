@@ -112,6 +112,7 @@ public sealed class ExtractionDeadLetterServiceTests
         using var testDb = new TestDb();
         await using var db = testDb.ContextFor(7);
         var job = await SeedDeadLetterAsync(db, 7);
+        var sourceId = await SeedClearedSourceAsync(db, job);
         var service = new ExtractionDeadLetterService(
             db, new IntegrityFailureStorage(), new Scanner(MalwareScanStatus.Clean));
 
@@ -123,12 +124,54 @@ public sealed class ExtractionDeadLetterServiceTests
         Assert.Equal(ExtractionDeadLetterAction.EvidenceIntegrityFailure,
             (await db.ExtractionDeadLetterEvents.SingleAsync()).Action);
         Assert.True((await service.ListAsync(7, default)).Single().BlocksReadiness);
+        var rejectedSource = await db.Set<SourceDocument>().SingleAsync(x => x.Id == sourceId);
+        Assert.Equal(DocumentSecurityStatus.Rejected, rejectedSource.SecurityStatus);
+        Assert.Null(rejectedSource.MalwareVerdictStatus);
+        Assert.Null(rejectedSource.MalwareScannerEngine);
+        Assert.Null(rejectedSource.MalwareSignatureVersion);
+        Assert.Null(rejectedSource.MalwareScannedOn);
+        Assert.False(rejectedSource.HasFreshCleanMalwareVerdict(
+            DateTimeOffset.UtcNow, TimeSpan.FromDays(1)));
 
         var retry = new ExtractionDeadLetterService(
             db, new AvailableStorage(), new Scanner(MalwareScanStatus.Clean));
         await Assert.ThrowsAsync<InvalidOperationException>(() => retry.RecoverAsync(
             7, job.Id, "operator@example.com",
             new("A security finding cannot be softened by retry.", "integrity-7-2"), default));
+        Assert.Single(await db.ExtractionDeadLetterEvents.ToListAsync());
+    }
+
+    [Fact]
+    public async Task MalwareDetection_RejectsPreviouslyClearedSourceAndCannotBeRetried()
+    {
+        using var testDb = new TestDb();
+        await using var db = testDb.ContextFor(7);
+        var job = await SeedDeadLetterAsync(db, 7);
+        var sourceId = await SeedClearedSourceAsync(db, job);
+        var service = new ExtractionDeadLetterService(
+            db, new AvailableStorage(), new Scanner(MalwareScanStatus.Infected));
+
+        var result = await service.RecoverAsync(7, job.Id, "operator@example.com",
+            new("Malware was detected during recovery.", "malware-7-1"), default);
+
+        Assert.Equal("MalwareDetected", result.Status);
+        Assert.True(result.BlocksReadiness);
+        var rejectedSource = await db.Set<SourceDocument>().SingleAsync(x => x.Id == sourceId);
+        Assert.Equal(DocumentSecurityStatus.Rejected, rejectedSource.SecurityStatus);
+        Assert.Equal(MalwareScanStatus.Infected.ToString(), rejectedSource.MalwareVerdictStatus);
+        Assert.Equal("test-scanner", rejectedSource.MalwareScannerEngine);
+        Assert.Equal("test-signature", rejectedSource.MalwareSignatureVersion);
+        Assert.NotNull(rejectedSource.MalwareScannedOn);
+        Assert.False(rejectedSource.HasFreshCleanMalwareVerdict(
+            DateTimeOffset.UtcNow, TimeSpan.FromDays(1)));
+        Assert.Equal(ExtractionDeadLetterAction.MalwareDetected,
+            (await db.ExtractionDeadLetterEvents.SingleAsync()).Action);
+
+        var retry = new ExtractionDeadLetterService(
+            db, new AvailableStorage(), new Scanner(MalwareScanStatus.Clean));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => retry.RecoverAsync(
+            7, job.Id, "operator@example.com",
+            new("A malware finding cannot be softened by retry.", "malware-7-2"), default));
         Assert.Single(await db.ExtractionDeadLetterEvents.ToListAsync());
     }
 
@@ -206,6 +249,51 @@ public sealed class ExtractionDeadLetterServiceTests
         db.Add(job);
         await db.SaveChangesAsync();
         return job;
+    }
+
+    private static async Task<long> SeedClearedSourceAsync(
+        ERP_RFQ_Automation.Models.ErpRfqAutomationContext db,
+        ExtractionJob job)
+    {
+        var corpus = DocumentCorpus.Create(
+            job.BusinessUnitId, job.BatchId, CorpusSourceType.ManualUpload);
+        db.Add(corpus);
+        await db.SaveChangesAsync();
+
+        var source = SourceDocument.Create(
+            job.BusinessUnitId,
+            corpus.Id,
+            job.ContentHash,
+            job.FileName!,
+            "text/csv",
+            "test-evidence",
+            $"cleared/{job.ContentHash}.csv",
+            "original-version",
+            14);
+        source.RecordMalwareVerdict(
+            MalwareScanStatus.Clean, "previous-scanner", "previous-signatures");
+        source.ReleaseFromQuarantine(
+            "test-evidence", $"cleared/{job.ContentHash}.csv", "original-version");
+        source.BindExtractionJob(job.Id);
+        db.Add(source);
+        await db.SaveChangesAsync();
+
+        var occurrence = SourceDocumentOccurrence.Create(
+            job.BusinessUnitId,
+            source.Id,
+            corpus.Id,
+            $"dead-letter:{job.Id}",
+            "{}",
+            job.Id);
+        occurrence.BindExtractionJob(job.Id);
+        occurrence.MarkProcessing();
+        occurrence.MarkDeadLetter("extraction_failed");
+        db.Add(occurrence);
+        await db.SaveChangesAsync();
+
+        job.SourceDocumentOccurrenceId = occurrence.Id;
+        await db.SaveChangesAsync();
+        return source.Id;
     }
 
     private sealed class AvailableStorage : IEvidenceObjectStorage

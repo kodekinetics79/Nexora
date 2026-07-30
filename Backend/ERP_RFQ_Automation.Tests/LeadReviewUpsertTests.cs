@@ -1,4 +1,6 @@
 using ERP_RFQ_Automation.DTOs.Lead;
+using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
+using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Repositories;
 using ERP_RFQ_Automation.Tests.Support;
@@ -19,6 +21,48 @@ public class LeadReviewUpsertTests
 
     private static LeadItemReviewDTO ItemDto(long? id, string? name, int? qty, string? lineNo = null)
         => new() { Id = id, ProductShortName = name, Quantity = qty, LineItemNo = lineNo };
+
+    private static void SeedAuthoritativeEvidence(ErpRfqAutomationContext context, long leadId)
+    {
+        var corpus = DocumentCorpus.Create(Bu, Guid.NewGuid(), CorpusSourceType.ManualUpload);
+        context.Set<DocumentCorpus>().Add(corpus);
+        context.SaveChanges();
+
+        var hash = new string('a', 64);
+        var source = SourceDocument.Create(Bu, corpus.Id, hash, $"lead-{leadId}.pdf",
+            "application/pdf", "quarantine", $"tenant/{Bu}/lead-{leadId}", "v1", 128);
+        source.ReleaseFromQuarantine("cleared", $"tenant/{Bu}/lead-{leadId}", "v1");
+        context.Set<SourceDocument>().Add(source);
+        context.SaveChanges();
+
+        var occurrence = SourceDocumentOccurrence.Create(Bu, source.Id, corpus.Id,
+            $"lead-review:{leadId}", "{}");
+        context.Set<SourceDocumentOccurrence>().Add(occurrence);
+        context.SaveChanges();
+
+        var job = new ExtractionJob
+        {
+            SourceDocumentOccurrenceId = occurrence.Id,
+            BatchId = corpus.BatchId,
+            BusinessUnitId = Bu,
+            SourceType = ExtractionSourceType.ManualUpload,
+            ContentHash = hash,
+            StoragePath = source.ObjectKey,
+            FileName = source.OriginalFileName,
+            FileType = "pdf",
+            Status = ExtractionStatus.Succeeded,
+            ResultLeadId = leadId,
+            CreatedOn = DateTime.UtcNow,
+            UpdatedOn = DateTime.UtcNow
+        };
+        context.Set<ExtractionJob>().Add(job);
+        context.SaveChanges();
+
+        occurrence.BindExtractionJob(job.Id);
+        occurrence.MarkProcessing();
+        occurrence.MarkResolved();
+        context.SaveChanges();
+    }
 
     [Fact]
     public async Task ExistingItem_IsUpdatedInPlace()
@@ -180,6 +224,7 @@ public class LeadReviewUpsertTests
         using (var seed = db.ContextFor(null))
         {
             Seed.Lead(seed, 100, Bu, parseStatus: "NeedsReview", items: new[] { Seed.LeadItem(1, "L1", 1) });
+            SeedAuthoritativeEvidence(seed, 100);
             seed.SaveChanges();
         }
 
@@ -197,6 +242,36 @@ public class LeadReviewUpsertTests
         var reviewed = verify.Leads.Include(l => l.EmailIngests).Single(l => l.Id == 100);
         Assert.Null(reviewed.LeadStatusId);
         Assert.Equal("Success", reviewed.EmailIngests.ParseStatus);
+    }
+
+    [Fact]
+    public async Task Approve_WithoutAuthoritativeEvidence_IsRejectedWithoutMutation()
+    {
+        using var db = new TestDb();
+        using (var seed = db.ContextFor(null))
+        {
+            Seed.Lead(seed, 100, Bu, parseStatus: "NeedsReview",
+                items: new[] { Seed.LeadItem(1, "L1", 1) });
+            seed.SaveChanges();
+        }
+
+        using var ctx = db.ContextFor(Bu);
+        var repo = new LeadRepository(ctx);
+        var error = await Assert.ThrowsAsync<LeadReviewValidationException>(() =>
+            repo.SubmitLeadReviewAsync(100, Bu, new LeadReviewSubmitDTO
+            {
+                ExpectedVersion = 1,
+                Action = "approve",
+                Reason = "Verified without a source.",
+                Items = new() { ItemDto(1, "L1", 1) }
+            }));
+
+        Assert.Contains("authoritative source-document evidence", error.Message, StringComparison.Ordinal);
+        using var verify = db.ContextFor(Bu);
+        var lead = verify.Leads.Include(x => x.EmailIngests).Single(x => x.Id == 100);
+        Assert.False(lead.CommercialFactsVerified);
+        Assert.Equal("NeedsReview", lead.EmailIngests.ParseStatus);
+        Assert.Empty(verify.Set<LeadReviewAudit>());
     }
 
     [Fact]
@@ -394,6 +469,7 @@ public class LeadReviewUpsertTests
             var lead = Seed.Lead(seed, 100, Bu, parseStatus: "NeedsReview",
                 items: new[] { Seed.LeadItem(1, "L1", 1) });
             lead.RequiresCommercialReview = true;
+            SeedAuthoritativeEvidence(seed, 100);
             seed.SaveChanges();
         }
 

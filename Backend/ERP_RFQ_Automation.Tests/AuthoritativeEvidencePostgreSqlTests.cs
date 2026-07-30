@@ -141,6 +141,16 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
                 var job = await context.Set<ExtractionJob>().SingleAsync(x => x.Id == jobId);
                 Assert.Equal(ExtractionStatus.Succeeded, job.Status);
                 Assert.NotNull(job.ResultLeadId);
+
+                var immutableUpdate = await Assert.ThrowsAsync<PostgresException>(() =>
+                    context.Database.ExecuteSqlInterpolatedAsync(
+                        $"UPDATE source_documents SET content_hash = {new string('b', 64)} WHERE id = {source.Id}"));
+                Assert.Equal("23514", immutableUpdate.SqlState);
+
+                var immutableObjectUpdate = await Assert.ThrowsAsync<PostgresException>(() =>
+                    context.Database.ExecuteSqlInterpolatedAsync(
+                        $"UPDATE source_documents SET object_key = {"tampered/source.csv"} WHERE id = {source.Id}"));
+                Assert.Equal("23514", immutableObjectUpdate.SqlState);
             }
 
             await using (var otherTenant = _database.TenantContextWithRls(tenantId + 1))
@@ -255,9 +265,6 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
                 bytes, "customer-rfq.csv", tenantId, ExtractionSourceType.ManualUpload, metadata: occurrence));
             Assert.NotNull(outage.BatchId);
             Assert.NotNull(outage.SourceDocumentOccurrenceId);
-            Assert.Equal(IntakeOccurrenceStatus.AwaitingSecurityScan,
-                (await context.Set<SourceDocumentOccurrence>()
-                    .SingleAsync(x => x.BusinessUnitId == tenantId)).IntakeStatus);
             Assert.Empty(await context.Set<ExtractionJob>().Where(x => x.BusinessUnitId == tenantId).ToListAsync());
 
             context.ChangeTracker.Clear();
@@ -372,9 +379,73 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
             Assert.Null(item.ExtractionJobId);
             Assert.Empty(await context.Set<ExtractionJob>()
                 .Where(x => x.BusinessUnitId == tenantId).ToListAsync());
-            Assert.Equal(IntakeOccurrenceStatus.AwaitingSecurityScan,
-                (await context.Set<SourceDocumentOccurrence>()
-                    .SingleAsync(x => x.BusinessUnitId == tenantId)).IntakeStatus);
+            context.ChangeTracker.Clear();
+            var occurrence = await context.Set<SourceDocumentOccurrence>()
+                .SingleAsync(x => x.BusinessUnitId == tenantId);
+            Assert.Equal(IntakeOccurrenceStatus.Rejected, occurrence.IntakeStatus);
+            Assert.Equal(IngestionOutcomeState.SOURCE_OBJECT_UNAVAILABLE, occurrence.OutcomeState);
+            Assert.Equal("EvidenceStorage", occurrence.LastErrorCategory);
+            Assert.Equal("source_object_unavailable", occurrence.LastErrorCode);
+
+            var replay = await new SecurityScanRecoveryService(
+                    context, new UnavailableReadEvidenceStorage(), cleanIngestion)
+                .RetryBatchAsync(tenantId, blocked.BatchId.Value);
+            Assert.Equal(0, replay.Eligible);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task ScannerRecovery_TransientStorageFailureRemainsRetryable()
+    {
+        var tenantId = NewTenantId();
+        var bytes = ValidCsv();
+        var root = NewStorageRoot();
+        try
+        {
+            await using var context = _database.ContextFor(null);
+            SeedTenant(context, tenantId);
+            await context.SaveChangesAsync();
+            var queue = NewQueue(context);
+            var writableStorage = new LocalEvidenceObjectStorage(new LocalFileStorage(root, root));
+            var unavailableInspection = new FileInspectionResult(
+                FileInspectionStatus.Quarantined, "text/csv", bytes.Length,
+                "Scanner unavailable.", "clamav", null)
+            {
+                MalwareStatus = MalwareScanStatus.Unavailable,
+                IsRetryable = true,
+                ErrorCode = "security_scanner_unavailable"
+            };
+            var blockedIngestion = new DocumentIngestionService(queue, writableStorage,
+                new FixedInspectionService(unavailableInspection), context,
+                new NoopLogger<DocumentIngestionService>());
+            var blocked = await Assert.ThrowsAsync<DocumentInspectionException>(() => blockedIngestion.IngestAsync(
+                bytes, "transient-source.csv", tenantId, ExtractionSourceType.ManualUpload,
+                metadata: new ExtractionJobMetadata { SourceOccurrenceId = "transient-source" }));
+
+            context.ChangeTracker.Clear();
+            var cleanIngestion = new DocumentIngestionService(queue, writableStorage,
+                new FixedInspectionService(ClearedInspection()), context,
+                new NoopLogger<DocumentIngestionService>());
+            var result = await new SecurityScanRecoveryService(
+                    context, new TransientReadEvidenceStorage(), cleanIngestion)
+                .RetryBatchAsync(tenantId, blocked.BatchId!.Value);
+
+            Assert.Equal(1, result.Eligible);
+            Assert.Equal(1, result.StillAwaiting);
+            Assert.Equal(0, result.SourceObjectUnavailable);
+            Assert.Equal("AwaitingSecurityScan", Assert.Single(result.Items).Status);
+            context.ChangeTracker.Clear();
+            var occurrence = await context.Set<SourceDocumentOccurrence>()
+                .SingleAsync(x => x.BusinessUnitId == tenantId);
+            Assert.Equal(IntakeOccurrenceStatus.AwaitingSecurityScan, occurrence.IntakeStatus);
+            Assert.Equal(IngestionOutcomeState.SECURITY_SCAN_BLOCKED, occurrence.OutcomeState);
+            Assert.Empty(await context.Set<ExtractionJob>()
+                .Where(x => x.BusinessUnitId == tenantId).ToListAsync());
         }
         finally
         {
@@ -493,9 +564,9 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
             var duplicate = Assert.Single(occurrences, x => x.OriginalOccurrenceId.HasValue);
             Assert.Equal(IntakeOccurrenceStatus.Queued,
                 Assert.Single(occurrences, x => !x.OriginalOccurrenceId.HasValue).IntakeStatus);
-            Assert.Equal(IntakeOccurrenceStatus.Resolved, duplicate.IntakeStatus);
+            Assert.Equal(IntakeOccurrenceStatus.Queued, duplicate.IntakeStatus);
             Assert.Equal(IngestionOutcomeState.EXACT_DUPLICATE_CONFIRMED, duplicate.OutcomeState);
-            Assert.True(duplicate.ProcessingReused);
+            Assert.False(duplicate.ProcessingReused);
 
         }
         finally
@@ -561,6 +632,7 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
 
             var original = await ingestion.IngestAsync(bytes, "original.csv", tenantId,
                 ExtractionSourceType.ManualUpload,
+                priority: int.MaxValue,
                 metadata: new ExtractionJobMetadata { SourceOccurrenceId = "original", UploadedBy = "buyer@example.test" });
             context.ChangeTracker.Clear();
             var duplicate = await ingestion.IngestAsync(bytes, "forwarded-copy.csv", tenantId,
@@ -580,11 +652,12 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
             Assert.Equal(IngestionOutcomeState.EXACT_DUPLICATE_CONFIRMED, storedDuplicate.OutcomeState);
             Assert.True(storedDuplicate.MalwareScanReused);
             Assert.False(storedDuplicate.MalwareScanRerun);
-            Assert.True(storedDuplicate.ProcessingReused);
-            Assert.True(storedDuplicate.ParserReused);
-            Assert.True(storedDuplicate.OcrReused);
-            Assert.True(storedDuplicate.LocalModelReused);
-            Assert.True(storedDuplicate.ExternalModelReused);
+            Assert.Equal(IntakeOccurrenceStatus.Queued, storedDuplicate.IntakeStatus);
+            Assert.False(storedDuplicate.ProcessingReused);
+            Assert.False(storedDuplicate.ParserReused);
+            Assert.False(storedDuplicate.OcrReused);
+            Assert.False(storedDuplicate.LocalModelReused);
+            Assert.False(storedDuplicate.ExternalModelReused);
             Assert.Equal(bytes.LongLength, storedDuplicate.BytesUploaded);
             Assert.Equal(bytes.LongLength, storedDuplicate.StorageLogicalBytes);
             Assert.Equal(0, storedDuplicate.StoragePhysicalBytes);
@@ -603,6 +676,23 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
             Assert.Equal(0, summary.LogicalInquiries);
             Assert.Equal(0, summary.Rejected);
 
+            var claimed = await queue.ClaimAsync("shared-occurrence-test", TimeSpan.FromMinutes(2), 1);
+            Assert.NotNull(claimed);
+            Assert.True(await queue.SetStatusAsync(claimed!.Id, "shared-occurrence-test", claimed.Attempts,
+                ExtractionStatus.Extracting));
+            Assert.True(await queue.SetStatusAsync(claimed.Id, "shared-occurrence-test", claimed.Attempts,
+                ExtractionStatus.Persisting));
+            Assert.True(await queue.CompleteAsync(claimed.Id, "shared-occurrence-test", claimed.Attempts, null));
+            context.ChangeTracker.Clear();
+            var completedDuplicate = await context.Set<SourceDocumentOccurrence>().AsNoTracking()
+                .SingleAsync(x => x.Id == duplicate.SourceDocumentOccurrenceId);
+            Assert.Equal(IntakeOccurrenceStatus.Resolved, completedDuplicate.IntakeStatus);
+            Assert.True(completedDuplicate.ProcessingReused);
+            Assert.True(completedDuplicate.ParserReused);
+            Assert.True(completedDuplicate.OcrReused);
+            Assert.True(completedDuplicate.LocalModelReused);
+            Assert.True(completedDuplicate.ExternalModelReused);
+
             context.ChangeTracker.Clear();
             await ingestion.IngestAsync(bytes, "other-tenant.csv", otherTenantId,
                 ExtractionSourceType.ManualUpload,
@@ -612,6 +702,59 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
             await using var rls = _database.TenantContextWithRls(otherTenantId);
             Assert.Empty(await rls.Set<SourceDocumentOccurrence>().AsNoTracking()
                 .Where(x => x.OriginalOccurrenceId == original.SourceDocumentOccurrenceId).ToListAsync());
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task ExactHashDuplicate_OfDeadLetterRemainsActionableAndDoesNotCreateWork()
+    {
+        var tenantId = NewTenantId();
+        var bytes = ValidCsv("RFQ-DEADLETTER-DUPLICATE");
+        var root = NewStorageRoot();
+        try
+        {
+            await using var context = _database.ContextFor(null);
+            SeedTenant(context, tenantId);
+            await context.SaveChangesAsync();
+            var queue = NewQueue(context);
+            var ingestion = NewGovernedIngestion(context, queue, root, new CountingScanner());
+
+            var original = await ingestion.IngestAsync(bytes, "original.csv", tenantId,
+                ExtractionSourceType.ManualUpload,
+                priority: int.MaxValue,
+                metadata: new ExtractionJobMetadata { SourceOccurrenceId = "deadletter-original" });
+            var job = await context.Set<ExtractionJob>().SingleAsync(x => x.Id == original.JobId);
+            job.MaxAttempts = 1;
+            await context.SaveChangesAsync();
+            context.ChangeTracker.Clear();
+
+            var claimed = await queue.ClaimAsync(
+                "deadletter-duplicate-test", TimeSpan.FromMinutes(2), 1);
+            Assert.NotNull(claimed);
+            Assert.True(await queue.FailAsync(claimed.Id, "deadletter-duplicate-test",
+                claimed.Attempts, "permanent_parse_failure"));
+            context.ChangeTracker.Clear();
+
+            var duplicate = await ingestion.IngestAsync(bytes, "forwarded.csv", tenantId,
+                ExtractionSourceType.ManualUpload,
+                metadata: new ExtractionJobMetadata { SourceOccurrenceId = "deadletter-forwarded" });
+
+            Assert.Equal(EnqueueOutcome.Duplicate, duplicate.Outcome);
+            Assert.Equal(ExtractionStatus.DeadLetter, duplicate.ExistingStatus);
+            Assert.Equal(original.JobId, duplicate.JobId);
+            Assert.Single(await context.Set<ExtractionJob>()
+                .Where(x => x.BusinessUnitId == tenantId).ToListAsync());
+            var occurrence = await context.Set<SourceDocumentOccurrence>().AsNoTracking()
+                .SingleAsync(x => x.Id == duplicate.SourceDocumentOccurrenceId);
+            Assert.Equal(IntakeOccurrenceStatus.DeadLetter, occurrence.IntakeStatus);
+            Assert.Equal("extraction_dead_letter", occurrence.LastErrorCode);
+            Assert.False(occurrence.ProcessingReused);
+            Assert.Equal(IngestionOutcomeState.EXACT_DUPLICATE_CONFIRMED, occurrence.OutcomeState);
         }
         finally
         {
@@ -665,9 +808,9 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
             context.ChangeTracker.Clear();
             var resumed = await context.Set<SourceDocumentOccurrence>().AsNoTracking()
                 .SingleAsync(x => x.Id == blocked.SourceDocumentOccurrenceId);
-            Assert.Equal(IntakeOccurrenceStatus.Resolved, resumed.IntakeStatus);
+            Assert.Equal(IntakeOccurrenceStatus.Queued, resumed.IntakeStatus);
             Assert.Equal(IngestionOutcomeState.EXACT_DUPLICATE_CONFIRMED, resumed.OutcomeState);
-            Assert.True(resumed.ProcessingReused);
+            Assert.False(resumed.ProcessingReused);
             Assert.Equal(original.JobId, resumed.ExtractionJobId);
             Assert.Equal(3, scanner.Calls);
             Assert.Equal(1, await context.Set<ExtractionJob>().CountAsync(x => x.BusinessUnitId == tenantId));
@@ -1066,6 +1209,18 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
         public Task<Stream> OpenVerifiedReadAsync(string storageUri, string expectedSha256,
             CancellationToken ct = default) =>
             throw new FileNotFoundException("Authorized test object is unavailable.");
+    }
+
+    private sealed class TransientReadEvidenceStorage : IEvidenceObjectStorage
+    {
+        public bool IsDurable => true;
+        public Task ProbeAsync(CancellationToken ct = default) => Task.CompletedTask;
+        public Task<EvidenceObject> WriteImmutableAsync(long businessUnitId, string zone, string sha256,
+            string extension, ReadOnlyMemory<byte> content, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<Stream> OpenVerifiedReadAsync(string storageUri, string expectedSha256,
+            CancellationToken ct = default) =>
+            throw new IOException("Authorized test storage is temporarily unavailable.");
     }
 
     private sealed class CompletionRejectingQueue : IExtractionQueue

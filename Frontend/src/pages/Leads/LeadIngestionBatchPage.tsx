@@ -34,6 +34,7 @@ import {
 import dayjs from 'dayjs';
 import leadService from '../../api/services/leadService';
 import type { BatchReconciliationItemDTO, LeadMatchCandidateDTO, MatchReviewDecisionAction } from '../../api/services/leadService';
+import { useAuth } from '../../context/AuthContext';
 
 type ChipColor = 'default' | 'primary' | 'success' | 'warning' | 'error' | 'info';
 
@@ -52,7 +53,9 @@ const classificationMeta = (classification: string): { label: string; color: Chi
   return { label: readable(classification || 'Pending'), color: 'default' };
 };
 
-const confidenceLabel = (confidence: number): string => `${Math.round(confidence * 100)}% confidence`;
+const confidenceLabel = (confidence: number, scored = true): string => scored
+  ? `${Math.round(confidence * 100)}% confidence`
+  : 'Not yet scored';
 
 const timestampLabel = (value?: string | null): string => {
   if (!value || !dayjs(value).isValid()) return 'time unavailable';
@@ -133,6 +136,8 @@ const batchErrorMessage = (status: number | undefined): { severity: 'warning' | 
 
 const MatchReviewPanel = ({ occurrenceId, candidate }: { occurrenceId: number; candidate: LeadMatchCandidateDTO }) => {
   const queryClient = useQueryClient();
+  const { hasPermission } = useAuth();
+  const canEditLeads = hasPermission('Leads', 'edit');
   const [action, setAction] = useState<MatchReviewDecisionAction | null>(null);
   const [reason, setReason] = useState('');
   const mutation = useMutation({
@@ -158,7 +163,7 @@ const MatchReviewPanel = ({ occurrenceId, candidate }: { occurrenceId: number; c
         <Box><Typography variant="caption" sx={{ fontWeight: 800 }}>Material differences</Typography><EvidenceLines lines={differenceLines(candidate.differencesJson)} /></Box>
         <Box><Typography variant="caption" sx={{ fontWeight: 800 }}>Downstream commercial impact</Typography><EvidenceLines lines={impactLines(candidate.downstreamImpactJson)} /></Box>
       </Stack>
-      {candidate.reviewState === 'Pending' && (
+      {candidate.reviewState === 'Pending' && canEditLeads && (
         <Stack direction="row" spacing={1} sx={{ mt: 1.5, flexWrap: 'wrap', gap: 1 }}>
           <Button size="small" variant="contained" onClick={() => choose('revision')}>Treat as revision</Button>
           <Button size="small" onClick={() => choose('create_new')}>Create new lead</Button>
@@ -181,7 +186,11 @@ const MatchReviewPanel = ({ occurrenceId, candidate }: { occurrenceId: number; c
 
 const ReconciliationRow = ({ item }: { item: BatchReconciliationItemDTO }) => {
   const navigate = useNavigate();
+  const { hasPermission } = useAuth();
   const awaitingScan = item.intakeStatus === 'AwaitingSecurityScan';
+  const classificationPending = item.classification.replaceAll('_', '').toLowerCase() === 'pending';
+  const hasExtractionScore = !awaitingScan && !classificationPending;
+  const canPrepareRfq = hasPermission('Leads', 'create') && hasPermission('RFQ Management', 'create');
   const meta = awaitingScan
     ? { label: 'Awaiting Security Scan', color: 'warning' as ChipColor }
     : classificationMeta(item.classification);
@@ -207,7 +216,7 @@ const ReconciliationRow = ({ item }: { item: BatchReconciliationItemDTO }) => {
           </Typography>
           <Typography variant="caption" color="text.secondary">
             Received {timestampLabel(item.ingestedAtUtc)}
-            {' | '}{readable(item.processingPath)}{' | '}{confidenceLabel(item.confidence)}
+            {' | '}{readable(item.processingPath)}{' | '}{confidenceLabel(item.confidence, hasExtractionScore)}
           </Typography>
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
             Security {readable(item.securityStatus || 'Pending')} updated {timestampLabel(item.securityScanUpdatedAtUtc || item.lastUpdatedAtUtc)}
@@ -250,13 +259,15 @@ const ReconciliationRow = ({ item }: { item: BatchReconciliationItemDTO }) => {
               >
                 Review inquiry
               </Button>
-              <Button
-                variant="contained"
-                size="small"
-                onClick={() => navigate(`/procurement/leads/${item.leadId}/convert`)}
-              >
-                Prepare RFQ
-              </Button>
+              {canPrepareRfq && (
+                <Button
+                  variant="contained"
+                  size="small"
+                  onClick={() => navigate(`/procurement/leads/${item.leadId}/convert`)}
+                >
+                  Prepare RFQ
+                </Button>
+              )}
             </>
           )}
         </Stack>
@@ -269,6 +280,8 @@ export default function LeadIngestionBatchPage() {
   const { batchId = '' } = useParams<{ batchId: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { hasPermission } = useAuth();
+  const canCreateLeads = hasPermission('Leads', 'create');
   const [activeClassification, setActiveClassification] = useState<string | null>(null);
   const batchQuery = useQuery({
     queryKey: ['lead-ingestion-batch', batchId],
@@ -345,8 +358,8 @@ export default function LeadIngestionBatchPage() {
           <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>Batch {batch.batchId}</Typography>
         </Box>
         <Stack direction="row" spacing={1}>
-          <Button startIcon={<BackIcon />} onClick={() => navigate('/procurement/leads/manual-upload')}>New upload</Button>
-          {awaitingSecurityScan > 0 && (
+          {canCreateLeads && <Button startIcon={<BackIcon />} onClick={() => navigate('/procurement/leads/manual-upload')}>New upload</Button>}
+          {awaitingSecurityScan > 0 && canCreateLeads && (
             <Button
               variant="contained"
               color="warning"

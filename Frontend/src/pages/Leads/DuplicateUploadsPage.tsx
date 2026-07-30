@@ -20,6 +20,7 @@ import {
 } from '@mui/material';
 import { OpenInNew, Refresh } from '@mui/icons-material';
 import leadService from '../../api/services/leadService';
+import { useAuth } from '../../context/AuthContext';
 
 const readable = (value: string): string => value.replaceAll('_', ' ').toLowerCase()
   .replace(/(^|\s)\S/g, (letter) => letter.toUpperCase());
@@ -32,6 +33,8 @@ type SortKey = 'ingestedAt' | 'fileName' | 'duplicateType' | 'securityStatus';
 
 export default function DuplicateUploadsPage() {
   const navigate = useNavigate();
+  const { hasPermission } = useAuth();
+  const canCreateLeads = hasPermission('Leads', 'create');
   const [sortKey, setSortKey] = useState<SortKey>('ingestedAt');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
   const query = useQuery({
@@ -174,7 +177,7 @@ export default function DuplicateUploadsPage() {
                         onClick={() => navigate(`/procurement/leads/ingestion/${row.uploadBatch}`)}>
                         Batch
                       </Button>
-                      {row.actions.includes('Retry security scan') && (
+                      {row.actions.includes('Retry security scan') && canCreateLeads && (
                         <Button size="small" startIcon={<Refresh />}
                           disabled={retryMutation.isPending && retryMutation.variables === row.uploadBatch}
                           onClick={() => retryMutation.mutate(row.uploadBatch)}>

@@ -158,7 +158,7 @@ public sealed class ExtractionDeadLetterService(
                     "The malware scanner is unavailable. The job remains blocked.");
             if (scan.Status == MalwareScanStatus.Infected)
                 return await RecordDispositionAsync(tenantId, job, actorId, reason, idempotencyKey,
-                    ExtractionDeadLetterAction.MalwareDetected, ct);
+                    ExtractionDeadLetterAction.MalwareDetected, ct, scan);
         }
 
         EvidenceObject clearedObject;
@@ -351,7 +351,8 @@ public sealed class ExtractionDeadLetterService(
         string reason,
         string idempotencyKey,
         ExtractionDeadLetterAction action,
-        CancellationToken ct)
+        CancellationToken ct,
+        MalwareScanResult? malwareVerdict = null)
         => ExecuteMutationAsync(tenantId, snapshot.Id, async () =>
         {
             var replay = await ReplayAsync(tenantId, snapshot.Id, idempotencyKey, ct);
@@ -365,11 +366,44 @@ public sealed class ExtractionDeadLetterService(
             if (action is ExtractionDeadLetterAction.RetryQueued
                 or ExtractionDeadLetterAction.SourceObjectUnavailable)
                 await EnsureNoSecurityBlockerAsync(tenantId, job, ct);
+            if (action is ExtractionDeadLetterAction.MalwareDetected
+                or ExtractionDeadLetterAction.EvidenceIntegrityFailure)
+                await RejectLinkedSourceAsync(tenantId, job, malwareVerdict, ct);
             db.ExtractionDeadLetterEvents.Add(Event(job, actorId, reason, idempotencyKey, action));
             await db.SaveChangesAsync(ct);
             return new(job.Id, job.BatchId, action.ToString(),
                 action != ExtractionDeadLetterAction.SourceObjectUnavailable, false);
         }, ct);
+
+    private async Task RejectLinkedSourceAsync(
+        long tenantId,
+        ExtractionJob job,
+        MalwareScanResult? malwareVerdict,
+        CancellationToken ct)
+    {
+        var occurrences = await db.Set<SourceDocumentOccurrence>()
+            .Include(x => x.SourceDocument)
+            .Where(x => x.BusinessUnitId == tenantId && x.ExtractionJobId == job.Id)
+            .ToListAsync(ct);
+        var source = occurrences.Select(x => x.SourceDocument).FirstOrDefault()
+            ?? await db.Set<SourceDocument>().SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == tenantId && x.ExtractionJobId == job.Id, ct)
+            ?? throw new InvalidOperationException(
+                "The extraction job has no authoritative source lineage for security disposition.");
+
+        source.RejectForSecurityFinding(malwareVerdict);
+        var malwareDetected = malwareVerdict?.Status == MalwareScanStatus.Infected;
+        var errorCode = malwareDetected ? "malware_detected" : "source_object_integrity_failed";
+        var details = JsonSerializer.Serialize(new
+        {
+            errorCode,
+            retryable = false,
+            sourceDocumentId = source.Id,
+            extractionJobId = job.Id
+        });
+        foreach (var occurrence in occurrences)
+            occurrence.MarkTerminalSecurityFailure(malwareDetected, errorCode, details);
+    }
 
     private async Task<RecoverExtractionDeadLetterResult?> ReplayAsync(
         long tenantId, long jobId, string idempotencyKey, CancellationToken ct)

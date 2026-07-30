@@ -42,7 +42,9 @@ public enum IngestionOutcomeState
     POSSIBLE_MATCH,
     SECURITY_SCAN_BLOCKED,
     MALWARE_DETECTED,
-    UNSUPPORTED_FORMAT
+    UNSUPPORTED_FORMAT,
+    SOURCE_OBJECT_UNAVAILABLE,
+    EVIDENCE_INTEGRITY_FAILURE
 }
 
 public enum DocumentProcessingStatus
@@ -251,7 +253,8 @@ public sealed class SourceDocument
     }
 
     public bool HasFreshCleanMalwareVerdict(DateTimeOffset now, TimeSpan maximumAge) =>
-        string.Equals(MalwareVerdictStatus, "Clean", StringComparison.Ordinal)
+        SecurityStatus == DocumentSecurityStatus.Cleared
+        && string.Equals(MalwareVerdictStatus, "Clean", StringComparison.Ordinal)
         && MalwareScannedOn.HasValue
         && maximumAge > TimeSpan.Zero
         && MalwareScannedOn.Value >= now.Subtract(maximumAge);
@@ -292,6 +295,35 @@ public sealed class SourceDocument
             throw new InvalidOperationException($"Security status cannot transition from {SecurityStatus} to {status}.");
         SecurityStatus = status;
         UpdatedOn = changedOn ?? DateTimeOffset.UtcNow;
+    }
+
+    public void RejectForSecurityFinding(
+        MalwareScanResult? malwareVerdict = null,
+        DateTimeOffset? changedOn = null)
+    {
+        var rejectedOn = changedOn ?? DateTimeOffset.UtcNow;
+        if (malwareVerdict is not null)
+        {
+            if (malwareVerdict.Status != MalwareScanStatus.Infected)
+                throw new ArgumentException("Only an infected malware verdict can reject a source document.",
+                    nameof(malwareVerdict));
+            RecordMalwareVerdict(
+                malwareVerdict.Status,
+                malwareVerdict.Engine,
+                malwareVerdict.Signature,
+                rejectedOn);
+        }
+        else
+        {
+            MalwareVerdictStatus = null;
+            MalwareScannerEngine = null;
+            MalwareSignatureVersion = null;
+            MalwareScannedOn = null;
+            UpdatedOn = rejectedOn;
+        }
+
+        if (SecurityStatus != DocumentSecurityStatus.Rejected)
+            MarkSecurityStatus(DocumentSecurityStatus.Rejected, rejectedOn);
     }
 
     public void ReleaseFromQuarantine(
@@ -461,6 +493,16 @@ public sealed class SourceDocumentOccurrence
         UpdatedOn = DateTimeOffset.UtcNow;
     }
 
+    public void BindDeadLetterJob(long extractionJobId, string errorCode, DateTimeOffset? changedOn = null)
+    {
+        ExtractionJobId = EvidenceLedgerGuard.Positive(extractionJobId, nameof(extractionJobId));
+        IntakeStatus = IntakeOccurrenceStatus.DeadLetter;
+        LastErrorCategory = "Extraction";
+        LastErrorCode = EvidenceLedgerGuard.Required(errorCode, 128, nameof(errorCode));
+        LastErrorDetailsJson = null;
+        UpdatedOn = changedOn ?? DateTimeOffset.UtcNow;
+    }
+
     public void RecordActualCost(decimal localComputeCost, decimal externalCost, string costStatus = "RECORDED")
     {
         LocalComputeCost = NonNegativeMoney(localComputeCost, nameof(localComputeCost));
@@ -548,6 +590,44 @@ public sealed class SourceDocumentOccurrence
         OutcomeState = string.Equals(errorCode, "malware_detected", StringComparison.OrdinalIgnoreCase)
             ? IngestionOutcomeState.MALWARE_DETECTED
             : IngestionOutcomeState.UNSUPPORTED_FORMAT;
+    }
+
+    public void MarkSourceObjectUnavailable(string errorCode, string detailsJson, DateTimeOffset? changedOn = null)
+    {
+        LastErrorCategory = "EvidenceStorage";
+        LastErrorCode = EvidenceLedgerGuard.Required(errorCode, 128, nameof(errorCode));
+        LastErrorDetailsJson = EvidenceLedgerGuard.Json(detailsJson, nameof(detailsJson));
+        Transition(IntakeOccurrenceStatus.Rejected, changedOn,
+            IntakeOccurrenceStatus.AwaitingSecurityScan,
+            IntakeOccurrenceStatus.Rejected);
+        OutcomeState = IngestionOutcomeState.SOURCE_OBJECT_UNAVAILABLE;
+    }
+
+    public void MarkEvidenceIntegrityFailure(string errorCode, string detailsJson, DateTimeOffset? changedOn = null)
+    {
+        LastErrorCategory = "EvidenceIntegrity";
+        LastErrorCode = EvidenceLedgerGuard.Required(errorCode, 128, nameof(errorCode));
+        LastErrorDetailsJson = EvidenceLedgerGuard.Json(detailsJson, nameof(detailsJson));
+        Transition(IntakeOccurrenceStatus.Rejected, changedOn,
+            IntakeOccurrenceStatus.AwaitingSecurityScan,
+            IntakeOccurrenceStatus.Rejected);
+        OutcomeState = IngestionOutcomeState.EVIDENCE_INTEGRITY_FAILURE;
+    }
+
+    public void MarkTerminalSecurityFailure(
+        bool malwareDetected,
+        string errorCode,
+        string detailsJson,
+        DateTimeOffset? changedOn = null)
+    {
+        LastErrorCategory = malwareDetected ? "SecurityInspection" : "EvidenceIntegrity";
+        LastErrorCode = EvidenceLedgerGuard.Required(errorCode, 128, nameof(errorCode));
+        LastErrorDetailsJson = EvidenceLedgerGuard.Json(detailsJson, nameof(detailsJson));
+        IntakeStatus = IntakeOccurrenceStatus.Rejected;
+        OutcomeState = malwareDetected
+            ? IngestionOutcomeState.MALWARE_DETECTED
+            : IngestionOutcomeState.EVIDENCE_INTEGRITY_FAILURE;
+        UpdatedOn = changedOn ?? DateTimeOffset.UtcNow;
     }
 
     private static decimal NonNegativeMoney(decimal value, string name) =>

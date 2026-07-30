@@ -1,5 +1,8 @@
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Infrastructure.Storage;
+using DocumentFormat.OpenXml;
+using DocumentFormat.OpenXml.Packaging;
+using DocumentFormat.OpenXml.Wordprocessing;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -58,6 +61,86 @@ public sealed class ProductionDocumentReaderTests
         await Assert.ThrowsAsync<DocumentParsingException>(() => reader.ReadAsync(job));
     }
 
+    [Fact]
+    public async Task Docx_PreservesParagraphAndTableRowStructure()
+    {
+        var bytes = CreateDocxWithCommercialTable();
+        var reader = CreateReader(bytes);
+
+        var result = await reader.ReadAsync(CreateJob("rfq.docx", "docx"));
+
+        Assert.Equal("RFQ 42\nPart Number\tQuantity\nABC-100\t25\nDelivery: urgent", result.HeaderText);
+        Assert.Contains("Part Number\tQuantity", result.LineItemRegions);
+        Assert.Contains("ABC-100\t25", result.LineItemRegions);
+    }
+
+    [Fact]
+    public async Task MalformedDocx_StopsWithTypedPermanentParseFailure()
+    {
+        var reader = CreateReader(System.Text.Encoding.UTF8.GetBytes("not-an-openxml-document"));
+
+        var error = await Assert.ThrowsAsync<DocumentParsingException>(() =>
+            reader.ReadAsync(CreateJob("rfq.docx", "docx")));
+
+        Assert.Contains("DOCX", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MultiPageTiff_ProcessesEveryFrame()
+    {
+        var reader = new ProductionDocumentReader(
+            NullLogger<ProductionDocumentReader>.Instance,
+            new TestEnvironment(AppContext.BaseDirectory),
+            new MemoryStorage([0x49, 0x49, 0x2A, 0x00]),
+            _ => ["RFQ 42 first page commercial text", "ABC-100 quantity 25 second page"]);
+
+        var result = await reader.ReadAsync(CreateJob("rfq.tiff", "tiff"));
+
+        Assert.Equal(2, result.OcrPageCount);
+        Assert.False(result.OcrTruncated);
+        Assert.Equal(ExtractionProcessingPath.LocalOcr, result.ProcessingPath);
+        Assert.Contains("RFQ 42 first page commercial text", result.HeaderText);
+        Assert.Contains("ABC-100 quantity 25 second page", result.HeaderText);
+    }
+
+    private static ProductionDocumentReader CreateReader(byte[] content) => new(
+        NullLogger<ProductionDocumentReader>.Instance,
+        new TestEnvironment(AppContext.BaseDirectory),
+        new MemoryStorage(content));
+
+    private static ExtractionJob CreateJob(string fileName, string fileType) => new()
+    {
+        Id = 125,
+        BusinessUnitId = 7,
+        StoragePath = "memory://evidence/object",
+        ContentHash = new string('c', 64),
+        FileName = fileName,
+        FileType = fileType
+    };
+
+    private static byte[] CreateDocxWithCommercialTable()
+    {
+        using var stream = new MemoryStream();
+        using (var document = WordprocessingDocument.Create(stream, WordprocessingDocumentType.Document, true))
+        {
+            var main = document.AddMainDocumentPart();
+            main.Document = new Document(
+                new Body(
+                    ParagraphWithText("RFQ 42"),
+                    new Table(
+                        new TableRow(TableCellWithText("Part Number"), TableCellWithText("Quantity")),
+                        new TableRow(TableCellWithText("ABC-100"), TableCellWithText("25"))),
+                    ParagraphWithText("Delivery: urgent")));
+            main.Document.Save();
+        }
+        return stream.ToArray();
+    }
+
+    private static Paragraph ParagraphWithText(string value) => new(new Run(new Text(value)));
+
+    private static TableCell TableCellWithText(string value) =>
+        new(ParagraphWithText(value));
+
     private sealed class FailingStorage : IEvidenceObjectStorage
     {
         public bool IsDurable => true;
@@ -82,13 +165,13 @@ public sealed class ProductionDocumentReaderTests
             Task.FromResult<Stream>(new MemoryStream(content, writable: false));
     }
 
-    private sealed class TestEnvironment : IWebHostEnvironment
+    private sealed class TestEnvironment(string? contentRootPath = null) : IWebHostEnvironment
     {
         public string ApplicationName { get; set; } = "Tests";
         public IFileProvider WebRootFileProvider { get; set; } = new NullFileProvider();
         public string WebRootPath { get; set; } = Path.GetTempPath();
         public string EnvironmentName { get; set; } = "Development";
-        public string ContentRootPath { get; set; } = Path.GetTempPath();
+        public string ContentRootPath { get; set; } = contentRootPath ?? Path.GetTempPath();
         public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
     }
 }

@@ -31,7 +31,7 @@ namespace ERP_RFQ_Automation.Extraction;
 ///   * XLS/XLSX — ExcelDataReader/EPPlus; header-mapped into <see cref="RfqSpreadsheetRow"/> and routed down the
 ///             DETERMINISTIC structured-bypass hook (IsStructured=true) so the LLM is skipped.
 ///   * CSV   — parsed into <see cref="RfqSpreadsheetRow"/> (structured bypass, same as XLSX).
-///   * Images (jpg/jpeg/png/bmp/tiff) — Tesseract OCR.
+///   * Images (jpg/jpeg/png/bmp/tiff) — Tesseract OCR, including every TIFF frame.
 ///   * Plain text / everything else — read as UTF-8.
 ///
 /// Self-contained: it calls PdfPig / Docnet / Tesseract / OpenXML / EPPlus directly and does
@@ -43,6 +43,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
     private readonly ILogger<ProductionDocumentReader> _log;
     private readonly string _tessDataPath;
     private readonly IEvidenceObjectStorage _evidenceStorage;
+    private readonly Func<byte[], IReadOnlyList<string>>? _tiffFrameOcr;
     private readonly NativeSpreadsheetParser _spreadsheetParser = new();
 
     // A PDF/image that yields fewer than this many non-whitespace characters is treated as scanned.
@@ -57,9 +58,19 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         ILogger<ProductionDocumentReader> log,
         IWebHostEnvironment env,
         IEvidenceObjectStorage evidenceStorage)
+        : this(log, env, evidenceStorage, null)
+    {
+    }
+
+    internal ProductionDocumentReader(
+        ILogger<ProductionDocumentReader> log,
+        IWebHostEnvironment env,
+        IEvidenceObjectStorage evidenceStorage,
+        Func<byte[], IReadOnlyList<string>>? tiffFrameOcr)
     {
         _log = log;
         _evidenceStorage = evidenceStorage;
+        _tiffFrameOcr = tiffFrameOcr;
         _tessDataPath = Path.Combine(env.ContentRootPath, "tessdata");
         // EPPlus 7 requires a license context; the app sets this at startup, set it here too
         // so the reader is safe to use independently of startup ordering.
@@ -116,7 +127,8 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             // parser; falls back to the OpenXML reader for mislabeled .docx files.
             "doc" => Native(ExtractTextFromLegacyDoc(bytes)),
             "docx" => Native(ExtractTextFromDocx(bytes)),
-            "jpg" or "jpeg" or "png" or "bmp" or "tiff" or "tif" or "gif" or "webp" => ExtractTextFromImage(bytes),
+            "tiff" or "tif" => ExtractTextFromTiff(bytes),
+            "jpg" or "jpeg" or "png" or "bmp" or "gif" or "webp" => ExtractTextFromImage(bytes),
             _ => Native(DecodeText(bytes))
         };
 
@@ -183,9 +195,17 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         // A file named .doc that is actually OOXML has no OLE signature — try OpenXML.
         if (!string.IsNullOrWhiteSpace(text))
             return text;
-        var openXmlText = ExtractTextFromDocx(bytes);
-        if (!string.IsNullOrWhiteSpace(openXmlText))
-            return openXmlText;
+        try
+        {
+            var openXmlText = ExtractTextFromDocx(bytes);
+            if (!string.IsNullOrWhiteSpace(openXmlText))
+                return openXmlText;
+        }
+        catch (DocumentParsingException)
+        {
+            // The legacy parser already established this is not readable OLE. A failed
+            // OOXML fallback means the .doc content is unsupported, not retryable.
+        }
         throw new UnsupportedDocumentFormatException(
             "The legacy .doc file passed security inspection but the local binary reader could not parse it; an isolated converter is not configured.");
     }
@@ -196,20 +216,71 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         {
             using var ms = new MemoryStream(bytes, writable: false);
             using var doc = WordprocessingDocument.Open(ms, false);
-            var sb = new StringBuilder();
             var body = doc.MainDocumentPart?.Document?.Body;
-            if (body != null)
+            if (body == null)
+                throw new DocumentParsingException("The DOCX document has no readable main document body.");
+
+            var lines = new List<string>();
+            foreach (var element in body.Elements())
             {
-                foreach (var t in body.Descendants<Text>())
-                    sb.Append(t.Text).Append(' ');
+                switch (element)
+                {
+                    case Paragraph paragraph:
+                        AddLine(lines, ExtractParagraphText(paragraph));
+                        break;
+                    case Table table:
+                        foreach (var row in table.Elements<TableRow>())
+                        {
+                            var cells = row.Elements<TableCell>()
+                                .Select(cell => string.Join(" ", cell.Elements<Paragraph>()
+                                    .Select(ExtractParagraphText)
+                                    .Where(value => !string.IsNullOrWhiteSpace(value))))
+                                .Select(value => value.Trim())
+                                .ToArray();
+                            AddLine(lines, string.Join('\t', cells));
+                        }
+                        break;
+                }
             }
-            return sb.ToString();
+
+            return string.Join('\n', lines);
+        }
+        catch (DocumentParsingException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
             _log.LogWarning(ex, "DOCX extraction failed.");
-            return string.Empty;
+            throw new DocumentParsingException("The DOCX document could not be parsed safely.", ex);
         }
+    }
+
+    private static string ExtractParagraphText(Paragraph paragraph)
+    {
+        var text = new StringBuilder();
+        foreach (var element in paragraph.Descendants())
+        {
+            switch (element)
+            {
+                case Text runText:
+                    text.Append(runText.Text);
+                    break;
+                case TabChar:
+                    text.Append('\t');
+                    break;
+                case Break or CarriageReturn:
+                    text.Append(' ');
+                    break;
+            }
+        }
+        return text.ToString().Trim();
+    }
+
+    private static void AddLine(List<string> lines, string value)
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+            lines.Add(value.Trim());
     }
 
     // ---- PDF (text layer + OCR fallback) ---------------------------------
@@ -325,6 +396,90 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             return new DocumentReadResult(string.Empty, ExtractionProcessingPath.LocalOcr,
                 ExtractionOcrStatus.Failed, 0, false);
         }
+    }
+
+    private DocumentReadResult ExtractTextFromTiff(byte[] bytes)
+    {
+        if (_tiffFrameOcr != null)
+        {
+            var frameTexts = _tiffFrameOcr(bytes);
+            return TiffResult(frameTexts, frameTexts.Count, 0);
+        }
+
+        var temporaryPath = Path.Combine(Path.GetTempPath(), $"nexora-ocr-{Guid.NewGuid():N}.tiff");
+        try
+        {
+            var options = new FileStreamOptions
+            {
+                Mode = FileMode.CreateNew,
+                Access = FileAccess.Write,
+                Share = FileShare.None,
+                Options = FileOptions.WriteThrough
+            };
+            if (!OperatingSystem.IsWindows())
+                options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+            using (var temporary = new FileStream(temporaryPath, options))
+                temporary.Write(bytes);
+            lock (OcrLock)
+            {
+                using var images = PixArray.LoadMultiPageTiffFromFile(temporaryPath);
+                using var engine = new TesseractEngine(_tessDataPath, "eng", EngineMode.Default);
+                var text = new StringBuilder();
+                var failedPageCount = 0;
+                var pageNumber = 0;
+
+                foreach (var image in images)
+                {
+                    pageNumber++;
+                    try
+                    {
+                        using var page = engine.Process(image);
+                        var pageText = page.GetText();
+                        if (!string.IsNullOrWhiteSpace(pageText))
+                            text.AppendLine(pageText);
+                    }
+                    catch (Exception ex)
+                    {
+                        failedPageCount++;
+                        _log.LogWarning(ex, "OCR failed for TIFF page {Page}.", pageNumber);
+                    }
+                }
+
+                return TiffResult([text.ToString()], images.Count, failedPageCount);
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Multi-page TIFF OCR failed.");
+            return new DocumentReadResult(string.Empty, ExtractionProcessingPath.LocalOcr,
+                ExtractionOcrStatus.Failed, 0, false);
+        }
+        finally
+        {
+            try
+            {
+                File.Delete(temporaryPath);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "Temporary TIFF cleanup failed.");
+            }
+        }
+    }
+
+    private static DocumentReadResult TiffResult(
+        IReadOnlyList<string> frameTexts,
+        int pageCount,
+        int failedPageCount)
+    {
+        var value = string.Join('\n', frameTexts.Where(text => !string.IsNullOrWhiteSpace(text)));
+        var status = IsNearEmpty(value)
+            ? ExtractionOcrStatus.Failed
+            : failedPageCount > 0
+                ? ExtractionOcrStatus.Partial
+                : ExtractionOcrStatus.Completed;
+        return new DocumentReadResult(value, ExtractionProcessingPath.LocalOcr,
+            status, pageCount, false);
     }
 
     // ---- spreadsheets -> structured rows ---------------------------------
