@@ -54,42 +54,46 @@ public sealed class PlatformGovernanceService(ErpRfqAutomationContext db)
         var definition = ValidateDefinition(command.ArtifactType, command.DefinitionJson);
         var artifactKey = NormalizeKey(command.ArtifactKey);
         var now = DateTime.UtcNow;
-        await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
-        var replay = await EventReplayAsync(tenantId, idempotencyKey, ct);
-        if (replay is not null)
-            return new(Summary(await ArtifactAsync(tenantId, replay.GovernedArtifactId, ct)), true);
-
-        if (await db.GovernedArtifacts.AnyAsync(x => x.BusinessUnitId == tenantId
-                && x.ArtifactType == command.ArtifactType && x.ArtifactKey == artifactKey, ct))
-            throw new PlatformGovernanceConflictException("An artifact with this type and key already exists.");
-
-        var artifact = new GovernedArtifact
+        return await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
         {
-            BusinessUnitId = tenantId,
-            ArtifactType = command.ArtifactType,
-            ArtifactKey = artifactKey,
-            Name = Required(command.Name, 200, "Name is required."),
-            Description = Optional(command.Description, 1000),
-            CreatedOn = now,
-            CreatedByUserId = actorUserId,
-            UpdatedOn = now,
-            UpdatedByUserId = actorUserId
-        };
-        artifact.Versions.Add(new GovernedArtifactVersion
-        {
-            BusinessUnitId = tenantId,
-            VersionNumber = 1,
-            DefinitionJson = definition,
-            ChangeSummary = Required(command.ChangeSummary, 1000, "A change summary is required."),
-            CreatedOn = now,
-            CreatedByUserId = actorUserId
+            db.ChangeTracker.Clear();
+            await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+            var replay = await EventReplayAsync(tenantId, idempotencyKey, ct);
+            if (replay is not null)
+                return new(Summary(await ArtifactAsync(tenantId, replay.GovernedArtifactId, ct)), true);
+
+            if (await db.GovernedArtifacts.AnyAsync(x => x.BusinessUnitId == tenantId
+                    && x.ArtifactType == command.ArtifactType && x.ArtifactKey == artifactKey, ct))
+                throw new PlatformGovernanceConflictException("An artifact with this type and key already exists.");
+
+            var artifact = new GovernedArtifact
+            {
+                BusinessUnitId = tenantId,
+                ArtifactType = command.ArtifactType,
+                ArtifactKey = artifactKey,
+                Name = Required(command.Name, 200, "Name is required."),
+                Description = Optional(command.Description, 1000),
+                CreatedOn = now,
+                CreatedByUserId = actorUserId,
+                UpdatedOn = now,
+                UpdatedByUserId = actorUserId
+            };
+            artifact.Versions.Add(new GovernedArtifactVersion
+            {
+                BusinessUnitId = tenantId,
+                VersionNumber = 1,
+                DefinitionJson = definition,
+                ChangeSummary = Required(command.ChangeSummary, 1000, "A change summary is required."),
+                CreatedOn = now,
+                CreatedByUserId = actorUserId
+            });
+            artifact.Events.Add(NewEvent(tenantId, 1, "CREATED", "Initial governed version",
+                definition, idempotencyKey, actorUserId, now));
+            db.GovernedArtifacts.Add(artifact);
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+            return new ArtifactTransitionResult(Summary(artifact), false);
         });
-        artifact.Events.Add(NewEvent(tenantId, 1, "CREATED", "Initial governed version",
-            definition, idempotencyKey, actorUserId, now));
-        db.GovernedArtifacts.Add(artifact);
-        await db.SaveChangesAsync(ct);
-        await tx.CommitAsync(ct);
-        return new(Summary(artifact), false);
     }
 
     public async Task<ArtifactTransitionResult> CreateVersionAsync(long tenantId, long artifactId,
@@ -98,35 +102,39 @@ public sealed class PlatformGovernanceService(ErpRfqAutomationContext db)
     {
         EnsureActor(tenantId, actorUserId);
         idempotencyKey = Required(idempotencyKey, 160, "Idempotency-Key is required.");
-        await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
-        var replay = await EventReplayAsync(tenantId, idempotencyKey, ct);
-        if (replay is not null)
-            return new(Summary(await ArtifactAsync(tenantId, replay.GovernedArtifactId, ct)), true);
-        var artifact = await ArtifactAsync(tenantId, artifactId, ct);
-        EnsureVersion(artifact, command.ExpectedVersion);
-        if (artifact.Status == GovernedLifecycleStatus.Archived)
-            throw new PlatformGovernanceConflictException("Restore the artifact before creating a version.");
-        var definition = ValidateDefinition(artifact.ArtifactType, command.DefinitionJson);
-        var number = checked(artifact.CurrentVersionNumber + 1);
-        var now = DateTime.UtcNow;
-        db.GovernedArtifactVersions.Add(new GovernedArtifactVersion
+        return await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
         {
-            BusinessUnitId = tenantId,
-            GovernedArtifactId = artifactId,
-            VersionNumber = number,
-            DefinitionJson = definition,
-            ChangeSummary = Required(command.ChangeSummary, 1000, "A change summary is required."),
-            CreatedOn = now,
-            CreatedByUserId = actorUserId
+            db.ChangeTracker.Clear();
+            await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+            var replay = await EventReplayAsync(tenantId, idempotencyKey, ct);
+            if (replay is not null)
+                return new(Summary(await ArtifactAsync(tenantId, replay.GovernedArtifactId, ct)), true);
+            var artifact = await ArtifactAsync(tenantId, artifactId, ct);
+            EnsureVersion(artifact, command.ExpectedVersion);
+            if (artifact.Status == GovernedLifecycleStatus.Archived)
+                throw new PlatformGovernanceConflictException("Restore the artifact before creating a version.");
+            var definition = ValidateDefinition(artifact.ArtifactType, command.DefinitionJson);
+            var number = checked(artifact.CurrentVersionNumber + 1);
+            var now = DateTime.UtcNow;
+            db.GovernedArtifactVersions.Add(new GovernedArtifactVersion
+            {
+                BusinessUnitId = tenantId,
+                GovernedArtifactId = artifactId,
+                VersionNumber = number,
+                DefinitionJson = definition,
+                ChangeSummary = Required(command.ChangeSummary, 1000, "A change summary is required."),
+                CreatedOn = now,
+                CreatedByUserId = actorUserId
+            });
+            artifact.CurrentVersionNumber = number;
+            artifact.Status = GovernedLifecycleStatus.Draft;
+            Touch(artifact, actorUserId, now);
+            db.GovernedArtifactEvents.Add(NewEvent(tenantId, number, "VERSION_CREATED",
+                command.ChangeSummary, definition, idempotencyKey, actorUserId, now, artifactId));
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+            return new ArtifactTransitionResult(Summary(artifact), false);
         });
-        artifact.CurrentVersionNumber = number;
-        artifact.Status = GovernedLifecycleStatus.Draft;
-        Touch(artifact, actorUserId, now);
-        db.GovernedArtifactEvents.Add(NewEvent(tenantId, number, "VERSION_CREATED",
-            command.ChangeSummary, definition, idempotencyKey, actorUserId, now, artifactId));
-        await db.SaveChangesAsync(ct);
-        await tx.CommitAsync(ct);
-        return new(Summary(artifact), false);
     }
 
     public async Task<ArtifactTransitionResult> TransitionAsync(long tenantId, long artifactId,
@@ -137,78 +145,82 @@ public sealed class PlatformGovernanceService(ErpRfqAutomationContext db)
         idempotencyKey = Required(idempotencyKey, 160, "Idempotency-Key is required.");
         var action = Required(command.Action, 32, "Action is required.").ToUpperInvariant();
         var reason = Required(command.Reason, 1000, "A governance reason is required.");
-        await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
-        var replay = await EventReplayAsync(tenantId, idempotencyKey, ct);
-        if (replay is not null)
-            return new(Summary(await ArtifactAsync(tenantId, replay.GovernedArtifactId, ct)), true);
-        var artifact = await ArtifactAsync(tenantId, artifactId, ct);
-        EnsureVersion(artifact, command.ExpectedVersion);
-        var now = DateTime.UtcNow;
-        var current = await db.GovernedArtifactVersions.SingleAsync(x => x.BusinessUnitId == tenantId
-            && x.GovernedArtifactId == artifactId
-            && x.VersionNumber == artifact.CurrentVersionNumber, ct);
-
-        switch (action)
+        return await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
         {
-            case "TEST":
-                if (artifact.Status != GovernedLifecycleStatus.Draft)
-                    throw new PlatformGovernanceConflictException("Only a draft version can enter test.");
-                ValidateDefinition(artifact.ArtifactType, current.DefinitionJson);
-                artifact.Status = current.Status = GovernedLifecycleStatus.Test;
-                current.TestedOn = now;
-                break;
-            case "PUBLISH":
-                if (artifact.Status != GovernedLifecycleStatus.Test)
-                    throw new PlatformGovernanceConflictException("Only a tested version can be published.");
-                if (artifact.ArtifactType == GovernedArtifactType.ReleaseCandidate)
-                    await EnsureReleaseCandidateReadyAsync(tenantId, current.DefinitionJson, ct);
-                var prior = await db.GovernedArtifactVersions.Where(x => x.BusinessUnitId == tenantId
-                    && x.GovernedArtifactId == artifactId && x.Status == GovernedLifecycleStatus.Production)
-                    .ToListAsync(ct);
-                foreach (var version in prior) version.Status = GovernedLifecycleStatus.Archived;
-                artifact.Status = current.Status = GovernedLifecycleStatus.Production;
-                artifact.ProductionVersionNumber = current.VersionNumber;
-                current.PublishedOn = now;
-                break;
-            case "ROLLBACK":
-                if (!command.TargetVersionNumber.HasValue)
-                    throw new PlatformGovernanceValidationException("A rollback target version is required.");
-                var target = await db.GovernedArtifactVersions.SingleOrDefaultAsync(x =>
-                    x.BusinessUnitId == tenantId && x.GovernedArtifactId == artifactId
-                    && x.VersionNumber == command.TargetVersionNumber.Value, ct)
-                    ?? throw new PlatformGovernanceNotFoundException("The rollback version was not found.");
-                if (!target.PublishedOn.HasValue)
-                    throw new PlatformGovernanceConflictException("Only a previously published version can be restored.");
-                var production = await db.GovernedArtifactVersions.Where(x => x.BusinessUnitId == tenantId
-                    && x.GovernedArtifactId == artifactId && x.Status == GovernedLifecycleStatus.Production)
-                    .ToListAsync(ct);
-                foreach (var version in production) version.Status = GovernedLifecycleStatus.Archived;
-                target.Status = GovernedLifecycleStatus.Production;
-                artifact.CurrentVersionNumber = target.VersionNumber;
-                artifact.ProductionVersionNumber = target.VersionNumber;
-                artifact.Status = GovernedLifecycleStatus.Production;
-                break;
-            case "ARCHIVE":
-                if (artifact.Status == GovernedLifecycleStatus.Archived)
-                    throw new PlatformGovernanceConflictException("The artifact is already archived.");
-                artifact.Status = GovernedLifecycleStatus.Archived;
-                break;
-            case "RESTORE":
-                if (artifact.Status != GovernedLifecycleStatus.Archived)
-                    throw new PlatformGovernanceConflictException("Only an archived artifact can be restored.");
-                artifact.Status = GovernedLifecycleStatus.Draft;
-                current.Status = GovernedLifecycleStatus.Draft;
-                break;
-            default:
-                throw new PlatformGovernanceValidationException("Supported actions are TEST, PUBLISH, ROLLBACK, ARCHIVE and RESTORE.");
-        }
+            db.ChangeTracker.Clear();
+            await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+            var replay = await EventReplayAsync(tenantId, idempotencyKey, ct);
+            if (replay is not null)
+                return new(Summary(await ArtifactAsync(tenantId, replay.GovernedArtifactId, ct)), true);
+            var artifact = await ArtifactAsync(tenantId, artifactId, ct);
+            EnsureVersion(artifact, command.ExpectedVersion);
+            var now = DateTime.UtcNow;
+            var current = await db.GovernedArtifactVersions.SingleAsync(x => x.BusinessUnitId == tenantId
+                && x.GovernedArtifactId == artifactId
+                && x.VersionNumber == artifact.CurrentVersionNumber, ct);
 
-        Touch(artifact, actorUserId, now);
-        db.GovernedArtifactEvents.Add(NewEvent(tenantId, artifact.CurrentVersionNumber, action,
-            reason, current.DefinitionJson, idempotencyKey, actorUserId, now, artifactId));
-        await db.SaveChangesAsync(ct);
-        await tx.CommitAsync(ct);
-        return new(Summary(artifact), false);
+            switch (action)
+            {
+                case "TEST":
+                    if (artifact.Status != GovernedLifecycleStatus.Draft)
+                        throw new PlatformGovernanceConflictException("Only a draft version can enter test.");
+                    ValidateDefinition(artifact.ArtifactType, current.DefinitionJson);
+                    artifact.Status = current.Status = GovernedLifecycleStatus.Test;
+                    current.TestedOn = now;
+                    break;
+                case "PUBLISH":
+                    if (artifact.Status != GovernedLifecycleStatus.Test)
+                        throw new PlatformGovernanceConflictException("Only a tested version can be published.");
+                    if (artifact.ArtifactType == GovernedArtifactType.ReleaseCandidate)
+                        await EnsureReleaseCandidateReadyAsync(tenantId, current.DefinitionJson, ct);
+                    var prior = await db.GovernedArtifactVersions.Where(x => x.BusinessUnitId == tenantId
+                        && x.GovernedArtifactId == artifactId && x.Status == GovernedLifecycleStatus.Production)
+                        .ToListAsync(ct);
+                    foreach (var version in prior) version.Status = GovernedLifecycleStatus.Archived;
+                    artifact.Status = current.Status = GovernedLifecycleStatus.Production;
+                    artifact.ProductionVersionNumber = current.VersionNumber;
+                    current.PublishedOn = now;
+                    break;
+                case "ROLLBACK":
+                    if (!command.TargetVersionNumber.HasValue)
+                        throw new PlatformGovernanceValidationException("A rollback target version is required.");
+                    var target = await db.GovernedArtifactVersions.SingleOrDefaultAsync(x =>
+                        x.BusinessUnitId == tenantId && x.GovernedArtifactId == artifactId
+                        && x.VersionNumber == command.TargetVersionNumber.Value, ct)
+                        ?? throw new PlatformGovernanceNotFoundException("The rollback version was not found.");
+                    if (!target.PublishedOn.HasValue)
+                        throw new PlatformGovernanceConflictException("Only a previously published version can be restored.");
+                    var production = await db.GovernedArtifactVersions.Where(x => x.BusinessUnitId == tenantId
+                        && x.GovernedArtifactId == artifactId && x.Status == GovernedLifecycleStatus.Production)
+                        .ToListAsync(ct);
+                    foreach (var version in production) version.Status = GovernedLifecycleStatus.Archived;
+                    target.Status = GovernedLifecycleStatus.Production;
+                    artifact.CurrentVersionNumber = target.VersionNumber;
+                    artifact.ProductionVersionNumber = target.VersionNumber;
+                    artifact.Status = GovernedLifecycleStatus.Production;
+                    break;
+                case "ARCHIVE":
+                    if (artifact.Status == GovernedLifecycleStatus.Archived)
+                        throw new PlatformGovernanceConflictException("The artifact is already archived.");
+                    artifact.Status = GovernedLifecycleStatus.Archived;
+                    break;
+                case "RESTORE":
+                    if (artifact.Status != GovernedLifecycleStatus.Archived)
+                        throw new PlatformGovernanceConflictException("Only an archived artifact can be restored.");
+                    artifact.Status = GovernedLifecycleStatus.Draft;
+                    current.Status = GovernedLifecycleStatus.Draft;
+                    break;
+                default:
+                    throw new PlatformGovernanceValidationException("Supported actions are TEST, PUBLISH, ROLLBACK, ARCHIVE and RESTORE.");
+            }
+
+            Touch(artifact, actorUserId, now);
+            db.GovernedArtifactEvents.Add(NewEvent(tenantId, artifact.CurrentVersionNumber, action,
+                reason, current.DefinitionJson, idempotencyKey, actorUserId, now, artifactId));
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+            return new ArtifactTransitionResult(Summary(artifact), false);
+        });
     }
 
     private async Task<GovernedArtifact> ArtifactAsync(long tenantId, long artifactId, CancellationToken ct) =>
@@ -221,17 +233,17 @@ public sealed class PlatformGovernanceService(ErpRfqAutomationContext db)
 
     private static GovernedArtifactEvent NewEvent(long tenantId, int version, string action,
         string reason, string snapshot, string key, long actor, DateTime now, long artifactId = 0) => new()
-    {
-        BusinessUnitId = tenantId,
-        GovernedArtifactId = artifactId,
-        ArtifactVersionNumber = version,
-        Action = action,
-        Reason = reason,
-        SnapshotJson = snapshot,
-        IdempotencyKey = key,
-        ActorUserId = actor,
-        OccurredOn = now
-    };
+        {
+            BusinessUnitId = tenantId,
+            GovernedArtifactId = artifactId,
+            ArtifactVersionNumber = version,
+            Action = action,
+            Reason = reason,
+            SnapshotJson = snapshot,
+            IdempotencyKey = key,
+            ActorUserId = actor,
+            OccurredOn = now
+        };
 
     private static GovernedArtifactSummary Summary(GovernedArtifact x) => new(x.Id, x.ArtifactType,
         x.ArtifactKey, x.Name, x.Description, x.Status, x.CurrentVersionNumber,

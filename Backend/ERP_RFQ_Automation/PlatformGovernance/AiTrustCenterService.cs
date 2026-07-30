@@ -96,19 +96,23 @@ public sealed class AiTrustCenterService(ErpRfqAutomationContext db)
     {
         PlatformGovernanceService.EnsureActor(tenantId, actorUserId);
         idempotencyKey = PlatformGovernanceService.Required(idempotencyKey, 160, "Idempotency-Key is required.");
-        await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
-        var replay = await ReplayAsync(tenantId, idempotencyKey, ct);
-        if (replay is not null) return new(Map(await PolicyAsync(tenantId, ct)), true);
-        var policy = await PolicyAsync(tenantId, ct);
-        if (policy.Version != command.ExpectedVersion)
-            throw new PlatformGovernanceConflictException($"AI policy version is {policy.Version}; refresh and retry.");
-        var before = Map(policy);
-        Apply(policy, command, actorUserId);
-        AddAudit(tenantId, actorUserId, idempotencyKey, "POLICY_UPDATED", command.Reason,
-            before, Map(policy));
-        await db.SaveChangesAsync(ct);
-        await tx.CommitAsync(ct);
-        return new(Map(policy), false);
+        return await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            db.ChangeTracker.Clear();
+            await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+            var replay = await ReplayAsync(tenantId, idempotencyKey, ct);
+            if (replay is not null) return new(Map(await PolicyAsync(tenantId, ct)), true);
+            var policy = await PolicyAsync(tenantId, ct);
+            if (policy.Version != command.ExpectedVersion)
+                throw new PlatformGovernanceConflictException($"AI policy version is {policy.Version}; refresh and retry.");
+            var before = Map(policy);
+            Apply(policy, command, actorUserId);
+            AddAudit(tenantId, actorUserId, idempotencyKey, "POLICY_UPDATED", command.Reason,
+                before, Map(policy));
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+            return new AiTrustPolicyMutationResult(Map(policy), false);
+        });
     }
 
     public async Task<AiTrustPolicyMutationResult> RollbackAsync(long tenantId, long actorUserId,
@@ -116,24 +120,28 @@ public sealed class AiTrustCenterService(ErpRfqAutomationContext db)
     {
         PlatformGovernanceService.EnsureActor(tenantId, actorUserId);
         idempotencyKey = PlatformGovernanceService.Required(idempotencyKey, 160, "Idempotency-Key is required.");
-        await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
-        if (await ReplayAsync(tenantId, idempotencyKey, ct) is not null)
-            return new(Map(await PolicyAsync(tenantId, ct)), true);
-        var policy = await PolicyAsync(tenantId, ct);
-        if (policy.Version != command.ExpectedVersion)
-            throw new PlatformGovernanceConflictException($"AI policy version is {policy.Version}; refresh and retry.");
-        var target = await db.TenantGovernanceAuditEvents.AsNoTracking().SingleOrDefaultAsync(x =>
-            x.BusinessUnitId == tenantId && x.Area == "AITrust" && x.Id == command.AuditEventId, ct)
-            ?? throw new PlatformGovernanceNotFoundException("The AI policy audit version was not found.");
-        var envelope = JsonSerializer.Deserialize<PolicyAuditEnvelope>(target.EvidenceJson)
-            ?? throw new PlatformGovernanceValidationException("The selected audit version cannot be restored.");
-        var before = Map(policy);
-        Apply(policy, envelope.Before with { ExpectedVersion = policy.Version, Reason = command.Reason }, actorUserId);
-        AddAudit(tenantId, actorUserId, idempotencyKey, "POLICY_ROLLED_BACK", command.Reason,
-            before, Map(policy));
-        await db.SaveChangesAsync(ct);
-        await tx.CommitAsync(ct);
-        return new(Map(policy), false);
+        return await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            db.ChangeTracker.Clear();
+            await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+            if (await ReplayAsync(tenantId, idempotencyKey, ct) is not null)
+                return new(Map(await PolicyAsync(tenantId, ct)), true);
+            var policy = await PolicyAsync(tenantId, ct);
+            if (policy.Version != command.ExpectedVersion)
+                throw new PlatformGovernanceConflictException($"AI policy version is {policy.Version}; refresh and retry.");
+            var target = await db.TenantGovernanceAuditEvents.AsNoTracking().SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == tenantId && x.Area == "AITrust" && x.Id == command.AuditEventId, ct)
+                ?? throw new PlatformGovernanceNotFoundException("The AI policy audit version was not found.");
+            var envelope = JsonSerializer.Deserialize<PolicyAuditEnvelope>(target.EvidenceJson)
+                ?? throw new PlatformGovernanceValidationException("The selected audit version cannot be restored.");
+            var before = Map(policy);
+            Apply(policy, envelope.Before with { ExpectedVersion = policy.Version, Reason = command.Reason }, actorUserId);
+            AddAudit(tenantId, actorUserId, idempotencyKey, "POLICY_ROLLED_BACK", command.Reason,
+                before, Map(policy));
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+            return new AiTrustPolicyMutationResult(Map(policy), false);
+        });
     }
 
     private async Task<AiProcessingPolicy> PolicyAsync(long tenantId, CancellationToken ct) =>
@@ -147,11 +155,16 @@ public sealed class AiTrustCenterService(ErpRfqAutomationContext db)
     private void AddAudit(long tenantId, long actorUserId, string key, string action, string reason,
         AiTrustPolicyState before, AiTrustPolicyState after) => db.TenantGovernanceAuditEvents.Add(new()
         {
-            BusinessUnitId = tenantId, Area = "AITrust", AggregateType = "AiProcessingPolicy",
-            AggregateReference = tenantId.ToString(), Action = action,
+            BusinessUnitId = tenantId,
+            Area = "AITrust",
+            AggregateType = "AiProcessingPolicy",
+            AggregateReference = tenantId.ToString(),
+            Action = action,
             Reason = PlatformGovernanceService.Required(reason, 2000, "A policy reason is required."),
             EvidenceJson = JsonSerializer.Serialize(new PolicyAuditEnvelope(ToCommand(before), ToCommand(after))),
-            IdempotencyKey = key, ActorUserId = actorUserId, OccurredOn = DateTime.UtcNow
+            IdempotencyKey = key,
+            ActorUserId = actorUserId,
+            OccurredOn = DateTime.UtcNow
         });
 
     private static void Apply(AiProcessingPolicy policy, UpdateAiTrustPolicyCommand command, long actorUserId)

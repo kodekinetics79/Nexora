@@ -1,5 +1,7 @@
 using ERP_RFQ_Automation.Tests.Support;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
+using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.PlatformGovernance;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -9,6 +11,58 @@ namespace ERP_RFQ_Automation.Tests;
 [Collection(PostgreSqlIntegrationCollection.Name)]
 public sealed class Wave1PlatformGovernancePostgreSqlTests(PostgreSqlTestDatabase database)
 {
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Wave1_transactions_execute_with_production_retry_strategy()
+    {
+        const long tenantId = 60_970;
+        await using (var seed = database.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(seed, tenantId);
+            await seed.SaveChangesAsync();
+        }
+
+        var options = new DbContextOptionsBuilder<ErpRfqAutomationContext>()
+            .UseNpgsql(database.ConnectionString, npgsql => npgsql.EnableRetryOnFailure())
+            .Options;
+        await using var context = new ErpRfqAutomationContext(options, new StubTenant(tenantId));
+        var artifacts = new PlatformGovernanceService(context);
+        var suite = await artifacts.CreateAsync(tenantId, 81, "retry-suite-create",
+            new(GovernedArtifactType.TestSuite, "retry-suite", "Retry suite", "Production retry regression",
+                "{\"requirements\":[],\"tests\":[{\"name\":\"atomic\",\"actual\":true,\"expected\":true}],\"environment\":\"Sandbox\",\"passThreshold\":1}",
+                "Initial retry-safe suite"), default);
+        var simulation = await new ReleaseSimulationService(context).RunAsync(
+            tenantId, 81, suite.Artifact.Id, "retry-suite-run", default);
+        Assert.True(simulation.Succeeded);
+
+        var actions = new HumanActionService(context);
+        var action = await actions.CreateAsync(tenantId, 81, "retry-action-create",
+            new("REVIEW", "Lead", "RETRY-001", "Retry review", "Review required",
+                "Approve after evidence review", "{\"verified\":true}", 0.8m,
+                "Prevents incorrect routing", "RESUME", HumanActionPriority.High, null,
+                DateTime.UtcNow.AddHours(1)), default);
+        var completed = await actions.TransitionAsync(tenantId, action.Item.Id, 81,
+            "retry-action-complete", new(action.Item.Version, HumanActionStatus.Completed,
+                "APPROVE", "Verified under production retry strategy"), default);
+        Assert.Equal(HumanActionStatus.Completed, completed.Item.Status);
+
+        var corpus = DocumentCorpus.Create(tenantId, Guid.NewGuid(), CorpusSourceType.Api);
+        context.Add(corpus);
+        await context.SaveChangesAsync();
+        var document = SourceDocument.Create(tenantId, corpus.Id, new string('c', 64),
+            "retry-archive.pdf", "application/pdf", "evidence", "retry/archive.pdf", "v1", 128);
+        context.Add(document);
+        await context.SaveChangesAsync();
+        var occurrence = SourceDocumentOccurrence.Create(tenantId, document.Id, corpus.Id,
+            "retry-archive-occurrence", "{\"source\":\"test\"}");
+        context.Add(occurrence);
+        await context.SaveChangesAsync();
+        var governed = await new CommercialDocumentArchiveService(context).GovernAsync(
+            tenantId, 81, occurrence.Id, "retry-archive-hold",
+            new(0, "HOLD_APPLIED", "Retry strategy regression"), default);
+        Assert.True(governed.LegalHold);
+    }
+
     [Fact]
     [Trait("Category", "PostgreSQL")]
     public async Task Quality_analytics_reconciles_tenant_records_and_discloses_missing_accuracy_evidence()

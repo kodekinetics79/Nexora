@@ -108,11 +108,15 @@ public sealed class CommercialDocumentArchiveService(ErpRfqAutomationContext db)
         var leadLinks = await db.Set<LeadIngestionOccurrence>().AsNoTracking()
             .Where(x => x.BusinessUnitId == tenantId && x.SourceDocumentOccurrenceId.HasValue
                 && occurrenceIds.Contains(x.SourceDocumentOccurrenceId.Value))
-            .Select(x => new { OccurrenceId = x.SourceDocumentOccurrenceId!.Value, x.LeadId,
+            .Select(x => new
+            {
+                OccurrenceId = x.SourceDocumentOccurrenceId!.Value,
+                x.LeadId,
                 NexoraSerial = x.Lead == null ? null : x.Lead.CommercialCaseReference,
                 CustomerRfq = x.Lead == null ? null : x.Lead.Rfqno,
                 CustomerId = x.Lead == null ? null : x.Lead.CustomerId,
-                ContactId = x.Lead == null ? null : x.Lead.ContactId })
+                ContactId = x.Lead == null ? null : x.Lead.ContactId
+            })
             .ToListAsync(ct);
         var leadByOccurrence = leadLinks.GroupBy(x => x.OccurrenceId).ToDictionary(x => x.Key, x => x.First());
         var leadIds = leadLinks.Where(x => x.LeadId.HasValue).Select(x => x.LeadId!.Value).Distinct().ToArray();
@@ -176,52 +180,57 @@ public sealed class CommercialDocumentArchiveService(ErpRfqAutomationContext db)
         var reason = PlatformGovernanceService.Required(command.Reason, 1000,
             "A governance reason is required.");
 
-        await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
-        var replay = await db.TenantGovernanceAuditEvents.AsNoTracking().SingleOrDefaultAsync(x =>
-            x.BusinessUnitId == tenantId && x.IdempotencyKey == idempotencyKey, ct);
-        if (replay is not null)
+        return await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
         {
-            var replayEvents = await EventsAsync(tenantId, occurrenceId, ct);
-            var replayState = State(replayEvents);
-            return new(occurrenceId, replayState.LegalHold, replayState.DeletionRequested,
-                replayState.Version, true);
-        }
-        if (!await db.Set<SourceDocumentOccurrence>().AsNoTracking().AnyAsync(x =>
-                x.BusinessUnitId == tenantId && x.Id == occurrenceId, ct))
-            throw new PlatformGovernanceNotFoundException("The archived document occurrence was not found.");
-        var events = await EventsAsync(tenantId, occurrenceId, ct);
-        var state = State(events);
-        if (command.ExpectedVersion != state.Version)
-            throw new PlatformGovernanceConflictException(
-                $"Archive governance version is {state.Version}; refresh and retry.");
-        if (action == "DELETION_REQUESTED" && state.LegalHold)
-            throw new PlatformGovernanceConflictException("Deletion cannot be requested while legal hold is active.");
-        if (action == "HOLD_RELEASED" && !state.LegalHold)
-            throw new PlatformGovernanceConflictException("The document is not on legal hold.");
+            db.ChangeTracker.Clear();
+            await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+            var replay = await db.TenantGovernanceAuditEvents.AsNoTracking().SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == tenantId && x.IdempotencyKey == idempotencyKey, ct);
+            if (replay is not null)
+            {
+                var replayEvents = await EventsAsync(tenantId, occurrenceId, ct);
+                var replayState = State(replayEvents);
+                return new(occurrenceId, replayState.LegalHold, replayState.DeletionRequested,
+                    replayState.Version, true);
+            }
+            if (!await db.Set<SourceDocumentOccurrence>().AsNoTracking().AnyAsync(x =>
+                    x.BusinessUnitId == tenantId && x.Id == occurrenceId, ct))
+                throw new PlatformGovernanceNotFoundException("The archived document occurrence was not found.");
+            var events = await EventsAsync(tenantId, occurrenceId, ct);
+            var state = State(events);
+            if (command.ExpectedVersion != state.Version)
+                throw new PlatformGovernanceConflictException(
+                    $"Archive governance version is {state.Version}; refresh and retry.");
+            if (action == "DELETION_REQUESTED" && state.LegalHold)
+                throw new PlatformGovernanceConflictException("Deletion cannot be requested while legal hold is active.");
+            if (action == "HOLD_RELEASED" && !state.LegalHold)
+                throw new PlatformGovernanceConflictException("The document is not on legal hold.");
 
-        var next = state with
-        {
-            LegalHold = action == "HOLD_APPLIED" || action != "HOLD_RELEASED" && state.LegalHold,
-            DeletionRequested = action == "DELETION_REQUESTED"
-                || action != "DELETION_CANCELLED" && state.DeletionRequested,
-            Version = state.Version + 1
-        };
-        db.TenantGovernanceAuditEvents.Add(new()
-        {
-            BusinessUnitId = tenantId,
-            Area = Area,
-            AggregateType = "SourceDocumentOccurrence",
-            AggregateReference = Reference(occurrenceId),
-            Action = action,
-            Reason = reason,
-            EvidenceJson = JsonSerializer.Serialize(new { before = state, after = next }),
-            IdempotencyKey = idempotencyKey,
-            ActorUserId = actorUserId,
-            OccurredOn = DateTime.UtcNow
+            var next = state with
+            {
+                LegalHold = action == "HOLD_APPLIED" || action != "HOLD_RELEASED" && state.LegalHold,
+                DeletionRequested = action == "DELETION_REQUESTED"
+                    || action != "DELETION_CANCELLED" && state.DeletionRequested,
+                Version = state.Version + 1
+            };
+            db.TenantGovernanceAuditEvents.Add(new()
+            {
+                BusinessUnitId = tenantId,
+                Area = Area,
+                AggregateType = "SourceDocumentOccurrence",
+                AggregateReference = Reference(occurrenceId),
+                Action = action,
+                Reason = reason,
+                EvidenceJson = JsonSerializer.Serialize(new { before = state, after = next }),
+                IdempotencyKey = idempotencyKey,
+                ActorUserId = actorUserId,
+                OccurredOn = DateTime.UtcNow
+            });
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+            return new ArchiveGovernanceResult(occurrenceId, next.LegalHold,
+                next.DeletionRequested, next.Version, false);
         });
-        await db.SaveChangesAsync(ct);
-        await tx.CommitAsync(ct);
-        return new(occurrenceId, next.LegalHold, next.DeletionRequested, next.Version, false);
     }
 
     private Task<List<TenantGovernanceAuditEvent>> EventsAsync(long tenantId, long occurrenceId,
