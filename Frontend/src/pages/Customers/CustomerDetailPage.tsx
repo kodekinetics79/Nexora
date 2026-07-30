@@ -65,47 +65,54 @@ const CustomerDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { hasPermission } = useAuth();
+  const customerId = Number(id);
+  const validCustomerId = Number.isInteger(customerId) && customerId > 0;
+  const canViewCustomers = hasPermission('Customers');
+  const canViewQuotes = hasPermission('Quotations');
+  const canViewRfqs = hasPermission('RFQ Management');
+  const canViewOrders = hasPermission('Orders');
+  const canViewCommercialContext = canViewCustomers && canViewQuotes && canViewOrders && canViewRfqs;
+  const canViewMemory = canViewCustomers && canViewQuotes;
+  const canViewHealth = canViewCommercialContext;
 
   const customerQuery = useQuery({
-    queryKey: ['customer-detail', Number(id)],
-    queryFn: () => customerService.getById(Number(id)),
-    enabled: !!id,
+    queryKey: ['customer-detail', customerId],
+    queryFn: () => customerService.getById(customerId),
+    enabled: validCustomerId && canViewCustomers,
   });
   const customer = customerQuery.data;
-  const customerId = Number(id);
-  const canViewQuotes = hasPermission('Quotations');
-  const canViewCommercialContext = canViewQuotes && hasPermission('Orders') && hasPermission('RFQ Management');
-  const canViewHealth = canViewCommercialContext && hasPermission('Customers');
   const healthPeriod = React.useMemo(healthWindow, []);
   const contacts = useQuery({
     queryKey: ['customer-contacts', customerId],
     queryFn: () => contactService.getByCustomer(customerId),
-    enabled: Number.isFinite(customerId),
+    enabled: validCustomerId && canViewCustomers,
   });
   const context = useQuery({
     queryKey: ['customer-intelligence-context', customerId],
     queryFn: () => intelligenceService.getCustomerContext(customerId),
-    enabled: Number.isFinite(customerId) && canViewCommercialContext,
+    enabled: validCustomerId && canViewCommercialContext,
   });
   const memory = useQuery({
     queryKey: ['customer-commercial-memory', customerId],
     queryFn: () => commercialLearningService.getCustomer(customerId),
-    enabled: Number.isFinite(customerId) && hasPermission('Quotations'),
+    enabled: validCustomerId && canViewMemory,
   });
   const ownership = useQuery({
     queryKey: ['customer-account-ownership', customerId],
     queryFn: async () => {
-      const rows = await commercialIntelligenceService.getAccountOwnership({ search: customer?.name });
+      const rows = await commercialIntelligenceService.getAccountOwnership({ customerId });
       return rows.find(row => row.customerId === customerId) ?? null;
     },
-    enabled: Number.isFinite(customerId) && !!customer?.name,
+    enabled: validCustomerId && canViewCustomers,
   });
   const health = useQuery({
     queryKey: ['customer-health', customerId, healthPeriod.from, healthPeriod.to],
     queryFn: () => commercialIntelligenceService.getCustomerHealth(customerId, healthPeriod.from, healthPeriod.to),
-    enabled: Number.isFinite(customerId) && canViewHealth,
+    enabled: validCustomerId && canViewHealth,
   });
 
+  if (!canViewCustomers) return <Box sx={{ p: 4 }}><Alert severity="warning">Customer view permission is required.</Alert></Box>;
+  if (!validCustomerId) return <Box sx={{ p: 4 }}><Alert severity="error">The customer reference is invalid.</Alert></Box>;
   if (customerQuery.isLoading) return <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '60vh' }}><CircularProgress /></Box>;
   if (customerQuery.isError) return <Box sx={{ p: 4 }}><Alert severity="error" action={<Button color="inherit" onClick={() => void customerQuery.refetch()}>Retry</Button>}>Customer details could not be loaded.</Alert></Box>;
   if (!customer) return <Box sx={{ p: 4 }}><Typography>Customer not found.</Typography></Box>;
@@ -127,7 +134,7 @@ const CustomerDetailPage: React.FC = () => {
         </Box>
         <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
           <Chip label={customer.isActive ? 'Active' : 'Inactive'} color={customer.isActive ? 'success' : 'default'} size="small" variant="outlined" />
-          {hasPermission('Customers', 'edit') && <Button variant="contained" startIcon={<EditIcon />} onClick={() => navigate('/customers', { state: { editId: customer.id } })} disableElevation sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 1.5 }}>
+          {hasPermission('Customers', 'edit') && <Button variant="contained" startIcon={<EditIcon />} onClick={() => navigate(`/customers?edit=${customer.id}`)} disableElevation sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 1.5 }}>
             Edit Customer
           </Button>}
         </Box>
@@ -167,7 +174,7 @@ const CustomerDetailPage: React.FC = () => {
       <Grid container spacing={3}>
         <Grid size={{ xs: 12 }}>
           <Section title="Account ownership and active work" icon={<OwnershipIcon sx={{ fontSize: 16 }} />}>
-            {ownership.isLoading ? <CircularProgress size={20} /> : ownership.isError ? <Alert severity="error" action={<Button color="inherit" onClick={() => void ownership.refetch()}>Retry</Button>}>Account ownership could not be loaded.</Alert> : ownership.data ? (
+            {!canViewCustomers ? <Alert severity="info">Customer view permission is required.</Alert> : ownership.isLoading ? <CircularProgress size={20} /> : ownership.isError ? <Alert severity="error" action={<Button color="inherit" onClick={() => void ownership.refetch()}>Retry</Button>}>Account ownership could not be loaded.</Alert> : ownership.data ? (
               <Grid container spacing={2} sx={{ alignItems: 'center' }}>
                 <Grid size={{ xs: 12, sm: 4 }}><InfoRow label="Account owner" value={ownership.data.ownerName ?? 'Unassigned'} /></Grid>
                 <Grid size={{ xs: 6, sm: 2 }}><InfoRow label="Open inquiries" value={ownership.data.openLeads} /></Grid>
@@ -184,7 +191,11 @@ const CustomerDetailPage: React.FC = () => {
 
         <Grid size={{ xs: 12 }}>
           <Section title="Commercial performance" icon={<InsightsIcon sx={{ fontSize: 16 }} />}>
-            {!canViewQuotes ? <Alert severity="info">Quotation view permission is required to see commercial evidence.</Alert> : !canViewCommercialContext ? <Alert severity="info">RFQ and order view permissions are required to see combined commercial evidence.</Alert> : context.isError || memory.isError ? <Alert severity="error" action={<Button color="inherit" onClick={() => { void context.refetch(); void memory.refetch(); }}>Retry</Button>}>Commercial evidence could not be loaded.</Alert> : (
+            {!canViewQuotes ? <Alert severity="info">Quotation view permission is required to see commercial evidence.</Alert> : !canViewCommercialContext ? <Alert severity="info">RFQ and order view permissions are required to see combined commercial evidence.</Alert> : context.isLoading || memory.isLoading ? <CircularProgress size={20} /> : context.isError || memory.isError ? <Alert severity="error" action={<Button color="inherit" onClick={() => { void context.refetch(); void memory.refetch(); }}>Retry</Button>}>Commercial evidence could not be loaded. No empty result has been assumed.</Alert> : (
+              <>
+              {context.data?.completeness && (context.data.completeness.recentQuotesTruncated || context.data.completeness.soldOrderEvidenceTruncated || context.data.completeness.quoteItemEvidenceTruncated || context.data.completeness.demandLinesTruncated) && (
+                <Alert severity="warning" sx={{ mb: 1.5 }}>Some evidence lists reached their bounded evaluation limit. Aggregate quote totals still use all history.</Alert>
+              )}
               <Grid container spacing={2}>
                 {[
                   ['Inquiries', memory.data?.inquiryCount],
@@ -195,9 +206,16 @@ const CustomerDetailPage: React.FC = () => {
                   ['Orders, 24 months', context.data?.ordersLast24Months],
                 ].map(([label, value]) => <Grid key={String(label)} size={{ xs: 6, sm: 4, lg: 2 }}>
                   <Typography variant="caption" color="text.secondary">{label}</Typography>
-                  <Typography sx={{ fontSize: '1.2rem', fontWeight: 800 }}>{value ?? 'Not available'}</Typography>
+                  <Typography sx={{ fontSize: '1.2rem', fontWeight: 800 }}>{value ?? 'Insufficient evidence'}</Typography>
                 </Grid>)}
               </Grid>
+              {context.data?.orderValueStatus !== 'no_data' && <Box sx={{ mt: 2 }}>
+                <Typography variant="caption" color="text.secondary">Order value, 24 months</Typography>
+                {context.data?.orderValueStatus === 'single_currency'
+                  ? <Typography sx={{ fontWeight: 800 }}>{context.data.orderValueByCurrency[0]?.currencyCode} {context.data.orderValueLast24Months?.toLocaleString()}</Typography>
+                  : context.data?.orderValueByCurrency.map(group => <Typography key={`${group.currencyId}-${group.currencyCode}`} variant="body2">{group.currencyCode ?? 'Currency not recorded'}: {group.totalAmount.toLocaleString()} across {group.recordCount} order(s)</Typography>)}
+              </Box>}
+              </>
             )}
           </Section>
         </Grid>
@@ -242,8 +260,16 @@ const CustomerDetailPage: React.FC = () => {
 
         <Grid size={{ xs: 12, md: 6 }}>
           <Section title="Contacts" icon={<ContactsIcon sx={{ fontSize: 16 }} />}>
-            {contacts.isLoading ? <CircularProgress size={20} /> : contacts.isError ? <Alert severity="error" action={<Button color="inherit" onClick={() => void contacts.refetch()}>Retry</Button>}>Contacts could not be loaded.</Alert> : contacts.data?.length ? contacts.data.map(contact => (
-              <InfoRow key={contact.id} label={[contact.firstName, contact.lastName].filter(Boolean).join(' ')} value={contact.email || contact.phoneNo || contact.position} />
+            {!canViewCustomers ? <Alert severity="info">Customer view permission is required.</Alert> : contacts.isLoading ? <CircularProgress size={20} /> : contacts.isError ? <Alert severity="error" action={<Button color="inherit" onClick={() => void contacts.refetch()}>Retry</Button>}>Contacts could not be loaded. No empty result has been assumed.</Alert> : contacts.data?.length ? contacts.data.map(contact => (
+              <InfoRow key={contact.id} label={[contact.firstName, contact.middleName, contact.lastName].filter(Boolean).join(' ')} value={(
+                <Stack spacing={0.25}>
+                  {contact.position && <Typography variant="body2">{contact.position}</Typography>}
+                  {contact.email && <Typography variant="body2">{contact.email}</Typography>}
+                  {contact.phoneNo && <Typography variant="body2">Phone: {contact.phoneNo}</Typography>}
+                  {contact.mobileNo && <Typography variant="body2">Mobile: {contact.mobileNo}</Typography>}
+                  <Typography variant="caption" color="text.secondary">{contact.isPrimary ? 'Primary contact' : 'Contact'} · {contact.isActive === false ? 'Inactive' : 'Active'}</Typography>
+                </Stack>
+              )} />
             )) : <Typography color="text.secondary" variant="body2">No contacts recorded.</Typography>}
           </Section>
         </Grid>
@@ -258,31 +284,31 @@ const CustomerDetailPage: React.FC = () => {
 
         <Grid size={{ xs: 12 }}>
           <Section title="Recent Customer RFQs" icon={<HistoryIcon sx={{ fontSize: 16 }} />}>
-            {!canViewCommercialContext ? <Alert severity="info">Quotation and order view permissions are required.</Alert> : context.isLoading ? <CircularProgress size={20} /> : context.isError ? <Alert severity="error" action={<Button color="inherit" onClick={() => void context.refetch()}>Retry</Button>}>RFQ history could not be loaded.</Alert> : context.data?.recentRfqs.length ? <TableContainer sx={{ maxWidth: '100%' }}><Table size="small"><TableHead><TableRow><TableCell>RFQ</TableCell><TableCell>Received</TableCell><TableCell>Deadline</TableCell><TableCell>Status</TableCell><TableCell>Lines</TableCell><TableCell>Action</TableCell></TableRow></TableHead><TableBody>
-              {context.data.recentRfqs.map(rfq => <TableRow hover key={rfq.rfqId}><TableCell>{rfq.rfqNo}</TableCell><TableCell>{new Date(rfq.receivedOn).toLocaleDateString()}</TableCell><TableCell>{rfq.bidClosingOn ? new Date(rfq.bidClosingOn).toLocaleDateString() : 'Not recorded'}</TableCell><TableCell>{rfq.status ?? 'Not recorded'}</TableCell><TableCell>{rfq.lineCount}</TableCell><TableCell><Button size="small" endIcon={<OpenIcon />} onClick={() => navigate(`/procurement/rfqs/view/${rfq.rfqId}`)}>Open</Button></TableCell></TableRow>)}
+            {!canViewCommercialContext ? <Alert severity="info">RFQ, quotation, and order view permissions are required.</Alert> : context.isLoading ? <CircularProgress size={20} /> : context.isError ? <Alert severity="error" action={<Button color="inherit" onClick={() => void context.refetch()}>Retry</Button>}>RFQ history could not be loaded.</Alert> : context.data?.recentRfqs.length ? <TableContainer sx={{ maxWidth: '100%' }}><Table size="small" aria-label="Recent customer RFQs"><TableHead><TableRow><TableCell>RFQ</TableCell><TableCell>Contact</TableCell><TableCell>Received</TableCell><TableCell>Deadline</TableCell><TableCell>Status</TableCell><TableCell>Lines</TableCell><TableCell>Action</TableCell></TableRow></TableHead><TableBody>
+              {context.data.recentRfqs.map(rfq => <TableRow hover key={rfq.rfqId}><TableCell>{rfq.rfqNo}</TableCell><TableCell>{rfq.contactName ?? 'Not recorded'}</TableCell><TableCell>{new Date(rfq.receivedOn).toLocaleDateString()}</TableCell><TableCell>{rfq.bidClosingOn ? new Date(rfq.bidClosingOn).toLocaleDateString() : 'Not recorded'}</TableCell><TableCell>{rfq.status ?? 'Not recorded'}</TableCell><TableCell>{rfq.lineCount}</TableCell><TableCell><Button size="small" endIcon={<OpenIcon />} onClick={() => navigate(`/procurement/rfqs/view/${rfq.rfqId}`)}>Open</Button></TableCell></TableRow>)}
             </TableBody></Table></TableContainer> : <Typography color="text.secondary" variant="body2">No Customer RFQs recorded.</Typography>}
           </Section>
         </Grid>
 
         <Grid size={{ xs: 12 }}>
           <Section title="Recent quote outcomes" icon={<HistoryIcon sx={{ fontSize: 16 }} />}>
-            {!canViewCommercialContext ? <Alert severity="info">Quotation and order view permissions are required.</Alert> : context.isError ? <Alert severity="error" action={<Button color="inherit" onClick={() => void context.refetch()}>Retry</Button>}>Quote history could not be loaded.</Alert> : context.data?.recentQuotes.length ? <TableContainer sx={{ maxWidth: '100%' }}><Table size="small"><TableHead><TableRow><TableCell>Quote</TableCell><TableCell>Date</TableCell><TableCell>Outcome</TableCell><TableCell>Outcome evidence</TableCell><TableCell>Action</TableCell></TableRow></TableHead><TableBody>
-              {context.data.recentQuotes.map(quote => <TableRow hover key={quote.quoteId}><TableCell>{quote.quoteNo}</TableCell><TableCell>{quote.quoteDate ? new Date(quote.quoteDate).toLocaleDateString() : 'Not recorded'}</TableCell><TableCell><Chip size="small" label={quote.outcome} color={quote.outcome === 'won' ? 'success' : quote.outcome === 'lost' ? 'error' : 'default'} /></TableCell><TableCell>{quote.outcomeReasonName || quote.statusValue || 'No decision recorded'}</TableCell><TableCell><Button size="small" endIcon={<OpenIcon />} onClick={() => navigate(`/sales/quotes/view/${quote.quoteId}`)}>Open</Button></TableCell></TableRow>)}
+            {!canViewCommercialContext ? <Alert severity="info">RFQ, quotation, and order view permissions are required.</Alert> : context.isLoading ? <CircularProgress size={20} /> : context.isError ? <Alert severity="error" action={<Button color="inherit" onClick={() => void context.refetch()}>Retry</Button>}>Quote history could not be loaded.</Alert> : context.data?.recentQuotes.length ? <TableContainer sx={{ maxWidth: '100%' }}><Table size="small" aria-label="Recent customer quote outcomes"><TableHead><TableRow><TableCell>Quote</TableCell><TableCell>Contact</TableCell><TableCell>Date</TableCell><TableCell>Outcome</TableCell><TableCell>Outcome evidence</TableCell><TableCell>Action</TableCell></TableRow></TableHead><TableBody>
+              {context.data.recentQuotes.map(quote => <TableRow hover key={quote.quoteId}><TableCell>{quote.quoteNo}</TableCell><TableCell>{quote.contactName ?? 'Not recorded'}</TableCell><TableCell>{quote.quoteDate ? new Date(quote.quoteDate).toLocaleDateString() : 'Not recorded'}</TableCell><TableCell><Chip size="small" label={quote.outcome} color={quote.outcome === 'won' ? 'success' : quote.outcome === 'lost' ? 'error' : 'default'} /></TableCell><TableCell>{quote.outcomeReasonName || quote.statusValue || 'No decision recorded'}</TableCell><TableCell><Button size="small" endIcon={<OpenIcon />} onClick={() => navigate(`/sales/quotes/view/${quote.quoteId}`)}>Open</Button></TableCell></TableRow>)}
             </TableBody></Table></TableContainer> : <Typography color="text.secondary" variant="body2">No quote history recorded.</Typography>}
           </Section>
         </Grid>
 
         <Grid size={{ xs: 12 }}>
           <Section title="Recent Customer Orders" icon={<ShippingIcon sx={{ fontSize: 16 }} />}>
-            {!canViewCommercialContext ? <Alert severity="info">Quotation and order view permissions are required.</Alert> : context.isLoading ? <CircularProgress size={20} /> : context.isError ? <Alert severity="error" action={<Button color="inherit" onClick={() => void context.refetch()}>Retry</Button>}>Order history could not be loaded.</Alert> : context.data?.recentOrders.length ? <TableContainer sx={{ maxWidth: '100%' }}><Table size="small"><TableHead><TableRow><TableCell>Order</TableCell><TableCell>Date</TableCell><TableCell>Status</TableCell><TableCell>Total</TableCell><TableCell>Action</TableCell></TableRow></TableHead><TableBody>
-              {context.data.recentOrders.map(order => <TableRow hover key={order.orderId}><TableCell>{order.orderNo}</TableCell><TableCell>{new Date(order.orderDate).toLocaleDateString()}</TableCell><TableCell>{order.status ?? 'Not recorded'}</TableCell><TableCell>{order.totalAmount.toLocaleString()}</TableCell><TableCell><Button size="small" endIcon={<OpenIcon />} onClick={() => navigate(`/sales/orders/${order.orderId}`)}>Open</Button></TableCell></TableRow>)}
+            {!canViewCommercialContext ? <Alert severity="info">RFQ, quotation, and order view permissions are required.</Alert> : context.isLoading ? <CircularProgress size={20} /> : context.isError ? <Alert severity="error" action={<Button color="inherit" onClick={() => void context.refetch()}>Retry</Button>}>Order history could not be loaded.</Alert> : context.data?.recentOrders.length ? <TableContainer sx={{ maxWidth: '100%' }}><Table size="small" aria-label="Recent customer orders"><TableHead><TableRow><TableCell>Order</TableCell><TableCell>Contact</TableCell><TableCell>Date</TableCell><TableCell>Status</TableCell><TableCell>Total</TableCell><TableCell>Action</TableCell></TableRow></TableHead><TableBody>
+              {context.data.recentOrders.map(order => <TableRow hover key={order.orderId}><TableCell>{order.orderNo}</TableCell><TableCell>{order.contactName ?? 'Not recorded'}</TableCell><TableCell>{new Date(order.orderDate).toLocaleDateString()}</TableCell><TableCell>{order.status ?? 'Not recorded'}</TableCell><TableCell>{order.currencyCode ? `${order.currencyCode} ` : ''}{order.totalAmount.toLocaleString()}</TableCell><TableCell><Button size="small" endIcon={<OpenIcon />} onClick={() => navigate(`/sales/orders/${order.orderId}`)}>Open</Button></TableCell></TableRow>)}
             </TableBody></Table></TableContainer> : <Typography color="text.secondary" variant="body2">No Customer Orders recorded.</Typography>}
           </Section>
         </Grid>
 
         <Grid size={{ xs: 12 }}>
           <Section title="Demand profile" icon={<InsightsIcon sx={{ fontSize: 16 }} />}>
-            {!canViewCommercialContext ? <Alert severity="info">Quotation and order view permissions are required.</Alert> : context.isLoading ? <CircularProgress size={20} /> : context.isError ? <Alert severity="error" action={<Button color="inherit" onClick={() => void context.refetch()}>Retry</Button>}>Demand evidence could not be loaded.</Alert> : context.data?.demandProfile.length ? <TableContainer sx={{ maxWidth: '100%' }}><Table size="small"><TableHead><TableRow><TableCell>Part</TableCell><TableCell>Description</TableCell><TableCell>RFQs</TableCell><TableCell>Requested quantity</TableCell></TableRow></TableHead><TableBody>
+            {!canViewCommercialContext ? <Alert severity="info">RFQ, quotation, and order view permissions are required.</Alert> : context.isLoading ? <CircularProgress size={20} /> : context.isError ? <Alert severity="error" action={<Button color="inherit" onClick={() => void context.refetch()}>Retry</Button>}>Demand evidence could not be loaded.</Alert> : context.data?.demandProfile.length ? <TableContainer sx={{ maxWidth: '100%' }}><Table size="small" aria-label="Customer demand profile"><TableHead><TableRow><TableCell>Part</TableCell><TableCell>Description</TableCell><TableCell>RFQs</TableCell><TableCell>Requested quantity</TableCell></TableRow></TableHead><TableBody>
               {context.data.demandProfile.map((line, index) => <TableRow hover key={`${line.productId ?? 'unknown'}-${line.partNumber ?? 'unresolved'}-${index}`}><TableCell>{line.partNumber ?? (line.productId ? `Product ${line.productId}` : 'Part not resolved')}</TableCell><TableCell>{line.description ?? 'Description not recorded'}</TableCell><TableCell>{line.inquiryCount}</TableCell><TableCell>{line.requestedQuantity.toLocaleString()}</TableCell></TableRow>)}
             </TableBody></Table></TableContainer> : <Typography color="text.secondary" variant="body2">No RFQ demand history recorded.</Typography>}
           </Section>

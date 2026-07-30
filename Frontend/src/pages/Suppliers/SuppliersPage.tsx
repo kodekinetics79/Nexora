@@ -89,10 +89,12 @@ const ContactSubForm: React.FC<{
             control={<Switch size="small" checked={value.isPrimary} onChange={(e) => onChange({ ...value, isPrimary: e.target.checked })} />}
             label={<Typography variant="caption" sx={{ fontWeight: 700 }}>Primary</Typography>}
           />
-          <FormControlLabel
-            control={<Switch size="small" checked={value.isActive} onChange={(e) => onChange({ ...value, isActive: e.target.checked })} />}
-            label={<Typography variant="caption" sx={{ fontWeight: 700 }}>Active</Typography>}
-          />
+          {isEdit
+            ? <Chip size="small" label={value.isActive ? 'Active' : 'Inactive'} color={value.isActive ? 'success' : 'default'} variant="outlined" />
+            : <FormControlLabel
+                control={<Switch size="small" checked={value.isActive} onChange={(e) => onChange({ ...value, isActive: e.target.checked })} />}
+                label={<Typography variant="caption" sx={{ fontWeight: 700 }}>Active</Typography>}
+              />}
         </Grid>
         <Grid size={{ xs: 12 }} sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1 }}>
           <Button size="small" onClick={onCancel} color="inherit" startIcon={<CloseIcon />}>Cancel</Button>
@@ -114,10 +116,10 @@ const SuppliersPage: React.FC = () => {
   const { enqueueSnackbar } = useSnackbar();
   const canCreateSupplier = hasPermission('Suppliers', 'create');
   const canEditSupplier = hasPermission('Suppliers', 'edit');
-  const canViewContacts = hasPermission('Customers');
-  const canCreateContact = hasPermission('Customers', 'create');
-  const canEditContact = hasPermission('Customers', 'edit');
-  const canDeleteContact = hasPermission('Customers', 'delete');
+  const canViewContacts = hasPermission('Suppliers');
+  const canCreateContact = hasPermission('Suppliers', 'create');
+  const canEditContact = hasPermission('Suppliers', 'edit');
+  const canDeleteContact = hasPermission('Suppliers', 'delete');
 
   // List state
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
@@ -222,7 +224,7 @@ const SuppliersPage: React.FC = () => {
   });
 
   const deleteContactMutation = useMutation({
-    mutationFn: (id: number) => contactService.delete(id),
+    mutationFn: (contact: ContactDTO) => contactService.delete(contact.id, contact.concurrencyToken),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['supplier-contacts', selectedRecord?.id] });
       enqueueSnackbar('Contact removed', { variant: 'info' });
@@ -283,11 +285,12 @@ const SuppliersPage: React.FC = () => {
       }
     }
 
+    const { isActive, ...editableContact } = contactForm;
     const body: Partial<ContactDTO> = {
-      ...contactForm,
+      ...editableContact,
       supplierId: selectedRecord.id,
-      createdBy: userData.userName || 'System',
-      ...(editingContact ? { modifiedBy: userData.userName || 'System' } : {}),
+      ...(!editingContact ? { isActive } : {}),
+      ...(editingContact ? { concurrencyToken: editingContact.concurrencyToken } : {}),
     };
     editingContact
       ? updateContactMutation.mutate({ id: editingContact.id, body })
@@ -598,7 +601,7 @@ const SuppliersPage: React.FC = () => {
                         <IconButton size="small" onClick={() => openEditContact(c)}><EditIcon fontSize="small" /></IconButton>
                       </Tooltip>}
                       {canDeleteContact && <Tooltip title="Remove">
-                        <IconButton size="small" color="error" onClick={() => deleteContactMutation.mutate(c.id)}>
+                        <IconButton size="small" color="error" onClick={() => deleteContactMutation.mutate(c)}>
                           <DeleteIcon fontSize="small" />
                         </IconButton>
                       </Tooltip>}

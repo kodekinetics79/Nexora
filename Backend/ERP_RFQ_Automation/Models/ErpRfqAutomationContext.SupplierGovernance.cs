@@ -46,10 +46,10 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<Contact>(entity =>
         {
             entity.HasIndex(x => new { x.BusinessUnitId, x.CustomerId }).IsUnique()
-                .HasFilter("\"IsPrimary\" = TRUE AND \"CustomerID\" IS NOT NULL")
+                .HasFilter("\"IsPrimary\" = TRUE AND \"IsActive\" IS DISTINCT FROM FALSE AND \"CustomerID\" IS NOT NULL")
                 .HasDatabaseName("UX_Contacts_BU_Customer_Primary");
             entity.HasIndex(x => new { x.BusinessUnitId, x.SupplierId }).IsUnique()
-                .HasFilter("\"IsPrimary\" = TRUE AND \"SupplierID\" IS NOT NULL")
+                .HasFilter("\"IsPrimary\" = TRUE AND \"IsActive\" IS DISTINCT FROM FALSE AND \"SupplierID\" IS NOT NULL")
                 .HasDatabaseName("UX_Contacts_BU_Supplier_Primary");
         });
     }

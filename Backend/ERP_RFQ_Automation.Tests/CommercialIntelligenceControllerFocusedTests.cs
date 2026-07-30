@@ -224,6 +224,43 @@ public sealed class CommercialIntelligenceControllerFocusedTests
         Assert.Equal("SELECTED", row.GetProperty("reason").GetString());
     }
 
+    [Fact]
+    public async Task AccountOwnership_ExactCustomerFilterIsTenantQualified()
+    {
+        const long tenant = 87_250;
+        const long otherTenant = 87_251;
+        using var database = new TestDb();
+        await using var context = database.ContextFor(tenant);
+        var selected = Seed.Customer(context, 87_252, tenant, "Shared account name");
+        Seed.Customer(context, 87_253, tenant, "Shared account name");
+        await context.SaveChangesAsync();
+        await using (var otherContext = database.ContextFor(otherTenant))
+        {
+            Seed.Customer(otherContext, 87_254, otherTenant, "Other tenant account");
+            await otherContext.SaveChangesAsync();
+        }
+        var controller = new CommercialIntelligenceController(context, null!, null!, new TestRoleGate(true))
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = new DefaultHttpContext { User = Principal(tenant) }
+            }
+        };
+
+        var exactResponse = Assert.IsType<OkObjectResult>(
+            await controller.AccountOwnership(null, default, selected.Id));
+        using var exactDocument = JsonDocument.Parse(JsonSerializer.Serialize(
+            exactResponse.Value, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        var exact = Assert.Single(exactDocument.RootElement.EnumerateArray());
+        Assert.Equal(selected.Id, exact.GetProperty("customerId").GetInt64());
+
+        var crossTenantResponse = Assert.IsType<OkObjectResult>(
+            await controller.AccountOwnership(null, default, 87_254));
+        using var crossTenantDocument = JsonDocument.Parse(JsonSerializer.Serialize(
+            crossTenantResponse.Value, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        Assert.Empty(crossTenantDocument.RootElement.EnumerateArray());
+    }
+
     private static ClaimsPrincipal Principal(long tenant, long userId = 1, long roleId = 1) => new(new ClaimsIdentity(
         [new Claim("businessUnitId", tenant.ToString()), new Claim(ClaimTypes.NameIdentifier, userId.ToString()), new Claim("roleId", roleId.ToString())], "focused-test"));
 

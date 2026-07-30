@@ -125,6 +125,9 @@ export interface CustomerQuoteSummaryDTO {
   /** "won" | "lost" | "open" */
   outcome: 'won' | 'lost' | 'open';
   outcomeReasonName: string | null;
+  contactId?: number | null;
+  contactName?: string | null;
+  currencyCode?: string | null;
   keyLines: CustomerKeyLineDTO[];
 }
 
@@ -134,6 +137,8 @@ export interface CustomerItemPriceDTO {
   unitPrice: number;
   quoteDate: string | null;
   monthsAgo: number | null;
+  acceptedOn?: string | null;
+  currencyCode?: string | null;
 }
 
 export interface CustomerRfqSummaryDTO {
@@ -143,6 +148,8 @@ export interface CustomerRfqSummaryDTO {
   bidClosingOn: string | null;
   status: string | null;
   lineCount: number;
+  contactId?: number | null;
+  contactName?: string | null;
 }
 
 export interface CustomerOrderSummaryDTO {
@@ -152,6 +159,9 @@ export interface CustomerOrderSummaryDTO {
   status: string | null;
   totalAmount: number;
   quoteId: number | null;
+  contactId?: number | null;
+  contactName?: string | null;
+  currencyCode?: string | null;
 }
 
 export interface CustomerDemandSummaryDTO {
@@ -160,6 +170,34 @@ export interface CustomerDemandSummaryDTO {
   description: string | null;
   inquiryCount: number;
   requestedQuantity: number;
+  sourceRfqIds?: number[];
+  sourceRfqsTruncated?: boolean;
+}
+
+export interface CustomerCurrencyAggregateDTO {
+  currencyId: number | null;
+  currencyCode: string | null;
+  recordCount: number;
+  totalAmount: number;
+  averageAmount: number | null;
+}
+
+export interface CustomerContextCompletenessDTO {
+  quoteAggregateScope: string;
+  recentQuoteLimit: number;
+  recentQuotesTruncated: boolean;
+  soldOrderEvidenceLimit: number;
+  soldOrdersEvaluated: number;
+  soldOrderEvidenceTruncated: boolean;
+  quoteItemEvidenceLimit: number;
+  quoteItemsEvaluated: number;
+  quoteItemEvidenceTruncated: boolean;
+  demandLookbackMonths: number;
+  demandCohortFrom: string;
+  demandCohortTo: string;
+  demandLineLimit: number;
+  demandLinesEvaluated: number;
+  demandLinesTruncated: boolean;
 }
 
 export interface CustomerContextDTO {
@@ -171,8 +209,12 @@ export interface CustomerContextDTO {
   /** 0–100; null while nothing has been decided yet. */
   winRatePct: number | null;
   ordersLast24Months: number;
-  orderValueLast24Months: number;
+  orderValueLast24Months: number | null;
+  orderValueStatus: string;
+  orderValueByCurrency: CustomerCurrencyAggregateDTO[];
   avgQuoteTotal: number | null;
+  avgQuoteTotalStatus: string;
+  quoteValueByCurrency: CustomerCurrencyAggregateDTO[];
   /** Average margin era (0–100); null when no cost floor data exists. */
   avgMarginPct: number | null;
   lastQuoteDate: string | null;
@@ -181,6 +223,7 @@ export interface CustomerContextDTO {
   recentRfqs: CustomerRfqSummaryDTO[];
   recentOrders: CustomerOrderSummaryDTO[];
   demandProfile: CustomerDemandSummaryDTO[];
+  completeness: CustomerContextCompletenessDTO;
   generatedAt: string;
 }
 

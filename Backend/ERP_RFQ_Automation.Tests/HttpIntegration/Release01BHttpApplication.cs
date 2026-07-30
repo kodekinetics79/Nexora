@@ -45,6 +45,7 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
     public const long TenantBCustomerId = 86_002;
     public const long TenantAContactId = 86_101;
     public const long TenantBContactId = 86_102;
+    public const long TenantASupplierContactId = 596_301;
     public const long TenantALeadId = 87_001;
     public const long TenantBLeadId = 87_002;
     public const long TenantAAttachmentId = 88_001;
@@ -260,6 +261,7 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         const long productsModuleId = 84_007;
         const long usersModuleId = 84_008;
         const long quotationsModuleId = 84_009;
+        const long suppliersModuleId = 84_010;
         var supplierNegotiationModuleId = await db.Modules.Where(x =>
             x.ModuleName == "Supplier Negotiation").Select(x => x.Id).SingleAsync();
         db.Modules.AddRange(
@@ -271,7 +273,8 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
             Module(ordersModuleId, "Orders"),
             Module(productsModuleId, "Products"),
             Module(usersModuleId, "Users"),
-            Module(quotationsModuleId, "Quotations"));
+            Module(quotationsModuleId, "Quotations"),
+            Module(suppliersModuleId, "Suppliers"));
 
         db.SetupMasters.AddRange(
             Role(AllowedRole, TenantA, "Release 01B Reader"),
@@ -282,7 +285,8 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         db.RolePermissions.AddRange(
             Permission(85_001, AllowedRole, leadsModuleId, TenantA, canCreate: true, canEdit: true),
             Permission(85_002, AllowedRole, dashboardModuleId, TenantA),
-            Permission(85_003, AllowedRole, customersModuleId, TenantA),
+            Permission(85_003, AllowedRole, customersModuleId, TenantA,
+                canCreate: true, canEdit: true, canDelete: true),
             Permission(85_004, AllowedRole, rfqManagementModuleId, TenantA, canCreate: true, canEdit: true),
             Permission(85_005, AllowedRole, supplierHistoryModuleId, TenantA, canCreate: true, canEdit: true),
             Permission(85_006, AllowedRole, ordersModuleId, TenantA, canCreate: true, canEdit: true),
@@ -297,6 +301,10 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
             Permission(85_015, GrowthManagerRole, quotationsModuleId, TenantA),
             Permission(85_016, GrowthManagerRole, ordersModuleId, TenantA),
             Permission(85_017, GrowthManagerRole, supplierHistoryModuleId, TenantA));
+        db.RolePermissions.AddRange(
+            Permission(85_018, AllowedRole, suppliersModuleId, TenantA,
+                canCreate: true, canEdit: true, canDelete: true),
+            Permission(85_019, SupplierHistoryViewerRole, suppliersModuleId, TenantA));
 
         db.Users.AddRange(
             User(GrowthRepUser, TenantA, AllowedRole, "Rep", "growth-rep@nexora.invalid"),
@@ -350,6 +358,19 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
 
         ProcurementTestData.SeedGraph(db, TenantA, TenantAProcurementOffset);
         ProcurementTestData.SeedGraph(db, TenantB, TenantBProcurementOffset);
+        db.Contacts.Add(new Contact
+        {
+            Id = TenantASupplierContactId,
+            BusinessUnitId = TenantA,
+            SupplierId = TenantAProcurementSupplierId,
+            FirstName = "Supplier",
+            LastName = "Contact",
+            Email = "supplier-contact@nexora.invalid",
+            IsActive = true,
+            CreatedBy = "release-01b-tests",
+            CreatedOn = DateTime.UtcNow,
+            ConcurrencyToken = Guid.NewGuid()
+        });
         LinkRfqToLead(db, TenantAProcurementRfqId, TenantALeadId);
         LinkRfqToLead(db, TenantBProcurementRfqId, TenantBLeadId);
         SeedSupplierNegotiationQuote(db, TenantA, TenantAProcurementOffset,
@@ -608,7 +629,7 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
     };
 
     private static RolePermission Permission(long id, long roleId, long moduleId, long tenantId,
-        bool canCreate = false, bool canEdit = false) => new()
+        bool canCreate = false, bool canEdit = false, bool canDelete = false) => new()
     {
         Id = id,
         RoleId = roleId,
@@ -616,6 +637,7 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         BusinessUnitId = tenantId,
         CanCreate = canCreate,
         CanEdit = canEdit,
+        CanDelete = canDelete,
         CreatedBy = "release-01b-tests",
         CreatedOn = DateTime.UtcNow
     };
@@ -623,14 +645,15 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
     private static Customer Customer(long id, long tenantId, string name, string email) => new()
     {
         Id = id, Buid = tenantId, Name = name, ContactEmail = email, ImageUrl = string.Empty,
-        IsActive = true, CreatedBy = "release-01b-tests", CreatedOn = DateTime.UtcNow
+        IsActive = true, CreatedBy = "release-01b-tests", CreatedOn = DateTime.UtcNow,
+        ConcurrencyToken = Guid.NewGuid()
     };
 
     private static Contact Contact(long id, long tenantId, long customerId, string email) => new()
     {
         Id = id, BusinessUnitId = tenantId, CustomerId = customerId, FirstName = "HTTP",
         LastName = "Contact", Email = email, IsActive = true, CreatedBy = "release-01b-tests",
-        CreatedOn = DateTime.UtcNow
+        CreatedOn = DateTime.UtcNow, ConcurrencyToken = Guid.NewGuid()
     };
 
     private static EmailConfiguration EmailConfiguration(long id, long tenantId, string email) => new()

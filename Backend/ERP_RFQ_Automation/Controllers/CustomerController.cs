@@ -1,6 +1,5 @@
 using ERP_RFQ_Automation.Authorization;
-using ERP_RFQ_Automation.DTOs.BusinessUnit;
-using ERP_RFQ_Automation.DTOs.CurrencyDTOs;
+using ERP_RFQ_Automation.CommercialRouting;
 using ERP_RFQ_Automation.DTOs.CustomerDTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
@@ -8,6 +7,7 @@ using ERP_RFQ_Automation.Security.DocumentInspection;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using System.IO;
 using System.Security.Claims;
 
@@ -33,7 +33,7 @@ namespace ERP_RFQ_Automation.Controllers
             _fileInspection = fileInspection;
         }
 
-        // GET: api/Customer?pageNumber=1&pageSize=10&id=1&name=abc&contactEmail=abc@example.com&taxId=123&currencyId=1&isActive=true&businessUnitId=1
+        // GET: api/Customer?pageNumber=1&pageSize=10&id=1&name=abc&contactEmail=abc@example.com&isActive=true&docId=CU00000001
 
         [HttpGet]
         [RequireModulePermission("Customers", PermissionAction.View)]
@@ -43,8 +43,6 @@ namespace ERP_RFQ_Automation.Controllers
             [FromQuery] long? id = null,
             [FromQuery] string? name = null,
             [FromQuery] string? contactEmail = null,
-            [FromQuery] string? taxId = null,
-            [FromQuery] long? currencyId = null,
             [FromQuery] bool? isActive = null,
             [FromQuery] string? docId = null)
         { 
@@ -153,20 +151,25 @@ namespace ERP_RFQ_Automation.Controllers
                     ShippingState = request.ShippingState,
                     ShippingCountry = request.ShippingCountry,
                     ShippingPostalCode = request.ShippingPostalCode,
-                    Buid = businessUnitId,
-                    IsActive = request.IsActive ?? true,
-                    CreatedBy = AuthenticatedActor(),
-                    CreatedOn = DateTime.UtcNow
+                    IsActive = request.IsActive ?? true
                 };
 
-                await _repository.AddAsync(customer);
+                await _repository.AddAsync(customer, businessUnitId, AuthenticatedActor());
 
                 var response = MapToResponse(customer);
                 return CreatedAtAction(nameof(GetById), new { id = customer.Id }, response);
             }
+            catch (CustomerIdentityConflictException)
+            {
+                return Conflict("The email or phone number is already linked to another customer in this tenant.");
+            }
             catch (ArgumentException)
             {
                 return BadRequest("The customer request is invalid.");
+            }
+            catch (DbUpdateException)
+            {
+                return Conflict("A customer identity conflict prevented this change. Reload and try again.");
             }
             catch (Exception)
             {
@@ -186,6 +189,8 @@ namespace ERP_RFQ_Automation.Controllers
 
                 if (!TryGetAuthenticatedBusinessUnitId(out var targetBUId))
                     return BadRequest("Business Unit ID is required.");
+                if (!request.ConcurrencyToken.HasValue || request.ConcurrencyToken == Guid.Empty)
+                    return BadRequest("A concurrency token is required.");
 
                 var existing = await _repository.GetByIdAsync(id, targetBUId);
 
@@ -208,12 +213,8 @@ namespace ERP_RFQ_Automation.Controllers
                 existing.ShippingState = request.ShippingState;
                 existing.ShippingCountry = request.ShippingCountry;
                 existing.ShippingPostalCode = request.ShippingPostalCode;
-                existing.Buid = targetBUId;
-                existing.IsActive = request.IsActive ?? true;
-                existing.ModifiedBy = AuthenticatedActor();
-                existing.ModifiedOn = DateTime.UtcNow;
-
-                await _repository.UpdateAsync(existing, targetBUId);
+                await _repository.UpdateAsync(
+                    existing, targetBUId, AuthenticatedActor(), request.ConcurrencyToken.Value);
 
                 return NoContent();
             }
@@ -221,9 +222,21 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 return NotFound("Customer not found.");
             }
+            catch (CustomerIdentityConflictException)
+            {
+                return Conflict("The email or phone number is already linked to another customer in this tenant.");
+            }
             catch (ArgumentException)
             {
                 return BadRequest("The customer request is invalid.");
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                return Conflict("The customer was changed by another user. Reload it and try again.");
+            }
+            catch (DbUpdateException)
+            {
+                return Conflict("A customer identity conflict prevented this change. Reload and try again.");
             }
             catch (Exception)
             {
@@ -234,27 +247,29 @@ namespace ERP_RFQ_Automation.Controllers
         // DELETE: api/Customer/5
         [HttpDelete("{id}")]
         [RequireModulePermission("Customers", PermissionAction.Delete)]
-        public async Task<ActionResult> Delete(long id)
+        public async Task<ActionResult> Delete(long id, [FromQuery] Guid concurrencyToken)
         {
             try
             {
                 if (!TryGetAuthenticatedBusinessUnitId(out var targetBUId))
                     return BadRequest("Business Unit ID is required.");
+                if (concurrencyToken == Guid.Empty)
+                    return BadRequest("A concurrency token is required.");
 
-                await _repository.DeleteAsync(id, targetBUId);
+                await _repository.DeleteAsync(id, targetBUId, AuthenticatedActor(), concurrencyToken);
                 return NoContent();
             }
             catch (KeyNotFoundException)
             {
                 return NotFound("Customer not found.");
             }
-            catch (InvalidOperationException)
+            catch (DbUpdateConcurrencyException)
             {
-                return BadRequest("The customer cannot be deleted.");
+                return Conflict("The customer was changed by another user. Reload it and try again.");
             }
             catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to delete the customer.");
+                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to deactivate the customer.");
             }
         }
 
@@ -321,7 +336,8 @@ namespace ERP_RFQ_Automation.Controllers
                 CreatedBy = customer.CreatedBy,
                 CreatedOn = customer.CreatedOn,
                 ModifiedBy = customer.ModifiedBy,
-                ModifiedOn = customer.ModifiedOn
+                ModifiedOn = customer.ModifiedOn,
+                ConcurrencyToken = customer.ConcurrencyToken
             };
         }
     }

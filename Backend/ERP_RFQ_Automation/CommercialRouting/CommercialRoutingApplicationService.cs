@@ -687,6 +687,7 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
         var names = Values(CustomerIdentifierType.CustomerName);
         return await _db.Set<CustomerIdentifier>().AsNoTracking()
             .Where(i => i.BusinessUnitId == businessUnitId && i.EffectiveTo == null &&
+                _db.Customers.Any(c => c.Buid == businessUnitId && c.Id == i.CustomerId && c.IsActive != false) &&
                 ((i.IdentifierType == CustomerIdentifierType.Email && emails.Contains(i.NormalizedValue)) ||
                  (i.IdentifierType == CustomerIdentifierType.Domain && domains.Contains(i.NormalizedValue)) ||
                  (i.IdentifierType == CustomerIdentifierType.ErpAccount && accounts.Contains(i.NormalizedValue)) ||

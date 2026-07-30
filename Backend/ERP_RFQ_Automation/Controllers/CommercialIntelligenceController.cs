@@ -125,12 +125,19 @@ public sealed class CommercialIntelligenceController(
 
     [HttpGet("account-ownership")]
     [RequireModulePermission("Customers", PermissionAction.View)]
-    public async Task<ActionResult> AccountOwnership([FromQuery] string? search, CancellationToken ct)
+    public async Task<ActionResult> AccountOwnership(
+        [FromQuery] string? search,
+        CancellationToken ct,
+        [FromQuery] long? customerId = null)
     {
         var tenant = TenantId();
-        var customers = await db.Customers.AsNoTracking().Where(x => x.Buid == tenant &&
-                (string.IsNullOrWhiteSpace(search) || EF.Functions.ILike(x.Name, $"%{search}%")))
-            .OrderBy(x => x.Name).Take(250).ToListAsync(ct);
+        var customerQuery = db.Customers.AsNoTracking().Where(x => x.Buid == tenant);
+        if (customerId.HasValue)
+            customerQuery = customerQuery.Where(x => x.Id == customerId.Value);
+        else if (!string.IsNullOrWhiteSpace(search))
+            customerQuery = customerQuery.Where(x => EF.Functions.ILike(x.Name, $"%{search.Trim()}%"));
+        var customers = await customerQuery.OrderBy(x => x.Name).ThenBy(x => x.Id)
+            .Take(customerId.HasValue ? 1 : 250).ToListAsync(ct);
         var ids = customers.Select(x => x.Id).ToArray();
         var ownerships = await db.Set<CustomerOwnership>().AsNoTracking()
             .Where(x => x.BusinessUnitId == tenant && ids.Contains(x.CustomerId) && x.IsActive && x.EffectiveTo == null)

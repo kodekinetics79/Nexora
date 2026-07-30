@@ -9,6 +9,7 @@ using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Repositories;
 using ERP_RFQ_Automation.Tests.Support;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -179,7 +180,7 @@ public sealed class Release02SupplierGovernanceTests
             .Options;
         await using var context = new ErpRfqAutomationContext(options);
         var repository = new RecordingContactRepository();
-        var controller = new ContactController(repository, context)
+        var controller = new ContactController(repository, context, new AllowAuthorizationService())
         {
             ControllerContext = ControllerContext(null, "user-7")
         };
@@ -231,7 +232,7 @@ public sealed class Release02SupplierGovernanceTests
             CreatedOn = DateTime.UtcNow
         };
 
-        await Assert.ThrowsAsync<ArgumentException>(() => repository.AddAsync(contact));
+        await Assert.ThrowsAsync<ArgumentException>(() => repository.AddAsync(contact, 7, "test-user"));
         Assert.Empty(context.Contacts);
     }
 
@@ -334,10 +335,25 @@ public sealed class Release02SupplierGovernanceTests
             string? email, long? customerId, long? supplierId, bool? isPrimary,
             bool? isActive, long businessUnitId) => throw new NotSupportedException();
         public Task<Contact> GetByIdAsync(long id, long businessUnitId) => throw new NotSupportedException();
-        public Task AddAsync(Contact contact) => throw new NotSupportedException();
-        public Task UpdateAsync(Contact contact) => throw new NotSupportedException();
-        public Task DeleteAsync(long id, long businessUnitId) => throw new NotSupportedException();
+        public Task AddAsync(Contact contact, long businessUnitId, string actor) => throw new NotSupportedException();
+        public Task UpdateAsync(Contact contact, long businessUnitId, string actor, Guid expectedConcurrencyToken) => throw new NotSupportedException();
+        public Task DeleteAsync(long id, long businessUnitId, string actor, Guid expectedConcurrencyToken) => throw new NotSupportedException();
         public Task<IEnumerable<CustomerDropdown>> GetCustomersAsync(long businessUnitId) => throw new NotSupportedException();
+    }
+
+    private sealed class AllowAuthorizationService : IAuthorizationService
+    {
+        public Task<AuthorizationResult> AuthorizeAsync(
+            ClaimsPrincipal user,
+            object? resource,
+            IEnumerable<IAuthorizationRequirement> requirements) =>
+            Task.FromResult(AuthorizationResult.Success());
+
+        public Task<AuthorizationResult> AuthorizeAsync(
+            ClaimsPrincipal user,
+            object? resource,
+            string policyName) =>
+            Task.FromResult(AuthorizationResult.Success());
     }
 
     private sealed class TestWebHostEnvironment : IWebHostEnvironment

@@ -25,6 +25,7 @@ export interface CustomerDTO {
   createdOn?: string;
   modifiedBy?: string;
   modifiedOn?: string;
+  concurrencyToken: string;
 }
 
 export interface PaginatedCustomerResponse {
@@ -33,6 +34,15 @@ export interface PaginatedCustomerResponse {
   pageNumber: number;
   pageSize: number;
 }
+
+const toServerAuthoritativeFormData = (data: FormData): FormData => {
+  const result = new FormData();
+  const prohibited = new Set(['createdby', 'modifiedby', 'buid', 'businessunitid']);
+  data.forEach((value, key) => {
+    if (!prohibited.has(key.toLowerCase())) result.append(key, value);
+  });
+  return result;
+};
 
 const customerService = {
   getAll: async (params: { pageNumber?: number; pageSize?: number; name?: string; isActive?: boolean }): Promise<PaginatedCustomerResponse> => {
@@ -46,20 +56,20 @@ const customerService = {
   },
 
   create: async (data: FormData): Promise<CustomerDTO> => {
-    const r = await axiosInstance.post('/api/Customer', data, {
+    const r = await axiosInstance.post('/api/Customer', toServerAuthoritativeFormData(data), {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
     return r.data;
   },
 
   update: async (id: number, data: FormData): Promise<void> => {
-    await axiosInstance.put(`/api/Customer/${id}`, data, {
+    await axiosInstance.put(`/api/Customer/${id}`, toServerAuthoritativeFormData(data), {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
   },
 
-  delete: async (id: number): Promise<void> => {
-    await axiosInstance.delete(`/api/Customer/${id}`);
+  delete: async (id: number, concurrencyToken: string): Promise<void> => {
+    await axiosInstance.delete(`/api/Customer/${id}`, { params: { concurrencyToken } });
   },
 
   getCustomerByEmail: async (email: string): Promise<CustomerDTO | null> => {
