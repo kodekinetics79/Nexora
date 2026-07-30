@@ -453,6 +453,8 @@ builder.Services.AddScoped<ERP_RFQ_Automation.MultiTenancy.ISlaPolicyReader,
 builder.Services.AddScoped<ERP_RFQ_Automation.Sla.IQuoteOutcomeService, ERP_RFQ_Automation.Sla.QuoteOutcomeService>();
 builder.Services.AddSingleton<ERP_RFQ_Automation.Sla.ISlaNotifications, ERP_RFQ_Automation.Sla.SlaNotifications>();
 builder.Services.AddHostedService<ERP_RFQ_Automation.Sla.SlaSweepWorker>();
+builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.PlatformGovernanceService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.HumanActionService>();
 
 var app = builder.Build();
 

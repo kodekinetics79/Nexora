@@ -29,6 +29,7 @@ import {
   FactCheck as BoqIcon,
   AccountBalance as FinanceIcon,
   WarningAmber as ExceptionIcon,
+  AccountTree as PlatformIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../../context/AuthContext';
 
@@ -65,6 +66,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
     'lead_mgmt': location.pathname.includes('/leads') || location.pathname.includes('/commercial-cases'),
     'copilot': location.pathname.includes('/copilot'),
     'sales-management': location.pathname.startsWith('/sales/'),
+    'platform-governance': location.pathname.startsWith('/admin/platform/'),
   });
 
   const handleGroupClick = (key: string) => {
@@ -220,6 +222,16 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
           { key: 'categories', label: t('categories'), path: '/inventory/categories', moduleName: 'Product Categories' },
           { key: 'sub-categories', label: t('sub_categories'), path: '/inventory/sub-categories', moduleName: 'Product Categories' },
         ]
+      },
+      {
+        key: 'platform-governance',
+        label: 'Platform Governance',
+        icon: <PlatformIcon />,
+        moduleName: 'Users',
+        activePrefixes: ['/admin/platform/'],
+        children: [
+          { key: 'platform-taxonomy', label: 'Taxonomy & Skills', path: '/admin/platform/taxonomy', moduleName: 'Users' },
+        ],
       },
       {
         key: 'security',
