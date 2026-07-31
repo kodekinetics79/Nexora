@@ -2,8 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Dialog, DialogTitle, DialogContent, DialogActions,
-  Button, TextField, Grid, FormControlLabel,
-  Switch, Divider, Typography, CircularProgress,
+  Button, TextField, Grid,
+  Divider, Typography, CircularProgress,
 } from '@mui/material';
 import supplierService, { type SupplierDTO } from '../../api/services/supplierService';
 import { useAuth } from '../../context/AuthContext';
@@ -17,7 +17,8 @@ interface Props {
 
 const empty = {
   name: '', contactEmail: '', paymentTerms: '', addressLine1: '', addressLine2: '',
-  postalCode: '', tags: '', comments: '', isActive: true,
+  postalCode: '', tags: '', comments: '', cityId: '', countryId: '', currencyId: '',
+  concurrencyToken: '',
 };
 
 const SectionLabel = ({ label }: { label: string }) => (
@@ -36,6 +37,9 @@ const SupplierFormDialog: React.FC<Props> = ({ open, onClose, supplierId }) => {
   const isEdit = !!supplierId;
 
   const [form, setForm] = useState(empty);
+  const normalizedEmail = form.contactEmail.trim();
+  const emailInvalid = normalizedEmail.length > 0 && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail);
+  const nameInvalid = form.name.trim().length === 0;
 
   const { data: editData } = useQuery({
     queryKey: ['supplier-detail', supplierId],
@@ -54,7 +58,10 @@ const SupplierFormDialog: React.FC<Props> = ({ open, onClose, supplierId }) => {
         postalCode: editData.postalCode ?? '',
         tags: editData.tags ?? '',
         comments: editData.comments ?? '',
-        isActive: editData.isActive ?? true,
+        cityId: editData.cityId ? String(editData.cityId) : '',
+        countryId: editData.countryId ? String(editData.countryId) : '',
+        currencyId: editData.currencyId ? String(editData.currencyId) : '',
+        concurrencyToken: editData.concurrencyToken ?? '',
       });
     }
   }, [editData, open, isEdit]);
@@ -68,12 +75,16 @@ const SupplierFormDialog: React.FC<Props> = ({ open, onClose, supplierId }) => {
       enqueueSnackbar(isEdit ? 'Supplier updated!' : 'Supplier created!', { variant: 'success' });
       handleClose();
     },
-    onError: () => enqueueSnackbar('Failed to save supplier.', { variant: 'error' }),
+    onError: (error: any) => enqueueSnackbar(
+      error?.response?.data?.detail || error?.response?.data || error?.message || 'Failed to save supplier.',
+      { variant: 'error' },
+    ),
   });
 
   const handleClose = () => { setForm(empty); onClose(); };
 
   const handleSave = () => {
+    if (nameInvalid || emailInvalid) return;
     const fd = new FormData();
     Object.entries(form).forEach(([k, v]) => {
       if (v !== '' && v !== null && v !== undefined) fd.append(k, String(v));
@@ -93,10 +104,10 @@ const SupplierFormDialog: React.FC<Props> = ({ open, onClose, supplierId }) => {
 
           <SectionLabel label="Basic Information" />
           <Grid size={{ xs: 12, sm: 6 }}>
-            <TextField fullWidth label="Supplier Name" value={form.name} onChange={f('name')} required />
+            <TextField fullWidth label="Supplier Name" value={form.name} onChange={f('name')} required error={nameInvalid} helperText={nameInvalid ? 'Supplier name is required.' : undefined} />
           </Grid>
           <Grid size={{ xs: 12, sm: 6 }}>
-            <TextField fullWidth label="Contact Email" type="email" value={form.contactEmail} onChange={f('contactEmail')} />
+            <TextField fullWidth label="Contact Email" type="email" value={form.contactEmail} onChange={f('contactEmail')} error={emailInvalid} helperText={emailInvalid ? 'Enter a valid email address.' : undefined} />
           </Grid>
           <Grid size={{ xs: 12, sm: 6 }}>
             <TextField fullWidth label="Payment Terms" value={form.paymentTerms} onChange={f('paymentTerms')} placeholder="e.g. Net 30, COD" />
@@ -119,19 +130,11 @@ const SupplierFormDialog: React.FC<Props> = ({ open, onClose, supplierId }) => {
             <TextField fullWidth label="Postal Code" value={form.postalCode} onChange={f('postalCode')} />
           </Grid>
 
-          <SectionLabel label="Status" />
-          <Grid size={{ xs: 12 }}>
-            <FormControlLabel
-              control={<Switch checked={form.isActive} onChange={(e) => setForm(p => ({ ...p, isActive: e.target.checked }))} />}
-              label="Active"
-            />
-          </Grid>
-
         </Grid>
       </DialogContent>
       <DialogActions sx={{ p: 2 }}>
         <Button onClick={handleClose} color="inherit">Cancel</Button>
-        <Button variant="contained" onClick={handleSave} disabled={saveMutation.isPending} disableElevation sx={{ px: 4, fontWeight: 700 }}>
+        <Button variant="contained" onClick={handleSave} disabled={saveMutation.isPending || nameInvalid || emailInvalid} disableElevation sx={{ px: 4, fontWeight: 700 }}>
           {saveMutation.isPending ? <CircularProgress size={22} /> : (isEdit ? 'Update Supplier' : 'Create Supplier')}
         </Button>
       </DialogActions>

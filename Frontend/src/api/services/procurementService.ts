@@ -200,7 +200,7 @@ export interface SourcingCaseCandidate {
   complianceStatus?: string | null;
   riskStatus?: string | null;
   readinessStatus?: string | null;
-  eligibleForSupplierRfq?: boolean;
+  eligibleForSupplierRfq: boolean;
   blockingReasons?: string[];
 }
 
@@ -238,7 +238,24 @@ export interface PreparedSupplierRfqResult {
   supplierSolicitationId: number;
   status: string;
   sourcingCaseVersion: number;
+  solicitationVersion: number;
   replayed: boolean;
+}
+
+export interface QueuedSupplierRfqResult {
+  sourcingCaseId: number;
+  supplierSolicitationId: number;
+  status: string;
+  sourcingCaseVersion: number;
+  solicitationVersion: number;
+  replayed: boolean;
+}
+
+export interface SupplierRfqPreparationOutcome {
+  supplierId: number;
+  succeeded: boolean;
+  queued?: QueuedSupplierRfqResult;
+  error?: unknown;
 }
 
 export interface CreateSolicitationsRequest {
@@ -352,12 +369,13 @@ const procurementService = {
     supplierIds: number[],
     expectedVersion: number,
     operationId: string,
-  ): Promise<PreparedSupplierRfqResult[]> => {
-    const results: PreparedSupplierRfqResult[] = [];
+  ): Promise<SupplierRfqPreparationOutcome[]> => {
+    const results: SupplierRfqPreparationOutcome[] = [];
     let version = expectedVersion;
     for (const supplierId of supplierIds) {
-      const result = unwrap(
-        await axiosInstance.post<PreparedSupplierRfqResult>(
+      try {
+        const prepared = unwrap(
+          await axiosInstance.post<PreparedSupplierRfqResult>(
           `/api/procurement/sourcing-cases/${sourcingCaseId}/supplier-rfqs`,
           { supplierId, expectedVersion: version },
           {
@@ -365,10 +383,28 @@ const procurementService = {
               `prepare-supplier-rfq:${sourcingCaseId}:${supplierId}:${operationId}`,
             ),
           },
-        ),
-      );
-      results.push(result);
-      version = result.sourcingCaseVersion;
+          ),
+        );
+        const queued = unwrap(
+          await axiosInstance.post<QueuedSupplierRfqResult>(
+            `/api/procurement/sourcing-cases/${sourcingCaseId}/supplier-rfqs/${prepared.supplierSolicitationId}/queue`,
+            {
+              expectedSourcingCaseVersion: prepared.sourcingCaseVersion,
+              expectedSolicitationVersion: prepared.solicitationVersion,
+            },
+            {
+              headers: commandHeaders(
+                `queue-supplier-rfq:${sourcingCaseId}:${supplierId}:${operationId}`,
+              ),
+            },
+          ),
+        );
+        results.push({ supplierId, succeeded: true, queued });
+        version = queued.sourcingCaseVersion;
+      } catch (error) {
+        results.push({ supplierId, succeeded: false, error });
+        break;
+      }
     }
     return results;
   },

@@ -50,7 +50,6 @@ import procurementService, {
   type SupplierPurchaseOrder,
   type SupplierSolicitation,
 } from "../../../api/services/procurementService";
-import supplierService from "../../../api/services/supplierService";
 import currencyService, {
   type CurrencyDTO,
 } from "../../../api/services/currencyService";
@@ -132,7 +131,6 @@ function SourcingWorkbenchPage() {
   const queryClient = useQueryClient();
   const { userData, hasPermission } = useAuth();
   const [tab, setTab] = useState(0);
-  const [solicitOpen, setSolicitOpen] = useState(false);
   const [responseSolicitation, setResponseSolicitation] =
     useState<SupplierSolicitation | null>(null);
   const [awardOffer, setAwardOffer] = useState<SupplierOffer | null>(null);
@@ -150,15 +148,6 @@ function SourcingWorkbenchPage() {
     queryKey,
     queryFn: () => procurementService.getWorkbench(rfqId),
     retry: 1,
-  });
-  const suppliersQuery = useQuery({
-    queryKey: ["procurement-suppliers", userData?.businessUnitId],
-    queryFn: () =>
-      supplierService.getAll({
-        businessUnitId: userData?.businessUnitId ?? 0,
-        pageSize: 500,
-      }),
-    enabled: !!userData?.businessUnitId && !!rfqId,
   });
   const currenciesQuery = useQuery({
     queryKey: ["procurement-currencies", userData?.businessUnitId],
@@ -243,8 +232,17 @@ function SourcingWorkbenchPage() {
   const canIssuePo = hasPermission("Orders", "edit");
   const canReceive =
     hasPermission("Orders", "edit") && hasPermission("Products", "edit");
-  const referenceQueries = [suppliersQuery, currenciesQuery, warehousesQuery];
+  const referenceQueries = [currenciesQuery, warehousesQuery];
   const referenceDataFailed = referenceQueries.some((query) => query.isError);
+
+  const openSourcingCase = useMutation({
+    mutationFn: async (line: (typeof unresolvedLines)[number]) =>
+      line.sourcingCaseId
+        ? { id: line.sourcingCaseId }
+        : procurementService.createOrOpenSourcingCase(line.rfqId, line.id, 10),
+    onSuccess: (sourcingCase) => navigate(`/procurement/sourcing-cases/${sourcingCase.id}`),
+    onError: (error) => toast.error(errorMessage(error, "The governed Sourcing Case could not be opened.")),
+  });
 
   const retryMutation = useMutation({
     mutationFn: (id: number) =>
@@ -346,10 +344,10 @@ function SourcingWorkbenchPage() {
             <Button
               variant="contained"
               startIcon={<Send />}
-              onClick={() => setSolicitOpen(true)}
+              onClick={() => unresolvedLines[0] && openSourcingCase.mutate(unresolvedLines[0])}
               disabled={unresolvedLines.length === 0}
             >
-              Request supplier quotes
+              Open governed sourcing
             </Button>
           )}
         </Stack>
@@ -405,7 +403,7 @@ function SourcingWorkbenchPage() {
             </Button>
           }
         >
-          Required supplier, currency, or warehouse reference data could not
+          Required currency or warehouse reference data could not
           be loaded. Related actions are unavailable until it is restored.
         </Alert>
       )}
@@ -436,7 +434,7 @@ function SourcingWorkbenchPage() {
               <TableCell align="right">Still to source</TableCell>
               <TableCell>Resolution</TableCell>
               <TableCell>Checked</TableCell>
-              <TableCell align="right">Evidence</TableCell>
+              <TableCell align="right">Action</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
@@ -450,7 +448,6 @@ function SourcingWorkbenchPage() {
                     {line.description}
                   </Typography>
                 </TableCell>
-                <TableCell align="right"><Button size="small" startIcon={<Insights />} onClick={() => setMemoryLineId(line.id)}>Commercial memory</Button></TableCell>
                 <TableCell align="right">{line.requestedQuantity}</TableCell>
                 <TableCell align="right">{line.availableQuantity}</TableCell>
                 <TableCell align="right">{line.reservedQuantity}</TableCell>
@@ -483,6 +480,16 @@ function SourcingWorkbenchPage() {
                   {line.resolutionCheckedOn
                     ? new Date(line.resolutionCheckedOn).toLocaleString()
                     : "Not verified"}
+                </TableCell>
+                <TableCell align="right">
+                  <Stack direction="row" spacing={0.5} sx={{ justifyContent: "flex-end" }}>
+                    <Button size="small" startIcon={<Insights />} onClick={() => setMemoryLineId(line.id)}>Memory</Button>
+                    {line.shortfallQuantity > 0 && canSolicit && (
+                      <Button size="small" variant="outlined" onClick={() => openSourcingCase.mutate(line)}>
+                        {line.sourcingCaseId ? "Open case" : "Create case"}
+                      </Button>
+                    )}
+                  </Stack>
                 </TableCell>
               </TableRow>
             ))}
@@ -818,22 +825,6 @@ function SourcingWorkbenchPage() {
         </Stack>
       )}
 
-      {rfqId && (
-        <SolicitationDialog
-          open={solicitOpen}
-          onClose={() => setSolicitOpen(false)}
-          rfqId={rfqId}
-          lines={unresolvedLines}
-          suppliers={suppliersQuery.data?.items ?? []}
-          referenceDataError={suppliersQuery.isError}
-          onRetryReferenceData={() => suppliersQuery.refetch()}
-          onSaved={(partial: boolean) => {
-            if (!partial) setSolicitOpen(false);
-            refresh();
-            setTab(1);
-          }}
-        />
-      )}
       {responseSolicitation && (
         <ResponseDialog
           solicitation={responseSolicitation}
@@ -929,123 +920,6 @@ function DataTable({
         </Box>
       )}
     </Paper>
-  );
-}
-
-function SolicitationDialog({
-  open,
-  onClose,
-  rfqId,
-  lines,
-  suppliers,
-  referenceDataError,
-  onRetryReferenceData,
-  onSaved,
-}: any) {
-  const [supplierIds, setSupplierIds] = useState<number[]>([]);
-  const [lineIds, setLineIds] = useState<number[]>(
-    lines.map((line: any) => line.id),
-  );
-  const [dueOn, setDueOn] = useState("");
-  const [operationId] = useState(() => crypto.randomUUID());
-  const mutation = useMutation({
-    mutationFn: () =>
-      procurementService.createSolicitations(rfqId, {
-        supplierIds,
-        rfqItemIds: lineIds,
-        dueOn: dueOn || undefined,
-        operationId,
-      }),
-    onSuccess: (results) => {
-      const succeeded = results.filter((result) => result.succeeded).length;
-      const failed = results.length - succeeded;
-      if (failed === 0) {
-        toast.success(`${succeeded} supplier request${succeeded === 1 ? "" : "s"} queued`);
-      } else if (succeeded > 0) {
-        toast.error(`${succeeded} request${succeeded === 1 ? "" : "s"} queued; ${failed} failed. Review the solicitation list before retrying.`);
-      } else {
-        toast.error("No supplier requests were queued");
-      }
-      if (succeeded > 0) onSaved(failed > 0);
-    },
-    onError: (error) =>
-      toast.error(errorMessage(error, "Could not create supplier requests")),
-  });
-  return (
-    <Dialog open={open} onClose={onClose} fullWidth maxWidth="sm">
-      <DialogTitle>Request supplier quotes</DialogTitle>
-      <DialogContent>
-        <Stack spacing={2} sx={{ mt: 1 }}>
-          {referenceDataError && (
-            <Alert
-              severity="error"
-              action={<Button onClick={onRetryReferenceData}>Retry</Button>}
-            >
-              Suppliers could not be loaded.
-            </Alert>
-          )}
-          <Alert severity="info">
-            Delivery status is confirmed by the server. Queued requests are not
-            shown as sent until the provider accepts them.
-          </Alert>
-          <FormControl fullWidth>
-            <InputLabel>Suppliers</InputLabel>
-            <Select
-              multiple
-              label="Suppliers"
-              value={supplierIds}
-              onChange={(e) => setSupplierIds(e.target.value as number[])}
-            >
-              {suppliers.map((s: any) => (
-                <MenuItem key={s.id} value={s.id}>
-                  {s.name}
-                  {s.contactEmail ? ` · ${s.contactEmail}` : ""}
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
-          <FormControl fullWidth>
-            <InputLabel>RFQ lines</InputLabel>
-            <Select
-              multiple
-              label="RFQ lines"
-              value={lineIds}
-              onChange={(e) => setLineIds(e.target.value as number[])}
-            >
-              {lines.map((line: any) => (
-                <MenuItem key={line.id} value={line.id}>
-                  {line.partNumber || `Line ${line.id}`} · Shortfall{" "}
-                  {line.shortfallQuantity}
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
-          <TextField
-            type="date"
-            label="Response due"
-            value={dueOn}
-            onChange={(e) => setDueOn(e.target.value)}
-            slotProps={{ inputLabel: { shrink: true } }}
-          />
-        </Stack>
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={onClose}>Cancel</Button>
-        <Button
-          variant="contained"
-          startIcon={<Send />}
-          disabled={
-            supplierIds.length === 0 ||
-            lineIds.length === 0 ||
-            referenceDataError ||
-            mutation.isPending
-          }
-          onClick={() => mutation.mutate()}
-        >
-          Queue requests
-        </Button>
-      </DialogActions>
-    </Dialog>
   );
 }
 

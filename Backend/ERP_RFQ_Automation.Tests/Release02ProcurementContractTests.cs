@@ -13,9 +13,11 @@ public sealed class Release02ProcurementContractTests
     [InlineData(nameof(ProcurementController.CreateOrOpenSourcingCase), "RFQ Management", PermissionAction.Edit)]
     [InlineData(nameof(ProcurementController.CreateOrOpenSourcingCase), "Supplier History", PermissionAction.View)]
     [InlineData(nameof(ProcurementController.GetSourcingCase), "Supplier History", PermissionAction.View)]
-    [InlineData(nameof(ProcurementController.SearchSourcingCandidates), "Supplier History", PermissionAction.View)]
+    [InlineData(nameof(ProcurementController.SearchSourcingCandidates), "Supplier History", PermissionAction.Edit)]
     [InlineData(nameof(ProcurementController.PrepareSupplierRfq), "RFQ Management", PermissionAction.Edit)]
     [InlineData(nameof(ProcurementController.PrepareSupplierRfq), "Supplier History", PermissionAction.Create)]
+    [InlineData(nameof(ProcurementController.QueuePreparedSupplierRfq), "RFQ Management", PermissionAction.Edit)]
+    [InlineData(nameof(ProcurementController.QueuePreparedSupplierRfq), "Supplier History", PermissionAction.Create)]
     public void Sourcing_routes_require_explicit_commercial_permissions(
         string actionName, string module, PermissionAction action)
     {

@@ -215,6 +215,10 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 throw new ProcurementConflictException("The Sourcing Case changed; refresh before searching again.");
             if (sourcingCase.Status is SourcingCaseStatuses.Closed or SourcingCaseStatuses.Cancelled)
                 throw new ProcurementConflictException("A closed or cancelled Sourcing Case cannot be searched.");
+            if (await _db.Set<SupplierSolicitation>().AnyAsync(x =>
+                    x.BusinessUnitId == command.BusinessUnitId && x.SourcingCaseId == sourcingCase.Id, ct))
+                throw new ProcurementConflictException(
+                    "Supplier candidates cannot be refreshed after outreach preparation has started.");
 
             var now = DateTime.UtcNow;
             var previousCandidates = sourcingCase.Candidates.Select(ToCandidateSnapshot).ToArray();
@@ -261,15 +265,33 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 x.BusinessUnitId == command.BusinessUnitId && x.Id == command.SourcingCaseId, ct)
                 ?? throw new ProcurementValidationException("Sourcing Case was not found in the authenticated tenant.");
             var solicitationKey = $"{command.IdempotencyKey.Trim()}:supplier-rfq";
-            var hash = Hash(new { command.SourcingCaseId, command.SupplierId, command.DueOn });
+            var hash = Hash(new
+            {
+                command.SourcingCaseId,
+                command.SupplierId,
+                command.DueOn,
+                command.ExpectedVersion
+            });
             var replay = await _db.Set<SupplierSolicitation>().SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.IdempotencyKey == solicitationKey, ct);
             if (replay is not null)
             {
                 EnsureReplay(replay.RequestHash, hash);
+                var replayEvent = await _db.ProcurementEvents.AsNoTracking().SingleOrDefaultAsync(x =>
+                    x.BusinessUnitId == command.BusinessUnitId
+                    && x.AggregateType == "SourcingCase"
+                    && x.AggregateId == sourcingCase.Id
+                    && x.EventType == "SOURCING_CASE_OUTREACH_READY"
+                    && x.IdempotencyKey == $"{command.IdempotencyKey.Trim()}:case", ct);
+                var snapshot = replayEvent is null
+                    ? null
+                    : ExtractPreparedSupplierRfqSnapshot(replayEvent.PayloadJson);
+                if (snapshot is null || snapshot.SupplierSolicitationId != replay.Id)
+                    throw new ProcurementConflictException(
+                        "The original Supplier RFQ preparation snapshot is unavailable.");
                 await tx.CommitAsync(ct);
                 return new PreparedSupplierRfqResult(sourcingCase.Id, replay.Id, replay.Status.ToString(),
-                    sourcingCase.Version, true);
+                    snapshot.SourcingCaseVersion, snapshot.SolicitationVersion, true);
             }
             if (sourcingCase.Version != command.ExpectedVersion)
                 throw new ProcurementConflictException("The Sourcing Case changed; refresh before preparing Supplier RFQ.");
@@ -280,8 +302,50 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             if (supplierBlockers.Count > 0)
                 throw new ProcurementValidationException(
                     $"The selected supplier is not ready for a Supplier RFQ: {string.Join("; ", supplierBlockers)}");
+            var existingPrepared = await _db.Set<SupplierSolicitation>()
+                .OrderByDescending(x => x.Id)
+                .FirstOrDefaultAsync(x =>
+                x.BusinessUnitId == command.BusinessUnitId
+                && x.SourcingCaseId == sourcingCase.Id
+                && x.SupplierId == command.SupplierId, ct);
+            if (existingPrepared is not null)
+            {
+                if (existingPrepared.Status != SolicitationStatus.PendingDispatch)
+                    throw new ProcurementConflictException(
+                        "Supplier outreach already exists for this candidate. Review its current delivery or response status.");
+                var alreadyQueued = await _db.ProcurementOutboxMessages.AnyAsync(x =>
+                    x.BusinessUnitId == command.BusinessUnitId
+                    && x.SupplierSolicitationId == existingPrepared.Id, ct);
+                if (alreadyQueued)
+                    throw new ProcurementConflictException(
+                        "A Supplier RFQ for this candidate is already queued for governed delivery.");
+                var preparationEvent = await _db.ProcurementEvents.AsNoTracking()
+                    .Where(x => x.BusinessUnitId == command.BusinessUnitId
+                        && x.AggregateType == "SupplierSolicitation"
+                        && x.AggregateId == existingPrepared.Id
+                        && x.EventType == "SUPPLIER_RFQ_CREATED")
+                    .OrderByDescending(x => x.Id)
+                    .FirstOrDefaultAsync(ct);
+                var originalPayload = preparationEvent is null
+                    ? null
+                    : JsonSerializer.Deserialize<SolicitationDispatchPayload>(preparationEvent.PayloadJson);
+                if (originalPayload is null || originalPayload.DueOn != command.DueOn)
+                    throw new ProcurementConflictException(
+                        "A prepared Supplier RFQ already exists with different delivery terms. Review or cancel it before preparing another.");
+                await tx.CommitAsync(ct);
+                return new PreparedSupplierRfqResult(sourcingCase.Id, existingPrepared.Id,
+                    existingPrepared.Status.ToString(), sourcingCase.Version, existingPrepared.Version, true);
+            }
             var rfq = await RequireRfqAsync(command.BusinessUnitId, sourcingCase.RfqId, ct);
+            var rfqItem = await _db.Rfqitems.SingleAsync(x => x.Id == sourcingCase.RfqItemId
+                && x.Rfqid == sourcingCase.RfqId, ct);
+            var currentShortfall = await GetNetSourcingRequirementAsync(command.BusinessUnitId, rfqItem, ct);
+            if (currentShortfall <= 0)
+                throw new ProcurementConflictException(
+                    "This demand line is now fully covered. Refresh the RFQ before preparing supplier outreach.");
             var now = DateTime.UtcNow;
+            sourcingCase.UnfulfilledQuantity = currentShortfall;
+            sourcingCase.StockQuantity = Math.Max(0m, sourcingCase.RequestedQuantity - currentShortfall);
             var solicitation = new SupplierSolicitation
             {
                 BusinessUnitId = command.BusinessUnitId,
@@ -322,12 +386,135 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                     sourcingCase.CommercialDemandLineId,
                     sourcingCase.NexoraSerial,
                     SupplierId = supplier.Id,
-                    SupplierSolicitationId = solicitation.Id
+                    SupplierSolicitationId = solicitation.Id,
+                    SourcingCaseVersion = sourcingCase.Version,
+                    SolicitationVersion = solicitation.Version
                 }), now);
             await _db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
             return new PreparedSupplierRfqResult(sourcingCase.Id, solicitation.Id,
-                solicitation.Status.ToString(), sourcingCase.Version, false);
+                solicitation.Status.ToString(), sourcingCase.Version, solicitation.Version, false);
+        });
+    }
+
+    public async Task<QueuedSupplierRfqResult> QueuePreparedSupplierRfqAsync(
+        QueuePreparedSupplierRfqCommand command, CancellationToken ct = default)
+    {
+        ValidateCommand(command.BusinessUnitId, command.IdempotencyKey, command.Actor, command.CorrelationId);
+        if (command.SourcingCaseId <= 0 || command.SupplierSolicitationId <= 0)
+            throw new ProcurementValidationException("Sourcing Case and Supplier RFQ identifiers must be positive.");
+
+        var requestHash = Hash(new
+        {
+            command.SourcingCaseId,
+            command.SupplierSolicitationId,
+            command.ExpectedSourcingCaseVersion,
+            command.ExpectedSolicitationVersion
+        });
+        var strategy = _db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+            var replay = await _db.ProcurementEvents.AsNoTracking().SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == command.BusinessUnitId
+                && x.EventType == "SUPPLIER_RFQ_DISPATCH_QUEUED"
+                && x.IdempotencyKey == command.IdempotencyKey.Trim(), ct);
+            if (replay is not null)
+            {
+                using var replayPayload = JsonDocument.Parse(replay.PayloadJson);
+                if (replay.AggregateId != command.SupplierSolicitationId
+                    || replayPayload.RootElement.GetProperty("requestHash").GetString() != requestHash)
+                    throw new ProcurementConflictException(
+                        "The idempotency key was already used for a different Supplier RFQ dispatch.");
+                await tx.CommitAsync(ct);
+                return new QueuedSupplierRfqResult(command.SourcingCaseId, command.SupplierSolicitationId,
+                    replayPayload.RootElement.GetProperty("Status").GetString()!,
+                    replayPayload.RootElement.GetProperty("SourcingCaseVersion").GetInt64(),
+                    replayPayload.RootElement.GetProperty("SolicitationVersion").GetInt64(), true);
+            }
+
+            var sourcingCase = await _db.SourcingCases.SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == command.BusinessUnitId && x.Id == command.SourcingCaseId, ct)
+                ?? throw new ProcurementValidationException("Sourcing Case was not found in the authenticated tenant.");
+            var solicitation = await _db.Set<SupplierSolicitation>().SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == command.BusinessUnitId && x.Id == command.SupplierSolicitationId
+                && x.SourcingCaseId == sourcingCase.Id, ct)
+                ?? throw new ProcurementValidationException(
+                    "The prepared Supplier RFQ does not belong to this Sourcing Case.");
+            if (sourcingCase.Version != command.ExpectedSourcingCaseVersion
+                || solicitation.Version != command.ExpectedSolicitationVersion)
+                throw new ProcurementConflictException(
+                    "The Sourcing Case or Supplier RFQ changed; refresh before approving dispatch.");
+            if (solicitation.Status != SolicitationStatus.PendingDispatch)
+                throw new ProcurementConflictException("Only a prepared Supplier RFQ can be queued for dispatch.");
+            if (await _db.ProcurementOutboxMessages.AnyAsync(x =>
+                    x.BusinessUnitId == command.BusinessUnitId
+                    && x.SupplierSolicitationId == solicitation.Id, ct))
+                throw new ProcurementConflictException("This Supplier RFQ already has a dispatch record.");
+
+            var supplier = await RequireSupplierAsync(command.BusinessUnitId, solicitation.SupplierId, ct);
+            var blockers = SupplierRfqBlockingReasons(supplier);
+            if (blockers.Count > 0)
+                throw new ProcurementValidationException(
+                    $"The Supplier is no longer ready for outreach: {string.Join("; ", blockers)}");
+            var rfqItem = await _db.Rfqitems.SingleAsync(x => x.Id == sourcingCase.RfqItemId
+                && x.Rfqid == sourcingCase.RfqId, ct);
+            var currentShortfall = await GetNetSourcingRequirementAsync(command.BusinessUnitId, rfqItem, ct);
+            if (currentShortfall <= 0)
+                throw new ProcurementConflictException(
+                    "This demand line is now fully covered. Supplier outreach was not queued.");
+
+            var createdEvent = await _db.ProcurementEvents.AsNoTracking()
+                .Where(x => x.BusinessUnitId == command.BusinessUnitId
+                    && x.AggregateType == "SupplierSolicitation"
+                    && x.AggregateId == solicitation.Id
+                    && x.EventType == "SUPPLIER_RFQ_CREATED")
+                .OrderByDescending(x => x.Id)
+                .FirstOrDefaultAsync(ct)
+                ?? throw new ProcurementConflictException("The prepared Supplier RFQ audit evidence is unavailable.");
+            var dispatchPayload = JsonSerializer.Deserialize<SolicitationDispatchPayload>(createdEvent.PayloadJson)
+                ?? throw new ProcurementConflictException("The prepared Supplier RFQ dispatch payload is unavailable.");
+            if (dispatchPayload.SolicitationId != solicitation.Id
+                || dispatchPayload.BusinessUnitId != command.BusinessUnitId
+                || !string.Equals(dispatchPayload.ToEmail, supplier.ContactEmail, StringComparison.OrdinalIgnoreCase))
+                throw new ProcurementConflictException(
+                    "Supplier dispatch details changed after preparation. Prepare a new Supplier RFQ after governance review.");
+
+            var now = DateTime.UtcNow;
+            _db.ProcurementOutboxMessages.Add(new ProcurementOutboxMessage
+            {
+                BusinessUnitId = command.BusinessUnitId,
+                SupplierSolicitationId = solicitation.Id,
+                Status = ProcurementOutboxStatuses.Pending,
+                PayloadJson = createdEvent.PayloadJson,
+                NextAttemptOn = now,
+                OriginCorrelationId = command.CorrelationId.Trim(),
+                CreatedOn = now,
+                UpdatedOn = now
+            });
+            sourcingCase.UnfulfilledQuantity = currentShortfall;
+            sourcingCase.StockQuantity = Math.Max(0m, sourcingCase.RequestedQuantity - currentShortfall);
+            sourcingCase.NextAction = "Supplier RFQ queued for governed delivery";
+            sourcingCase.Version++;
+            sourcingCase.UpdatedOn = now;
+            sourcingCase.UpdatedBy = command.Actor.Trim();
+            AddEvent(command.BusinessUnitId, "SupplierSolicitation", solicitation.Id, solicitation.Version,
+                "SUPPLIER_RFQ_DISPATCH_QUEUED", command.Actor, command.CorrelationId,
+                command.IdempotencyKey, JsonSerializer.Serialize(new
+                {
+                    requestHash,
+                    SourcingCaseId = sourcingCase.Id,
+                    solicitation.SupplierRfqNumber,
+                    sourcingCase.NexoraSerial,
+                    sourcingCase.UnfulfilledQuantity,
+                    Status = solicitation.Status.ToString(),
+                    SourcingCaseVersion = sourcingCase.Version,
+                    SolicitationVersion = solicitation.Version
+                }), now);
+            await _db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+            return new QueuedSupplierRfqResult(sourcingCase.Id, solicitation.Id,
+                solicitation.Status.ToString(), sourcingCase.Version, solicitation.Version, false);
         });
     }
 
@@ -446,6 +633,10 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             }
         }
 
+        var sourcingCaseIds = await _db.SourcingCases.AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && x.RfqId == rfqId)
+            .GroupBy(x => x.RfqItemId)
+            .ToDictionaryAsync(x => x.Key, x => (long?)x.OrderByDescending(c => c.UpdatedOn).Select(c => c.Id).First(), ct);
         var checkedOn = DateTime.UtcNow;
         var lines = items.Select(item =>
         {
@@ -459,7 +650,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             var resolution = item.ProductId is null ? "UNKNOWN" : available >= requested ? "IN_STOCK"
                 : shortfall == 0 ? "COVERED"
                 : available > 0 ? "PARTIAL" : openIncoming > 0 ? "INCOMING" : "SHORTAGE";
-            return new SourcingLineView(item.Id, rfqId, item.ProductId,
+            return new SourcingLineView(item.Id, rfqId, item.ProductId, sourcingCaseIds.GetValueOrDefault(item.Id),
                 item.ManufacturerPartNumber ?? item.ItemMaterialCode, item.ProductShortDescription ?? item.ProductShortName
                     ?? item.CommodityProduct ?? item.ItemMaterialCode ?? $"RFQ line {item.Id}", requested, available,
                 reserved, shortfall, item.RequiredDesiredDate, resolution, checkedOn);
@@ -1361,7 +1552,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
     private async Task RefreshCandidatesAsync(SourcingCase sourcingCase, int limit, DateTime now, CancellationToken ct)
     {
         var suppliers = await _db.Suppliers.AsNoTracking()
-            .Where(x => x.Buid == sourcingCase.BusinessUnitId && x.IsActive != false)
+            .Where(x => x.Buid == sourcingCase.BusinessUnitId && x.IsActive == true)
             .Select(x => new { x.Id, x.Name, x.Tags })
             .ToListAsync(ct);
         var supplierIds = suppliers.Select(x => x.Id).ToHashSet();
@@ -1380,7 +1571,8 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
 
             var quotes = await _db.SupplierQuotedItems.AsNoTracking()
                 .Where(x => x.BusinessUnitId == sourcingCase.BusinessUnitId
-                    && x.ProductId == sourcingCase.ProductId.Value && supplierIds.Contains(x.SupplierId))
+                    && x.ProductId == sourcingCase.ProductId.Value && x.IsActive
+                    && supplierIds.Contains(x.SupplierId))
                 .GroupBy(x => x.SupplierId)
                 .Select(group => new
                 {
@@ -1401,6 +1593,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                     equals new { po.BusinessUnitId, po.Id }
                 where line.BusinessUnitId == sourcingCase.BusinessUnitId
                     && line.ProductId == sourcingCase.ProductId.Value
+                    && po.Status != SupplierPurchaseOrderStatuses.Cancelled
                     && supplierIds.Contains(po.SupplierId)
                 group new { line, po } by po.SupplierId into grouped
                 select new
@@ -1490,6 +1683,8 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
     private static IReadOnlyCollection<string> SupplierRfqBlockingReasons(Supplier supplier)
     {
         var reasons = new List<string>();
+        if (supplier.IsActive != true)
+            reasons.Add("Supplier must be active");
         if (string.IsNullOrWhiteSpace(supplier.ContactEmail))
             reasons.Add("A verified dispatch contact is required");
         if (supplier.GovernanceStatus is not (SupplierGovernanceStatuses.Approved
@@ -1499,8 +1694,8 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             reasons.Add("Supplier verification status must be VERIFIED");
         if (supplier.ReadinessStatus != SupplierReadinessStatuses.Ready)
             reasons.Add("Supplier outreach readiness must be READY");
-        if (supplier.ComplianceStatus is "BLOCKED" or "FAILED" or "RESTRICTED")
-            reasons.Add("Supplier compliance status blocks outreach");
+        if (supplier.ComplianceStatus != SupplierComplianceStatuses.Cleared)
+            reasons.Add("Supplier compliance status must be CLEARED");
         if (supplier.RiskStatus is "BLOCKED" or "HIGH")
             reasons.Add("Supplier risk status blocks outreach");
         return reasons;
@@ -1521,6 +1716,9 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
 
     private sealed record CandidateSearchSnapshot(
         int RequestedLimit, long Version, CandidateEvidenceSnapshot[] Candidates);
+
+    private sealed record PreparedSupplierRfqSnapshot(
+        long SupplierSolicitationId, long SourcingCaseVersion, long SolicitationVersion);
 
     private sealed record CandidateEvidenceSnapshot(
         long Id, long SourcingCaseId, long SupplierId, int Rank, string EvidenceType,
@@ -1554,6 +1752,19 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         try
         {
             return JsonSerializer.Deserialize<CandidateSearchSnapshot>(payloadJson,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static PreparedSupplierRfqSnapshot? ExtractPreparedSupplierRfqSnapshot(string payloadJson)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<PreparedSupplierRfqSnapshot>(payloadJson,
                 new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
         }
         catch (JsonException)

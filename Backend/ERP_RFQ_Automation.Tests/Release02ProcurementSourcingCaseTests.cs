@@ -158,6 +158,8 @@ public sealed class Release02ProcurementSourcingCaseTests
         Assert.False(first.Replayed);
         Assert.True(replay.Replayed);
         Assert.Equal(first.SupplierSolicitationId, replay.SupplierSolicitationId);
+        Assert.Equal(first.SourcingCaseVersion, replay.SourcingCaseVersion);
+        Assert.Equal(first.SolicitationVersion, replay.SolicitationVersion);
         Assert.Equal(SourcingCaseStatuses.OutreachReady,
             (await fixture.Execute(service => service.GetSourcingCaseAsync(fixture.BusinessUnitId, created.Id))).Status);
 
@@ -176,6 +178,91 @@ public sealed class Release02ProcurementSourcingCaseTests
         Assert.Empty(await verify.ProcurementOutboxMessages.ToListAsync());
         Assert.True(await verify.SourcingCaseCandidates.Where(x => x.SourcingCaseId == created.Id)
             .Select(x => x.Selected).SingleAsync());
+    }
+
+    [Fact]
+    public async Task Prepared_supplier_rfq_requires_explicit_idempotent_queue_approval()
+    {
+        using var fixture = new ProcurementScenario();
+        await MakeSourcingReadyAsync(fixture);
+        var created = await fixture.Execute(service => service.CreateOrOpenSourcingCaseAsync(
+            CreateCase(fixture, "queue-case")));
+        var candidate = Assert.Single(created.Candidates);
+        var dueOn = DateTime.UtcNow.AddDays(2);
+        var prepared = await fixture.Execute(service => service.PrepareSupplierRfqAsync(new(
+            fixture.BusinessUnitId, created.Id, candidate.SupplierId, dueOn,
+            created.Version, "queue-prepare", "qa", "corr-queue-prepare")));
+        await Assert.ThrowsAsync<ProcurementConflictException>(() => fixture.Execute(service =>
+            service.PrepareSupplierRfqAsync(new(fixture.BusinessUnitId, created.Id, candidate.SupplierId,
+                dueOn.AddDays(1), prepared.SourcingCaseVersion, "queue-prepare-changed-terms", "qa",
+                "corr-queue-changed-terms"))));
+        var recovered = await fixture.Execute(service => service.PrepareSupplierRfqAsync(new(
+            fixture.BusinessUnitId, created.Id, candidate.SupplierId, dueOn,
+            prepared.SourcingCaseVersion, "queue-prepare-recovery", "qa", "corr-queue-recovery")));
+        Assert.True(recovered.Replayed);
+        Assert.Equal(prepared.SupplierSolicitationId, recovered.SupplierSolicitationId);
+        var command = new QueuePreparedSupplierRfqCommand(fixture.BusinessUnitId, created.Id,
+            recovered.SupplierSolicitationId, recovered.SourcingCaseVersion, recovered.SolicitationVersion,
+            "queue-dispatch", "qa-manager", "corr-queue-dispatch");
+
+        var queued = await fixture.Execute(service => service.QueuePreparedSupplierRfqAsync(command));
+        var replay = await fixture.Execute(service => service.QueuePreparedSupplierRfqAsync(command));
+
+        Assert.False(queued.Replayed);
+        Assert.True(replay.Replayed);
+        Assert.Equal(queued.SupplierSolicitationId, replay.SupplierSolicitationId);
+        var originalPreparationReplay = await fixture.Execute(service => service.PrepareSupplierRfqAsync(new(
+            fixture.BusinessUnitId, created.Id, candidate.SupplierId, dueOn,
+            created.Version, "queue-prepare", "qa", "corr-queue-prepare")));
+        Assert.Equal(prepared.SourcingCaseVersion, originalPreparationReplay.SourcingCaseVersion);
+        Assert.Equal(prepared.SolicitationVersion, originalPreparationReplay.SolicitationVersion);
+        await using var verify = fixture.Context();
+        var outbox = Assert.Single(await verify.ProcurementOutboxMessages.ToListAsync());
+        Assert.Equal(ProcurementOutboxStatuses.Pending, outbox.Status);
+        Assert.Contains("SRFQ-", outbox.PayloadJson, StringComparison.Ordinal);
+        Assert.Contains(await verify.ProcurementEvents.ToListAsync(), x =>
+            x.EventType == "SUPPLIER_RFQ_DISPATCH_QUEUED" && x.Actor == "qa-manager");
+    }
+
+    [Fact]
+    public async Task Existing_sent_supplier_rfq_blocks_duplicate_outreach_to_same_candidate()
+    {
+        using var fixture = new ProcurementScenario();
+        await MakeSourcingReadyAsync(fixture);
+        var created = await fixture.Execute(service => service.CreateOrOpenSourcingCaseAsync(
+            CreateCase(fixture, "sent-duplicate-case")));
+        var candidate = Assert.Single(created.Candidates);
+        var prepared = await fixture.Execute(service => service.PrepareSupplierRfqAsync(new(
+            fixture.BusinessUnitId, created.Id, candidate.SupplierId, null, created.Version,
+            "sent-duplicate-prepare", "qa", "corr-sent-duplicate")));
+        await using (var update = fixture.Context())
+        {
+            var solicitation = await update.Set<ERP_RFQ_Automation.Agent.Models.SupplierSolicitation>()
+                .SingleAsync(x => x.Id == prepared.SupplierSolicitationId);
+            solicitation.Status = ERP_RFQ_Automation.Agent.Models.SolicitationStatus.Sent;
+            await update.SaveChangesAsync();
+        }
+
+        await Assert.ThrowsAsync<ProcurementConflictException>(() => fixture.Execute(service =>
+            service.PrepareSupplierRfqAsync(new(fixture.BusinessUnitId, created.Id, candidate.SupplierId,
+                null, prepared.SourcingCaseVersion, "sent-duplicate-second", "qa", "corr-sent-second"))));
+    }
+
+    [Fact]
+    public async Task Candidate_refresh_is_blocked_once_supplier_outreach_is_prepared()
+    {
+        using var fixture = new ProcurementScenario();
+        await MakeSourcingReadyAsync(fixture);
+        var created = await fixture.Execute(service => service.CreateOrOpenSourcingCaseAsync(
+            CreateCase(fixture, "refresh-lock-case")));
+        var candidate = Assert.Single(created.Candidates);
+        var prepared = await fixture.Execute(service => service.PrepareSupplierRfqAsync(new(
+            fixture.BusinessUnitId, created.Id, candidate.SupplierId, null, created.Version,
+            "refresh-lock-prepare", "qa", "corr-refresh-lock")));
+
+        await Assert.ThrowsAsync<ProcurementConflictException>(() => fixture.Execute(service =>
+            service.SearchSourcingCandidatesAsync(new(fixture.BusinessUnitId, created.Id, 20,
+                prepared.SourcingCaseVersion, "refresh-after-prepare", "qa", "corr-refresh-after"))));
     }
 
     private static CreateSourcingCaseCommand CreateCase(ProcurementScenario fixture, string key) => new(

@@ -10,6 +10,8 @@ public interface IProcurementApplicationService
         => throw new NotSupportedException("Supplier candidate search is not supported by this procurement adapter.");
     Task<PreparedSupplierRfqResult> PrepareSupplierRfqAsync(PrepareSupplierRfqCommand command, CancellationToken ct = default)
         => throw new NotSupportedException("Supplier RFQ preparation is not supported by this procurement adapter.");
+    Task<QueuedSupplierRfqResult> QueuePreparedSupplierRfqAsync(QueuePreparedSupplierRfqCommand command, CancellationToken ct = default)
+        => throw new NotSupportedException("Prepared Supplier RFQ dispatch is not supported by this procurement adapter.");
     Task<ProcurementWorkbench> GetWorkbenchAsync(long businessUnitId, long rfqId, CancellationToken ct = default);
     Task<IReadOnlyCollection<SupplierPurchaseOrderSummary>> SearchPurchaseOrdersAsync(
         long businessUnitId, string? search, int limit, CancellationToken ct = default);
@@ -51,6 +53,24 @@ public sealed record PrepareSupplierRfqCommand(
     string IdempotencyKey,
     string Actor,
     string CorrelationId);
+
+public sealed record QueuePreparedSupplierRfqCommand(
+    long BusinessUnitId,
+    long SourcingCaseId,
+    long SupplierSolicitationId,
+    long ExpectedSourcingCaseVersion,
+    long ExpectedSolicitationVersion,
+    string IdempotencyKey,
+    string Actor,
+    string CorrelationId);
+
+public sealed record QueuedSupplierRfqResult(
+    long SourcingCaseId,
+    long SupplierSolicitationId,
+    string Status,
+    long SourcingCaseVersion,
+    long SolicitationVersion,
+    bool Replayed);
 
 public sealed record SourcingCaseView(
     long Id,
@@ -103,6 +123,7 @@ public sealed record PreparedSupplierRfqResult(
     long SupplierSolicitationId,
     string Status,
     long SourcingCaseVersion,
+    long SolicitationVersion,
     bool Replayed);
 
 public sealed record CreateSolicitationCommand(
@@ -215,7 +236,7 @@ public sealed record CustomerQuoteDraftView(long QuoteId, string QuoteNumber, lo
 public sealed record CustomerQuoteDraftLineView(long QuoteItemId, long RfqItemId, decimal Quantity,
     decimal UnitPrice, decimal TotalAmount);
 
-public sealed record SourcingLineView(long Id, long RfqId, long? ProductId, string? PartNumber,
+public sealed record SourcingLineView(long Id, long RfqId, long? ProductId, long? SourcingCaseId, string? PartNumber,
     string Description, decimal RequestedQuantity, decimal AvailableQuantity, decimal ReservedQuantity,
     decimal ShortfallQuantity, DateTime? RequiredOn, string Resolution, DateTime ResolutionCheckedOn);
 public sealed record SolicitationView(long Id, long RfqId, long SupplierId, string SupplierName,

@@ -55,6 +55,7 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
     public const long TenantAProcurementWarehouseId = 396_020;
     public const long TenantAProcurementProductId = 396_030;
     public const long TenantAProcurementSupplierId = 396_050;
+    public const long TenantBProcurementSupplierId = 406_050;
     public const long TenantAProcurementRfqId = 396_060;
     public const long TenantAProcurementRfqItemId = 396_070;
     public const long TenantBProcurementRfqId = 406_060;
@@ -186,6 +187,23 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         outbox.SentOn = now;
         outbox.UpdatedOn = now;
         await db.SaveChangesAsync();
+    }
+
+    public async Task<long> CreateLegacyFixtureSolicitationAsync()
+    {
+        await using var db = Context();
+        var service = new ProcurementApplicationService(db);
+        var result = await service.CreateSolicitationAsync(new CreateSolicitationCommand(
+            TenantA,
+            TenantAProcurementRfqId,
+            TenantAProcurementSupplierId,
+            new[] { TenantAProcurementRfqItemId },
+            DateTime.UtcNow.AddDays(2),
+            $"http-fixture-solicitation:{Guid.NewGuid():N}",
+            "release-01b-tests",
+            $"http-fixture:{Guid.NewGuid():N}"));
+        await MarkSolicitationSentAsync(result.Id);
+        return result.Id;
     }
 
     public async Task<(long LineId, long Version)> IssuePurchaseOrderForHttpFlowAsync(long purchaseOrderId)

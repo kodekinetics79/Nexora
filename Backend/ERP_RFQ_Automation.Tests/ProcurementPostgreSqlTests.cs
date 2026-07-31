@@ -539,6 +539,7 @@ public sealed class ProcurementPostgreSqlTests(PostgreSqlTestDatabase database)
 
         var tenantTables = new[]
         {
+            "commercial_demand_lines", "sourcing_cases", "sourcing_case_candidates",
             "SupplierSolicitations", "SourcingAwards", "SupplierQuotedItems",
             "supplier_purchase_orders", "supplier_purchase_order_lines",
             "goods_receipts", "goods_receipt_lines", "procurement_events", "procurement_outbox"

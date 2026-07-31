@@ -82,7 +82,8 @@ namespace ERP_RFQ_Automation.Repositories
             // Get total count before pagination
             var totalCount = await query.CountAsync();
             // Apply pagination
-            query = query.Skip((pageNumber - 1) * pageSize).Take(pageSize);
+            query = query.OrderBy(x => x.Supplier.Name).ThenBy(x => x.Supplier.Id)
+                .Skip((pageNumber - 1) * pageSize).Take(pageSize);
             // Project to SupplierResponseDTO
             var suppliers = await query.Select(x => new SupplierResponseDTO
             {
@@ -143,6 +144,11 @@ namespace ERP_RFQ_Automation.Repositories
             if (supplier.Buid is null or <= 0)
                 throw new ArgumentException("Supplier must belong to an authenticated Business Unit.");
 
+            await using var transaction = _context.Database.IsRelational()
+                && _context.Database.CurrentTransaction is null
+                ? await _context.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable)
+                : null;
+
             // Validate unique name within same BusinessUnit
             var normalizedName = supplier.Name.Trim();
             var nameExists = await _context.Suppliers.AnyAsync(s => s.Name.ToLower() == normalizedName.ToLower() && s.Buid == supplier.Buid);
@@ -154,7 +160,8 @@ namespace ERP_RFQ_Automation.Repositories
             // Validate foreign keys
             if (supplier.CurrencyId.HasValue)
             {
-                var currencyExists = await _context.Currencies.AnyAsync(cur => cur.Id == supplier.CurrencyId.Value);
+                var currencyExists = await _context.Currencies.AnyAsync(cur =>
+                    cur.Id == supplier.CurrencyId.Value && cur.BusinessUnitId == supplier.Buid.Value);
                 if (!currencyExists)
                     throw new ArgumentException($"Currency with ID {supplier.CurrencyId.Value} does not exist.");
             }
@@ -174,10 +181,6 @@ namespace ERP_RFQ_Automation.Repositories
             supplier.EffectiveFrom = supplier.CreatedOn;
             supplier.ConcurrencyToken = Guid.NewGuid();
 
-            await using var transaction = _context.Database.IsRelational()
-                && _context.Database.CurrentTransaction is null
-                ? await _context.Database.BeginTransactionAsync()
-                : null;
             try
             {
                 _context.Suppliers.Add(supplier);
@@ -198,6 +201,10 @@ namespace ERP_RFQ_Automation.Repositories
 
         public async Task UpdateAsync(Supplier supplier, long businessUnitId)
         {
+            await using var transaction = _context.Database.IsRelational()
+                && _context.Database.CurrentTransaction is null
+                ? await _context.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable)
+                : null;
             var existing = await _context.Suppliers.AsNoTracking().FirstOrDefaultAsync(s => s.Id == supplier.Id && s.Buid == businessUnitId);
             if (existing == null)
                 throw new KeyNotFoundException($"Supplier with ID {supplier.Id} not found in Business Unit {businessUnitId}.");
@@ -216,7 +223,8 @@ namespace ERP_RFQ_Automation.Repositories
             // Validate foreign keys
             if (supplier.CurrencyId.HasValue)
             {
-                var currencyExists = await _context.Currencies.AnyAsync(cur => cur.Id == supplier.CurrencyId.Value);
+                var currencyExists = await _context.Currencies.AnyAsync(cur =>
+                    cur.Id == supplier.CurrencyId.Value && cur.BusinessUnitId == businessUnitId);
                 if (!currencyExists)
                     throw new ArgumentException($"Currency with ID {supplier.CurrencyId.Value} does not exist.");
             }
@@ -240,27 +248,29 @@ namespace ERP_RFQ_Automation.Repositories
             supplier.ConcurrencyToken = Guid.NewGuid();
             entry.State = EntityState.Modified;
             await _context.SaveChangesAsync();
+            if (transaction is not null)
+                await transaction.CommitAsync();
         }
 
         public async Task DeleteAsync(long id, long businessUnitId)
         {
-            var supplier = await GetByIdAsync(id, businessUnitId);
-
-            // Check for dependent contacts
-            var hasContacts = await _context.Contacts.AnyAsync(con =>
-                con.SupplierId == id && con.BusinessUnitId == businessUnitId);
-            if (hasContacts)
-                throw new InvalidOperationException($"Cannot delete Supplier with ID {id} because they have associated contacts.");
-
-            _context.Suppliers.Remove(supplier);
-            await _context.SaveChangesAsync();
+            _ = await GetByIdAsync(id, businessUnitId);
+            throw new InvalidOperationException(
+                "Supplier records preserve commercial lineage and cannot be deleted. Use the governed inactive decision instead.");
         }
 
         public async Task<List<SupplierSearchResultDTO>> SearchSuppliersAsync(string? searchTerm, string? productCategory, long businessUnitId)
         {
             var query = _context.Suppliers
                 .AsNoTracking()
-                .Where(s => s.Buid == businessUnitId && (s.IsActive == null || s.IsActive == true))
+                .Where(s => s.Buid == businessUnitId && s.IsActive == true
+                    && s.VerificationStatus == SupplierVerificationStatuses.Verified
+                    && s.ComplianceStatus == SupplierComplianceStatuses.Cleared
+                    && (s.RiskStatus == SupplierRiskStatuses.Low || s.RiskStatus == SupplierRiskStatuses.Medium)
+                    && s.ReadinessStatus == SupplierReadinessStatuses.Ready
+                    && (s.GovernanceStatus == SupplierGovernanceStatuses.Approved
+                        || s.GovernanceStatus == SupplierGovernanceStatuses.Preferred
+                        || s.GovernanceStatus == SupplierGovernanceStatuses.Provisional))
                 .Include(s => s.City)
                 .Include(s => s.Country)
                 .AsQueryable();
@@ -281,7 +291,7 @@ namespace ERP_RFQ_Automation.Repositories
                 query = query.Where(s => s.Tags != null && s.Tags.ToLower().Contains(productCategory.ToLower()));
             }
 
-            var suppliers = await query
+            var suppliers = await query.OrderBy(s => s.Name).ThenBy(s => s.Id)
                 .Take(20)
                 .Select(s => new SupplierSearchResultDTO
                 {

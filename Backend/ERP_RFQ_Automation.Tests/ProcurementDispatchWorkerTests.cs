@@ -168,6 +168,22 @@ public sealed class ProcurementDispatchWorkerTests
     }
 
     [Fact]
+    public async Task Supplier_blocked_after_queue_is_not_contacted()
+    {
+        using var fixture = new DispatchFixture();
+        fixture.SeedPending();
+        await fixture.BlockSupplierAsync();
+
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+
+        var state = await fixture.StateAsync();
+        Assert.Equal(0, fixture.Notification.SendCount);
+        Assert.Equal(ProcurementOutboxStatuses.DeadLettered, state.Message.Status);
+        Assert.Equal("SUPPLIER_GOVERNANCE_NOT_READY", state.Message.LastErrorCode);
+        Assert.Equal(SolicitationStatus.DeliveryFailed, state.Solicitation.Status);
+    }
+
+    [Fact]
     public async Task Provider_timeout_is_terminal_delivery_uncertain_without_resend()
     {
         var notification = new RecordingNotification { PauseDelivery = true };
@@ -317,6 +333,13 @@ public sealed class ProcurementDispatchWorkerTests
             });
             AgentSeed.Rfq(db, Rfq, Tenant, "RFQ-DISPATCH-1");
             AgentSeed.Supplier(db, Supplier, Tenant, "Supplier One", "supplier@example.test");
+            var governedSupplier = db.Suppliers.Local.Single(x => x.Id == Supplier);
+            governedSupplier.IsActive = true;
+            governedSupplier.GovernanceStatus = SupplierGovernanceStatuses.Approved;
+            governedSupplier.VerificationStatus = SupplierVerificationStatuses.Verified;
+            governedSupplier.ComplianceStatus = SupplierComplianceStatuses.Cleared;
+            governedSupplier.RiskStatus = SupplierRiskStatuses.Low;
+            governedSupplier.ReadinessStatus = SupplierReadinessStatuses.Ready;
             AgentSeed.Solicitation(db, Solicitation, Tenant, Rfq, Supplier, SolicitationStatus.PendingDispatch);
             var now = updatedOn ?? DateTime.UtcNow;
             db.ProcurementOutboxMessages.Add(new ProcurementOutboxMessage
@@ -351,6 +374,15 @@ public sealed class ProcurementDispatchWorkerTests
                 await db.ProcurementOutboxMessages.AsNoTracking().SingleAsync(),
                 await db.Set<SupplierSolicitation>().AsNoTracking().SingleAsync(),
                 await db.ProcurementEvents.AsNoTracking().ToListAsync());
+        }
+
+        public async Task BlockSupplierAsync()
+        {
+            await using var db = _database.ContextFor(null);
+            var supplier = await db.Suppliers.SingleAsync(x => x.Id == Supplier);
+            supplier.GovernanceStatus = SupplierGovernanceStatuses.Blocked;
+            supplier.ReadinessStatus = SupplierReadinessStatuses.Blocked;
+            await db.SaveChangesAsync();
         }
 
         public void Dispose()
@@ -431,6 +463,13 @@ public sealed class ProcurementDispatchWorkerPostgreSqlTests(PostgreSqlTestDatab
             });
             AgentSeed.Rfq(seed, rfqId, tenantId, $"RFQ-RETRY-{suffix}");
             AgentSeed.Supplier(seed, supplierId, tenantId, "Retry Supplier", "retry@example.test");
+            var governedSupplier = seed.Suppliers.Local.Single(x => x.Id == supplierId);
+            governedSupplier.IsActive = true;
+            governedSupplier.GovernanceStatus = SupplierGovernanceStatuses.Approved;
+            governedSupplier.VerificationStatus = SupplierVerificationStatuses.Verified;
+            governedSupplier.ComplianceStatus = SupplierComplianceStatuses.Cleared;
+            governedSupplier.RiskStatus = SupplierRiskStatuses.Low;
+            governedSupplier.ReadinessStatus = SupplierReadinessStatuses.Ready;
             AgentSeed.Solicitation(
                 seed, solicitationId, tenantId, rfqId, supplierId, SolicitationStatus.PendingDispatch);
             seed.ProcurementOutboxMessages.Add(new ProcurementOutboxMessage

@@ -5,10 +5,8 @@ using ERP_RFQ_Automation.DTOs.SupplierDTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
 using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using System.IO;
 using System.Security.Claims;
 
 namespace ERP_RFQ_Automation.Controllers
@@ -19,13 +17,10 @@ namespace ERP_RFQ_Automation.Controllers
     public class SupplierController : ControllerBase
     {
         private readonly ISupplierRepository _repository;
-        private readonly IWebHostEnvironment _environment;
-        private static readonly int[] AllowedPageSizes = { 5, 10, 25, 50 };
 
-        public SupplierController(ISupplierRepository repository, IWebHostEnvironment environment)
+        public SupplierController(ISupplierRepository repository)
         {
             _repository = repository;
-            _environment = environment;
         }
 
         // GET: api/Supplier?pageNumber=1&pageSize=10&id=1&name=abc&contactEmail=abc@example.com&taxId=123&currencyId=1&isActive=true&businessUnitId=1
@@ -45,7 +40,7 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 if (!TryGetAuthenticatedTenant(out var businessUnitId))
                     return Forbid();
-                
+
                 if (pageNumber < 1)
                     return BadRequest("Page number must be greater than or equal to 1.");
 
@@ -109,27 +104,11 @@ namespace ERP_RFQ_Automation.Controllers
 
                 var actor = GetAuthenticatedActor();
 
-                string? imagePath = null;
-                if (request.ImageFile != null)
-                {
-                    var uploadsFolder = Path.Combine(_environment.WebRootPath, "SupplierImages");
-                    if (!Directory.Exists(uploadsFolder))
-                        Directory.CreateDirectory(uploadsFolder);
-
-                    var uniqueFileName = $"{Guid.NewGuid()}_{request.ImageFile.FileName}";
-                    var filePath = Path.Combine(uploadsFolder, uniqueFileName);
-                    using (var fileStream = new FileStream(filePath, FileMode.Create))
-                    {
-                        await request.ImageFile.CopyToAsync(fileStream);
-                    }
-                    imagePath = $"/SupplierImages/{uniqueFileName}";
-                }
-
                 var supplier = new Supplier
                 {
                     Name = request.Name,
-                    ContactEmail = request.ContactEmail,
-                    ImageUrl = imagePath ?? string.Empty,  // Default to empty if no image provided
+                    ContactEmail = NormalizeEmail(request.ContactEmail),
+                    ImageUrl = string.Empty,
                     PaymentTerms = request.PaymentTerms,
                     AddressLine1 = request.AddressLine1,
                     AddressLine2 = request.AddressLine2,
@@ -140,7 +119,7 @@ namespace ERP_RFQ_Automation.Controllers
                     Comments = request.Comments,
                     CurrencyId = request.CurrencyId,
                     Buid = businessUnitId,
-                    IsActive = request.IsActive ?? true,
+                    IsActive = true,
                     CreatedBy = actor,
                     CreatedOn = DateTime.UtcNow
                 };
@@ -176,27 +155,10 @@ namespace ERP_RFQ_Automation.Controllers
                 if (existing.ConcurrencyToken.HasValue && request.ConcurrencyToken != existing.ConcurrencyToken)
                     return Conflict("The supplier changed since it was loaded. Refresh and retry.");
 
-                string? imagePath = existing.ImageUrl;
-                if (request.ImageFile != null)
-                {
-                    var uploadsFolder = Path.Combine(_environment.WebRootPath, "SupplierImages");
-                    if (!Directory.Exists(uploadsFolder))
-                        Directory.CreateDirectory(uploadsFolder);
-
-                    var uniqueFileName = $"{Guid.NewGuid()}_{request.ImageFile.FileName}";
-                    var filePath = Path.Combine(uploadsFolder, uniqueFileName);
-                    using (var fileStream = new FileStream(filePath, FileMode.Create))
-                    {
-                        await request.ImageFile.CopyToAsync(fileStream);
-                    }
-                    imagePath = $"/SupplierImages/{uniqueFileName}";
-                }
-
                 var dispatchEmailChanged = !string.Equals(existing.ContactEmail?.Trim(),
                     request.ContactEmail?.Trim(), StringComparison.OrdinalIgnoreCase);
                 existing.Name = request.Name;
-                existing.ContactEmail = request.ContactEmail;
-                existing.ImageUrl = imagePath ?? string.Empty;
+                existing.ContactEmail = NormalizeEmail(request.ContactEmail);
                 existing.PaymentTerms = request.PaymentTerms;
                 existing.AddressLine1 = request.AddressLine1;
                 existing.AddressLine2 = request.AddressLine2;
@@ -206,7 +168,7 @@ namespace ERP_RFQ_Automation.Controllers
                 existing.Tags = request.Tags;
                 existing.Comments = request.Comments;
                 existing.CurrencyId = request.CurrencyId;
-                existing.IsActive = request.IsActive ?? true;
+                // Activation is exclusively controlled by Supplier governance.
                 existing.ModifiedBy = GetAuthenticatedActor();
                 existing.ModifiedOn = DateTime.UtcNow;
                 if (dispatchEmailChanged)
@@ -358,6 +320,9 @@ namespace ERP_RFQ_Automation.Controllers
                     return Forbid();
 
                 var supplier = await _repository.GetByIdAsync(request.SupplierId, businessUnitId);
+                var blockers = SupplierRfqBlockingReasons(supplier);
+                if (blockers.Count > 0)
+                    return Conflict($"Supplier RFQ outreach is blocked: {string.Join("; ", blockers)}");
                 request.SupplierName = supplier.Name;
                 request.SupplierEmail = supplier.ContactEmail ?? string.Empty;
 
@@ -427,6 +392,28 @@ namespace ERP_RFQ_Automation.Controllers
         {
             return long.TryParse(User.FindFirst("businessUnitId")?.Value, out businessUnitId)
                 && businessUnitId > 0;
+        }
+
+        private static string? NormalizeEmail(string? email)
+            => string.IsNullOrWhiteSpace(email) ? null : email.Trim().ToLowerInvariant();
+
+        private static IReadOnlyCollection<string> SupplierRfqBlockingReasons(Supplier supplier)
+        {
+            var reasons = new List<string>();
+            if (supplier.IsActive != true) reasons.Add("Supplier is inactive");
+            if (string.IsNullOrWhiteSpace(supplier.ContactEmail)) reasons.Add("Dispatch email is missing");
+            if (supplier.GovernanceStatus is not (SupplierGovernanceStatuses.Approved
+                    or SupplierGovernanceStatuses.Preferred or SupplierGovernanceStatuses.Provisional))
+                reasons.Add("Governance approval is required");
+            if (supplier.VerificationStatus != SupplierVerificationStatuses.Verified)
+                reasons.Add("Supplier identity is not verified");
+            if (supplier.ComplianceStatus != SupplierComplianceStatuses.Cleared)
+                reasons.Add("Compliance is not cleared");
+            if (supplier.RiskStatus is SupplierRiskStatuses.High or SupplierRiskStatuses.Blocked)
+                reasons.Add("Supplier risk blocks outreach");
+            if (supplier.ReadinessStatus != SupplierReadinessStatuses.Ready)
+                reasons.Add("Supplier is not READY for outreach");
+            return reasons;
         }
 
         private string GetAuthenticatedActor()

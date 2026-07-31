@@ -133,7 +133,7 @@ public partial class ErpRfqAutomationContext
 
         // Customer identity is tenant-owned. Other catalog master data may remain shared.
         modelBuilder.Entity<Customer>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == CurrentTenantId);
-        modelBuilder.Entity<Supplier>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == null || e.Buid == CurrentTenantId);
+        modelBuilder.Entity<Supplier>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == CurrentTenantId);
         modelBuilder.Entity<Product>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == null || e.Buid == CurrentTenantId);
         modelBuilder.Entity<Inventory>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == null || e.Buid == CurrentTenantId);
         modelBuilder.Entity<ProductAttachment>().HasQueryFilter(e =>

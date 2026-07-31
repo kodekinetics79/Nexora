@@ -148,6 +148,25 @@ async function installGateOneApi(page: Page) {
         supplierSolicitationId: 12000 + request.supplierId,
         status: 'PENDING_DISPATCH',
         sourcingCaseVersion: currentCase.version,
+        solicitationVersion: 1,
+        replayed: false,
+      }),
+    });
+  });
+  await page.route(`**/api/procurement/sourcing-cases/${sourcingCaseId}/supplier-rfqs/*/queue`, async (route) => {
+    const request = route.request().postDataJSON();
+    expect(request.expectedSourcingCaseVersion).toBe(currentCase.version);
+    expect(request.expectedSolicitationVersion).toBe(1);
+    currentCase.version += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        sourcingCaseId,
+        supplierSolicitationId: Number(route.request().url().split('/').at(-2)),
+        status: 'QUEUED',
+        sourcingCaseVersion: currentCase.version,
+        solicitationVersion: 2,
         replayed: false,
       }),
     });
@@ -166,7 +185,7 @@ test('out-of-stock Customer RFQ line creates or opens a persisted Sourcing Case'
   await expect(page.getByText('NXR-R02-OOS-001', { exact: true })).toBeVisible();
 });
 
-test('10/20/50 candidate control uses deterministic API evidence and prepares Supplier RFQ', async ({ page }) => {
+test('10/20/50 candidate control uses deterministic API evidence and approves Supplier RFQ delivery', async ({ page }) => {
   await installGateOneApi(page);
   await page.goto(`/procurement/sourcing-cases/${sourcingCaseId}`);
 
@@ -177,11 +196,13 @@ test('10/20/50 candidate control uses deterministic API evidence and prepares Su
   await expect(page.getByText('Approved Supplier 3')).toBeVisible();
 
   await page.getByLabel('Select Approved Supplier 1').check();
-  await page.getByRole('button', { name: 'Prepare Supplier RFQ' }).click();
-  await expect(page.getByRole('dialog', { name: 'Prepare Supplier RFQs' })).toBeVisible();
+  await page.getByRole('button', { name: 'Prepare and Queue Supplier RFQ' }).click();
+  await expect(page.getByRole('dialog', { name: 'Approve Supplier RFQ Delivery' })).toBeVisible();
   const prepareRequest = page.waitForRequest(`**/api/procurement/sourcing-cases/${sourcingCaseId}/supplier-rfqs`);
-  await page.getByRole('button', { name: 'Create Supplier RFQs' }).click();
+  const queueRequest = page.waitForRequest(`**/api/procurement/sourcing-cases/${sourcingCaseId}/supplier-rfqs/*/queue`);
+  await page.getByRole('button', { name: 'Approve and Queue' }).click();
   expect((await prepareRequest).postDataJSON().supplierId).toBe(901);
+  expect((await queueRequest).postDataJSON().expectedSolicitationVersion).toBe(1);
   await expect(page).toHaveURL(new RegExp(`/procurement/rfqs/${rfqId}/sourcing$`));
 });
 
@@ -192,5 +213,5 @@ test('candidate search has a truthful empty state and does not start external di
   await page.getByRole('button', { name: 'Show 50 Supplier candidates' }).click();
   await expect(page.getByText('No known Supplier candidates found')).toBeVisible();
   await expect(page.getByText('No tenant Supplier history matched this demand line. No external search was started.')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Prepare Supplier RFQ' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Prepare and Queue Supplier RFQ' })).toBeDisabled();
 });

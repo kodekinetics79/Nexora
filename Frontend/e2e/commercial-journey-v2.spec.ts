@@ -372,9 +372,9 @@ test('07 selected known Suppliers become governed Supplier RFQs', async ({ page 
     await page.goto(`/procurement/sourcing-cases/${sourcingCase.id}`);
     await page.getByRole('checkbox', { name: 'Select Atlas Automation Partners' }).check();
     await page.getByRole('checkbox', { name: 'Select Meridian Process Equipment' }).check();
-    await page.getByRole('button', { name: 'Prepare Supplier RFQ' }).click();
-    await expect(page.getByRole('heading', { name: 'Prepare Supplier RFQs' })).toBeVisible();
-    await page.getByRole('button', { name: 'Create Supplier RFQs' }).click();
+    await page.getByRole('button', { name: 'Prepare and Queue Supplier RFQ' }).click();
+    await expect(page.getByRole('heading', { name: 'Approve Supplier RFQ Delivery' })).toBeVisible();
+    await page.getByRole('button', { name: 'Approve and Queue' }).click();
     await expect(page).toHaveURL(new RegExp(`/procurement/rfqs/${rfqId()}/sourcing`));
     workbench = await getWorkbench(page, token);
   }
