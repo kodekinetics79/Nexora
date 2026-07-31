@@ -13,7 +13,8 @@ namespace ERP_RFQ_Automation.Controllers;
 [Route("api/inventory-intelligence")]
 public sealed class InventoryIntelligenceController(
     ErpRfqAutomationContext db,
-    ICommercialLineResolutionApplicationService lineResolution) : ControllerBase
+    ICommercialLineResolutionApplicationService lineResolution,
+    IInventoryAvailabilityService inventoryAvailability) : ControllerBase
 {
     [HttpPost("leads/{leadId:long}/resolve")]
     [RequireModulePermission("Leads", PermissionAction.Edit)]
@@ -115,16 +116,15 @@ public sealed class InventoryIntelligenceController(
     [RequireModulePermission("Products", PermissionAction.Edit)]
     public async Task<ActionResult> Release(long id, VersionRequest request, CancellationToken ct)
     {
-        _ = RequiredIdempotencyKey();
-        var tenant = TenantId();
-        var reservation = await db.Set<StockReservation>().SingleOrDefaultAsync(x => x.BusinessUnitId == tenant && x.Id == id, ct);
-        if (reservation == null) return NotFound();
-        if (reservation.Version != request.ExpectedVersion) return Conflict(new { error = "Reservation changed. Refresh and retry." });
-        if (reservation.Status == StockReservationStatus.Released) return NoContent();
-        if (reservation.Status != StockReservationStatus.Active) return Conflict(new { error = "Only an active reservation can be released." });
-        db.Entry(reservation).Property(x => x.Version).OriginalValue = reservation.Version;
-        reservation.Status = StockReservationStatus.Released; reservation.ReleasedOn = DateTime.UtcNow;
-        await db.SaveChangesAsync(ct); return NoContent();
+        try
+        {
+            await inventoryAvailability.ReleaseAsync(TenantId(), id, request.ExpectedVersion,
+                RequiredIdempotencyKey(), Actor(), ct);
+            return NoContent();
+        }
+        catch (KeyNotFoundException) { return NotFound(); }
+        catch (DbUpdateConcurrencyException ex) { return Conflict(new { error = ex.Message }); }
+        catch (InvalidOperationException ex) { return Conflict(new { error = ex.Message }); }
     }
 
     [HttpGet("incoming")]
@@ -210,13 +210,17 @@ public sealed class InventoryIntelligenceController(
     }
 
     private long TenantId() => long.TryParse(User.FindFirst("businessUnitId")?.Value, out var id) && id > 0 ? id : throw new InvalidOperationException("Business Unit ID is required.");
+    private string Actor() => User.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value
+        ?? User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+        ?? throw new InvalidOperationException("Authenticated actor identity is required.");
     private string RequiredIdempotencyKey() => Request.Headers.TryGetValue("Idempotency-Key", out var value) && !string.IsNullOrWhiteSpace(value) ? value.ToString() : throw new ArgumentException("Idempotency-Key header is required.");
     private static object Metric(string key, string label, decimal value) => new { key, label, value, unit = "count" };
     private static object Resource(string key, string label, string description, int count, string route) => new { key, label, description, recordCount = count, route, requiredModule = "Products" };
     private static object ResolutionRow(LeadLineCommercialResolution x) => new {
-        x.Id, x.LeadId, x.LeadRevisionId, x.LeadLineId, x.RfqId, x.ProductId,
+        x.Id, x.LeadId, x.LeadRevisionId, x.LeadLineId, x.RfqId, x.RfqItemId, x.ProductId,
         x.RequestedPartNumber, x.RequestedQuantity, classification = x.Classification.ToString(),
-        x.AvailableToPromise, x.IncomingAvailable,
+        x.AvailableToPromise, x.IncomingAvailable, x.ProjectedShortage, x.LeadTimeDays,
+        x.ExpectedAvailableOn, x.UnitCost, x.CostCurrencyCode,
         fulfilment = System.Text.Json.JsonSerializer.Deserialize<object>(x.FulfilmentJson),
         relatedResources = System.Text.Json.JsonSerializer.Deserialize<object>(x.RelatedResourcesJson),
         productResolution = System.Text.Json.JsonSerializer.Deserialize<object>(x.ProductResolutionJson),

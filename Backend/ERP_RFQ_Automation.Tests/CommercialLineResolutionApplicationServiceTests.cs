@@ -13,7 +13,7 @@ public sealed class CommercialLineResolutionApplicationServiceTests
     public async Task ResolveLead_reuses_sufficient_snapshot_and_appends_for_a_larger_resource_limit()
     {
         using var database = new TestDb();
-        await SeedRevisionAsync(database, 1, 100, "KNOWN-1", 4);
+        await SeedRevisionAsync(database, 1, 100, "KNOWN-1", 4, 901);
         await using var context = database.ContextFor(1);
         var service = Service(context, ProductResolutionDecisionState.AutoLinked, 901);
 
@@ -35,7 +35,7 @@ public sealed class CommercialLineResolutionApplicationServiceTests
     public async Task ResolveLead_force_refresh_appends_an_immutable_inventory_snapshot()
     {
         using var database = new TestDb();
-        await SeedRevisionAsync(database, 1, 103, "KNOWN-2", 4);
+        await SeedRevisionAsync(database, 1, 103, "KNOWN-2", 4, 904);
         await using var context = database.ContextFor(1);
         var service = Service(context, ProductResolutionDecisionState.AutoLinked, 904);
 
@@ -47,6 +47,36 @@ public sealed class CommercialLineResolutionApplicationServiceTests
         Assert.NotEqual(first.ResolutionBatchId, refreshed.ResolutionBatchId);
         Assert.True(refreshed.ResolvedOn > first.ResolvedOn);
         Assert.Equal(2, await context.Set<LeadLineCommercialResolution>().CountAsync());
+    }
+
+    [Fact]
+    public async Task LinkRfq_attaches_resolution_to_the_exact_persisted_rfq_line()
+    {
+        using var database = new TestDb();
+        await SeedRevisionAsync(database, 1, 104, "KNOWN-3", 4, 905);
+        await using var context = database.ContextFor(1);
+        var service = Service(context, ProductResolutionDecisionState.AutoLinked, 905);
+        var resolution = Assert.Single(await service.ResolveLeadAsync(1, 104, 10));
+        context.Rfqs.Add(new ERP_RFQ_Automation.Models.Rfq
+        {
+            Id = 504, LeadId = 104, BusinessUnitId = 1, Rfqno = "RFQ-504",
+            BuyersName = "Module 4 buyer", RecDate = DateTime.UtcNow,
+            CreatedBy = "test", CreatedDate = DateTime.UtcNow,
+        });
+        context.Rfqitems.Add(new ERP_RFQ_Automation.Models.Rfqitem
+        {
+            Id = 505, Rfqid = 504, ProductId = 905, LineItemNo = "1",
+            ManufacturerPartNumber = "KNOWN-3", ProductShortName = "Known product",
+            Quantity = 4, CreatedBy = "test", CreatedDate = DateTime.UtcNow,
+        });
+        await context.SaveChangesAsync();
+
+        await service.LinkRfqAsync(1, 104, 504);
+
+        var linked = await context.Set<LeadLineCommercialResolution>()
+            .AsNoTracking().SingleAsync(x => x.Id == resolution.Id);
+        Assert.Equal(504, linked.RfqId);
+        Assert.Equal(505, linked.RfqItemId);
     }
 
     [Fact]
@@ -92,7 +122,8 @@ public sealed class CommercialLineResolutionApplicationServiceTests
             new LeadLineCommercialResolutionService(new FulfilmentRouteService(), local));
     }
 
-    private static async Task SeedRevisionAsync(TestDb database, long tenant, long leadId, string part, decimal quantity)
+    private static async Task SeedRevisionAsync(TestDb database, long tenant, long leadId, string part,
+        decimal quantity, long? productId = null)
     {
         await using var context = database.ContextFor(null);
         var lead = Seed.Lead(context, leadId, tenant);
@@ -111,6 +142,12 @@ public sealed class CommercialLineResolutionApplicationServiceTests
         revision.Items.Add(new LeadItemRevision { BusinessUnitId = tenant, LineNumber = 1,
             LineFingerprint = new string('c', 64), SnapshotJson = JsonSerializer.Serialize(new { part, quantity }) });
         context.Add(revision);
+        if (productId.HasValue)
+            context.Products.Add(new ERP_RFQ_Automation.Models.Product
+            {
+                Id = productId.Value, Buid = tenant, PartNo = part, ProductName = part,
+                CreatedBy = "test", CreatedOn = DateTime.UtcNow, IsActive = true,
+            });
         await context.SaveChangesAsync();
         lead.CurrentRevisionId = revision.Id; lead.CurrentRevisionNumber = 1;
         await context.SaveChangesAsync();

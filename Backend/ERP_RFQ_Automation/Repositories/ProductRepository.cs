@@ -2,6 +2,8 @@ using ERP_RFQ_Automation.DTOs.LookupDTOs;
 using ERP_RFQ_Automation.DTOs.ProductDTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Inventory;
+using ERP_RFQ_Automation.Inventory.Commercial;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Hosting;
 using System;
@@ -465,6 +467,7 @@ namespace ERP_RFQ_Automation.Repositories
         {
             var response = new ProductMatchResponseDTO();
             if (request == null) return response;
+            if (request.Quantity <= 0m) request.Quantity = 1m;
 
             var partNo = request.PartNo?.Trim().ToLowerInvariant();
             var mfr = request.Manufacturer?.Trim().ToLowerInvariant();
@@ -506,6 +509,7 @@ namespace ERP_RFQ_Automation.Repositories
                         MatchConfidence = mfrMatches ? 100 : 95,
                         MatchReason = mfrMatches ? "Exact match on Part Number and Manufacturer" : "Exact match on Part Number"
                     };
+                    await EnrichAvailabilityAsync(response.ExactMatch, request.BusinessUnitId, request.Quantity);
                     return response;
                 }
             }
@@ -523,8 +527,7 @@ namespace ERP_RFQ_Automation.Repositories
 
                 if (quotedMatch != null)
                 {
-                    response.HasExactMatch = true;
-                    response.ExactMatch = new ProductMatchSuggestionDTO
+                    response.FuzzyMatches.Add(new ProductMatchSuggestionDTO
                     {
                         ProductId = 0, // Not in inventory
                         ProductName = quotedMatch.ItemName ?? "",
@@ -536,10 +539,14 @@ namespace ERP_RFQ_Automation.Repositories
                         SellingPrice = quotedMatch.UnitPrice,
                         MatchConfidence = 90,
                         MatchReason = "Found in historical Supplier Quotes",
+                        AvailabilityStatus = "UnknownProduct",
+                        DecisionState = "SupplierHistoryOnly",
+                        ProjectedShortage = request.Quantity,
+                        EvidenceReference = $"supplier-quoted-item:{quotedMatch.Id}",
                         PreferredSupplierId = quotedMatch.SupplierId,
                         PreferredSupplierName = quotedMatch.Supplier?.Name,
                         PreferredSupplierEmail = quotedMatch.Supplier?.ContactEmail
-                    };
+                    });
                     return response;
                 }
             }
@@ -609,7 +616,76 @@ namespace ERP_RFQ_Automation.Repositories
             }
 
             response.FuzzyMatches = fuzzyMatches.OrderByDescending(m => m.MatchConfidence).Take(5).ToList();
+            foreach (var match in response.FuzzyMatches)
+                await EnrichAvailabilityAsync(match, request.BusinessUnitId, request.Quantity);
             return response;
+        }
+
+        private async Task EnrichAvailabilityAsync(ProductMatchSuggestionDTO match, long businessUnitId,
+            decimal requestedQuantity)
+        {
+            if (match.ProductId <= 0)
+            {
+                match.ProjectedShortage = requestedQuantity;
+                return;
+            }
+
+            var inventory = await _context.Set<ERP_RFQ_Automation.Models.Inventory>().AsNoTracking()
+                .Where(x => x.Buid == businessUnitId && x.ProductId == match.ProductId)
+                .Select(x => new
+                {
+                    x.Id, x.QtyOnHand, x.AllocatedQuantity, x.QuarantineQuantity,
+                    x.DamagedQuantity, x.ExpiredQuantity, x.SafetyStockQuantity
+                }).ToListAsync();
+            var inventoryIds = inventory.Select(x => x.Id).ToArray();
+            var reserved = await _context.Set<StockReservation>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && inventoryIds.Contains(x.InventoryId)
+                    && x.Status == StockReservationStatus.Active)
+                .GroupBy(x => x.InventoryId)
+                .Select(x => new { InventoryId = x.Key, Quantity = x.Sum(y => y.Quantity) })
+                .ToDictionaryAsync(x => x.InventoryId, x => x.Quantity);
+            match.AvailableToPromise = inventory.Sum(x => Math.Max(0m, x.QtyOnHand
+                - reserved.GetValueOrDefault(x.Id) - x.AllocatedQuantity - x.QuarantineQuantity
+                - x.DamagedQuantity - x.ExpiredQuantity - x.SafetyStockQuantity));
+
+            var incoming = await _context.IncomingInventory.AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.ProductId == match.ProductId
+                    && (x.Status == IncomingInventoryStatus.Ordered
+                        || x.Status == IncomingInventoryStatus.Confirmed
+                        || x.Status == IncomingInventoryStatus.InTransit
+                        || x.Status == IncomingInventoryStatus.PartiallyReceived))
+                .OrderBy(x => x.ExpectedOn).ThenBy(x => x.Id).ToListAsync();
+            match.IncomingAvailable = incoming.Sum(x => x.OpenQuantity);
+            var immediateShortage = Math.Max(0m, requestedQuantity - match.AvailableToPromise);
+            match.ProjectedShortage = Math.Max(0m, immediateShortage - match.IncomingAvailable);
+            match.AvailabilityStatus = immediateShortage == 0m ? "KnownInStock"
+                : match.IncomingAvailable >= immediateShortage ? "KnownIncoming" : "KnownShortage";
+            match.DecisionState = match.MatchConfidence >= 95 ? "AutoLinked" : "ReviewRequired";
+            match.LeadTimeDays = match.LeadTime;
+            match.EvidenceReference = $"product:{match.ProductId}:inventory-as-of:{DateTime.UtcNow:O}";
+
+            if (immediateShortage > 0m)
+            {
+                var covered = 0m;
+                foreach (var receipt in incoming)
+                {
+                    covered += receipt.OpenQuantity;
+                    if (covered < immediateShortage) continue;
+                    match.ExpectedAvailableOn = receipt.ExpectedOn;
+                    break;
+                }
+                if (match.ExpectedAvailableOn is null && match.LeadTime is > 0)
+                    match.ExpectedAvailableOn = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(match.LeadTime.Value);
+            }
+
+            if (match.UnitCost is not null)
+            {
+                var baseCurrencies = await _context.Currencies.AsNoTracking()
+                    .Where(x => x.BusinessUnitId == businessUnitId && x.IsActive == true && x.IsBaseCurrency == true)
+                    .OrderBy(x => x.Id).Take(2).Select(x => x.Code).ToArrayAsync();
+                match.CostCurrencyCode = baseCurrencies.Length == 1 ? baseCurrencies[0] : null;
+                if (match.CostCurrencyCode is null) match.UnitCost = null;
+            }
         }
 
         private ProductMatchSuggestionDTO MapToProductMatchSuggestion(Product product, int confidence, string reason)
@@ -691,7 +767,7 @@ namespace ERP_RFQ_Automation.Repositories
 
             // Check if product has purchase history (check RFQ items for now)
             bool hasPurchaseHistory = await _context.Rfqitems
-                .AnyAsync(ri => ri.ProductId == productId);
+                .AnyAsync(ri => ri.ProductId == productId && ri.Rfq.BusinessUnitId == businessUnitId);
 
             return new StockDetailsDTO
             {
@@ -719,7 +795,7 @@ namespace ERP_RFQ_Automation.Repositories
             // Get RFQ items for this product (as purchase history)
             var rfqItems = await _context.Rfqitems
                 .AsNoTracking()
-                .Where(ri => ri.ProductId == productId)
+                .Where(ri => ri.ProductId == productId && ri.Rfq.BusinessUnitId == businessUnitId)
                 .Include(ri => ri.Rfq)
                 .Include(ri => ri.Supplier)
                 .OrderByDescending(ri => ri.CreatedDate)

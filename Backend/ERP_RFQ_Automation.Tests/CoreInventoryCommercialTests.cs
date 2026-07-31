@@ -142,7 +142,27 @@ public sealed class CoreInventoryCommercialTests
         Assert.Equal(CommercialResolutionClassification.KnownIncoming, result.Classification);
         Assert.Equal(15m, result.IncomingAvailable);
         Assert.Equal(5m, result.AvailableToPromise);
+        Assert.Equal(0m, result.ProjectedShortage);
+        Assert.Equal(new DateOnly(2026, 8, 1), result.ExpectedAvailableOn);
         Assert.Empty(result.RelatedResources);
+    }
+
+    [Fact]
+    public async Task Partial_incoming_supply_remains_a_shortage_with_a_truthful_projected_gap()
+    {
+        var service = new LeadLineCommercialResolutionService(
+            new FulfilmentRouteService(),
+            new LocalRelatedResourceSearch(new RecordingResourceRepository([])));
+        var request = Request(productId: 7, inventory: [Snapshot(1, onHand: 2)], incoming:
+        [
+            Incoming(IncomingInventoryStatus.Confirmed, 3, "PO-PARTIAL"),
+        ]);
+
+        var result = await service.ResolveAsync(request);
+
+        Assert.Equal(CommercialResolutionClassification.KnownShortage, result.Classification);
+        Assert.Equal(5m, result.ProjectedShortage);
+        Assert.Null(result.ExpectedAvailableOn);
     }
 
     [Fact]

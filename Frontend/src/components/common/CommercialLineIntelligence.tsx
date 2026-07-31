@@ -54,18 +54,19 @@ const CommercialLineIntelligence: React.FC<Props> = ({ stage, recordId }) => {
           </Stack>
         )}
       </Stack>
-      {(query.isError || resolve.isError) && <Alert severity="error">Inventory Check Unavailable. No product, stock, or supplier commitment was selected automatically.</Alert>}
+      {(query.isError || resolve.isError) && <Alert severity="error" action={<Button color="inherit" onClick={() => stage === 'lead' ? resolve.mutate() : query.refetch()}>Retry</Button>}>Inventory Check Unavailable. No product, stock, or supplier commitment was selected automatically.</Alert>}
       {query.isLoading && <CircularProgress size={22} />}
-      {!query.isLoading && rows.length === 0 && <Typography variant="body2" color="text.secondary">No persisted line resolution is available yet.</Typography>}
+      {!query.isLoading && !query.isError && !resolve.isError && rows.length === 0 && <Typography variant="body2" color="text.secondary">No persisted line resolution is available yet.</Typography>}
       <Stack spacing={1.25}>
         {rows.map((row) => {
           const label = labels[row.classification];
           return <Box data-testid="commercial-line-resolution" key={row.id} sx={{ p: 1.5, border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
             <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ justifyContent: 'space-between' }}>
-              <Box><Typography sx={{ fontWeight: 850 }}>{row.requestedPartNumber}</Typography><Typography variant="caption" color="text.secondary">Requested {row.requestedQuantity} · ATP {row.availableToPromise} · Incoming {row.incomingAvailable}</Typography></Box>
+              <Box><Typography sx={{ fontWeight: 850 }}>{row.requestedPartNumber}</Typography><Typography variant="caption" color="text.secondary">Requested {row.requestedQuantity} · ATP {row.availableToPromise} · Incoming {row.incomingAvailable} · Shortage {row.projectedShortage}</Typography></Box>
               <Chip size="small" color={label.color} label={label.text} sx={{ fontWeight: 800, alignSelf: 'flex-start' }} />
             </Stack>
             <Typography variant="caption" color="text.secondary">Evidence {row.evidenceReference || 'not recorded'} · inventory as of {new Date(row.inventoryAsOfUtc).toLocaleString()}</Typography>
+            {(row.leadTimeDays != null || row.expectedAvailableOn || row.unitCost != null) && <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>Lead time {row.leadTimeDays != null ? `${row.leadTimeDays} days` : 'not established'} · Expected {row.expectedAvailableOn ? new Date(row.expectedAvailableOn).toLocaleDateString() : 'not established'} · Cost {row.unitCost != null ? `${row.costCurrencyCode || 'currency unverified'} ${row.unitCost.toFixed(2)}` : 'not recorded'}</Typography>}
             {row.relatedResources.length > 0 && <Typography variant="body2" sx={{ mt: .75 }}>{row.relatedResources.length} tenant-local supplier or product references available. External discovery was not used.</Typography>}
           </Box>;
         })}

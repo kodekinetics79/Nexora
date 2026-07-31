@@ -61,7 +61,10 @@ public sealed record CommercialResolutionRequest(
     bool RequiresPossibleMatchReview,
     IReadOnlyCollection<InventorySnapshot> Inventory,
     IReadOnlyCollection<IncomingInventory> Incoming,
-    int RelatedResourceLimit = 10);
+    int RelatedResourceLimit = 10,
+    int? ProductLeadTimeDays = null,
+    decimal? UnitCost = null,
+    string? CostCurrencyCode = null);
 
 public interface ILeadLineCommercialResolutionService
 {

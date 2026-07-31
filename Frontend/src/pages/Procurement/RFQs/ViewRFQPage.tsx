@@ -34,6 +34,7 @@ import CommercialLineIntelligence from '../../../components/common/CommercialLin
 import procurementService from '../../../api/services/procurementService';
 import commercialLearningService from '../../../api/services/commercialLearningService';
 import CommercialProcessingEvidence from '../../../components/common/CommercialProcessingEvidence';
+import commercialIntelligenceService from '../../../api/services/commercialIntelligenceService';
 
 const DataField: React.FC<{ label: string; value: string | number | null; bold?: boolean; color?: string }> = ({ label, value, bold = true, color = 'text.primary' }) => (
   <Box sx={{ mb: 1.5 }}>
@@ -91,6 +92,12 @@ const ViewRFQPage: React.FC = () => {
     enabled: !!id && hasPermission('RFQ Management') && hasPermission('Quotations'),
     retry: 1,
   });
+  const lineResolutionQuery = useQuery({
+    queryKey: ['commercial-line-resolutions', 'rfq', Number(id)],
+    queryFn: () => commercialIntelligenceService.getRfqLineResolutions(Number(id)),
+    enabled: !!id && hasPermission('RFQ Management'),
+    retry: 1,
+  });
 
   const approveMutation = useMutation({
     mutationFn: (payload: { id: number; approvedBy: string; email?: string; subject?: string; body?: string; customerId?: number }) =>
@@ -145,6 +152,9 @@ const ViewRFQPage: React.FC = () => {
     offersByLine.set(offer.rfqItemId, (offersByLine.get(offer.rfqItemId) ?? 0) + 1);
   }
   const intelligenceLines = new Map((intelligence?.lines ?? []).map((line) => [line.rfqItemId, line]));
+  const persistedResolutions = new Map(
+    (lineResolutionQuery.data ?? []).filter(line => line.rfqItemId != null).map(line => [line.rfqItemId!, line]),
+  );
   const lineMatches = (itemId: number, filter: string) => {
     const line = sourcingLines.get(itemId);
     const decisionLine = intelligenceLines.get(itemId);
@@ -163,13 +173,13 @@ const ViewRFQPage: React.FC = () => {
   const visibleItems = rfq.rfqitems.filter((item) => lineMatches(item.id, lineFilter));
   const summary = [
     { key: 'all', label: 'Total lines', value: rfq.rfqitems.length, icon: <EvidenceIcon fontSize="small" /> },
-    { key: 'stock', label: 'Ready from stock', value: rfq.rfqitems.filter((x) => lineMatches(x.id, 'stock')).length, icon: <InventoryIcon fontSize="small" /> },
-    { key: 'partial', label: 'Partially available', value: rfq.rfqitems.filter((x) => lineMatches(x.id, 'partial')).length, icon: <BlockerIcon fontSize="small" /> },
-    { key: 'sourcing', label: 'Sourcing required', value: rfq.rfqitems.filter((x) => lineMatches(x.id, 'sourcing')).length, icon: <SourcingIcon fontSize="small" /> },
-    { key: 'quoted', label: 'Supplier Quotes', value: sourcingQuery.data?.offers.length ?? 0, icon: <QuoteDraftIcon fontSize="small" /> },
-    { key: 'unresolved', label: 'Unresolved matches', value: rfq.rfqitems.filter((x) => lineMatches(x.id, 'unresolved')).length, icon: <BlockerIcon fontSize="small" /> },
-    { key: 'pricing', label: 'Pricing pending', value: rfq.rfqitems.filter((x) => lineMatches(x.id, 'pricing')).length, icon: <PricingIcon fontSize="small" /> },
-    { key: 'ready', label: 'Ready for quote', value: rfq.rfqitems.filter((x) => lineMatches(x.id, 'ready')).length, icon: <ApproveIcon fontSize="small" /> },
+    { key: 'stock', label: 'Ready from stock', value: sourcingQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'stock')).length, icon: <InventoryIcon fontSize="small" /> },
+    { key: 'partial', label: 'Partially available', value: sourcingQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'partial')).length, icon: <BlockerIcon fontSize="small" /> },
+    { key: 'sourcing', label: 'Sourcing required', value: sourcingQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'sourcing')).length, icon: <SourcingIcon fontSize="small" /> },
+    { key: 'quoted', label: 'Lines with supplier quotes', value: sourcingQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'quoted')).length, icon: <QuoteDraftIcon fontSize="small" /> },
+    { key: 'unresolved', label: 'Unresolved matches', value: sourcingQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'unresolved')).length, icon: <BlockerIcon fontSize="small" /> },
+    { key: 'pricing', label: 'Pricing pending', value: intelligenceQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'pricing')).length, icon: <PricingIcon fontSize="small" /> },
+    { key: 'ready', label: 'Ready for quote', value: intelligenceQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'ready')).length, icon: <ApproveIcon fontSize="small" /> },
   ];
   const readinessPercent = intelligence?.readinessScore ?? 0;
   const primaryBlocker = intelligence?.nextBestAction.explanation ?? (intelligenceQuery.isLoading ? 'Calculating from current commercial evidence' : 'Commercial intelligence unavailable');
@@ -424,7 +434,14 @@ const ViewRFQPage: React.FC = () => {
                       <TableCell align="center" sx={{ fontSize: '0.85rem', fontWeight: 900 }}>
                         {item.quantity} {item.unitOfMeasure || 'EA'}
                       </TableCell>
-                      <TableCell><Chip size="small" label={item.productId ? 'Request data verified' : 'Item Resolution Pending'} color={item.productId ? 'success' : 'warning'} variant="outlined" /></TableCell>
+                      <TableCell>{(() => {
+                        const resolution = persistedResolutions.get(item.id);
+                        if (lineResolutionQuery.isLoading) return <Chip size="small" label="Resolution checking" variant="outlined" />;
+                        if (lineResolutionQuery.isError) return <Chip size="small" label="Resolution unavailable" color="error" variant="outlined" />;
+                        if (!resolution) return <Chip size="small" label="Resolution not recorded" color="warning" variant="outlined" />;
+                        const reviewed = resolution.productResolution?.decisionState?.toLowerCase().includes('approved') || resolution.classification === 'KnownInStock' || resolution.classification === 'KnownIncoming' || resolution.classification === 'KnownShortage';
+                        return <Tooltip title={`Evidence: ${resolution.evidenceReference || 'not recorded'}`}><Chip size="small" label={reviewed ? 'Persisted resolution' : resolution.classification.replace(/([a-z])([A-Z])/g, '$1 $2')} color={reviewed ? 'success' : 'warning'} variant="outlined" /></Tooltip>;
+                      })()}</TableCell>
                       <TableCell>
                         <Typography variant="caption" sx={{ fontWeight: 700 }}>{sourcingLines.get(item.id)?.resolution.replaceAll('_', ' ') || 'Checking'}</Typography>
                         <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>ATP {sourcingLines.get(item.id)?.availableQuantity ?? '—'} · Short {sourcingLines.get(item.id)?.shortfallQuantity ?? '—'}</Typography>
@@ -519,7 +536,6 @@ const ViewRFQPage: React.FC = () => {
                   {[
                     { title: 'RFQ Created', user: rfq.createdBy, date: rfq.createdDate, icon: <EditIcon sx={{ fontSize: 14 }} /> },
                     rfq.modifiedBy && { title: 'Last Modified', user: rfq.modifiedBy, date: rfq.modifiedDate, icon: <HistoryIcon sx={{ fontSize: 14 }} /> },
-                    !isDraft && { title: 'Approved & Sent', user: userData?.userName, date: new Date().toISOString(), icon: <ApproveIcon sx={{ fontSize: 14 }} /> }
                   ].filter(Boolean).map((log: any, i) => (
                     <Box key={i} sx={{ display: 'flex', gap: 1.5 }}>
                        <Box sx={{ mt: 0.5, p: 0.5, borderRadius: '50%', bgcolor: 'action.hover', display: 'flex' }}>

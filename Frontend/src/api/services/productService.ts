@@ -58,6 +58,33 @@ export interface ProductDTO {
   attachments: ProductAttachmentDTO[];
 }
 
+export interface ProductMatchSuggestion {
+  productId?: number;
+  id?: number;
+  productName: string;
+  partNo: string;
+  manufacturer?: string;
+  manufacturerName?: string;
+  description?: string;
+  qtyOnHand?: number;
+  unitCost?: number;
+  costCurrencyCode?: string;
+  sellingPrice?: number;
+  finalLandedCost?: number;
+  finalSalesPrice?: number;
+  preferredSupplierId?: number;
+  preferredSupplierName?: string;
+  preferredSupplierEmail?: string;
+  availableToPromise?: number;
+  incomingAvailable?: number;
+  projectedShortage?: number;
+  availabilityStatus?: string;
+  leadTimeDays?: number | null;
+  expectedAvailableOn?: string | null;
+  decisionState?: string;
+  evidenceReference?: string | null;
+}
+
 export interface PaginatedProductResponse {
   items: ProductDTO[];
   totalItems: number;
@@ -157,11 +184,11 @@ const productService = {
     return r.data;
   },
 
-  matchProduct: async (query: { name?: string; partNo?: string; manufacturer?: string; businessUnitId?: number }) => {
+  matchProduct: async (query: { name?: string; description?: string; partNo?: string; manufacturer?: string; businessUnitId?: number; quantity?: number }) => {
     const response = await axiosInstance.post<{
       hasExactMatch: boolean;
-      exactMatch: ProductDTO | null;
-      fuzzyMatches: ProductDTO[];
+      exactMatch: ProductMatchSuggestion | null;
+      fuzzyMatches: ProductMatchSuggestion[];
     }>('/api/Product/match-product', query);
     return response.data;
   },

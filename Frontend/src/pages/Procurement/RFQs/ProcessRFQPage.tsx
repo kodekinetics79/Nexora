@@ -43,10 +43,20 @@ interface ProcessItem extends AcceptedLeadItemDTO {
   selectionSource: 'product' | 'quotedItem';
   productId: number | null;
   supplierQuotedItemId: number | null;
-  matchStatus: 'pending' | 'loading' | 'matched' | 'no-match' | 'sourced-web';
+  matchStatus: 'pending' | 'loading' | 'matched' | 'no-match' | 'unavailable' | 'sourced-web';
   finalSalesPrice?: number;
   finalLandedCost?: number;
   qtyOnHand?: number;
+  availableToPromise?: number;
+  incomingAvailable?: number;
+  projectedShortage?: number;
+  availabilityStatus?: string;
+  leadTimeDays?: number | null;
+  expectedAvailableOn?: string | null;
+  unitCost?: number | null;
+  costCurrencyCode?: string;
+  decisionState?: string;
+  evidenceReference?: string | null;
   include: boolean;
   preferredSupplierName?: string;
   preferredSupplierEmail?: string;
@@ -111,7 +121,7 @@ const ProductSelector: React.FC<ProductSelectorProps> = React.memo(({ value, onC
               <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
                 <Typography variant="caption" color="text.secondary">{option.partNo}</Typography>
                 <Chip
-                  label={`Stock: ${option.qtyOnHand ?? 0}`}
+                  label={`On hand: ${option.qtyOnHand ?? 0}`}
                   size="small"
                   color={(option.qtyOnHand ?? 0) > 0 ? 'success' : 'error'}
                   sx={{ height: 14, fontSize: '0.55rem', fontWeight: 900 }}
@@ -222,9 +232,13 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
 
   const handleProductChange = useCallback((p: any) => {
     onUpdate(index, {
+      matchStatus: p ? 'pending' : 'no-match',
       productId: p?.id ?? null,
       unitPrice: p?.finalSalesPrice ?? p?.sellingPrice ?? 0,
       qtyOnHand: p?.qtyOnHand ?? 0,
+      availableToPromise: p?.availableToPromise,
+      projectedShortage: undefined,
+      evidenceReference: undefined,
       selectedName: p ? `${p.productName} (${p.partNo})` : undefined
     });
     setIsEditing(false);
@@ -255,23 +269,36 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
     try {
       const res = await productService.matchProduct({
         name: item.productShortName,
+        description: item.productShortDescription || item.productShortName,
         partNo: item.manufacturerPartNumber,
         manufacturer: item.manufacturerName,
-        businessUnitId: businessUnitId
+        businessUnitId: businessUnitId,
+        quantity: item.quantity,
       });
       if (res.hasExactMatch && res.exactMatch) {
+        const exact = res.exactMatch;
         onUpdate(index, {
           matchStatus: 'matched',
-          productId: res.exactMatch.id,
-          unitPrice: res.exactMatch.finalSalesPrice ?? res.exactMatch.sellingPrice ?? 0,
-          qtyOnHand: res.exactMatch.qtyOnHand ?? 0,
-          selectedName: `${res.exactMatch.productName} (${res.exactMatch.partNo})`
+          productId: exact.productId ?? exact.id ?? null,
+          unitPrice: exact.finalSalesPrice ?? exact.sellingPrice ?? 0,
+          qtyOnHand: exact.qtyOnHand ?? 0,
+          availableToPromise: exact.availableToPromise ?? 0,
+          incomingAvailable: exact.incomingAvailable ?? 0,
+          projectedShortage: exact.projectedShortage ?? Math.max(0, item.quantity - (exact.availableToPromise ?? 0)),
+          availabilityStatus: exact.availabilityStatus,
+          leadTimeDays: exact.leadTimeDays,
+          expectedAvailableOn: exact.expectedAvailableOn,
+          unitCost: exact.unitCost,
+          costCurrencyCode: exact.costCurrencyCode,
+          decisionState: exact.decisionState,
+          evidenceReference: exact.evidenceReference,
+          selectedName: `${exact.productName} (${exact.partNo})`
         });
       } else {
         onUpdate(index, { matchStatus: 'no-match' });
       }
-    } catch (e) {
-      onUpdate(index, { matchStatus: 'no-match' });
+    } catch {
+      onUpdate(index, { matchStatus: 'unavailable', productId: null, supplierQuotedItemId: null, selectedName: undefined });
     }
   }, [item, index, onUpdate, businessUnitId]);
 
@@ -282,6 +309,7 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
           size="small"
           checked={!!item.include}
           onChange={() => onToggleSelect(index)}
+          slotProps={{ input: { 'aria-label': `${item.include ? 'Exclude' : 'Include'} ${item.productShortName}` } }}
         />
       </TableCell>
       {/* Requested Item */}
@@ -310,11 +338,11 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
               sx={{ height: 16, fontSize: '0.55rem', fontWeight: 900, bgcolor: '#e8f5e9', color: '#2e7d32', borderRadius: 1 }}
             />
             {item.matchStatus === 'matched' && (
-              <Chip
-                label="System Match"
-                size="small"
-                sx={{ height: 16, fontSize: '0.55rem', fontWeight: 900, bgcolor: '#e3f2fd', color: '#1976d2', borderRadius: 1 }}
-              />
+              <Stack direction="row" spacing={0.75} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
+                <Chip label="System Match" size="small" sx={{ height: 16, fontSize: '0.55rem', fontWeight: 900, bgcolor: '#e3f2fd', color: '#1976d2', borderRadius: 1 }} />
+                <Chip label={`ATP ${item.availableToPromise ?? 0}`} size="small" color={(item.projectedShortage ?? 0) > 0 ? 'warning' : 'success'} sx={{ height: 18, fontSize: '0.6rem', fontWeight: 800 }} />
+                {(item.projectedShortage ?? 0) > 0 && <Chip label={`Short ${item.projectedShortage}`} size="small" color="warning" sx={{ height: 18, fontSize: '0.6rem', fontWeight: 800 }} />}
+              </Stack>
             )}
             {item.matchStatus === 'no-match' && (
               <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
@@ -359,10 +387,21 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
             {item.matchStatus === 'loading' && (
               <CircularProgress size={10} thickness={6} />
             )}
+            {item.matchStatus === 'unavailable' && (
+              <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+                <Chip label="Inventory check unavailable" size="small" color="error" variant="outlined" sx={{ height: 20, fontSize: '0.6rem', fontWeight: 800 }} />
+                <Button size="small" variant="outlined" color="error" onClick={handleSmartMatch} aria-label={`Retry inventory check for ${item.productShortName}`} sx={{ height: 22, fontSize: '0.62rem', textTransform: 'none' }}>Retry</Button>
+              </Stack>
+            )}
           </Box>
           <Typography variant="caption" sx={{ color: '#888', fontWeight: 600, display: 'block' }}>
             Qty: {item.quantity}
           </Typography>
+          {item.matchStatus === 'matched' && (
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+              {item.availabilityStatus || 'Availability resolved'} · Lead time {item.leadTimeDays != null ? `${item.leadTimeDays}d` : 'not established'} · Expected {item.expectedAvailableOn ? new Date(item.expectedAvailableOn).toLocaleDateString() : 'not established'} · Cost {item.unitCost != null ? `${item.costCurrencyCode || 'currency unverified'} ${item.unitCost.toFixed(2)}` : 'not recorded'} · Evidence {item.evidenceReference || 'not recorded'}
+            </Typography>
+          )}
           <Link
             underline="hover"
             onClick={handleViewDetails}
@@ -415,7 +454,16 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
             </Stack>
           ) : (
             <Box
+              role="button"
+              tabIndex={0}
+              aria-label={`Select ${item.selectionSource === 'product' ? 'product' : 'supplier quote'} for ${item.productShortName}`}
               onClick={() => setIsEditing(true)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  setIsEditing(true);
+                }
+              }}
               sx={{
                 width: '100%',
                 minHeight: 32,
@@ -460,7 +508,7 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
 
       {/* Action */}
       <TableCell align="center">
-        <IconButton size="small" onClick={handleRemove} color="error">
+        <IconButton size="small" onClick={handleRemove} color="error" aria-label={`Remove ${item.productShortName}`}>
           <DeleteIcon sx={{ fontSize: 18 }} />
         </IconButton>
       </TableCell>
@@ -738,7 +786,8 @@ const ItemDetailsDialog: React.FC<{
       const res = await productService.matchProduct({
         name: item.productShortName,
         partNo: item.manufacturerPartNumber,
-        manufacturer: item.manufacturerName
+        manufacturer: item.manufacturerName,
+        quantity: item.quantity,
       });
       setMatchingResult(res);
     } catch (e) {
@@ -1029,8 +1078,7 @@ const ProcessRFQPage: React.FC = () => {
     const targetItems = providedItems || items;
     if (targetItems.length === 0) return;
 
-    // Mark all pending items as loading
-    setItems(prev => prev.map(i => i.matchStatus === 'pending' ? { ...i, matchStatus: 'loading' } : i));
+    setItems(prev => prev.map(i => i.matchStatus === 'pending' || i.matchStatus === 'unavailable' ? { ...i, matchStatus: 'loading' } : i));
 
     const chunkSize = 5;
     for (let i = 0; i < targetItems.length; i += chunkSize) {
@@ -1038,28 +1086,41 @@ const ProcessRFQPage: React.FC = () => {
 
       const matches = await Promise.all(
         chunk.map(async (it) => {
-          if (it.matchStatus !== 'pending' && it.matchStatus !== 'loading') {
+          if (it.matchStatus !== 'pending' && it.matchStatus !== 'loading' && it.matchStatus !== 'unavailable') {
             return null;
           }
           try {
             const res = await productService.matchProduct({
               name: it.productShortName,
+              description: it.productShortDescription || it.productShortName,
               partNo: it.manufacturerPartNumber,
               manufacturer: it.manufacturerName,
-              businessUnitId: userData?.businessUnitId
+              businessUnitId: userData?.businessUnitId,
+              quantity: it.quantity,
             });
             if (res.hasExactMatch && res.exactMatch) {
+              const exact = res.exactMatch;
               return {
                 matchStatus: 'matched' as const,
-                productId: res.exactMatch.id,
-                unitPrice: res.exactMatch.finalSalesPrice ?? res.exactMatch.sellingPrice ?? 0,
-                qtyOnHand: res.exactMatch.qtyOnHand ?? 0,
-                selectedName: `${res.exactMatch.productName} (${res.exactMatch.partNo})`
+                productId: exact.productId ?? exact.id ?? null,
+                unitPrice: exact.finalSalesPrice ?? exact.sellingPrice ?? 0,
+                qtyOnHand: exact.qtyOnHand ?? 0,
+                availableToPromise: exact.availableToPromise ?? 0,
+                incomingAvailable: exact.incomingAvailable ?? 0,
+                projectedShortage: exact.projectedShortage ?? Math.max(0, it.quantity - (exact.availableToPromise ?? 0)),
+                availabilityStatus: exact.availabilityStatus,
+                leadTimeDays: exact.leadTimeDays,
+                expectedAvailableOn: exact.expectedAvailableOn,
+                unitCost: exact.unitCost,
+                costCurrencyCode: exact.costCurrencyCode,
+                decisionState: exact.decisionState,
+                evidenceReference: exact.evidenceReference,
+                selectedName: `${exact.productName} (${exact.partNo})`
               };
             }
             return { matchStatus: 'no-match' as const };
-          } catch (e) {
-            return { matchStatus: 'no-match' as const };
+          } catch {
+            return { matchStatus: 'unavailable' as const, productId: null, supplierQuotedItemId: null };
           }
         })
       );
@@ -1150,6 +1211,12 @@ const ProcessRFQPage: React.FC = () => {
       return;
     }
 
+    const unchecked = includedItems.filter(i => i.matchStatus === 'pending' || i.matchStatus === 'unavailable' || i.matchStatus === 'loading');
+    if (unchecked.length > 0) {
+      toast.error(`Inventory verification is incomplete for ${unchecked.length} line${unchecked.length === 1 ? '' : 's'}. Check availability before creating the RFQ.`);
+      return;
+    }
+
     const sourcingRequired = includedItems.filter(i => !i.productId && !i.supplierQuotedItemId).length;
     if (sourcingRequired > 0) {
       toast(`${sourcingRequired} unresolved line${sourcingRequired === 1 ? '' : 's'} will be carried to governed supplier sourcing.`);
@@ -1236,12 +1303,15 @@ const ProcessRFQPage: React.FC = () => {
             <Button
               variant="outlined" size="small" startIcon={<BatchIcon />}
               onClick={() => {
-                if (items.some(i => i.include)) {
+                if (items.some(i => i.include && i.matchStatus === 'unavailable')) {
+                  toast.error('Retry unavailable inventory checks before supplier sourcing.');
+                } else if (items.some(i => i.include)) {
                   setShowBatchSupplierSearch(true);
                 } else {
                   toast.error('Please select at least one item');
                 }
               }}
+              disabled={items.some(i => i.include && (i.matchStatus === 'pending' || i.matchStatus === 'unavailable' || i.matchStatus === 'loading'))}
               sx={{ bgcolor: 'white', borderColor: '#ddd', color: '#666', fontWeight: 800, textTransform: 'none', px: 2 }}
             >
               Batch Quote
@@ -1256,13 +1326,18 @@ const ProcessRFQPage: React.FC = () => {
             <Button
               variant="contained" size="small" startIcon={<SaveIcon />}
               onClick={handleSubmit}
-              disabled={createRfqMutation.isPending}
+              disabled={createRfqMutation.isPending || items.some(i => i.include && (i.matchStatus === 'pending' || i.matchStatus === 'unavailable' || i.matchStatus === 'loading'))}
               sx={{ bgcolor: '#1976d2', fontWeight: 800, textTransform: 'none', px: 3 }}
             >
               Create As Draft
             </Button>
           </Stack>
         </Box>
+        {items.some(item => item.include && item.matchStatus === 'unavailable') && (
+          <Alert severity="error" sx={{ mt: 1.5 }} action={<Button color="inherit" onClick={() => handleRunSmartMatchAll()}>Retry unavailable checks</Button>}>
+            Inventory Check Unavailable. Supplier sourcing and RFQ creation remain blocked until these lines are checked successfully.
+          </Alert>
+        )}
       </Box>
 
       {/* General Information */}
@@ -1376,6 +1451,7 @@ const ProcessRFQPage: React.FC = () => {
                   checked={items.length > 0 && items.every(i => i.include)}
                   indeterminate={items.some(i => i.include) && !items.every(i => i.include)}
                   onChange={(e) => setItems(prev => prev.map(i => ({ ...i, include: e.target.checked })))}
+                  slotProps={{ input: { 'aria-label': 'Select all RFQ lines' } }}
                 />
               </TableCell>
               {['Requested Item', 'Select Product Or Quote', 'Qty', 'Price', 'Action'].map((h, i) => (

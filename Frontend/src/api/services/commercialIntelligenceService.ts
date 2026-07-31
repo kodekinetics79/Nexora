@@ -414,12 +414,18 @@ export interface CommercialLineResolutionDTO {
   leadRevisionId: number;
   leadLineId: number;
   rfqId?: number | null;
+  rfqItemId?: number | null;
   productId?: number | null;
   requestedPartNumber: string;
   requestedQuantity: number;
   classification: 'KnownInStock' | 'KnownIncoming' | 'KnownShortage' | 'UnknownProduct' | 'PossibleMatchReview' | 'NonInventoryService';
   availableToPromise: number;
   incomingAvailable: number;
+  projectedShortage: number;
+  leadTimeDays?: number | null;
+  expectedAvailableOn?: string | null;
+  unitCost?: number | null;
+  costCurrencyCode?: string | null;
   fulfilment: { classification?: string; allocatedQuantity?: number; shortageQuantity?: number };
   relatedResources: Array<{ resourceId: string; displayName: string; matchReason: string; score: number; evidenceReference: string }>;
   productResolution: { confidence?: number; method?: string; decisionState?: string };

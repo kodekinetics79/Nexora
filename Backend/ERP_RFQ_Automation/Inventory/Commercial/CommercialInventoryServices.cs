@@ -197,6 +197,28 @@ public sealed class LeadLineCommercialResolutionService(
                 or IncomingInventoryStatus.InTransit
                 or IncomingInventoryStatus.PartiallyReceived)
             .Sum(x => x.OpenQuantity);
+        var projectedShortage = Math.Max(0m, route.ShortageQuantity - incoming);
+        DateOnly? expectedAvailableOn = null;
+        if (route.ShortageQuantity > 0m)
+        {
+            var covered = 0m;
+            foreach (var receipt in request.Incoming
+                         .Where(x => x.Status is IncomingInventoryStatus.Ordered
+                             or IncomingInventoryStatus.Confirmed
+                             or IncomingInventoryStatus.InTransit
+                             or IncomingInventoryStatus.PartiallyReceived)
+                         .OrderBy(x => x.ExpectedOn).ThenBy(x => x.Id))
+            {
+                covered += receipt.OpenQuantity;
+                if (covered < route.ShortageQuantity) continue;
+                expectedAvailableOn = receipt.ExpectedOn;
+                break;
+            }
+
+            if (expectedAvailableOn is null && request.ProductLeadTimeDays is > 0)
+                expectedAvailableOn = DateOnly.FromDateTime(DateTime.UtcNow)
+                    .AddDays(request.ProductLeadTimeDays.Value);
+        }
         var related = Array.Empty<RelatedResource>();
         CommercialResolutionClassification classification;
 
@@ -214,7 +236,7 @@ public sealed class LeadLineCommercialResolutionService(
         {
             classification = CommercialResolutionClassification.KnownInStock;
         }
-        else if (incoming > 0m)
+        else if (incoming >= route.ShortageQuantity)
         {
             classification = CommercialResolutionClassification.KnownIncoming;
         }
@@ -237,6 +259,11 @@ public sealed class LeadLineCommercialResolutionService(
             Classification = classification,
             AvailableToPromise = request.Inventory.Sum(x => x.AvailableToPromise),
             IncomingAvailable = incoming,
+            ProjectedShortage = projectedShortage,
+            LeadTimeDays = request.ProductLeadTimeDays,
+            ExpectedAvailableOn = expectedAvailableOn,
+            UnitCost = request.UnitCost,
+            CostCurrencyCode = request.CostCurrencyCode,
             Fulfilment = route,
             RelatedResources = related,
             ResolutionMethod = "LocalDeterministicCommercialInventory",

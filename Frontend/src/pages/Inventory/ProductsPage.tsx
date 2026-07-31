@@ -8,6 +8,7 @@ import {
   DialogContent, Table, TableHead, TableBody, TableRow, TableCell,
   Stack,
   CircularProgress,
+  Alert,
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -23,10 +24,11 @@ import productService from '../../api/services/productService';
 import SearchField from '../../components/common/SearchField';
 import UploadExportToolbar from '../../components/common/UploadExportToolbar';
 import ProductFormDialog from './ProductFormDialog';
+import { useAuth } from '../../context/AuthContext';
 
 const PurchaseHistoryDialog: React.FC<{ open: boolean; onClose: () => void; productId: number | null }> = ({ open, onClose, productId }) => {
   const { t } = useTranslation();
-  const { data: history, isLoading } = useQuery({
+  const { data: history, isLoading, isError, refetch } = useQuery({
     queryKey: ['product-history', productId],
     queryFn: () => productService.getPurchaseHistory(productId!),
     enabled: !!productId && open,
@@ -43,6 +45,8 @@ const PurchaseHistoryDialog: React.FC<{ open: boolean; onClose: () => void; prod
       <DialogContent dividers sx={{ p: 0 }}>
         {isLoading ? (
           <Box sx={{ p: 4, textAlign: 'center' }}><CircularProgress size={24} /><Typography sx={{ mt: 1 }}>Loading history...</Typography></Box>
+        ) : isError ? (
+          <Box sx={{ p: 3 }}><Alert severity="error" action={<Button color="inherit" onClick={() => refetch()}>Retry</Button>}>Purchase history could not be loaded.</Alert></Box>
         ) : !historyItems.length ? (
           <Box sx={{ p: 4, textAlign: 'center' }}><Typography color="text.secondary">No purchase records found for this product.</Typography></Box>
         ) : (
@@ -79,6 +83,9 @@ const PurchaseHistoryDialog: React.FC<{ open: boolean; onClose: () => void; prod
 const ProductsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const { hasPermission } = useAuth();
+  const canCreate = hasPermission('Products', 'create');
+  const canEdit = hasPermission('Products', 'edit');
 
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ page: 0, pageSize: 10 });
   const [search, setSearch] = useState('');
@@ -89,7 +96,7 @@ const ProductsPage: React.FC = () => {
   const [editingProductId, setEditingProductId] = useState<number | undefined>(undefined);
   const [historyProductId, setHistoryProductId] = useState<number | null>(null);
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['products', paginationModel, search, filterActive],
     queryFn: () => productService.getAll({
       pageNumber: paginationModel.page + 1,
@@ -138,8 +145,8 @@ const ProductsPage: React.FC = () => {
         </Box>
       ),
     },
-    { field: 'unitCost', headerName: 'Unit Cost', width: 110, renderCell: (p) => p.value ? `$${Number(p.value).toFixed(2)}` : '—' },
-    { field: 'sellingPrice', headerName: 'Selling Price', width: 120, renderCell: (p) => p.value ? `$${Number(p.value).toFixed(2)}` : '—' },
+    { field: 'unitCost', headerName: 'Unit Cost', width: 165, renderCell: (p) => p.value != null ? `No currency · ${Number(p.value).toFixed(2)}` : '—' },
+    { field: 'sellingPrice', headerName: 'Selling Price', width: 165, renderCell: (p) => p.value != null ? `No currency · ${Number(p.value).toFixed(2)}` : '—' },
     {
       field: 'isActive',
       headerName: t('status'),
@@ -158,11 +165,11 @@ const ProductsPage: React.FC = () => {
               <ViewIcon fontSize="small" />
             </IconButton>
           </Tooltip>
-          <Tooltip title="Edit Product">
+          {canEdit && <Tooltip title="Edit Product">
             <IconButton size="small" color="info" onClick={() => handleEdit(p.row.id)}>
               <EditIcon fontSize="small" />
             </IconButton>
-          </Tooltip>
+          </Tooltip>}
           <Tooltip title="Purchase History">
             <IconButton size="small" color="secondary" onClick={() => setHistoryProductId(p.row.id)}>
               <HistoryIcon fontSize="small" />
@@ -191,10 +198,11 @@ const ProductsPage: React.FC = () => {
             onExport={productService.export}
             templateFileName="ProductTemplate.xlsx"
             exportFileName="Products.xlsx"
+            canUpload={canCreate}
           />
-          <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3 }}>
+          {canCreate && <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3 }}>
             Add Product
-          </Button>
+          </Button>}
         </Box>
       </Box>
 
@@ -202,8 +210,8 @@ const ProductsPage: React.FC = () => {
       <Box sx={{ display: 'flex', gap: 2, mb: 2 }}>
         {[
           { label: 'Total Products', value: totalItems, icon: <InventoryIcon />, color: 'primary.main' },
-          { label: 'Low Stock', value: lowStock, icon: <LowStockIcon />, color: 'warning.main' },
-          { label: 'Out of Stock', value: outOfStock, icon: <OutOfStockIcon />, color: 'error.main' },
+          { label: 'Low Stock on this page', value: lowStock, icon: <LowStockIcon />, color: 'warning.main' },
+          { label: 'Out of Stock on this page', value: outOfStock, icon: <OutOfStockIcon />, color: 'error.main' },
         ].map((stat) => (
           <Paper key={stat.label} sx={{ px: 2.5, py: 1.5, borderRadius: 2.5, display: 'flex', alignItems: 'center', gap: 1.5, border: '1px solid', borderColor: 'divider', boxShadow: 'none', minWidth: 150 }}>
             <Box sx={{ color: stat.color }}>{stat.icon}</Box>
@@ -226,6 +234,7 @@ const ProductsPage: React.FC = () => {
       </Paper>
 
       {/* Data Grid */}
+      {isError && <Alert severity="error" sx={{ mb: 1.5 }} action={<Button color="inherit" onClick={() => refetch()}>Retry</Button>}>Products could not be loaded.</Alert>}
       <Paper sx={{ height: 'calc(100vh - 310px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
         <DataGrid
           rows={products}
@@ -243,7 +252,7 @@ const ProductsPage: React.FC = () => {
 
       {/* Create/Edit Product Dialog */}
       <ProductFormDialog
-        open={isFormOpen}
+        open={isFormOpen && (editingProductId ? canEdit : canCreate)}
         onClose={() => setIsFormOpen(false)}
         productId={editingProductId}
       />

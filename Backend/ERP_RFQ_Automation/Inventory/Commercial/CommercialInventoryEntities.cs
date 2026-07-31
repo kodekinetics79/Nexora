@@ -164,6 +164,7 @@ public sealed class LeadLineCommercialResolution
     public long LeadRevisionId { get; set; }
     public long LeadLineId { get; set; }
     public long? RfqId { get; set; }
+    public long? RfqItemId { get; set; }
     public long? ProductId { get; set; }
     public Guid ResolutionBatchId { get; set; }
     public int ResourceLimit { get; set; }
@@ -172,6 +173,11 @@ public sealed class LeadLineCommercialResolution
     public CommercialResolutionClassification Classification { get; set; }
     public decimal AvailableToPromise { get; set; }
     public decimal IncomingAvailable { get; set; }
+    public decimal ProjectedShortage { get; set; }
+    public int? LeadTimeDays { get; set; }
+    public DateOnly? ExpectedAvailableOn { get; set; }
+    public decimal? UnitCost { get; set; }
+    public string? CostCurrencyCode { get; set; }
     public string FulfilmentJson { get; set; } = "{}";
     public string RelatedResourcesJson { get; set; } = "[]";
     public string ProductResolutionJson { get; set; } = "{}";

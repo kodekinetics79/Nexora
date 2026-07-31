@@ -5,6 +5,7 @@ import {
   Dialog, DialogTitle, DialogContent, DialogActions,
   Button, TextField, MenuItem, Grid, FormControlLabel,
   Switch, Divider, Typography, CircularProgress,
+  Alert,
 } from '@mui/material';
 import productService from '../../api/services/productService';
 import { useAuth } from '../../context/AuthContext';
@@ -18,7 +19,7 @@ interface Props {
 
 const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
   const { t } = useTranslation();
-  const { userData } = useAuth();
+  const { userData, hasPermission } = useAuth();
   const { enqueueSnackbar } = useSnackbar();
   const queryClient = useQueryClient();
   const isEdit = !!productId;
@@ -43,7 +44,7 @@ const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
   const { data: suppliers } = useQuery({ queryKey: ['product-suppliers'], queryFn: productService.getSuppliers, enabled: open });
 
   // Load for edit
-  const { data: editData } = useQuery({
+  const { data: editData, isLoading: isEditLoading, isError: isEditError, refetch: refetchEdit } = useQuery({
     queryKey: ['product-detail', productId],
     queryFn: () => productService.getById(productId!),
     enabled: open && isEdit,
@@ -93,7 +94,7 @@ const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
       enqueueSnackbar(isEdit ? 'Product updated!' : 'Product created!', { variant: 'success' });
       handleClose();
     },
-    onError: () => enqueueSnackbar('Failed to save product.', { variant: 'error' }),
+    onError: (error: any) => enqueueSnackbar(error?.response?.status === 409 ? 'This product changed since you opened it. Reload and review the latest values.' : 'Failed to save product.', { variant: 'error' }),
   });
 
   const handleClose = () => {
@@ -102,6 +103,10 @@ const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
   };
 
   const handleSave = () => {
+    if (!hasPermission('Products', isEdit ? 'edit' : 'create')) {
+      enqueueSnackbar('You do not have permission to save this product.', { variant: 'error' });
+      return;
+    }
     const fd = new FormData();
     Object.entries(form).forEach(([k, v]) => {
       if (v !== '' && v !== null && v !== undefined) fd.append(k, String(v));
@@ -157,6 +162,9 @@ const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
             <TextField fullWidth multiline rows={2} label="Description" value={form.description} onChange={f('description')} />
           </Grid>
 
+          {isEditLoading && <Grid size={{ xs: 12 }}><CircularProgress size={22} aria-label="Loading product" /></Grid>}
+          {isEditError && <Grid size={{ xs: 12 }}><Alert severity="error" action={<Button color="inherit" onClick={() => refetchEdit()}>Retry</Button>}>The product could not be loaded for editing.</Alert></Grid>}
+
           {/* Pricing & Stock */}
           <SectionTitle label="Pricing & Stock" />
           <Grid size={{ xs: 6, sm: 3 }}>
@@ -169,7 +177,7 @@ const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
             </TextField>
           </Grid>
           <Grid size={{ xs: 12, sm: 3 }}>
-            <TextField fullWidth type="number" label="Unit Cost ($)" value={form.unitCost} onChange={f('unitCost')} />
+            <TextField fullWidth type="number" label="Unit Cost" value={form.unitCost} onChange={f('unitCost')} />
           </Grid>
           <Grid size={{ xs: 12, sm: 3 }}>
             <TextField fullWidth type="number" label="Selling Price ($)" value={form.sellingPrice} onChange={f('sellingPrice')} />
@@ -245,7 +253,7 @@ const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
       </DialogContent>
       <DialogActions sx={{ p: 2 }}>
         <Button onClick={handleClose} color="inherit">{t('cancel') || 'Cancel'}</Button>
-        <Button variant="contained" onClick={handleSave} disabled={saveMutation.isPending} sx={{ px: 4 }}>
+        <Button variant="contained" onClick={handleSave} disabled={saveMutation.isPending || isEditLoading || isEditError || !hasPermission('Products', isEdit ? 'edit' : 'create')} sx={{ px: 4 }}>
           {saveMutation.isPending ? <CircularProgress size={22} /> : (isEdit ? 'Update Product' : 'Create Product')}
         </Button>
       </DialogActions>
