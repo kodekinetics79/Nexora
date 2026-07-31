@@ -221,10 +221,14 @@ public sealed class SalesApplicationService(
             .Where(x => x.FollowUpTaskId == task.Id && x.OccurredAtUtc <= asOfUtc)
             .OrderByDescending(x => x.ToVersion).ThenByDescending(x => x.Id)
             .Select(x => (FollowUpStatus?)x.ToStatus).FirstOrDefault() ?? FollowUpStatus.Open;
-        var won = activities.Where(x => x.ActivityType == CommercialActivityType.Won)
-            .Select(x => (x.AggregateType, x.AggregateId)).Distinct().Count();
-        var lost = activities.Where(x => x.ActivityType == CommercialActivityType.Lost)
-            .Select(x => (x.AggregateType, x.AggregateId)).Distinct().Count();
+        var latestOutcomes = activities
+            .Where(x => x.ActivityType is CommercialActivityType.Won or CommercialActivityType.Lost)
+            .GroupBy(x => (x.AggregateType, x.AggregateId))
+            .Select(group => group.OrderByDescending(x => x.OccurredAtUtc)
+                .ThenByDescending(x => x.Id).First().ActivityType)
+            .ToArray();
+        var won = latestOutcomes.Count(x => x == CommercialActivityType.Won);
+        var lost = latestOutcomes.Count(x => x == CommercialActivityType.Lost);
         var decisions = won + lost;
         var responseHours = activities.Where(x => x.ActivityType == CommercialActivityType.QuoteSent)
             .Select(sent => allActivities.Where(response => response.SalesRepUserId == userId &&

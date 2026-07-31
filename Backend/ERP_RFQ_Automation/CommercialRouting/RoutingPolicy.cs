@@ -75,7 +75,9 @@ public sealed record RoutingUserAvailability(
     bool IsActive = true,
     bool IsAvailable = true,
     int CapacityPercent = 100,
-    RoutingWorkloadSnapshot? Workload = null);
+    RoutingWorkloadSnapshot? Workload = null,
+    bool HasGovernedProfile = false,
+    string EligibilityReason = "Active tenant user");
 
 public sealed record RoutingWorkloadSnapshot(
     int ActiveLeadCount,

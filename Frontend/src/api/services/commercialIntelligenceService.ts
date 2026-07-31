@@ -19,6 +19,8 @@ export interface CommercialAttentionItem {
   reason: string;
   dueAt?: string | null;
   priority: string;
+  actionRoute?: string | null;
+  requiredModule?: string | null;
 }
 
 export interface SalesTodayDTO {
@@ -39,6 +41,32 @@ export interface RepSummaryDTO {
   draftQuotes: number;
   followUpsDue: number;
   pipelineGroups: CurrencyPipelineGroupDTO[];
+}
+
+export interface RoutingWorkloadDTO {
+  activeLeadCount: number;
+  leadLineCount: number;
+  overdueDeadlineCount: number;
+  urgentDeadlineCount: number;
+  approachingDeadlineCount: number;
+  openRfqCount: number;
+  openQuoteCount: number;
+  followUpCount: number;
+  workloadPoints: number;
+}
+
+export interface RoutingOwnerOptionDTO {
+  userId: number;
+  name: string;
+  email: string;
+  roleName?: string | null;
+  isAvailable: boolean;
+  capacityPercent: number;
+  workload: RoutingWorkloadDTO;
+  hasGovernedProfile: boolean;
+  eligibilityReason: string;
+  measuredAtUtc: string;
+  policyVersion: string;
 }
 
 export interface CurrencyPipelineGroupDTO {
@@ -64,6 +92,10 @@ export interface RepProfileDTO extends RepSummaryDTO {
   accountCount: number;
   wonValueGroups: CurrencyAmountGroupDTO[];
   conversionRate?: number | null;
+  decidedQuotes: number;
+  conversionEligible: boolean;
+  performanceFrom: string;
+  performanceTo: string;
   recentActivity: CommercialAttentionItem[];
 }
 
@@ -90,6 +122,15 @@ export interface RoutingQueueItemDTO {
   recommendedOwnerUserId?: number | null;
   recommendedOwnerName?: string | null;
   recommendationReason?: string | null;
+  matchConfidence: number;
+  policyVersion: string;
+  recommendationMeasuredAt?: string | null;
+  recommendedOwnerAvailable?: boolean | null;
+  recommendedOwnerCapacityPercent?: number | null;
+  recommendedOwnerWorkloadPoints?: number | null;
+  priority: number;
+  status: string;
+  overdue: boolean;
   version: number;
 }
 
@@ -113,7 +154,33 @@ export interface PerformanceDTO {
   from: string;
   to: string;
   metrics: IntelligenceMetric[];
-  representatives: Array<RepSummaryDTO & { wonQuotes: number; lostQuotes: number; conversionRate?: number | null }>;
+  scope: 'tenant' | 'assigned_to_me';
+  minimumConversionSample: number;
+  outcomeReconciliation: {
+    recordedOutcomes?: number | null;
+    attributedOutcomes: number;
+    unattributedOutcomes?: number | null;
+    completenessPercent?: number | null;
+    isTenantComplete: boolean;
+  };
+  representatives: Array<RepSummaryDTO & {
+    wonQuotes: number;
+    lostQuotes: number;
+    decidedQuotes: number;
+    conversionEligible: boolean;
+    conversionRate?: number | null;
+    activityCount: number;
+    opportunities: number;
+    quoteSent: number;
+    customerResponses: number;
+    averageResponseHours?: number | null;
+    followUpsCreated: number;
+    completedFollowUps: number;
+    followUpsCompletedOnTime: number;
+    openFollowUps: number;
+    overdueFollowUps: number;
+    revenueByCurrency: CurrencyAmountGroupDTO[];
+  }>;
 }
 
 export interface CommercialIntelligenceEvidenceDTO {
@@ -383,16 +450,20 @@ const commercialIntelligenceService = {
     (await axiosInstance.get<TeamOverviewDTO>(`${commercialRoot}/team-overview`)).data,
   getRepDirectory: async (): Promise<RepSummaryDTO[]> =>
     (await axiosInstance.get<RepSummaryDTO[]>(`${commercialRoot}/reps`)).data,
-  getRepProfile: async (userId: number): Promise<RepProfileDTO> =>
-    (await axiosInstance.get<RepProfileDTO>(`${commercialRoot}/reps/${userId}`)).data,
+  getRepProfile: async (userId: number, from?: string, to?: string): Promise<RepProfileDTO> =>
+    (await axiosInstance.get<RepProfileDTO>(`${commercialRoot}/reps/${userId}`, { params: { from, to } })).data,
   getAccountOwnership: async (params: ListParams = {}): Promise<AccountOwnershipDTO[]> =>
     (await axiosInstance.get<AccountOwnershipDTO[]>(`${commercialRoot}/account-ownership`, { params })).data,
-  assignAccount: async (customerId: number, ownerUserId: number, expectedVersion: number, idempotencyKey: string): Promise<AccountOwnershipDTO> =>
-    (await axiosInstance.post<AccountOwnershipDTO>(`${commercialRoot}/account-ownership/${customerId}/assign`, { ownerUserId, expectedVersion }, { headers: { 'Idempotency-Key': idempotencyKey } })).data,
+  assignAccount: async (customerId: number, ownerUserId: number, expectedVersion: number, reason: string | undefined, idempotencyKey: string): Promise<AccountOwnershipDTO> =>
+    (await axiosInstance.post<AccountOwnershipDTO>(`${commercialRoot}/account-ownership/${customerId}/assign`, { ownerUserId, expectedVersion, reason }, { headers: { 'Idempotency-Key': idempotencyKey } })).data,
   getRoutingQueue: async (params: { sourceId?: number } = {}): Promise<RoutingQueueItemDTO[]> =>
     (await axiosInstance.get<RoutingQueueItemDTO[]>(`${commercialRoot}/routing-queue`, { params })).data,
-  assignRoutingItem: async (leadId: number, ownerUserId: number, expectedVersion: number, idempotencyKey: string): Promise<void> => {
-    await axiosInstance.post(`${commercialRoot}/routing-queue/${leadId}/assign`, { ownerUserId, expectedVersion }, { headers: { 'Idempotency-Key': idempotencyKey } });
+  getRoutingOwnerOptions: async (): Promise<RoutingOwnerOptionDTO[]> =>
+    (await axiosInstance.get<RoutingOwnerOptionDTO[]>(`${commercialRoot}/routing-owner-options`)).data,
+  getAccountOwnerOptions: async (): Promise<RoutingOwnerOptionDTO[]> =>
+    (await axiosInstance.get<RoutingOwnerOptionDTO[]>(`${commercialRoot}/account-owner-options`)).data,
+  assignRoutingItem: async (sourceId: number, ownerUserId: number, expectedVersion: number, reason: string | undefined, idempotencyKey: string): Promise<void> => {
+    await axiosInstance.post(`${commercialRoot}/routing-queue/${sourceId}/assign`, { ownerUserId, expectedVersion, reason }, { headers: { 'Idempotency-Key': idempotencyKey } });
   },
   getFollowUps: async (params: ListParams = {}): Promise<FollowUpDTO[]> =>
     (await axiosInstance.get<FollowUpDTO[]>(`${commercialRoot}/follow-ups`, { params })).data,

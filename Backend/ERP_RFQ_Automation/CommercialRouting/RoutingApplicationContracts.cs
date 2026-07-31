@@ -59,6 +59,19 @@ public sealed record QueuePageResponse(
     int PageNumber,
     int PageSize);
 
+public sealed record RoutingOwnerOptionResponse(
+    long UserId,
+    string Name,
+    string Email,
+    string? RoleName,
+    bool IsAvailable,
+    int CapacityPercent,
+    RoutingWorkloadSnapshot Workload,
+    bool HasGovernedProfile,
+    string EligibilityReason,
+    DateTime MeasuredAtUtc,
+    string PolicyVersion);
+
 public sealed record QueueLeaseCommand(long ExpectedVersion, long UserId, int LeaseMinutes = 15);
 
 public sealed record QueueReleaseCommand(long ExpectedVersion, long UserId);

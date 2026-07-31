@@ -140,6 +140,25 @@ public sealed class CoreSalesApplicationServiceTests
     }
 
     [Fact]
+    public async Task Performance_uses_the_latest_append_only_outcome_after_a_governed_correction()
+    {
+        var store = new MemorySalesPersistence(71, 7101);
+        store.Activities.AddRange(
+        [
+            PersistedActivity(10, CommercialActivityType.Lost, From.AddDays(2)),
+            PersistedActivity(10, CommercialActivityType.Won, From.AddDays(3)),
+            PersistedActivity(11, CommercialActivityType.Lost, From.AddDays(4))
+        ]);
+
+        var result = Assert.Single(await new SalesApplicationService(store).GetPerformanceAsync(71,
+            new SalesPerformanceQuery(7101, From, From.AddMonths(1), From.AddDays(10)), default));
+
+        Assert.Equal(1, result.WonCount);
+        Assert.Equal(1, result.LostCount);
+        Assert.Equal(50m, result.WinRatePercent);
+    }
+
+    [Fact]
     public async Task Performance_fails_closed_on_cross_tenant_persistence_data()
     {
         var store = new MemorySalesPersistence(71, 7101);

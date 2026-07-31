@@ -98,28 +98,73 @@ public sealed class CommercialIntelligenceController(
 
     [HttpGet("reps/{userId:long}")]
     [RequireModulePermission("Users", PermissionAction.View)]
-    public async Task<ActionResult> Rep(long userId, CancellationToken ct)
+    public async Task<ActionResult> Rep(long userId, [FromQuery] DateTime? from, [FromQuery] DateTime? to, CancellationToken ct)
     {
         var tenant = TenantId();
         if (!await IsTenantWideAsync(tenant) && UserId() != userId) return Forbid();
         var summary = (await BuildRepSummaries(tenant, ct)).SingleOrDefault(x => x.UserId == userId);
         if (summary == null) return NotFound();
         var accountCount = await db.Set<CustomerOwnership>().CountAsync(x => x.BusinessUnitId == tenant && x.PrimaryUserId == userId && x.IsActive, ct);
+        var now = DateTime.UtcNow;
+        var fromUtc = NormalizeUtc(from ?? now.AddDays(-90));
+        var toUtc = NormalizeUtc(to ?? now.AddSeconds(1));
+        if (fromUtc >= toUtc || toUtc - fromUtc > TimeSpan.FromDays(366))
+            return BadRequest(new { error = "The performance period must be between 1 and 366 days." });
+        var asOf = now < toUtc ? now : toUtc.AddTicks(-1);
         var performance = (await sales.GetPerformanceAsync(tenant,
-            new SalesPerformanceQuery(userId, DateTime.UtcNow.AddDays(-90), DateTime.UtcNow.AddSeconds(1), DateTime.UtcNow), ct)).SingleOrDefault();
-        var activity = await db.CommercialActivities.AsNoTracking().Where(x => x.BusinessUnitId == tenant && x.SalesRepUserId == userId)
-            .OrderByDescending(x => x.OccurredAtUtc).Take(20).Select(x => new {
-                id = x.Id, recordType = x.AggregateType, recordId = x.AggregateId,
-                reference = x.AggregateType + " " + x.AggregateId, reason = x.ActivityType.ToString(),
-                dueAt = (DateTime?)x.OccurredAtUtc, priority = "Recorded"
-            }).ToListAsync(ct);
+            new SalesPerformanceQuery(userId, fromUtc, toUtc, asOf), ct)).SingleOrDefault();
+        var activities = await db.CommercialActivities.AsNoTracking().Where(x => x.BusinessUnitId == tenant && x.SalesRepUserId == userId)
+            .Where(x => x.OccurredAtUtc >= fromUtc && x.OccurredAtUtc < toUtc)
+            .OrderByDescending(x => x.OccurredAtUtc).Take(20).ToListAsync(ct);
+        var leadIds = activities.Where(x => x.AggregateType.Equals("Lead", StringComparison.OrdinalIgnoreCase))
+            .Select(x => x.AggregateId).Distinct().ToArray();
+        var rfqIds = activities.Where(x => x.AggregateType.Equals("RFQ", StringComparison.OrdinalIgnoreCase))
+            .Select(x => x.AggregateId).Distinct().ToArray();
+        var quoteIds = activities.Where(x => x.AggregateType.Equals("Quote", StringComparison.OrdinalIgnoreCase))
+            .Select(x => x.AggregateId).Distinct().ToArray();
+        var orderIds = activities.Where(x => x.AggregateType.Equals("Order", StringComparison.OrdinalIgnoreCase))
+            .Select(x => x.AggregateId).Distinct().ToArray();
+        var leads = await db.Leads.AsNoTracking().Where(x => x.BusinessUnitId == tenant && leadIds.Contains(x.Id))
+            .ToDictionaryAsync(x => x.Id, ct);
+        var rfqs = await db.Rfqs.AsNoTracking().Where(x => x.BusinessUnitId == tenant && rfqIds.Contains(x.Id))
+            .ToDictionaryAsync(x => x.Id, ct);
+        var quotes = await db.Quotes.AsNoTracking().Where(x => x.BusinessUnitId == tenant && quoteIds.Contains(x.Id))
+            .ToDictionaryAsync(x => x.Id, ct);
+        var orders = await db.Orders.AsNoTracking().Where(x => x.BusinessUnitId == tenant && orderIds.Contains(x.Id))
+            .ToDictionaryAsync(x => x.Id, ct);
+        var customerIds = activities.Where(x => x.CustomerId.HasValue).Select(x => x.CustomerId!.Value)
+            .Concat(leads.Values.Where(x => x.CustomerId.HasValue).Select(x => x.CustomerId!.Value))
+            .Concat(rfqs.Values.Where(x => x.CustomerId.HasValue).Select(x => x.CustomerId!.Value))
+            .Concat(quotes.Values.Where(x => x.CustomerId.HasValue).Select(x => x.CustomerId!.Value))
+            .Concat(orders.Values.Select(x => x.CustomerId)).Distinct().ToArray();
+        var customers = await db.Customers.AsNoTracking().Where(x => x.Buid == tenant && customerIds.Contains(x.Id))
+            .ToDictionaryAsync(x => x.Id, x => x.Name, ct);
+        var activity = activities.Select(item =>
+        {
+            var evidence = ResolveActivityEvidence(item, leads, rfqs, quotes, orders);
+            var customerId = item.CustomerId ?? evidence.CustomerId;
+            return new
+            {
+                id = item.Id, recordType = item.AggregateType, recordId = item.AggregateId,
+                nexoraSerial = evidence.NexoraSerial,
+                reference = evidence.Reference ?? $"{item.AggregateType} {item.AggregateId}",
+                customerName = customerId.HasValue && customers.TryGetValue(customerId.Value, out var name)
+                    ? name : evidence.CustomerName,
+                reason = item.ActivityType.ToString(), dueAt = (DateTime?)item.OccurredAtUtc,
+                priority = "Recorded", evidence.ActionRoute, evidence.RequiredModule
+            };
+        }).ToArray();
         return Ok(new {
             summary.UserId, summary.Name, summary.Email, summary.RoleName, summary.ActiveLeads,
             summary.OverdueLeads, summary.OpenRfqs, summary.DraftQuotes, summary.FollowUpsDue,
             summary.PipelineGroups, accountCount,
             wonValueGroups = performance?.RevenueByCurrency.Select(x => new CurrencyAmountGroup(x.CurrencyCode, x.WeightedRevenueAmount)).ToArray()
                 ?? Array.Empty<CurrencyAmountGroup>(),
-            conversionRate = performance?.WinRatePercent, recentActivity = activity
+            decidedQuotes = (performance?.WonCount ?? 0) + (performance?.LostCount ?? 0),
+            conversionEligible = (performance?.WonCount ?? 0) + (performance?.LostCount ?? 0) >= MinimumConversionSample,
+            conversionRate = (performance?.WonCount ?? 0) + (performance?.LostCount ?? 0) >= MinimumConversionSample
+                ? performance?.WinRatePercent : null,
+            performanceFrom = fromUtc, performanceTo = toUtc, recentActivity = activity
         });
     }
 
@@ -166,8 +211,7 @@ public sealed class CommercialIntelligenceController(
     {
         var tenant = TenantId();
         var idempotencyKey = IdempotencyKey();
-        if (!await db.Customers.AnyAsync(x => x.Buid == tenant && x.Id == customerId, ct) ||
-            !await db.Users.AnyAsync(x => x.Buid == tenant && x.Id == request.OwnerUserId && x.IsActive != false, ct)) return NotFound();
+        var reason = request.Reason?.Trim();
         var strategy = db.Database.CreateExecutionStrategy();
         (CustomerOwnership? Created, bool Conflict) outcome;
         try
@@ -183,27 +227,48 @@ public sealed class CommercialIntelligenceController(
                 if (replay is not null)
                 {
                     if (replay.CustomerId != customerId || replay.PrimaryUserId != request.OwnerUserId
-                        || replay.Scope != OwnershipScope.GeneralCustomer || replay.ScopeKey != null)
+                        || replay.Scope != OwnershipScope.GeneralCustomer || replay.ScopeKey != null
+                        || !string.Equals(replay.Reason, reason ?? "Initial account owner assigned from sales management", StringComparison.Ordinal))
                         throw new InvalidOperationException("The idempotency key was already used for a different ownership request.");
                     await transaction.CommitAsync(ct);
                     return (Created: replay, Conflict: false);
                 }
+                if (!await db.Customers.AnyAsync(x => x.Buid == tenant && x.Id == customerId, ct) ||
+                    !await db.Users.AnyAsync(x => x.Buid == tenant && x.Id == request.OwnerUserId && x.IsActive != false, ct))
+                    throw new RoutingNotFoundException("The customer or owner was not found in this tenant.");
+                var ownerOption = (await routing.GetOwnerOptionsAsync(tenant, ct))
+                    .SingleOrDefault(option => option.UserId == request.OwnerUserId);
+                if (ownerOption == null || !ownerOption.IsAvailable)
+                    throw new RoutingConflictException("The selected owner is not currently eligible for governed routing.");
                 var current = await db.Set<CustomerOwnership>().Where(x => x.BusinessUnitId == tenant &&
-                    x.CustomerId == customerId && x.IsActive && x.EffectiveTo == null).ToListAsync(ct);
+                    x.CustomerId == customerId && x.Scope == OwnershipScope.GeneralCustomer &&
+                    x.ScopeKey == null && x.IsActive && x.EffectiveTo == null).ToListAsync(ct);
                 if (current.Count != 0 && current.Max(x => x.Version) != request.ExpectedVersion)
                     return (Created: (CustomerOwnership?)null, Conflict: true);
+                if (current.Any(x => x.PrimaryUserId != request.OwnerUserId) && (reason?.Length ?? 0) < 5)
+                    throw new InvalidOperationException("A reassignment reason of at least 5 characters is required.");
                 var now = DateTime.UtcNow;
+                var nextVersion = current.Count == 0 ? 1 : current.Max(value => value.Version) + 1;
                 foreach (var value in current) { value.IsActive = false; value.EffectiveTo = now; value.Version++; }
                 if (current.Count != 0) await db.SaveChangesAsync(ct);
                 var replacement = new CustomerOwnership { BusinessUnitId = tenant, CustomerId = customerId,
                     PrimaryUserId = request.OwnerUserId, Scope = OwnershipScope.GeneralCustomer, Priority = 100,
                     EffectiveFrom = now, IsActive = true, Source = "MANUAL",
-                    Reason = "Assigned from sales management", MutationIdempotencyKey = idempotencyKey, Version = 1 };
+                    Reason = reason ?? "Initial account owner assigned from sales management",
+                    MutationIdempotencyKey = idempotencyKey, Version = nextVersion };
                 db.Add(replacement); await db.SaveChangesAsync(ct); await transaction.CommitAsync(ct);
                 return (Created: (CustomerOwnership?)replacement, Conflict: false);
             });
         }
         catch (InvalidOperationException ex)
+        {
+            return Conflict(new { error = ex.Message });
+        }
+        catch (RoutingNotFoundException ex)
+        {
+            return NotFound(new { error = ex.Message });
+        }
+        catch (RoutingConflictException ex)
         {
             return Conflict(new { error = ex.Message });
         }
@@ -238,27 +303,72 @@ public sealed class CommercialIntelligenceController(
     public async Task<ActionResult> RoutingQueue([FromQuery] long? sourceId, CancellationToken ct)
     {
         var tenant = TenantId();
+        var owners = await routing.GetOwnerOptionsAsync(tenant, ct);
+        var ownerLookup = owners.ToDictionary(owner => owner.UserId);
         var rows = await (from item in db.Set<UnassignedWorkItem>().AsNoTracking()
             join lead in db.Leads.AsNoTracking() on item.LeadId equals lead.Id
+            join decision in db.Set<LeadRoutingDecision>().AsNoTracking() on item.RoutingDecisionId equals decision.Id
             where item.BusinessUnitId == tenant &&
-                  ((!sourceId.HasValue && item.Status == WorkItemStatus.Open) ||
+                  ((!sourceId.HasValue && (item.Status == WorkItemStatus.Open || item.Status == WorkItemStatus.Claimed)) ||
                    (sourceId.HasValue && item.Id == sourceId.Value))
             orderby item.Priority descending, item.EnteredOn
             select new { sourceId = item.Id, leadId = lead.Id, nexoraSerial = lead.CommercialCaseReference ?? $"LEAD-{lead.Id}",
                 customerName = lead.BuyersName, receivedAt = lead.RecDate, dueAt = (DateTime?)item.SlaDueOn,
                 reason = item.RequiredAction, recommendedOwnerUserId = item.SuggestedUserId,
-                recommendedOwnerName = (string?)null, recommendationReason = item.ReasonCode, version = item.Version }).Take(250).ToListAsync(ct);
-        return Ok(rows);
+                recommendationReason = item.ReasonCode, matchConfidence = item.MatchConfidence,
+                policyVersion = decision.PolicyVersion, priority = item.Priority,
+                status = item.Status.ToString(), version = item.Version }).Take(250).ToListAsync(ct);
+        return Ok(rows.Select(row =>
+        {
+            ownerLookup.TryGetValue(row.recommendedOwnerUserId ?? 0, out var owner);
+            return new
+            {
+                row.sourceId, row.leadId, row.nexoraSerial, row.customerName, row.receivedAt, row.dueAt,
+                overdue = row.dueAt < DateTime.UtcNow, row.reason, row.recommendedOwnerUserId,
+                recommendedOwnerName = owner?.Name, row.recommendationReason, row.matchConfidence,
+                row.policyVersion, recommendationMeasuredAt = owner?.MeasuredAtUtc,
+                recommendedOwnerAvailable = owner?.IsAvailable,
+                recommendedOwnerCapacityPercent = owner?.CapacityPercent,
+                recommendedOwnerWorkloadPoints = owner?.Workload.WorkloadPoints,
+                row.priority, row.status, row.version
+            };
+        }));
     }
 
-    [HttpPost("routing-queue/{leadId:long}/assign")]
+    [HttpGet("routing-owner-options")]
     [RequireManagerRole]
     [RequireModulePermission("Leads", PermissionAction.Edit)]
-    public async Task<ActionResult> AssignLead(long leadId, AssignRoutingRequest request, CancellationToken ct)
+    public async Task<ActionResult> RoutingOwnerOptions(CancellationToken ct) =>
+        Ok(await routing.GetOwnerOptionsAsync(TenantId(), ct));
+
+    [HttpGet("account-owner-options")]
+    [RequireManagerRole]
+    [RequireModulePermission("Customers", PermissionAction.Edit)]
+    public async Task<ActionResult> AccountOwnerOptions(CancellationToken ct) =>
+        Ok(await routing.GetOwnerOptionsAsync(TenantId(), ct));
+
+    [HttpPost("routing-queue/{sourceId:long}/assign")]
+    [RequireManagerRole]
+    [RequireModulePermission("Leads", PermissionAction.Edit)]
+    public async Task<ActionResult> AssignLead(long sourceId, AssignRoutingRequest request, CancellationToken ct)
     {
-        await routing.AssignLeadAsync(TenantId(), new ManualAssignLeadCommand(leadId, request.OwnerUserId, UserId(),
-            IdempotencyKey(), HttpContext.TraceIdentifier, AssignmentScope.LeadOnly, "Assigned from routing queue", false, null), ct);
-        return NoContent();
+        var tenant = TenantId();
+        var item = await db.Set<UnassignedWorkItem>().AsNoTracking()
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == tenant && x.Id == sourceId, ct);
+        if (item == null) return NotFound();
+        var reason = request.Reason?.Trim();
+        if (item.SuggestedUserId.HasValue && item.SuggestedUserId != request.OwnerUserId && (reason?.Length ?? 0) < 5)
+            return BadRequest(new { error = "A routing override reason of at least 5 characters is required." });
+        try
+        {
+            var result = await routing.AssignQueueItemAsync(tenant, sourceId, new AssignQueueItemCommand(
+                request.ExpectedVersion, request.OwnerUserId, UserId(), IdempotencyKey(),
+                CorrelationId(), AssignmentScope.LeadOnly,
+                reason ?? "Manager accepted the routing recommendation."), ct);
+            return Ok(result);
+        }
+        catch (RoutingNotFoundException ex) { return NotFound(new { error = ex.Message }); }
+        catch (RoutingConflictException ex) { return Conflict(new { error = ex.Message }); }
     }
 
     [HttpGet("follow-ups")]
@@ -323,11 +433,35 @@ public sealed class CommercialIntelligenceController(
         var tenantWide = await IsTenantWideAsync(tenant);
         var actorUserId = UserId();
         if (!tenantWide && !actorUserId.HasValue) return Forbid();
-        var fromUtc = DateTime.SpecifyKind(from, DateTimeKind.Utc);
-        var toUtc = DateTime.SpecifyKind(to, DateTimeKind.Utc);
+        var fromUtc = NormalizeUtc(from);
+        var toUtc = NormalizeUtc(to);
+        if (fromUtc >= toUtc || toUtc - fromUtc > TimeSpan.FromDays(366))
+            return BadRequest(new { error = "The performance period must be between 1 and 366 days." });
         var results = await sales.GetPerformanceAsync(tenant, new SalesPerformanceQuery(
             tenantWide ? null : actorUserId, fromUtc, toUtc,
             DateTime.UtcNow < toUtc ? DateTime.UtcNow : toUtc.AddTicks(-1)), ct);
+        var attributedOutcomeIds = await db.CommercialActivities.AsNoTracking()
+            .Where(activity => activity.BusinessUnitId == tenant && activity.AggregateType == "Quote" &&
+                (activity.ActivityType == CommercialActivityType.Won || activity.ActivityType == CommercialActivityType.Lost) &&
+                activity.OccurredAtUtc >= fromUtc && activity.OccurredAtUtc < toUtc &&
+                (tenantWide || activity.SalesRepUserId == actorUserId))
+            .Select(activity => activity.AggregateId).Distinct().ToArrayAsync(ct);
+        int? recordedOutcomeCount = null;
+        int? unattributedOutcomeCount = null;
+        decimal? attributionCompletenessPercent = null;
+        if (tenantWide)
+        {
+            var recordedOutcomes = await db.Quotes.AsNoTracking().Include(quote => quote.Status)
+                .Where(quote => quote.BusinessUnitId == tenant && quote.OutcomeOn >= fromUtc && quote.OutcomeOn < toUtc)
+                .Select(quote => new { quote.Id, quote.Status!.SetupCode, quote.Status.SetupValue })
+                .ToListAsync(ct);
+            recordedOutcomeCount = recordedOutcomes.Count(quote =>
+                Canonical(quote.SetupCode, quote.SetupValue) is "ACCEPTED" or "REJECTED");
+            unattributedOutcomeCount = Math.Max(0, recordedOutcomeCount.Value - attributedOutcomeIds.Length);
+            attributionCompletenessPercent = recordedOutcomeCount == 0
+                ? null
+                : Math.Round(attributedOutcomeIds.Length * 100m / recordedOutcomeCount.Value, 1);
+        }
         var reps = await BuildRepSummaries(tenant, ct);
         if (!tenantWide) reps = reps.Where(x => x.UserId == actorUserId).ToList();
         var rows = from rep in reps join result in results on rep.UserId equals result.SalesRepUserId into resultRows from result in resultRows.DefaultIfEmpty()
@@ -338,14 +472,33 @@ public sealed class CommercialIntelligenceController(
                 completedFollowUps = result?.FollowUpsCompleted ?? 0,
                 followUpsCompletedOnTime = result?.FollowUpsCompletedOnTime ?? 0,
                 openFollowUps = result?.OpenFollowUps ?? 0, overdueFollowUps = result?.OverdueFollowUps ?? 0,
-                conversionRate = result?.WinRatePercent };
+                activityCount = result?.ActivityCount ?? 0,
+                opportunities = result?.OpportunityCount ?? 0,
+                quoteSent = result?.QuoteSentCount ?? 0,
+                customerResponses = result?.CustomerResponseCount ?? 0,
+                decidedQuotes = (result?.WonCount ?? 0) + (result?.LostCount ?? 0),
+                conversionEligible = (result?.WonCount ?? 0) + (result?.LostCount ?? 0) >= MinimumConversionSample,
+                conversionRate = (result?.WonCount ?? 0) + (result?.LostCount ?? 0) >= MinimumConversionSample
+                    ? result?.WinRatePercent : null,
+                averageResponseHours = result?.AverageResponseHours,
+                revenueByCurrency = result?.RevenueByCurrency.Select(x => new CurrencyAmountGroup(x.CurrencyCode, x.WeightedRevenueAmount)).ToArray()
+                    ?? Array.Empty<CurrencyAmountGroup>() };
         return Ok(new { generatedAt = DateTime.UtcNow, from = fromUtc, to = toUtc,
-            metrics = new[] { Metric("won", "Won", results.Sum(x => x.WonCount)), Metric("lost", "Lost", results.Sum(x => x.LostCount)) }, representatives = rows });
+            scope = tenantWide ? "tenant" : "assigned_to_me", minimumConversionSample = MinimumConversionSample,
+            outcomeReconciliation = new {
+                recordedOutcomes = recordedOutcomeCount,
+                attributedOutcomes = attributedOutcomeIds.Length,
+                unattributedOutcomes = unattributedOutcomeCount,
+                completenessPercent = attributionCompletenessPercent,
+                isTenantComplete = tenantWide
+            },
+            metrics = new[] { Metric("won", "Won", results.Sum(x => x.WonCount)), Metric("lost", "Lost", results.Sum(x => x.LostCount)),
+                Metric("decided", "Decided outcomes", results.Sum(x => x.WonCount + x.LostCount)) }, representatives = rows });
     }
 
     private async Task<List<RepSummary>> BuildRepSummaries(long tenant, CancellationToken ct)
     {
-        var users = await db.Users.AsNoTracking().Where(x => x.Buid == tenant && x.IsActive != false).OrderBy(x => x.FirstName).ThenBy(x => x.LastName).ToListAsync(ct);
+        var users = await db.Users.AsNoTracking().Include(x => x.Role).Where(x => x.Buid == tenant && x.IsActive != false).OrderBy(x => x.FirstName).ThenBy(x => x.LastName).ToListAsync(ct);
         var assignments = await db.Set<LeadAssignment>().AsNoTracking().Where(x => x.BusinessUnitId == tenant && x.EffectiveTo == null).ToListAsync(ct);
         var followUps = await db.FollowUpTasks.AsNoTracking().Where(x => x.BusinessUnitId == tenant && x.Status != FollowUpStatus.Completed && x.Status != FollowUpStatus.Cancelled).ToListAsync(ct);
         var leadIds = assignments.Select(x => x.LeadId).Distinct().ToArray();
@@ -368,7 +521,39 @@ public sealed class CommercialIntelligenceController(
     }
 
     private static object Metric(string key, string label, decimal value) => new { key, label, value, unit = "count" };
+    private const int MinimumConversionSample = 5;
     private static string Name(User user) => $"{user.FirstName} {user.LastName}".Trim();
+    private static DateTime NormalizeUtc(DateTime value) => value.Kind switch
+    {
+        DateTimeKind.Utc => value,
+        DateTimeKind.Local => value.ToUniversalTime(),
+        _ => DateTime.SpecifyKind(value, DateTimeKind.Utc)
+    };
+    private static ActivityEvidence ResolveActivityEvidence(
+        CommercialActivity activity,
+        IReadOnlyDictionary<long, Lead> leads,
+        IReadOnlyDictionary<long, Rfq> rfqs,
+        IReadOnlyDictionary<long, Quote> quotes,
+        IReadOnlyDictionary<long, Order> orders)
+    {
+        if (activity.AggregateType.Equals("Lead", StringComparison.OrdinalIgnoreCase) &&
+            leads.TryGetValue(activity.AggregateId, out var lead))
+            return new(lead.CommercialCaseReference, lead.Rfqno, lead.BuyersName, lead.CustomerId,
+                $"/procurement/leads/view/{lead.Id}", "Leads");
+        if (activity.AggregateType.Equals("RFQ", StringComparison.OrdinalIgnoreCase) &&
+            rfqs.TryGetValue(activity.AggregateId, out var rfq))
+            return new(rfq.NexoraSerial, rfq.Rfqno, rfq.BuyersName, rfq.CustomerId,
+                $"/procurement/rfqs/view/{rfq.Id}", "RFQ Management");
+        if (activity.AggregateType.Equals("Quote", StringComparison.OrdinalIgnoreCase) &&
+            quotes.TryGetValue(activity.AggregateId, out var quote))
+            return new(quote.NexoraSerial, quote.QuoteNo, null, quote.CustomerId,
+                $"/sales/quotes/view/{quote.Id}", "Quotations");
+        if (activity.AggregateType.Equals("Order", StringComparison.OrdinalIgnoreCase) &&
+            orders.TryGetValue(activity.AggregateId, out var order))
+            return new(order.NexoraSerial, order.OrderNo, null, order.CustomerId,
+                $"/sales/orders/{order.Id}", "Orders");
+        return new(null, null, null, activity.CustomerId, null, null);
+    }
     private static string Canonical(string? code, string? value) => ((string.IsNullOrWhiteSpace(code) ? value : code) ?? string.Empty).Trim().Replace(' ', '_').ToUpperInvariant();
     private static bool TerminalLead(string? code, string? value) => Canonical(code, value) is "DISQUALIFIED" or "CONVERTED_TO_RFQ" or "LOST" or "CANCELLED" or "COMPLETED" or "DUPLICATED";
     private static bool TerminalRfq(string? code, string? value) => Canonical(code, value) is "CANCELLED" or "CLOSED" or "QUOTE_SENT";
@@ -390,13 +575,18 @@ public sealed class CommercialIntelligenceController(
     private Task<bool> IsTenantWideAsync(long tenant) =>
         roleGate.IsManagerOrAdminAsync(ClaimId("roleId"), tenant);
     private string IdempotencyKey() => Request.Headers.TryGetValue("Idempotency-Key", out var value) && !string.IsNullOrWhiteSpace(value) ? value.ToString() : throw new SalesValidationException("Idempotency-Key header is required.");
+    private string CorrelationId() => Request.Headers.TryGetValue("X-Correlation-ID", out var value) && !string.IsNullOrWhiteSpace(value)
+        ? value.ToString().Trim()
+        : HttpContext.TraceIdentifier;
 }
 
-public sealed record AssignAccountRequest(long OwnerUserId, long ExpectedVersion);
-public sealed record AssignRoutingRequest(long OwnerUserId, long ExpectedVersion);
+public sealed record AssignAccountRequest(long OwnerUserId, long ExpectedVersion, string? Reason = null);
+public sealed record AssignRoutingRequest(long OwnerUserId, long ExpectedVersion, string? Reason = null);
 public sealed record CompleteFollowUpRequest(long ExpectedVersion);
 public sealed record RepSummary(long UserId, string Name, string? Email, string? RoleName, int ActiveLeads,
     int OverdueLeads, int OpenRfqs, int DraftQuotes, int FollowUpsDue, IReadOnlyList<CurrencyPipelineGroup> PipelineGroups);
 public sealed record CurrencyPipelineGroup(long? CurrencyId, string? CurrencyCode, int QuoteCount,
     decimal PipelineValue, decimal WeightedPipeline);
 public sealed record CurrencyAmountGroup(string CurrencyCode, decimal Value);
+public sealed record ActivityEvidence(string? NexoraSerial, string? Reference, string? CustomerName,
+    long? CustomerId, string? ActionRoute, string? RequiredModule);

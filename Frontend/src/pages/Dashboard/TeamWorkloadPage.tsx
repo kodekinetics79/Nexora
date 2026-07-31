@@ -13,12 +13,15 @@ import {
   TableRow,
   Tooltip,
   Typography,
+  Button,
 } from '@mui/material';
 import {
   Groups as TeamIcon,
   Inbox as InboxIcon,
 } from '@mui/icons-material';
 import dashboardService, { type TeamWorkloadRowDTO } from '../../api/services/dashboardService';
+import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../../context/AuthContext';
 
 /**
  * WP-B1: manager view of who is carrying what right now. One row per rep plus
@@ -27,6 +30,10 @@ import dashboardService, { type TeamWorkloadRowDTO } from '../../api/services/da
  * Zero-training language: "waiting too long", not "SLA breach".
  */
 export default function TeamWorkloadPage() {
+  const navigate = useNavigate();
+  const { hasPermission } = useAuth();
+  const canOpenRouting = hasPermission('Leads');
+  const canOpenRepRecords = hasPermission('Users');
   const workload = useQuery({
     queryKey: ['dashboard', 'team-workload'],
     queryFn: dashboardService.getTeamWorkload,
@@ -74,9 +81,8 @@ export default function TeamWorkloadPage() {
         </Stack>
       ) : workload.isError ? (
         <Paper variant="outlined" sx={{ p: 4, borderRadius: 3, textAlign: 'center' }}>
-          <Typography variant="body1" sx={{ color: 'text.secondary' }}>
-            We couldn&apos;t load the team right now. It will retry automatically.
-          </Typography>
+          <Typography variant="body1" sx={{ color: 'text.secondary', mb: 1.5 }}>We couldn&apos;t load the team right now.</Typography>
+          <Button onClick={() => void workload.refetch()}>Retry</Button>
         </Paper>
       ) : (
         <TableContainer component={Paper} variant="outlined" sx={{ borderRadius: 3 }}>
@@ -108,9 +114,7 @@ export default function TeamWorkloadPage() {
                     <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
                       <InboxIcon fontSize="small" sx={{ color: 'warning.main' }} />
                       <Box>
-                        <Typography variant="body2" sx={{ fontWeight: 800 }}>
-                          Unassigned
-                        </Typography>
+                        {canOpenRouting ? <Button color="inherit" sx={{ p: 0, minWidth: 0, justifyContent: 'flex-start', fontWeight: 800 }} onClick={() => navigate('/sales/routing')}>Unassigned</Button> : <Typography variant="body2" sx={{ fontWeight: 800 }}>Unassigned</Typography>}
                         <Typography variant="caption" sx={{ color: 'text.secondary' }}>
                           Work nobody owns yet — assign these first
                         </Typography>
@@ -127,9 +131,7 @@ export default function TeamWorkloadPage() {
               {reps.map((rep) => (
                 <TableRow key={rep.userId} hover>
                   <TableCell>
-                    <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                      {rep.name}
-                    </Typography>
+                    {canOpenRepRecords ? <Button color="inherit" sx={{ p: 0, minWidth: 0, justifyContent: 'flex-start', fontWeight: 600 }} onClick={() => navigate(`/sales/reps/${rep.userId}`)}>{rep.name}</Button> : <Typography variant="body2" sx={{ fontWeight: 600 }}>{rep.name}</Typography>}
                     {rep.email && (
                       <Typography variant="caption" sx={{ color: 'text.secondary' }}>
                         {rep.email}
