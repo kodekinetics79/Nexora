@@ -75,7 +75,12 @@ public sealed class Release02SupplierGovernanceTests
 
         var unavailable = Assert.IsType<ObjectResult>(result.Result);
         Assert.Equal(StatusCodes.Status503ServiceUnavailable, unavailable.StatusCode);
-        Assert.Contains("disabled", Assert.IsType<string>(unavailable.Value), StringComparison.OrdinalIgnoreCase);
+        // The refusal is an RFC 7807 payload carrying a traceId, not a bare string, so a
+        // caller can quote one identifier that ties straight back to the server log entry.
+        var problem = Assert.IsType<ProblemDetails>(unavailable.Value);
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, problem.Status);
+        Assert.Contains("disabled", problem.Detail!, StringComparison.OrdinalIgnoreCase);
+        Assert.True(problem.Extensions.ContainsKey("traceId"));
         Assert.DoesNotContain(typeof(ISupplierRepository).GetMethods(), method =>
             method.Name.Contains("Web", StringComparison.OrdinalIgnoreCase));
     }

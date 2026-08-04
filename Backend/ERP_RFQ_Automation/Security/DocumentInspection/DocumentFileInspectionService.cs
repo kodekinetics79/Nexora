@@ -120,7 +120,9 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
             {
                 scan = MalwareScanResult.Error(
                     _malwareScanner.GetType().Name,
-                    $"The malware scanner failed: {exception.GetType().Name}.");
+                    MalwareScannerMessages.ScannerFailed,
+                    $"The malware scanner {_malwareScanner.GetType().Name} failed with " +
+                    $"{exception.GetType().Name}: {exception.Message}");
             }
         }
 
@@ -159,7 +161,8 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
             {
                 MalwareStatus = scan.Status,
                 IsRetryable = true,
-                ErrorCode = "security_scanner_unavailable"
+                ErrorCode = "security_scanner_unavailable",
+                OperatorDiagnostics = scan.Diagnostics
             }
         };
     }

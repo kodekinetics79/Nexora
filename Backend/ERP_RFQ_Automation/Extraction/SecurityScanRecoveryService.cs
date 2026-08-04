@@ -21,19 +21,49 @@ public sealed record SecurityScanRetryResult(
     int StillAwaiting,
     int Rejected,
     int SourceObjectUnavailable,
-    IReadOnlyList<SecurityScanRetryItem> Items);
+    IReadOnlyList<SecurityScanRetryItem> Items)
+{
+    /// <summary>Every batch touched by this sweep. Single-element for a batch-scoped retry.</summary>
+    public IReadOnlyList<Guid> Batches { get; init; } = [];
+
+    /// <summary>True when the per-call cap was hit and the caller should invoke the sweep again.</summary>
+    public bool MoreRemaining { get; init; }
+}
+
+/// <summary>One batch holding files that a scanner outage blocked, for operator discovery.</summary>
+public sealed record BlockedBatchSummary(
+    Guid BatchId,
+    int BlockedFiles,
+    DateTimeOffset OldestReceivedOn,
+    DateTimeOffset NewestReceivedOn);
 
 public interface ISecurityScanRecoveryService
 {
+    /// <summary>Replays the scanner-blocked files of one batch from their immutable source objects.</summary>
     Task<SecurityScanRetryResult> RetryBatchAsync(
         long businessUnitId,
         Guid batchId,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Tenant-wide sweep. The operator escape hatch: it needs no batch id and does not depend on the
+    /// batch page still offering a retry control, which it stops doing once a hold has been recorded
+    /// as Rejected.
+    /// </summary>
+    Task<SecurityScanRetryResult> RetryTenantAsync(
+        long businessUnitId,
+        CancellationToken ct = default);
+
+    /// <summary>Lists the batches that currently hold scanner-blocked files.</summary>
+    Task<IReadOnlyList<BlockedBatchSummary>> ListBlockedBatchesAsync(
+        long businessUnitId,
         CancellationToken ct = default);
 }
 
 public sealed class SecurityScanRecoveryService : ISecurityScanRecoveryService
 {
     private const int MaximumBatchFiles = 50;
+    private const int MaximumDiscoveryFiles = 500;
     private const int MaximumFileBytes = 25 * 1024 * 1024;
     private readonly ErpRfqAutomationContext _db;
     private readonly IEvidenceObjectStorage _storage;
@@ -52,12 +82,60 @@ public sealed class SecurityScanRecoveryService : ISecurityScanRecoveryService
         _log = log;
     }
 
-    public async Task<SecurityScanRetryResult> RetryBatchAsync(
+    public Task<SecurityScanRetryResult> RetryBatchAsync(
         long businessUnitId,
         Guid batchId,
+        CancellationToken ct = default) =>
+        RetryAsync(businessUnitId, batchId, ct);
+
+    public Task<SecurityScanRetryResult> RetryTenantAsync(
+        long businessUnitId,
+        CancellationToken ct = default) =>
+        RetryAsync(businessUnitId, batchId: null, ct);
+
+    public async Task<IReadOnlyList<BlockedBatchSummary>> ListBlockedBatchesAsync(
+        long businessUnitId,
         CancellationToken ct = default)
     {
-        var candidates = await (
+        var held = await (
+            from occurrence in _db.Set<SourceDocumentOccurrence>().AsNoTracking()
+            join corpus in _db.Set<DocumentCorpus>().AsNoTracking()
+                on new { occurrence.BusinessUnitId, occurrence.CorpusId }
+                equals new { corpus.BusinessUnitId, CorpusId = corpus.Id }
+            where occurrence.BusinessUnitId == businessUnitId
+                  && (occurrence.IntakeStatus == IntakeOccurrenceStatus.AwaitingSecurityScan
+                      || occurrence.IntakeStatus == IntakeOccurrenceStatus.Rejected)
+            orderby occurrence.ReceivedOn, occurrence.Id
+            select new
+            {
+                corpus.BatchId,
+                occurrence.IntakeStatus,
+                occurrence.LastErrorCode,
+                occurrence.SourceMetadataJson,
+                occurrence.ReceivedOn
+            })
+            .Take(MaximumDiscoveryFiles)
+            .ToListAsync(ct);
+
+        return held
+            .Where(x => SecurityHoldRecovery.IsRecoverableSecurityHold(
+                x.IntakeStatus, x.LastErrorCode, x.SourceMetadataJson))
+            .GroupBy(x => x.BatchId)
+            .Select(group => new BlockedBatchSummary(
+                group.Key,
+                group.Count(),
+                group.Min(x => x.ReceivedOn),
+                group.Max(x => x.ReceivedOn)))
+            .OrderBy(x => x.OldestReceivedOn)
+            .ToArray();
+    }
+
+    private async Task<SecurityScanRetryResult> RetryAsync(
+        long businessUnitId,
+        Guid? batchId,
+        CancellationToken ct)
+    {
+        var page = await (
             from occurrence in _db.Set<SourceDocumentOccurrence>().AsNoTracking()
             join corpus in _db.Set<DocumentCorpus>().AsNoTracking()
                 on new { occurrence.BusinessUnitId, occurrence.CorpusId }
@@ -66,20 +144,32 @@ public sealed class SecurityScanRecoveryService : ISecurityScanRecoveryService
                 on new { occurrence.BusinessUnitId, occurrence.SourceDocumentId }
                 equals new { source.BusinessUnitId, SourceDocumentId = source.Id }
             where occurrence.BusinessUnitId == businessUnitId
-                  && corpus.BatchId == batchId
+                  && (batchId == null || corpus.BatchId == batchId)
+                  // Rejected is included deliberately: a scanner outage must never be a terminal
+                  // user-facing state. SecurityHoldRecovery then separates "our infrastructure
+                  // failed" from a real malware verdict or a malformed document.
                   && (occurrence.IntakeStatus == IntakeOccurrenceStatus.AwaitingSecurityScan
                       || occurrence.IntakeStatus == IntakeOccurrenceStatus.Rejected)
             orderby occurrence.ReceivedOn, occurrence.Id
             select new
             {
                 Occurrence = occurrence,
-                Source = source
-            }).Take(MaximumBatchFiles).ToListAsync(ct);
+                Source = source,
+                corpus.BatchId
+            })
+            .Take(MaximumBatchFiles + 1)
+            .ToListAsync(ct);
+        var moreRemaining = page.Count > MaximumBatchFiles;
+        var candidates = moreRemaining ? page.Take(MaximumBatchFiles).ToList() : page;
 
         var eligible = candidates.Where(x => IsRetryable(x.Occurrence)).ToArray();
         var items = new List<SecurityScanRetryItem>(eligible.Length);
+        _log?.LogInformation(
+            "Security-scan recovery sweep for business unit {BusinessUnitId} scope {Scope}: {Candidates} candidate(s), {Eligible} eligible.",
+            businessUnitId, batchId?.ToString() ?? "all-batches", candidates.Count, eligible.Length);
         foreach (var candidate in eligible)
         {
+            var batchIdForCandidate = candidate.BatchId;
             ct.ThrowIfCancellationRequested();
             var metadata = ParseMetadata(candidate.Occurrence.SourceMetadataJson);
             if (metadata is null)
@@ -107,7 +197,7 @@ public sealed class SecurityScanRecoveryService : ISecurityScanRecoveryService
             {
                 _log?.LogWarning(exception,
                     "Recovery source object is unavailable for occurrence {OccurrenceId} in batch {BatchId}.",
-                    candidate.Occurrence.Id, batchId);
+                    candidate.Occurrence.Id, batchIdForCandidate);
                 var errorCode = SourceObjectErrorCode(exception);
                 if (exception is InvalidDataException)
                 {
@@ -147,7 +237,7 @@ public sealed class SecurityScanRecoveryService : ISecurityScanRecoveryService
                     metadata.FileName,
                     businessUnitId,
                     metadata.SourceType,
-                    batchId,
+                    batchIdForCandidate,
                     metadata: metadata.Metadata,
                     ct: ct);
                 items.Add(new(candidate.Occurrence.Id, metadata.FileName,
@@ -155,6 +245,7 @@ public sealed class SecurityScanRecoveryService : ISecurityScanRecoveryService
             }
             catch (DocumentInspectionException exception)
             {
+                // Still blocked: the scanner has not come back yet. The occurrence stays replayable.
                 items.Add(new(candidate.Occurrence.Id, metadata.FileName,
                     exception.Inspection.IsRetryable ? "AwaitingSecurityScan" : "Rejected",
                     exception.Inspection.ErrorCode,
@@ -162,37 +253,36 @@ public sealed class SecurityScanRecoveryService : ISecurityScanRecoveryService
             }
         }
 
-        return new SecurityScanRetryResult(
-            batchId,
+        var result = new SecurityScanRetryResult(
+            batchId ?? Guid.Empty,
             eligible.Length,
             items.Count(x => x.Status == "Queued"),
             items.Count(x => x.Status == "AwaitingSecurityScan"),
             items.Count(x => x.Status == "Rejected"),
             items.Count(x => x.Status == "SOURCE_OBJECT_UNAVAILABLE"),
-            items);
+            items)
+        {
+            Batches = candidates.Select(x => x.BatchId).Distinct().ToArray(),
+            MoreRemaining = moreRemaining
+        };
+        _log?.LogInformation(
+            "Security-scan recovery sweep finished for business unit {BusinessUnitId}: Queued={Queued} StillAwaiting={StillAwaiting} Rejected={Rejected} SourceUnavailable={SourceUnavailable} MoreRemaining={MoreRemaining}.",
+            businessUnitId, result.Queued, result.StillAwaiting, result.Rejected,
+            result.SourceObjectUnavailable, result.MoreRemaining);
+        return result;
     }
 
-    private static bool IsRetryable(SourceDocumentOccurrence occurrence)
-    {
-        if (occurrence.IntakeStatus == IntakeOccurrenceStatus.AwaitingSecurityScan)
-            return true;
-        if (!string.Equals(occurrence.LastErrorCode, "document_quarantined", StringComparison.OrdinalIgnoreCase)
-            && !string.Equals(occurrence.LastErrorCode, "security_scanner_unavailable", StringComparison.OrdinalIgnoreCase))
-            return false;
 
-        try
-        {
-            using var metadata = JsonDocument.Parse(occurrence.SourceMetadataJson);
-            var inspection = metadata.RootElement.GetProperty("inspection");
-            return !inspection.TryGetProperty("ScannerSignature", out var signature)
-                   || signature.ValueKind == JsonValueKind.Null
-                   || string.IsNullOrWhiteSpace(signature.GetString());
-        }
-        catch (Exception exception) when (exception is JsonException or KeyNotFoundException or InvalidOperationException)
-        {
-            return false;
-        }
-    }
+    // Shared with the batch-reconciliation read model so the "Retry blocked files" affordance and the
+    // replay it triggers can never disagree. The previous local copy called TryGetProperty on the
+    // `inspection` element without checking its kind; the ingest gateway always writes
+    // `"inspection": null`, so that threw InvalidOperationException and every Rejected occurrence was
+    // reported as ineligible — the retry endpoint answered Eligible: 0 and released nothing.
+    private static bool IsRetryable(SourceDocumentOccurrence occurrence) =>
+        SecurityHoldRecovery.IsRecoverableSecurityHold(
+            occurrence.IntakeStatus,
+            occurrence.LastErrorCode,
+            occurrence.SourceMetadataJson);
 
     private static RecoveryMetadata? ParseMetadata(string sourceMetadataJson)
     {

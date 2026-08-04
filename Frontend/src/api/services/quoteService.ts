@@ -137,7 +137,10 @@ const quoteService = {
     } catch (error: any) {
       const data = error?.response?.data;
       if (error?.response?.status === 409 && data?.queuedForApproval) {
-        return { held: true, message: data.summary || data.message, approvalId: data.approvalId };
+        // Only a string may become user-facing copy — an object here would render as
+        // "[object Object]" at the call site.
+        const summary = [data.summary, data.message].find((value) => typeof value === 'string' && value.trim());
+        return { held: true, message: summary, approvalId: data.approvalId };
       }
       throw error;
     }

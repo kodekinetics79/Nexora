@@ -224,8 +224,12 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
 
         // Revisions-lite chain lock (WP-B4): a superseded quote's fate is carried
         // by its newer revision — the system must not stamp an outcome on it.
+        // IgnoreQueryFilters is kept (the sweep may run scoped or unscoped) but the tenant is now
+        // chained explicitly: a revision always belongs to the same business unit as the quote it
+        // supersedes, so a match from another tenant is never legitimate — it would suppress this
+        // tenant's auto-expiry on the strength of a foreign row.
         var superseded = await _context.Quotes.AsNoTracking().IgnoreQueryFilters()
-            .AnyAsync(q => q.RevisionOfQuoteId == quote.Id, ct);
+            .AnyAsync(q => q.RevisionOfQuoteId == quote.Id && q.BusinessUnitId == quote.BusinessUnitId, ct);
         if (superseded) return false;
 
         await EnsureExpiredStatusSeededAsync(quote.BusinessUnitId, ct);
@@ -304,9 +308,12 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
         {
             // RFQ receive date + lead linkage in one projection. Rfq.RecDate is
             // non-nullable but may be a sentinel (< year 2000) — treat as unknown.
+            // Tenant chained from the quote: Quote.RfqId is an intra-tenant foreign key, so
+            // IgnoreQueryFilters here must not become a licence to read another tenant's RFQ
+            // receive date and lead id into this tenant's outcome metric.
             var rfqFacts = quote.Rfqid.HasValue
                 ? await _context.Rfqs.AsNoTracking().IgnoreQueryFilters()
-                    .Where(r => r.Id == quote.Rfqid.Value)
+                    .Where(r => r.Id == quote.Rfqid.Value && r.BusinessUnitId == quote.BusinessUnitId)
                     .Select(r => new { r.RecDate, r.LeadId })
                     .FirstOrDefaultAsync(ct)
                 : null;
@@ -566,8 +573,14 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
             .FirstOrDefaultAsync(ct);
         if (roleId is null or 0) return false;
 
+        // The Users lookup above already chains the tenant; this one did not, and it is the half
+        // that actually decides the privilege. A role id that also exists in another business unit
+        // would have resolved to THAT tenant's role name, so a row called "Manager" elsewhere could
+        // authorise correcting a frozen outcome here. SetupMaster carries a global query filter, so
+        // this only ever mattered on the null-tenant sweep path — which is precisely where this
+        // service runs.
         var roleName = await _context.SetupMasters.AsNoTracking()
-            .Where(s => s.SetupId == roleId && s.SetupType == "role")
+            .Where(s => s.SetupId == roleId && s.SetupType == "role" && s.BusinessUnitId == businessUnitId)
             .Select(s => s.SetupValue)
             .FirstOrDefaultAsync(ct);
         if (string.IsNullOrWhiteSpace(roleName)) return false;

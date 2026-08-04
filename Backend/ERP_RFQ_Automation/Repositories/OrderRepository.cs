@@ -1,7 +1,9 @@
 using ERP_RFQ_Automation.DTOs.OrderDTOs;
+using ERP_RFQ_Automation.Fx;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -123,14 +125,44 @@ namespace ERP_RFQ_Automation.Repositories
             var orders = await _context.Orders
                 .AsNoTracking()
                 .Where(o => o.BusinessUnitId == businessUnitId)
+                .Select(o => new { o.Id, o.StatusId, o.TotalAmount, o.CurrencyId })
                 .ToListAsync();
+
+            // FX fix: this used to be `orders.Sum(o => o.TotalAmount)`, which added AED, USD and
+            // EUR order totals together as bare decimals and reported the result as one revenue
+            // number. Order.TotalAmount is denominated by Order.CurrencyId, so that sum was only
+            // ever correct for a single-currency tenant. Amounts are now converted into the
+            // business unit's base currency using approved, effective-dated rates, and the total
+            // FAILS CLOSED (null + a surfaced reason + a per-currency breakdown) when any order's
+            // currency has no approved rate. Same contract as QuoteRepository.GetQuoteStatsAsync.
+            var fx = new FxConversionService(_context);
+            var total = await fx.TotalAsync(
+                businessUnitId,
+                orders.Select(o => new FxAmount(o.TotalAmount, o.CurrencyId)).ToArray(),
+                DateTime.UtcNow);
 
             return new OrderStatsDTO
             {
                 TotalOrders = orders.Count,
                 PendingOrders = orders.Count(o => o.StatusId == 36), // Assuming 36 is Pending/Processing
                 CompletedOrders = orders.Count(o => o.StatusId == 37), // Assuming 37 is Completed/Delivered
-                TotalRevenue = orders.Sum(o => o.TotalAmount)
+                TotalRevenue = total.Total,
+                TotalRevenueCurrency = total.TargetCurrencyCode,
+                TotalRevenueConverted = total.Converted,
+                TotalRevenueUnavailableReason = total.UnavailableReason,
+                RevenueByCurrency = total.Components
+                    .Select(c => new OrderStatsCurrencyBreakdownDTO
+                    {
+                        CurrencyId = c.CurrencyId,
+                        CurrencyCode = c.CurrencyCode,
+                        Subtotal = c.Subtotal,
+                        OrderCount = c.RowCount,
+                        Converted = c.Converted,
+                        ExchangeRate = c.Rate,
+                        ConvertedSubtotal = c.ConvertedSubtotal,
+                        Reason = c.Reason
+                    })
+                    .ToList()
             };
         }
     }

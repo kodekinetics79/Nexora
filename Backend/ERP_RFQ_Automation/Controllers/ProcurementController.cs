@@ -145,6 +145,19 @@ public sealed class ProcurementController(
             IdempotencyKey(), Actor(), CorrelationId(), request.DeliveryEvidenceSha256,
             request.DeliveredOn), RequestAborted)));
 
+    /// <summary>
+    /// Cancels a purchase order that will never be received. Until this route existed a stranded
+    /// DRAFT purchase order permanently suppressed its RFQ line's net sourcing requirement, so the
+    /// line could never be re-sourced and the customer demand was unfulfillable with no operator
+    /// recourse.
+    /// </summary>
+    [HttpPost("purchase-orders/{purchaseOrderId:long}/cancel")]
+    [RequireModulePermission("Orders", PermissionAction.Edit)]
+    public Task<IActionResult> CancelPurchaseOrder(long purchaseOrderId, [FromBody] CancelSupplierPurchaseOrderRequest request)
+        => ExecuteAsync(async () => Ok(await service.CancelPurchaseOrderAsync(new CancelPurchaseOrderCommand(
+            TenantId(), purchaseOrderId, request.ExpectedVersion, request.Reason,
+            IdempotencyKey(), Actor(), CorrelationId()), RequestAborted)));
+
     [HttpPost("goods-receipts")]
     [RequireModulePermission("Orders", PermissionAction.Edit)]
     [RequireModulePermission("Products", PermissionAction.Edit)]
@@ -312,6 +325,10 @@ public sealed class IssueSupplierPurchaseOrderRequest
     public string DeliveryEvidenceSha256 { get; init; } = string.Empty;
     public DateTime DeliveredOn { get; init; }
 }
+
+public sealed record CancelSupplierPurchaseOrderRequest(
+    long ExpectedVersion,
+    string Reason);
 
 public sealed record PostGoodsReceiptRequest(
     long PurchaseOrderId,

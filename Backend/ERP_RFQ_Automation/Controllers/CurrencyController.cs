@@ -1,9 +1,11 @@
 using ERP_RFQ_Automation.DTOs.CurrencyDTOs;
+using ERP_RFQ_Automation.Fx;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using System;
 using System.Linq;
 using System.Threading.Tasks;
@@ -17,10 +19,23 @@ namespace ERP_RFQ_Automation.Controllers
     public class CurrencyController : ControllerBase
     {
         private readonly ICurrencyRepository _repository;
+        private readonly ErpRfqAutomationContext _context;
+        private readonly IFxConversionService _fx;
 
-        public CurrencyController(ICurrencyRepository repository)
+        // ErpRfqAutomationContext is already a registered scoped service, so the FX surface needs
+        // no new Program.cs wiring. FxConversionService is a thin, stateless collaborator over the
+        // context and is constructed directly for the same reason.
+        public CurrencyController(ICurrencyRepository repository, ErpRfqAutomationContext context)
         {
             _repository = repository;
+            _context = context;
+            _fx = new FxConversionService(context);
+        }
+
+        private long ResolveBusinessUnit(long? fromQuery)
+        {
+            var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            return claimBUId > 0 ? claimBUId : (fromQuery ?? 0);
         }
 
         [HttpGet]
@@ -192,6 +207,250 @@ namespace ERP_RFQ_Automation.Controllers
                 return NotFound(ex.Message);
             }
         }
+
+        // ---------------------------------------------------------------- FX rates
+        //
+        // Currency.ExchangeRate is a single mutable, undated column with no approval and no
+        // history. It is left in place for backward compatibility but is NOT what conversions
+        // read. The endpoints below manage the effective-dated, approval-gated FxRates table that
+        // the commercial side actually uses.
+
+        /// <summary>Effective-dated rates for this business unit, newest window first.</summary>
+        [HttpGet("fx-rates")]
+        public async Task<ActionResult<List<FxRateResponseDTO>>> GetFxRates(
+            [FromQuery] long? businessUnitId = null,
+            [FromQuery] long? fromCurrencyId = null,
+            [FromQuery] long? toCurrencyId = null,
+            [FromQuery] string? status = null)
+        {
+            var buId = ResolveBusinessUnit(businessUnitId);
+            if (buId <= 0) return BadRequest("Business Unit ID is required.");
+
+            var query = _context.FxRates.AsNoTracking().Where(r => r.BusinessUnitId == buId);
+            if (fromCurrencyId.HasValue) query = query.Where(r => r.FromCurrencyId == fromCurrencyId.Value);
+            if (toCurrencyId.HasValue) query = query.Where(r => r.ToCurrencyId == toCurrencyId.Value);
+            if (!string.IsNullOrWhiteSpace(status)) query = query.Where(r => r.Status == status);
+
+            var rates = await query
+                .OrderByDescending(r => r.EffectiveFrom).ThenByDescending(r => r.Id)
+                .ToListAsync();
+            var codes = await _context.Currencies.AsNoTracking()
+                .Where(c => c.BusinessUnitId == buId)
+                .ToDictionaryAsync(c => c.Id, c => c.Code);
+
+            return Ok(rates.Select(r => MapFxRate(r, codes)).ToList());
+        }
+
+        /// <summary>
+        /// Records a new effective-dated rate. It is created as Pending and is INERT until
+        /// approved — an unapproved rate can never move a commercial total.
+        /// </summary>
+        [HttpPost("fx-rates")]
+        public async Task<ActionResult<FxRateResponseDTO>> CreateFxRate(
+            [FromBody] FxRateCreateRequestDTO request, [FromQuery] long? businessUnitId = null)
+        {
+            var buId = ResolveBusinessUnit(businessUnitId);
+            if (buId <= 0) return BadRequest("Business Unit ID is required.");
+            if (request is null) return BadRequest("A request body is required.");
+            if (request.FromCurrencyId <= 0 || request.ToCurrencyId <= 0)
+                return BadRequest("Both a source and a target currency are required.");
+            if (request.FromCurrencyId == request.ToCurrencyId)
+                return BadRequest("A currency's rate against itself is always 1 and is not stored.");
+            if (request.Rate <= 0m)
+                return BadRequest("An exchange rate must be greater than zero.");
+            if (request.EffectiveTo.HasValue && request.EffectiveTo.Value <= request.EffectiveFrom)
+                return BadRequest("EffectiveTo must be later than EffectiveFrom.");
+
+            // Both currencies must belong to this business unit; the FK is not declared at the
+            // model level (see Models/ErpRfqAutomationContext.Fx.cs), so it is checked here.
+            var owned = await _context.Currencies.AsNoTracking()
+                .Where(c => c.BusinessUnitId == buId &&
+                            (c.Id == request.FromCurrencyId || c.Id == request.ToCurrencyId))
+                .Select(c => c.Id).ToListAsync();
+            if (owned.Count != 2)
+                return BadRequest("Both currencies must exist in this business unit.");
+
+            var duplicate = await _context.FxRates.AnyAsync(r => r.BusinessUnitId == buId &&
+                r.FromCurrencyId == request.FromCurrencyId && r.ToCurrencyId == request.ToCurrencyId &&
+                r.EffectiveFrom == request.EffectiveFrom);
+            if (duplicate)
+                return Conflict("A rate for this currency pair already starts at that effective date.");
+
+            var rate = new FxRate
+            {
+                BusinessUnitId = buId,
+                FromCurrencyId = request.FromCurrencyId,
+                ToCurrencyId = request.ToCurrencyId,
+                Rate = FxConversionService.RoundRate(request.Rate),
+                EffectiveFrom = request.EffectiveFrom,
+                EffectiveTo = request.EffectiveTo,
+                Source = string.IsNullOrWhiteSpace(request.Source) ? "Manual" : request.Source.Trim(),
+                Status = FxRateStatuses.Pending,
+                Version = 1,
+                CreatedBy = User.Identity?.Name ?? "System",
+                CreatedOn = DateTime.UtcNow,
+                Note = request.Note
+            };
+            _context.FxRates.Add(rate);
+            await _context.SaveChangesAsync();
+
+            var codes = await _context.Currencies.AsNoTracking()
+                .Where(c => c.BusinessUnitId == buId).ToDictionaryAsync(c => c.Id, c => c.Code);
+            return Ok(MapFxRate(rate, codes));
+        }
+
+        /// <summary>Approves a rate, making it visible to conversions from its effective date.</summary>
+        [HttpPost("fx-rates/{id}/approve")]
+        public async Task<ActionResult<FxRateResponseDTO>> ApproveFxRate(long id, [FromQuery] long? businessUnitId = null)
+        {
+            var buId = ResolveBusinessUnit(businessUnitId);
+            if (buId <= 0) return BadRequest("Business Unit ID is required.");
+
+            var rate = await _context.FxRates.FirstOrDefaultAsync(r => r.Id == id && r.BusinessUnitId == buId);
+            if (rate is null) return NotFound("Exchange rate not found.");
+            if (rate.Status == FxRateStatuses.Approved) return Conflict("This exchange rate is already approved.");
+
+            rate.Status = FxRateStatuses.Approved;
+            rate.ApprovedBy = User.Identity?.Name ?? "System";
+            rate.ApprovedOn = DateTime.UtcNow;
+            rate.Version += 1;
+            await _context.SaveChangesAsync();
+
+            var codes = await _context.Currencies.AsNoTracking()
+                .Where(c => c.BusinessUnitId == buId).ToDictionaryAsync(c => c.Id, c => c.Code);
+            return Ok(MapFxRate(rate, codes));
+        }
+
+        /// <summary>
+        /// The rate that would be applied for a pair at a given instant, and how it was reached.
+        /// Returns 409 with the explicit reason when no approved rate exists — the same fail-closed
+        /// wording the commercial totals surface.
+        /// </summary>
+        [HttpGet("fx-rates/effective")]
+        public async Task<IActionResult> GetEffectiveRate(
+            [FromQuery] long fromCurrencyId, [FromQuery] long toCurrencyId,
+            [FromQuery] DateTime? asOf = null, [FromQuery] long? businessUnitId = null)
+        {
+            var buId = ResolveBusinessUnit(businessUnitId);
+            if (buId <= 0) return BadRequest("Business Unit ID is required.");
+            if (fromCurrencyId <= 0 || toCurrencyId <= 0)
+                return BadRequest("Both a source and a target currency are required.");
+
+            var at = asOf ?? DateTime.UtcNow;
+            var resolution = await _fx.ResolveRateAsync(buId, fromCurrencyId, toCurrencyId, at);
+            if (!resolution.Found)
+                return Conflict(new ProblemDetails
+                {
+                    Status = StatusCodes.Status409Conflict,
+                    Title = "No approved exchange rate",
+                    Detail = resolution.Reason
+                });
+
+            return Ok(new
+            {
+                fromCurrencyId,
+                toCurrencyId,
+                asOf = at,
+                rate = resolution.Rate,
+                fxRateId = resolution.FxRateId,
+                rateEffectiveFrom = resolution.RateEffectiveFrom,
+                resolutionPath = resolution.ResolutionPath
+            });
+        }
+
+        // ------------------------------------------------------- FX snapshots (audit)
+
+        /// <summary>
+        /// "What rate was used on this quote?" — the stable answer. Returns every rate frozen
+        /// against the document, with the rate row and effective date it came from.
+        /// </summary>
+        [HttpGet("fx-snapshots/{documentType}/{documentId}")]
+        public async Task<ActionResult<List<FxRateSnapshotResponseDTO>>> GetFxSnapshots(
+            string documentType, long documentId, [FromQuery] long? businessUnitId = null)
+        {
+            var buId = ResolveBusinessUnit(businessUnitId);
+            if (buId <= 0) return BadRequest("Business Unit ID is required.");
+
+            var snapshots = await _fx.GetSnapshotsAsync(buId, documentType, documentId);
+            var codes = await _context.Currencies.AsNoTracking()
+                .Where(c => c.BusinessUnitId == buId).ToDictionaryAsync(c => c.Id, c => c.Code);
+
+            return Ok(snapshots.Select(s => new FxRateSnapshotResponseDTO
+            {
+                Id = s.Id,
+                DocumentType = s.DocumentType,
+                DocumentId = s.DocumentId,
+                FromCurrencyId = s.FromCurrencyId,
+                FromCurrencyCode = codes.TryGetValue(s.FromCurrencyId, out var fc) ? fc : null,
+                ToCurrencyId = s.ToCurrencyId,
+                ToCurrencyCode = codes.TryGetValue(s.ToCurrencyId, out var tc) ? tc : null,
+                Rate = s.Rate,
+                FxRateId = s.FxRateId,
+                RateEffectiveFrom = s.RateEffectiveFrom,
+                ResolutionPath = s.ResolutionPath,
+                AsOf = s.AsOf,
+                CapturedOn = s.CapturedOn,
+                CapturedBy = s.CapturedBy
+            }).ToList());
+        }
+
+        /// <summary>
+        /// Freezes the current approved rate against a document so later rate corrections cannot
+        /// restate it. Idempotent: an existing snapshot is returned unchanged.
+        /// </summary>
+        [HttpPost("fx-snapshots/{documentType}/{documentId}")]
+        public async Task<IActionResult> CaptureFxSnapshot(
+            string documentType, long documentId,
+            [FromQuery] long fromCurrencyId, [FromQuery] long toCurrencyId,
+            [FromQuery] DateTime? asOf = null, [FromQuery] long? businessUnitId = null)
+        {
+            var buId = ResolveBusinessUnit(businessUnitId);
+            if (buId <= 0) return BadRequest("Business Unit ID is required.");
+
+            try
+            {
+                var snapshot = await _fx.CaptureSnapshotAsync(buId, documentType, documentId,
+                    fromCurrencyId, toCurrencyId, asOf ?? DateTime.UtcNow, User.Identity?.Name ?? "System");
+                return Ok(new
+                {
+                    snapshot.Id, snapshot.DocumentType, snapshot.DocumentId,
+                    snapshot.FromCurrencyId, snapshot.ToCurrencyId, snapshot.Rate,
+                    snapshot.FxRateId, snapshot.RateEffectiveFrom, snapshot.ResolutionPath,
+                    snapshot.AsOf, snapshot.CapturedOn, snapshot.CapturedBy
+                });
+            }
+            catch (FxConversionException ex)
+            {
+                // Same surfacing contract as Procurement: the message is the contract.
+                return Conflict(new ProblemDetails
+                {
+                    Status = StatusCodes.Status409Conflict,
+                    Title = "No approved exchange rate",
+                    Detail = ex.Message
+                });
+            }
+        }
+
+        private static FxRateResponseDTO MapFxRate(FxRate r, IReadOnlyDictionary<long, string> codes) => new()
+        {
+            Id = r.Id,
+            BusinessUnitID = r.BusinessUnitId,
+            FromCurrencyId = r.FromCurrencyId,
+            FromCurrencyCode = codes.TryGetValue(r.FromCurrencyId, out var fc) ? fc : null,
+            ToCurrencyId = r.ToCurrencyId,
+            ToCurrencyCode = codes.TryGetValue(r.ToCurrencyId, out var tc) ? tc : null,
+            Rate = r.Rate,
+            EffectiveFrom = r.EffectiveFrom,
+            EffectiveTo = r.EffectiveTo,
+            Source = r.Source,
+            Status = r.Status,
+            ApprovedBy = r.ApprovedBy,
+            ApprovedOn = r.ApprovedOn,
+            Version = r.Version,
+            CreatedBy = r.CreatedBy,
+            CreatedOn = r.CreatedOn,
+            Note = r.Note
+        };
 
         private static CurrencyResponseDTO MapToResponse(Currency c) => new()
         {

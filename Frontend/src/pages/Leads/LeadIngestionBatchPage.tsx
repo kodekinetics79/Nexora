@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   Alert,
+  AlertTitle,
   Box,
   Button,
   Chip,
@@ -16,11 +17,13 @@ import {
   Paper,
   Stack,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
   CheckCircleOutlined as NewIcon,
+  CloudOff as OfflineIcon,
   ContentCopy as DuplicateIcon,
   ErrorOutlined as RejectedIcon,
   FactCheck as ReviewIcon,
@@ -35,13 +38,49 @@ import dayjs from 'dayjs';
 import leadService from '../../api/services/leadService';
 import type { BatchReconciliationItemDTO, LeadMatchCandidateDTO, MatchReviewDecisionAction } from '../../api/services/leadService';
 import { useAuth } from '../../context/AuthContext';
+import ApiErrorNotice from '../../components/common/ApiErrorNotice';
+import { looksLikeTechnicalNoise } from '../../utils/apiErrors';
+import { explainIntakeItem, isInfrastructureHold } from '../../utils/intakeErrors';
 
 type ChipColor = 'default' | 'primary' | 'success' | 'warning' | 'error' | 'info';
 
+/**
+ * Prettifies machine tokens for LABELS ONLY (statuses, classifications, processing paths).
+ *
+ * It must never be used on an error code: title-casing `document_quarantined` into "Document
+ * Quarantined" restates the code without explaining anything. Error codes go through
+ * `explainIntakeItem` in src/utils/intakeErrors.ts.
+ */
 const readable = (value: string): string => value
   .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
   .replaceAll('_', ' ')
   .replace(/\b\w/g, (character) => character.toUpperCase());
+
+/**
+ * `reasons` is the literal path by which backend exception text becomes product copy: the read
+ * model falls back to the extraction job's raw `LastError`
+ * (LeadIdentity/LeadIdentityApplicationService.cs:399-400). Anything carrying operator signal is
+ * withheld here — `explainIntakeItem` already provides the user-facing explanation, and the raw
+ * text stays available through the support disclosure.
+ */
+const presentableReasons = (reasons: string[]): string[] => reasons
+  .map((reason) => reason.trim())
+  .filter((reason) => reason.length > 0)
+  // "Intake stopped: document quarantined." is the code echoed back; the error map says it better.
+  .filter((reason) => !/^Intake (?:stopped|status):/i.test(reason))
+  .filter((reason) => !looksLikeTechnicalNoise(reason));
+
+const withheldReasons = (reasons: string[]): string[] => reasons
+  .map((reason) => reason.trim())
+  .filter((reason) => reason.length > 0 && looksLikeTechnicalNoise(reason));
+
+/**
+ * Poll backoff. The old loop stopped the moment nothing was Pending or Awaiting, so a scanner that
+ * recovered minutes later was never noticed. We keep watching while infrastructure holds remain,
+ * and widen the interval so a long outage is not a tight loop against the API.
+ */
+export const pollIntervalFor = (completedFetches: number): number =>
+  Math.min(2000 * 2 ** Math.floor(Math.max(completedFetches, 0) / 3), 30000);
 
 const classificationMeta = (classification: string): { label: string; color: ChipColor } => {
   const normalized = classification.replaceAll('_', '').toLowerCase();
@@ -126,13 +165,8 @@ const responseStatus = (error: unknown): number | undefined => {
   return typeof response?.status === 'number' ? response.status : undefined;
 };
 
-const batchErrorMessage = (status: number | undefined): { severity: 'warning' | 'error'; message: string } => {
-  if (status === 401) return { severity: 'error', message: 'Your session is no longer authorized. Sign in again to view this batch.' };
-  if (status === 403) return { severity: 'error', message: 'You do not have permission to view this reconciliation batch.' };
-  if (status === 404) return { severity: 'warning', message: 'This reconciliation batch was not found for your organization.' };
-  if (status === 409) return { severity: 'warning', message: 'This batch changed while it was being reviewed. Refresh to load the current state.' };
-  return { severity: 'error', message: 'The reconciliation service is unavailable. The source remains safely recorded; retry when the service recovers.' };
-};
+const BATCH_LOAD_FALLBACK =
+  'The reconciliation service is not answering. Every source document remains safely recorded — retry when the service recovers.';
 
 const MatchReviewPanel = ({ occurrenceId, candidate }: { occurrenceId: number; candidate: LeadMatchCandidateDTO }) => {
   const queryClient = useQueryClient();
@@ -179,22 +213,41 @@ const MatchReviewPanel = ({ occurrenceId, candidate }: { occurrenceId: number; c
           <Button variant="contained" onClick={() => mutation.mutate()} disabled={!reason.trim() || mutation.isPending}>Record decision</Button>
         </DialogActions>
       </Dialog>
-      {mutation.isError && <Alert severity="error" sx={{ mt: 1 }}>The decision was not recorded. Refresh and try again.</Alert>}
+      {mutation.isError && (
+        <ApiErrorNotice
+          error={mutation.error}
+          fallbackMessage="The decision was not recorded. Nothing changed — refresh and try again."
+          sx={{ mt: 1 }}
+        />
+      )}
     </Box>
   );
 };
 
-const ReconciliationRow = ({ item }: { item: BatchReconciliationItemDTO }) => {
+interface ReconciliationRowProps {
+  item: BatchReconciliationItemDTO;
+  /** Present only when the signed-in user may release held files. */
+  onRetryHold?: () => void;
+  retrying?: boolean;
+  /** Outcome recorded for this occurrence by the most recent retry sweep. */
+  retryOutcome?: { status: string; errorCode?: string | null };
+}
+
+const ReconciliationRow = ({ item, onRetryHold, retrying, retryOutcome }: ReconciliationRowProps) => {
   const navigate = useNavigate();
   const { hasPermission } = useAuth();
-  const awaitingScan = item.intakeStatus === 'AwaitingSecurityScan';
+  const held = isInfrastructureHold(item);
   const classificationPending = item.classification.replaceAll('_', '').toLowerCase() === 'pending';
-  const hasExtractionScore = !awaitingScan && !classificationPending;
+  const hasExtractionScore = !held && !classificationPending;
   const canPrepareRfq = hasPermission('Leads', 'create') && hasPermission('RFQ Management', 'create');
-  const meta = awaitingScan
-    ? { label: 'Awaiting Security Scan', color: 'warning' as ChipColor }
+  const failed = held || item.classification.replaceAll('_', '').toLowerCase() === 'rejectedorunprocessable';
+  const explanation = failed ? explainIntakeItem(item) : null;
+  const meta = held
+    ? { label: 'Held — scanning offline', color: 'warning' as ChipColor }
     : classificationMeta(item.classification);
   const canOpenLead = typeof item.leadId === 'number' && item.leadId > 0;
+  const shownReasons = presentableReasons(item.reasons);
+  const hiddenReasons = withheldReasons(item.reasons);
 
   return (
     <Paper component="article" variant="outlined" sx={{ p: { xs: 2, md: 2.5 }, borderRadius: 2 }}>
@@ -222,18 +275,51 @@ const ReconciliationRow = ({ item }: { item: BatchReconciliationItemDTO }) => {
             Security {readable(item.securityStatus || 'Pending')} updated {timestampLabel(item.securityScanUpdatedAtUtc || item.lastUpdatedAtUtc)}
             {item.extractionStatus ? ` | Extraction ${readable(item.extractionStatus)} updated ${timestampLabel(item.extractionUpdatedAtUtc)}` : ''}
           </Typography>
-          {item.intakeStatus && item.intakeStatus !== 'Reconciled' && (
-            <Typography variant="body2" color={meta.color === 'error' ? 'error.main' : 'text.secondary'} sx={{ mt: 0.75 }}>
-              Intake: {readable(item.intakeStatus)}{item.errorCode ? ` (${readable(item.errorCode)})` : ''}
+          {explanation && (
+            <Alert
+              severity={explanation.category === 'infrastructure' ? 'warning' : 'error'}
+              icon={explanation.category === 'infrastructure' ? <OfflineIcon fontSize="inherit" /> : undefined}
+              variant="outlined"
+              sx={{ mt: 1.25, borderRadius: 1.5 }}
+            >
+              <AlertTitle sx={{ fontWeight: 800, mb: 0.25 }}>{explanation.title}</AlertTitle>
+              <Typography variant="body2">{explanation.whatHappened}</Typography>
+              <Typography variant="body2" sx={{ mt: 0.5, fontWeight: 700 }}>{explanation.nextAction}</Typography>
+              {shownReasons.length > 0 && (
+                <Stack spacing={0.25} sx={{ mt: 0.75 }}>
+                  {shownReasons.map((reason) => (
+                    <Typography key={reason} variant="caption" color="text.secondary">{reason}</Typography>
+                  ))}
+                </Stack>
+              )}
+              {hiddenReasons.length > 0 && (
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.75 }}>
+                  Diagnostic detail was recorded for support and is not shown here.
+                </Typography>
+              )}
+              {retryOutcome && (
+                <Typography variant="caption" sx={{ display: 'block', mt: 0.75, fontWeight: 700 }}>
+                  Last retry: {retryOutcome.status === 'Queued'
+                    ? 'released for processing.'
+                    : retryOutcome.status === 'StillAwaiting'
+                      ? 'scanning is still offline; this file stays held.'
+                      : readable(retryOutcome.status)}
+                </Typography>
+              )}
+            </Alert>
+          )}
+          {!explanation && item.intakeStatus && item.intakeStatus !== 'Reconciled' && (
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.75 }}>
+              Intake: {readable(item.intakeStatus)}
             </Typography>
           )}
           <Typography variant="body2" sx={{ mt: 1 }}>
             Customer: {readable(item.customerResolutionStatus || 'Awaiting customer resolution')}
             {' | '}Owner: {item.assignedOpportunityOwner || 'Not assigned'}
           </Typography>
-          {item.reasons.length > 0 && (
+          {!explanation && shownReasons.length > 0 && (
             <Stack spacing={0.25} sx={{ mt: 1 }}>
-              {item.reasons.map((reason) => (
+              {shownReasons.map((reason) => (
                 <Typography key={reason} variant="body2" color="text.secondary">{reason}</Typography>
               ))}
             </Stack>
@@ -249,6 +335,22 @@ const ReconciliationRow = ({ item }: { item: BatchReconciliationItemDTO }) => {
             color={item.externalAiUsed ? 'warning' : 'default'}
             variant="outlined"
           />
+          {held && onRetryHold && (
+            <Tooltip title="Replays this file from its stored original. Releases every held file in this batch — no re-upload needed.">
+              <span>
+                <Button
+                  variant="contained"
+                  color="warning"
+                  size="small"
+                  startIcon={retrying ? <CircularProgress size={16} color="inherit" /> : <RetryIcon />}
+                  onClick={onRetryHold}
+                  disabled={retrying}
+                >
+                  {retrying ? 'Retrying…' : 'Retry security scan'}
+                </Button>
+              </span>
+            </Tooltip>
+          )}
           {canOpenLead && (
             <>
               <Button
@@ -295,9 +397,16 @@ export default function LeadIngestionBatchPage() {
     refetchInterval: (query) => {
       const batch = query.state.data;
       if (!batch) return 2000;
-      return batch.items.length < batch.filesReceived || batch.items.some((item) =>
-        item.classification.replaceAll('_', '').toLowerCase() === 'pending'
-        || item.intakeStatus === 'AwaitingSecurityScan') ? 2000 : false;
+      const stillArriving = batch.items.length < batch.filesReceived;
+      const stillProcessing = batch.items.some((item) =>
+        item.classification.replaceAll('_', '').toLowerCase() === 'pending');
+      // Infrastructure holds keep the loop alive: the scanner may recover at any point, and the
+      // user must see that happen without reloading the page.
+      const stillHeld = batch.items.some(isInfrastructureHold);
+      if (!stillArriving && !stillProcessing && !stillHeld) return false;
+      return stillArriving || stillProcessing
+        ? 2000
+        : pollIntervalFor(query.state.dataUpdateCount);
     },
   });
   const retryMutation = useMutation({
@@ -318,21 +427,29 @@ export default function LeadIngestionBatchPage() {
   }
 
   if (batchQuery.isError || !batchQuery.data) {
-    const error = batchErrorMessage(responseStatus(batchQuery.error));
     return (
       <Box sx={{ maxWidth: 900, mx: 'auto', p: 3 }}>
-        <Alert
-          severity={error.severity}
-          action={<Button color="inherit" startIcon={<RefreshIcon />} onClick={() => batchQuery.refetch()}>Check again</Button>}
-        >
-          {error.message}
-        </Alert>
+        <ApiErrorNotice
+          error={batchQuery.error}
+          fallbackMessage={BATCH_LOAD_FALLBACK}
+          onRetry={() => batchQuery.refetch()}
+          retryLabel="Check again"
+        />
       </Box>
     );
   }
 
   const batch = batchQuery.data;
-  const awaitingSecurityScan = batch.awaitingSecurityScan ?? 0;
+  // Derived from the items, NOT from `batch.awaitingSecurityScan`. That counter only tallies intake
+  // occurrences that were never reconciled, so it reaches 0 the moment a hold is recorded against a
+  // reconciled occurrence — which is exactly when the retry control used to vanish and strand the
+  // files. `recoverableSecurityHold` is per-item and durable.
+  const heldItems = batch.items.filter(isInfrastructureHold);
+  const heldCount = Math.max(heldItems.length, batch.awaitingSecurityScan ?? 0);
+  const canRetryHolds = heldCount > 0 && canCreateLeads;
+  const retryOutcomes = new Map(
+    (retryMutation.data?.items ?? []).map((entry) => [entry.sourceDocumentOccurrenceId, entry]),
+  );
   const metrics = [
     { label: 'Files received', value: batch.filesReceived, classification: null, icon: <FilesIcon color="action" /> },
     { label: 'Logical inquiries', value: batch.logicalInquiries, classification: null, icon: <ReviewIcon color="action" /> },
@@ -340,14 +457,14 @@ export default function LeadIngestionBatchPage() {
     { label: 'Exact duplicates', value: batch.exactDuplicates, classification: 'exactduplicate', icon: <DuplicateIcon color="info" /> },
     { label: 'Revisions', value: batch.revisions, classification: 'revision', icon: <RevisionIcon color="primary" /> },
     { label: 'Possible matches', value: batch.possibleMatches, classification: 'possiblematchreviewrequired', icon: <ReviewIcon color="warning" /> },
-    { label: 'Awaiting security scan', value: awaitingSecurityScan, classification: 'awaitingsecurityscan', icon: <SecurityIcon color="warning" /> },
+    { label: 'Held by scanning', value: heldCount, classification: 'awaitingsecurityscan', icon: <SecurityIcon color="warning" /> },
     { label: 'Rejected', value: batch.rejected, classification: 'rejectedorunprocessable', icon: <RejectedIcon color="error" /> },
   ];
   const pendingCount = Math.max(batch.filesReceived - batch.items.length, 0) + batch.items.filter((item) =>
     item.classification.replaceAll('_', '').toLowerCase() === 'pending').length;
   const visibleItems = activeClassification === null ? batch.items : batch.items.filter((item) =>
     activeClassification === 'awaitingsecurityscan'
-      ? item.intakeStatus === 'AwaitingSecurityScan'
+      ? isInfrastructureHold(item)
       : item.classification.replaceAll('_', '').toLowerCase() === activeClassification);
 
   return (
@@ -359,7 +476,7 @@ export default function LeadIngestionBatchPage() {
         </Box>
         <Stack direction="row" spacing={1}>
           {canCreateLeads && <Button startIcon={<BackIcon />} onClick={() => navigate('/procurement/leads/manual-upload')}>New upload</Button>}
-          {awaitingSecurityScan > 0 && canCreateLeads && (
+          {canRetryHolds && (
             <Button
               variant="contained"
               color="warning"
@@ -367,7 +484,7 @@ export default function LeadIngestionBatchPage() {
               onClick={() => retryMutation.mutate()}
               disabled={retryMutation.isPending}
             >
-              Retry Blocked Files
+              {retryMutation.isPending ? 'Retrying…' : `Retry ${heldCount} held file${heldCount === 1 ? '' : 's'}`}
             </Button>
           )}
           <Button variant="outlined" startIcon={batchQuery.isFetching ? <CircularProgress size={16} /> : <RefreshIcon />} onClick={() => batchQuery.refetch()} disabled={batchQuery.isFetching}>
@@ -392,14 +509,63 @@ export default function LeadIngestionBatchPage() {
         ))}
       </Grid>
 
+      {/*
+        Degraded-service banner. An infrastructure outage is not a rejection: it is our fault, the
+        files are intact, and they resume without the user doing anything. It is deliberately styled
+        as an outage notice (warning + offline icon) so it never reads like the per-file content
+        rejections below it.
+      */}
+      {heldCount > 0 && (
+        <Alert
+          severity="warning"
+          icon={<OfflineIcon fontSize="inherit" />}
+          sx={{ mb: 2, borderLeft: 4, borderColor: 'warning.main' }}
+          action={canRetryHolds ? (
+            <Button
+              color="inherit"
+              size="small"
+              startIcon={retryMutation.isPending ? <CircularProgress size={16} color="inherit" /> : <RetryIcon />}
+              onClick={() => retryMutation.mutate()}
+              disabled={retryMutation.isPending}
+            >
+              Retry now
+            </Button>
+          ) : undefined}
+        >
+          <AlertTitle sx={{ fontWeight: 800 }}>Malware scanning is offline</AlertTitle>
+          {heldCount} file{heldCount === 1 ? ' is' : 's are'} held safely and will process automatically when it
+          recovers. Nothing is wrong with {heldCount === 1 ? 'this document' : 'these documents'}, and no re-upload
+          is needed — the originals are stored exactly as you sent them.
+        </Alert>
+      )}
+
       <Box aria-live="polite" sx={{ mb: retryMutation.isSuccess || retryMutation.isError ? 2 : 0 }}>
         {retryMutation.isSuccess && (
-          <Alert severity={retryMutation.data.stillAwaiting > 0 || retryMutation.data.sourceObjectUnavailable > 0 ? 'warning' : 'success'}>
-            Retry complete: {retryMutation.data.queued} queued, {retryMutation.data.stillAwaiting} still awaiting security scan, {retryMutation.data.rejected} rejected, {retryMutation.data.sourceObjectUnavailable} source objects unavailable.
+          <Alert severity={retryMutation.data.queued > 0 ? 'success' : 'warning'}>
+            <AlertTitle sx={{ fontWeight: 800 }}>
+              {retryMutation.data.queued > 0
+                ? `${retryMutation.data.queued} file${retryMutation.data.queued === 1 ? '' : 's'} released for processing`
+                : 'No files could be released yet'}
+            </AlertTitle>
+            {retryMutation.data.stillAwaiting > 0 && (
+              <>{retryMutation.data.stillAwaiting} still held because scanning has not recovered. They stay queued and retry automatically. </>
+            )}
+            {retryMutation.data.rejected > 0 && (
+              <>{retryMutation.data.rejected} did not pass inspection on this attempt. </>
+            )}
+            {retryMutation.data.sourceObjectUnavailable > 0 && (
+              <>{retryMutation.data.sourceObjectUnavailable} could not be read from storage — contact support with this batch reference. </>
+            )}
+            {retryMutation.data.eligible === 0 && 'No file in this batch is currently eligible for replay.'}
+            {retryMutation.data.moreRemaining && ' More files remain — run the retry again to continue.'}
           </Alert>
         )}
         {retryMutation.isError && (
-          <Alert severity="error">Blocked files could not be retried. Their stored evidence and current status are unchanged.</Alert>
+          <ApiErrorNotice
+            error={retryMutation.error}
+            fallbackMessage="Held files could not be retried. Their stored originals and current status are unchanged — try again shortly."
+            onRetry={() => retryMutation.mutate()}
+          />
         )}
       </Box>
 
@@ -429,6 +595,11 @@ export default function LeadIngestionBatchPage() {
             <ReconciliationRow
               key={`${item.sourceDocumentOccurrenceId ?? 'lead'}:${item.occurrenceId}:${item.classification}`}
               item={item}
+              onRetryHold={canCreateLeads ? () => retryMutation.mutate() : undefined}
+              retrying={retryMutation.isPending}
+              retryOutcome={item.sourceDocumentOccurrenceId != null
+                ? retryOutcomes.get(item.sourceDocumentOccurrenceId)
+                : undefined}
             />
           ))}
         </Stack>

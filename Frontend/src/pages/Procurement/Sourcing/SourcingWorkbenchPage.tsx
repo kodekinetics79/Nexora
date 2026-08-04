@@ -103,6 +103,15 @@ const statusColor = (
   return "default";
 };
 
+/**
+ * Only a solicitation whose delivery FAILED can be retried. The server refuses every other
+ * status, so gating the button on the red status colour (which also covers CANCELLED,
+ * EXPIRED and DECLINED) offered a Retry that could never succeed and always ended in an
+ * error toast. Mirrors ProcurementApplicationService.RetrySolicitationAsync.
+ */
+const isRetryable = (status: string): boolean =>
+  status.replaceAll("_", "").toUpperCase() === "DELIVERYFAILED";
+
 const ResolutionChip = ({ resolution }: { resolution: string }) => {
   const colors: Record<
     string,
@@ -547,7 +556,7 @@ function SourcingWorkbenchPage() {
                     spacing={1}
                     sx={{ justifyContent: "flex-end" }}
                   >
-                    {canSolicit && statusColor(item.status) === "error" && (
+                    {canSolicit && isRetryable(item.status) && (
                       <Button
                         size="small"
                         startIcon={<Replay />}

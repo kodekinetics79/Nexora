@@ -8,7 +8,11 @@ export async function loginThroughUi(page: Page, credentials: LoginCredentials):
     localStorage.removeItem('userData');
   });
   await page.getByLabel('Email Address').fill(credentials.email);
-  await page.getByLabel('Password').fill(credentials.password);
+  // The password field now sits next to a "Show password" reveal button, so a
+  // substring getByLabel('Password') matches both. Match on the computed
+  // accessible name + role instead (getByLabel with exact:true would miss the
+  // input, whose <label> text carries MUI's required asterisk).
+  await page.getByRole('textbox', { name: 'Password', exact: true }).fill(credentials.password);
   await page.getByRole('button', { name: 'LOGIN' }).click();
 
   const continueButton = page.getByRole('button', { name: 'CONTINUE' });

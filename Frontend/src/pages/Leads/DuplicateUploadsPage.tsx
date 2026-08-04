@@ -20,6 +20,7 @@ import {
 } from '@mui/material';
 import { OpenInNew, Refresh } from '@mui/icons-material';
 import leadService from '../../api/services/leadService';
+import ApiErrorNotice from '../../components/common/ApiErrorNotice';
 import { useAuth } from '../../context/AuthContext';
 
 const readable = (value: string): string => value.replaceAll('_', ' ').toLowerCase()
@@ -73,7 +74,13 @@ export default function DuplicateUploadsPage() {
   );
 
   if (query.isLoading) return <Box sx={{ p: 4, textAlign: 'center' }}><CircularProgress /></Box>;
-  if (query.isError) return <Alert severity="error">Duplicate uploads could not be loaded.</Alert>;
+  if (query.isError) return (
+    <ApiErrorNotice
+      error={query.error}
+      fallbackMessage="Duplicate uploads could not be loaded. Nothing was changed — try again."
+      onRetry={() => query.refetch()}
+    />
+  );
 
   return (
     <Box sx={{ maxWidth: 1600, mx: 'auto', p: { xs: 2, md: 3 } }}>
@@ -90,7 +97,11 @@ export default function DuplicateUploadsPage() {
       </Stack>
 
       {retryMutation.isError && (
-        <Alert severity="error" sx={{ mb: 2 }}>The blocked files could not be retried.</Alert>
+        <ApiErrorNotice
+          error={retryMutation.error}
+          fallbackMessage="Held files could not be retried. Their stored originals and current status are unchanged — try again shortly."
+          sx={{ mb: 2 }}
+        />
       )}
       {retryMutation.data && (
         <Alert severity={retryMutation.data.stillAwaiting > 0 || retryMutation.data.sourceObjectUnavailable > 0 ? 'warning' : 'success'} sx={{ mb: 2 }}>

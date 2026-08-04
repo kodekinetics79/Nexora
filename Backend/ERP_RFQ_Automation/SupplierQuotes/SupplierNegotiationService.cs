@@ -822,15 +822,24 @@ public sealed class SupplierNegotiationService(ErpRfqAutomationContext context)
         .Select(char.ToUpperInvariant).ToArray());
     private static decimal? CommercialPrice(NegotiationProjection projection) =>
         projection.LandedUnitCost is > 0 ? projection.LandedUnitCost : null;
+    /// <summary>
+    /// The landed unit cost of a line in the CURRENT round, computed with the same definition
+    /// the canonical projection persists (<see cref="LandedCostFormula"/>).
+    ///
+    /// This matters because the figure is compared against persisted
+    /// <c>SupplierQuotedItem.LandedUnitCost</c> / <c>SourcingAward.LandedUnitCost</c> values in
+    /// <see cref="PostSelectionIncreaseEvidence"/>, and a &gt;2% gap there raises a CRITICAL,
+    /// BLOCKING flag. When the two sides used different allocation bases the flag fired on
+    /// arithmetic rather than on anything the supplier did.
+    /// </summary>
     private static decimal CurrentLandedUnitCost(SupplierQuoteRevision revision, SupplierQuoteLine line)
     {
-        var totalMerchandiseValue = revision.Lines.Sum(x => x.UnitPrice * x.Quantity);
-        var lineValue = line.UnitPrice * line.Quantity;
-        var sharedCharges = revision.FreightAmount + revision.TaxAmount;
-        var allocated = totalMerchandiseValue <= 0 || line.Quantity <= 0
-            ? 0
-            : sharedCharges * (lineValue / totalMerchandiseValue) / line.Quantity;
-        return decimal.Round(line.UnitPrice + allocated, 4);
+        var totalLineValue = LandedCostFormula.TotalLineValue(
+            revision.Lines.Select(x => (x.UnitPrice, x.Quantity)));
+        var lineValue = LandedCostFormula.LineValue(line.UnitPrice, line.Quantity);
+        var freight = LandedCostFormula.AllocateByValue(revision.FreightAmount, lineValue, totalLineValue);
+        var tax = LandedCostFormula.AllocateByValue(revision.TaxAmount, lineValue, totalLineValue);
+        return LandedCostFormula.UnitCost(line.UnitPrice, line.Quantity, freight, tax);
     }
     private static decimal Median(IReadOnlyList<decimal> values) => values.Count % 2 == 1
         ? values[values.Count / 2]

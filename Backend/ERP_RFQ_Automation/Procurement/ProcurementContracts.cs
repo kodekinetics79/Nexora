@@ -22,6 +22,19 @@ public interface IProcurementApplicationService
     Task<AwardResult> ApproveAwardAsync(ApproveAwardCommand command, CancellationToken ct = default);
     Task<PurchaseOrderResult> CreatePurchaseOrderAsync(CreatePurchaseOrderCommand command, CancellationToken ct = default);
     Task<PurchaseOrderResult> IssuePurchaseOrderAsync(IssuePurchaseOrderCommand command, CancellationToken ct = default);
+
+    /// <summary>
+    /// Cancels a purchase order that will never be received, releasing the supply it committed.
+    ///
+    /// <para>Without this there was no code path anywhere that assigned
+    /// <see cref="SupplierPurchaseOrderStatuses.Cancelled"/>. A DRAFT purchase order whose supplier
+    /// quotes had lapsed could never be issued and never be cancelled, yet it kept suppressing the
+    /// net sourcing requirement for its RFQ line — so re-sourcing threw "already fully covered" and
+    /// the customer line became permanently unfulfillable with no operator recourse.</para>
+    /// </summary>
+    Task<PurchaseOrderResult> CancelPurchaseOrderAsync(CancelPurchaseOrderCommand command, CancellationToken ct = default)
+        => throw new NotSupportedException("Purchase order cancellation is not supported by this procurement adapter.");
+
     Task<GoodsReceiptResult> PostGoodsReceiptAsync(PostGoodsReceiptCommand command, CancellationToken ct = default);
 }
 
@@ -204,6 +217,15 @@ public sealed record IssuePurchaseOrderCommand(
     string? DeliveryEvidenceSha256 = null,
     DateTime? DeliveredOn = null);
 
+public sealed record CancelPurchaseOrderCommand(
+    long BusinessUnitId,
+    long PurchaseOrderId,
+    long ExpectedVersion,
+    string Reason,
+    string IdempotencyKey,
+    string Actor,
+    string CorrelationId);
+
 public sealed record PostGoodsReceiptCommand(
     long BusinessUnitId,
     long PurchaseOrderId,
@@ -242,7 +264,8 @@ public sealed record SourcingLineView(long Id, long RfqId, long? ProductId, long
 public sealed record SolicitationView(long Id, long RfqId, long SupplierId, string SupplierName,
     string? SupplierEmail, IReadOnlyCollection<long> RfqItemIds, string Status, string Channel,
     int AttemptCount, string? ProviderReference,
-    string? LastErrorCode, DateTime? SentOn, DateTime? RespondedOn, DateTime UpdatedOn, long Version);
+    string? LastErrorCode, DateTime? SentOn, DateTime? RespondedOn, DateTime UpdatedOn, long Version,
+    DateTime? DueOn = null);
 public sealed record SupplierOfferView(long Id, long SolicitationId, long RfqItemId, long SupplierId,
     string SupplierName, string? QuoteReference, int QuoteRevision, long CurrencyId, string CurrencyCode,
     decimal Quantity, decimal? AvailableQuantity, decimal UnitPrice, decimal FreightCost, decimal DutyCost,

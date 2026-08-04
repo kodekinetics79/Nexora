@@ -21,6 +21,7 @@ import {
   TableCell,
   TableHead,
   TableRow,
+  TextField,
   ToggleButton,
   ToggleButtonGroup,
   Typography,
@@ -71,6 +72,7 @@ function SourcingCasePage() {
   const [candidateLimit, setCandidateLimit] = useState<CandidateLimit>(10);
   const [selectedSupplierIds, setSelectedSupplierIds] = useState<number[]>([]);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [responseDueOn, setResponseDueOn] = useState("");
 
   const queryKey = ["sourcing-case", sourcingCaseId];
   const query = useQuery({
@@ -136,6 +138,10 @@ function SourcingCasePage() {
         selectedSupplierIds,
         query.data.version,
         crypto.randomUUID(),
+        // <input type="datetime-local"> yields a local wall-clock string with no
+        // zone. The API rejects non-UTC and past deadlines, so convert to a real
+        // UTC instant here rather than sending the raw field value.
+        responseDueOn ? new Date(responseDueOn).toISOString() : null,
       );
     },
     onSuccess: async (results) => {
@@ -364,6 +370,16 @@ function SourcingCasePage() {
               />
             ))}
           </Stack>
+          <TextField
+            type="datetime-local"
+            label="Supplier response deadline (optional)"
+            value={responseDueOn}
+            onChange={(event: React.ChangeEvent<HTMLInputElement>) => setResponseDueOn(event.target.value)}
+            fullWidth
+            sx={{ mt: 2 }}
+            slotProps={{ inputLabel: { shrink: true } }}
+            helperText="Leave blank for no deadline. Sent to the supplier and recorded on the solicitation."
+          />
           <Alert severity="info" sx={{ mt: 2 }}>
             Customer target prices and margin data are not included.
           </Alert>

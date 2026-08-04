@@ -9,6 +9,17 @@ namespace ERP_RFQ_Automation.Services.Interfaces
     {
         AiProviderClass ProviderClass => AiProviderClass.External;
 
+        /// <summary>
+        /// The canonical identity of the endpoint this client will actually call —
+        /// normalized origin, model, resolved provider class and the reason for that
+        /// classification. Callers that must decide whether egress to this destination is
+        /// authorized (see <c>IAiExternalProviderTrust</c>) match against THIS value, so
+        /// the endpoint that is governed is provably the endpoint that is called.
+        /// The default is deliberately unresolved-and-External: an implementation that
+        /// does not describe itself can never be matched by an allow-list, so it fails closed.
+        /// </summary>
+        AiProviderDescriptor ProviderDescriptor => AiProviderDescriptor.Unresolved();
+
         Task<LeadExtractionResult?> ExtractLeadDataAsync(
             string fullText, AiCallContext context, CancellationToken cancellationToken = default);
 

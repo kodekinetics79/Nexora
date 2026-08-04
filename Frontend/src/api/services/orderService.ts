@@ -48,11 +48,31 @@ export interface OrderItemDTO {
 }
 
 // Mirrors Backend DTOs/OrderDTOs/OrderStatsDTO.cs (GET /api/Order/stats).
+export interface OrderStatsCurrencyBreakdownDTO {
+  currencyId: number | null;
+  currencyCode: string | null;
+  subtotal: number;
+  orderCount: number;
+  converted: boolean;
+  exchangeRate: number | null;
+  convertedSubtotal: number | null;
+  reason: string | null;
+}
+
 export interface OrderStatsDTO {
   totalOrders: number;
   pendingOrders: number;
   completedOrders: number;
-  totalRevenue: number;
+  /**
+   * Converted into `totalRevenueCurrency` using approved FX rates. NULL means "not answerable",
+   * never zero — do not coalesce it to 0. When it is null, `totalRevenueUnavailableReason`
+   * says why and `revenueByCurrency` is the honest thing to show instead.
+   */
+  totalRevenue: number | null;
+  totalRevenueCurrency: string | null;
+  totalRevenueConverted: boolean;
+  totalRevenueUnavailableReason: string | null;
+  revenueByCurrency: OrderStatsCurrencyBreakdownDTO[];
 }
 
 const orderService = {

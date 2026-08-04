@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useId } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import {
   Box,
@@ -10,6 +10,7 @@ import {
   Collapse,
   Tooltip,
 } from '@mui/material';
+import { alpha } from '@mui/material/styles';
 import { useTranslation } from 'react-i18next';
 import {
   Dashboard as DashboardIcon,
@@ -54,6 +55,9 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
   const { t } = useTranslation();
   const { userData, hasPermission } = useAuth();
   const isManager = userData.isManager === true;
+  // Two Sidebars are mounted at once (mobile drawer + permanent drawer), so
+  // aria-controls targets must be unique per instance.
+  const instanceId = useId();
 
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
     'dashboard': location.pathname.startsWith('/dashboard'),
@@ -295,25 +299,55 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
       ? item.children!.some(child => isPathMatched(child.path, child.activePrefixes))
       : item.path ? isPathMatched(item.path, item.activePrefixes) : false;
 
+    // The child list only exists in the DOM while expanded (unmountOnExit) and
+    // is never rendered while the rail is collapsed — only advertise
+    // aria-expanded/aria-controls when there is a real region to point at.
+    const hasCollapsibleGroup = hasChildren && !collapsed;
+    const groupListId = `${instanceId}-group-${item.key}`;
+
     return (
       <React.Fragment key={item.key}>
         <ListItem disablePadding sx={{ display: 'block', mb: 0.5 }}>
           <Tooltip title={collapsed ? item.label : ""} placement="right">
             <ListItemButton
               onClick={() => hasChildren ? handleGroupClick(item.key) : navigateTo(item.path!)}
+              selected={isSelected}
+              // Selected state was previously conveyed by background colour
+              // alone (SC 1.4.1 / SC 4.1.2). aria-current="page" marks the
+              // actual current page; groups expose expand state instead.
+              aria-current={!hasChildren && isSelected ? 'page' : undefined}
+              aria-expanded={hasCollapsibleGroup ? isOpen : undefined}
+              aria-controls={hasCollapsibleGroup && isOpen ? groupListId : undefined}
+              // When collapsed the text label is not rendered, leaving an
+              // icon-only control — give it an explicit name (SC 4.1.2).
+              aria-label={collapsed ? item.label : undefined}
               sx={{
                 minHeight: 44,
                 justifyContent: collapsed ? 'center' : 'initial',
                 px: 2,
                 borderRadius: '10px',
-                backgroundColor: isSelected ? 'primary.main' : 'transparent',
-                color: isSelected ? 'primary.contrastText' : 'text.primary',
+                color: 'text.primary',
                 '&:hover': {
-                  backgroundColor: isSelected ? 'primary.dark' : 'action.hover',
+                  backgroundColor: 'action.hover',
                   transform: 'translateX(4px)',
                 },
+                // `&.Mui-selected` keeps our colours ahead of MUI's default
+                // selected styling in the cascade.
+                '&.Mui-selected': {
+                  backgroundColor: 'primary.main',
+                  color: 'primary.contrastText',
+                  boxShadow: (theme) => `0 10px 15px -3px ${alpha(theme.palette.primary.main, 0.3)}`,
+                },
+                '&.Mui-selected:hover': {
+                  backgroundColor: 'primary.dark',
+                  color: 'primary.contrastText',
+                  transform: 'translateX(4px)',
+                },
+                '&.Mui-focusVisible': {
+                  outline: (theme) => `3px solid ${theme.palette.primary.main}`,
+                  outlineOffset: 2,
+                },
                 transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
-                boxShadow: isSelected ? (theme) => `0 10px 15px -3px ${theme.palette.primary.main}4D` : 'none',
               }}
             >
               <ListItemIcon
@@ -342,15 +376,17 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
           </Tooltip>
         </ListItem>
 
-        {hasChildren && !collapsed && (
+        {hasCollapsibleGroup && (
           <Collapse in={isOpen} timeout="auto" unmountOnExit>
-            <List component="div" disablePadding>
+            <List component="div" disablePadding id={groupListId} aria-label={item.label}>
               {item.children?.map((child) => {
                 const isChildSelected = isPathMatched(child.path, child.activePrefixes);
                 return (
                   <ListItemButton
                     key={child.key}
                     onClick={() => navigateTo(child.path)}
+                    selected={isChildSelected}
+                    aria-current={isChildSelected ? 'page' : undefined}
                     sx={{
                       minHeight: 40,
                       pl: 4,
@@ -358,10 +394,26 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
                       mx: 1,
                       mb: 0.2,
                       borderRadius: 1.5,
-                      color: isChildSelected ? 'primary.main' : 'text.secondary',
-                      backgroundColor: isChildSelected ? 'rgba(25, 118, 210, 0.08)' : 'transparent',
+                      color: 'text.secondary',
                       '&:hover': {
-                        backgroundColor: 'rgba(0, 0, 0, 0.03)',
+                        // Was a hardcoded rgba(0,0,0,.03) — invisible in dark mode.
+                        backgroundColor: 'action.hover',
+                      },
+                      // Selected child used primary.main as small (0.8rem) text,
+                      // which drops under 4.5:1 for the lighter brand colours
+                      // (SC 1.4.3). Use body text colour plus weight, a tinted
+                      // background and a primary accent bar instead.
+                      '&.Mui-selected': {
+                        color: 'text.primary',
+                        backgroundColor: (theme) => alpha(theme.palette.primary.main, 0.14),
+                        boxShadow: (theme) => `inset 3px 0 0 0 ${theme.palette.primary.main}`,
+                      },
+                      '&.Mui-selected:hover': {
+                        backgroundColor: (theme) => alpha(theme.palette.primary.main, 0.22),
+                      },
+                      '&.Mui-focusVisible': {
+                        outline: (theme) => `3px solid ${theme.palette.primary.main}`,
+                        outlineOffset: -1,
                       },
                     }}
                   >

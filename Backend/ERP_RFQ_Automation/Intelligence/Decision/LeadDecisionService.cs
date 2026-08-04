@@ -95,6 +95,8 @@ public sealed class LeadDecisionService : ILeadDecisionService
 
         // ---- 1. catalog coverage -------------------------------------------
         var matches = await MatchCatalogAsync(items, businessUnitId, ct);
+        var availableByProduct = await AvailableToPromiseByProductAsync(
+            matches.Values.Select(m => m.Product.Id).Distinct().ToArray(), businessUnitId, ct);
 
         // ---- 2 + 3. estimated value & margin potential ---------------------
         var coverageItems = new List<CoverageItem>(items.Count);
@@ -134,7 +136,15 @@ public sealed class LeadDecisionService : ILeadDecisionService
             // remains unavailable until an authoritative currency-bearing cost
             // source is wired into the decision brief.
 
-            var catalogQtyOnHand = match?.Product.QtyOnHand;
+            // LEDGER AUTHORITY: this used to render "in stock" from Product.QtyOnHand — a legacy
+            // denormalised column that is not per-warehouse, nets off nothing that is already
+            // reserved, allocated, quarantined, damaged, expired or protected as safety stock, and
+            // that the availability engine cannot see at all. A rep reading the brief was shown a
+            // number no other screen agreed with. The figure is now available-to-promise summed
+            // over the tenant's real inventory rows, via InventoryQuantityMath.
+            decimal? catalogQtyOnHand = match is null
+                ? null
+                : availableByProduct.GetValueOrDefault(match.Product.Id);
             var hasCatalogOnHand = catalogQtyOnHand is > 0m;
 
             coverageItems.Add(new CoverageItem
@@ -313,12 +323,59 @@ public sealed class LeadDecisionService : ILeadDecisionService
         string? ProductShortName, string? ProductShortDescription,
         int Quantity, decimal? UnitPrice, string? Currency);
 
+    // Product.QtyOnHand is deliberately NOT projected here: stock for the brief comes from the
+    // Inventory rows via AvailableToPromiseByProductAsync, never from the product master.
     private sealed record ProductLite(
         long Id, string PartNo, string? ModelNo, string? ProductName,
-        decimal QtyOnHand, decimal? UnitCost, decimal? SellingPrice,
+        decimal? UnitCost, decimal? SellingPrice,
         decimal? FinalLandedCost, decimal? FinalSalesPrice);
 
     private sealed record CatalogMatch(ProductLite Product, string MatchType);
+
+    /// <summary>
+    /// Authoritative available-to-promise per product, summed across every warehouse row the
+    /// tenant holds for it. Two batched queries (inventory rows, then their active holds) and the
+    /// shared <see cref="ERP_RFQ_Automation.Inventory.InventoryQuantityMath.AvailableToPromise"/>
+    /// formula, so this brief cannot drift from the availability screens or from the order
+    /// allocator. Products with no inventory row are simply absent, which reads as zero.
+    /// </summary>
+    private async Task<Dictionary<long, decimal>> AvailableToPromiseByProductAsync(
+        IReadOnlyCollection<long> productIds, long businessUnitId, CancellationToken ct)
+    {
+        if (productIds.Count == 0) return new Dictionary<long, decimal>();
+
+        var rows = await _db.Set<Models.Inventory>().AsNoTracking()
+            .Where(x => x.Buid == businessUnitId && x.ProductId != null && productIds.Contains(x.ProductId!.Value))
+            .Select(x => new
+            {
+                x.Id,
+                ProductId = x.ProductId!.Value,
+                x.QtyOnHand,
+                x.AllocatedQuantity,
+                x.QuarantineQuantity,
+                x.DamagedQuantity,
+                x.ExpiredQuantity,
+                x.SafetyStockQuantity
+            })
+            .ToListAsync(ct);
+        if (rows.Count == 0) return new Dictionary<long, decimal>();
+
+        var inventoryIds = rows.Select(x => x.Id).ToArray();
+        var reserved = await _db.Set<ERP_RFQ_Automation.Inventory.StockReservation>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && inventoryIds.Contains(x.InventoryId)
+                        && x.Status == ERP_RFQ_Automation.Inventory.StockReservationStatus.Active)
+            .GroupBy(x => x.InventoryId)
+            .Select(x => new { InventoryId = x.Key, Quantity = x.Sum(v => v.Quantity) })
+            .ToDictionaryAsync(x => x.InventoryId, x => x.Quantity, ct);
+
+        return rows
+            .GroupBy(x => x.ProductId)
+            .ToDictionary(
+                group => group.Key,
+                group => group.Sum(x => ERP_RFQ_Automation.Inventory.InventoryQuantityMath.AvailableToPromise(
+                    x.QtyOnHand, reserved.GetValueOrDefault(x.Id), x.AllocatedQuantity,
+                    x.QuarantineQuantity, x.DamagedQuantity, x.ExpiredQuantity, x.SafetyStockQuantity)));
+    }
 
     /// <summary>
     /// Cheap batched matching using exact product identifiers only. Product names
@@ -346,7 +403,7 @@ public sealed class LeadDecisionService : ILeadDecisionService
                             || mpns.Contains(p.PartNo.ToLower())
                             || (p.ModelNo != null && mpns.Contains(p.ModelNo.ToLower())))
                 .Select(p => new ProductLite(p.Id, p.PartNo, p.ModelNo, p.ProductName,
-                    p.QtyOnHand, p.UnitCost, p.SellingPrice, p.FinalLandedCost, p.FinalSalesPrice))
+                    p.UnitCost, p.SellingPrice, p.FinalLandedCost, p.FinalSalesPrice))
                 .ToListAsync(ct);
 
             foreach (var group in exactRows.GroupBy(
@@ -573,7 +630,7 @@ public sealed class LeadDecisionService : ILeadDecisionService
             reasons.Add($"None of the {N0(c.TotalItems)} items match our catalog.");
         else
             reasons.Add($"Exact catalog identities found for {N0(c.CoveredItems)} of {N0(c.TotalItems)} items " +
-                        $"({Fmt(c.CoveragePct)}% coverage; {N0(c.CatalogOnHandItems)} show catalog quantity on hand, not ATP).");
+                        $"({Fmt(c.CoveragePct)}% coverage; {N0(c.CatalogOnHandItems)} have stock available to promise).");
 
         // -- value --
         if (b.EstimatedValue is > 0m)

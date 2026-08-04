@@ -1,24 +1,17 @@
 import { enqueueSnackbar } from 'notistack';
+import { toPresentableError } from './apiErrors';
 
-export const handleApiError = (error: any) => {
-  if (error.response) {
-    const { status, data } = error.response;
-
-    if (status === 400 && data.errors) {
-      // Handle validation errors
-      Object.entries(data.errors).forEach(([field, messages]: [string, any]) => {
-        messages.forEach((message: string) => {
-          enqueueSnackbar(`${field}: ${message}`, { variant: 'error' });
-        });
-      });
-    } else if (data.message) {
-      enqueueSnackbar(data.message, { variant: 'error' });
-    } else {
-      enqueueSnackbar('An unexpected error occurred.', { variant: 'error' });
-    }
-  } else if (error.request) {
-    enqueueSnackbar('No response from server. Please check your connection.', { variant: 'error' });
-  } else {
-    enqueueSnackbar(error.message, { variant: 'error' });
-  }
+/**
+ * Shared snackbar error handler.
+ *
+ * The exported signature is unchanged so existing call sites need no edit, but the presentation
+ * decision now belongs to `toPresentableError`. Previously this function rendered `data.message`
+ * without checking it was a string and fell through to `error.message` — which put axios transport
+ * text and the API hostname in front of users.
+ */
+export const handleApiError = (error: unknown): void => {
+  const presented = toPresentableError(error);
+  enqueueSnackbar(presented.message, {
+    variant: presented.severity === 'info' ? 'info' : presented.severity,
+  });
 };

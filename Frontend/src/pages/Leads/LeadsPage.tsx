@@ -28,6 +28,7 @@ import { useSnackbar } from 'notistack';
 import { formatDateSafe, parseDateSafe } from '../../utils/dates';
 import { confidenceLevel } from '../Intelligence/common';
 import { useAuth } from '../../context/AuthContext';
+import { presentableErrorMessage } from '../../utils/apiErrors';
 
 // ---------------------------------------------------------------------------
 // Per-user view preferences (column visibility + density), persisted locally.
@@ -263,7 +264,10 @@ const LeadsPage: React.FC = () => {
       enqueueSnackbar('Email synchronization started successfully!', { variant: 'success' });
       queryClient.invalidateQueries({ queryKey: ['leads'] });
     },
-    onError: (err: any) => enqueueSnackbar(err.response?.data || 'Sync failed', { variant: 'error' }),
+    onError: (error: unknown) => enqueueSnackbar(
+      presentableErrorMessage(error, 'Email synchronization could not be started. Nothing was changed — try again.'),
+      { variant: 'error' },
+    ),
   });
 
   const { data, isLoading, isError, refetch } = useQuery({

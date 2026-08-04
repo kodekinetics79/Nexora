@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Controllers;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
@@ -25,7 +26,7 @@ public sealed class RolePermissionTenantIsolationTests
     public async Task GetById_FailsClosed_WhenTenantClaimIsMissing()
     {
         var repository = new CapturingRepository();
-        var controller = new RolePermissionController(repository)
+        var controller = new RolePermissionController(repository, new DenyAllRoleGate())
         {
             ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() }
         };
@@ -39,13 +40,27 @@ public sealed class RolePermissionTenantIsolationTests
     private static RolePermissionController Controller(CapturingRepository repository, long tenantId)
     {
         var identity = new ClaimsIdentity([new Claim("businessUnitId", tenantId.ToString())], "test");
-        return new RolePermissionController(repository)
+        return new RolePermissionController(repository, new DenyAllRoleGate())
         {
             ControllerContext = new ControllerContext
             {
                 HttpContext = new DefaultHttpContext { User = new ClaimsPrincipal(identity) }
             }
         };
+    }
+
+    /// <summary>
+    /// Fail-closed <see cref="IRoleGate"/> stub. These tests assert tenant isolation of the
+    /// repository call, not role escalation, so every privilege question answers "no".
+    /// </summary>
+    private sealed class DenyAllRoleGate : IRoleGate
+    {
+        public Task<bool> IsSuperAdminAsync(long roleId, long businessUnitId) => Task.FromResult(false);
+
+        public Task<bool> IsManagerOrAdminAsync(long roleId, long businessUnitId) => Task.FromResult(false);
+
+        public Task<bool> CanManageRoleAsync(long callerRoleId, long? targetRoleId, long businessUnitId)
+            => Task.FromResult(false);
     }
 
     private sealed class CapturingRepository : IRolePermissionRepository

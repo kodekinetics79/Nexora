@@ -42,11 +42,13 @@ namespace ERP_RFQ_Automation.Controllers
                     return Forbid();
 
                 if (pageNumber < 1)
-                    return BadRequest("Page number must be greater than or equal to 1.");
+                    return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid supplier query",
+                        "Page number must be greater than or equal to 1."));
 
                 // Relaxed validation: Allow any page size up to 1000
                 if (pageSize < 1 || pageSize > 1000)
-                    return BadRequest("Page size must be between 1 and 1000.");
+                    return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid supplier query",
+                        "Page size must be between 1 and 1000."));
 
                 var (suppliers, totalCount) = await _repository.GetAllAsync(pageNumber, pageSize, id, name, contactEmail, currencyId, isActive, docId, businessUnitId);
 
@@ -62,7 +64,8 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to retrieve suppliers.");
+                return StatusCode(StatusCodes.Status500InternalServerError, Problem(
+                    StatusCodes.Status500InternalServerError, "Suppliers unavailable", "Unable to retrieve suppliers."));
             }
         }
 
@@ -81,11 +84,12 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (KeyNotFoundException ex)
             {
-                return NotFound(ex.Message);
+                return NotFound(Problem(StatusCodes.Status404NotFound, "Supplier not found", ex.Message));
             }
             catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to retrieve the supplier.");
+                return StatusCode(StatusCodes.Status500InternalServerError, Problem(
+                    StatusCodes.Status500InternalServerError, "Supplier unavailable", "Unable to retrieve the supplier."));
             }
         }
 
@@ -131,11 +135,12 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (ArgumentException ex)
             {
-                return BadRequest(ex.Message);
+                return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid supplier request", ex.Message));
             }
             catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to create the supplier.");
+                return StatusCode(StatusCodes.Status500InternalServerError, Problem(
+                    StatusCodes.Status500InternalServerError, "Supplier not created", "Unable to create the supplier."));
             }
         }
 
@@ -153,7 +158,8 @@ namespace ERP_RFQ_Automation.Controllers
 
                 var existing = await _repository.GetByIdAsync(id, businessUnitId);
                 if (existing.ConcurrencyToken.HasValue && request.ConcurrencyToken != existing.ConcurrencyToken)
-                    return Conflict("The supplier changed since it was loaded. Refresh and retry.");
+                    return Conflict(Problem(StatusCodes.Status409Conflict, "Supplier conflict",
+                        "The supplier changed since it was loaded. Refresh and retry."));
 
                 var dispatchEmailChanged = !string.Equals(existing.ContactEmail?.Trim(),
                     request.ContactEmail?.Trim(), StringComparison.OrdinalIgnoreCase);
@@ -187,19 +193,21 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (KeyNotFoundException ex)
             {
-                return NotFound(ex.Message);
+                return NotFound(Problem(StatusCodes.Status404NotFound, "Supplier not found", ex.Message));
             }
             catch (ArgumentException ex)
             {
-                return BadRequest(ex.Message);
+                return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid supplier request", ex.Message));
             }
             catch (DbUpdateConcurrencyException)
             {
-                return Conflict("The supplier changed since it was loaded. Refresh and retry.");
+                return Conflict(Problem(StatusCodes.Status409Conflict, "Supplier conflict",
+                        "The supplier changed since it was loaded. Refresh and retry."));
             }
             catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to update the supplier.");
+                return StatusCode(StatusCodes.Status500InternalServerError, Problem(
+                    StatusCodes.Status500InternalServerError, "Supplier not updated", "Unable to update the supplier."));
             }
         }
 
@@ -218,15 +226,16 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (KeyNotFoundException ex)
             {
-                return NotFound(ex.Message);
+                return NotFound(Problem(StatusCodes.Status404NotFound, "Supplier not found", ex.Message));
             }
             catch (InvalidOperationException ex)
             {
-                return BadRequest(ex.Message);
+                return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid supplier request", ex.Message));
             }
             catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to delete the supplier.");
+                return StatusCode(StatusCodes.Status500InternalServerError, Problem(
+                    StatusCodes.Status500InternalServerError, "Supplier not deleted", "Unable to delete the supplier."));
             }
         }
 
@@ -289,7 +298,8 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to search suppliers.");
+                return StatusCode(StatusCodes.Status500InternalServerError, Problem(
+                    StatusCodes.Status500InternalServerError, "Supplier search unavailable", "Unable to search suppliers."));
             }
         }
 
@@ -300,10 +310,12 @@ namespace ERP_RFQ_Automation.Controllers
             if (!TryGetAuthenticatedTenant(out _))
                 return Forbid();
             if (string.IsNullOrWhiteSpace(query))
-                return BadRequest("Search query is required.");
+                return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid supplier query",
+                    "Search query is required."));
 
-            return StatusCode(StatusCodes.Status503ServiceUnavailable,
-                "External supplier discovery is disabled until a governed, tenant-authorized provider is configured.");
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, Problem(
+                StatusCodes.Status503ServiceUnavailable, "External supplier discovery disabled",
+                "External supplier discovery is disabled until a governed, tenant-authorized provider is configured."));
         }
 
         // Compose Quote Email
@@ -322,7 +334,8 @@ namespace ERP_RFQ_Automation.Controllers
                 var supplier = await _repository.GetByIdAsync(request.SupplierId, businessUnitId);
                 var blockers = SupplierRfqBlockingReasons(supplier);
                 if (blockers.Count > 0)
-                    return Conflict($"Supplier RFQ outreach is blocked: {string.Join("; ", blockers)}");
+                    return Conflict(Problem(StatusCodes.Status409Conflict, "Supplier RFQ outreach blocked",
+                        $"Supplier RFQ outreach is blocked: {string.Join("; ", blockers)}"));
                 request.SupplierName = supplier.Name;
                 request.SupplierEmail = supplier.ContactEmail ?? string.Empty;
 
@@ -331,11 +344,13 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (KeyNotFoundException)
             {
-                return NotFound("Supplier not found.");
+                return NotFound(Problem(StatusCodes.Status404NotFound, "Supplier not found", "Supplier not found."));
             }
             catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, "Unable to compose the Supplier RFQ email.");
+                return StatusCode(StatusCodes.Status500InternalServerError, Problem(
+                    StatusCodes.Status500InternalServerError, "Supplier RFQ email unavailable",
+                    "Unable to compose the Supplier RFQ email."));
             }
         }
 
@@ -392,6 +407,17 @@ namespace ERP_RFQ_Automation.Controllers
         {
             return long.TryParse(User.FindFirst("businessUnitId")?.Value, out businessUnitId)
                 && businessUnitId > 0;
+        }
+
+        /// <summary>
+        /// RFC 7807 body carrying the request's trace identifier, so a caller reporting a
+        /// failure gives support an id that ties straight back to the server log entry.
+        /// </summary>
+        private ProblemDetails Problem(int status, string title, string detail)
+        {
+            var problem = new ProblemDetails { Status = status, Title = title, Detail = detail };
+            problem.Extensions["traceId"] = HttpContext.TraceIdentifier;
+            return problem;
         }
 
         private static string? NormalizeEmail(string? email)

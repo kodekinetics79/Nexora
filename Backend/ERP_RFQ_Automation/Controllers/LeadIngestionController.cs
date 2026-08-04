@@ -41,6 +41,40 @@ public sealed class LeadIngestionController : ControllerBase
         return Ok(await _securityScanRecovery.RetryBatchAsync(bu, batchId, ct));
     }
 
+    /// <summary>
+    /// Operator discovery: which batches still hold files that a malware-scanner outage blocked.
+    /// Deliberately independent of the batch page, whose retry control disappears once a hold has
+    /// been recorded as Rejected — an infrastructure outage must never become a dead end.
+    /// </summary>
+    [HttpGet("blocked-files")]
+    [RequireModulePermission("Leads", PermissionAction.View)]
+    public async Task<IActionResult> BlockedFiles(CancellationToken ct)
+    {
+        if (!TryTenant(out var bu)) return BadRequest(new { message = "A valid businessUnitId claim is required." });
+        var batches = await _securityScanRecovery.ListBlockedBatchesAsync(bu, ct);
+        return Ok(new
+        {
+            blockedFiles = batches.Sum(x => x.BlockedFiles),
+            batches
+        });
+    }
+
+    /// <summary>
+    /// Tenant-wide replay of every scanner-blocked file from its immutable source object — no
+    /// batch id and no re-upload required. Capped per call; re-invoke while <c>moreRemaining</c> is true.
+    /// </summary>
+    [HttpPost("retry-blocked-files")]
+    [RequireModulePermission("Leads", PermissionAction.Create)]
+    public async Task<IActionResult> RetryAllBlockedFiles(CancellationToken ct)
+    {
+        if (!TryTenant(out var bu)) return BadRequest(new { message = "A valid businessUnitId claim is required." });
+        var result = await _securityScanRecovery.RetryTenantAsync(bu, ct);
+        _log.LogInformation(
+            "Tenant-wide security-scan recovery requested for business unit {BusinessUnitId}: Eligible={Eligible} Queued={Queued} StillAwaiting={StillAwaiting}.",
+            bu, result.Eligible, result.Queued, result.StillAwaiting);
+        return Ok(result);
+    }
+
     [HttpGet("match-reviews")]
     [RequireModulePermission("Leads", PermissionAction.View)]
     public async Task<IActionResult> PossibleMatches(CancellationToken ct)

@@ -233,7 +233,21 @@ namespace ERP_RFQ_Automation.Repositories
 
         public async Task ChangePasswordAsync(long id, string newPassword)
         {
-            var user = await _context.Users.FindAsync(id);
+            // This method rewrites a credential, and IUserRepository gives it no tenant argument,
+            // so the only thing standing between it and a cross-tenant account takeover is
+            // UserController's caller-id/business-unit gate. Re-derive the boundary here from the
+            // request's own tenant scope so the repository is safe independently of its caller.
+            //
+            // Deliberately STRICTER than the Users global query filter: that filter treats a NULL
+            // Buid as master data visible to every tenant, which is a reasonable read policy and a
+            // bad password-reset policy. This matches GetByIdAsync, which the controller already
+            // requires to succeed first, so no caller that works today starts failing.
+            var query = _context.Users.Where(u => u.Id == id);
+            var tenantId = _context.ScopedTenantId;
+            if (tenantId is not null)
+                query = query.Where(u => u.Buid == tenantId);
+
+            var user = await query.FirstOrDefaultAsync();
             if (user == null)
                 throw new KeyNotFoundException($"User with ID {id} not found.");
 

@@ -6,6 +6,7 @@ import {
   Typography,
   Box,
   Avatar,
+  ButtonBase,
   Menu,
   MenuItem,
   ListItemIcon,
@@ -30,9 +31,17 @@ import { useAuth } from '../../context/AuthContext';
 interface NavbarProps {
   onToggleSidebar: () => void;
   drawerWidth: number;
+  /** Drives `aria-expanded` on the sidebar toggle (SC 4.1.2). */
+  sidebarExpanded?: boolean;
+  /** id of the `<nav>` the toggle controls, for `aria-controls`. */
+  sidebarId?: string;
 }
 
-const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
+const PROFILE_BUTTON_ID = 'account-menu-button';
+const PROFILE_MENU_ID = 'account-menu';
+const COLOR_MENU_ID = 'color-theme-menu';
+
+const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarExpanded, sidebarId }) => {
   const { mode, setMode, primaryColor, setPrimaryColor } = useAppTheme();
   const { userData, logout } = useAuth();
   const navigate = useNavigate();
@@ -144,6 +153,9 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
             color="inherit"
             edge="start"
             onClick={onToggleSidebar}
+            aria-label={sidebarExpanded ? 'Collapse navigation menu' : 'Expand navigation menu'}
+            aria-expanded={sidebarExpanded}
+            aria-controls={sidebarId}
             sx={{ mr: 2 }}
           >
             <MenuIcon />
@@ -161,13 +173,17 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
               borderColor: 'divider',
             }}
           >
-            <SearchIcon sx={{ color: 'text.secondary', mr: 1, fontSize: 18 }} />
+            <SearchIcon aria-hidden sx={{ color: 'text.secondary', mr: 1, fontSize: 18 }} />
             <InputBase
               inputRef={searchInputRef}
               value={searchValue}
               onChange={(e) => setSearchValue(e.target.value)}
               onKeyDown={handleQuickSearch}
               placeholder="Search anything..."
+              type="search"
+              // Placeholders are not a reliable accessible name (SC 4.1.2) —
+              // they disappear on input and are ignored by some AT.
+              inputProps={{ 'aria-label': 'Search the application, press Enter to jump' }}
               sx={{
                 flex: 1,
                 fontSize: '0.875rem',
@@ -175,7 +191,7 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
                 '& input::placeholder': { color: 'text.secondary', opacity: 0.7 },
               }}
             />
-            <Box sx={{ ml: 'auto', px: 0.8, py: 0.2, backgroundColor: 'action.hover', borderRadius: 1, border: '1px solid', borderColor: 'divider' }}>
+            <Box aria-hidden sx={{ ml: 'auto', px: 0.8, py: 0.2, backgroundColor: 'action.hover', borderRadius: 1, border: '1px solid', borderColor: 'divider' }}>
               <Typography variant="caption" sx={{ fontWeight: 700, fontSize: 10, opacity: 0.8 }}>⌘ K</Typography>
             </Box>
           </Box>
@@ -185,7 +201,9 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
           {/* FE-10: language switcher hidden for the pilot — page bodies are not
               fully translated, so switching languages would produce a mixed
               English/localized UI. The app is locked to English (see i18n.ts). */}
-          <Tooltip title="Toggle Theme">
+          {/* A string Tooltip title becomes the child's aria-label in MUI, so
+              making it state-specific also fixes the accessible name (SC 4.1.2). */}
+          <Tooltip title={mode === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}>
             <IconButton color="inherit" onClick={() => setMode(mode === 'dark' ? 'light' : 'dark')} sx={{ backgroundColor: 'action.hover', width: 40, height: 40, borderRadius: 2 }}>
               {mode === 'dark' ? <SunIcon sx={{ fontSize: 20 }} /> : <MoonIcon sx={{ fontSize: 20 }} />}
             </IconButton>
@@ -193,20 +211,48 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
 
           <Divider orientation="vertical" flexItem sx={{ mx: 1.5, height: 24, my: 'auto' }} />
 
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, cursor: 'pointer', ml: 1 }} onClick={handleProfileClick}>
+          {/* Was a click-only <Box>: mouse users could open the account menu but
+              keyboard users had no way to reach or activate it (SC 2.1.1 /
+              SC 4.1.2). ButtonBase renders a real <button> with native focus,
+              Enter/Space activation and a focus ring. */}
+          <ButtonBase
+            id={PROFILE_BUTTON_ID}
+            onClick={handleProfileClick}
+            aria-haspopup="menu"
+            aria-expanded={Boolean(anchorEl)}
+            aria-controls={anchorEl ? PROFILE_MENU_ID : undefined}
+            aria-label={`Account menu — ${displayName || 'User'}, ${userData.roleName || 'Member'}`}
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 1.5,
+              ml: 1,
+              px: 0.75,
+              py: 0.5,
+              borderRadius: 2,
+              textAlign: 'left',
+              '&:focus-visible': {
+                outline: (theme) => `3px solid ${theme.palette.primary.main}`,
+                outlineOffset: 2,
+              },
+            }}
+          >
             <Avatar
               sx={{
                 width: 36,
                 height: 36,
                 bgcolor: 'primary.main',
+                // MUI Avatar defaults its text to background.default, which is
+                // only 3.92:1 on the default brand colour (SC 1.4.3).
+                color: 'primary.contrastText',
                 fontWeight: 700,
                 fontSize: 14,
                 boxShadow: `0 0 0 2px ${mode === 'dark' ? '#0f172a' : '#fff'}, 0 0 0 4px ${primaryColor}44`
               }}
             >
-              {initials || <Person sx={{ fontSize: 18 }} />}
+              {initials || <Person aria-hidden sx={{ fontSize: 18 }} />}
             </Avatar>
-            <Box sx={{ display: { xs: 'none', sm: 'block' }, textAlign: 'left' }}>
+            <Box aria-hidden sx={{ display: { xs: 'none', sm: 'block' }, textAlign: 'left' }}>
               <Typography variant="subtitle2" sx={{ fontWeight: 800, lineHeight: 1.2, fontSize: '0.85rem' }}>
                 {displayName || 'User'}
               </Typography>
@@ -214,16 +260,18 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
                 {userData.roleName || 'Member'}
               </Typography>
             </Box>
-          </Box>
+          </ButtonBase>
         </Box>
 
         <Menu
+          id={PROFILE_MENU_ID}
           anchorEl={anchorEl}
           open={Boolean(anchorEl)}
           onClose={handleClose}
           transformOrigin={{ horizontal: 'right', vertical: 'top' }}
           anchorOrigin={{ horizontal: 'right', vertical: 'bottom' }}
           slotProps={{
+            list: { 'aria-labelledby': PROFILE_BUTTON_ID },
             paper: {
               sx: {
                 mt: 1.5,
@@ -247,7 +295,13 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
             />
           </MenuItem>
 
-          <MenuItem onClick={handleColorMenuOpen} sx={{ borderRadius: 2, py: 1.5 }}>
+          <MenuItem
+            onClick={handleColorMenuOpen}
+            aria-haspopup="menu"
+            aria-expanded={Boolean(colorMenuAnchor)}
+            aria-controls={colorMenuAnchor ? COLOR_MENU_ID : undefined}
+            sx={{ borderRadius: 2, py: 1.5 }}
+          >
             <ListItemIcon><Language fontSize="small" sx={{ opacity: 0.7 }} /></ListItemIcon>
             <Box sx={{ flex: 1 }}>
               <ListItemText
@@ -277,6 +331,8 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
 
         {/* Color Selection Sub-Menu */}
         <Menu
+          id={COLOR_MENU_ID}
+          aria-label="Select brand color"
           anchorEl={colorMenuAnchor}
           open={Boolean(colorMenuAnchor)}
           onClose={handleClose}
@@ -304,6 +360,12 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
           {colorOptions.map((option) => (
             <MenuItem
               key={option.color}
+              // The current choice was conveyed only by background colour and
+              // font weight (SC 1.4.1). menuitemradio + aria-checked exposes it
+              // to assistive tech as a real selected state.
+              role="menuitemradio"
+              aria-checked={primaryColor === option.color}
+              selected={primaryColor === option.color}
               onClick={() => {
                 setPrimaryColor(option.color);
                 handleClose();
@@ -315,6 +377,7 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
               }}
             >
               <Box
+                aria-hidden
                 sx={{
                   width: 12,
                   height: 12,
@@ -337,7 +400,7 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth }) => {
                 }}
               />
               {primaryColor === option.color && (
-                <Box sx={{ width: 6, height: 6, borderRadius: '50%', bgcolor: 'success.main', ml: 1 }} />
+                <Box aria-hidden sx={{ width: 6, height: 6, borderRadius: '50%', bgcolor: 'success.main', ml: 1 }} />
               )}
             </MenuItem>
           ))}

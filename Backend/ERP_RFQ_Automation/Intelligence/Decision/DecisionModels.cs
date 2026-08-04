@@ -64,15 +64,19 @@ public sealed class CatalogCoverage
     public decimal CoveragePct { get; set; }
 
     /// <summary>
-    /// Compatibility field: exact matches whose product master reports QtyOnHand &gt; 0.
-    /// This is catalog-on-hand evidence, not authoritative ATP or full supply coverage.
+    /// Exact matches with positive available-to-promise. Same number as
+    /// <see cref="CatalogOnHandItems"/>; kept as a compatibility alias for existing consumers.
     /// </summary>
     public int InStockItems { get; set; }
 
-    /// <summary>Exact matches whose product master reports catalog quantity on hand.</summary>
+    /// <summary>Exact matches with positive available-to-promise across the tenant's warehouses.</summary>
     public int CatalogOnHandItems { get; set; }
 
-    /// <summary>Total raw product-master QtyOnHand across exact matches; not ATP.</summary>
+    /// <summary>
+    /// Total available-to-promise across exact matches. Sourced from the Inventory rows through
+    /// <c>InventoryQuantityMath.AvailableToPromise</c> — it used to be the raw product-master
+    /// QtyOnHand column, a number the availability engine could not see.
+    /// </summary>
     public decimal CatalogOnHandQuantity { get; set; }
 
     public List<CoverageItem> Items { get; set; } = new();
@@ -91,13 +95,17 @@ public sealed class CoverageItem
 
     public long? ProductId { get; set; }
 
-    /// <summary>Compatibility field for catalog-on-hand evidence; not ATP.</summary>
+    /// <summary>Compatibility alias for <see cref="HasCatalogOnHand"/>.</summary>
     public bool InStock { get; set; }
 
-    /// <summary>Whether the exact match has positive product-master QtyOnHand; not ATP.</summary>
+    /// <summary>Whether the exact match has positive available-to-promise.</summary>
     public bool HasCatalogOnHand { get; set; }
 
-    /// <summary>Raw product-master QtyOnHand for the exact match; not reserved/available quantity.</summary>
+    /// <summary>
+    /// Available-to-promise for the exact match, summed across the tenant's warehouses: on-hand
+    /// net of reserved, allocated, quarantined, damaged, expired and safety stock. Null when the
+    /// line has no exact catalog match.
+    /// </summary>
     public decimal? CatalogQtyOnHand { get; set; }
 
     /// <summary>The unit price used for the value estimate (null when unpriceable).</summary>

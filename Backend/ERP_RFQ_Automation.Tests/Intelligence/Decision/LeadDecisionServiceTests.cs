@@ -264,6 +264,10 @@ public sealed class LeadDecisionServiceTests
             lead.LeadItems.Add(Item(1002, "VOLUME", null, "Volume", 9, 10m, "USD"));
             seed.Products.Add(Product(501, "HIGH", "High value", 1m, 50m, 100m));
             seed.Products.Add(Product(502, "VOLUME", "Volume", 1m, 9m, 10m));
+            // Stock now comes from the Inventory rows, never the product master column: the
+            // decision brief must quote a number the availability engine agrees with.
+            Stock(seed, warehouseId: 601, inventoryId: 611, productId: 501, onHand: 1m);
+            Stock(seed, warehouseId: 601, inventoryId: 612, productId: 502, onHand: 1m);
             await seed.SaveChangesAsync();
         }
 
@@ -277,7 +281,7 @@ public sealed class LeadDecisionServiceTests
         Assert.False(brief.IsMarginComplete);
         Assert.Equal(2, brief.Coverage.CatalogOnHandItems);
         Assert.Equal(2m, brief.Coverage.CatalogOnHandQuantity);
-        Assert.Contains(brief.Reasons, reason => reason.Contains("not ATP", StringComparison.Ordinal));
+        Assert.Contains(brief.Reasons, reason => reason.Contains("available to promise", StringComparison.Ordinal));
         Assert.DoesNotContain(brief.Reasons, reason => reason.Contains("We stock", StringComparison.Ordinal));
     }
 
@@ -373,6 +377,35 @@ public sealed class LeadDecisionServiceTests
         UnitPrice = unitPrice,
         Currency = currency
     };
+
+    /// <summary>An authoritative per-warehouse stock row; the warehouse is created on first use.</summary>
+    private static void Stock(ErpRfqAutomationContext ctx, long warehouseId, long inventoryId,
+        long productId, decimal onHand)
+    {
+        if (!ctx.Warehouses.Local.Any(x => x.Id == warehouseId) && ctx.Warehouses.Find(warehouseId) is null)
+            ctx.Warehouses.Add(new Warehouse
+            {
+                Id = warehouseId,
+                BusinessUnitId = TenantId,
+                WarehouseCode = $"WH-{warehouseId}",
+                WarehouseName = $"Warehouse {warehouseId}",
+                IsActive = true,
+                CreatedBy = "decision-tests",
+                CreatedOn = new DateTime(2026, 7, 29, 0, 0, 0, DateTimeKind.Utc)
+            });
+        ctx.Set<ERP_RFQ_Automation.Models.Inventory>().Add(new ERP_RFQ_Automation.Models.Inventory
+        {
+            Id = inventoryId,
+            Buid = TenantId,
+            ProductId = productId,
+            WarehouseId = warehouseId,
+            PartNo = $"INV-{inventoryId}",
+            QtyOnHand = onHand,
+            ReorderPoint = 0m,
+            CreatedBy = "decision-tests",
+            CreatedOn = new DateTime(2026, 7, 29, 0, 0, 0, DateTimeKind.Utc)
+        });
+    }
 
     private static Product Product(
         long id,

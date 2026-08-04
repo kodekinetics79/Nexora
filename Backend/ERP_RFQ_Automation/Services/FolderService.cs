@@ -278,7 +278,8 @@ namespace ERP_RFQ_Automation.Services
                     if (File.Exists(processedPath))
                         processedPath = Path.Combine(processedFolder, $"{Guid.NewGuid():N}_{fileName}");
                     File.Move(claimedPath, processedPath, false);
-                    DeleteRetryState(filePath);
+                    await ClearRetryStateAsync(businessUnitId, leadSourceLabel, fileName, cancellationToken);
+                    DeleteLegacyRetrySidecar(filePath);
                     if (result.Outcome == ERP_RFQ_Automation.Extraction.EnqueueOutcome.Enqueued)
                         report.Enqueued++;
                     else
@@ -297,12 +298,14 @@ namespace ERP_RFQ_Automation.Services
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Failed to enqueue {Label} file {FileName}.", leadSourceLabel, fileName);
-                    var attempts = await RecordRetryAsync(filePath, ex, cancellationToken);
+                    var attempts = await RecordRetryAsync(
+                        businessUnitId, leadSourceLabel, fileName, ex, cancellationToken);
                     if (attempts >= 3)
                     {
                         await QuarantineAsync(claimedPath ?? filePath, businessUnitId, leadSourceLabel,
                             "Staging failed after three attempts.", attempts, cancellationToken);
-                        DeleteRetryState(filePath);
+                        await ClearRetryStateAsync(businessUnitId, leadSourceLabel, fileName, cancellationToken);
+                        DeleteLegacyRetrySidecar(filePath);
                         report.Rejected++;
                     }
                     else
@@ -1355,30 +1358,90 @@ namespace ERP_RFQ_Automation.Services
                 .ToArray();
         }
 
+        /// <summary>
+        /// Records one staging failure and returns the running attempt count.
+        ///
+        /// The counter lives in the DATABASE (FolderIngestionRetryStates), not in a
+        /// "&lt;file&gt;.nexora-retry.json" sidecar next to the document. On Render the
+        /// upload root is an ephemeral, per-instance disk, so sidecars reset the counter
+        /// on every restart (a poison document could retry forever) and were invisible to
+        /// every other instance (the three-strikes quarantine rule was per-instance).
+        /// </summary>
         private async Task<int> RecordRetryAsync(
-            string filePath, Exception exception, CancellationToken cancellationToken)
+            long businessUnitId,
+            string sourceLabel,
+            string fileName,
+            Exception exception,
+            CancellationToken cancellationToken)
         {
-            var statePath = filePath + ".nexora-retry.json";
-            var attempts = 1;
+            var key = RetryKey(fileName);
             try
             {
-                if (File.Exists(statePath))
-                {
-                    var current = JsonSerializer.Deserialize<FolderRetryState>(
-                        await File.ReadAllTextAsync(statePath, cancellationToken));
-                    attempts = (current?.Attempts ?? 0) + 1;
-                }
-            }
-            catch (Exception readException) when (readException is not OperationCanceledException)
-            {
-                _logger.LogWarning(readException, "Could not read folder retry state for {FileName}.", Path.GetFileName(filePath));
-            }
+                var now = DateTime.UtcNow;
+                var state = await _context.Set<FolderIngestionRetryState>()
+                    .FirstOrDefaultAsync(
+                        x => x.BusinessUnitId == businessUnitId
+                             && x.SourceLabel == sourceLabel
+                             && x.FileName == key,
+                        cancellationToken);
 
-            var state = new FolderRetryState(attempts, exception.GetType().Name, DateTime.UtcNow);
-            var temporaryPath = statePath + ".tmp";
-            await File.WriteAllTextAsync(temporaryPath, JsonSerializer.Serialize(state), cancellationToken);
-            File.Move(temporaryPath, statePath, true);
-            return attempts;
+                if (state is null)
+                {
+                    state = new FolderIngestionRetryState
+                    {
+                        BusinessUnitId = businessUnitId,
+                        SourceLabel = sourceLabel,
+                        FileName = key,
+                        Attempts = 1,
+                        LastErrorType = exception.GetType().Name,
+                        FirstFailedOn = now,
+                        LastFailedOn = now
+                    };
+                    _context.Set<FolderIngestionRetryState>().Add(state);
+                }
+                else
+                {
+                    state.Attempts++;
+                    state.LastErrorType = exception.GetType().Name;
+                    state.LastFailedOn = now;
+                }
+
+                await _context.SaveChangesAsync(cancellationToken);
+                return state.Attempts;
+            }
+            catch (Exception persistException) when (persistException is not OperationCanceledException)
+            {
+                // The retry ledger must never be the reason a sweep dies. Falling back to
+                // "one attempt" keeps the file in place for the next sweep instead of
+                // quarantining a document we could not account for.
+                _logger.LogWarning(persistException,
+                    "Could not persist folder retry state for {FileName}; treating as a single attempt.", fileName);
+                return 1;
+            }
+        }
+
+        private async Task ClearRetryStateAsync(
+            long businessUnitId, string sourceLabel, string fileName, CancellationToken cancellationToken)
+        {
+            var key = RetryKey(fileName);
+            try
+            {
+                await _context.Set<FolderIngestionRetryState>()
+                    .Where(x => x.BusinessUnitId == businessUnitId
+                                && x.SourceLabel == sourceLabel
+                                && x.FileName == key)
+                    .ExecuteDeleteAsync(cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Could not clear folder retry state for {FileName}.", fileName);
+            }
+        }
+
+        private static string RetryKey(string fileName)
+        {
+            var name = Path.GetFileName(fileName);
+            return name.Length <= 400 ? name : name[^400..];
         }
 
         private async Task QuarantineAsync(
@@ -1415,7 +1478,7 @@ namespace ERP_RFQ_Automation.Services
             {
                 File.Move(filePath, quarantinePath, false);
                 File.Move(stagedMetadataPath, metadataPath, false);
-                DeleteRetryState(filePath);
+                DeleteLegacyRetrySidecar(filePath);
             }
             catch
             {
@@ -1425,10 +1488,20 @@ namespace ERP_RFQ_Automation.Services
             }
         }
 
-        private static void DeleteRetryState(string filePath)
+        /// <summary>
+        /// Removes a legacy on-disk retry sidecar if one is still present from before the
+        /// counter moved into the database. Best-effort: the file is on ephemeral storage
+        /// and may already be gone.
+        /// </summary>
+        private static void DeleteLegacyRetrySidecar(string filePath)
         {
-            var statePath = filePath + ".nexora-retry.json";
-            if (File.Exists(statePath)) File.Delete(statePath);
+            try
+            {
+                var statePath = filePath + ".nexora-retry.json";
+                if (File.Exists(statePath)) File.Delete(statePath);
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
 
         private static void RecoverStaleClaims(string processingFolder, string watchedFolder)
@@ -1454,7 +1527,5 @@ namespace ERP_RFQ_Automation.Services
 
         private static StringComparison PathComparison()
             => OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-
-        private sealed record FolderRetryState(int Attempts, string ErrorType, DateTime UpdatedOn);
     }
 }

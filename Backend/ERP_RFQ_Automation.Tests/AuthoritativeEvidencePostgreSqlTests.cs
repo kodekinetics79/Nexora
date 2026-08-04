@@ -334,6 +334,79 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
         }
     }
 
+    /// <summary>
+    /// The production shape of the ClamAV outage: occurrences that ended up in the terminal
+    /// <see cref="IntakeOccurrenceStatus.Rejected"/> state (the batch page then hides its retry
+    /// control entirely) must still be discoverable and replayable tenant-wide, with no batch id
+    /// and no re-upload. An infrastructure outage must never be a user-facing dead end.
+    /// </summary>
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task ScannerRecovery_ReleasesTerminallyRejectedHoldsTenantWideWithoutABatchId()
+    {
+        var tenantId = NewTenantId();
+        var bytes = ValidCsv();
+        var root = NewStorageRoot();
+        try
+        {
+            await using var context = _database.ContextFor(null);
+            SeedTenant(context, tenantId);
+            await context.SaveChangesAsync();
+            var queue = NewQueue(context);
+            var storage = new LocalEvidenceObjectStorage(new LocalFileStorage(root, root));
+            var unavailableInspection = new FileInspectionResult(
+                FileInspectionStatus.Quarantined, "text/csv", bytes.Length,
+                MalwareScannerMessages.ScannerUnreachable, "ClamAV", null)
+            {
+                MalwareStatus = MalwareScanStatus.Unavailable,
+                IsRetryable = true,
+                ErrorCode = "security_scanner_unavailable"
+            };
+            var blockedIngestion = new DocumentIngestionService(queue, storage,
+                new FixedInspectionService(unavailableInspection), context,
+                new NoopLogger<DocumentIngestionService>());
+            var outage = await Assert.ThrowsAsync<DocumentInspectionException>(() => blockedIngestion.IngestAsync(
+                bytes, "customer-rfq.csv", tenantId, ExtractionSourceType.ManualUpload,
+                metadata: new ExtractionJobMetadata { SourceOccurrenceId = "terminal-hold" }));
+
+            // Drive the occurrence into the terminal state the owner's documents are stuck in.
+            var held = await context.Set<SourceDocumentOccurrence>()
+                .SingleAsync(x => x.BusinessUnitId == tenantId && x.Id == outage.SourceDocumentOccurrenceId);
+            held.MarkRejected("SecurityInspection", "security_scanner_unavailable",
+                "{\"reason\":\"scanner unreachable\",\"retryable\":true}");
+            await context.SaveChangesAsync();
+            context.ChangeTracker.Clear();
+
+            var cleanIngestion = new DocumentIngestionService(queue, storage,
+                new FixedInspectionService(ClearedInspection()), context,
+                new NoopLogger<DocumentIngestionService>());
+            var recovery = new SecurityScanRecoveryService(context, storage, cleanIngestion);
+
+            var blocked = await recovery.ListBlockedBatchesAsync(tenantId);
+            var blockedBatch = Assert.Single(blocked);
+            Assert.Equal(outage.BatchId, blockedBatch.BatchId);
+            Assert.Equal(1, blockedBatch.BlockedFiles);
+
+            var released = await recovery.RetryTenantAsync(tenantId);
+
+            Assert.Equal(1, released.Eligible);
+            Assert.Equal(1, released.Queued);
+            Assert.False(released.MoreRemaining);
+            Assert.Equal(outage.BatchId, Assert.Single(released.Batches));
+            context.ChangeTracker.Clear();
+            var recovered = await context.Set<SourceDocumentOccurrence>()
+                .SingleAsync(x => x.BusinessUnitId == tenantId);
+            Assert.Equal(IntakeOccurrenceStatus.Queued, recovered.IntakeStatus);
+            Assert.Equal(DocumentSecurityStatus.Cleared,
+                (await context.Set<SourceDocument>().SingleAsync(x => x.BusinessUnitId == tenantId)).SecurityStatus);
+            Assert.Empty(await recovery.ListBlockedBatchesAsync(tenantId));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Fact]
     [Trait("Category", "PostgreSQL")]
     public async Task ScannerRecovery_MissingSourceObjectIsClassifiedWithoutCreatingWork()

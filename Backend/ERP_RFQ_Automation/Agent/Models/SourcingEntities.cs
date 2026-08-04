@@ -43,6 +43,14 @@ public sealed class SupplierSolicitation
     public DateTime SentOn { get; set; }
     public DateTime? RespondedOn { get; set; }
 
+    /// <summary>
+    /// The response deadline the buyer committed to when preparing this Supplier RFQ.
+    /// Persisted as a first-class UTC column so it survives as queryable evidence: it is
+    /// echoed on the workbench, carried in the dispatch payload, and is the only durable
+    /// record of the commitment. Null when the buyer set no deadline.
+    /// </summary>
+    public DateTime? DueOn { get; set; }
+
     /// <summary>Dispatch channel, e.g. "Email".</summary>
     public string Channel { get; set; } = "Email";
 

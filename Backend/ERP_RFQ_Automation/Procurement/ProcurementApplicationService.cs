@@ -257,6 +257,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         PrepareSupplierRfqCommand command, CancellationToken ct = default)
     {
         ValidateCommand(command.BusinessUnitId, command.IdempotencyKey, command.Actor, command.CorrelationId);
+        ValidateSolicitationDueOn(command.DueOn);
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
@@ -359,6 +360,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 RequestedRfqItemIdsJson = JsonSerializer.Serialize(new[] { sourcingCase.RfqItemId }),
                 Status = SolicitationStatus.PendingDispatch,
                 Channel = "Email",
+                DueOn = command.DueOn,
                 Notes = command.DueOn is null ? $"Sourcing Case {sourcingCase.Id}"
                     : $"Sourcing Case {sourcingCase.Id}; Due {command.DueOn.Value:O}",
                 CreatedOn = now,
@@ -694,7 +696,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                     supplier?.ContactEmail, solicitedLineIds, x.Status.ToString().ToUpperInvariant(), x.Channel,
                     delivery?.AttemptCount ?? 0,
                     delivery?.ProviderReference, delivery?.LastErrorCode, x.SentOn == default ? null : x.SentOn,
-                    x.RespondedOn, x.UpdatedOn, x.Version);
+                    x.RespondedOn, x.UpdatedOn, x.Version, x.DueOn);
             }).ToArray(), offerViews, awardViews, poViews,
             customerDraft is null ? null : new CustomerQuoteDraftView(customerDraft.Id, customerDraft.QuoteNo,
                 customerDraft.CurrencyId, customerDraft.QuoteItems.Where(x => x.RfqitemId.HasValue)
@@ -705,6 +707,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
     public async Task<SolicitationResult> CreateSolicitationAsync(CreateSolicitationCommand command, CancellationToken ct = default)
     {
         ValidateCommand(command.BusinessUnitId, command.IdempotencyKey, command.Actor, command.CorrelationId);
+        ValidateSolicitationDueOn(command.DueOn);
         if (command.RfqItemIds.Count == 0 || command.RfqItemIds.Distinct().Count() != command.RfqItemIds.Count)
             throw new ProcurementValidationException("At least one distinct RFQ line is required.");
         var hash = Hash(new { command.RfqId, command.SupplierId, Lines = command.RfqItemIds.Order(), command.DueOn });
@@ -762,6 +765,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 RequestedRfqItemIdsJson = JsonSerializer.Serialize(command.RfqItemIds.Order()),
                 Status = SolicitationStatus.PendingDispatch,
                 Channel = "Email",
+                DueOn = command.DueOn,
                 Notes = command.DueOn is null ? null : $"Due {command.DueOn.Value:O}",
                 CreatedOn = now,
                 UpdatedOn = now
@@ -1404,7 +1408,20 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                     WarehouseId = line.WarehouseId,
                     OrderedQuantity = line.OrderedQuantity,
                     ReceivedQuantity = 0,
-                    AllocatedQuantity = 0,
+                    // SUPPLY COMMITMENT: this was hard-coded to 0 and nothing ever incremented it,
+                    // so IncomingInventory.OpenQuantity subtracted nothing and the same inbound
+                    // container read as free supply to every customer line that asked — two
+                    // customers could be promised the same units.
+                    //
+                    // Every IncomingInventory row is created here, and only here, from a PO line
+                    // whose SourcingAward carries the customer RFQ line it was raised to cover
+                    // (SupplierPurchaseOrderLine.RfqItemId). The inbound quantity is therefore
+                    // already spoken for on arrival: it is committed supply, not free supply.
+                    // Marking it allocated makes OpenQuantity report the truth (zero uncommitted
+                    // units) so no second line can be promised against it. The RFQ line that owns
+                    // it is unaffected — GetNetSourcingRequirementAsync nets its coverage from the
+                    // purchase order lines themselves, not from this bucket.
+                    AllocatedQuantity = line.OrderedQuantity,
                     ExpectedOn = po.ExpectedOn ?? throw new ProcurementValidationException("An expected delivery date is required before issuing."),
                     Status = IncomingInventoryStatus.Ordered,
                     SourceType = "SupplierPurchaseOrderLine",
@@ -1424,6 +1441,107 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                     deliveryEvidenceSha256 = evidenceSha256,
                     deliveredOn
                 }), deliveredOn.Value);
+            await _db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+            return new PurchaseOrderResult(po.Id, po.PurchaseOrderNumber, po.Status, false);
+        });
+    }
+
+    /// <summary>
+    /// Cancels a purchase order that will never be received and gives its RFQ line back to
+    /// sourcing.
+    ///
+    /// <para>Nothing in this codebase ever assigned <see cref="SupplierPurchaseOrderStatuses.Cancelled"/>
+    /// before this method existed — only Draft, Issued, PartiallyReceived and Received. A draft PO
+    /// whose supplier quotes had expired could not be issued (issuance requires unexpired quotes)
+    /// and could not be cancelled, but it still counted as committed supply, so
+    /// <c>GetNetSourcingRequirementAsync</c> returned zero and <c>CreateSolicitationAsync</c> threw
+    /// "already fully covered". The customer line was unfulfillable forever.</para>
+    ///
+    /// <para>Cancellation is refused once any goods have physically arrived: those units are
+    /// already on hand under the stock ledger and cancelling their paperwork would strand them.</para>
+    /// </summary>
+    public async Task<PurchaseOrderResult> CancelPurchaseOrderAsync(CancelPurchaseOrderCommand command, CancellationToken ct = default)
+    {
+        ValidateCommand(command.BusinessUnitId, command.IdempotencyKey, command.Actor, command.CorrelationId);
+        var reason = command.Reason?.Trim() ?? string.Empty;
+        if (reason.Length is 0 or > 500)
+            throw new ProcurementValidationException("A cancellation reason of up to 500 characters is required.");
+        var hash = Hash(new { command.PurchaseOrderId, command.ExpectedVersion, reason });
+        var strategy = _db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+            var replayEvent = await _db.ProcurementEvents.AsNoTracking().SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == command.BusinessUnitId && x.EventType == "SUPPLIER_PO_CANCELLED"
+                && x.IdempotencyKey == command.IdempotencyKey.Trim(), ct);
+            if (replayEvent is not null)
+            {
+                using var payload = JsonDocument.Parse(replayEvent.PayloadJson);
+                EnsureReplay(payload.RootElement.GetProperty("requestHash").GetString(), hash);
+                var replayPo = await _db.SupplierPurchaseOrders.SingleAsync(x => x.BusinessUnitId == command.BusinessUnitId
+                    && x.Id == replayEvent.AggregateId, ct);
+                await tx.CommitAsync(ct);
+                return new PurchaseOrderResult(replayPo.Id, replayPo.PurchaseOrderNumber, replayPo.Status, true);
+            }
+
+            var po = await _db.SupplierPurchaseOrders.Include(x => x.Lines)
+                .SingleOrDefaultAsync(x => x.BusinessUnitId == command.BusinessUnitId && x.Id == command.PurchaseOrderId, ct)
+                ?? throw new ProcurementValidationException("Purchase order was not found.");
+            if (po.Version != command.ExpectedVersion)
+                throw new ProcurementConflictException("The purchase order changed; refresh before cancelling.");
+            if (po.Status == SupplierPurchaseOrderStatuses.Cancelled)
+                throw new ProcurementConflictException("The purchase order is already cancelled.");
+            // The only remaining statuses are PARTIALLY_RECEIVED and RECEIVED, both of which mean
+            // stock has physically landed and is already governed by the reservation ledger;
+            // cancelling their paperwork would strand it. The line-level check is the same rule
+            // stated against the quantities, so a future status transition cannot bypass it.
+            if (po.Status is not (SupplierPurchaseOrderStatuses.Draft or SupplierPurchaseOrderStatuses.Issued)
+                || po.Lines.Any(x => x.ReceivedQuantity > 0m))
+                throw new ProcurementConflictException(
+                    "Goods have already been received against this purchase order; only a draft or "
+                    + "issued purchase order can be cancelled.");
+
+            var now = DateTime.UtcNow;
+            po.Status = SupplierPurchaseOrderStatuses.Cancelled;
+            po.Version++;
+            po.ModifiedOn = now;
+            po.ModifiedBy = command.Actor.Trim();
+
+            // The inbound supply this PO promised no longer exists. Cancelling the IncomingInventory
+            // row drops it out of OpenQuantity, every incoming-supply projection, and the
+            // commercial resolution classifier in one move.
+            var incomingIds = po.Lines.Where(x => x.IncomingInventoryId is not null)
+                .Select(x => x.IncomingInventoryId!.Value).Distinct().ToArray();
+            if (incomingIds.Length > 0)
+            {
+                var incomingRows = await _db.IncomingInventory
+                    .Where(x => x.BusinessUnitId == command.BusinessUnitId && incomingIds.Contains(x.Id))
+                    .ToListAsync(ct);
+                foreach (var incoming in incomingRows)
+                {
+                    _db.Entry(incoming).Property(x => x.Status).CurrentValue = IncomingInventoryStatus.Cancelled;
+                    _db.Entry(incoming).Property(x => x.AllocatedQuantity).CurrentValue = 0m;
+                }
+            }
+
+            // The awards die with the purchase order they were converted into: the PO lines stay
+            // for audit, so an award can never be re-converted, and leaving them "CONVERTED_TO_PO"
+            // would claim a commitment that no longer exists. The RFQ line is re-sourced from
+            // scratch, which is exactly what a cancelled order requires.
+            var awardIds = po.Lines.Select(x => x.SourcingAwardId).Distinct().ToArray();
+            var awards = await _db.Set<SourcingAward>()
+                .Where(x => x.BusinessUnitId == command.BusinessUnitId && awardIds.Contains(x.Id))
+                .ToListAsync(ct);
+            foreach (var award in awards)
+            {
+                award.Status = "CANCELLED";
+                award.Version++;
+            }
+
+            AddEvent(command.BusinessUnitId, "SupplierPurchaseOrder", po.Id, po.Version, "SUPPLIER_PO_CANCELLED",
+                command.Actor, command.CorrelationId, command.IdempotencyKey,
+                JsonSerializer.Serialize(new { requestHash = hash, reason, awardIds, incomingIds }), now);
             await _db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
             return new PurchaseOrderResult(po.Id, po.PurchaseOrderNumber, po.Status, false);
@@ -1527,6 +1645,12 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                         && x.Id == line.IncomingInventoryId.Value, ct);
                     var received = incoming.ReceivedQuantity + requested.Quantity;
                     _db.Entry(incoming).Property(x => x.ReceivedQuantity).CurrentValue = received;
+                    // Units that have physically landed are no longer inbound commitments: they
+                    // are now on-hand stock governed by the reservation ledger. Releasing the
+                    // matching allocation keeps the invariant Allocated + Received <= Ordered,
+                    // which is what stops OpenQuantity's non-negativity guard from tripping.
+                    _db.Entry(incoming).Property(x => x.AllocatedQuantity).CurrentValue =
+                        Math.Max(0m, Math.Min(incoming.AllocatedQuantity, incoming.OrderedQuantity - received));
                     _db.Entry(incoming).Property(x => x.Status).CurrentValue = received >= incoming.OrderedQuantity
                         ? IncomingInventoryStatus.Received : IncomingInventoryStatus.PartiallyReceived;
                 }
@@ -1783,6 +1907,20 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             throw new ProcurementValidationException("Supplier candidate limit must be 10, 20, or 50.");
     }
 
+    /// <summary>
+    /// A supplier response deadline is a commitment the buyer makes to the supplier, so it is
+    /// persisted rather than discarded. Reject anything that could not be honoured: a non-UTC
+    /// instant (the column and the dispatch payload are both UTC) or a deadline already past.
+    /// </summary>
+    private static void ValidateSolicitationDueOn(DateTime? dueOn)
+    {
+        if (dueOn is null) return;
+        if (dueOn.Value.Kind == DateTimeKind.Local)
+            throw new ProcurementValidationException("A Supplier RFQ response deadline must be supplied in UTC.");
+        if (dueOn.Value <= DateTime.UtcNow)
+            throw new ProcurementValidationException("A Supplier RFQ response deadline must be in the future.");
+    }
+
     private static QuoteComparisonLine ToComparisonLine(SupplierQuotedItem row, decimal remainingRequirement,
         Supplier? supplier, SupplierQuotes.SupplierQuoteRevision? canonicalRevision, DateTime? requiredOn)
     {
@@ -1920,8 +2058,16 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             .Select(x => new { x.Id, x.Quantity })
             .ToListAsync(ct);
         var siblingIds = siblingItems.Select(x => x.Id).ToArray();
+        // COMMITTED SUPPLY: this used to count every status except CANCELLED, which included
+        // DRAFT. A draft purchase order is an internal intention, not a supplier commitment —
+        // and until CancelPurchaseOrderAsync existed, nothing could ever assign CANCELLED, so a
+        // draft whose supplier quotes had lapsed suppressed this line's net requirement forever
+        // and CreateSolicitationAsync refused to re-source it as "already fully covered". Only an
+        // order actually placed with a supplier reduces what still has to be bought.
         var activePurchaseOrderIds = _db.SupplierPurchaseOrders.AsNoTracking()
-            .Where(x => x.BusinessUnitId == businessUnitId && x.Status != SupplierPurchaseOrderStatuses.Cancelled)
+            .Where(x => x.BusinessUnitId == businessUnitId
+                && (x.Status == SupplierPurchaseOrderStatuses.Issued
+                    || x.Status == SupplierPurchaseOrderStatuses.PartiallyReceived))
             .Select(x => x.Id);
         var incomingByItem = await _db.SupplierPurchaseOrderLines.AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && siblingIds.Contains(x.RfqItemId)

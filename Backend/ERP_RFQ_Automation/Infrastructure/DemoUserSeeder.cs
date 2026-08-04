@@ -16,6 +16,22 @@ public static class DemoUserSeeder
         using var scope = services.CreateScope();
         var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("DemoUserSeeder");
 
+        // Fail-closed: this seeder provisions a SUPER_ADMIN tenant login AND a platform owner.
+        // It runs from startup, outside any HttpContext, which means CurrentTenantId is null
+        // (EF global query filters are no-ops) and TenantRlsCommandInterceptor.ResolveDatabaseRole
+        // returns the BYPASSRLS nexora_pipeline_app role — both tenant-isolation layers are off
+        // for the duration. That is acceptable for a pilot/demo tenant and is not acceptable in
+        // Production, so Production refuses rather than warns.
+        if (environment.IsProduction())
+        {
+            logger.LogError(
+                "DemoUserSeeder refused to run: DemoUser:Enabled is true in the Production environment. "
+                + "This seeder provisions a Super Admin tenant login and a platform owner and is a demo/pilot "
+                + "facility only. Set DemoUser:Enabled=false, or run this deployment under a non-Production "
+                + "ASPNETCORE_ENVIRONMENT.");
+            return;
+        }
+
         var email = configuration["DemoUser:Email"] ?? "robert@example.com";
         var businessUnitName = configuration["DemoUser:BusinessUnitName"] ?? "Customer POC";
         var businessUnitCode = configuration["DemoUser:BusinessUnitCode"] ?? "CUSTOMER-POC";
@@ -31,12 +47,6 @@ public static class DemoUserSeeder
             logger.LogWarning(
                 "DemoUser:Enabled is true but DemoUser:Password and/or PlatformOwner:Password are not set. Skipping seeding — no default credential will be created.");
             return;
-        }
-
-        if (environment.IsProduction())
-        {
-            logger.LogWarning(
-                "DemoUserSeeder is running in the Production environment (DemoUser:Enabled=true). Ensure the seeded credentials are intended and rotated after first login.");
         }
 
         var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
@@ -106,42 +116,62 @@ public static class DemoUserSeeder
         }
 
         var passwordHash = BCrypt.Net.BCrypt.HashPassword(password);
-        var user = await db.Users.FirstOrDefaultAsync(u => u.Email == email);
 
-        if (user == null)
+        // Users.Email carries a GLOBAL unique index (UQ__Users__A9D10534A3A2A11E), so the address
+        // configured here may already belong to a real account in a DIFFERENT business unit. The
+        // lookup used to be by email alone, which — combined with the null tenant context above —
+        // matched that foreign account and then rewrote its Buid to the demo tenant and its RoleId
+        // to SUPER_ADMIN. Resolve the demo user by (email, demo business unit) and treat a match on
+        // any other tenant as a configuration error to refuse, never as a row to adopt.
+        var accountForEmail = await db.Users.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(u => u.Email == email);
+        var user = accountForEmail?.Buid == businessUnit.Id ? accountForEmail : null;
+
+        if (accountForEmail is not null && user is null)
         {
-            user = new User
-            {
-                FirstName = "Robert",
-                LastName = "Pilot",
-                Email = email,
-                PasswordHash = passwordHash,
-                ImageUrl = string.Empty,
-                RoleId = role.SetupId,
-                Buid = businessUnit.Id,
-                Timezone = "UTC",
-                Region = "Demo",
-                IsActive = true,
-                CreatedBy = "system:demo-seed",
-                CreatedOn = now
-            };
-            db.Users.Add(user);
+            logger.LogError(
+                "DemoUserSeeder refused to seed {Email}: that address already belongs to an existing "
+                + "account in a different business unit. Seeding it would move that account into the "
+                + "demo tenant {BusinessUnit} and grant it Super Admin. Choose a different "
+                + "DemoUser:Email.", email, businessUnit.BusinessUnitName);
         }
         else
         {
-            // Never overwrite an existing user's password on restart — that would silently reset a
-            // credential an operator may have already rotated. Only backfill non-credential metadata.
-            user.FirstName = string.IsNullOrWhiteSpace(user.FirstName) ? "Robert" : user.FirstName;
-            user.LastName = string.IsNullOrWhiteSpace(user.LastName) ? "Pilot" : user.LastName;
-            user.RoleId = role.SetupId;
-            user.Buid = businessUnit.Id;
-            user.IsActive = true;
-            user.ModifiedBy = "system:demo-seed";
-            user.ModifiedOn = now;
-        }
+            if (user == null)
+            {
+                user = new User
+                {
+                    FirstName = "Robert",
+                    LastName = "Pilot",
+                    Email = email,
+                    PasswordHash = passwordHash,
+                    ImageUrl = string.Empty,
+                    RoleId = role.SetupId,
+                    Buid = businessUnit.Id,
+                    Timezone = "UTC",
+                    Region = "Demo",
+                    IsActive = true,
+                    CreatedBy = "system:demo-seed",
+                    CreatedOn = now
+                };
+                db.Users.Add(user);
+            }
+            else
+            {
+                // Never overwrite an existing user's password on restart — that would silently reset a
+                // credential an operator may have already rotated. Only backfill non-credential metadata.
+                user.FirstName = string.IsNullOrWhiteSpace(user.FirstName) ? "Robert" : user.FirstName;
+                user.LastName = string.IsNullOrWhiteSpace(user.LastName) ? "Pilot" : user.LastName;
+                user.RoleId = role.SetupId;
+                user.Buid = businessUnit.Id;
+                user.IsActive = true;
+                user.ModifiedBy = "system:demo-seed";
+                user.ModifiedOn = now;
+            }
 
-        await db.SaveChangesAsync();
-        logger.LogInformation("Ensured demo login user {Email} for business unit {BusinessUnit}.", email, businessUnit.BusinessUnitName);
+            await db.SaveChangesAsync();
+            logger.LogInformation("Ensured demo login user {Email} for business unit {BusinessUnit}.", email, businessUnit.BusinessUnitName);
+        }
 
         var platformOwner = await db.Set<PlatformUser>().FirstOrDefaultAsync(u => u.Email == platformEmail);
         var platformPasswordHash = BCrypt.Net.BCrypt.HashPassword(platformPassword);

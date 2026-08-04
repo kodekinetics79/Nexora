@@ -77,12 +77,15 @@ namespace ERP_RFQ_Automation.Repositories
 
         public async Task UpdateAsync(Warehouse warehouse)
         {
-            var existing = await _context.Warehouses.AsNoTracking().FirstOrDefaultAsync(w => w.Id == warehouse.Id);
+            // TENANT ISOLATION: this used to look the row up by Id alone, so the tenant check was
+            // whatever the caller happened to put in warehouse.BusinessUnitId. Scoping the read to
+            // the tenant makes a cross-tenant update a not-found rather than a silent success if
+            // any future caller reaches the repository without the controller's pre-check.
+            var existing = await _context.Warehouses.AsNoTracking()
+                .FirstOrDefaultAsync(w => w.Id == warehouse.Id && w.BusinessUnitId == warehouse.BusinessUnitId);
             if (existing == null)
-                throw new KeyNotFoundException($"Warehouse with ID {warehouse.Id} not found.");
-
-            if (existing.BusinessUnitId != warehouse.BusinessUnitId)
-                throw new ArgumentException("Cannot change the Business Unit of a warehouse.");
+                throw new KeyNotFoundException(
+                    $"Warehouse with ID {warehouse.Id} not found in Business Unit {warehouse.BusinessUnitId}.");
 
             // Validate unique warehouse code within same BusinessUnit (excluding current warehouse)
             var codeExists = await _context.Warehouses.AnyAsync(w =>
@@ -128,6 +131,29 @@ namespace ERP_RFQ_Automation.Repositories
         public async Task DeleteAsync(long id, long businessUnitId)
         {
             var warehouse = await GetByIdAsync(id, businessUnitId);
+
+            // Deleting a warehouse used to be unconditional. Inventory rows carry a plain
+            // WarehouseId with no enforced foreign key, so the delete succeeded and orphaned every
+            // stock row pointing at it — and because the availability query inner-joins
+            // Inventory to Warehouse, that stock silently vanished from available-to-promise while
+            // remaining physically present. Movements and incoming supply do hold Restrict foreign
+            // keys, so those cases surfaced as opaque 500s instead. Every dependency is now an
+            // explicit, explainable conflict.
+            if (await _context.Set<ERP_RFQ_Automation.Models.Inventory>()
+                    .AnyAsync(x => x.Buid == businessUnitId && x.WarehouseId == id))
+                throw new InvalidOperationException(
+                    $"Cannot delete warehouse {id} because it holds inventory records. Transfer or write off its stock first.");
+            if (await _context.InventoryMovements
+                    .AnyAsync(x => x.BusinessUnitId == businessUnitId && x.WarehouseId == id))
+                throw new InvalidOperationException(
+                    $"Cannot delete warehouse {id} because it has an inventory movement history, which is an immutable audit record.");
+            if (await _context.IncomingInventory
+                    .AnyAsync(x => x.BusinessUnitId == businessUnitId && x.WarehouseId == id))
+                throw new InvalidOperationException(
+                    $"Cannot delete warehouse {id} because incoming supply is expected there.");
+            if (await _context.Products.AnyAsync(x => x.Buid == businessUnitId && x.WarehouseId == id))
+                throw new InvalidOperationException(
+                    $"Cannot delete warehouse {id} because products still name it as their default warehouse.");
 
             _context.Warehouses.Remove(warehouse);
             await _context.SaveChangesAsync();

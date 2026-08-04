@@ -284,7 +284,9 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
                 SecurityScanUpdatedAtUtc = intake?.UpdatedOn,
                 LastUpdatedAtUtc = intake?.UpdatedOn ?? x.IngestedAtUtc,
                 ExtractionStatus = job?.Status.ToString(),
-                ExtractionUpdatedAtUtc = job is null ? null : AsUtc(job.UpdatedOn)
+                ExtractionUpdatedAtUtc = job is null ? null : AsUtc(job.UpdatedOn),
+                RecoverableSecurityHold = intake is not null && IsRecoverableSecurityHold(
+                    intake.IntakeStatus, intake.LastErrorCode, intake.SourceMetadataJson)
             };
         }).ToList();
 
@@ -324,6 +326,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
                 awaitingSecurityScan ? "security_scanner_unavailable" : intake.LastErrorCode,
                 intake.Id)
             {
+                RecoverableSecurityHold = awaitingSecurityScan,
                 SecurityStatus = intake.SecurityStatus.ToString(),
                 SecurityScanUpdatedAtUtc = intake.UpdatedOn,
                 LastUpdatedAtUtc = intake.UpdatedOn,
@@ -362,33 +365,14 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             new(DateTime.SpecifyKind(value, DateTimeKind.Utc));
     }
 
+    // Single source of truth, shared with SecurityScanRecoveryService: what this read model counts as
+    // "awaiting security scan" must be exactly what the retry endpoint is willing to replay.
     private static bool IsRecoverableSecurityHold(
         IntakeOccurrenceStatus intakeStatus,
         string? lastErrorCode,
-        string sourceMetadataJson)
-    {
-        if (intakeStatus == IntakeOccurrenceStatus.AwaitingSecurityScan)
-            return true;
-        if (intakeStatus != IntakeOccurrenceStatus.Rejected
-            || (!string.Equals(lastErrorCode, "document_quarantined", StringComparison.OrdinalIgnoreCase)
-                && !string.Equals(lastErrorCode, "security_scanner_unavailable", StringComparison.OrdinalIgnoreCase)))
-            return false;
-
-        try
-        {
-            using var metadata = JsonDocument.Parse(sourceMetadataJson);
-            if (!metadata.RootElement.TryGetProperty("inspection", out var inspection)
-                || inspection.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
-                return true;
-            return !inspection.TryGetProperty("ScannerSignature", out var signature)
-                   || signature.ValueKind == JsonValueKind.Null
-                   || string.IsNullOrWhiteSpace(signature.GetString());
-        }
-        catch (Exception exception) when (exception is JsonException or InvalidOperationException)
-        {
-            return false;
-        }
-    }
+        string sourceMetadataJson) =>
+        ERP_RFQ_Automation.Extraction.SecurityHoldRecovery.IsRecoverableSecurityHold(
+            intakeStatus, lastErrorCode, sourceMetadataJson);
 
     private static IReadOnlyList<string> IntakeReasons(
         string? detailsJson,

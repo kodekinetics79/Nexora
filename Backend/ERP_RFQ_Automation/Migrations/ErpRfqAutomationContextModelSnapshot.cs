@@ -144,6 +144,94 @@ namespace ERP_RFQ_Automation.Migrations
                     b.ToTable("AiCallAttempts", (string)null);
                 });
 
+            modelBuilder.Entity("ERP_RFQ_Automation.AI.AiExternalProviderAuthorization", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("AllowedPurposes")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<string>("AuthorizedBy")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<long>("AuthorizedByUserId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime>("AuthorizedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Endpoint")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTime?>("ExpiresOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("Justification")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<string>("Model")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("Provider")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("RevocationReason")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<string>("RevokedBy")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<long?>("RevokedByUserId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime?>("RevokedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<bool>("UnstructuredDocumentsAllowed")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime>("UpdatedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L);
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BusinessUnitId", "Endpoint")
+                        .HasDatabaseName("IX_AiProviderAuthorizations_BU_Endpoint");
+
+                    b.HasIndex("BusinessUnitId", "Provider", "Endpoint", "Model")
+                        .IsUnique()
+                        .HasDatabaseName("UX_AiProviderAuthorizations_BU_Provider_Endpoint_Model");
+
+                    b.ToTable("AiProviderAuthorizations", (string)null);
+                });
+
             modelBuilder.Entity("ERP_RFQ_Automation.AI.AiProcessingPolicy", b =>
                 {
                     b.Property<long>("BusinessUnitId")
@@ -777,6 +865,9 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("timestamp without time zone")
                         .HasDefaultValueSql("now()");
 
+                    b.Property<DateTime?>("DueOn")
+                        .HasColumnType("timestamp without time zone");
+
                     b.Property<string>("IdempotencyKey")
                         .IsRequired()
                         .HasMaxLength(160)
@@ -839,6 +930,10 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("BusinessUnitId", "CommercialDemandLineId");
+
+                    b.HasIndex("BusinessUnitId", "DueOn")
+                        .HasDatabaseName("IX_SupplierSolicitations_BU_DueOn")
+                        .HasFilter("\"DueOn\" IS NOT NULL");
 
                     b.HasIndex("BusinessUnitId", "IdempotencyKey")
                         .IsUnique();
@@ -8368,6 +8463,135 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasKey("BusinessUnitId");
 
                     b.ToTable("TenantQueueStates", (string)null);
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Fx.FxRate", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("ApprovedBy")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTime?>("ApprovedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTime>("CreatedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<DateTime>("EffectiveFrom")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<DateTime?>("EffectiveTo")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<long>("FromCurrencyId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Note")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<decimal>("Rate")
+                        .HasPrecision(20, 10)
+                        .HasColumnType("numeric(20,10)");
+
+                    b.Property<string>("Source")
+                        .IsRequired()
+                        .HasMaxLength(60)
+                        .HasColumnType("character varying(60)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<long>("ToCurrencyId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex(new[] { "BusinessUnitId", "FromCurrencyId", "ToCurrencyId", "Status" }, "IX_FxRates_BU_Pair_Status");
+
+                    b.HasIndex(new[] { "BusinessUnitId", "FromCurrencyId", "ToCurrencyId", "EffectiveFrom" }, "UX_FxRates_BU_Pair_EffectiveFrom")
+                        .IsUnique();
+
+                    b.ToTable("FxRates");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Fx.FxRateSnapshot", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime>("AsOf")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("CapturedBy")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTime>("CapturedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<long>("DocumentId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("DocumentType")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)");
+
+                    b.Property<long>("FromCurrencyId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("FxRateId")
+                        .HasColumnType("bigint");
+
+                    b.Property<decimal>("Rate")
+                        .HasPrecision(20, 10)
+                        .HasColumnType("numeric(20,10)");
+
+                    b.Property<DateTime>("RateEffectiveFrom")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("ResolutionPath")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)");
+
+                    b.Property<long>("ToCurrencyId")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex(new[] { "BusinessUnitId", "DocumentType", "DocumentId", "FromCurrencyId", "ToCurrencyId" }, "UX_FxRateSnapshots_BU_Document_Pair")
+                        .IsUnique();
+
+                    b.ToTable("FxRateSnapshots");
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.GeneralLedger.AccountingPeriod", b =>
@@ -16075,6 +16299,91 @@ namespace ERP_RFQ_Automation.Migrations
                         });
                 });
 
+            modelBuilder.Entity("ERP_RFQ_Automation.Security.LoginAttemptRecord", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("AttemptKey")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<int>("FailedCount")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("FirstFailedOnUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<DateTime>("LastFailedOnUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<DateTime?>("LockedUntilUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("Plane")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("LockedUntilUtc")
+                        .HasDatabaseName("IX_LoginAttempts_LockedUntilUtc");
+
+                    b.HasIndex("Plane", "AttemptKey")
+                        .IsUnique()
+                        .HasDatabaseName("UX_LoginAttempts_Plane_AttemptKey");
+
+                    b.ToTable("LoginAttempts", (string)null);
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Services.FolderIngestionRetryState", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<int>("Attempts")
+                        .HasColumnType("integer");
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("FileName")
+                        .IsRequired()
+                        .HasMaxLength(400)
+                        .HasColumnType("character varying(400)");
+
+                    b.Property<DateTime>("FirstFailedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("LastErrorType")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTime>("LastFailedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("SourceLabel")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BusinessUnitId", "SourceLabel", "FileName")
+                        .IsUnique()
+                        .HasDatabaseName("UX_FolderIngestionRetryStates_BU_Source_File");
+
+                    b.ToTable("FolderIngestionRetryStates", (string)null);
+                });
+
             modelBuilder.Entity("ERP_RFQ_Automation.Sla.SlaEvent", b =>
                 {
                     b.Property<long>("Id")
@@ -16091,6 +16400,11 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("timestamp without time zone")
                         .HasDefaultValueSql("now()");
 
+                    b.Property<string>("DedupKey")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)");
+
                     b.Property<long>("EntityId")
                         .HasColumnType("bigint");
 
@@ -16105,6 +16419,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(20)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("BusinessUnitId", "DedupKey")
+                        .IsUnique()
+                        .HasDatabaseName("UX_SlaEvents_BU_DedupKey");
 
                     b.HasIndex("BusinessUnitId", "EntityType", "EntityId", "Level")
                         .HasDatabaseName("IX_SlaEvents_BU_Entity_Level");
@@ -16815,6 +17133,15 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsRequired();
 
                     b.Navigation("Request");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.AI.AiExternalProviderAuthorization", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Models.BusinessUnit", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.AI.AiProcessingPolicy", b =>

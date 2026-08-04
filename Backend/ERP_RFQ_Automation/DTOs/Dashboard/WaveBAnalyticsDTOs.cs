@@ -58,8 +58,19 @@ namespace ERP_RFQ_Automation.DTOs.Dashboard
 
         public int Count { get; set; }
 
-        /// <summary>Stage value: lead-line estimates for lead stages, quote totals for quote stages.</summary>
-        public decimal Value { get; set; }
+        /// <summary>
+        /// Stage value in the business unit's base currency: lead-line estimates for lead stages,
+        /// quote totals for quote stages. NULL means "not answerable", never zero — a stage whose
+        /// rows span currencies without approved rates cannot be reduced to one figure, and a 0
+        /// would read as a real collapse in the funnel.
+        /// </summary>
+        public decimal? Value { get; set; }
+
+        /// <summary>ISO code <see cref="Value"/> is expressed in.</summary>
+        public string? ValueCurrency { get; set; }
+
+        /// <summary>Why <see cref="Value"/> is null, when applicable.</summary>
+        public string? ValueUnavailableReason { get; set; }
     }
 
     /// <summary>Lost/expired quotes grouped by their recorded outcome reason.</summary>
@@ -67,7 +78,15 @@ namespace ERP_RFQ_Automation.DTOs.Dashboard
     {
         public string Reason { get; set; } = string.Empty;
         public int Count { get; set; }
-        public decimal Value { get; set; }
+
+        /// <summary>Lost value in base currency; NULL when this group spans unconvertible currencies.</summary>
+        public decimal? Value { get; set; }
+
+        /// <summary>ISO code <see cref="Value"/> is expressed in.</summary>
+        public string? ValueCurrency { get; set; }
+
+        /// <summary>Why <see cref="Value"/> is null, when applicable.</summary>
+        public string? ValueUnavailableReason { get; set; }
     }
 
     public class PipelineAnalyticsDTO
@@ -76,16 +95,31 @@ namespace ERP_RFQ_Automation.DTOs.Dashboard
 
         public List<PipelineLossReasonDTO> LossReasons { get; set; } = new();
 
-        /// <summary>SENT-not-responded totals × 0.3 + SENT-responded totals × 0.5.</summary>
-        public decimal WeightedForecast { get; set; }
+        /// <summary>
+        /// SENT-not-responded totals × 0.3 + SENT-responded totals × 0.5, in base currency.
+        /// NULL when the open pipeline cannot be fully converted — previously this probability-
+        /// weighted two mixed-currency baskets and then ADDED them, which made it the single most
+        /// misleading number on the dashboard.
+        /// </summary>
+        public decimal? WeightedForecast { get; set; }
+
+        /// <summary>ISO code the forecast and the two value figures below are expressed in.</summary>
+        public string? ForecastCurrency { get; set; }
+
+        /// <summary>Why <see cref="WeightedForecast"/> is null, when applicable.</summary>
+        public string? ForecastUnavailableReason { get; set; }
 
         /// <summary>Open SENT quotes still waiting for any customer response.</summary>
         public int AwaitingResponseQuotes { get; set; }
-        public decimal AwaitingResponseValue { get; set; }
+
+        /// <summary>Base-currency value of the awaiting bucket; NULL when unconvertible.</summary>
+        public decimal? AwaitingResponseValue { get; set; }
 
         /// <summary>Open SENT quotes where the customer has responded but no outcome is recorded yet.</summary>
         public int RespondedQuotes { get; set; }
-        public decimal RespondedValue { get; set; }
+
+        /// <summary>Base-currency value of the responded bucket; NULL when unconvertible.</summary>
+        public decimal? RespondedValue { get; set; }
 
         /// <summary>
         /// Quoted-vs-floor margin proxy: average (unitPrice − cost) / unitPrice over
@@ -97,6 +131,13 @@ namespace ERP_RFQ_Automation.DTOs.Dashboard
 
         /// <summary>Quote lines that had floor data and were included in AvgMarginPct.</summary>
         public int MarginSampleLines { get; set; }
+
+        /// <summary>
+        /// Quote lines that had floor data but were EXCLUDED from AvgMarginPct because their
+        /// quote currency could not be converted to base currency (or the quote carried no
+        /// currency). A non-zero value here means the margin sample is incomplete.
+        /// </summary>
+        public int MarginLinesExcludedForFx { get; set; }
 
         /// <summary>All priced quote lines in the BU (denominator for floor coverage).</summary>
         public int TotalQuoteLines { get; set; }

@@ -192,22 +192,95 @@ public sealed class TenantRlsCommandInterceptor : DbCommandInterceptor
                 businessUnitId is { } tenantId ? SignedActor(tenantId) : null);
     }
 
+    /// <summary>
+    /// Chooses the PostgreSQL role a command executes under. Returning null means "issue no
+    /// SET LOCAL ROLE", which leaves the command on the connection's own login role.
+    ///
+    /// That matters more than it looks: ResolveDirectMigrationConnection (Program.cs) reuses the
+    /// runtime username for migrations, so the runtime login role is also the role that OWNS the
+    /// tables — and a table owner is exempt from its own row-level-security policies unless the
+    /// table is declared FORCE. Verified against postgres:16 using the exact role topology
+    /// ValidateRuntimeDatabaseRoleAsync enforces (owner NOINHERIT, NOSUPERUSER, NOBYPASSRLS):
+    /// a SELECT on an ENABLE-only tenant table returned EVERY tenant's rows. So the old
+    /// "anonymous / unrecognised route" fallthrough was the one code path where BOTH isolation
+    /// layers were off at once — the EF filter is a no-op with a null tenant, and RLS did not
+    /// bind the owner.
+    ///
+    /// It now falls through to <see cref="TenantRole"/> WITHOUT setting nexora.business_unit_id.
+    /// nexora_tenant_app is NOBYPASSRLS, so every policy evaluates
+    /// `"BusinessUnitID" = NULLIF(current_setting(...), '')::bigint` against NULL: the same
+    /// verification showed 0 rows returned and INSERT rejected with "new row violates row-level
+    /// security policy". A request that has no tenant gets no tenant data, which is the correct
+    /// answer rather than a degradation.
+    ///
+    /// Deliberately NOT <see cref="PipelineRole"/>: that role is created BYPASSRLS
+    /// (20260728134117_ConfigureDatabaseExecutionRoles), and the same verification showed it
+    /// returning every tenant's rows both with and without FORCE. Routing the null case there
+    /// would relabel the hole, not close it.
+    ///
+    /// Deliberately NOT a throw: this is reached on an in-flight HTTP request, and the failure
+    /// mode of a wrong guess is a dead startup or a dead health probe rather than a leak. The
+    /// role above is already fail-closed at the database, so throwing buys no isolation.
+    ///
+    /// The null return is kept for the parameterless-accessor constructor only. That overload is
+    /// never used by Program.cs (the DI container resolves the three-argument constructor); it
+    /// exists for background-worker test harnesses that sweep across tenants before pushing a
+    /// scope, and forcing those onto an unGUCed tenant role would make them read nothing.
+    ///
+    /// ORDER MATTERS. The two login endpoints are resolved BEFORE the tenant check, because a
+    /// login request that arrives carrying a live tenant JWT (the frontend attaches the bearer
+    /// token to every request) would otherwise run as nexora_tenant_app, which has no privilege
+    /// on "LoginAttempts" — see the inline note at the branch.
+    /// </summary>
     internal static string? ResolveDatabaseRole(
         long? businessUnitId, IHttpContextAccessor? httpContextAccessor)
     {
-        if (businessUnitId.HasValue)
-            return TenantRole;
         if (httpContextAccessor is null)
-            return null;
+            return businessUnitId.HasValue ? TenantRole : null;
 
         var httpContext = httpContextAccessor.HttpContext;
         if (httpContext is null)
+            return businessUnitId.HasValue ? TenantRole : PipelineRole;
+
+        // THE TWO LOGIN PATHS ARE RESOLVED FIRST, deliberately ABOVE the tenant check.
+        //
+        // COMPOSITION DEFECT this closes: axiosInstance attaches the bearer token to EVERY
+        // request, so a user who already holds a live tenant JWT and re-posts /api/Auth/Login
+        // arrives here with businessUnitId set. Under the old ordering that request ran as
+        // nexora_tenant_app — and 20260804181701_LoginAttemptThrottle REVOKEs all privileges
+        // on "LoginAttempts" from that role. LoginAttemptThrottle fails OPEN on infrastructure
+        // errors (a broken counter table must not lock every user out of the product), so the
+        // 42501 insufficient_privilege was swallowed and the progressive lockout silently did
+        // not exist on the default, token-bearing path: no counter, no lockout, no forensic
+        // row, at the full request rate. /api/platform/auth/login had the identical shape.
+        //
+        // Neither branch grants anything an attacker could not already reach by simply dropping
+        // the token — both login paths already resolve to these roles when businessUnitId is
+        // null — so this adds no capability. It only stops a tenant token from DOWNGRADING the
+        // role out of the privileges its own throttle table requires.
+        //
+        // StartsWithSegments rather than an exact string compare: "/api/Auth/Login/" routes to
+        // the same endpoint but was a different string and fell through to the tenant role. It
+        // is segment-aware, so a hypothetical "/api/Auth/LoginHistory" is NOT matched.
+        if (httpContext.Request.Path.StartsWithSegments("/api/platform/auth/login"))
             return PipelineRole;
+        if (httpContext.Request.Path.StartsWithSegments("/api/Auth/Login"))
+            return IdentityRole;
+
+        // NOT hoisted above this line: the REST of /api/platform. nexora_pipeline_app is
+        // BYPASSRLS, and an impersonation token (PlatformAuthService) is a TENANT token that
+        // carries businessUnitId and no platform scope — so hoisting the whole platform prefix
+        // would let a tenant-scoped request execute under the bypass role the moment a platform
+        // authorization check regressed. A tenant scope therefore keeps the fail-closed tenant
+        // role everywhere except the login endpoints, whose privileges it demonstrably needs.
+        if (businessUnitId.HasValue)
+            return TenantRole;
+
         if (httpContext.Request.Path.StartsWithSegments("/api/platform"))
             return PipelineRole;
-        return string.Equals(httpContext.Request.Path.Value, "/api/Auth/Login", StringComparison.OrdinalIgnoreCase)
-            ? IdentityRole
-            : null;
+
+        // Fail closed: least-privileged role, no tenant GUC, therefore no tenant rows.
+        return TenantRole;
     }
 
     private static DbCommand CreateSetupCommand(DbCommand command, ExecutionScope executionScope)

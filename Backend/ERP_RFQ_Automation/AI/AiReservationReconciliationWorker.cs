@@ -113,6 +113,7 @@ public sealed class AiReservationReconciler : IAiReservationReconciler
 public sealed class AiReservationReconciliationWorker : BackgroundService
 {
     private readonly IAiReservationReconciler _reconciler;
+    private readonly ERP_RFQ_Automation.HealthChecks.IBackgroundWorkerHeartbeats? _heartbeats;
     private readonly ILogger<AiReservationReconciliationWorker> _log;
     private readonly TimeSpan _staleAfter;
     private readonly TimeSpan _interval;
@@ -120,18 +121,28 @@ public sealed class AiReservationReconciliationWorker : BackgroundService
     public AiReservationReconciliationWorker(
         IAiReservationReconciler reconciler,
         IConfiguration configuration,
-        ILogger<AiReservationReconciliationWorker> log)
+        ILogger<AiReservationReconciliationWorker> log,
+        ERP_RFQ_Automation.HealthChecks.IBackgroundWorkerHeartbeats? heartbeats = null)
     {
         _reconciler = reconciler;
         _log = log;
+        _heartbeats = heartbeats;
         _staleAfter = TimeSpan.FromMinutes(Math.Clamp(
             configuration.GetValue("AiGovernance:ReservationStaleAfterMinutes", 15), 5, 1440));
         _interval = TimeSpan.FromMinutes(Math.Clamp(
             configuration.GetValue("AiGovernance:ReconciliationIntervalMinutes", 2), 1, 60));
+        // Without this the worker could fault once (BackgroundServiceExceptionBehavior
+        // is Ignore) and stay dead for the process lifetime while /ready stayed green;
+        // AI budget reservations would then leak indefinitely.
+        _heartbeats?.Register(
+            ERP_RFQ_Automation.HealthChecks.BackgroundWorkerNames.AiReservationReconciliation, _interval);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        _heartbeats?.Beat(
+            ERP_RFQ_Automation.HealthChecks.BackgroundWorkerNames.AiReservationReconciliation, _interval);
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -139,6 +150,8 @@ public sealed class AiReservationReconciliationWorker : BackgroundService
                 var count = await _reconciler.ReconcileAsync(DateTime.UtcNow - _staleAfter, stoppingToken);
                 if (count > 0)
                     _log.LogWarning("Reconciled {Count} stale AI reservation(s) as unknown usage.", count);
+                _heartbeats?.Beat(
+                    ERP_RFQ_Automation.HealthChecks.BackgroundWorkerNames.AiReservationReconciliation, _interval);
                 await Task.Delay(_interval, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -148,6 +161,8 @@ public sealed class AiReservationReconciliationWorker : BackgroundService
             catch (Exception ex)
             {
                 _log.LogError(ex, "AI reservation reconciliation failed; retrying.");
+                _heartbeats?.Beat(
+                    ERP_RFQ_Automation.HealthChecks.BackgroundWorkerNames.AiReservationReconciliation, _interval);
                 await Task.Delay(_interval, stoppingToken);
             }
         }

@@ -17,13 +17,20 @@ namespace ERP_RFQ_Automation.Services
         private readonly IOrderRepository _orderRepository;
         private readonly ErpRfqAutomationContext _context;
         private readonly ILifecycleApplicationService? _lifecycle;
+        private readonly ERP_RFQ_Automation.Inventory.IOrderStockReservationService _stock;
 
         public OrderService(IOrderRepository orderRepository, ErpRfqAutomationContext context,
-            ILifecycleApplicationService? lifecycle = null)
+            ILifecycleApplicationService? lifecycle = null,
+            ERP_RFQ_Automation.Inventory.IOrderStockReservationService? stock = null)
         {
             _orderRepository = orderRepository;
             _context = context;
             _lifecycle = lifecycle;
+            // Defaulted rather than required so the existing call sites keep compiling, but never
+            // null: a null here would silently reinstate the stock leak this service exists to
+            // close, and the service depends on nothing but the same DbContext.
+            _stock = stock ?? new ERP_RFQ_Automation.Inventory.OrderStockReservationService(
+                context, new ERP_RFQ_Automation.Inventory.InventoryAvailabilityService(context));
         }
 
         public async Task<IEnumerable<OrderDto>> GetAllOrdersAsync(long businessUnitId)
@@ -391,6 +398,12 @@ namespace ERP_RFQ_Automation.Services
                 throw new Exception("Locked: Order cannot be modified as a shipment has been created.");
             }
 
+            // An order that moves to CANCELLED must give its stock back. Without this the holds
+            // stay Active forever, so available-to-promise stays suppressed and the units are
+            // never resellable — the cancellation is invisible to every availability screen.
+            var isCancelling = !await IsCancelledStatusAsync(order.StatusId, businessUnitId)
+                               && await IsCancelledStatusAsync(dto.StatusId, businessUnitId);
+
             order.StatusId = dto.StatusId;
             order.PaymentMethodId = dto.PaymentMethodId;
             order.PaymentStatusId = dto.PaymentStatusId;
@@ -402,18 +415,77 @@ namespace ERP_RFQ_Automation.Services
             order.ModifiedBy = "System";
             order.ModifiedOn = DateTime.Now;
 
-            await _orderRepository.UpdateOrderAsync(order, businessUnitId);
+            if (!isCancelling)
+            {
+                await _orderRepository.UpdateOrderAsync(order, businessUnitId);
+                return MapToDto(order);
+            }
+
+            // The release and the cancellation are one decision, so they commit together: an order
+            // marked cancelled while its stock stays held, or stock released while the order stays
+            // open, are both wrong and neither is self-correcting.
+            await InTransactionAsync(async () =>
+            {
+                await _stock.ReleaseOrderAsync(businessUnitId, order.Id, "order-cancelled");
+                await _orderRepository.UpdateOrderAsync(order, businessUnitId);
+            });
             return MapToDto(order);
         }
 
         public async Task DeleteOrderAsync(long id, long businessUnitId)
         {
-            var shipmentsExist = await _context.Shipments.AnyAsync(s => s.OrderId == id);
+            var shipmentsExist = await _context.Shipments.AnyAsync(s => s.OrderId == id && s.BusinessUnitId == businessUnitId);
             if (shipmentsExist)
             {
                 throw new Exception("Locked: Order cannot be deleted as a shipment has been created.");
             }
-            await _orderRepository.DeleteOrderAsync(id, businessUnitId);
+
+            // StockReservation has NO foreign key to Orders (only an index on OrderId), so
+            // `Orders.Remove` leaves every active hold behind with a dangling OrderId. Nothing can
+            // ever call ReleaseForOrderAsync for it again and the stock is suppressed from
+            // available-to-promise permanently. Release BEFORE the delete, in the same
+            // transaction, while the order still exists: the orphan sweep is a recovery path for
+            // holds already stranded, not the fix.
+            await InTransactionAsync(async () =>
+            {
+                await _stock.ReleaseOrderAsync(businessUnitId, id, "order-deleted");
+                await _orderRepository.DeleteOrderAsync(id, businessUnitId);
+            });
+        }
+
+        /// <summary>
+        /// Runs a stock-and-order mutation as one unit of work. The reservation services join an
+        /// ambient transaction when they find one, so the holds and the order state commit or roll
+        /// back together.
+        /// </summary>
+        private async Task InTransactionAsync(Func<Task> work)
+        {
+            if (_context.Database.CurrentTransaction is not null)
+            {
+                await work();
+                return;
+            }
+
+            var strategy = _context.Database.CreateExecutionStrategy();
+            await strategy.ExecuteAsync(async () =>
+            {
+                await using var transaction = await _context.Database.BeginTransactionAsync();
+                await work();
+                await transaction.CommitAsync();
+            });
+        }
+
+        /// <summary>
+        /// True when the setup id names a cancelled order status in this tenant. Resolved from
+        /// SetupMaster rather than a hard-coded id because OrderStatus ids are tenant-seeded.
+        /// </summary>
+        private async Task<bool> IsCancelledStatusAsync(long? statusId, long businessUnitId)
+        {
+            if (statusId is null or 0) return false;
+            return await _context.SetupMasters.AsNoTracking().AnyAsync(s =>
+                s.SetupId == statusId && s.BusinessUnitId == businessUnitId && s.SetupType == "OrderStatus"
+                && (s.SetupCode == "CANCELLED" || s.SetupCode == "CANCELED"
+                    || s.SetupValue.ToUpper() == "CANCELLED" || s.SetupValue.ToUpper() == "CANCELED"));
         }
 
         public async Task<IEnumerable<OrderDto>> GetOrdersByCustomerIdAsync(long customerId, long businessUnitId)

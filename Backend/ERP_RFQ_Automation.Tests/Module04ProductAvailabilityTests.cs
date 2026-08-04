@@ -57,7 +57,7 @@ public sealed class Module04ProductAvailabilityTests
         }
 
         await using var context = database.ContextFor(1);
-        var repository = new ProductRepository(context, new TestEnvironment());
+        var repository = new ProductRepository(context, new TestEnvironment(), new ClearingFileInspection());
         var result = await repository.MatchProductAsync(new ProductMatchRequestDTO
         {
             BusinessUnitId = 1, PartNo = "PN-100", Quantity = 20m,

@@ -4,12 +4,14 @@ using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Inventory;
 using ERP_RFQ_Automation.Inventory.Commercial;
+using ERP_RFQ_Automation.Security.DocumentInspection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Hosting;
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace ERP_RFQ_Automation.Repositories
@@ -18,30 +20,95 @@ namespace ERP_RFQ_Automation.Repositories
     {
         private readonly ErpRfqAutomationContext _context;
         private readonly IWebHostEnvironment _environment;
+        private readonly IFileInspectionService _fileInspection;
 
-        public ProductRepository(ErpRfqAutomationContext context, IWebHostEnvironment environment)
+        public ProductRepository(
+            ErpRfqAutomationContext context,
+            IWebHostEnvironment environment,
+            IFileInspectionService fileInspection)
         {
             _context = context;
             _environment = environment;
+            _fileInspection = fileInspection;
         }
 
-        private async Task<string?> SaveAttachmentAsync(IFormFile file, string subFolder)
+        /// <summary>A product attachment that has passed <see cref="IFileInspectionService"/>.</summary>
+        private sealed record InspectedAttachment(string FileName, byte[] Content, string Extension);
+
+        /// <summary>
+        /// SEC-H5: product attachments used to be written straight to wwwroot as
+        /// <c>$"{Guid.NewGuid()}_{file.FileName}"</c> — no <see cref="Path.GetFileName(string)"/>,
+        /// no extension allowlist, no magic-byte check, no size ceiling and no malware scan.
+        /// Every attachment now goes through the same shared <see cref="IFileInspectionService"/>
+        /// that the customer import and evidence intake paths use, which enforces the
+        /// extension allowlist, the 25 MB ceiling, extension↔content agreement and the
+        /// malware scan in one place.
+        ///
+        /// Inspection runs BEFORE any database write so a rejected file cannot leave a
+        /// half-written product behind, and the bytes are buffered so nothing touches disk
+        /// until the whole batch has cleared.
+        /// </summary>
+        private async Task<List<InspectedAttachment>> InspectAttachmentsAsync(
+            List<IFormFile>? attachments, CancellationToken cancellationToken = default)
         {
-            if (file == null || file.Length == 0) return null;
+            var inspected = new List<InspectedAttachment>();
+            if (attachments == null) return inspected;
 
-            var uploadsFolder = Path.Combine(_environment.WebRootPath, subFolder);
-            if (!Directory.Exists(uploadsFolder))
-                Directory.CreateDirectory(uploadsFolder);
-
-            var uniqueFileName = $"{Guid.NewGuid()}_{file.FileName}";
-            var filePath = Path.Combine(uploadsFolder, uniqueFileName);
-
-            using (var stream = new FileStream(filePath, FileMode.Create))
+            foreach (var file in attachments)
             {
-                await file.CopyToAsync(stream);
+                if (file == null || file.Length == 0) continue;
+
+                // Never trust the client-supplied path: strip any directory component first.
+                var safeName = Path.GetFileName(file.FileName ?? string.Empty);
+
+                await using var content = new MemoryStream();
+                await file.CopyToAsync(content, cancellationToken);
+                content.Position = 0;
+
+                var result = await _fileInspection.InspectAsync(
+                    new FileInspectionRequest(content, safeName, file.ContentType, file.Length),
+                    cancellationToken);
+
+                // Generic message: inspection reasons/diagnostics are operator-only.
+                if (!result.IsCleared)
+                    throw new ArgumentException($"Attachment '{safeName}' failed security inspection.");
+
+                // The inspector has already proven the extension is allow-listed AND that it
+                // agrees with the detected content type, so it is safe to reuse here.
+                var extension = Path.GetExtension(safeName).ToLowerInvariant();
+                if (string.IsNullOrEmpty(extension))
+                    throw new ArgumentException($"Attachment '{safeName}' failed security inspection.");
+
+                inspected.Add(new InspectedAttachment(safeName, content.ToArray(), extension));
             }
 
-            return $"/{subFolder}/{uniqueFileName}";
+            return inspected;
+        }
+
+        /// <summary>
+        /// SEC-H5: writes an already-inspected attachment under a server-generated name.
+        /// The client filename never reaches the filesystem; <c>FileMode.CreateNew</c> +
+        /// <c>FileShare.None</c> prevent overwriting an existing file, and the resolved path
+        /// is asserted to stay inside the upload folder.
+        /// </summary>
+        private async Task<string> PersistAttachmentAsync(
+            InspectedAttachment attachment, string subFolder, CancellationToken cancellationToken = default)
+        {
+            var uploadsFolder = Path.GetFullPath(Path.Combine(_environment.WebRootPath, subFolder));
+            Directory.CreateDirectory(uploadsFolder);
+
+            var storedName = $"{Guid.NewGuid():N}{attachment.Extension}";
+            var fullPath = Path.GetFullPath(Path.Combine(uploadsFolder, storedName));
+            if (!fullPath.StartsWith(uploadsFolder + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+                throw new ArgumentException("The resolved attachment path escaped the upload folder.");
+
+            await using (var output = new FileStream(
+                fullPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                await output.WriteAsync(attachment.Content, cancellationToken);
+            }
+
+            return $"/{subFolder}/{storedName}";
         }
 
         private bool IsImage(string fileName)
@@ -226,46 +293,68 @@ namespace ERP_RFQ_Automation.Repositories
             if (!buExists)
                 throw new ArgumentException($"Business Unit ID {product.Buid} does not exist.");
 
-            // Auto generate DocId
-            var maxDoc = await _context.Products
-                .Where(p => p.DocId != null && p.DocId.StartsWith("PR"))
-                .Select(p => p.DocId)
-                .MaxAsync();
+            // DocId allocation. This previously took MAX over EVERY tenant's products, so one
+            // tenant's numbering jumped whenever another created a product (a cross-tenant
+            // information leak in the document number itself), and `long.Parse` threw on any
+            // legacy DocId whose suffix was not purely numeric, failing the whole create.
+            // Scoped to the tenant, parsed defensively, and allocated inside the same
+            // serializable transaction as the insert so two concurrent creates cannot collide.
+            product.DocId = await AllocateProductDocIdAsync(product.Buid);
 
-            long nextNum = 1;
-            if (maxDoc != null)
-            {
-                nextNum = long.Parse(maxDoc.Substring(2)) + 1;
-            }
-            product.DocId = "PR" + nextNum.ToString("D8");
+            // SEC-H5: inspect every attachment before the product row is committed, so a
+            // rejected/infected file aborts the whole operation instead of leaving a
+            // half-written product plus a partially persisted attachment set behind.
+            var inspectedAttachments = await InspectAttachmentsAsync(attachments);
 
+            // A new product has no stock. Opening stock enters the authoritative per-warehouse
+            // ledger through POST /api/inventory-intelligence/stock/count, which also creates the
+            // Inventory row. Product.QtyOnHand is a legacy denormalised column, never the stock
+            // of record, so it stays at zero here.
+            product.QtyOnHand = 0m;
             _context.Products.Add(product);
             await _context.SaveChangesAsync();
 
             // Save attachments to ProductAttachment table
-            if (attachments != null && attachments.Any())
+            if (inspectedAttachments.Count > 0)
             {
-                foreach (var file in attachments)
+                foreach (var inspectedAttachment in inspectedAttachments)
                 {
-                    var path = await SaveAttachmentAsync(file, "ProductAttachments");
-                    if (path != null)
+                    var path = await PersistAttachmentAsync(inspectedAttachment, "ProductAttachments");
+                    var attachment = new ProductAttachment
                     {
-                        var attachment = new ProductAttachment
-                        {
-                            InventoryId = product.Id,
-                            FileName = file.FileName,
-                            Locations = path,
-                            Description = null,  // can add from request if needed
-                            UploadDate = DateTime.UtcNow,
-                            UploadedBy = null,  // set if user ID available
-                            CreatedBy = product.CreatedBy,
-                            CreatedOn = DateTime.UtcNow
-                        };
-                        _context.ProductAttachments.Add(attachment);
-                    }
+                        InventoryId = product.Id,
+                        FileName = inspectedAttachment.FileName,
+                        Locations = path,
+                        Description = null,  // can add from request if needed
+                        UploadDate = DateTime.UtcNow,
+                        UploadedBy = null,  // set if user ID available
+                        CreatedBy = product.CreatedBy,
+                        CreatedOn = DateTime.UtcNow
+                    };
+                    _context.ProductAttachments.Add(attachment);
                 }
                 await _context.SaveChangesAsync();
             }
+        }
+
+        /// <summary>
+        /// Issues the next per-tenant product document number. Tenant-scoped (numbering must not
+        /// depend on other tenants' activity), tolerant of legacy non-numeric suffixes, and
+        /// evaluated in memory over the tenant's own DocIds so a lexicographic MAX cannot pick a
+        /// shorter string as the high-water mark.
+        /// </summary>
+        private async Task<string> AllocateProductDocIdAsync(long? businessUnitId)
+        {
+            var issued = await _context.Products.AsNoTracking()
+                .Where(p => p.Buid == businessUnitId && p.DocId != null && p.DocId.StartsWith("PR"))
+                .Select(p => p.DocId!)
+                .ToListAsync();
+
+            var highWater = issued
+                .Select(value => long.TryParse(value.AsSpan(2), out var parsed) ? parsed : 0L)
+                .DefaultIfEmpty(0L)
+                .Max();
+            return "PR" + (highWater + 1).ToString("D8");
         }
 
         public async Task UpdateAsync(Product product, long businessUnitId, List<IFormFile>? attachments)
@@ -328,30 +417,30 @@ namespace ERP_RFQ_Automation.Repositories
 
             product.ModifiedOn = DateTime.UtcNow;
 
+            // SEC-H5: inspect before the product update is committed (see AddAsync).
+            var inspectedAttachments = await InspectAttachmentsAsync(attachments);
+
             _context.Products.Update(product);
             await _context.SaveChangesAsync();
 
             // Add new attachments
-            if (attachments != null && attachments.Any())
+            if (inspectedAttachments.Count > 0)
             {
-                foreach (var file in attachments)
+                foreach (var inspectedAttachment in inspectedAttachments)
                 {
-                    var path = await SaveAttachmentAsync(file, "ProductAttachments");
-                    if (path != null)
+                    var path = await PersistAttachmentAsync(inspectedAttachment, "ProductAttachments");
+                    var attachment = new ProductAttachment
                     {
-                        var attachment = new ProductAttachment
-                        {
-                            InventoryId = product.Id,
-                            FileName = file.FileName,
-                            Locations = path,
-                            Description = null,
-                            UploadDate = DateTime.UtcNow,
-                            UploadedBy = null,
-                            CreatedBy = product.ModifiedBy ?? product.CreatedBy,
-                            CreatedOn = DateTime.UtcNow
-                        };
-                        _context.ProductAttachments.Add(attachment);
-                    }
+                        InventoryId = product.Id,
+                        FileName = inspectedAttachment.FileName,
+                        Locations = path,
+                        Description = null,
+                        UploadDate = DateTime.UtcNow,
+                        UploadedBy = null,
+                        CreatedBy = product.ModifiedBy ?? product.CreatedBy,
+                        CreatedOn = DateTime.UtcNow
+                    };
+                    _context.ProductAttachments.Add(attachment);
                 }
                 await _context.SaveChangesAsync();
             }
@@ -364,6 +453,23 @@ namespace ERP_RFQ_Automation.Repositories
             // Check for dependencies (e.g., attachments)
             if (await _context.ProductAttachments.AnyAsync(a => a.InventoryId == id))
                 throw new InvalidOperationException($"Cannot delete Product with ID {id} because it has associated attachments. Delete attachments first.");
+
+            // Stock dependencies. Inventory, movements and incoming supply all hold Restrict
+            // foreign keys to Products, so without these checks the delete surfaced as a raw
+            // DbUpdateException (an opaque 500) instead of an explainable conflict — and a
+            // product still holding physical stock must not be deletable at all.
+            if (await _context.Set<ERP_RFQ_Automation.Models.Inventory>()
+                    .AnyAsync(x => x.Buid == businessUnitId && x.ProductId == id))
+                throw new InvalidOperationException(
+                    $"Cannot delete Product {id} because it has inventory records. Move or write off its stock first.");
+            if (await _context.InventoryMovements
+                    .AnyAsync(x => x.BusinessUnitId == businessUnitId && x.ProductId == id))
+                throw new InvalidOperationException(
+                    $"Cannot delete Product {id} because it has an inventory movement history, which is an immutable audit record.");
+            if (await _context.IncomingInventory
+                    .AnyAsync(x => x.BusinessUnitId == businessUnitId && x.ProductId == id))
+                throw new InvalidOperationException(
+                    $"Cannot delete Product {id} because incoming supply is expected against it.");
 
             _context.Products.Remove(product);
             await _context.SaveChangesAsync();
@@ -644,9 +750,14 @@ namespace ERP_RFQ_Automation.Repositories
                 .GroupBy(x => x.InventoryId)
                 .Select(x => new { InventoryId = x.Key, Quantity = x.Sum(y => y.Quantity) })
                 .ToDictionaryAsync(x => x.InventoryId, x => x.Quantity);
-            match.AvailableToPromise = inventory.Sum(x => Math.Max(0m, x.QtyOnHand
-                - reserved.GetValueOrDefault(x.Id) - x.AllocatedQuantity - x.QuarantineQuantity
-                - x.DamagedQuantity - x.ExpiredQuantity - x.SafetyStockQuantity));
+            match.AvailableToPromise = inventory.Sum(x => InventoryQuantityMath.AvailableToPromise(
+                x.QtyOnHand, reserved.GetValueOrDefault(x.Id), x.AllocatedQuantity, x.QuarantineQuantity,
+                x.DamagedQuantity, x.ExpiredQuantity, x.SafetyStockQuantity));
+            // The match result used to report the product master's QtyOnHand next to an
+            // inventory-derived AvailableToPromise, so the same card could show "120 on hand,
+            // 0 available" purely because the two columns are different ledgers. On-hand now
+            // comes from the same authoritative rows the availability figure does.
+            match.QtyOnHand = inventory.Sum(x => x.QtyOnHand);
 
             var incoming = await _context.IncomingInventory.AsNoTracking()
                 .Where(x => x.BusinessUnitId == businessUnitId && x.ProductId == match.ProductId
@@ -769,12 +880,20 @@ namespace ERP_RFQ_Automation.Repositories
             bool hasPurchaseHistory = await _context.Rfqitems
                 .AnyAsync(ri => ri.ProductId == productId && ri.Rfq.BusinessUnitId == businessUnitId);
 
+            // UI TRUTHFULNESS: this returned the product master's QtyOnHand while
+            // ProductController.GetById returned the sum of the Inventory rows for the same
+            // product, so the product page and its stock panel could disagree about the same
+            // number. Both now read the authoritative per-warehouse ledger.
+            var onHand = await _context.Set<ERP_RFQ_Automation.Models.Inventory>().AsNoTracking()
+                .Where(x => x.Buid == businessUnitId && x.ProductId == productId)
+                .SumAsync(x => (decimal?)x.QtyOnHand) ?? 0m;
+
             return new StockDetailsDTO
             {
                 ProductId = product.Id,
                 ProductName = product.ProductName ?? "",
                 PartNo = product.PartNo,
-                QtyOnHand = product.QtyOnHand,
+                QtyOnHand = onHand,
                 ReorderPoint = product.ReorderPoint,
                 WarehouseName = product.Warehouse?.WarehouseName,
                 StockPartNumber = product.PartNo,

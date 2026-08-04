@@ -4,23 +4,35 @@ import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import {
   Box, Typography, Paper, Button, Stack,
-  CircularProgress, Alert, IconButton, List,
+  CircularProgress, Alert, AlertTitle, IconButton, List,
   ListItem, ListItemIcon, ListItemText,
 } from '@mui/material';
 import {
   AutoAwesome as AIIcon,
+  CloudOff as OfflineIcon,
   Delete as DeleteIcon,
   Description as DocIcon,
   Info as InfoIcon,
   Inbox as InboxIcon,
+  OpenInNew as OpenIcon,
 } from '@mui/icons-material';
-import leadService from '../../api/services/leadService';
+import leadService, { type GovernedUploadJobDTO } from '../../api/services/leadService';
 import { useAuth } from '../../context/AuthContext';
 import { useSnackbar } from 'notistack';
+import { presentableErrorMessage } from '../../utils/apiErrors';
+import { explainIntakeError, isRecoverableIntakeErrorCode } from '../../utils/intakeErrors';
 
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
 const MAX_BATCH_BYTES = 200 * 1024 * 1024;
 const MAX_FILES = 50;
+/**
+ * Governed-upload outcomes that mean the document did not enter processing.
+ *
+ * `AwaitingSecurityScan` matters most and was missing: ExtractionController.cs:129-131 returns it
+ * for every retryable inspection failure, so a scanner outage — the exact case that stranded the
+ * owner's documents — used to look like a clean success and navigate the tray away.
+ */
+const STOPPED_OUTCOMES = ['Skipped', 'Rejected', 'Quarantined', 'Error', 'AwaitingSecurityScan'];
 const SUPPORTED_EXTENSIONS = [
   '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.xlsm', '.csv', '.txt',
   '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tif', '.tiff', '.webp',
@@ -41,27 +53,55 @@ const ManualUploadLeadsPage: React.FC = () => {
   const [files, setFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
   const [selectionError, setSelectionError] = useState<string | null>(null);
+  // Retained after an all-failed upload so the tray survives and the batch stays reachable.
+  const [failedJobs, setFailedJobs] = useState<GovernedUploadJobDTO[]>([]);
+  const [batchId, setBatchId] = useState<string | null>(null);
   const canCreateLeads = hasPermission('Leads', 'create');
+  const heldByScanner = failedJobs.some((job) => isRecoverableIntakeErrorCode(job.errorCode));
 
   const uploadMutation = useMutation({
     mutationFn: (fd: FormData) => leadService.uploadGoverned(fd),
     onSuccess: (result) => {
-      const stopped = result.jobs.filter((job) => ['Skipped', 'Rejected', 'Quarantined', 'Error'].includes(job.outcome));
+      const stopped = result.jobs.filter((job) => STOPPED_OUTCOMES.includes(job.outcome));
+      const everyFileFailed = result.jobs.length > 0 && stopped.length === result.jobs.length;
+
+      if (!result.batchId) {
+        setSelectionError('The server did not return a batch reference. Your selected files have been kept so you can try again.');
+        return;
+      }
+
+      setBatchId(result.batchId);
+
+      // An all-failed upload used to navigate straight to the batch page, clearing the tray and
+      // forcing the user to re-select every file to retry. Stay put and keep the files: the batch
+      // is still reachable through the link below, and retrying is one click.
+      if (everyFileFailed) {
+        const held = stopped.filter((job) => isRecoverableIntakeErrorCode(job.errorCode));
+        setFailedJobs(stopped);
+        enqueueSnackbar(
+          held.length > 0
+            ? 'Malware scanning is offline. Your files are held safely — retry when you are ready.'
+            : `No document could be processed. Your ${result.jobs.length === 1 ? 'file has' : 'files have'} been kept so you can retry.`,
+          { variant: 'warning' },
+        );
+        return;
+      }
+
+      setFailedJobs([]);
       enqueueSnackbar(
         stopped.length === 0
           ? 'Documents queued for ingestion and reconciliation.'
           : `${stopped.length} document${stopped.length === 1 ? '' : 's'} need attention. Opened the batch outcomes.`,
         { variant: stopped.length === 0 ? 'success' : 'warning' },
       );
-      if (result.batchId) {
-        setFiles([]);
-        navigate(`/procurement/leads/ingestion/${encodeURIComponent(result.batchId)}`);
-      } else {
-        setSelectionError('The server did not return a batch reference. Your selected files have been retained.');
-      }
+      setFiles([]);
+      navigate(`/procurement/leads/ingestion/${encodeURIComponent(result.batchId)}`);
     },
-    onError: (err: any) => {
-      enqueueSnackbar(err.response?.data?.message || 'Upload failed', { variant: 'error' });
+    onError: (error: unknown) => {
+      enqueueSnackbar(
+        presentableErrorMessage(error, 'The upload could not be completed. Your files were not sent — try again.'),
+        { variant: 'error' },
+      );
     },
     onSettled: () => setUploading(false),
   });
@@ -84,6 +124,7 @@ const ManualUploadLeadsPage: React.FC = () => {
     }
 
     setSelectionError(null);
+    setFailedJobs([]);
     setFiles(combined);
   };
 
@@ -100,6 +141,7 @@ const ManualUploadLeadsPage: React.FC = () => {
   const handleUpload = () => {
     if (files.length === 0 || uploading || !canCreateLeads) return;
     setUploading(true);
+    setFailedJobs([]);
     const fd = new FormData();
     files.forEach(f => fd.append('files', f));
     uploadMutation.mutate(fd);
@@ -185,6 +227,57 @@ const ManualUploadLeadsPage: React.FC = () => {
 
           {selectionError && <Alert severity="warning" sx={{ mb: 3 }}>{selectionError}</Alert>}
 
+          {/*
+            All-failed upload. The files stay in the tray below, so "Queue for reconciliation"
+            retries the exact same selection in one click — no re-picking.
+          */}
+          {failedJobs.length > 0 && (
+            <Alert
+              severity="warning"
+              icon={heldByScanner ? <OfflineIcon fontSize="inherit" /> : undefined}
+              sx={{ mb: 3, borderLeft: 4, borderColor: 'warning.main' }}
+              action={batchId ? (
+                <Button
+                  color="inherit"
+                  size="small"
+                  endIcon={<OpenIcon />}
+                  onClick={() => navigate(`/procurement/leads/ingestion/${encodeURIComponent(batchId)}`)}
+                >
+                  View batch
+                </Button>
+              ) : undefined}
+            >
+              <AlertTitle sx={{ fontWeight: 800 }}>
+                {heldByScanner
+                  ? 'Malware scanning is offline'
+                  : `No document was processed (${failedJobs.length} file${failedJobs.length === 1 ? '' : 's'})`}
+              </AlertTitle>
+              <Typography variant="body2" sx={{ mb: 1 }}>
+                {heldByScanner
+                  ? 'Your files are held safely and will process automatically when scanning recovers. They are still selected below — press Queue for reconciliation to retry now.'
+                  : 'Your files are still selected below, so you can fix and retry without choosing them again.'}
+              </Typography>
+              <Stack spacing={0.75}>
+                {failedJobs.map((job) => {
+                  const explanation = explainIntakeError(job.errorCode);
+                  return (
+                    <Box key={`${job.jobId}:${job.fileName}`}>
+                      <Typography variant="body2" sx={{ fontWeight: 700, overflowWrap: 'anywhere' }}>
+                        {job.fileName}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                        {explanation.whatHappened}
+                      </Typography>
+                      <Typography variant="caption" sx={{ display: 'block', fontWeight: 700 }}>
+                        {explanation.nextAction}
+                      </Typography>
+                    </Box>
+                  );
+                })}
+              </Stack>
+            </Alert>
+          )}
+
           {/* File Queue Preview */}
           {files.length > 0 && (
             <List sx={{ mb: 4, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
@@ -234,7 +327,11 @@ const ManualUploadLeadsPage: React.FC = () => {
               }}
               startIcon={uploading ? <CircularProgress size={20} color="inherit" /> : <AIIcon />}
             >
-              {uploading ? 'Queueing documents...' : 'Queue for reconciliation'}
+              {uploading
+                ? 'Queueing documents...'
+                : failedJobs.length > 0
+                  ? `Retry ${files.length} file${files.length === 1 ? '' : 's'}`
+                  : 'Queue for reconciliation'}
             </Button>
           </Box>
         </Box>

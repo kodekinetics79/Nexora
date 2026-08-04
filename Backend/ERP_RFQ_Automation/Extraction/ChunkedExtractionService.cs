@@ -134,9 +134,20 @@ public interface IChunkedExtractionService
 /// </summary>
 public sealed class ChunkedExtractionService : IChunkedExtractionService
 {
+    /// <summary>
+    /// The refusal an unauthorized external provider still receives, unchanged. Kept as a
+    /// constant so the fail-closed wording can never drift away from the contract tests
+    /// that assert it.
+    /// </summary>
+    internal const string ExternalUnstructuredRefusal =
+        "External processing is blocked for unstructured documents until a locally reduced, " +
+        "redacted field/row payload is available; send this document to human review or " +
+        "configure a local model.";
+
     private readonly ILLMService _llm;
     private readonly ICanonicalRfqNormalizer _normalizer;
     private readonly ILogger<ChunkedExtractionService> _log;
+    private readonly IAiExternalProviderTrust? _externalProviderTrust;
 
     // Chunk bounds: cap by item count AND character budget so a chunk fits the model
     // context and stays inside the request timeout. Chunk COUNT scales with the document.
@@ -145,14 +156,22 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
     private const int HeaderContextBudget = 6_000;
     private const double MinAcceptableConfidence = 0.60;
 
+    /// <param name="externalProviderTrust">
+    /// Per-tenant external-provider allow-list. Optional, and its ABSENCE IS A REFUSAL:
+    /// when the gate is not wired up, every external provider is refused exactly as
+    /// before. There is no configuration, and no missing registration, that turns
+    /// unstructured external processing on by accident.
+    /// </param>
     public ChunkedExtractionService(
         ILLMService llm,
         ICanonicalRfqNormalizer normalizer,
-        ILogger<ChunkedExtractionService> log)
+        ILogger<ChunkedExtractionService> log,
+        IAiExternalProviderTrust? externalProviderTrust = null)
     {
         _llm = llm;
         _normalizer = normalizer;
         _log = log;
+        _externalProviderTrust = externalProviderTrust;
     }
 
     public Task<ChunkedExtractionOutcome> ExtractAsync(DocumentExtractionInput input, CancellationToken ct = default)
@@ -167,11 +186,42 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         var expected = input.LineItemRegions.Count;
         var diagnostics = new List<string>();
 
+        // ---- external-provider allow-list -----------------------------------
+        // Unstructured extraction sends whole document text to the model, so this is the
+        // single highest-risk egress in the product. It used to be governed by one global
+        // bit: External => always refuse. That is not a governance position, it is an
+        // outage with a comment. The decision is now a per-tenant, attributed, revocable
+        // authorization for one exact endpoint (AI/AiExternalProviderTrustService.cs).
+        // Everything not on that list is refused with the identical message and the same
+        // zero bytes of egress; everything on it still goes through the unchanged token
+        // ledger, budget caps, redaction, injection boundary and count conservation below.
         if (_llm.ProviderClass == AiProviderClass.External)
         {
-            return Failed(expected,
-                "External processing is blocked for unstructured documents until a locally reduced, redacted field/row payload is available; send this document to human review or configure a local model.",
-                input);
+            var descriptor = _llm.ProviderDescriptor;
+            var decision = _externalProviderTrust is null
+                ? AiExternalProviderDecision.Deny(
+                    AiExternalProviderTrustReasons.GateUnavailable, descriptor)
+                : await _externalProviderTrust.EvaluateAsync(
+                    input.BusinessUnitId, descriptor, AiPurposes.RfqExtraction,
+                    unstructuredPayload: true, ct);
+
+            if (!decision.Allowed)
+            {
+                _log.LogWarning(
+                    "Unstructured extraction REFUSED for tenant {Tenant}: external provider is not authorized. "
+                    + "{Descriptor} reason={Reason} document={Document}.",
+                    input.BusinessUnitId, descriptor, decision.Reason, input.SourceDocumentName);
+                return Failed(expected, $"{ExternalUnstructuredRefusal} [denial: {decision.Reason}]", input);
+            }
+
+            _log.LogWarning(
+                "Unstructured extraction ALLOWED to an EXTERNAL provider for tenant {Tenant} under "
+                + "allow-list authorization {AuthorizationId}. {Descriptor} document={Document}. "
+                + "Redaction, token budget, injection boundary and count conservation still apply.",
+                input.BusinessUnitId, decision.AuthorizationId, descriptor, input.SourceDocumentName);
+            diagnostics.Add(
+                $"External provider authorized for unstructured extraction (authorization #{decision.AuthorizationId}, "
+                + $"endpoint {decision.Endpoint}, model {decision.Model}).");
         }
 
         if (expected == 0)

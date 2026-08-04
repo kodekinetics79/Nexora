@@ -10,8 +10,16 @@ public partial class ErpRfqAutomationContext
     public virtual DbSet<AiCallAttempt> AiCallAttempts { get; set; } = null!;
     public virtual DbSet<AiBudgetPeriod> AiBudgetPeriods { get; set; } = null!;
 
-    private static void ConfigureAiGovernance(ModelBuilder modelBuilder)
+    // Instance (not static) so the AI-provider allow-list partial below can declare its
+    // tenant global query filter, which must capture the context's CurrentTenantId.
+    // The single call site in ErpRfqAutomationContext.Tenancy.cs is unchanged.
+    private void ConfigureAiGovernance(ModelBuilder modelBuilder)
     {
+        // ==== Per-tenant external AI provider allow-list (AI/AiExternalProviderTrust.cs) ====
+        // Same partial-splice pattern as Agent/Sla/Metrics/Boq; implementation lives in
+        // ErpRfqAutomationContext.AiProviderTrust.cs.
+        ConfigureAiProviderTrustModel(modelBuilder);
+
         modelBuilder.Entity<AiProcessingPolicy>(entity =>
         {
             entity.ToTable("AiProcessingPolicies");

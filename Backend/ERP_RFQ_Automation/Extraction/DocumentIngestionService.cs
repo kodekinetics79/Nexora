@@ -321,6 +321,22 @@ public sealed class DocumentIngestionService : IDocumentIngestion
                 signature = rejectedInspection.ScannerSignature,
                 retryable = rejectedInspection.IsRetryable
             });
+            if (rejectedInspection.MalwareStatus is MalwareScanStatus.Unavailable or MalwareScanStatus.Error)
+            {
+                // The tenant only ever sees rejectedInspection.Reason; the endpoint/exception detail
+                // that tells an operator WHAT to fix goes here and nowhere else.
+                _log.LogError(
+                    "Security scanning unavailable — {FileName} (occurrence {OccurrenceId}, batch {BatchId}) is held, not lost. " +
+                    "Engine={Engine} ErrorCode={ErrorCode} Retryable={Retryable}. Detail: {Diagnostics}",
+                    fileName,
+                    occurrence.Id,
+                    actualBatchId,
+                    rejectedInspection.ScannerEngine,
+                    rejectedInspection.ErrorCode,
+                    rejectedInspection.IsRetryable,
+                    rejectedInspection.OperatorDiagnostics ?? "(no scanner diagnostics recorded)");
+            }
+
             if (rejectedInspection.IsRetryable)
             {
                 occurrence.MarkAwaitingSecurityScan(rejectedInspection.ErrorCode, detailsJson);

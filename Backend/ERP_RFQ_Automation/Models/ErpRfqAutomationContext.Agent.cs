@@ -113,6 +113,11 @@ public partial class ErpRfqAutomationContext
             e.Property(x => x.Version).HasDefaultValue(1).IsConcurrencyToken();
             e.Property(x => x.CreatedOn).HasDefaultValueSql("now()");
             e.Property(x => x.UpdatedOn).HasDefaultValueSql("now()");
+            // Buyer-committed response deadline. A first-class column (not prose in Notes)
+            // so open Supplier RFQs can be listed, sorted, and chased by their deadline.
+            e.HasIndex(x => new { x.BusinessUnitId, x.DueOn })
+                .HasDatabaseName("IX_SupplierSolicitations_BU_DueOn")
+                .HasFilter("\"DueOn\" IS NOT NULL");
             e.HasIndex(x => new { x.BusinessUnitId, x.RfqId }).HasDatabaseName("IX_SupplierSolicitations_BU_Rfq");
             e.HasIndex(x => new { x.BusinessUnitId, x.IdempotencyKey }).IsUnique();
             e.HasIndex(x => new { x.BusinessUnitId, x.SupplierRfqNumber }).IsUnique()

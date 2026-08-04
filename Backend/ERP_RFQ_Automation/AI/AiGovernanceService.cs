@@ -128,7 +128,15 @@ public sealed class AiGovernanceService : IAiGovernanceService
                 var recentProviderClasses = await db.AiRequests.AsNoTracking()
                     .Where(x => x.BusinessUnitId == context.BusinessUnitId && x.Status != AiCallStatuses.Denied)
                     .OrderByDescending(x => x.CreatedOn).Take(100).Select(x => x.ProviderClass).ToListAsync(ct);
-                if ((recentProviderClasses.Count(x => x == AiProviderClass.External) + 1m) / (recentProviderClasses.Count + 1m) > .10m)
+                // Honour the tenant's configured ceiling instead of a hardcoded 10%.
+                // AiProcessingPolicy.ExternalDependencyCeilingPercent has always been
+                // persisted, editable through the AI Trust Center and validated to 0..10,
+                // but this comparison used a literal .10m — so a tenant who tightened the
+                // ceiling to, say, 2% silently got 10%. A knob that does nothing is worse
+                // than no knob. `policy` is non-null here: PolicyDenial returns
+                // "policy_missing" for a null policy, which short-circuits this branch.
+                var externalCeiling = policy!.ExternalDependencyCeilingPercent / 100m;
+                if ((recentProviderClasses.Count(x => x == AiProviderClass.External) + 1m) / (recentProviderClasses.Count + 1m) > externalCeiling)
                     denial = "external_dependency_cap";
             }
             if (denial is not null)

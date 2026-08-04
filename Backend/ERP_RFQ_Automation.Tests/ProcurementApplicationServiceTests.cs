@@ -893,6 +893,9 @@ internal sealed class ProcurementScenario : IDisposable
         BusinessUnitId, poId, ProcurementTestData.Warehouse, number, DateTime.UtcNow, version,
         [new PostGoodsReceiptLine(lineId, quantity)], key, "qa", $"corr-{key}");
 
+    public CancelPurchaseOrderCommand Cancel(long poId, string key, string reason, long version = 1) => new(
+        BusinessUnitId, poId, version, reason, key, "qa", $"corr-{key}");
+
     public IssuePurchaseOrderCommand Issue(long poId, string key, long version = 1, DateTime? deliveredOn = null) => new(
         BusinessUnitId, poId, version, $"provider-receipt:{key}", key, "qa", $"corr-{key}",
         new string('a', 64), deliveredOn ?? DateTime.UtcNow);

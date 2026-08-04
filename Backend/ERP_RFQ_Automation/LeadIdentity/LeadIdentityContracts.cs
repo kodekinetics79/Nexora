@@ -60,6 +60,15 @@ public sealed record BatchReconciliationItemDto(long OccurrenceId, long? LeadId,
     public DateTimeOffset? LastUpdatedAtUtc { get; init; }
     public string? ExtractionStatus { get; init; }
     public DateTimeOffset? ExtractionUpdatedAtUtc { get; init; }
+
+    /// <summary>
+    /// True when this file is held by a malware scanner that never produced a verdict, so it can be
+    /// replayed from its immutable source without a re-upload. This is the durable "our
+    /// infrastructure failed" signal — distinct from a real malware detection
+    /// (<c>ErrorCode = malware_detected</c>) or a malformed document (<c>document_rejected</c>),
+    /// neither of which is ever replayable.
+    /// </summary>
+    public bool RecoverableSecurityHold { get; init; }
 }
 public sealed record LeadMatchCandidateDto(long CandidateId, long CandidateLeadId, string NexoraSerial,
     string? CustomerRfqReference, decimal Confidence, string MatchEvidenceJson, string DifferencesJson,

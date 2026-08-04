@@ -1,8 +1,10 @@
 import { lazy, Suspense } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
-import { Box, CircularProgress } from '@mui/material';
+import { Box, CircularProgress, Typography } from '@mui/material';
 import MainLayout from './components/layout/MainLayout';
 import PermissionGuard from './components/common/PermissionGuard';
+import RouteAnnouncer from './components/layout/RouteAnnouncer';
+import useDocumentTitle from './hooks/useDocumentTitle';
 
 // FE-09: route-level code splitting. Each page is loaded on demand so the
 // initial bundle only ships the app shell (layout, guards, providers).
@@ -114,13 +116,40 @@ const CopilotActivityPage = lazy(() => import('./pages/Copilot/ActivityPage'));
 const PlatformRoutes = lazy(() => import('./platform/PlatformRoutes'));
 
 const PageLoader = () => (
-  <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '60vh', width: '100%' }}>
-    <CircularProgress />
+  <Box
+    role="status"
+    aria-live="polite"
+    sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '60vh', width: '100%' }}
+  >
+    <CircularProgress aria-label="Loading page" />
   </Box>
 );
 
+/**
+ * 404 view. Sets its own title (the route is by definition not in
+ * `routeTitles.ts`) and provides the page's `<h1>` — SC 2.4.2 / SC 1.3.1.
+ */
+const NotFoundPage = () => {
+  useDocumentTitle('Page Not Found');
+  return (
+    <Box component="main" id="main-content" tabIndex={-1} sx={{ p: 4 }}>
+      <Typography variant="h4" component="h1" gutterBottom>
+        Page not found
+      </Typography>
+      <Typography variant="body1" color="text.secondary">
+        The page you requested does not exist. Check the address, or use the navigation menu to
+        continue.
+      </Typography>
+    </Box>
+  );
+};
+
 function App() {
   return (
+    <>
+    {/* Per-route document title, focus reset, scroll reset and a polite
+        route-change announcement — SC 2.4.2 / 2.4.3 / 4.1.3. */}
+    <RouteAnnouncer />
     <Suspense fallback={<PageLoader />}>
     <Routes>
       <Route path="/" element={<Navigate to="/login" replace />} />
@@ -277,9 +306,10 @@ function App() {
       <Route path="/platform/*" element={<PlatformRoutes />} />
 
       <Route path="/login" element={<LoginPage />} />
-      <Route path="*" element={<Box sx={{ p: 4 }}>404 Not Found</Box>} />
+      <Route path="*" element={<NotFoundPage />} />
     </Routes>
     </Suspense>
+    </>
   );
 }
 

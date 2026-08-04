@@ -369,6 +369,12 @@ const procurementService = {
     supplierIds: number[],
     expectedVersion: number,
     operationId: string,
+    /**
+     * Supplier response deadline, ISO-8601 UTC. The API rejects past or
+     * non-UTC values, so callers must send an instant (trailing `Z`), not a
+     * local date string. Omit for no deadline.
+     */
+    dueOn?: string | null,
   ): Promise<SupplierRfqPreparationOutcome[]> => {
     const results: SupplierRfqPreparationOutcome[] = [];
     let version = expectedVersion;
@@ -377,7 +383,7 @@ const procurementService = {
         const prepared = unwrap(
           await axiosInstance.post<PreparedSupplierRfqResult>(
           `/api/procurement/sourcing-cases/${sourcingCaseId}/supplier-rfqs`,
-          { supplierId, expectedVersion: version },
+          { supplierId, expectedVersion: version, dueOn: dueOn ?? null },
           {
             headers: commandHeaders(
               `prepare-supplier-rfq:${sourcingCaseId}:${supplierId}:${operationId}`,

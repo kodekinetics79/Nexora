@@ -42,6 +42,8 @@ public partial class ErpRfqAutomationContext
 
         ConfigureAiGovernance(modelBuilder);
         ConfigureExtractionOperations(modelBuilder);
+        // SEC-H6: pre-authentication login counter — deliberately unfiltered, see the partial.
+        ConfigureLoginThrottlingModel(modelBuilder);
         modelBuilder.ConfigureCommercialFinance();
         modelBuilder.ConfigureGeneralLedger();
         modelBuilder.ConfigureBankReconciliation();
@@ -121,6 +123,15 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<LeadIdentityAuditEvent>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<LeadRevisionImpact>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
 
+        // Foreign-exchange authority (Fx/). These two tables decide what rate a customer's quote
+        // is converted at, so a tenant-crossing read is a commercial data leak, not a schema nit.
+        // The database layer is closed by 20260804203000_TenantIsolationForFxAuthority (RLS +
+        // policies); these are the matching EF filters, and they are the layer that still protects
+        // reads made by nexora_pipeline_app, which is created BYPASSRLS. Entity shape itself is
+        // configured by data annotations in Fx/FxEntities.cs — see Models/ErpRfqAutomationContext.Fx.cs.
+        modelBuilder.Entity<ERP_RFQ_Automation.Fx.FxRate>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<ERP_RFQ_Automation.Fx.FxRateSnapshot>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+
         // Dependent commercial rows inherit the tenant boundary from their required
         // aggregate root. Keep these filters aligned with the PostgreSQL parent-derived
         // RLS policies so non-PostgreSQL test/provider paths retain the same isolation.
@@ -148,6 +159,36 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<EmailIngest>().HasQueryFilter(e =>
             CurrentTenantId == null || e.EmailConfiguration.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<Contact>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+
+        // ==== Tenant-owned configuration + reference data ====
+        // These twelve tables carry a tenant column and were already covered by the
+        // information_schema sweep in 20260723120000_CompleteTenantRlsCoverage, so PostgreSQL
+        // has hidden other tenants' rows from nexora_tenant_app since that migration. They had
+        // no matching EF filter, which left three real gaps the database could not close:
+        //   * nexora_pipeline_app (every background worker) is created BYPASSRLS, so RLS never
+        //     constrained worker-side reads of these tables;
+        //   * the SQLite integration suite and any non-PostgreSQL provider have no RLS at all;
+        //   * a warehouse/currency/UOM/tax row resolved by primary key alone would silently
+        //     attach ANOTHER tenant's reference row to a quote or order on those paths.
+        // Every tenant column here is NOT NULL except ProductSubCategory.BusinessUnitId; the
+        // predicates below are written to mirror each table's RLS policy exactly, so the two
+        // layers can never disagree about which rows exist. In particular there is no
+        // "null means shared master data" clause: the sweep granted that only to Customers,
+        // Suppliers, Products and Inventory, so a NULL BusinessUnitId row here is already
+        // invisible to a tenant in PostgreSQL and must stay invisible in EF too.
+        // Guarded by TenantIsolationTests.Every_entity_with_a_tenant_column_has_a_global_query_filter.
+        modelBuilder.Entity<Warehouse>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<Currency>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<Team>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<UserGroup>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<ProductCategory>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<ProductSubCategory>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<QuoteConfiguration>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<Taxis>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<SetCountry>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == CurrentTenantId);
+        modelBuilder.Entity<SetState>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == CurrentTenantId);
+        modelBuilder.Entity<SetCity>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == CurrentTenantId);
+        modelBuilder.Entity<SetUom>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
 
         // LeadItem.ExtraFields (partial property in LeadItem.Extra.cs): verbatim
         // unrecognized customer-document columns, stored as jsonb.
@@ -420,6 +461,11 @@ public partial class ErpRfqAutomationContext
             entity.HasKey(e => e.BusinessUnitId);
             entity.Property(e => e.BusinessUnitId).ValueGeneratedNever();
             entity.Property(e => e.Weight).HasDefaultValue(1.0);
+            // Per-tenant extraction queue fairness state. The scheduler sweeps every tenant
+            // and therefore runs with a null tenant context, where this filter is a no-op;
+            // it exists so a request-scoped context can never read or rewrite another
+            // tenant's queue weight/backoff. Mirrors the table's RLS policy.
+            entity.HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         });
 
         modelBuilder.Entity<Lead>(entity =>

@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.Inventory;
+using ERP_RFQ_Automation.Inventory.Commercial;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
@@ -151,5 +152,120 @@ public class OrderStockReservationTests
 
         Assert.Equal(1, released);
         Assert.Equal(100m, (await new InventoryAvailabilityService(db.ContextFor(Bu)).GetAvailabilityAsync(Bu, 1)).Available);
+    }
+
+    // ------------------------------------------------------------------ partial goods issue
+
+    [Fact]
+    public async Task A_partial_goods_issue_consumes_only_the_declared_quantity()
+    {
+        using var db = new TestDb();
+        SeedOrder(db, onHand: 100m, orderQty: 40m);
+        await Service(db).ReserveOrderAsync(Bu, 1, "rep@acme");
+
+        // THE DEFECT VERBATIM: the order-scoped ConsumeOrderAsync reads no quantity at all, so
+        // issuing 10 units consumed the whole 40-unit hold — on-hand fell by 40, an Issue movement
+        // for 40 was posted and the reservation flipped to Consumed, so nothing could ever recover
+        // the 30 that never left the warehouse. The reconciler reported no drift, because the
+        // movement and the decrement agreed with each other.
+        var issue = await Service(db).ConsumeOrderLinesAsync(
+            Bu, 1, new Dictionary<long, decimal> { [1] = 10m }, "rep@acme");
+
+        var line = Assert.Single(issue.Lines);
+        Assert.Equal(10m, line.Issued);
+        Assert.Equal(30m, line.StillReserved);
+        Assert.True(issue.HasUnshippedBalance);
+
+        var availability = await new InventoryAvailabilityService(db.ContextFor(Bu)).GetAvailabilityAsync(Bu, 1);
+        Assert.Equal(90m, availability.OnHand);     // exactly the 10 that shipped
+        Assert.Equal(30m, availability.Reserved);   // the balance is still held for this order
+        Assert.Equal(60m, availability.Available);  // and is still NOT promisable to anyone else
+
+        await using var verify = db.ContextFor(Bu);
+        var movement = Assert.Single(await verify.InventoryMovements.ToListAsync());
+        Assert.Equal(InventoryMovementType.Issue, movement.Type);
+        Assert.Equal(10m, movement.Quantity);       // the ledger records the physical truth
+    }
+
+    [Fact]
+    public async Task The_balance_left_by_a_partial_goods_issue_is_still_recoverable()
+    {
+        using var db = new TestDb();
+        SeedOrder(db, onHand: 100m, orderQty: 40m);
+        await Service(db).ReserveOrderAsync(Bu, 1, "rep@acme");
+        await Service(db).ConsumeOrderLinesAsync(Bu, 1, new Dictionary<long, decimal> { [1] = 10m }, "rep@acme");
+
+        // The whole point of not over-consuming: cancelling the rest of the order gives the
+        // unshipped units back. Against the old path this returned 0 — the hold was Consumed and
+        // ReleaseOrderAsync has nothing to release.
+        var released = await Service(db).ReleaseOrderAsync(Bu, 1, "rep@acme");
+
+        Assert.Equal(1, released);
+        var availability = await new InventoryAvailabilityService(db.ContextFor(Bu)).GetAvailabilityAsync(Bu, 1);
+        Assert.Equal(90m, availability.OnHand);
+        Assert.Equal(0m, availability.Reserved);
+        Assert.Equal(90m, availability.Available);  // 30 units back on the shelf
+    }
+
+    [Fact]
+    public async Task Issuing_the_remainder_of_a_partly_shipped_line_consumes_exactly_the_balance()
+    {
+        using var db = new TestDb();
+        SeedOrder(db, onHand: 100m, orderQty: 40m);
+        await Service(db).ReserveOrderAsync(Bu, 1, "rep@acme");
+        await Service(db).ConsumeOrderLinesAsync(Bu, 1, new Dictionary<long, decimal> { [1] = 10m }, "rep@acme");
+
+        // A second allocation pass runs first in the shipment path; the 10 already issued must not
+        // be re-reserved, or the line would end up holding more than was ever ordered.
+        await Service(db).ReserveOrderAsync(Bu, 1, "rep@acme");
+        var issue = await Service(db).ConsumeOrderLinesAsync(
+            Bu, 1, new Dictionary<long, decimal> { [1] = 30m }, "rep@acme");
+
+        Assert.Equal(30m, Assert.Single(issue.Lines).Issued);
+        Assert.False(issue.HasUnshippedBalance);
+
+        var availability = await new InventoryAvailabilityService(db.ContextFor(Bu)).GetAvailabilityAsync(Bu, 1);
+        Assert.Equal(60m, availability.OnHand);     // 40 ordered units, delivered across two issues
+        Assert.Equal(0m, availability.Reserved);
+
+        await using var verify = db.ContextFor(Bu);
+        var movements = await verify.InventoryMovements.OrderBy(x => x.Id).ToListAsync();
+        Assert.Equal(new[] { 10m, 30m }, movements.Select(x => x.Quantity).ToArray());
+    }
+
+    [Fact]
+    public async Task A_declared_quantity_above_what_the_line_holds_issues_only_what_is_held()
+    {
+        using var db = new TestDb();
+        SeedOrder(db, onHand: 100m, orderQty: 40m);
+        await Service(db).ReserveOrderAsync(Bu, 1, "rep@acme");
+
+        // A replayed shipment, or an operator typing past the ordered quantity. The ledger can
+        // only ever issue stock the line actually holds, so on-hand cannot be driven below what
+        // the order legitimately reserved.
+        var issue = await Service(db).ConsumeOrderLinesAsync(
+            Bu, 1, new Dictionary<long, decimal> { [1] = 500m }, "rep@acme");
+
+        var line = Assert.Single(issue.Lines);
+        Assert.Equal(500m, line.Declared);
+        Assert.Equal(40m, line.Issued);
+        Assert.Equal(0m, line.StillReserved);
+        Assert.Equal(60m, (await new InventoryAvailabilityService(db.ContextFor(Bu)).GetAvailabilityAsync(Bu, 1)).OnHand);
+    }
+
+    [Fact]
+    public async Task A_goods_issue_naming_a_line_of_another_order_is_refused()
+    {
+        using var db = new TestDb();
+        SeedOrder(db, onHand: 100m, orderQty: 40m);
+        await Service(db).ReserveOrderAsync(Bu, 1, "rep@acme");
+
+        // OrderItem carries no BusinessUnitId — isolation is parent-derived — so an id from
+        // somebody else's order must be rejected outright rather than quietly issuing nothing.
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            Service(db).ConsumeOrderLinesAsync(Bu, 1, new Dictionary<long, decimal> { [999] = 1m }, "rep@acme"));
+
+        Assert.Contains("999", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(100m, (await new InventoryAvailabilityService(db.ContextFor(Bu)).GetAvailabilityAsync(Bu, 1)).OnHand);
     }
 }

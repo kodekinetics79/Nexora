@@ -203,7 +203,8 @@ public sealed class PricingEngine : IPricingEngine
             $"{scored.Count} accepted quote(s) on record.",
             CostBasis: null,
             Date: best.Date,
-            RefText: best.QuoteNo));
+            RefText: best.QuoteNo,
+            CurrencyCode: best.CurrencyCode));
     }
 
     // ------------------------------------------------------------------ blending
@@ -222,6 +223,17 @@ public sealed class PricingEngine : IPricingEngine
         if (candidates.Count == 0)
         {
             line.Rationale = "No governed pricing evidence is available for this line; review it in the Customer Quote workflow.";
+            line.Confidence = 0m;
+            line.NeedsAttention = true;
+            return line;
+        }
+
+        // Fail closed: only candidates denominated in this line's currency may be blended. A
+        // signal in another currency is dropped rather than converted here, because a shadow
+        // pricing advisory must rest on like-for-like evidence, not on an FX assumption.
+        candidates = candidates.Where(c => CurrencyOk(c.CurrencyCode, currency)).ToList();
+        if (candidates.Count == 0)
+        {
             line.Confidence = 0m;
             line.NeedsAttention = true;
             return line;
@@ -315,9 +327,16 @@ public sealed class PricingEngine : IPricingEngine
 
     // ------------------------------------------------------------------ internal rows
 
+    /// <summary>
+    /// A price signal admitted into the blend. CurrencyCode is REQUIRED: the weighted blend at
+    /// BuildLine averages Price across candidates, so a candidate that does not carry its own
+    /// currency could silently be averaged against a different denomination the moment a second
+    /// signal source is admitted. Today only recentQuote exists and it is already currency-
+    /// filtered, so this is an invariant made structural rather than a live bug fixed.
+    /// </summary>
     private sealed record Candidate(
         string Source, string Label, decimal Price, double Weight, string Detail,
-        decimal? CostBasis, DateTime? Date, string? RefText);
+        decimal? CostBasis, DateTime? Date, string? RefText, string? CurrencyCode);
 
     private sealed record AcceptedQuoteRow(long ProductId, decimal UnitPrice, decimal Quantity, DateTime? Date, string CurrencyCode, string QuoteNo);
 }

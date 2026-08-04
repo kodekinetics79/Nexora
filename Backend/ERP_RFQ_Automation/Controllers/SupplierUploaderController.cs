@@ -3,6 +3,7 @@ using System.IO;
 using System.Security.Claims;
 using System.Threading.Tasks;
 using ERP_RFQ_Automation.Services;
+using ERP_RFQ_Automation.Authorization;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -25,6 +26,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet("download-template")]
+        [RequireModulePermission("Suppliers", PermissionAction.View)]
         public async Task<IActionResult> DownloadTemplate([FromQuery] long? businessUnitId = null)
         {
             try
@@ -48,6 +50,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPost("upload-template")]
+        [RequireModulePermission("Suppliers", PermissionAction.Create)]
         public async Task<IActionResult> UploadTemplate(IFormFile file, [FromForm] long? businessUnitId = null)
         {
             var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
@@ -78,6 +81,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet("export")]
+        [RequireModulePermission("Suppliers", PermissionAction.View)]
         public async Task<IActionResult> ExportData([FromQuery] long? businessUnitId = null)
         {
             try

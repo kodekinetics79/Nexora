@@ -25,6 +25,16 @@ namespace ERP_RFQ_Automation.Controllers
             _repository = repository;
         }
 
+        /// <summary>
+        /// The business unit that owns rows written by this request. Setup_Master holds roles and
+        /// lookup values, so it is tenant-owned data, not global reference data.
+        /// TenantClaimGuardMiddleware 403s any authenticated request to a non-platform route whose
+        /// token carries no businessUnitId > 0, so a caller reaching an action here always has one;
+        /// 0 is still treated as "no tenant" and refused rather than silently defaulted.
+        /// </summary>
+        private long TenantId
+            => long.TryParse(User.FindFirst("businessUnitId")?.Value, out var id) && id > 0 ? id : 0;
+
         // GET: api/SetupMaster?pageNumber=1&pageSize=10&setupId=1&setupType=Type1&setupCode=CODE1&setupName=Name1&isActive=true&businessUnitId=1
         [HttpGet]
         public async Task<ActionResult<PaginatedSetupMasterResponseDTO>> GetAll(
@@ -109,8 +119,13 @@ namespace ERP_RFQ_Automation.Controllers
                 if (!ModelState.IsValid)
                     return BadRequest(ModelState);
 
-                // BusinessUnitId is no longer strictly required for lookup but might still be stored
-                // for legacy reasons or future use. We'll leave it in the DTO but won't use it for filtering.
+                // Setup_Master rows are tenant-owned (the table has a BusinessUnitID column, an EF
+                // global query filter, and an RLS policy). This used to hardcode BusinessUnitId = 1,
+                // which meant every tenant's admin wrote their roles and lookup values into business
+                // unit 1's namespace. Stamp the caller's own tenant instead.
+                var tenantId = TenantId;
+                if (tenantId <= 0)
+                    return StatusCode(StatusCodes.Status403Forbidden, "A valid tenant claim is required.");
 
                 // Normalize: treat 0 as null
                 long? parentId = (request.ParentSetupId.HasValue && request.ParentSetupId.Value == 0)
@@ -124,7 +139,7 @@ namespace ERP_RFQ_Automation.Controllers
                     SetupValue = request.SetupName,
                     Description = request.Description,
                     ParentSetupId = parentId,
-                    BusinessUnitId = 1, // Store as System/Global BU
+                    BusinessUnitId = tenantId,
                     IsActive = request.IsActive,
                     CreatedBy = request.CreatedBy,
                     CreatedOn = DateTime.UtcNow
@@ -175,7 +190,11 @@ namespace ERP_RFQ_Automation.Controllers
                 existing.SetupValue = request.SetupName;
                 existing.Description = request.Description;
                 existing.ParentSetupId = parentId;
-                existing.BusinessUnitId = 1; // Ensure it's assigned to System/Global BU
+                // BusinessUnitId is deliberately NOT assigned. It used to be rewritten to 1 on every
+                // update, which reassigned the row away from its owning tenant; on PostgreSQL the RLS
+                // WITH CHECK clause turned that into a 500, and on any path that is not covered by RLS
+                // (background/pipeline role, non-PostgreSQL provider) it silently handed the row to
+                // business unit 1. SetupMasterRepository.UpdateAsync re-pins the stored owner as well.
                 existing.IsActive = request.IsActive;
                 existing.ModifiedBy = request.ModifiedBy;
                 existing.ModifiedOn = DateTime.UtcNow;
