@@ -345,7 +345,7 @@ public class PlatformBillingController : ControllerBase
         statement.Lines.OrderBy(l => l.MeterKey, StringComparer.Ordinal)
             .Select(l => new BillingStatementLineDto(
                 l.MeterKey, l.Description, l.MeteredQuantity, l.IncludedQuantity,
-                l.BillableQuantity, l.UnitPrice, l.Amount, l.SourceNote))
+                l.BillableQuantity, l.UnitPrice, l.Amount, l.SourceNote, l.CoverageNote))
             .ToList());
 }
 
@@ -370,9 +370,17 @@ public sealed record RateCardDto(
     bool IsActive, DateTime CreatedOn, string? CreatedBy, long Version,
     IReadOnlyList<RateCardLineDto> Lines);
 
+/// <summary>
+/// One statement line on the wire. <paramref name="SourceNote"/> is provenance
+/// only; <paramref name="CoverageNote"/> is the meter's signal-coverage caveat
+/// (null when the signal is complete). They are separate fields so a priced page
+/// line still visibly carries its NOT-BILLING-READY warning without an operator
+/// having to parse it back out of the provenance string.
+/// </summary>
 public sealed record BillingStatementLineDto(
     string MeterKey, string Description, decimal MeteredQuantity, decimal IncludedQuantity,
-    decimal BillableQuantity, decimal UnitPrice, decimal Amount, string? SourceNote);
+    decimal BillableQuantity, decimal UnitPrice, decimal Amount, string? SourceNote,
+    string? CoverageNote);
 
 public sealed record BillingStatementDto(
     long Id, long TenantId, DateTime PeriodStartUtc, DateTime PeriodEndUtc,

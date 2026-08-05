@@ -2,8 +2,8 @@ import ArtifactStudioPage from './ArtifactStudioPage';
 
 export default function ReleaseCenterPage() {
   return <ArtifactStudioPage
-    title="Test, Simulation & Release Center"
-    subtitle="Deterministic evaluation evidence, release approval and rollback"
+    title="Test & Release Center"
+    subtitle="Test suite definitions, release approval and rollback"
     types={['TestSuite', 'ReleaseCandidate']}
   />;
 }

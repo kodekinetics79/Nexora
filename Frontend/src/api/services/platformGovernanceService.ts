@@ -90,31 +90,6 @@ export interface AiTrustCenterView {
   inferencePosture: 'LocalFirst' | 'ExternalAuthorized';
 }
 
-export interface ConnectorSdkContract {
-  contractVersion: string;
-  connectorTypes: string[];
-  authenticationModes: string[];
-  commercialOperations: string[];
-  requiredDefinitionFields: string[];
-  deliveryGuarantees: string[];
-  webhookEnvelope: string;
-  secretRule: string;
-}
-
-export interface ReleaseSimulationResult {
-  testSuiteId: number;
-  versionNumber: number;
-  total: number;
-  passed: number;
-  failed: number;
-  passRate: number;
-  passThreshold: number;
-  succeeded: boolean;
-  tests: Array<{ name: string; passed: boolean; difference?: string | null }>;
-  completedOn: string;
-  idempotentReplay: boolean;
-}
-
 export interface ArchiveDocumentItem {
   occurrenceId: number; sourceDocumentId: number; fileName: string; mimeType: string;
   byteSize: number; contentHash: string; ingestedOn: string; intakeStatus: string;
@@ -265,16 +240,6 @@ export const platformGovernanceService = {
   rollbackAiTrustPolicy: async (policy: AiTrustPolicy, auditEventId: number, reason: string) => {
     const { data } = await axiosInstance.post('/api/platform-governance/ai-trust/policy/rollback',
       { expectedVersion: policy.version, auditEventId, reason },
-      { headers: { 'Idempotency-Key': key() } });
-    return data;
-  },
-  getConnectorSdk: async () => {
-    const { data } = await axiosInstance.get<ConnectorSdkContract>('/api/platform-governance/connector-sdk');
-    return data;
-  },
-  simulateTestSuite: async (id: number) => {
-    const { data } = await axiosInstance.post<ReleaseSimulationResult>(
-      `/api/platform-governance/test-suites/${id}/simulate`, {},
       { headers: { 'Idempotency-Key': key() } });
     return data;
   },

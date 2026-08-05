@@ -263,8 +263,25 @@ public class BillingStatementLine
 
     public decimal Amount { get; set; }
 
-    /// <summary>Provenance, e.g. "ExtractionJobs count 2026-08 (BU 12)".</summary>
+    /// <summary>
+    /// Provenance ONLY, e.g. "ExtractionJobs count 2026-08 (BU 12)" — the source
+    /// ledger, period and business unit the quantity came from. Mapped as
+    /// unbounded <c>text</c>: provenance notes name every contributing ledger and
+    /// routinely run past any fixed width, and truncating a statement's audit
+    /// trail (or hard-failing the compute on PostgreSQL's 22001) is never the
+    /// right trade.
+    /// </summary>
     public string? SourceNote { get; set; }
+
+    /// <summary>
+    /// The meter's signal-coverage caveat (<see cref="ERP_RFQ_Automation.Billing.MeterReading.CoverageNote"/>),
+    /// kept as its OWN column rather than concatenated onto
+    /// <see cref="SourceNote"/>: the caveat is structured data — machine-readable,
+    /// independently renderable, and independently queryable — not prose glued
+    /// onto provenance. Null when the meter's signal is complete and unqualified.
+    /// Also mapped unbounded <c>text</c>.
+    /// </summary>
+    public string? CoverageNote { get; set; }
 
     public BillingStatement Statement { get; set; } = null!;
 }
