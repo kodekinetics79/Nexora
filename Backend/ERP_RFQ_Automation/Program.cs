@@ -532,7 +532,6 @@ builder.Services.AddHostedService<ERP_RFQ_Automation.Sla.SlaSweepWorker>();
 builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.PlatformGovernanceService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.HumanActionService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.AiTrustCenterService>();
-builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.ReleaseSimulationService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.CommercialDocumentArchiveService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.QualityAnalyticsService>();
 

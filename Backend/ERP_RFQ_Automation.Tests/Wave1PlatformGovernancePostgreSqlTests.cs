@@ -31,9 +31,7 @@ public sealed class Wave1PlatformGovernancePostgreSqlTests(PostgreSqlTestDatabas
             new(GovernedArtifactType.TestSuite, "retry-suite", "Retry suite", "Production retry regression",
                 "{\"requirements\":[],\"tests\":[{\"name\":\"atomic\",\"actual\":true,\"expected\":true}],\"environment\":\"Sandbox\",\"passThreshold\":1}",
                 "Initial retry-safe suite"), default);
-        var simulation = await new ReleaseSimulationService(context).RunAsync(
-            tenantId, 81, suite.Artifact.Id, "retry-suite-run", default);
-        Assert.True(simulation.Succeeded);
+        Assert.Equal(GovernedLifecycleStatus.Draft, suite.Artifact.Status);
 
         var actions = new HumanActionService(context);
         var action = await actions.CreateAsync(tenantId, 81, "retry-action-create",

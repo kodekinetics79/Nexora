@@ -1,4 +1,5 @@
 using System.Data.Common;
+using System.Globalization;
 using System.Reflection;
 using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.Billing;
@@ -294,6 +295,212 @@ public class PlatformBillingTests
 
         await using var verification = db.Context(null);
         Assert.Equal(1, await verification.Set<BillingStatement>().CountAsync());
+    }
+
+    // ------------------------------ F2: no finalizing an open / settling period
+
+    [Fact]
+    public async Task Compute_still_drafts_the_current_month_but_finalizing_it_is_refused_with_409()
+    {
+        using var db = new BillingTestDb();
+        var (tenantId, buId) = await SeedTenantAsync(db);
+        var rateCardId = await SeedRateCardAsync(db);
+        var currentMonth = MonthOf(DateTime.UtcNow);
+
+        await using (var seed = db.Context(null))
+        {
+            // Three documents already metered this month — exactly the partial
+            // usage a premature finalize would freeze.
+            for (var i = 0; i < 3; i++)
+                seed.Add(NewJob(buId, currentMonth.StartUtc.AddMinutes(i + 1)));
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = db.Context(null);
+        var service = Service(context);
+
+        // Draft preview of the live month is the POINT of compute — it must work.
+        var draft = await service.ComputeStatementAsync(tenantId, currentMonth, rateCardId);
+        Assert.Equal(BillingStatementStatus.Draft, draft.Status);
+        Assert.Equal(3m, Line(draft, BillingMeterKeys.Documents).MeteredQuantity);
+
+        // Finalizing it would bill the month-to-date forever: the unique index
+        // blocks a second statement and the DB trigger blocks correcting this one.
+        var rejected = await Assert.ThrowsAsync<BillingConflictException>(
+            () => service.FinalizeAsync(draft.Id, "billing@nexora.test"));
+        Assert.Contains("Earliest finalize time", rejected.Message);
+        Assert.Contains("settle lag", rejected.Message);
+        Assert.Contains(
+            (currentMonth.EndUtc + BillingStatementService.FinalizeSettleLag).ToString("yyyy-MM-dd HH:mm"),
+            rejected.Message);
+
+        var conflict = await Controller(context, service).FinalizeStatement(draft.Id, CancellationToken.None);
+        Assert.IsType<ConflictObjectResult>(conflict.Result);
+
+        // The Draft is untouched and still recomputable.
+        await using var verification = db.Context(null);
+        var row = await verification.Set<BillingStatement>().SingleAsync(s => s.Id == draft.Id);
+        Assert.Equal(BillingStatementStatus.Draft, row.Status);
+        Assert.Null(row.FinalizedAtUtc);
+        Assert.Null(row.FinalizedBy);
+    }
+
+    [Theory]
+    [InlineData(1, false)]   // period closed an hour ago — reconciliation is still landing
+    [InlineData(47, false)]  // one hour short of the settle lag
+    [InlineData(49, true)]   // clear of the settle lag — safe to freeze
+    public async Task Finalize_waits_for_the_settle_lag_to_clear_after_the_period_ends(
+        int hoursSincePeriodEnd, bool expectAllowed)
+    {
+        // The lag is a named constant precisely so this boundary is pinned, not
+        // re-derived: 48h covers late AI reconciliation and dead-letter re-drives.
+        Assert.Equal(TimeSpan.FromHours(48), BillingStatementService.FinalizeSettleLag);
+
+        using var db = new BillingTestDb();
+        var (tenantId, _) = await SeedTenantAsync(db);
+        var rateCardId = await SeedRateCardAsync(db);
+
+        var periodEnd = DateTime.UtcNow.AddHours(-hoursSincePeriodEnd);
+        long statementId;
+        await using (var seed = db.Context(null))
+        {
+            var statement = NewStatement(tenantId, rateCardId, periodEnd.AddMonths(-1), periodEnd);
+            seed.Add(statement);
+            await seed.SaveChangesAsync();
+            statementId = statement.Id;
+        }
+
+        await using var context = db.Context(null);
+        var service = Service(context);
+
+        if (expectAllowed)
+        {
+            var finalized = await service.FinalizeAsync(statementId, "billing@nexora.test");
+            Assert.Equal(BillingStatementStatus.Final, finalized.Status);
+            Assert.NotNull(finalized.FinalizedAtUtc);
+        }
+        else
+        {
+            var rejected = await Assert.ThrowsAsync<BillingConflictException>(
+                () => service.FinalizeAsync(statementId, "billing@nexora.test"));
+            Assert.Contains("settle lag", rejected.Message);
+            Assert.Contains(
+                (periodEnd + BillingStatementService.FinalizeSettleLag).ToString("yyyy-MM-dd HH:mm"),
+                rejected.Message);
+
+            await using var verification = db.Context(null);
+            var row = await verification.Set<BillingStatement>().SingleAsync(s => s.Id == statementId);
+            Assert.Equal(BillingStatementStatus.Draft, row.Status);
+        }
+    }
+
+    [Fact]
+    public async Task Finalize_is_allowed_for_a_closed_month_that_has_cleared_the_settle_lag()
+    {
+        using var db = new BillingTestDb();
+        var (tenantId, buId) = await SeedTenantAsync(db);
+        var rateCardId = await SeedRateCardAsync(db);
+        // Two months back: closed, and far past the 48h lag under any clock.
+        var closedMonth = MonthOf(DateTime.UtcNow.AddMonths(-2));
+
+        await using (var seed = db.Context(null))
+        {
+            for (var i = 0; i < 4; i++)
+                seed.Add(NewJob(buId, closedMonth.StartUtc.AddDays(i)));
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = db.Context(null);
+        var service = Service(context);
+        var draft = await service.ComputeStatementAsync(tenantId, closedMonth, rateCardId);
+        var finalized = await service.FinalizeAsync(draft.Id, "billing@nexora.test");
+
+        Assert.Equal(BillingStatementStatus.Final, finalized.Status);
+        Assert.Equal("billing@nexora.test", finalized.FinalizedBy);
+        Assert.NotNull(finalized.FinalizedAtUtc);
+        Assert.Equal(3.00m, Line(finalized, BillingMeterKeys.Documents).Amount); // (4 - 2 included) x 1.50
+    }
+
+    [Fact]
+    public async Task Compute_is_refused_with_409_for_a_period_that_has_not_started_yet()
+    {
+        using var db = new BillingTestDb();
+        var (tenantId, _) = await SeedTenantAsync(db);
+        var rateCardId = await SeedRateCardAsync(db);
+        var nextMonth = MonthOf(DateTime.UtcNow.AddMonths(1));
+
+        await using var context = db.Context(null);
+        var service = Service(context);
+
+        var rejected = await Assert.ThrowsAsync<BillingConflictException>(
+            () => service.ComputeStatementAsync(tenantId, nextMonth, rateCardId));
+        Assert.Contains("in the future", rejected.Message);
+        Assert.Contains(nextMonth.Key, rejected.Message);
+
+        var conflict = await Controller(context, service).ComputeStatement(
+            new ComputeStatementRequest(tenantId, nextMonth.Key, rateCardId), CancellationToken.None);
+        Assert.IsType<ConflictObjectResult>(conflict.Result);
+
+        // Nothing half-written: no all-zero Draft squatting on the period's one
+        // and only statement slot.
+        await using var verification = db.Context(null);
+        Assert.Equal(0, await verification.Set<BillingStatement>().CountAsync());
+    }
+
+    [Fact]
+    public async Task Finalize_is_refused_with_409_for_a_future_period_statement_seeded_out_of_band()
+    {
+        using var db = new BillingTestDb();
+        var (tenantId, _) = await SeedTenantAsync(db);
+        var rateCardId = await SeedRateCardAsync(db);
+        var nextMonth = MonthOf(DateTime.UtcNow.AddMonths(1));
+
+        long statementId;
+        await using (var seed = db.Context(null))
+        {
+            // Compute refuses future periods, so this row can only exist from an
+            // out-of-band write — the finalize gate must still hold.
+            var statement = NewStatement(tenantId, rateCardId, nextMonth.StartUtc, nextMonth.EndUtc);
+            seed.Add(statement);
+            await seed.SaveChangesAsync();
+            statementId = statement.Id;
+        }
+
+        await using var context = db.Context(null);
+        var service = Service(context);
+        var rejected = await Assert.ThrowsAsync<BillingConflictException>(
+            () => service.FinalizeAsync(statementId, "billing@nexora.test"));
+        Assert.Contains(nextMonth.StartUtc.ToString("yyyy-MM"), rejected.Message);
+        Assert.Contains("Earliest finalize time", rejected.Message);
+    }
+
+    [Fact]
+    public async Task Re_finalizing_an_already_final_statement_stays_idempotent_and_is_never_gated()
+    {
+        using var db = new BillingTestDb();
+        var (tenantId, _) = await SeedTenantAsync(db);
+        var rateCardId = await SeedRateCardAsync(db);
+
+        // A Final statement for the CURRENT month (legacy row, finalized before
+        // the gate existed): the idempotent fast path must win over the gate, or
+        // every read-back of history would start throwing 409s.
+        var currentMonth = MonthOf(DateTime.UtcNow);
+        long statementId;
+        await using (var seed = db.Context(null))
+        {
+            var statement = NewStatement(tenantId, rateCardId, currentMonth.StartUtc, currentMonth.EndUtc);
+            statement.Status = BillingStatementStatus.Final;
+            statement.FinalizedAtUtc = DateTime.UtcNow;
+            statement.FinalizedBy = "legacy@nexora.test";
+            seed.Add(statement);
+            await seed.SaveChangesAsync();
+            statementId = statement.Id;
+        }
+
+        await using var context = db.Context(null);
+        var again = await Service(context).FinalizeAsync(statementId, "someone-else@nexora.test");
+        Assert.Equal(BillingStatementStatus.Final, again.Status);
+        Assert.Equal("legacy@nexora.test", again.FinalizedBy);
     }
 
     // ----------------------------------------------- rate-card immutability
@@ -830,11 +1037,13 @@ public class PlatformBillingTests
         Assert.Equal(1.80m, statement.TotalAmount);
 
         // ...but the priced line must never look more trustworthy than its
-        // signal: provenance AND the coverage caveat travel together.
+        // signal: provenance AND the coverage caveat travel together — as two
+        // separate fields, not one concatenated string.
         Assert.Contains("ExtractionRuns", line.SourceNote);
         Assert.Contains("2026-07", line.SourceNote);
         Assert.Contains($"BU {buId}", line.SourceNote);
-        Assert.Contains("NOT BILLING-READY", line.SourceNote);
+        Assert.DoesNotContain("NOT BILLING-READY", line.SourceNote); // provenance only
+        Assert.Equal(BillingStatementService.PageSignalCoverageNote, line.CoverageNote);
     }
 
     [Fact]
@@ -991,10 +1200,107 @@ public class PlatformBillingTests
                 Assert.Contains("2026-07", sourceNote);
         }
 
-        // Only the page lines carry the not-billing-ready caveat.
-        Assert.Contains("NOT BILLING-READY", Line(statement, BillingMeterKeys.PagesProcessed).SourceNote);
-        Assert.Contains("NOT BILLING-READY", Line(statement, BillingMeterKeys.PagesOcr).SourceNote);
-        Assert.DoesNotContain("NOT BILLING-READY", Line(statement, BillingMeterKeys.Documents).SourceNote);
+        // Only the page lines carry the not-billing-ready caveat, and it lives in
+        // its own field — SourceNote stays pure provenance.
+        Assert.Contains("NOT BILLING-READY", Line(statement, BillingMeterKeys.PagesProcessed).CoverageNote);
+        Assert.Contains("NOT BILLING-READY", Line(statement, BillingMeterKeys.PagesOcr).CoverageNote);
+        Assert.Null(Line(statement, BillingMeterKeys.Documents).CoverageNote);
+        Assert.All(statement.Lines, l => Assert.DoesNotContain("NOT BILLING-READY", l.SourceNote ?? ""));
+    }
+
+    // ---------------------- F1: unbounded notes + coverage note as its own column
+
+    [Fact]
+    public async Task Statement_lines_round_trip_notes_far_longer_than_400_characters_without_truncation()
+    {
+        using var db = new BillingTestDb();
+        var (tenantId, buId) = await SeedTenantAsync(db);
+        var cardId = await SeedPageAndStorageCardAsync(db);
+        await using (var seed = db.Context(null))
+        {
+            await SeedJobWithRunsAsync(seed, buId, InJuly, ExtractionStatus.Succeeded,
+                pages: 12, ocrPages: 4, byteSize: 1_073_741_824L);
+        }
+
+        long statementId;
+        await using (var context = db.Context(null))
+            statementId = (await Service(context).ComputeStatementAsync(tenantId, July, cardId)).Id;
+
+        // Re-read through a FRESH context so the assertions are about what the
+        // database actually stored, not about the in-memory graph.
+        await using var verification = db.Context(null);
+        var lines = await verification.Set<BillingStatementLine>().AsNoTracking()
+            .Where(l => l.BillingStatementId == statementId)
+            .ToListAsync();
+
+        foreach (var meterKey in new[]
+                 {
+                     BillingMeterKeys.PagesProcessed, BillingMeterKeys.PagesOcr, BillingMeterKeys.StorageGb
+                 })
+        {
+            var line = lines.Single(l => l.MeterKey == meterKey);
+            Assert.NotNull(line.SourceNote);
+            Assert.NotNull(line.CoverageNote);
+
+            // THE regression: the old code wrote SourceNote + " | " + CoverageNote
+            // into a varchar(400) column. That value is far longer than 400
+            // characters, so PostgreSQL raised 22001 and the compute 500'd —
+            // while SQLite, which ignores varchar lengths, stayed green.
+            var oldConcatenatedValue = $"{line.SourceNote} | {line.CoverageNote}";
+            Assert.True(oldConcatenatedValue.Length > 400,
+                $"{meterKey}: expected the concatenated note to overflow varchar(400), got {oldConcatenatedValue.Length}.");
+
+            // Both fields survive the round trip byte-for-byte.
+            Assert.EndsWith($"BU {buId})", line.SourceNote);
+            Assert.Equal(
+                meterKey == BillingMeterKeys.StorageGb
+                    ? BillingStatementService.StorageCoverageNote
+                    : BillingStatementService.PageSignalCoverageNote,
+                line.CoverageNote);
+        }
+
+        // The page caveat alone already exceeds the old column width, so nothing
+        // about this survives a bounded mapping.
+        Assert.True(BillingStatementService.PageSignalCoverageNote.Length > 400);
+        Assert.True(BillingStatementService.StorageCoverageNote.Length > 300);
+    }
+
+    [Fact]
+    public async Task Coverage_caveat_is_a_separate_field_on_the_line_and_on_the_wire()
+    {
+        using var db = new BillingTestDb();
+        var (tenantId, buId) = await SeedTenantAsync(db);
+        var cardId = await SeedPageAndStorageCardAsync(db);
+        await using (var seed = db.Context(null))
+        {
+            await SeedJobWithRunsAsync(seed, buId, InJuly, ExtractionStatus.Succeeded,
+                pages: 10, ocrPages: 2, byteSize: 2_147_483_648L);
+        }
+
+        await using var context = db.Context(null);
+        var service = Service(context);
+        var response = await Controller(context, service).ComputeStatement(
+            new ComputeStatementRequest(tenantId, "2026-07", cardId), CancellationToken.None);
+        var payload = Assert.IsType<BillingStatementDto>(Assert.IsType<OkObjectResult>(response.Result).Value);
+
+        // A priced page line still visibly carries its warning on the wire...
+        var pages = payload.Lines.Single(l => l.MeterKey == BillingMeterKeys.PagesProcessed);
+        Assert.Equal(2.00m, pages.Amount); // 10 pages x 0.20
+        Assert.Equal(BillingStatementService.PageSignalCoverageNote, pages.CoverageNote);
+        // ...as its own field: provenance is not polluted with the caveat, and
+        // the caveat is not something a consumer has to split back out of a string.
+        Assert.Contains("ExtractionRuns", pages.SourceNote);
+        Assert.DoesNotContain("NOT BILLING-READY", pages.SourceNote);
+        Assert.DoesNotContain(" | ", pages.SourceNote);
+
+        var storage = payload.Lines.Single(l => l.MeterKey == BillingMeterKeys.StorageGb);
+        Assert.Equal(BillingStatementService.StorageCoverageNote, storage.CoverageNote);
+        Assert.Contains("SourceDocuments.ByteSize", storage.SourceNote);
+
+        // Meters with a complete signal carry NO caveat at all — null, not "".
+        var documents = payload.Lines.Single(l => l.MeterKey == BillingMeterKeys.Documents);
+        Assert.Null(documents.CoverageNote);
+        Assert.Contains("ExtractionJobs", documents.SourceNote);
     }
 
     [Fact]
@@ -1073,6 +1379,15 @@ public class PlatformBillingTests
         Assert.True(BillingPeriod.TryParse(key, out var period));
         return period;
     }
+
+    /// <summary>
+    /// The calendar month containing <paramref name="moment"/>. The F2 gates are
+    /// relative to the wall clock, so these tests derive their periods from
+    /// UtcNow instead of hard-coding a month that would drift into/out of the
+    /// settle lag as the calendar moves.
+    /// </summary>
+    private static BillingPeriod MonthOf(DateTime moment)
+        => Parse(moment.ToString("yyyy-MM", CultureInfo.InvariantCulture));
 
     private static MeterReading Meter(TenantUsageReadout usage, string key)
         => usage.Meters.Single(m => m.MeterKey == key);
@@ -1167,6 +1482,34 @@ public class PlatformBillingTests
                 new RateCardLine { MeterKey = BillingMeterKeys.Documents, IncludedQuantity = 2m, UnitPrice = 1.50m, Unit = "document" },
                 new RateCardLine { MeterKey = BillingMeterKeys.AiTokensExternal, IncludedQuantity = 50_000m, UnitPrice = 0.001m, Unit = "1K tokens" },
                 new RateCardLine { MeterKey = BillingMeterKeys.Seats, IncludedQuantity = 1m, UnitPrice = 30m, Unit = "seat" }
+            }
+        };
+        seed.Add(card);
+        await seed.SaveChangesAsync();
+        return card.Id;
+    }
+
+    /// <summary>
+    /// A card pricing the three meters that carry a coverage caveat
+    /// (pages.processed / pages.ocr / storage.gb) plus documents — the exact
+    /// shape whose statement lines overflowed the old varchar(400) SourceNote.
+    /// </summary>
+    private static async Task<long> SeedPageAndStorageCardAsync(BillingTestDb db)
+    {
+        await using var seed = db.Context(null);
+        var card = new RateCard
+        {
+            Code = $"notes-{Guid.NewGuid():N}"[..20],
+            Currency = "USD",
+            EffectiveFromUtc = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
+            IsActive = true,
+            CreatedBy = "test",
+            Lines =
+            {
+                new RateCardLine { MeterKey = BillingMeterKeys.Documents, IncludedQuantity = 0m, UnitPrice = 1.00m, Unit = "document" },
+                new RateCardLine { MeterKey = BillingMeterKeys.PagesProcessed, IncludedQuantity = 0m, UnitPrice = 0.20m, Unit = "page" },
+                new RateCardLine { MeterKey = BillingMeterKeys.PagesOcr, IncludedQuantity = 0m, UnitPrice = 0.05m, Unit = "page" },
+                new RateCardLine { MeterKey = BillingMeterKeys.StorageGb, IncludedQuantity = 0m, UnitPrice = 0.10m, Unit = "GB" }
             }
         };
         seed.Add(card);
@@ -1307,11 +1650,13 @@ public class PlatformBillingTests
         CreatedOn = createdOn ?? InJuly
     };
 
-    private static BillingStatement NewStatement(long tenantId, long rateCardId) => new()
+    private static BillingStatement NewStatement(
+        long tenantId, long rateCardId,
+        DateTime? periodStartUtc = null, DateTime? periodEndUtc = null) => new()
     {
         TenantId = tenantId,
-        PeriodStartUtc = PeriodStart,
-        PeriodEndUtc = PeriodStart.AddMonths(1),
+        PeriodStartUtc = periodStartUtc ?? PeriodStart,
+        PeriodEndUtc = periodEndUtc ?? (periodStartUtc ?? PeriodStart).AddMonths(1),
         RateCardId = rateCardId,
         Currency = "USD",
         Status = BillingStatementStatus.Draft,

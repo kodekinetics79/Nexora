@@ -93,7 +93,15 @@ public static class BillingModelConfiguration
             e.HasKey(x => x.Id);
             e.Property(x => x.MeterKey).IsRequired().HasMaxLength(64);
             e.Property(x => x.Description).IsRequired().HasMaxLength(256);
-            e.Property(x => x.SourceNote).HasMaxLength(400);
+            // Provenance and the coverage caveat are UNBOUNDED text, not
+            // varchar(400). A page/storage provenance note names every
+            // contributing ledger and its caveat names every instrumentation gap;
+            // both blow past 400 characters routinely. On PostgreSQL a bounded
+            // column turns that into a 22001 (string data right truncation) that
+            // no billing catch handles, so statement compute 500s in production
+            // while SQLite — which ignores varchar lengths entirely — stays green.
+            e.Property(x => x.SourceNote).HasColumnType("text");
+            e.Property(x => x.CoverageNote).HasColumnType("text");
             e.Property(x => x.MeteredQuantity).HasPrecision(18, 3);
             e.Property(x => x.IncludedQuantity).HasPrecision(18, 3);
             e.Property(x => x.BillableQuantity).HasPrecision(18, 3);

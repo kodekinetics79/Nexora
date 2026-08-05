@@ -1,3 +1,4 @@
+using System.Globalization;
 using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Extraction;
@@ -48,12 +49,16 @@ public sealed record MeterReading(string MeterKey, decimal Quantity, string Unit
     /// <summary>
     /// False when the meter's source signal is known to be partial. A false value
     /// does NOT stop a rate card from pricing the meter — it is the explicit
-    /// warning that doing so under-bills, and it is echoed onto every statement
-    /// line's SourceNote.
+    /// warning that doing so under-bills, and <see cref="CoverageNote"/> is copied
+    /// onto every statement line the meter produces.
     /// </summary>
     public bool BillingReady { get; init; } = true;
 
-    /// <summary>Names the exact instrumentation gaps when coverage is incomplete.</summary>
+    /// <summary>
+    /// Names the exact instrumentation gaps when coverage is incomplete. Copied
+    /// verbatim onto <see cref="BillingStatementLine.CoverageNote"/> — its own
+    /// column, never concatenated into the line's provenance note.
+    /// </summary>
     public string? CoverageNote { get; init; }
 }
 
@@ -118,13 +123,19 @@ public interface IBillingStatementService
     /// <summary>
     /// Idempotently upserts the Draft statement for (tenant, period): recompute
     /// replaces Draft lines atomically; a Final statement is returned unchanged;
-    /// a duplicate insert lost to a race returns the winning row.
+    /// a duplicate insert lost to a race returns the winning row. The CURRENT
+    /// period computes freely (that Draft is the live preview); a period that has
+    /// not started yet throws <see cref="BillingConflictException"/> (409).
     /// </summary>
     Task<BillingStatement> ComputeStatementAsync(
         long tenantId, BillingPeriod period, long? rateCardId = null, CancellationToken ct = default);
 
     /// <summary>
     /// Draft → Final (immutable). Already-Final statements return unchanged.
+    /// Throws <see cref="BillingConflictException"/> (409) when the statement's
+    /// period has not yet closed AND cleared
+    /// <see cref="BillingStatementService.FinalizeSettleLag"/> — finalizing an
+    /// open period permanently freezes partial usage.
     /// <paramref name="onFinalized"/> (when supplied) runs INSIDE the finalize
     /// transaction, after the status flip is saved and before commit — the
     /// caller's audit write commits atomically with the finalize or not at all
@@ -173,6 +184,26 @@ public class BillingStatementService : IBillingStatementService
         "ByteSize is recorded for every document in the evidence ledger (required at construction, taken from the ingested byte length). " +
         "Doors that bypass the evidence ledger — supplier-quote capture (Email/Portal/Api), the template uploaders and the legacy " +
         "direct-extract e-mail path (Ingestion:UseUnifiedQueue=false) — store no SourceDocument and so contribute no bytes.";
+
+    /// <summary>
+    /// How long after a period ENDS a statement for that period must wait before
+    /// it can be finalized (P0: an open or future period must never be frozen).
+    ///
+    /// 48 hours, because usage for a period keeps landing after the calendar
+    /// month closes: external AI requests are reconciled asynchronously (an
+    /// Unknown request settles when the provider outcome is read back, which is
+    /// what moves tokens onto the ai.tokens.external meter), and dead-letter
+    /// re-drives replay failed documents — a re-driven job that finally succeeds
+    /// changes its billable status and writes new run evidence. Finalizing before
+    /// those land bakes a short bill in permanently: UX_BillingStatements_Tenant_
+    /// PeriodStart blocks a second statement and the database immutability
+    /// trigger blocks correcting the first one, so the under-charge is
+    /// unfixable, not merely wrong.
+    ///
+    /// Applies to FINALIZE ONLY. Computing (and recomputing) the Draft for a live
+    /// period is the whole point of the Draft preview and stays unrestricted.
+    /// </summary>
+    internal static readonly TimeSpan FinalizeSettleLag = TimeSpan.FromHours(48);
 
     private readonly ErpRfqAutomationContext _context;
     private readonly ILogger<BillingStatementService> _logger;
@@ -321,6 +352,18 @@ public class BillingStatementService : IBillingStatementService
     public async Task<BillingStatement> ComputeStatementAsync(
         long tenantId, BillingPeriod period, long? rateCardId = null, CancellationToken ct = default)
     {
+        // P0: a period that has not STARTED has no usage to meter — computing it
+        // would persist a fabricated all-zero Draft that the unique index then
+        // makes the one statement for that period. The CURRENT period is
+        // deliberately allowed: its Draft is a live preview (see FinalizeSettleLag
+        // — only finalize is time-gated).
+        var now = DateTime.UtcNow;
+        if (period.StartUtc > now)
+            throw new BillingConflictException(
+                $"Billing period {period.Key} starts {period.StartUtc:yyyy-MM-dd HH:mm}Z, which is in the future; " +
+                "a statement cannot be computed for a period that has not begun. " +
+                $"The current period is {now:yyyy-MM}.");
+
         var tenant = await _context.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
                          .Include(t => t.Plan)
                          .FirstOrDefaultAsync(t => t.Id == tenantId, ct)
@@ -450,6 +493,21 @@ public class BillingStatementService : IBillingStatementService
 
             if (statement.Status == BillingStatementStatus.Final)
                 return statement; // idempotent — a Final statement is immutable (no audit callback: nothing changed).
+
+            // P0: refuse to freeze a period that is still open (or still settling).
+            // Checked AFTER the already-Final fast path so re-finalizing an
+            // existing Final statement stays idempotent rather than 409-ing.
+            var earliestFinalizeUtc = statement.PeriodEndUtc + FinalizeSettleLag;
+            if (earliestFinalizeUtc > DateTime.UtcNow)
+                throw new BillingConflictException(
+                    $"Billing statement {statementId} covers period " +
+                    $"{statement.PeriodStartUtc.ToString("yyyy-MM", CultureInfo.InvariantCulture)}, which ends " +
+                    $"{statement.PeriodEndUtc:yyyy-MM-dd HH:mm}Z. Finalizing is permanent — the unique index blocks a " +
+                    "second statement for the period and the immutability trigger blocks correcting this one — so a " +
+                    $"period is only finalizable once it has closed AND cleared the {FinalizeSettleLag.TotalHours:0}h " +
+                    "settle lag that lets late AI reconciliation and dead-letter re-drives land. " +
+                    $"Earliest finalize time: {earliestFinalizeUtc:yyyy-MM-dd HH:mm}Z. " +
+                    "The Draft stays recomputable until then.");
 
             statement.Status = BillingStatementStatus.Final;
             statement.FinalizedAtUtc = DateTime.UtcNow;
@@ -681,14 +739,16 @@ public class BillingStatementService : IBillingStatementService
                 BillableQuantity = billable,
                 UnitPrice = cardLine.UnitPrice,
                 Amount = amount,
-                // Traceability: source ledger + period + BU, plus the meter's
-                // coverage caveat when its signal is known to be partial — a
-                // priced line must never look more trustworthy than its signal.
+                // Traceability: SourceNote carries provenance (source ledger +
+                // period + BU) and nothing else. The meter's coverage caveat
+                // travels in its OWN field — a priced line must never look more
+                // trustworthy than its signal, but the caveat is structured data,
+                // not prose glued onto provenance, so it stays separately
+                // readable (and separately queryable) on the line and on the wire.
                 SourceNote = meter is null
                     ? $"No source ledger backs meter '{cardLine.MeterKey}'; metered 0 for {usage.Period}."
-                    : string.IsNullOrEmpty(meter.CoverageNote)
-                        ? meter.SourceNote
-                        : $"{meter.SourceNote} | {meter.CoverageNote}"
+                    : meter.SourceNote,
+                CoverageNote = string.IsNullOrEmpty(meter?.CoverageNote) ? null : meter.CoverageNote
             });
         }
 

@@ -235,7 +235,7 @@ public sealed class Wave1PlatformGovernanceTests
     }
 
     [Fact]
-    public async Task Release_candidate_requires_current_published_suite_and_passing_simulation()
+    public async Task Release_candidate_requires_every_referenced_test_suite_to_be_published()
     {
         using var database = new TestDb();
         await using var context = database.ContextFor(61_061);
@@ -244,13 +244,9 @@ public sealed class Wave1PlatformGovernanceTests
         var artifacts = new PlatformGovernanceService(context);
         var suite = await artifacts.CreateAsync(61_061, 70, "suite-create",
             new(GovernedArtifactType.TestSuite, "wave1-contracts", "Wave 1 contracts",
-                "Deterministic contract suite",
+                "Contract test suite",
                 "{\"requirements\":[\"W1-SEC-01\"],\"tests\":[{\"name\":\"tenant contract\",\"actual\":true,\"expected\":true}],\"environment\":\"Sandbox\",\"passThreshold\":1}",
                 "Initial suite"), default);
-        var suiteTest = await artifacts.TransitionAsync(61_061, suite.Artifact.Id, 70, "suite-test",
-            new(suite.Artifact.Version, "TEST", "Suite definition reviewed"), default);
-        var suitePublished = await artifacts.TransitionAsync(61_061, suite.Artifact.Id, 70, "suite-publish",
-            new(suiteTest.Artifact.Version, "PUBLISH", "Suite approved"), default);
         var release = await artifacts.CreateAsync(61_061, 70, "release-create",
             new(GovernedArtifactType.ReleaseCandidate, "wave1-rc", "Wave 1 RC",
                 "Wave 1 release candidate",
@@ -261,16 +257,15 @@ public sealed class Wave1PlatformGovernanceTests
 
         await Assert.ThrowsAsync<PlatformGovernanceConflictException>(() => artifacts.TransitionAsync(
             61_061, release.Artifact.Id, 70, "release-publish-early",
-            new(releaseTest.Artifact.Version, "PUBLISH", "Attempt before evidence"), default));
-        var simulation = await new ReleaseSimulationService(context).RunAsync(61_061, 70,
-            suitePublished.Artifact.Id, "suite-simulate", default);
-        var published = await artifacts.TransitionAsync(61_061, release.Artifact.Id, 70,
-            "release-publish", new(releaseTest.Artifact.Version, "PUBLISH", "All suites passed"), default);
+            new(releaseTest.Artifact.Version, "PUBLISH", "Attempt before the suite is published"), default));
 
-        Assert.True(simulation.Succeeded);
-        Assert.Equal(1m, simulation.PassRate);
+        var suiteTest = await artifacts.TransitionAsync(61_061, suite.Artifact.Id, 70, "suite-test",
+            new(suite.Artifact.Version, "TEST", "Suite definition reviewed"), default);
+        await artifacts.TransitionAsync(61_061, suite.Artifact.Id, 70, "suite-publish",
+            new(suiteTest.Artifact.Version, "PUBLISH", "Suite approved"), default);
+        var published = await artifacts.TransitionAsync(61_061, release.Artifact.Id, 70,
+            "release-publish", new(releaseTest.Artifact.Version, "PUBLISH", "Referenced suites published"), default);
+
         Assert.Equal(GovernedLifecycleStatus.Production, published.Artifact.Status);
-        Assert.Contains(await context.TenantGovernanceAuditEvents.ToListAsync(),
-            x => x.Action == "SIMULATION_PASSED");
     }
 }

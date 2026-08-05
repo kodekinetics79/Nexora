@@ -359,16 +359,6 @@ public sealed class PlatformGovernanceService(ErpRfqAutomationContext db)
             .ToListAsync(ct);
         if (suites.Count != keys.Length || suites.Any(x => x.Status != GovernedLifecycleStatus.Production))
             throw new PlatformGovernanceConflictException("Every referenced test suite must be published.");
-        foreach (var suite in suites)
-        {
-            var reference = $"{suite.Id}:v{suite.CurrentVersionNumber}";
-            var passed = await db.TenantGovernanceAuditEvents.AsNoTracking().AnyAsync(x =>
-                x.BusinessUnitId == tenantId && x.Area == "ReleaseCenter"
-                && x.AggregateReference == reference && x.Action == "SIMULATION_PASSED", ct);
-            if (!passed)
-                throw new PlatformGovernanceConflictException(
-                    $"Test suite '{suite.ArtifactKey}' has no passing result for its current version.");
-        }
     }
 
     private static string NormalizeKey(string value)

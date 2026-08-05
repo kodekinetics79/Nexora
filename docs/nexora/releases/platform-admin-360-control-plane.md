@@ -81,6 +81,29 @@ enough to price against:
 Page meters therefore ship with an explicit coverage flag and must not be priced until
 ingestion is instrumented to record a true page count at every door.
 
+## Not Ready — invoicing
+
+A finance review of the consumption vertical concluded that statements are a defensible
+**usage calculation**, not yet an invoice. Before a real invoice is issued:
+
+1. Decide the v1 billable scope. The recommendation is base subscription + documents +
+   external AI tokens; page and storage meters stay read-only until instrumented.
+2. Add a correction path — credit note, adjustment, or supersede — **before the first Final
+   statement exists**, because Final rows are deliberately immutable in the database.
+3. Add invoice identity: gapless numbering, bill-to legal entity, tax determination, issue and
+   due dates, and AR linkage — or delegate all of it to a billing-of-record provider and feed
+   it usage from these statements.
+4. Freeze evidence at finalize: statement lines record quantities and prices, but not the
+   source row identifiers behind them, so a disputed quantity cannot be re-derived from
+   ledgers that have since moved.
+5. Split segregation of duties: one policy currently gates rate-card pricing, statement
+   computation, and finalization, so a single billing administrator can set a price and sign
+   the statement that uses it.
+6. Settle the unit definitions in writing (what counts as "a document", the seat basis, the
+   storage basis) and make code and contract agree.
+7. Run one full parallel month — meter everything, invoice nobody, reconcile to source
+   ledgers and provider cost — before issuing.
+
 ## Verification
 
 Recorded in the delivery report accompanying this increment: backend portable lane, PostgreSQL
