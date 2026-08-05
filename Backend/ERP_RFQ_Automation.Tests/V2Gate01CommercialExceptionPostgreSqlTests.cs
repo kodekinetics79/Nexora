@@ -33,8 +33,8 @@ public sealed class V2Gate01CommercialExceptionPostgreSqlTests(PostgreSqlTestDat
             await using (var baseline = database.ContextForConnectionString(rehearsalBuilder.ConnectionString, 831001))
             {
                 await baseline.Database.MigrateAsync("20260728202215_AllowNonEmailLeadIntake");
-                var lead = Seed.Lead(baseline, 831011, 831001);
-                await baseline.SaveChangesAsync();
+                // Pinned to the rehearsal era (see Seed.HistoricalLead).
+                var lead = Seed.HistoricalLead(baseline, 831011, 831001);
                 var decision = new LeadRoutingDecision
                 {
                     BusinessUnitId = 831001,

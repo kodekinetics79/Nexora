@@ -4,6 +4,7 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using ERP_RFQ_Automation.Extraction.Quantities;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -89,6 +90,12 @@ namespace ERP_RFQ_Automation.Services
 
                 var groupedLeads = new Dictionary<string, (Lead Lead, List<LeadItem> Items)>();
 
+                // Leads with at least one row whose quantity could not be read. These get
+                // RequiresCommercialReview so the extraction-review gate actually engages —
+                // it is keyed on that flag, and this upload door never set it, which is why
+                // a fabricated quantity could reach a customer quote unseen.
+                var quantityNeedsReview = new HashSet<string>(StringComparer.Ordinal);
+
                 for (int row = 2; row <= rowCount; row++)
                 {
                     var rfqNo = ws.Cells[row, 1].Text?.Trim();
@@ -114,7 +121,13 @@ namespace ERP_RFQ_Automation.Services
                             LeadSource = "Excel Upload",
                             EmailSource = "Excel",
                             Clientemail = "excel@upload.com",
-                            Aiconfidence = 1.0m, // Manual upload is 100% confident
+                            // Aiconfidence is deliberately NOT set. Nothing was extracted
+                            // here — a human typed these cells into Nexora's own template,
+                            // so there is no prediction to be confident about. Writing 1.0
+                            // put a fabricated "100%" into the same column the review screen
+                            // and the dashboard read as a model score, and those rows then
+                            // pulled the tenant's average confidence upward. Null means
+                            // "not applicable", which is the truth.
                             CreatedBy = createdBy,
                             CreatedDate = DateTime.UtcNow,
                             BusinessUnitId = businessUnitId,
@@ -123,16 +136,41 @@ namespace ERP_RFQ_Automation.Services
                         groupedLeads[leadKey] = (lead, new List<LeadItem>());
                     }
 
+                    // QUANTITY — never invent a number. This previously read
+                    //     Quantity = int.TryParse(cell.Text, out var qty) ? qty : 1
+                    // and int.TryParse's default NumberStyles rejects thousands separators,
+                    // any decimal point, and any trailing unit. So "1,000" became 1, as did
+                    // "2,500 PCS", "12.00" and "2.5". The customer asked for a thousand and
+                    // the quote said one — plausible enough to pass review, and the review
+                    // gate was inert on this door anyway (RequiresCommercialReview was never
+                    // set here). 875 of 2,966 production lines carried quantity 1.
+                    //
+                    // Unreadable now stores 0, which every downstream guard already rejects
+                    // (QuoteService line validation, the reviewer's approve check, and the
+                    // new CHECK constraints), AND raises RequiresCommercialReview on the
+                    // parent lead so a human is actually asked. Fractional values are treated
+                    // as unreadable rather than truncated: Quantity is an int column, and
+                    // silently turning 2.5 into 2 is a 20% under-quote.
+                    var quantityReading = QuantityParser.Parse(ws.Cells[row, 6].Text, allowFractional: false);
+                    if (quantityReading.RequiresReview)
+                    {
+                        quantityNeedsReview.Add(leadKey);
+                        _logger.LogWarning(
+                            "Row {Row}: quantity {Raw} could not be read ({Origin}); the line is held for review rather than defaulted.",
+                            row, ws.Cells[row, 6].Text, quantityReading.Origin);
+                    }
+
                     var item = new LeadItem
                     {
                         ProductShortName = productName,
-                        Quantity = int.TryParse(ws.Cells[row, 6].Text, out var qty) ? qty : 1,
+                        Quantity = quantityReading.HasValue ? (int)quantityReading.Value!.Value : 0,
                         UnitPrice = decimal.TryParse(ws.Cells[row, 7].Text, out var price) ? price : null,
                         Currency = ws.Cells[row, 8].Text?.Trim(),
                         ManufacturerName = ws.Cells[row, 9].Text?.Trim(),
                         ManufacturerPartNumber = ws.Cells[row, 10].Text?.Trim(),
-                        LeadTime = int.TryParse(ws.Cells[row, 11].Text, out var lt) ? lt : null,
-                        Aiconfidence = 1.0m
+                        LeadTime = int.TryParse(ws.Cells[row, 11].Text, out var lt) ? lt : null
+                        // Aiconfidence left null — see the lead above. A typed cell has no
+                        // extraction confidence.
                     };
 
                     groupedLeads[leadKey].Items.Add(item);
@@ -141,10 +179,28 @@ namespace ERP_RFQ_Automation.Services
                 int leadCount = 0;
                 int itemViewCount = 0;
 
-                foreach (var entry in groupedLeads.Values)
+                // The batch ingest was stamped "Success" at creation, BEFORE any row was
+                // parsed. The review queue lists a lead with an EmailIngest only while that
+                // ingest reads "NeedsReview", and review submit refuses otherwise — so a
+                // held lead under a "Success" ingest was blocked from converting yet
+                // invisible to every reviewer: governed into a queue nobody can see.
+                // (Known edge: all leads in one upload share this ingest, so approving one
+                // flips it to "Success" for the rest; acceptable for now because a reviewer
+                // works a batch together, and the conversion gate on each lead still holds.)
+                if (quantityNeedsReview.Count > 0)
+                    dummyIngest.ParseStatus = "NeedsReview";
+
+                foreach (var (leadKey, entry) in groupedLeads)
                 {
                     var lead = entry.Lead;
                     lead.NoOfLineItems = entry.Items.Count;
+
+                    // Engage the review gate for this lead when any quantity was unreadable.
+                    // LeadRepository and LeadConversionIntelligence both refuse RFQ conversion
+                    // while RequiresCommercialReview is set and CommercialFactsVerified is not,
+                    // so this is what stops a held line from being quoted.
+                    if (quantityNeedsReview.Contains(leadKey))
+                        lead.RequiresCommercialReview = true;
                     _context.Leads.Add(lead);
                     await _context.SaveChangesAsync(); // Save to get Lead.Id
 

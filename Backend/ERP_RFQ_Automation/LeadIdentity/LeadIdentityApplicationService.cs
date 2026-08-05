@@ -7,6 +7,7 @@ using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.CommercialRouting;
+using ERP_RFQ_Automation.Services.Uom;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.LeadIdentity;
@@ -825,14 +826,23 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
     private static object Snapshot(Lead x) => new { rfq = Normalize(x.Rfqno), buyer = Normalize(x.BuyersName), closing = x.BidClosingDate?.ToUniversalTime().ToString("O"),
         items = x.LeadItems.Select(ItemSnapshot).OrderBy(i => i.part).ThenBy(i => i.line).ToArray() };
     private static ItemFingerprintSnapshot ItemSnapshot(LeadItem x) => new(Normalize(x.LineItemNo), Normalize(x.ManufacturerPartNumber ?? x.ItemMaterialCode),
-        Normalize(x.ProductShortDescription ?? x.ItemText), x.Quantity, Normalize(x.UnitOfMeasure), x.BidClosingDateLine?.ToUniversalTime().ToString("O"));
+        Normalize(x.ProductShortDescription ?? x.ItemText), x.Quantity, NormalizeUom(x.UnitOfMeasure), x.BidClosingDateLine?.ToUniversalTime().ToString("O"));
     private static string LineFingerprint(LeadItem x) => Hash(JsonSerializer.Serialize(ItemSnapshot(x)));
     private static string LineIdentityFingerprint(LeadItem x) => Hash(JsonSerializer.Serialize(new
     {
         part = Normalize(x.ManufacturerPartNumber ?? x.ItemMaterialCode),
         description = Normalize(x.ProductShortDescription ?? x.ItemText),
-        uom = Normalize(x.UnitOfMeasure)
+        uom = NormalizeUom(x.UnitOfMeasure)
     }));
+    /// <summary>
+    /// UoM for identity purposes. <see cref="Normalize"/> alone only lowercases and drops
+    /// punctuation, so "each", "EA", "pcs", "piece" and "NOS" — five spellings of ONE unit,
+    /// all present in production — produced five different hashes and the same RFQ arriving
+    /// twice failed to dedup. The canonicaliser collapses the spellings and deliberately does
+    /// NOT collapse packaging ("Pack" stays distinct from "EA"), so two genuinely different
+    /// lines still hash differently.
+    /// </summary>
+    private static string? NormalizeUom(string? value) => Normalize(UomCanonicalizer.EquivalenceKey(value));
     private static string? CustomerScope(Lead x, string? sender)
     {
         if (x.CustomerId.HasValue) return $"customer:{x.CustomerId}";

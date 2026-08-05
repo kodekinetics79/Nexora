@@ -78,6 +78,14 @@ public sealed class AiProcessingPolicy
     public string? AllowedModel { get; set; }
     public long? MonthlySoftTokenLimit { get; set; }
     public long? MonthlyHardTokenLimit { get; set; }
+
+    /// <summary>
+    /// Per-document token budget for ONE extraction pass. Enforcement (see
+    /// <c>AiGovernanceService.ReserveAsync</c>) allows
+    /// <c>AiGovernanceService.DocumentBudgetRetryCycles</c> full passes over the
+    /// document's lifetime, because the usage ledger accumulates across queue retry
+    /// attempts and a retry is a genuinely new set of governed calls.
+    /// </summary>
     public long? MaxTokensPerDocument { get; set; }
     public decimal? ExternalInputCostPerMillionTokens { get; set; }
     public decimal? ExternalOutputCostPerMillionTokens { get; set; }

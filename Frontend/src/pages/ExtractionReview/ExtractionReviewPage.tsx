@@ -13,6 +13,7 @@ import {
   RateReview as ReviewIcon,
   FactCheck as QueueIcon,
   TaskAlt as CaughtUpIcon,
+  ErrorOutlined as NeedsCheckDotIcon,
 } from '@mui/icons-material';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
@@ -22,33 +23,16 @@ import SearchField from '../../components/common/SearchField';
 
 dayjs.extend(relativeTime);
 
-// Confidence styling mirrors LeadsPage: <0.5 red, 0.5–0.7 amber, >=0.7 green.
-const confidenceColor = (value: number | null): 'error' | 'warning' | 'success' => {
-  const v = value ?? 0;
-  if (v < 0.5) return 'error';
-  if (v < 0.7) return 'warning';
-  return 'success';
-};
-
-const ConfidenceChip: React.FC<{ value: number | null }> = ({ value }) => {
-  const color = confidenceColor(value);
-  const pct = Math.round((value ?? 0) * 100);
-  const label = value == null ? 'No score' : `${pct}%`;
-  return (
-    <Chip
-      label={label}
-      size="small"
-      color={color}
-      variant="outlined"
-      aria-label={`AI extraction confidence ${value == null ? 'unknown' : `${pct} percent`}`}
-      sx={{ fontWeight: 900, fontSize: '0.7rem', height: 22, borderWidth: 2 }}
-    />
-  );
-};
+// This queue used to render an extraction-confidence percentage per row in
+// red/amber/green. That number was never measured — on the structured path it
+// is a literal (1.0 parsed / 0.2 not / 0 blank), on the model path it is the
+// model's own self-report against a rubric in its own prompt — so it is no
+// longer shown anywhere. Every document in this queue needs a human look; what
+// the reviewer needs from the list is which one to open next, not a score.
 
 const ExtractionReviewPage: React.FC = () => {
   const navigate = useNavigate();
-  const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
+  const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 50, page: 0 });
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
 
@@ -85,6 +69,25 @@ const ExtractionReviewPage: React.FC = () => {
   };
 
   const columns: GridColDef<NeedsReviewItem>[] = [
+    {
+      // Column index 0, matching the review workbench. Everything in this queue
+      // is unreviewed by definition; the dot makes that state readable at a
+      // glance instead of a colour-coded score that implied a verdict.
+      field: 'checkStatus',
+      headerName: 'Status',
+      width: 56,
+      sortable: false,
+      filterable: false,
+      align: 'center',
+      headerAlign: 'center',
+      renderCell: () => (
+        <Tooltip title="Not yet reviewed by a person">
+          <Box role="img" aria-label="Needs check" sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+            <NeedsCheckDotIcon sx={{ fontSize: 18, color: 'error.main' }} />
+          </Box>
+        </Tooltip>
+      ),
+    },
     {
       field: 'rfqno',
       headerName: 'RFQ #',
@@ -139,24 +142,25 @@ const ExtractionReviewPage: React.FC = () => {
     },
     {
       field: 'itemCount',
-      headerName: 'Items',
-      width: 90,
+      headerName: 'Lines',
+      width: 190,
       align: 'center',
       headerAlign: 'center',
-      renderCell: (p) => (
-        <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-          <ItemsIcon sx={{ fontSize: 14, color: 'text.secondary' }} />
-          <Typography sx={{ fontSize: '0.85rem', fontWeight: 800 }}>{p.row.itemCount ?? 0}</Typography>
-        </Stack>
-      ),
-    },
-    {
-      field: 'aiconfidence',
-      headerName: 'Confidence',
-      width: 130,
-      align: 'center',
-      headerAlign: 'center',
-      renderCell: (p) => <ConfidenceChip value={p.row.aiconfidence} />,
+      renderCell: (p) => {
+        const total = p.row.itemCount ?? 0;
+        // Rendered only when the backend computes it; never inferred here.
+        const needing = p.row.linesNeedingCheck;
+        return (
+          <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+            <ItemsIcon sx={{ fontSize: 14, color: 'text.secondary' }} />
+            <Typography sx={{ fontSize: '0.85rem', fontWeight: 800 }}>
+              {needing == null
+                ? `${total} line${total === 1 ? '' : 's'}`
+                : `${needing} of ${total} need a check`}
+            </Typography>
+          </Stack>
+        );
+      },
     },
     {
       field: 'reviewReason',
@@ -215,8 +219,8 @@ const ExtractionReviewPage: React.FC = () => {
           </Stack>
           <Typography variant="body2" color="text.secondary">
             {totalCount > 0
-              ? `${totalCount} document${totalCount === 1 ? '' : 's'} awaiting review`
-              : 'Verify and correct AI-extracted documents before they move downstream'}
+              ? `${totalCount} document${totalCount === 1 ? '' : 's'} awaiting review — every extraction is reviewed by a person`
+              : 'Verify and correct extracted documents before they move downstream'}
           </Typography>
         </Box>
         <Tooltip title="Refresh queue">
@@ -268,7 +272,7 @@ const ExtractionReviewPage: React.FC = () => {
                   <CaughtUpIcon sx={{ fontSize: 56, color: 'success.main', opacity: 0.85 }} />
                   <Typography sx={{ fontWeight: 800 }}>No documents awaiting review — you're all caught up</Typography>
                   <Typography variant="body2" color="text.secondary">
-                    New low-confidence extractions will appear here automatically.
+                    Every new extraction is routed here for a person to verify before it moves downstream.
                   </Typography>
                 </Box>
               ),

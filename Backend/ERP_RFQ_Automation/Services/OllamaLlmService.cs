@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.Services.Interfaces;
+using System.Globalization;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -107,7 +108,18 @@ namespace ERP_RFQ_Automation.Services
                 ReadCommentHandling = JsonCommentHandling.Skip,
                 DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
                 WriteIndented = false,
-                NumberHandling = JsonNumberHandling.AllowReadingFromString
+                NumberHandling = JsonNumberHandling.AllowReadingFromString,
+                // LeadItemData.Quantity is int?, and the default reader fails the ENTIRE
+                // document when one line item writes "Quantity": 2.0 (or "2.0" as a string)
+                // — one decimal point on one of 174 lines dead-lettered whole documents as
+                // "unparseable output". The lenient converter accepts every integral
+                // spelling (2, 2.0, "2", "2.0") and maps a REAL fraction (2.5) to null so
+                // the line routes to review instead of being silently under-quoted.
+                // Quantity is the only int? on any wire contract this client reads or
+                // writes with these options (Ollama counters are long?, BOQ quantities are
+                // decimal?, num_predict is a non-nullable int), so the registration cannot
+                // leak onto other fields.
+                Converters = { new LenientQuantityConverter() }
             };
         }
 
@@ -129,7 +141,16 @@ namespace ERP_RFQ_Automation.Services
 
             // Intelligent text truncation
             var processedText = PrepareProviderInput(fullText);
-            var instructions = BuildExtractionInstructions();
+            // ING-07: the caller's governed prompt version selects the instruction set, so the
+            // prompt recorded in the ledger is provably the prompt that was sent. A
+            // conversational email body cannot be described by the structured RFQ prompt (see
+            // Extraction/Conversational/ConversationalPrompt.cs); every other caller is
+            // unaffected and still gets the document instructions.
+            var instructions = ERP_RFQ_Automation.Extraction.Conversational.ConversationalPrompt
+                    .IsConversational(context.PromptVersion)
+                ? ERP_RFQ_Automation.Extraction.Conversational.ConversationalPrompt
+                    .BuildConversationalExtractionInstructions()
+                : BuildExtractionInstructions();
             var maximumRequestBytes = MeasureRequestBytes(instructions, processedText);
             var governedContext = context with { ProviderClass = _providerClass };
             var reservation = await _governance.ReserveAsync(
@@ -499,6 +520,10 @@ namespace ERP_RFQ_Automation.Services
                     return (false, null);
                 }
 
+                // Line-level defects are quarantined BEFORE document-level validation so a
+                // single bad line can never speak for the other 173 (see the method's doc).
+                result = QuarantineNonPositiveQuantityLines(result);
+
                 if (!ValidateExtractionResult(result))
                 {
                     // Parsed cleanly but failed sanity checks (e.g. confidence out of range).
@@ -531,24 +556,56 @@ namespace ERP_RFQ_Automation.Services
             return trimmed;
         }
 
+        /// <summary>
+        /// One extracted line whose quantity is zero or negative survives as the same line
+        /// with a NULL quantity — the pipeline's "needs review" state (the canonical-line
+        /// store itself says so: <c>ck_canonical_line_items_quantity</c> is
+        /// <c>quantity IS NULL OR quantity &gt; 0</c>) — instead of rejecting the whole
+        /// extraction result. Validation used to fail the ENTIRE document when ANY single
+        /// line carried a non-positive quantity, which dead-lettered 174-line documents for
+        /// one bad cell. The diagnostic below records which line positions were quarantined
+        /// (positions only — never document content, per the truncation-log rule).
+        /// Fractional quantities (2.5) never reach here: <see cref="LenientQuantityConverter"/>
+        /// already mapped them to null at read time.
+        /// </summary>
+        private LeadExtractionResult QuarantineNonPositiveQuantityLines(LeadExtractionResult result)
+        {
+            if (result.Items is not { Count: > 0 })
+                return result;
+
+            // Lifted comparison: a null quantity is already "needs review", not invalid.
+            var quarantinedPositions = result.Items
+                .Select((item, index) => (item, position: index + 1))
+                .Where(x => x.item.Quantity <= 0)
+                .Select(x => x.position)
+                .ToList();
+            if (quarantinedPositions.Count == 0)
+                return result;
+
+            _log.LogWarning(
+                "Quarantined {QuarantinedCount} of {TotalCount} extracted lines with a zero or negative "
+                + "quantity (line positions: {Positions}). Each survives with a null quantity, which routes "
+                + "that LINE to review; the rest of the document is preserved instead of dead-lettering.",
+                quarantinedPositions.Count, result.Items.Count, string.Join(",", quarantinedPositions));
+
+            return result with
+            {
+                Items = result.Items
+                    .Select(item => item.Quantity <= 0 ? item with { Quantity = null } : item)
+                    .ToList()
+            };
+        }
+
         private bool ValidateExtractionResult(LeadExtractionResult result)
         {
-            // Basic validation checks
+            // DOCUMENT-level validation only: reject the whole result exclusively for
+            // evidence that poisons the whole envelope. A defect confined to one line is
+            // quarantined per line by QuarantineNonPositiveQuantityLines before this runs —
+            // this method must never regrow a per-line check that fails the document.
             if (result.OverallConfidence < 0 || result.OverallConfidence > 1)
             {
                 _log.LogWarning("Invalid overall confidence: {Confidence}", result.OverallConfidence);
                 return false;
-            }
-
-            // Check if items have valid quantities
-            if (result.Items != null)
-            {
-                var invalidItems = result.Items.Where(i => i.Quantity <= 0).ToList(); // Updated to <= 0 to catch zeros
-                if (invalidItems.Any())
-                {
-                    _log.LogWarning("Found {Count} items with non-positive quantities", invalidItems.Count);
-                    return false;
-                }
             }
 
             return true;
@@ -563,11 +620,15 @@ namespace ERP_RFQ_Automation.Services
 2. All confidence scores must be between 0.0 and 1.0
 3. Use null for missing values, never use empty strings
 4. Dates must be in YYYY-MM-DD format or null
-5. Quantities must be positive integers
+5. Quantities must be positive integers written as bare digits: no decimal point (write 2, never 2.0), no thousands separators (write 12000, never 12,000), no units, no quotes. If a line states no quantity, use null — never invent one
 6. Assign confidence based on evidence in the text - aim for accuracy over conservatism where evidence is strong
 7. CUSTOM COLUMNS: if the document contains column headers or labeled per-item values that do NOT map to any field in the schema below (e.g. ""Plant Code"", ""Incoterms"", ""Project"", ""Cost Center""), preserve them per item in ""ExtraFields"" as an object whose keys are the ORIGINAL header text exactly as written and whose values are the cell values as strings. Do NOT invent columns, do NOT duplicate values already mapped to schema fields, and use null (or omit ""ExtraFields"") when there are no unmapped columns. Limit to at most 20 entries per item.
 8. MULTI-INQUIRY DOCUMENTS: if (and ONLY if) the document clearly contains MULTIPLE distinct inquiries/RFQs (e.g. different RFQ numbers, clearly separated sections for different requests), set every item's ""InquiryGroup"" to that item's inquiry identifier (prefer the inquiry's own RFQ number; otherwise a short section label), using the IDENTICAL string for all items of the same inquiry, with an ""InquiryGroupConfidence"" reflecting how certain the separation is. If the document is one single inquiry — the common case — use null (or omit) ""InquiryGroup"" for every item. NEVER invent groups when the separation is not explicit.
 9. INQUIRY TYPE: classify the OVERALL document as ""product"" (physical goods/materials/spare parts), ""service"" (labor, installation, maintenance, consulting, scope-of-work) or ""mixed"" (clearly both) in ""InquiryType"" with ""InquiryTypeConfidence"". Use null if genuinely unclear.
+10. DIRECTION OF TRADE (most important). You extract on behalf of the SUPPLIER who RECEIVED this document. The CUSTOMER is the organisation REQUESTING quotations. Any block labelled ""Vendor"", ""Vendor Code"", ""Vendname"", ""Supplier"", ""Bidder"", ""To:"" or ""Quote To"" names the RECIPIENT — put it in ""SupplierNameOnDocument"" / ""SupplierAccountRefOnDocument"" and NEVER in ""CustomerCompanyName"". If the buying organisation is not stated anywhere, return null — do NOT infer it from letterhead, template titles, or the vendor block.
+11. CUSTOMER EVIDENCE. ""CustomerCompanyName"" must be copied verbatim from the document. Supply, in ""CustomerCompanyEvidence"", the 120-character-or-shorter verbatim snippet that names it (e.g. the sentence containing it, or the e-mail domain line). If you cannot supply that snippet, return null for both.
+12. ONE CONFIDENCE PER LINE ITEM. Each line-item object must contain EXACTLY the keys listed in the item schema below and NO OTHERS. In particular do NOT add a ""<FieldName>Confidence"" key for any item field — per-field confidences are requested at the document-header level only. A line item carries a single ""ItemConfidence"" summarising how certain you are about that whole line. Emitting extra confidence keys wastes the response budget and causes long documents to be cut off mid-answer.
+13. UNITS OF MEASURE. ""UnitOfMeasure"" is the unit the line's quantity is counted in, and NOTHING else — never a quantity, a size, a description or a price. TRANSCRIBE IT VERBATIM: return the document's own wording character-for-character (""each"", ""EA"", ""pcs"", ""NOS"", ""Activ.unit"" — whichever the document wrote), and do NOT translate, expand, abbreviate or standardise it. The platform maps spellings onto its own vocabulary — EA, SET, PR, DZ, LOT, M, MM, CM, M2, M3, FT, KG, MT, L, HR, DAY — after extraction; doing it here rewrites the customer's own words and destroys the evidence a reviewer checks against. If the document states no unit for a line, return null — NEVER default to ""EA"", ""each"" or ""1"". If the unit names a PACKAGE or a FORM rather than a count (""Pack"", ""Package"", ""Box"", ""Carton"", ""Pallet"", ""Drum"", ""Bundle"", ""Roll"", ""Coil"", ""Length"", ""Pipe""), copy that wording verbatim and NEVER convert it to a piece count: a pallet is not a piece, and the document does not say how many are on one.
 
 **CONFIDENCE GUIDELINES (OPTIMIZED FOR HIGHER PRECISION):**
 - 0.95-1.0: Explicitly stated in text with exact match and clear labeling
@@ -603,56 +664,45 @@ namespace ERP_RFQ_Automation.Services
   ""OverallConfidence"": number,
   ""InquiryType"": ""product"" | ""service"" | ""mixed"" | null,
   ""InquiryTypeConfidence"": number,
+  ""CustomerCompanyName"": string | null,
+  ""CustomerCompanyNameConfidence"": number,
+  ""CustomerCompanyEvidence"": string | null,
+  ""CustomerCompanyRegistrationId"": string | null,
+  ""CustomerCompanyRegistrationIdConfidence"": number,
+  ""CustomerBuyerEmail"": string | null,
+  ""CustomerBuyerEmailConfidence"": number,
+  ""CustomerPortalName"": string | null,
+  ""CustomerPortalNameConfidence"": number,
+  ""SupplierNameOnDocument"": string | null,
+  ""SupplierNameOnDocumentConfidence"": number,
+  ""SupplierAccountRefOnDocument"": string | null,
+  ""SupplierAccountRefOnDocumentConfidence"": number,
   ""Items"": [
     {{
       ""CompanyRef"": string | null,
-      ""CompanyRefConfidence"": number,
       ""CustomerAccountPortalId"": string | null,
-      ""CustomerAccountPortalIdConfidence"": number,
       ""CustomerRfqno"": string | null,
-      ""CustomerRfqnoConfidence"": number,
       ""ItemMaterialCode"": string | null,
-      ""ItemMaterialCodeConfidence"": number,
       ""CommodityProduct"": string | null,
-      ""CommodityProductConfidence"": number,
       ""BuyerName"": string | null,
-      ""BuyerNameConfidence"": number,
       ""LineItemNo"": string | null,
-      ""LineItemNoConfidence"": number,
       ""ProductShortName"": string | null,
-      ""ProductShortNameConfidence"": number,
       ""Alternative"": string | null,
-      ""AlternativeConfidence"": number,
       ""ProductShortDescription"": string | null,
-      ""ProductShortDescriptionConfidence"": number,
       ""Currency"": string | null,
-      ""CurrencyConfidence"": number,
       ""UnitOfMeasure"": string | null,
-      ""UnitOfMeasureConfidence"": number,
       ""UnitPrice"": number | null,
-      ""UnitPriceConfidence"": number,
-      ""Quantity"": number,
-      ""QuantityConfidence"": number,
+      ""Quantity"": integer | null,
       ""StorageLocation"": string | null,
-      ""StorageLocationConfidence"": number,
       ""ManufacturerName"": string | null,
-      ""ManufacturerNameConfidence"": number,
       ""ManufacturerPartNumber"": string | null,
-      ""ManufacturerPartNumberConfidence"": number,
       ""AlternateProductName"": string | null,
-      ""AlternateProductNameConfidence"": number,
       ""AlternatePartNumber"": string | null,
-      ""AlternatePartNumberConfidence"": number,
       ""ItemText"": string | null,
-      ""ItemTextConfidence"": number,
       ""MaterialPotext"": string | null,
-      ""MaterialPotextConfidence"": number,
       ""LeadTime"": string | null,
-      ""LeadTimeConfidence"": number,
       ""ReceivedDate"": ""YYYY-MM-DD"" | null,
-      ""ReceivedDateConfidence"": number,
       ""BidClosingDateLine"": ""YYYY-MM-DD"" | null,
-      ""BidClosingDateLineConfidence"": number,
       ""ItemConfidence"": number,
       ""ExtraFields"": {{ ""<original column header>"": ""<cell value as string>"" }} | null,
       ""InquiryGroup"": string | null,
@@ -718,5 +768,62 @@ namespace ERP_RFQ_Automation.Services
             [property: JsonPropertyName("role")] string Role,
             [property: JsonPropertyName("content")] string Content
         );
+
+        /// <summary>
+        /// Tolerant reader for the LLM's nullable-int line-item quantity, same family as
+        /// <see cref="LenientStringDictionaryConverter"/> / <c>LenientBoolConverter</c>: a
+        /// slightly-off model output degrades the FIELD instead of failing the whole parse.
+        /// Accepts an integer in any legal disguise — 2, 2.0, 2e0, "2", "2.0" — and reads
+        /// anything that is NOT unambiguously a whole number as null, the pipeline's
+        /// needs-review state. A real fraction (2.5) reads as null on purpose: truncating
+        /// it to 2 is a silent under-quote and rounding it up is an invention; both are
+        /// worse than a reviewer's eyes. Registered on the client's parse options, never
+        /// as a [JsonConverter] attribute, so the DTO contract stays untouched.
+        /// </summary>
+        internal sealed class LenientQuantityConverter : JsonConverter<int?>
+        {
+            public override int? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+            {
+                switch (reader.TokenType)
+                {
+                    case JsonTokenType.Number:
+                        if (reader.TryGetInt32(out var whole))
+                            return whole;
+                        // 2.0 / 2e2: an integral value written with a fraction or exponent.
+                        return reader.TryGetDecimal(out var value) ? WholeNumberOrNull(value) : null;
+                    case JsonTokenType.String:
+                        var text = reader.GetString()?.Trim();
+                        if (string.IsNullOrEmpty(text))
+                            return null;
+                        if (int.TryParse(text, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var parsed))
+                            return parsed;
+                        // "2.0" but NOT "12,000": group separators are locale-ambiguous
+                        // ("2,5" is 2.5 in much of the world) — misreading one silently
+                        // corrupts a quantity, so anything separated goes to review instead.
+                        return decimal.TryParse(
+                            text, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint,
+                            CultureInfo.InvariantCulture, out var fromText)
+                            ? WholeNumberOrNull(fromText)
+                            : null;
+                    case JsonTokenType.Null:
+                        return null;
+                    default:
+                        reader.Skip(); // true/false/object/array carry no usable quantity
+                        return null;
+                }
+            }
+
+            /// <summary>Whole and within int range reads as that int; anything else is review.</summary>
+            private static int? WholeNumberOrNull(decimal value)
+                => decimal.Truncate(value) == value && value >= int.MinValue && value <= int.MaxValue
+                    ? (int)value
+                    : null;
+
+            public override void Write(Utf8JsonWriter writer, int? value, JsonSerializerOptions options)
+            {
+                if (value is null) writer.WriteNullValue();
+                else writer.WriteNumberValue(value.Value);
+            }
+        }
     }
 }

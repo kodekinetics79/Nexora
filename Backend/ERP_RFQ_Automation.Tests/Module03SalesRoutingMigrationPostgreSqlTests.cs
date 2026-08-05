@@ -87,8 +87,9 @@ public sealed class Module03SalesRoutingMigrationPostgreSqlTests(PostgreSqlTestD
 
             Seed.EnsureBusinessUnit(context, 99_501);
             Seed.EnsureBusinessUnit(context, 99_502);
-            var lead = Seed.Lead(context, 99_511, 99_501, buyersName: "Routing tenant A");
-            await context.SaveChangesAsync();
+            // Pinned to the rehearsal era: seeding through the CURRENT model would name
+            // every column later migrations added and fail with 42703.
+            var lead = Seed.HistoricalLead(context, 99_511, 99_501, "Routing tenant A");
             await SeedOwnersAsync(context);
             var decision = new LeadRoutingDecision
             {

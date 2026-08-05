@@ -202,6 +202,25 @@ const presentableCandidate = (raw: string): string | null => {
   return collapsed.length > 0 ? collapsed : null;
 };
 
+/**
+ * THE gate for rendering a server-supplied sentence as product copy, exported so nothing in the
+ * product grows a second, weaker copy of these rules.
+ *
+ * Returns the sentence when it is safe to show — a string (never an object, never an axios
+ * `.message`), bounded to {@link MAX_MESSAGE_LENGTH}, printable, not a bare HTTP reason phrase and
+ * free of the operator markers in {@link TECHNICAL_MARKERS} (hostnames, URLs, exception type names,
+ * stack frames, SQL, paths) — and `null` when it must not be shown.
+ *
+ * Used by the intake pipeline (src/utils/intakeErrors.ts) as well as by `toPresentableError`: the
+ * reason a document was rejected is server-authored text and gets exactly the same scrutiny as a
+ * response body, whether it arrives in a 4xx or on a 202 batch row.
+ */
+export const presentableServerText = (value: unknown): string | null => {
+  const trimmed = trimmedString(value);
+  if (trimmed === null) return null;
+  return presentableCandidate(unwrapJsonStringLiteral(trimmed));
+};
+
 const serverText = (data: unknown): string | null => {
   const direct = trimmedString(data);
   if (direct !== null) {

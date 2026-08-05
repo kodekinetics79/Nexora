@@ -84,6 +84,93 @@ public sealed class ExtractionWorkerSpreadsheetFallbackTests
         }
     }
 
+    [Fact]
+    public async Task FailedExtraction_StoresThePerChunkDiagnosticsInTheRecordedError()
+    {
+        // Dead-letter truth: the reason recorded through queue.FailAsync becomes
+        // ExtractionJobs.LastError. It used to carry only the flattened summary while the
+        // extractor's per-chunk diagnostics were discarded, so a dead-lettered job could
+        // not say which stage failed. The stored error must now carry both.
+        var document = "line one\nline two\nline three\nline four\nline five\n"u8.ToArray();
+        var job = CreateJob(803, "plain-enquiry.txt");
+        job.FileType = "txt";
+        var queue = new RecordingQueue(job);
+        var llm = new StubLlm(AiProviderClass.Local); // no scripted responses -> every chunk fails
+        using var services = BuildServices(queue, document, llm, new RecordingPersister());
+        var worker = CreateWorker(services);
+
+        await worker.StartAsync(CancellationToken.None);
+        try
+        {
+            var recordedError = await queue.RetryableFailure.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+            Assert.StartsWith("All chunks failed; no data extracted.", recordedError);
+            Assert.Contains("[diagnostics:", recordedError);
+            Assert.Contains("Document split into 1 chunk(s)", recordedError);
+            Assert.Contains("Chunk 1/1 failed", recordedError);
+            Assert.Contains("attempts_exhausted", recordedError);
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+            worker.Dispose();
+        }
+    }
+
+    [Fact]
+    public void ComposeFailureReason_CarriesGovernanceRefusalDiagnosticsIntoTheStoredError()
+    {
+        // The job-33 shape: every chunk refused by governance before any model call. The
+        // stored error must lead with the honest summary and keep each chunk's refusal.
+        const string reason = "AI governance refused every request before any model call was made "
+            + "(duplicate_request). No chunk was extracted.";
+        var outcome = new ChunkedExtractionOutcome
+        {
+            Status = ExtractionOutcomeStatus.Failed,
+            ReviewReason = reason,
+            Diagnostics = new List<string>
+            {
+                "Document split into 2 chunk(s) for 24 line item(s).",
+                "Chunk 1/2 refused by AI governance before any model call (duplicate_request); 12 item(s) not extracted.",
+                "Chunk 2/2 refused by AI governance before any model call (duplicate_request); 12 item(s) not extracted.",
+                reason
+            }
+        };
+
+        var stored = ExtractionWorker.ComposeFailureReason(outcome, structuredFallbackNote: null);
+
+        Assert.StartsWith("AI governance refused every request", stored);
+        Assert.Contains("Chunk 1/2 refused by AI governance", stored);
+        Assert.Contains("Chunk 2/2 refused by AI governance", stored);
+        Assert.DoesNotContain("All chunks failed", stored);
+    }
+
+    [Fact]
+    public void ComposeFailureReason_KeepsTheSummaryFirst_AndBoundsTheDigestUnderTheColumnLimit()
+    {
+        // ExtractionQueue trims LastError at 4,000 characters keeping the START, so the
+        // digest must be bounded separately or a verbose document would truncate away
+        // nothing — but an unbounded one could push its own summary into the trimmed tail
+        // of follow-on consumers. The summary always survives.
+        var outcome = new ChunkedExtractionOutcome
+        {
+            Status = ExtractionOutcomeStatus.Failed,
+            ReviewReason = "All chunks failed; no data extracted.",
+            Diagnostics = Enumerable.Range(1, 200)
+                .Select(i => $"Chunk {i}/200 failed ({new string('x', 100)}).")
+                .ToList()
+        };
+
+        var stored = ExtractionWorker.ComposeFailureReason(
+            outcome, "The XLSX spreadsheet was read successfully.");
+
+        Assert.StartsWith(
+            "The XLSX spreadsheet was read successfully. All chunks failed; no data extracted.", stored);
+        Assert.Contains("[diagnostics:", stored);
+        Assert.True(stored.Length <= 4_000,
+            $"stored error is {stored.Length} chars; it must survive the 4,000-char LastError column intact");
+    }
+
     // ---- harness ----------------------------------------------------------
 
     private static byte[] ReadFixture(string name)

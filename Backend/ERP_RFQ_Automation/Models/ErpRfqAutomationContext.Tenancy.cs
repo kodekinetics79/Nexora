@@ -1,5 +1,6 @@
 using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.CommercialRouting;
+using ERP_RFQ_Automation.CustomerResolution;
 using ERP_RFQ_Automation.Inventory;
 using ERP_RFQ_Automation.CustomFields;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
@@ -42,6 +43,7 @@ public partial class ErpRfqAutomationContext
 
         ConfigureAiGovernance(modelBuilder);
         ConfigureExtractionOperations(modelBuilder);
+        ConfigureEvidenceRetentionModel(modelBuilder);
         // Platform-plane SaaS billing (rate cards, statements) — platform schema, not tenant-scoped.
         ConfigureBillingModel(modelBuilder);
         // SEC-H6: pre-authentication login counter — deliberately unfiltered, see the partial.
@@ -214,6 +216,9 @@ public partial class ErpRfqAutomationContext
         // PostgreSQL-only model because their constraints use jsonb and PostgreSQL
         // expressions.
         modelBuilder.ApplyCommercialRoutingModel();
+        // Client-organisation identity: the ranked machine proposals behind every
+        // "Nexora thinks this is ..." on a lead.
+        modelBuilder.ApplyCustomerResolutionModel();
         modelBuilder.ApplyCommercialSalesModel();
         modelBuilder.ApplyCommercialExceptionModel();
         modelBuilder.ApplyOpportunityPriorityModel(Database.IsNpgsql());
@@ -235,6 +240,8 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<ERP_RFQ_Automation.Inventory.StockReservation>()
             .HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CustomerIdentifier>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<ERP_RFQ_Automation.CustomerResolution.LeadCustomerMatchCandidate>()
+            .HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CustomerOwnership>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<LeadRoutingDecision>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<LeadAssignment>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
@@ -494,6 +501,32 @@ public partial class ErpRfqAutomationContext
                 .HasForeignKey(e => new { e.BusinessUnitId, e.LeadId })
                 .HasPrincipalKey(e => new { e.BusinessUnitId, e.Id })
                 .OnDelete(DeleteBehavior.Restrict);
+            entity.HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        });
+
+        // ==== Extraction accuracy corpus (labels harvested from approved reviews) ====
+        // The only ground truth Nexora has. Written inside the review transaction by
+        // LeadRepository.CaptureExtractionCorpusAsync; read by AccuracyMeasurementService.
+        modelBuilder.Entity<ExtractionCorpusEntry>(entity =>
+        {
+            entity.ToTable("ExtractionCorpusEntries");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.ExtractionPath).HasMaxLength(32).IsRequired();
+            entity.Property(e => e.Scope).HasMaxLength(16).IsRequired();
+            entity.Property(e => e.FieldName).HasMaxLength(64).IsRequired();
+            entity.Property(e => e.ApprovedBy).HasMaxLength(255).IsRequired();
+            entity.Property(e => e.CapturedOn).HasDefaultValueSql("now()");
+            // One cell per (review, scope, field): a re-approval writes a new audit and a
+            // new set of cells, so a re-reviewed document can never double-count itself
+            // into its own sample.
+            entity.HasIndex(e => new { e.BusinessUnitId, e.LeadReviewAuditId, e.Scope, e.FieldName })
+                .IsUnique().HasDatabaseName("UX_ExtractionCorpusEntries_BU_Audit_Field");
+            // The measurement read path: group by path + field within a tenant.
+            entity.HasIndex(e => new { e.BusinessUnitId, e.ExtractionPath, e.Scope, e.FieldName })
+                .HasDatabaseName("IX_ExtractionCorpusEntries_BU_Path_Field");
+            entity.HasOne(e => e.ReviewAudit).WithMany()
+                .HasForeignKey(e => e.LeadReviewAuditId)
+                .OnDelete(DeleteBehavior.Cascade);
             entity.HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         });
 

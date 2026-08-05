@@ -96,6 +96,11 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
                     RequestHash: requestHash);
                 var result = _engine.Route(request, _policy);
 
+                // The engine has always proven customer matches and persisted them onto
+                // LeadRoutingDecision.CustomerId — while the Lead itself stayed unlinked.
+                // Write the link through (same transaction) when, and only when, the match
+                // is exact-identifier grade; see WriteCustomerThroughToLead.
+                WriteCustomerThroughToLead(lead, result.Decision, identifiers);
                 await PersistRoutingResultAsync(lead, result, ct);
                 return ToResponse(result.Decision, result.Assignment?.Id, result.WorkItem?.Id);
             }, ct);
@@ -516,6 +521,73 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
         _db.Add(assignment);
         await _db.SaveChangesAsync(ct);
         return ToResponse(decision, assignment.Id, queueItem?.Id);
+    }
+
+    /// <summary>
+    /// Identifier grades trusted to LINK a lead to a customer (Lead.CustomerId), not merely
+    /// to route it. Exact, singular identifiers only. Deliberately excluded:
+    ///   * CustomerName / Alias / HistoricalInference — name similarity routes well, but a
+    ///     wrong client on a lead is worse than an unresolved one;
+    ///   * Phone — switchboard numbers are shared across organisations;
+    ///   * Portal / PortalAccount / RfqNumberPattern — learned, suggestion-grade evidence.
+    /// </summary>
+    private static readonly HashSet<CustomerIdentifierType> CustomerLinkGradeIdentifiers =
+    [
+        CustomerIdentifierType.ErpAccount,
+        CustomerIdentifierType.TaxRegistration,
+        CustomerIdentifierType.Email,
+        CustomerIdentifierType.Domain
+    ];
+
+    /// <summary>
+    /// Writes the routed customer through to <c>Lead.CustomerId</c>. RouteLeadAsync has
+    /// been proving customer matches and persisting them onto
+    /// <see cref="LeadRoutingDecision.CustomerId"/> while the Lead stayed unlinked — the
+    /// matching engine "worked" while zero production leads carried a customer. This runs
+    /// inside the routing transaction, i.e. exactly where routing already runs: after
+    /// identity reconciliation and after ingestion-time client resolution, so the dedup
+    /// corpus scoping that keys on <c>customer:{Id}</c> is never re-keyed retroactively.
+    ///
+    /// It is deliberately NARROWER than the routing match itself:
+    ///   * only an unambiguous engine match at its highest authority
+    ///     (<see cref="CustomerMatchStatus.Matched"/> — verified identifier, above
+    ///     threshold, no ambiguity) qualifies;
+    ///   * only when that match came from an exact-identifier-grade signal
+    ///     (<see cref="CustomerLinkGradeIdentifiers"/>) — never fuzzy name similarity;
+    ///   * a lead that already carries a customer (human or machine linked) is never
+    ///     rewritten, and a human decision is never touched.
+    /// The link is recorded through the Lead's governed mutator so the reason, confidence
+    /// and explanation are stored with it (CustomerID⇔status invariant preserved).
+    /// </summary>
+    private static void WriteCustomerThroughToLead(
+        Lead lead, LeadRoutingDecision decision, IReadOnlyList<CustomerIdentifier> identifiers)
+    {
+        if (lead.CustomerId.HasValue) return;                                    // never overwrite
+        if (LeadCustomerMatchStatuses.IsHumanDecided(lead.CustomerMatchStatus)) return;
+        if (decision.MatchStatus != CustomerMatchStatus.Matched) return;         // highest authority only
+        if (decision.CustomerId is not > 0 || decision.MatchedIdentifierId is null) return;
+
+        var matched = identifiers.FirstOrDefault(i => i.Id == decision.MatchedIdentifierId.Value);
+        if (matched is null || !matched.IsVerified) return;
+        if (matched.CustomerId != decision.CustomerId.Value) return;
+        if (!CustomerLinkGradeIdentifiers.Contains(matched.IdentifierType)) return;
+
+        var reasonCode = matched.IdentifierType switch
+        {
+            CustomerIdentifierType.ErpAccount => CustomerResolution.CustomerMatchReasonCodes.ErpAccountExact,
+            CustomerIdentifierType.TaxRegistration => CustomerResolution.CustomerMatchReasonCodes.TaxRegExact,
+            CustomerIdentifierType.Email => CustomerResolution.CustomerMatchReasonCodes.SenderEmailExact,
+            _ => CustomerResolution.CustomerMatchReasonCodes.SenderDomain
+        };
+        lead.AutoResolveCommercialIdentity(
+            decision.CustomerId.Value,
+            contactId: null,
+            reasonCode,
+            decision.MatchConfidence,
+            $"Routing matched verified {matched.IdentifierType} identifier "
+            + $"'{matched.DisplayValue}' ({decision.DecisionCode}).",
+            decision.CreatedOn);
+        lead.ModifiedDate = decision.CreatedOn;
     }
 
     private async Task PersistRoutingResultAsync(Lead lead, RoutingResult result, CancellationToken ct)

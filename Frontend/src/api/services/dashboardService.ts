@@ -1,3 +1,4 @@
+import axios from 'axios';
 import axiosInstance from './../axiosInstance';
 import type { OrderStatsDTO } from './orderService';
 
@@ -221,6 +222,40 @@ export interface PipelineAnalyticsDTO {
   generatedAt: string;
 }
 
+// ─── GET /api/analytics/brand-demand ────────────────────────────────────────
+// Which manufacturers the tenant's customers are actually asking for, grouped
+// from LeadItems by normalised manufacturer name. Every figure carries its
+// denominator: lines, units, and the number of DISTINCT documents behind it —
+// concentration read off lines alone is misleading when two documents supply
+// most of the volume.
+
+export interface BrandDemandRowDTO {
+  /** Normalised manufacturer name, e.g. "CROUSE HINDS/EATON". */
+  manufacturer: string;
+  /** Raw spellings folded into this row — shown so the grouping is auditable. */
+  variants?: string[] | null;
+  lineCount: number;
+  totalQuantity: number | null;
+  /** Documents (leads) this manufacturer appears on. The honest weight. */
+  documentCount: number;
+}
+
+export interface BrandDemandDTO {
+  rows: BrandDemandRowDTO[];
+  /** Denominators for the whole window, so shares can be stated honestly. */
+  totalLines: number;
+  linesWithManufacturer: number;
+  distinctManufacturers: number;
+  totalDocuments: number;
+  generatedAt: string;
+  filter?: { from: string; to: string } | null;
+}
+
+export interface BrandDemandParams {
+  from?: string;
+  to?: string;
+}
+
 // ─── Service ────────────────────────────────────────────────────────────────
 
 const dashboardService = {
@@ -273,6 +308,25 @@ const dashboardService = {
   getPipelineAnalytics: async (): Promise<PipelineAnalyticsDTO> => {
     const r = await axiosInstance.get<PipelineAnalyticsDTO>('/api/dashboard/pipeline-analytics');
     return r.data;
+  },
+
+  /**
+   * Brand demand concentration. Returns null — never throws — when the endpoint
+   * is not deployed yet (404/501) or the caller is not entitled to it (403), so
+   * the page shows an honest "not available yet" state instead of an error.
+   */
+  getBrandDemand: async (params: BrandDemandParams = {}): Promise<BrandDemandDTO | null> => {
+    try {
+      const r = await axiosInstance.get<BrandDemandDTO>('/api/analytics/brand-demand', { params });
+      if (r.status === 204 || !r.data) return null;
+      return { ...r.data, rows: r.data.rows ?? [] };
+    } catch (error: unknown) {
+      if (axios.isAxiosError(error)) {
+        const status = error.response?.status;
+        if (status === 404 || status === 403 || status === 501) return null;
+      }
+      throw error;
+    }
   },
 };
 

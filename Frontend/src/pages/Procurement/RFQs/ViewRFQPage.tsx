@@ -581,8 +581,12 @@ const ViewRFQPage: React.FC = () => {
           <Box><Typography variant="overline">Source evidence</Typography><Typography variant="h6" sx={{ fontWeight: 900 }}>{evidenceItem?.manufacturerPartNumber || evidenceItem?.itemMaterialCode || `Line ${evidenceItem?.lineItemNo || ''}`}</Typography></Box>
           <IconButton aria-label="Close evidence" onClick={() => setEvidenceItemId(null)}><CloseIcon /></IconButton>
         </Stack>
-        <Alert severity={evidenceItem?.aiconfidence != null && evidenceItem.aiconfidence < 0.8 ? 'warning' : 'info'} sx={{ mb: 2 }}>
-          Confidence {evidenceItem?.aiconfidence == null ? 'not recorded' : `${Math.round(evidenceItem.aiconfidence * 100)}%`}. Uncertain values require review.
+        {/* This alert used to lead with an extraction-confidence percentage.
+            Nexora does not measure extraction accuracy, so no figure is shown;
+            what is true — and actionable — is that a person checks every line. */}
+        <Alert severity="info" sx={{ mb: 2 }}>
+          Every extracted line is verified by a reviewer before it moves downstream. Cross-check the values below against the
+          original customer document.
         </Alert>
         <DataField label="Original customer value" value={evidenceItem?.itemText || evidenceItem?.materialPotext || evidenceItem?.productShortDescription || 'Source text not linked'} bold={false} />
         <DataField label="Normalized part" value={evidenceItem?.manufacturerPartNumber || evidenceItem?.itemMaterialCode || 'Unresolved'} />

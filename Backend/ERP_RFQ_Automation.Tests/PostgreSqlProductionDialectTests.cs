@@ -461,10 +461,24 @@ public sealed class PostgreSqlProductionDialectTests
         var deleteError = await Assert.ThrowsAsync<PostgresException>(() => delete.ExecuteNonQueryAsync());
         Assert.Equal("55000", deleteError.SqlState);
 
+        // A plain TRUNCATE is now refused TWICE over: ExtractionCorpusEntries carries a
+        // foreign key to this table, so PostgreSQL rejects it as feature_not_supported
+        // (0A000) before the immutability trigger is ever reached. Both are refusals and
+        // either is acceptable here.
         await using var truncate = connection.CreateCommand();
         truncate.CommandText = "TRUNCATE TABLE public.\"LeadReviewAudits\"";
         var truncateError = await Assert.ThrowsAsync<PostgresException>(() => truncate.ExecuteNonQueryAsync());
-        Assert.Equal("55000", truncateError.SqlState);
+        Assert.Contains(truncateError.SqlState, new[] { "55000", "0A000" });
+
+        // …and the trigger itself still refuses when the foreign-key objection is removed,
+        // which is the property this assertion actually exists to protect. Without this
+        // second case the FK above would have silently replaced a trigger test with a
+        // referential-integrity test.
+        await using var truncateCascade = connection.CreateCommand();
+        truncateCascade.CommandText = "TRUNCATE TABLE public.\"LeadReviewAudits\" CASCADE";
+        var truncateCascadeError = await Assert.ThrowsAsync<PostgresException>(
+            () => truncateCascade.ExecuteNonQueryAsync());
+        Assert.Equal("55000", truncateCascadeError.SqlState);
 
         await using var mismatch = connection.CreateCommand();
         mismatch.CommandText = """

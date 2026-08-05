@@ -18,6 +18,9 @@ import {
 } from '@mui/icons-material';
 import leadService from '../../api/services/leadService';
 import LateIngestedBadge from './LateIngestedBadge';
+import ClientIdentityPanel from './ClientIdentityPanel';
+import ResolveClientDialog from './ResolveClientDialog';
+import { clientDisplayName } from './ClientCell';
 import LifecycleActions from '../../components/common/LifecycleActions';
 import CommercialLineIntelligence from '../../components/common/CommercialLineIntelligence';
 import { parseDateSafe, formatDateSafe } from '../../utils/dates';
@@ -104,6 +107,10 @@ const LeadDetailPage: React.FC = () => {
     enabled: !!id,
   });
 
+  // Second entry point to client resolution, from the Customer field in General
+  // Information. Shares the query cache with ClientIdentityPanel's own dialog.
+  const [resolveClientOpen, setResolveClientOpen] = React.useState(false);
+
   // WP-A3: duplicate-flag resolution ("Not a duplicate" unblocks conversion;
   // "Confirm duplicate" keeps it blocked).
   const [duplicateAction, setDuplicateAction] = React.useState<'not_duplicate' | 'confirm' | null>(null);
@@ -128,7 +135,9 @@ const LeadDetailPage: React.FC = () => {
   if (isError) return <Box sx={{ p: 4 }}><Alert severity="error" action={<Button color="inherit" onClick={() => refetch()}>Retry</Button>}>We couldn't load this lead.</Alert></Box>;
   if (!lead) return <Box sx={{ p: 4 }}><Typography>Lead not found.</Typography></Box>;
 
-  const aiConfidence = (lead.aiconfidence || 0) * 100;
+  // Review state, from facts the platform records — not from a model score.
+  const awaitingReview = (lead.headerRemarks ?? '').startsWith('[NEEDS REVIEW]');
+  const reviewedByPerson = !awaitingReview && (lead.reviewVersion ?? 0) > 0;
 
   return (
     <Box sx={{ p: { xs: 1, sm: 2, md: 3 }, maxWidth: 1800, mx: 'auto', minWidth: 0 }}>
@@ -171,13 +180,16 @@ const LeadDetailPage: React.FC = () => {
               sx={{ mt: 1, fontWeight: 900, fontFamily: 'monospace', width: 'fit-content' }}
             />
           )}
-          {lead.customerId && (
-            <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: 'wrap' }}>
-              <Chip size="small" label={lead.customerName || `Customer #${lead.customerId}`} variant="outlined" />
-              {lead.contactId && <Chip size="small" label={`Contact #${lead.contactId}`} variant="outlined" />}
-              <Chip size="small" label={lead.customerMatchStatus} color="success" variant="outlined" />
-            </Stack>
-          )}
+          {/* The client organisation is the primary identity on a lead, so this
+              panel is ALWAYS rendered — resolved, suggested or unresolved — and
+              sits directly under the Nexora Serial. It replaces a chip row that
+              appeared only when a customer happened to be linked, which is
+              exactly the case that never occurred in production. */}
+          <ClientIdentityPanel
+            lead={lead}
+            canEdit={hasPermission('Leads', 'edit')}
+            onChanged={() => queryClient.invalidateQueries({ queryKey: ['lead-detail', Number(id)] })}
+          />
         </Box>
         <Stack direction="row" spacing={1.5} sx={{ flexWrap: 'wrap', gap: 1, justifyContent: { xs: 'flex-start', md: 'flex-end' } }}>
           {lead.commercialCaseId && (
@@ -256,13 +268,11 @@ const LeadDetailPage: React.FC = () => {
         </Alert>
       )}
 
-      {lead.customerMatchStatus?.toUpperCase() === 'AMBIGUOUS' && (
-        <Alert severity="warning" sx={{ mb: 3 }} action={
-          <Button color="inherit" onClick={() => navigate('/sales/accounts')}>Confirm Existing Customer</Button>
-        }>
-          Customer Resolution Required. Review the tenant customer evidence before confirming the account.
-        </Alert>
-      )}
+      {/* The former AMBIGUOUS-only alert lived here. It is gone on purpose:
+          ambiguity is one of three client states, all of them now rendered by
+          ClientIdentityPanel above with the candidates and a one-click resolve —
+          instead of a banner that only fired for one status and sent the rep to
+          an unrelated screen. */}
 
       <Grid container spacing={3}>
         {/* Left Column: General Information */}
@@ -293,21 +303,62 @@ const LeadDetailPage: React.FC = () => {
                 />
               </Grid>
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Current Revision" value={`Revision ${lead.currentRevisionNumber || 1}`} /></Grid>
-              <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Customer" value={lead.customerName || (lead.customerId ? `Customer #${lead.customerId}` : 'Unresolved')} /></Grid>
+              {/* No dead-end "Unresolved" string here any more: when there is no
+                  client, this field offers the way to set one. The full evidence
+                  and the machine's suggestions live in ClientIdentityPanel. */}
+              <Grid size={{ xs: 12, md: 4 }} component="div">
+                {lead.customerId ? (
+                  <DataField label="Customer" value={clientDisplayName(lead)} />
+                ) : (
+                  <Box sx={{ mb: 1.5 }}>
+                    <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase', display: 'block', mb: 0.2, fontSize: '0.65rem' }}>
+                      Customer
+                    </Typography>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      onClick={() => setResolveClientOpen(true)}
+                      disabled={!hasPermission('Leads', 'edit')}
+                      sx={{ fontWeight: 800, textTransform: 'none', mt: 0.25 }}
+                    >
+                      Set client
+                    </Button>
+                  </Box>
+                )}
+              </Grid>
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Account Owner" value={lead.accountOwnerName || 'Unassigned'} /></Grid>
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Opportunity Owner" value={lead.assignedToFullName || 'Unassigned'} /></Grid>
               {lead.assignmentReason && <Grid size={{ xs: 12, md: 8 }} component="div"><DataField label="Assignment reason" value={lead.assignmentReason} /></Grid>}
 
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="RFQ Type" value={lead.rfqtype ?? 'N/A'} /></Grid>
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Opportunity No" value={lead.opportunityNo ?? 'N/A'} /></Grid>
+              {/* Replaces the "N% Match" meter. That number was Lead.Aiconfidence,
+                  which is not a measured accuracy: on the structured path it is a
+                  literal written per cell, on the model path it is the model's own
+                  self-report. What a user can act on is whether a person has
+                  checked this document yet, which is a fact we record. */}
               <Grid size={{ xs: 12, md: 4 }} component="div">
-                <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase', display: 'block', mb: 0.5, fontSize: '0.65rem' }}>AI Confidence</Typography>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-                  <Typography sx={{ fontWeight: 900, color: 'primary.main', fontSize: '0.9rem' }}>{Math.round(aiConfidence)}% Match</Typography>
-                  <Box sx={{ flex: 1, height: 6, bgcolor: 'action.hover', borderRadius: 3, overflow: 'hidden', maxWidth: 120 }}>
-                    <Box sx={{ height: '100%', width: `${aiConfidence}%`, bgcolor: 'primary.main' }} />
-                  </Box>
-                </Box>
+                <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase', display: 'block', mb: 0.5, fontSize: '0.65rem' }}>Extraction review</Typography>
+                {awaitingReview ? (
+                  <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+                    <Chip size="small" color="warning" variant="outlined" label="Awaiting review" sx={{ fontWeight: 800, fontSize: '0.7rem' }} />
+                    <Button
+                      size="small"
+                      onClick={() => navigate(`/procurement/extraction/review/${lead.id}`)}
+                      sx={{ fontWeight: 800, textTransform: 'none' }}
+                    >
+                      Open review
+                    </Button>
+                  </Stack>
+                ) : (
+                  <Chip
+                    size="small"
+                    color={reviewedByPerson ? 'success' : 'default'}
+                    variant="outlined"
+                    label={reviewedByPerson ? 'Checked by a person' : 'Not flagged for review'}
+                    sx={{ fontWeight: 800, fontSize: '0.7rem' }}
+                  />
+                )}
               </Grid>
             </Grid>
           </Paper>
@@ -448,6 +499,14 @@ const LeadDetailPage: React.FC = () => {
       </Grid>
 
       <LeadRevisionTimeline leadId={lead.id} />
+
+      <ResolveClientDialog
+        open={resolveClientOpen}
+        leadId={lead.id}
+        lead={lead}
+        onClose={() => setResolveClientOpen(false)}
+        onResolved={() => queryClient.invalidateQueries({ queryKey: ['lead-detail', Number(id)] })}
+      />
 
       {/* WP-A3: confirm dialog for duplicate resolution */}
       <Dialog open={duplicateAction !== null} onClose={() => setDuplicateAction(null)} fullWidth maxWidth="xs">

@@ -13,6 +13,14 @@ namespace ERP_RFQ_Automation.Interfaces
         /// <summary>WP-B2: stage funnel, loss reasons, weighted forecast and quoted-vs-floor margin proxy.</summary>
         Task<PipelineAnalyticsDTO> GetPipelineAnalyticsAsync(long businessUnitId);
 
+        /// <summary>Pilot analytics: open enquiries bucketed by days to bid closing date, with line counts.</summary>
+        Task<DeadlineBoardDTO> GetDeadlineBoardAsync(
+            long businessUnitId, int maxLeads = 200, CancellationToken cancellationToken = default);
+
+        /// <summary>Pilot analytics: documents in, leads out, and the coverage of what came out.</summary>
+        Task<DocumentYieldDTO> GetDocumentYieldAsync(
+            long businessUnitId, DateTime from, DateTime to, CancellationToken cancellationToken = default);
+
         /// <summary>
         /// Release-01 dashboard snapshot. All metrics share one tenant, role scope,
         /// reporting window, and generated-at boundary.

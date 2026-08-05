@@ -144,67 +144,36 @@ namespace ERP_RFQ_Automation.Repositories
                     Percentage = totalRfqs > 0 ? (decimal)g.Count() / totalRfqs * 100 : 0
                 }).ToListAsync();
 
-            // 5. Efficiency Velocity (Actual categories with items)
-            data.EfficiencyVelocity = await _context.ProductCategories
-                .Where(c => c.BusinessUnitId == businessUnitId)
-                .Select(c => new CategoryDistributionDTO
-                {
-                    CategoryName = c.CategoryName,
-                    Count = _context.Rfqitems.Count(ri => ri.Rfq.BusinessUnitId == businessUnitId && ri.Product != null && ri.Product.CategoryId == c.Id),
-                    Percentage = 0 
-                })
-                .OrderByDescending(x => x.Count)
-                .Take(5)
-                .ToListAsync();
-
-            // 6. Operational Health (Radar Chart with real KPI logic)
-            data.OperationalHealth = new List<RadarDataDTO>
-            {
-                new RadarDataDTO { Subject = "Lead Conversion", A = data.Stats.ConversionRates.LeadToRfq, B = 70 },
-                new RadarDataDTO { Subject = "Bid Capacity", A = data.Stats.BidRatio, B = 85 },
-                new RadarDataDTO { Subject = "Win Rate", A = data.Stats.ConversionRates.QuoteToOrder, B = 40 },
-                new RadarDataDTO { Subject = "Catalog Match", A = totalLineItems > 0 ? (double)_context.Rfqitems.Count(ri => ri.Rfq.BusinessUnitId == businessUnitId && ri.Product != null) / totalLineItems * 100 : 0, B = 60 },
-                new RadarDataDTO { Subject = "AI Accuracy", A = totalLeads > 0 ? (double)_context.Leads.Where(l => l.BusinessUnitId == businessUnitId).Average(l => l.Aiconfidence ?? 0) * 100 : 0, B = 90 }
-            };
-
-            // 7. Response Integrity (Bubble chart: Created Day vs mean quote value)
-            // FX fix: the Y axis averaged sibling quote totals on one RFQ. Nothing constrains
-            // sibling quotes to share a CurrencyId, so the axis mixed denominations. Quotes are
-            // pulled with their currency and converted per RFQ; an RFQ whose quotes cannot be
-            // converted is plotted at Y = 0 with the bubble's own reason recorded, rather than
-            // being given a fabricated position.
-            var scatterRfqs = await _context.Rfqs.AsNoTracking()
-                .Where(r => r.BusinessUnitId == businessUnitId)
-                .OrderByDescending(r => r.CreatedDate)
-                .Take(15)
-                .Select(r => new
-                {
-                    r.CreatedDate,
-                    r.Rfqno,
-                    ItemCount = r.Rfqitems.Count,
-                    Quotes = r.Quotes.Select(q => new { q.TotalAmount, q.CurrencyId }).ToList()
-                })
-                .ToListAsync();
-
+            // 5/6/7. WITHDRAWN FOR THE PILOT — three chart series that asserted more than
+            // the data supports. Each is returned empty rather than deleted from the DTO so
+            // the contract holds while the presentation layer removes the panels.
+            //
+            //   EfficiencyVelocity — product categories with an item count and a Percentage
+            //     hardcoded to 0. A percentage column that is always zero is not a missing
+            //     value, it is a wrong one, and it renders as a flat bar chart implying the
+            //     categories carry no volume.
+            //
+            //   OperationalHealth (radar) — five subjects, five targets, none sourced. The
+            //     B values (70/85/40/60/90) were invented; a chart drawn against an invented
+            //     target tells a reader they are behind or ahead of nothing. Two of the
+            //     subjects were worse than unsourced:
+            //       * "Catalog Match" reported 5 matched lines out of 5 as 100%, a perfect
+            //         score off a five-line sample.
+            //       * "AI Accuracy" averaged Lead.Aiconfidence and multiplied by 100. That
+            //         column is not an accuracy: on the structured path the normalizer
+            //         writes a literal 1.0 when a cell parsed and 0.2 when it did not, and
+            //         on the model path it is the model's own self-report. Averaging it and
+            //         labelling the result "AI Accuracy" published a number that had never
+            //         been measured against anything. Measured accuracy now lives at
+            //         /api/Dashboard/extraction-accuracy, which returns no percentage until
+            //         a field has 30 approved documents behind it.
+            //
+            //   ResponseIntegrity (bubble) — X was the DAY OF THE MONTH the RFQ was created
+            //     plotted against mean quote value. Day-of-month is not a variable; the
+            //     chart's shape was an artefact of the calendar.
+            data.EfficiencyVelocity = new List<CategoryDistributionDTO>();
+            data.OperationalHealth = new List<RadarDataDTO>();
             data.ResponseIntegrity = new List<ScatterDataDTO>();
-            foreach (var r in scatterRfqs)
-            {
-                double y = 0;
-                if (r.Quotes.Count > 0)
-                {
-                    var rfqFx = await fx.TotalAsync(businessUnitId,
-                        r.Quotes.Select(q => new FxAmount(q.TotalAmount ?? 0m, q.CurrencyId)).ToArray(), today);
-                    if (rfqFx.Total.HasValue)
-                        y = (double)FxConversionService.RoundMoney(rfqFx.Total.Value / r.Quotes.Count);
-                }
-                data.ResponseIntegrity.Add(new ScatterDataDTO
-                {
-                    X = r.CreatedDate.Day,
-                    Y = y,
-                    Z = r.ItemCount * 5,
-                    Name = r.Rfqno ?? "RFQ"
-                });
-            }
 
             // 8. Recent Activities (Real-time timeline)
             var recentLeads = await _context.Leads.Where(l => l.BusinessUnitId == businessUnitId).OrderByDescending(l => l.CreatedDate).Take(10).Select(l => new RecentItemDTO { Id = l.Rfqno, Type = "Lead", Description = l.BuyersName, Status = l.LeadStatus != null ? l.LeadStatus.SetupValue : "Open", Date = l.CreatedDate }).ToListAsync();
@@ -240,6 +209,243 @@ namespace ERP_RFQ_Automation.Repositories
                 IsUp = diff >= 0
             };
         }
+
+        // ════════════════════════════════════════════════════════════════════
+        // PILOT ANALYTICS 1/3 — deadline board
+        // ════════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Every open enquiry bucketed by how long is left to answer it, with the line-item
+        /// count that says how much work each bucket actually is.
+        ///
+        /// This is the one analytic a trading desk uses every morning, and it needs nothing
+        /// the pilot tenant will not have: no customer identity, no catalog, no FX, no
+        /// lifecycle events. Just Lead.BidClosingDate and a line count, both of which are
+        /// populated today.
+        ///
+        /// TWO DISCLOSURES ARE PART OF THE ANSWER, not footnotes:
+        ///   * leads with NO usable closing date are counted separately rather than dropped
+        ///     into a comfortable bucket — 27 leads with a silent gap look like 27 leads
+        ///     under control;
+        ///   * leads that ENTERED Nexora after their own closing date are flagged, because
+        ///     they are overdue on arrival and counting them against handling performance
+        ///     books a loss that predates the product. Same rule as the workload view.
+        /// </summary>
+        public async Task<DeadlineBoardDTO> GetDeadlineBoardAsync(
+            long businessUnitId, int maxLeads = 200, CancellationToken cancellationToken = default)
+        {
+            var now = DateTime.UtcNow;
+            var today = now.Date;
+
+            // "Open" mirrors GetDashboardDataAsync's ActiveLeads: untriaged leads count,
+            // because untriaged is precisely the state the deadline board exists to surface.
+            var rows = await _context.Leads.AsNoTracking()
+                .Where(l => l.BusinessUnitId == businessUnitId)
+                .Where(l => l.LeadStatus == null
+                            || (l.LeadStatus.SetupValue != "Rejected" && l.LeadStatus.SetupValue != "Closed"))
+                .Where(l => l.LeadRejectedReasonId == null)
+                .Select(l => new
+                {
+                    l.Id,
+                    l.Rfqno,
+                    l.BuyersName,
+                    l.BidClosingDate,
+                    l.SubDate,
+                    l.CreatedDate,
+                    LineItems = l.LeadItems.Count,
+                    AwaitingReview = l.EmailIngests == null
+                        ? !l.CommercialFactsVerified
+                        : l.EmailIngests.ParseStatus == "NeedsReview"
+                })
+                .ToListAsync(cancellationToken);
+
+            var earliestReceivedOn = await ERP_RFQ_Automation.LeadIdentity.LeadIngestionAudit
+                .EarliestSourceReceivedOnAsync(_context, businessUnitId, rows.Select(r => r.Id).ToList());
+
+            var leads = rows.Select(r =>
+            {
+                var hasDate = r.BidClosingDate.HasValue && r.BidClosingDate.Value.Year >= SentinelYearFloor;
+                int? daysLeft = hasDate ? (r.BidClosingDate!.Value.Date - today).Days : null;
+                var lateIngested = ERP_RFQ_Automation.LeadIdentity.LeadIngestionAudit.IsLateIngested(
+                    earliestReceivedOn.TryGetValue(r.Id, out var receivedOn) ? receivedOn : null,
+                    r.CreatedDate, r.BidClosingDate, r.SubDate);
+                return new DeadlineLeadDTO(
+                    r.Id, r.Rfqno, r.BuyersName,
+                    hasDate ? r.BidClosingDate : null,
+                    daysLeft,
+                    BucketKey(daysLeft),
+                    r.LineItems,
+                    r.AwaitingReview,
+                    lateIngested);
+            }).ToList();
+
+            var buckets = BucketOrder
+                .Select(bucket => new DeadlineBucketDTO(
+                    bucket.Key,
+                    bucket.Label,
+                    leads.Count(l => l.Bucket == bucket.Key),
+                    leads.Where(l => l.Bucket == bucket.Key).Sum(l => l.LineItems)))
+                .ToList();
+
+            // Most urgent first; leads with no date sort last but are never hidden.
+            var ordered = leads
+                .OrderBy(l => l.DaysLeft.HasValue ? 0 : 1)
+                .ThenBy(l => l.DaysLeft ?? int.MaxValue)
+                .ThenByDescending(l => l.LineItems)
+                .Take(Math.Clamp(maxLeads, 1, 1000))
+                .ToList();
+
+            return new DeadlineBoardDTO(
+                now,
+                leads.Count,
+                leads.Sum(l => l.LineItems),
+                leads.Count(l => l.DaysLeft is null),
+                leads.Count(l => l.LateIngested),
+                buckets,
+                ordered);
+        }
+
+        private static readonly (string Key, string Label)[] BucketOrder =
+        {
+            ("overdue", "Past deadline"),
+            ("today", "Closing today"),
+            ("days_1_3", "1–3 days"),
+            ("days_4_7", "4–7 days"),
+            ("days_8_30", "8–30 days"),
+            ("later", "More than 30 days"),
+            ("unknown", "No closing date")
+        };
+
+        private static string BucketKey(int? daysLeft) => daysLeft switch
+        {
+            null => "unknown",
+            < 0 => "overdue",
+            0 => "today",
+            <= 3 => "days_1_3",
+            <= 7 => "days_4_7",
+            <= 30 => "days_8_30",
+            _ => "later"
+        };
+
+        // ════════════════════════════════════════════════════════════════════
+        // PILOT ANALYTICS 3/3 — document yield and review funnel
+        // ════════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// What happened to every document the tenant sent us, end to end, and how much of
+        /// what we produced from them is actually usable.
+        ///
+        /// Yield and quality are ONE question. Nine leads out of fifty-four resolved jobs is
+        /// not a 16.7% inefficiency to be optimised later; it is forty-five enquiries that
+        /// entered the building and produced nothing, and it belongs on the same screen as
+        /// the field-completeness tiles. Every stage carries the previous stage as its
+        /// denominator, so a reader can see exactly where the loss is rather than being
+        /// handed a single composite score.
+        ///
+        /// The concentration line exists because it is the fact most likely to mislead:
+        /// when a handful of documents carry almost all the lines, any line-weighted
+        /// quality figure is a statement about those few documents and nothing else.
+        /// </summary>
+        public async Task<DocumentYieldDTO> GetDocumentYieldAsync(
+            long businessUnitId, DateTime from, DateTime to, CancellationToken cancellationToken = default)
+        {
+            var fromOffset = new DateTimeOffset(DateTime.SpecifyKind(from, DateTimeKind.Utc));
+            var toOffset = new DateTimeOffset(DateTime.SpecifyKind(to, DateTimeKind.Utc));
+
+            var documents = await _context
+                .Set<ERP_RFQ_Automation.DocumentIntelligence.Persistence.SourceDocument>().AsNoTracking()
+                .Where(d => d.BusinessUnitId == businessUnitId && d.CreatedOn >= fromOffset && d.CreatedOn <= toOffset)
+                .Select(d => new { d.Id, d.SecurityStatus })
+                .ToListAsync(cancellationToken);
+
+            var jobs = await _context.Set<ERP_RFQ_Automation.Extraction.ExtractionJob>().AsNoTracking()
+                .Where(j => j.BusinessUnitId == businessUnitId && j.CreatedOn >= from && j.CreatedOn <= to)
+                .Select(j => new { j.Id, j.Status, j.ResultLeadId })
+                .ToListAsync(cancellationToken);
+
+            var leadIds = jobs.Where(j => j.ResultLeadId.HasValue).Select(j => j.ResultLeadId!.Value)
+                .Distinct().ToList();
+
+            var lines = await _context.LeadItems.AsNoTracking()
+                .Where(li => li.Lead.BusinessUnitId == businessUnitId && leadIds.Contains(li.LeadId))
+                .Select(li => new { li.LeadId, HasExtraFields = li.ExtraFields != null })
+                .ToListAsync(cancellationToken);
+
+            var reviewedLeadIds = await _context.Set<LeadReviewAudit>().AsNoTracking()
+                .Where(a => a.BusinessUnitId == businessUnitId && a.Action == "approve" && leadIds.Contains(a.LeadId))
+                .Select(a => a.LeadId)
+                .Distinct()
+                .ToListAsync(cancellationToken);
+
+            var evidencedLeadIds = await _context
+                .Set<ERP_RFQ_Automation.DocumentIntelligence.Persistence.CanonicalInquiry>().AsNoTracking()
+                .Where(i => i.BusinessUnitId == businessUnitId && i.LeadId.HasValue && leadIds.Contains(i.LeadId!.Value))
+                .Select(i => i.LeadId!.Value)
+                .Distinct()
+                .ToListAsync(cancellationToken);
+
+            var submitted = documents.Count;
+            var cleared = documents.Count(d =>
+                d.SecurityStatus == ERP_RFQ_Automation.DocumentIntelligence.Persistence.DocumentSecurityStatus.Cleared);
+            var jobsCreated = jobs.Count;
+            var jobsSucceeded = jobs.Count(j => j.Status == ERP_RFQ_Automation.Extraction.ExtractionStatus.Succeeded);
+            var leadsProduced = leadIds.Count;
+            var linesProduced = lines.Count;
+
+            var stages = new List<FunnelStageDTO>
+            {
+                Stage("submitted", "Documents submitted", submitted, null,
+                    "Source documents recorded for this tenant in the window."),
+                Stage("cleared", "Cleared security", cleared, submitted,
+                    "Documents whose security status is Cleared / documents submitted."),
+                Stage("jobs", "Extraction jobs created", jobsCreated, cleared,
+                    "Extraction jobs created in the window / documents cleared."),
+                Stage("succeeded", "Extraction succeeded", jobsSucceeded, jobsCreated,
+                    "Jobs in Succeeded state / extraction jobs created."),
+                Stage("leads", "Leads produced", leadsProduced, jobsSucceeded,
+                    "Distinct leads bound to a succeeded job / jobs succeeded. THIS is document yield."),
+                Stage("reviewed", "Leads approved by a reviewer", reviewedLeadIds.Count, leadsProduced,
+                    "Leads with at least one approved human review / leads produced.")
+            };
+
+            var coverage = new List<CoverageTileDTO>
+            {
+                Tile("lines", "Line items extracted", linesProduced, linesProduced,
+                    "Line items on the leads produced in this window."),
+                Tile("extra-fields", "Lines preserving the customer's own columns",
+                    lines.Count(l => l.HasExtraFields), linesProduced,
+                    "Lines carrying ExtraFields (unmapped source columns kept verbatim) / lines extracted."),
+                Tile("evidence", "Leads with a source-address evidence ledger",
+                    evidencedLeadIds.Count, leadsProduced,
+                    "Leads with a canonical inquiry, i.e. a per-field link back to the cell it came from / leads produced. "
+                    + "Populated on the structured spreadsheet path; PDF and OCR runs do not yet retain word boxes.")
+            };
+
+            // Line concentration: how much of the corpus the biggest documents account for.
+            var linesByLead = lines.GroupBy(l => l.LeadId).Select(g => g.Count())
+                .OrderByDescending(count => count).ToList();
+            var topCount = Math.Min(2, linesByLead.Count);
+            var topLines = linesByLead.Take(topCount).Sum();
+            decimal? topShare = linesProduced > 0
+                ? decimal.Round(topLines * 100m / linesProduced, 1)
+                : null;
+
+            return new DocumentYieldDTO(
+                DateTime.UtcNow, from, to, stages, coverage, topCount, topShare,
+                topShare is null
+                    ? "No lines were produced in this window, so no concentration can be reported."
+                    : $"The {topCount} largest document(s) account for {topShare}% of all lines "
+                      + $"({topLines} of {linesProduced}). Any line-weighted quality figure is "
+                      + "predominantly a statement about those documents.");
+        }
+
+        private static FunnelStageDTO Stage(string key, string label, long numerator, long? denominator,
+            string definition) => new(key, label, numerator, denominator,
+            denominator is null or 0 ? null : decimal.Round(numerator * 100m / denominator.Value, 1), definition);
+
+        private static CoverageTileDTO Tile(string key, string label, long covered, long total,
+            string definition) => new(key, label, covered, total,
+            total == 0 ? null : decimal.Round(covered * 100m / total, 1), definition);
 
         // ════════════════════════════════════════════════════════════════════
         // WP-B1: manager team-workload view

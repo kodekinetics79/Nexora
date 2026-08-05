@@ -65,8 +65,16 @@ public sealed record BatchReconciliationItemDto(long OccurrenceId, long? LeadId,
     /// True when this file is held by a malware scanner that never produced a verdict, so it can be
     /// replayed from its immutable source without a re-upload. This is the durable "our
     /// infrastructure failed" signal — distinct from a real malware detection
-    /// (<c>ErrorCode = malware_detected</c>) or a malformed document (<c>document_rejected</c>),
-    /// neither of which is ever replayable.
+    /// (<c>ErrorCode = malware_detected</c>), a macro-enabled document
+    /// (<c>macro_enabled_document</c>) or any other terminal inspection verdict
+    /// (<c>document_rejected</c>), none of which is ever replayable.
+    ///
+    /// <para>
+    /// <c>document_rejected</c> is a BUCKET, so it never explains anything on its own: the specific
+    /// reason travels in <see cref="BatchReconciliationItemDto.Reasons"/>, read straight out of the
+    /// occurrence's <c>last_error_details</c>. Any surface rendering the code must render that
+    /// reason too rather than guessing at the cause.
+    /// </para>
     /// </summary>
     public bool RecoverableSecurityHold { get; init; }
 }

@@ -141,25 +141,8 @@ const OutstandingRFQsPage: React.FC = () => {
         </Stack>
       )
     },
-    {
-      field: 'aiconfidence',
-      headerName: 'AI Confidence',
-      width: 130,
-      renderCell: (p) => {
-        const val = (p.row.aiconfidence ?? 0) * 100;
-        const color = val >= 70 ? 'success' : val >= 40 ? 'warning' : 'error';
-        return (
-          <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%', width: '100%' }}>
-            <Typography sx={{ fontSize: '0.75rem', fontWeight: 900, color: `${color}.main`, mb: 0.5 }}>
-              {Math.round(val)}% Match
-            </Typography>
-            <Box sx={{ height: 4, width: '100%', bgcolor: 'action.hover', borderRadius: 2, overflow: 'hidden' }}>
-              <Box sx={{ height: '100%', width: `${val}%`, bgcolor: `${color}.main` }} />
-            </Box>
-          </Box>
-        );
-      }
-    },
+    // An "AI Confidence — N% Match" column used to sit here. That number is not
+    // a measured accuracy and is no longer rendered anywhere in the product.
     {
       field: 'recDate',
       headerName: 'Received',

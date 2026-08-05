@@ -19,15 +19,20 @@ import {
   ExpandMore as ChangeIcon,
 } from '@mui/icons-material';
 import { useSnackbar } from 'notistack';
-import leadService from '../../api/services/leadService';
+import leadService, { type AcceptedLeadResponseDTO } from '../../api/services/leadService';
 import SearchField from '../../components/common/SearchField';
 import { useAuth } from '../../context/AuthContext';
 import { presentableErrorMessage } from '../../utils/apiErrors';
+import ClientCell from './ClientCell';
+import ResolveClientDialog from './ResolveClientDialog';
 
 const AssignedLeadsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { userData } = useAuth();
+  const { userData, hasPermission } = useAuth();
+  const canEditLeads = hasPermission('Leads', 'edit');
+  // One resolve dialog for the whole grid (never one per row).
+  const [resolveLead, setResolveLead] = useState<AcceptedLeadResponseDTO | null>(null);
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
@@ -106,8 +111,22 @@ const AssignedLeadsPage: React.FC = () => {
       )
     },
     {
+      // Which CLIENT the enquiry came from — placed before the buyer person so
+      // the organisation reads first.
+      field: 'client',
+      headerName: 'Client',
+      width: 200,
+      sortable: false,
+      filterable: false,
+      renderCell: (p) => (
+        <Box sx={{ display: 'flex', alignItems: 'center', height: '100%' }}>
+          <ClientCell lead={p.row} canEdit={canEditLeads} onResolve={() => setResolveLead(p.row)} />
+        </Box>
+      ),
+    },
+    {
       field: 'buyer',
-      headerName: 'Buyer And Contact',
+      headerName: 'Buyer contact',
       flex: 1,
       minWidth: 200,
       renderCell: (p) => (
@@ -197,25 +216,9 @@ const AssignedLeadsPage: React.FC = () => {
         </Box>
       )
     },
-    {
-      field: 'aiconfidence',
-      headerName: 'AI Match',
-      width: 140,
-      renderCell: (p) => {
-        const val = (p.row.aiconfidence || 0) * 100;
-        const color = val > 80 ? 'success' : val > 50 ? 'warning' : 'error';
-        return (
-          <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%', width: '100%' }}>
-            <Typography sx={{ fontSize: '0.7rem', fontWeight: 900, color: `${color}.main`, mb: 0.5 }}>
-              {Math.round(val)}% Accurate
-            </Typography>
-            <Box sx={{ height: 4, width: '100%', bgcolor: 'action.hover', borderRadius: 2, overflow: 'hidden' }}>
-              <Box sx={{ height: '100%', width: `${val}%`, bgcolor: `${color}.main` }} />
-            </Box>
-          </Box>
-        );
-      }
-    },
+    // An "N% Accurate" column used to sit here, driven by Lead.Aiconfidence.
+    // Nexora has never measured extraction accuracy — there is no labelled
+    // corpus — so no accuracy figure is shown anywhere in the product.
     {
       field: 'itemCount',
       headerName: t('invoice_items'),
@@ -296,6 +299,15 @@ const AssignedLeadsPage: React.FC = () => {
           }}
         />
       </Paper>
+
+      {/* Client resolution — one dialog for the grid, driven by the client cell */}
+      <ResolveClientDialog
+        open={resolveLead !== null}
+        leadId={resolveLead?.id ?? null}
+        lead={resolveLead}
+        onClose={() => setResolveLead(null)}
+        onResolved={() => queryClient.invalidateQueries({ queryKey: ['leads-assigned'] })}
+      />
 
       {/* Inline quick-reassign: click 2 of 2 — pick the new owner */}
       <Menu

@@ -893,41 +893,11 @@ namespace ERP_RFQ_Automation.Services
             return sb.ToString();
         }
 
+        // DRIFT GUARD: shared with the email, manual-upload and async-worker doors — see
+        // LeadItemMapper. This door's date reader accepts several extra document conventions
+        // ("12 Mar 2024"), which is the only part that is genuinely door-specific.
         private LeadItem CreateLeadItem(long leadId, LeadItemData aiItem)
-        {
-            int? leadTime = int.TryParse(aiItem.LeadTime ?? "", out int lt) ? lt : null;
-            DateTime? receivedDate       = ParseDate(aiItem.ReceivedDate);
-            DateTime? bidClosingDateLine = ParseDate(aiItem.BidClosingDateLine);
-            return new LeadItem
-            {
-                LeadId                = leadId,
-                CompanyRef            = Truncate(aiItem.CompanyRef, 100),
-                CustomerAccountPortalId = Truncate(aiItem.CustomerAccountPortalId, 100),
-                CustomerRfqno         = Truncate(aiItem.CustomerRfqno, 100),
-                ItemMaterialCode      = Truncate(aiItem.ItemMaterialCode, 100),
-                CommodityProduct      = Truncate(aiItem.CommodityProduct, 200),
-                BuyerName             = Truncate(aiItem.BuyerName, 200),
-                LineItemNo            = Truncate(aiItem.LineItemNo, 50),
-                ProductShortName      = Truncate(aiItem.ProductShortName, 1000),
-                Alternative           = Truncate(aiItem.Alternative, 100),
-                ProductShortDescription = Truncate(aiItem.ProductShortDescription, 1000),
-                Currency              = Truncate(aiItem.Currency, 10),
-                UnitOfMeasure         = Truncate(aiItem.UnitOfMeasure, 100),
-                UnitPrice             = aiItem.UnitPrice,
-                Quantity              = aiItem.Quantity ?? 0,
-                StorageLocation       = Truncate(aiItem.StorageLocation, 100),
-                ManufacturerName      = Truncate(aiItem.ManufacturerName, 200),
-                ManufacturerPartNumber = Truncate(aiItem.ManufacturerPartNumber, 100),
-                AlternateProductName  = Truncate(aiItem.AlternateProductName, 200),
-                AlternatePartNumber   = Truncate(aiItem.AlternatePartNumber, 100),
-                ItemText              = Truncate(aiItem.ItemText, 2000),
-                MaterialPotext        = Truncate(aiItem.MaterialPotext, 2000),
-                LeadTime              = leadTime,
-                ReceivedDate          = receivedDate,
-                BidClosingDateLine    = bidClosingDateLine,
-                Aiconfidence          = (decimal?)(aiItem.ItemConfidence ?? 0.0)
-            };
-        }
+            => LeadItemMapper.Map(aiItem, ParseDate, leadId);
 
         private string GetFileTypeLabel(string ext) => ext switch
         {

@@ -15,6 +15,37 @@ public interface IFileStorage
     string GetPath(params string[] segments);
     Task<string> WriteImmutableAsync(string relativePath, ReadOnlyMemory<byte> content, CancellationToken ct = default);
     Task<Stream> OpenReadAsync(string storagePath, CancellationToken ct = default);
+
+    /// <summary>
+    /// Removes ONE stored file under the configured root. Returns true when a file was
+    /// actually removed and false when nothing was there to remove — an absent file is
+    /// success, not an error, because a retention purge is idempotent by construction and
+    /// because ~15 production documents lost their bytes to ephemeral storage before the
+    /// persistent disk existed.
+    ///
+    /// <para>
+    /// Containment is the whole security property: the path goes through the same
+    /// <see cref="ResolvePath"/> used by every read (full-path normalization, OS-correct
+    /// root-prefix comparison, per-segment symlink rejection) and is additionally refused
+    /// when it resolves to the storage root itself or to a directory. There is no
+    /// recursive form and no glob form, so a crafted stored path can at worst delete one
+    /// file that already lives inside evidence storage.
+    /// </para>
+    /// </summary>
+    Task<bool> TryDeleteAsync(string storagePath, CancellationToken ct = default);
+}
+
+/// <summary>
+/// The configured storage volume is full. Thrown instead of a bare <see cref="IOException"/>
+/// so the startup failure says what is wrong and what to do about it: a read-write service
+/// on a full disk IS broken and must still refuse to boot, but the operator should not have
+/// to guess that "No space left on device" during a probe write means the Render disk needs
+/// resizing or a retention purge.
+/// </summary>
+public sealed class StorageCapacityExhaustedException : IOException
+{
+    public StorageCapacityExhaustedException(string message, Exception? inner = null)
+        : base(message, inner) { }
 }
 
 /// <summary>
@@ -74,9 +105,34 @@ public sealed class LocalFileStorage : IFileStorage
         _rootWithSeparator = RootPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
             + Path.DirectorySeparatorChar;
 
-        // Fail at startup if the configured volume is present but not writable.
+        // Fail at startup if the configured volume is present but not writable. A full
+        // disk is reported as itself rather than as a bare IOException: boot must still
+        // fail, but the log has to name the cause instead of leaving an operator to
+        // decode errno 28 out of a probe write.
         var probe = Path.Combine(RootPath, ".nexora-storage-probe-" + Guid.NewGuid().ToString("N"));
-        using (File.Create(probe, bufferSize: 1, FileOptions.DeleteOnClose)) { }
+        try
+        {
+            using (File.Create(probe, bufferSize: 1, FileOptions.DeleteOnClose)) { }
+        }
+        catch (IOException exception) when (IsOutOfSpace(exception))
+        {
+            throw new StorageCapacityExhaustedException(
+                $"Storage volume '{RootPath}' is full: the startup write probe failed with "
+                + "'No space left on device'. Nexora cannot serve uploads or evidence reads from a "
+                + "full disk. Free space by resizing the volume or running an evidence retention "
+                + "purge, then restart.",
+                exception);
+        }
+    }
+
+    /// <summary>
+    /// ENOSPC on Unix (28) and ERROR_DISK_FULL/ERROR_HANDLE_DISK_FULL on Windows (112/39).
+    /// Checked on the OS error code rather than the message so it survives localization.
+    /// </summary>
+    internal static bool IsOutOfSpace(IOException exception)
+    {
+        var code = exception.HResult & 0xFFFF;
+        return OperatingSystem.IsWindows() ? code is 112 or 39 : code == 28;
     }
 
     public string RootPath { get; }
@@ -204,6 +260,38 @@ public sealed class LocalFileStorage : IFileStorage
         var expectedHash = SHA256.HashData(expected.Span);
         if (!CryptographicOperations.FixedTimeEquals(actualHash, expectedHash))
             throw new InvalidDataException("Existing immutable storage object has conflicting content.");
+    }
+
+    public Task<bool> TryDeleteAsync(string storagePath, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+
+        // ResolvePath is the containment boundary: traversal, absolute paths outside the
+        // root and symlinked segments all throw UnauthorizedAccessException here and are
+        // deliberately NOT swallowed — a purge that cannot prove where it is pointing must
+        // fail loudly, never "succeed" by deleting something else.
+        var path = ResolvePath(storagePath);
+
+        if (path.Equals(RootPath, _pathComparison))
+            throw new UnauthorizedAccessException("The storage root itself cannot be deleted.");
+        if (Directory.Exists(path))
+            throw new UnauthorizedAccessException("Only files can be deleted from evidence storage.");
+
+        try
+        {
+            if (!File.Exists(path))
+                return Task.FromResult(false);
+            File.Delete(path);
+            return Task.FromResult(true);
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return Task.FromResult(false);
+        }
+        catch (FileNotFoundException)
+        {
+            return Task.FromResult(false);
+        }
     }
 
     public Task<Stream> OpenReadAsync(string storagePath, CancellationToken ct = default)

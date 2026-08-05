@@ -45,7 +45,15 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
         var extension = Path.GetExtension(request.FileName ?? string.Empty).ToLowerInvariant();
         if (!SupportedExtensions.Contains(extension))
         {
-            return Rejected(null, 0, $"The file extension '{extension}' is not supported.");
+            // DO NOT interpolate the extension into this sentence. It is caller-controlled
+            // text from the uploaded FILENAME, checked before any allow-list, and rejection
+            // reasons are now rendered verbatim as authoritative product copy in the intake
+            // UI. A filename like "quote.pdf-is-not-supported-call-<phone>" would put an
+            // attacker's words inside a Nexora sentence shown to every colleague viewing
+            // the batch. The extension is unrecognised by definition, so it carries no
+            // information a fixed sentence lacks — the UI already shows the filename
+            // itself, safely, in its own column.
+            return Rejected(null, 0, "The file's extension is not a type Nexora accepts.");
         }
 
         if (request.DeclaredLength is < 0)
@@ -80,7 +88,11 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
         }
         catch (UnsafeArchiveException exception)
         {
-            return Rejected(null, bytes.LongLength, exception.Message);
+            // The reason is the ONLY truthful account of why this file stopped, and every caller
+            // persists it (DocumentIngestionService writes it into the occurrence's
+            // last_error_details). The error code travels with it so the UI can be specific about
+            // causes it has a real remedy for instead of guessing.
+            return Rejected(null, bytes.LongLength, exception.Message, exception.ErrorCode);
         }
 
         if (!detection.AllowedExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
@@ -225,7 +237,13 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
                 : new("text/plain", [".txt"]);
         }
 
-        throw new UnsafeArchiveException("The file has no recognized signature for its extension.");
+        // `extension` is already constrained to the intake allow-list above, so quoting it back is
+        // safe and is the single most useful fact we have: the name claims a format the bytes are
+        // not in. Saying only "no recognized signature" left users with nothing to act on.
+        throw new UnsafeArchiveException(
+            $"The file is named '{extension}' but its contents are not in that format. " +
+            "Open it in the application that produced it and use Save As to store a real " +
+            $"{extension} file, then upload that.");
     }
 
     private TypeDetection InspectOpenXml(byte[] bytes)
@@ -316,7 +334,9 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
             {
                 if (contentTypes.Contains("macroEnabled", StringComparison.OrdinalIgnoreCase))
                 {
-                    throw new UnsafeArchiveException("Macro-enabled Word documents are not supported.");
+                    throw new UnsafeArchiveException(
+                        MacroRejectionReason(isWordProcessing: true),
+                        DocumentInspectionErrorCodes.MacroEnabledDocument);
                 }
 
                 return new(
@@ -335,7 +355,9 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
                 var macroEnabled = workbookContentType?.Contains("macroEnabled",
                     StringComparison.OrdinalIgnoreCase) == true || names.Contains("xl/vbaProject.bin");
                 if (macroEnabled)
-                    throw new UnsafeArchiveException("Macro-enabled Excel workbooks are not supported.");
+                    throw new UnsafeArchiveException(
+                        MacroRejectionReason(isWordProcessing: false),
+                        DocumentInspectionErrorCodes.MacroEnabledDocument);
                 return new("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", [".xlsx"]);
             }
 
@@ -355,11 +377,16 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
     private TypeDetection InspectOleCompound(byte[] bytes, string extension)
     {
         var streamNames = ReadOleDirectoryNames(bytes);
+        // Deliberately a FLAT scan of every directory entry, nested storages included: a macro
+        // hidden inside an embedded object is still a macro. This stays exactly as strict as it
+        // was — only the wording it produces changed.
         if (streamNames.Any(name => name.Equals("_VBA_PROJECT_CUR", StringComparison.OrdinalIgnoreCase)
                 || name.Equals("VBA", StringComparison.OrdinalIgnoreCase)
                 || name.Equals("Macros", StringComparison.OrdinalIgnoreCase)))
         {
-            throw new UnsafeArchiveException("Macro-enabled legacy Office documents are not supported.");
+            throw new UnsafeArchiveException(
+                MacroRejectionReason(WordExtensions.Contains(extension)),
+                DocumentInspectionErrorCodes.MacroEnabledDocument);
         }
         var isWord = streamNames.Contains("WordDocument");
         var isExcel = streamNames.Contains("Workbook") || streamNames.Contains("Book");
@@ -369,9 +396,40 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
         if (extension == ".xls" && isExcel && !isWord)
             return new("application/vnd.ms-excel", [".xls"]);
 
-        throw new UnsafeArchiveException(
-            "The legacy Office document structure does not match its file extension.");
+        // "could not confirm" is the honest claim, and it stays honest in the known false-positive
+        // case too: this directory scan is flat, so a genuine workbook that EMBEDS a Word object
+        // also lands here. The remedy offered works either way.
+        throw new UnsafeArchiveException(WordExtensions.Contains(extension)
+            ? "Nexora could not confirm this is a Word document: the file's internal structure " +
+              $"does not match its '{extension}' name. Open it in Word and use Save As to store " +
+              "it as .docx, then upload that."
+            : "Nexora could not confirm this is an Excel workbook: the file's internal structure " +
+              $"does not match its '{extension}' name. Open it in Excel and use Save As to store " +
+              "it as .xlsx, then upload that.");
     }
+
+    /// <summary>
+    /// The macro rejection is a WORKING control — macros are a real malware vector and this file is
+    /// never going to be opened. What was broken is what the user was told: the UI turned every
+    /// rejection into "the file is damaged, re-export it or send it as a PDF", which is wrong twice
+    /// over for a macro-enabled workbook (it is not damaged, and a PDF loses the line items we need).
+    ///
+    /// <para>
+    /// So the reason names the actual cause AND the actual remedy, and is self-contained: it is
+    /// persisted verbatim into the occurrence and read back by every surface, including ones that
+    /// only ever show this one string.
+    /// </para>
+    /// </summary>
+    private static string MacroRejectionReason(bool isWordProcessing) => isWordProcessing
+        ? "This document contains macros (embedded VBA code), which Nexora does not accept. " +
+          "Open it in Word, use Save As to keep a macro-free copy as .docx, and upload that, " +
+          "or ask the sender for a macro-free version."
+        : "This workbook contains macros (embedded VBA code), which Nexora does not accept. " +
+          "Open it in Excel, use Save As to keep a macro-free copy as .xlsx, and upload that, " +
+          "or ask the sender for a macro-free version.";
+
+    private static readonly IReadOnlySet<string> WordExtensions =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".doc", ".docx" };
 
     private HashSet<string> ReadOleDirectoryNames(byte[] bytes)
     {
@@ -593,8 +651,16 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
         }
     }
 
-    private FileInspectionResult Rejected(string? detectedType, long length, string reason) =>
-        new(FileInspectionStatus.Rejected, detectedType, length, reason, "not-run", null);
+    private FileInspectionResult Rejected(
+        string? detectedType,
+        long length,
+        string reason,
+        string? errorCode = null)
+    {
+        var rejection = new FileInspectionResult(
+            FileInspectionStatus.Rejected, detectedType, length, reason, "not-run", null);
+        return errorCode is null ? rejection : rejection with { ErrorCode = errorCode };
+    }
 
     private static bool StartsWith(byte[] bytes, ReadOnlySpan<byte> signature) =>
         bytes.AsSpan().StartsWith(signature);
@@ -633,7 +699,11 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
 
     private sealed record TypeDetection(string ContentType, IReadOnlyCollection<string> AllowedExtensions);
 
-    private sealed class UnsafeArchiveException(string message) : Exception(message);
+    private sealed class UnsafeArchiveException(string message, string? errorCode = null) : Exception(message)
+    {
+        /// <summary>Null means "no distinct cause" — the caller falls back to document_rejected.</summary>
+        public string? ErrorCode { get; } = errorCode;
+    }
 
     private sealed class FileTooLargeException(long observedLength) : Exception
     {

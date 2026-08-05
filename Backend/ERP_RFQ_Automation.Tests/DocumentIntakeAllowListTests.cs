@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using ERP_RFQ_Automation.Extraction;
+using ERP_RFQ_Automation.Ingestion.Triage;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Security.DocumentInspection;
 using ERP_RFQ_Automation.Services;
@@ -79,14 +80,19 @@ public sealed class DocumentIntakeAllowListTests
         // Anything OFF the list is rejected by inspection with the unsupported-extension
         // reason; anything ON the list gets past the extension gate (content checks may
         // still reject garbage bytes, but never for its extension).
+        // The rejection sentence deliberately does NOT echo the extension: the extension is
+        // caller-controlled filename text, and rejection reasons are rendered verbatim as
+        // product copy in the intake UI, so interpolating it would let a crafted filename
+        // inject content into an authoritative Nexora sentence.
         var rejected = Inspect([0x01, 0x02], "deck.pptx");
         Assert.Equal(FileInspectionStatus.Rejected, rejected.Status);
-        Assert.Contains("not supported", rejected.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("not a type Nexora accepts", rejected.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(".pptx", rejected.Reason, StringComparison.OrdinalIgnoreCase);
 
         foreach (var ext in DocumentIntakeAllowList.Extensions)
         {
             var result = Inspect([0x01, 0x02], $"probe{ext}");
-            Assert.DoesNotContain("is not supported", result.Reason, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("not a type Nexora accepts", result.Reason, StringComparison.OrdinalIgnoreCase);
         }
     }
 
@@ -129,7 +135,7 @@ public sealed class DocumentIntakeAllowListTests
                 ("deck.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"));
 
             var queued = await service.EnqueueEmailForExtractionAsync(
-                message, ingest, Config(), ingestion);
+                message, ingest, Config(), ingestion, InquiryTriage(), FreshBody(message));
 
             // body + the two supported attachments
             Assert.Equal(3, queued);
@@ -173,7 +179,7 @@ public sealed class DocumentIntakeAllowListTests
                 ("deck.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"));
 
             var queued = await service.EnqueueEmailForExtractionAsync(
-                message, ingest, Config(), ingestion);
+                message, ingest, Config(), ingestion, InquiryTriage(), FreshBody(message));
 
             Assert.Equal(0, queued);
             Assert.Empty(ingestion.Calls);
@@ -209,6 +215,16 @@ public sealed class DocumentIntakeAllowListTests
         Username = "u",
         Password = "p"
     };
+
+    // ING-07: the intake fan-out now takes the gate's decision and the sender's fresh body
+    // text. These tests are about the ATTACHMENT filter, so they pass the ordinary
+    // "this is an inquiry" decision and the message's own normalized body.
+    private static EmailTriageDecision InquiryTriage()
+        => new(EmailTriageOutcome.Inquiry,
+            new[] { EmailTriageReasonCodes.RequestVerb }, null, false);
+
+    private static EmailBodyParts FreshBody(MimeMessage message)
+        => EmailBodyNormalizer.Normalize(message.GetTextBody(MimeKit.Text.TextFormat.Plain));
 
     private static MimeMessage BuildMessage(
         string subject, string? body, params (string FileName, string ContentType)[] attachments)
@@ -309,5 +325,7 @@ public sealed class DocumentIntakeAllowListTests
             => throw new InvalidOperationException("The intake tests never write immutable objects.");
         public Task<Stream> OpenReadAsync(string storagePath, CancellationToken ct = default)
             => throw new InvalidOperationException("The intake tests never read storage.");
+        public Task<bool> TryDeleteAsync(string storagePath, CancellationToken ct = default)
+            => throw new InvalidOperationException("The intake tests never delete storage.");
     }
 }

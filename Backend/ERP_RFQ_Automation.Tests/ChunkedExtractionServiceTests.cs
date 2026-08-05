@@ -10,11 +10,14 @@ namespace ERP_RFQ_Automation.Tests;
 
 /// <summary>
 /// ChunkedExtractionService is the safety net that guarantees a large RFQ is never
-/// silently truncated: line items are split into bounded chunks, extracted independently,
-/// unioned in order, and the item count is asserted (Σ chunk items == parsed rows). Any
-/// mismatch, partial chunk failure, or low confidence must route the document to
-/// NeedsReview rather than being saved as "complete". These tests drive that logic with a
-/// scripted LLM stub (one scripted response per chunk).
+/// silently truncated: parsed text regions are split into bounded chunks, extracted
+/// independently, and unioned in order. Conservation is enforced where it is real — a
+/// failed chunk, incomplete OCR, or a populated body that produced zero items routes the
+/// document to NeedsReview rather than being saved as "complete". What must NOT flag
+/// review on the unstructured path is "fewer items than text lines": lines are not items,
+/// and that comparison used to stamp a false "Item count mismatch" on effectively every
+/// unstructured document (and thereby disabled multi-inquiry auto-split). These tests
+/// drive that logic with a scripted LLM stub (one scripted response per chunk).
 /// </summary>
 public class ChunkedExtractionServiceTests
 {
@@ -25,6 +28,93 @@ public class ChunkedExtractionServiceTests
         => new() { BusinessUnitId = 1, LineItemRegions = regions, HeaderText = header };
 
     private static List<string> Rows(int n) => Enumerable.Range(0, n).Select(i => $"row {i}").ToList();
+
+    [Fact]
+    public async Task Every_header_field_survives_chunking_including_the_ones_declared_last()
+    {
+        // REGRESSION. WithItems used to rebuild LeadExtractionResult POSITIONALLY and stop at
+        // `items`, so every header field declared after it was silently dropped on every
+        // chunked document — InquiryType/InquiryTypeConfidence had been lost that way since
+        // the BOQ work landed, and the client-organisation fields would have been lost the
+        // same way. Chunking starts at 11 items and SEC bids run 12+ lines, so this hit
+        // exactly the documents that matter.
+        var perChunk = ExtractionOutputBudget.MaxItemsPerChunk(4096);
+        var header = Ext.Result(Ext.Items(perChunk, 0.9), 0.9) with
+        {
+            InquiryType = "service",
+            InquiryTypeConfidence = 0.88,
+            CustomerCompanyName = "Saudi Electricity Company",
+            CustomerCompanyNameConfidence = 0.91,
+            CustomerCompanyEvidence = "As SEC is implementing the new distribution standard",
+            CustomerBuyerEmail = "57322@se.com.sa",
+            CustomerBuyerEmailConfidence = 0.97,
+            CustomerPortalName = "MATERIALS E-BIDDING SYSTEM",
+            CustomerPortalNameConfidence = 0.93,
+            SupplierNameOnDocument = "ALI ZAID AL-QURAISHI&PARTNERS EL",
+            SupplierAccountRefOnDocument = "2004414",
+            SupplierAccountRefOnDocumentConfidence = 0.99
+        };
+        var llm = new StubLlm(header, Ext.Result(Ext.Items(1, 0.9), 0.9));
+
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(perChunk + 1)));
+
+        Assert.True(llm.CallCount > 1, "the document must actually be chunked for this to prove anything");
+        Assert.NotNull(outcome.Result);
+        Assert.Equal("service", outcome.Result!.InquiryType);
+        Assert.Equal(0.88, outcome.Result.InquiryTypeConfidence);
+        Assert.Equal("Saudi Electricity Company", outcome.Result.CustomerCompanyName);
+        Assert.Equal("As SEC is implementing the new distribution standard", outcome.Result.CustomerCompanyEvidence);
+        Assert.Equal("57322@se.com.sa", outcome.Result.CustomerBuyerEmail);
+        Assert.Equal("MATERIALS E-BIDDING SYSTEM", outcome.Result.CustomerPortalName);
+        Assert.Equal("ALI ZAID AL-QURAISHI&PARTNERS EL", outcome.Result.SupplierNameOnDocument);
+        Assert.Equal("2004414", outcome.Result.SupplierAccountRefOnDocument);
+        // The merge still does its own job: all items unioned, confidence recomputed.
+        Assert.Equal(perChunk + 1, outcome.Result.Items.Count);
+    }
+
+    [Fact]
+    public async Task ChunkMerge_PreservesEveryHeaderProperty_IncludingOnesAddedInTheFuture()
+    {
+        // REGRESSION NET for the WithItems positional drop, reflection-based so it cannot
+        // rot: every public property of LeadExtractionResult except Items gets a distinct
+        // probe value, and after chunked extraction every one of them must survive onto the
+        // merged result. A header field added to the record in the future is covered
+        // automatically — if reconstruction ever goes positional again and drops it, this
+        // fails without anyone having to remember to extend the hand-written test above.
+        var perChunk = ExtractionOutputBudget.MaxItemsPerChunk(4096);
+        var header = Ext.Result(Ext.Items(perChunk, 0.9), 0.9);
+        var headerProperties = typeof(LeadExtractionResult).GetProperties()
+            .Where(p => p.Name != nameof(LeadExtractionResult.Items))
+            .ToArray();
+        for (var i = 0; i < headerProperties.Length; i++)
+        {
+            var property = headerProperties[i];
+            if (property.PropertyType == typeof(string))
+                property.SetValue(header, $"probe-{property.Name}");
+            else if (property.PropertyType == typeof(double?))
+                property.SetValue(header, 0.70 + (i * 0.001)); // distinct, and high enough not to trip review
+            else
+                Assert.Fail(
+                    $"LeadExtractionResult.{property.Name} is a {property.PropertyType.Name}; teach this "
+                    + "regression test how to probe that type so reconstruction coverage stays total.");
+        }
+        var llm = new StubLlm(header, Ext.Result(Ext.Items(1, 0.9), 0.9));
+
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(perChunk + 1)));
+
+        Assert.True(llm.CallCount > 1, "the document must actually be chunked for this to prove anything");
+        Assert.NotNull(outcome.Result);
+        foreach (var property in headerProperties)
+        {
+            if (property.Name == nameof(LeadExtractionResult.OverallConfidence))
+                continue; // recomputed from the merged items BY DESIGN
+            Assert.True(
+                Equals(property.GetValue(header), property.GetValue(outcome.Result)),
+                $"LeadExtractionResult.{property.Name} was dropped or altered by the chunk-merge "
+                + $"reconstruction (expected '{property.GetValue(header)}', got '{property.GetValue(outcome.Result)}').");
+        }
+        Assert.Equal(perChunk + 1, outcome.Result!.Items.Count);
+    }
 
     [Fact]
     public async Task Conservation_AllItemsExtracted_HighConfidence_IsOk()
@@ -39,16 +129,61 @@ public class ChunkedExtractionServiceTests
     }
 
     [Fact]
-    public async Task ItemCountMismatch_RoutesToNeedsReview()
+    public async Task FewerItemsThanTextLines_IsNotAMismatch_OnTheUnstructuredPath()
     {
-        // 3 parsed rows but the LLM only returns 2 items -> a silent-loss guard must fire.
+        // PANEL ITEM 3. "expected" counts parsed TEXT LINES, not items — on a real PDF
+        // several lines form one item (wrapped descriptions, banners, footers), so 3 lines
+        // -> 2 items is the NORMAL case, not loss. This used to stamp a false "Item count
+        // mismatch: expected N, extracted M" on effectively every unstructured document
+        // (production: a 6-item SEC bid flagged as "expected 174") and, because only an Ok
+        // outcome may auto-split, silently disabled multi-inquiry splitting for all of them.
         var llm = new StubLlm(Ext.Result(Ext.Items(2, 0.9), 0.9));
         var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(3)));
 
-        Assert.Equal(ExtractionOutcomeStatus.NeedsReview, outcome.Status);
-        Assert.Equal(3, outcome.ExpectedItemCount);
+        Assert.Equal(ExtractionOutcomeStatus.Ok, outcome.Status);
+        Assert.Equal(3, outcome.ExpectedItemCount);   // still reported — as a diagnostic
         Assert.Equal(2, outcome.ExtractedItemCount);
-        Assert.Contains("mismatch", outcome.ReviewReason, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(outcome.ReviewReason);
+        Assert.DoesNotContain(outcome.Diagnostics,
+            d => d.Contains("mismatch", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task ZeroItemsFromAPopulatedBody_StillRoutesToNeedsReview()
+    {
+        // The one line-count signal that IS real on any document: the body had parsed
+        // regions and the model extracted NOTHING. Dropping the false mismatch alarm must
+        // not also drop this.
+        var llm = new StubLlm(Ext.Result(Ext.Items(0, 0.9), 0.9));
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(3)));
+
+        Assert.Equal(ExtractionOutcomeStatus.NeedsReview, outcome.Status);
+        Assert.Equal(0, outcome.ExtractedItemCount);
+        Assert.Contains("No line items were extracted", outcome.ReviewReason);
+    }
+
+    [Fact]
+    public async Task MultiInquirySplit_RunsForUnstructuredDocuments_OnItsOwnSignals()
+    {
+        // The false mismatch forced NeedsReview, and a NeedsReview document is never
+        // split — so auto-split was silently OFF for every unstructured document. With
+        // the text-line expectation gone, the splitter's own evidence (InquiryGroup
+        // labels + grouping confidence) decides.
+        var items = new List<LeadItemData>
+        {
+            Ext.Item(0.9, "Breaker") with { InquiryGroup = "RFQ-A", InquiryGroupConfidence = 0.9 },
+            Ext.Item(0.9, "Relay") with { InquiryGroup = "RFQ-A", InquiryGroupConfidence = 0.9 },
+            Ext.Item(0.9, "Cable") with { InquiryGroup = "RFQ-B", InquiryGroupConfidence = 0.9 },
+        };
+        var llm = new StubLlm(Ext.Result(items, 0.9));
+        // 8 text lines -> 3 items: the exact shape production sees on every PDF.
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(8)));
+
+        Assert.Equal(ExtractionOutcomeStatus.Ok, outcome.Status);
+        Assert.NotNull(outcome.SplitResults);
+        Assert.Equal(2, outcome.SplitResults!.Count);
+        Assert.Equal(new[] { 2, 1 }, outcome.SplitResults.Select(r => r.Items.Count).ToArray());
+        Assert.Contains(outcome.Diagnostics, d => d.Contains("split into 2 inquiry group(s)"));
     }
 
     [Fact]
@@ -93,6 +228,118 @@ public class ChunkedExtractionServiceTests
         Assert.Equal(ExtractionOutcomeStatus.Failed, outcome.Status);
         Assert.Equal(0, outcome.ExtractedItemCount);
         Assert.Null(outcome.Result);
+    }
+
+    /// <summary>Input pinned to a stable job identity and an explicit lease attempt, the way
+    /// the worker's document readers build it.</summary>
+    private static DocumentExtractionInput Attempt(int attempt, IReadOnlyList<string> regions)
+        => new()
+        {
+            BusinessUnitId = 1,
+            SourceId = "job:33",
+            AttemptNumber = attempt,
+            HeaderText = "buyer: Acme",
+            LineItemRegions = regions
+        };
+
+    [Fact]
+    public async Task RetryAttempt_IssuesADistinctIdempotencyKey_AndASameAttemptReplayDoesNot()
+    {
+        // THE dead-letter root cause: the key omitted the lease attempt, so a retried job
+        // replayed attempt one's keys and the governance ledger refused every call as a
+        // duplicate before any model call. A retry must be a NEW governed request; an
+        // identical (job, chunk, attempt) replay must still produce the identical key.
+        var first = new StubLlm(Ext.Result(Ext.Items(2, 0.9), 0.9));
+        var second = new StubLlm(Ext.Result(Ext.Items(2, 0.9), 0.9));
+        var replay = new StubLlm(Ext.Result(Ext.Items(2, 0.9), 0.9));
+
+        await NewService(first).ExtractUnstructuredAsync(Attempt(1, Rows(2)));
+        await NewService(second).ExtractUnstructuredAsync(Attempt(2, Rows(2)));
+        await NewService(replay).ExtractUnstructuredAsync(Attempt(1, Rows(2)));
+
+        var attemptOneKey = Assert.Single(first.IdempotencyKeys);
+        var attemptTwoKey = Assert.Single(second.IdempotencyKeys);
+        var replayedKey = Assert.Single(replay.IdempotencyKeys);
+        Assert.Equal("extraction:job:33:a1:chunk:1:2", attemptOneKey);
+        Assert.Equal("extraction:job:33:a2:chunk:1:2", attemptTwoKey);
+        Assert.NotEqual(attemptOneKey, attemptTwoKey); // retry N is a NEW governed request
+        Assert.Equal(attemptOneKey, replayedKey);      // same attempt still dedups downstream
+    }
+
+    [Fact]
+    public async Task WholeDocumentPass_KeyIsAlsoAttemptScoped()
+    {
+        var llm = new StubLlm(Ext.Result(Ext.Items(1, 0.9), 0.9));
+
+        await NewService(llm).ExtractUnstructuredAsync(Attempt(4, Array.Empty<string>()));
+
+        Assert.Equal("extraction:job:33:a4:whole", Assert.Single(llm.IdempotencyKeys));
+    }
+
+    /// <summary>An LLM whose governance layer refuses every reservation — the exact shape of
+    /// the production duplicate-key refusal, thrown before any provider call.</summary>
+    private sealed class GovernanceRefusingLlm : ILLMService
+    {
+        private readonly string _code;
+        public GovernanceRefusingLlm(string code) => _code = code;
+        public AiProviderClass ProviderClass => AiProviderClass.Local;
+
+        public Task<LeadExtractionResult?> ExtractLeadDataAsync(
+            string fullText, AiCallContext context, CancellationToken cancellationToken = default)
+            => throw new AiPolicyDeniedException(_code);
+
+        public Task<BoqDraftResult?> DraftServiceBoqAsync(
+            string scopeText, AiCallContext context, CancellationToken cancellationToken = default)
+            => Task.FromResult<BoqDraftResult?>(null);
+    }
+
+    [Fact]
+    public async Task GovernanceRefusal_SurfacesItsOwnCode_NeverMasqueradesAsAllChunksFailed()
+    {
+        // REGRESSION (job 33): every governed call was refused as duplicate_request before
+        // any model call, and the outcome still said "All chunks failed; no data
+        // extracted" — a governance refusal reported as a model failure. The refusal must
+        // keep its own code all the way into the failure reason and the diagnostics.
+        var llm = new GovernanceRefusingLlm("duplicate_request");
+
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(3)));
+
+        Assert.Equal(ExtractionOutcomeStatus.Failed, outcome.Status);
+        Assert.NotNull(outcome.ReviewReason);
+        Assert.Contains("AI governance refused", outcome.ReviewReason);
+        Assert.Contains("duplicate_request", outcome.ReviewReason);
+        Assert.Contains("before any model call", outcome.ReviewReason);
+        Assert.DoesNotContain("All chunks failed", outcome.ReviewReason);
+        Assert.Contains(outcome.Diagnostics,
+            d => d.Contains("refused by AI governance") && d.Contains("duplicate_request"));
+    }
+
+    [Fact]
+    public async Task GovernanceRefusal_OnTheWholeDocumentPass_SurfacesItsOwnCode()
+    {
+        var llm = new GovernanceRefusingLlm("document_budget_exceeded");
+
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(new List<string>()));
+
+        Assert.Equal(ExtractionOutcomeStatus.Failed, outcome.Status);
+        Assert.Contains("AI governance refused", outcome.ReviewReason);
+        Assert.Contains("document_budget_exceeded", outcome.ReviewReason);
+    }
+
+    [Fact]
+    public async Task AllChunksFailed_KeepsCollectedDiagnosticsOnTheFailedOutcome()
+    {
+        // The per-chunk diagnostics used to be discarded when every chunk failed — the
+        // outcome carried only the flattened reason, so the dead-letter LastError could
+        // not say which chunk failed or why. They must survive onto the Failed outcome.
+        var llm = new StubLlm((LeadExtractionResult?)null);
+
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(3)));
+
+        Assert.Equal(ExtractionOutcomeStatus.Failed, outcome.Status);
+        Assert.Contains(outcome.Diagnostics, d => d.Contains("split into 1 chunk(s)"));
+        Assert.Contains(outcome.Diagnostics, d => d.Contains("Chunk 1/1 failed"));
+        Assert.Contains(outcome.Diagnostics, d => d == outcome.ReviewReason);
     }
 
     [Fact]
@@ -171,21 +418,35 @@ public class ChunkedExtractionServiceTests
     [Fact]
     public async Task OutputTruncation_RetriesWithASmallerChunk_NeverTheSameRequestTwice()
     {
-        // The document plans 12 items per chunk against the advertised 8,192-token ceiling,
+        // The document plans 23 items per chunk against the advertised 8,192-token ceiling,
         // but this document is verbose enough that the model truncates above 4 items. The
         // extractor must respond by asking for LESS — halving, floor 1 — not by replaying
         // the identical failing request.
+        //
+        // 23, not 11: rfq-extraction-v2 stopped asking for a "<Field>Confidence" number
+        // beside each of the 24 per-item value fields. Those numbers were parsed and then
+        // discarded (LeadItem has ONE Aiconfidence column, fed from ItemConfidence), so half
+        // of every item's output budget was being spent on output nobody read.
+        // EstimatedOutputTokensPerItem went 450 -> 225 and the planned chunk doubled.
         var llm = new BudgetedStubLlm(maxOutputTokens: 8192, truncateAboveItems: 4);
         var planned = ExtractionOutputBudget.MaxItemsPerChunk(8192);
-        Assert.Equal(12, planned); // guards the documented arithmetic
+        Assert.Equal(23, planned); // guards the documented arithmetic
 
         var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(planned)));
 
-        // 12 truncates -> 6 + 6; each 6 truncates -> 3 + 3; every 3 succeeds.
-        Assert.Equal(new[] { 12, 6, 3, 3, 6, 3, 3 }, llm.RequestedItemCounts);
-        // No truncated size is ever re-issued at that same size.
-        Assert.Single(llm.RequestedItemCounts.Where(c => c == 12));
-        Assert.Equal(2, llm.RequestedItemCounts.Count(c => c == 6));
+        // Depth-first halving, left half reprocessed first: 23 -> 11 + 12; 11 -> 5 + 6;
+        // 5 -> 2 + 3; 6 -> 3 + 3; then 12 -> 6 + 6, each 6 -> 3 + 3. Anything <= 4 succeeds.
+        Assert.Equal(
+            new[] { 23, 11, 5, 2, 3, 6, 3, 3, 12, 6, 3, 3, 6, 3, 3 },
+            llm.RequestedItemCounts);
+        // No truncated request is ever replayed at the same size: a truncation is always
+        // followed immediately by a STRICTLY SMALLER request (the left half).
+        var counts = llm.RequestedItemCounts;
+        for (var i = 0; i < counts.Count - 1; i++)
+            if (counts[i] > 4) // > truncateAboveItems, i.e. this request truncated
+                Assert.True(counts[i + 1] < counts[i],
+                    $"request {i} truncated at {counts[i]} item(s) and the next request asked "
+                    + $"for {counts[i + 1]} — a truncated size must never be re-issued.");
         // Conservation still holds: every parsed row came back.
         Assert.Equal(ExtractionOutcomeStatus.Ok, outcome.Status);
         Assert.Equal(planned, outcome.ExpectedItemCount);
@@ -196,8 +457,8 @@ public class ChunkedExtractionServiceTests
     [Fact]
     public async Task OutputTruncation_OfASingleItem_FailsThatItemHonestly_AndDoesNotLoop()
     {
-        // Nothing left to halve. The item must fail — visibly, with the count mismatch
-        // guard firing — rather than the extractor looping forever trying to shrink it.
+        // Nothing left to halve. The item must fail — visibly, as a failed chunk —
+        // rather than the extractor looping forever trying to shrink it.
         var llm = new BudgetedStubLlm(maxOutputTokens: 8192, truncateAboveItems: 0);
 
         var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(3)));

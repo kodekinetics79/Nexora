@@ -72,6 +72,28 @@ public sealed class ExtractionJobMetadata
     /// </summary>
     public IReadOnlyList<string>? SkippedAttachments { get; set; }
 
+    /// <summary>
+    /// Shape of the submitted text, set by the intake door. <c>"prose"</c> marks a
+    /// conversational email BODY — free text with no table and no line-item rows — which the
+    /// extraction worker routes to the conversational extractor instead of the structured
+    /// RFQ prompt. Null (the default) keeps the existing structured/unstructured routing
+    /// exactly as it was. Attachment jobs never carry it: an attachment is a document.
+    /// </summary>
+    public string? BodyShape { get; set; }
+
+    /// <summary>The intake gate's decision for the source message
+    /// (<c>Inquiry</c> | <c>CommercialNonInquiry</c> | <c>Noise</c> | <c>Uncertain</c>).
+    /// Diagnostic provenance: a noise message never produces a job at all.</summary>
+    public string? TriageOutcome { get; set; }
+
+    /// <summary>Stable snake_case reason codes behind <see cref="TriageOutcome"/>.</summary>
+    public IReadOnlyList<string>? TriageReasonCodes { get; set; }
+
+    /// <summary>True when the source message was a reply/forward (In-Reply-To or References).
+    /// The conversational path flags such a lead for review rather than minting a silent
+    /// duplicate of an inquiry that is already in the system.</summary>
+    public bool? ThreadContinuation { get; set; }
+
     public static bool IsNonLeadCommercialType(string? value) =>
         !string.IsNullOrWhiteSpace(value) &&
         !value.Equals("CUSTOMER_RFQ", StringComparison.OrdinalIgnoreCase) &&

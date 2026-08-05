@@ -156,6 +156,8 @@ namespace ERP_RFQ_Automation.Services
                     ProductId = i.ProductId,
                     ItemDescription = i.ItemDescription,
                     Quantity = i.Quantity,
+                    UnitOfMeasure = i.UnitOfMeasure,
+                    CustomerLineRef = i.CustomerLineRef,
                     UnitPrice = i.UnitPrice,
                     // TotalAmount calculated later
                     DiscountTypeId = i.DiscountTypeId,
@@ -264,6 +266,11 @@ namespace ERP_RFQ_Automation.Services
                         ProductId = item.ProductId,
                         ItemDescription = item.ProductShortDescription ?? item.ProductShortName ?? item.ItemText ?? item.ItemMaterialCode,
                         Quantity = item.Quantity,
+                        // The draft gate above refuses a blank UnitOfMeasure — keep what it
+                        // validated instead of throwing it away, and carry the buyer's own
+                        // line number so the printed quote can echo their reference back.
+                        UnitOfMeasure = item.UnitOfMeasure,
+                        CustomerLineRef = item.LineItemNo,
                         UnitPrice = 0m,
                         TotalAmount = 0m,
                         TaxAmount = null,
@@ -368,6 +375,11 @@ namespace ERP_RFQ_Automation.Services
                             existingItem.ProductId = itemDto.ProductId;
                             existingItem.ItemDescription = itemDto.ItemDescription;
                             existingItem.Quantity = itemDto.Quantity;
+                            // Preserve-when-absent: the edit UI shows these read-only, and an
+                            // older client that omits them must not silently strip the unit or
+                            // the buyer's line reference from an RFQ-born line.
+                            existingItem.UnitOfMeasure = itemDto.UnitOfMeasure ?? existingItem.UnitOfMeasure;
+                            existingItem.CustomerLineRef = itemDto.CustomerLineRef ?? existingItem.CustomerLineRef;
                             existingItem.UnitPrice = itemDto.UnitPrice;
                             existingItem.DiscountTypeId = itemDto.DiscountTypeId;
                             existingItem.DiscountValue = itemDto.DiscountValue;
@@ -386,6 +398,8 @@ namespace ERP_RFQ_Automation.Services
                         ProductId = itemDto.ProductId,
                         ItemDescription = itemDto.ItemDescription,
                         Quantity = itemDto.Quantity,
+                        UnitOfMeasure = itemDto.UnitOfMeasure,
+                        CustomerLineRef = itemDto.CustomerLineRef,
                         UnitPrice = itemDto.UnitPrice,
                         DiscountTypeId = itemDto.DiscountTypeId,
                         DiscountValue = itemDto.DiscountValue,
@@ -487,6 +501,21 @@ namespace ERP_RFQ_Automation.Services
         // Rounds a monetary value to the 2-decimal currency scale used on printed documents
         // (FIN-09). Half-away-from-zero matches standard commercial/accounting rounding.
         private static decimal RoundCurrency(decimal value) => Math.Round(value, 2, MidpointRounding.AwayFromZero);
+
+        /// <summary>
+        /// Deterministic line order for every read surface (PDF + DTO): lines carrying the
+        /// buyer's own reference come first in that reference's order — numerically when the
+        /// reference is a number so SAP-style "00010" &lt; "00020" &lt; "00100" (ordinal text
+        /// would put "2" after "10") — then unreferenced lines in stable insertion (Id) order.
+        /// A quote line collection loaded via Include carries no ordering guarantee at all,
+        /// so without this the printed line sequence could differ between two exports.
+        /// </summary>
+        internal static IReadOnlyList<QuoteItem> OrderQuoteLines(IEnumerable<QuoteItem> items) => items
+            .OrderBy(i => string.IsNullOrWhiteSpace(i.CustomerLineRef) ? 1 : 0)
+            .ThenBy(i => long.TryParse(i.CustomerLineRef, out var n) ? n : long.MaxValue)
+            .ThenBy(i => i.CustomerLineRef, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(i => i.Id)
+            .ToList();
 
         // FIN-12: server-side guard rejecting non-positive quantities/prices and negative tax.
         private static void ValidateQuoteItemFinancials(decimal quantity, decimal unitPrice, decimal? taxAmount)
@@ -601,7 +630,7 @@ namespace ERP_RFQ_Automation.Services
                 DiscountTypeName = quote.DiscountType?.Description,
                 DiscountValue = quote.DiscountValue,
                 CustomerEmail = quote.Customer?.ContactEmail, // Map email
-                QuoteItems = quote.QuoteItems.Select(i => new QuoteItemResponseDTO
+                QuoteItems = OrderQuoteLines(quote.QuoteItems).Select(i => new QuoteItemResponseDTO
                 {
                     Id = i.Id,
                     QuoteId = i.QuoteId,
@@ -610,6 +639,8 @@ namespace ERP_RFQ_Automation.Services
                     ProductName = i.Product?.ProductName,
                     ItemDescription = i.ItemDescription,
                     Quantity = i.Quantity,
+                    UnitOfMeasure = i.UnitOfMeasure,
+                    CustomerLineRef = i.CustomerLineRef,
                     UnitPrice = i.UnitPrice,
                     TotalAmount = i.TotalAmount,
                     Discount = i.Discount, // Calculated Amount
@@ -691,6 +722,15 @@ namespace ERP_RFQ_Automation.Services
                 if (headerDiscount < 0) headerDiscount = 0;
             }
 
+            // The buyer's own RFQ number: Lead.Rfqno is the value the customer sent us;
+            // Rfq.Rfqno equals it when it existed and is a synthetic internal serial otherwise,
+            // so it is only a fallback. A procurement buyer files our quote under THEIR number.
+            string customerRfqReference = quote.Rfq?.Lead?.Rfqno ?? quote.Rfq?.Rfqno;
+
+            // Deterministic print order: buyer's line references first (numeric-aware), then
+            // unreferenced lines by insertion order. See OrderQuoteLines.
+            var orderedItems = OrderQuoteLines(quote.QuoteItems);
+
             QuestPDF.Settings.License = LicenseType.Community;
 
             var document = Document.Create(container =>
@@ -743,6 +783,8 @@ namespace ERP_RFQ_Automation.Services
                                 {
                                     info.Spacing(2);
                                     info.Item().Text(t => { t.Span("Reference No: ").SemiBold(); t.Span(quote.QuoteNo); });
+                                    if (!string.IsNullOrWhiteSpace(customerRfqReference))
+                                        info.Item().Text(t => { t.Span("Your RFQ Reference: ").SemiBold(); t.Span(customerRfqReference); });
                                     info.Item().Text(t => { t.Span("Quote Date: ").SemiBold(); t.Span($"{quote.QuoteDate:MMM dd, yyyy}"); });
                                     info.Item().Text(t => { t.Span("Valid Until: ").SemiBold(); t.Span($"{quote.ValidUntil:MMM dd, yyyy}"); });
                                 });
@@ -794,9 +836,10 @@ namespace ERP_RFQ_Automation.Services
                         {
                             table.ColumnsDefinition(columns =>
                             {
-                                columns.ConstantColumn(30);
+                                columns.ConstantColumn(50);   // buyer's line ref ("00010", "OPT-29") — wider than the old synthetic index
                                 columns.RelativeColumn(5);
                                 columns.ConstantColumn(50);
+                                columns.ConstantColumn(40);   // unit of measure
                                 columns.ConstantColumn(80);
                                 columns.ConstantColumn(80);
                             });
@@ -805,20 +848,24 @@ namespace ERP_RFQ_Automation.Services
                             {
                                 IContainer CellStyle(IContainer container) => container.Background(primaryColor).PaddingVertical(10).PaddingHorizontal(5).DefaultTextStyle(x => x.SemiBold().FontSize(9).FontColor(Colors.White));
 
-                                header.Cell().Element(CellStyle).Text("#");
+                                header.Cell().Element(CellStyle).Text("Your Ref");
                                 header.Cell().Element(CellStyle).Text("Description");
                                 header.Cell().Element(CellStyle).AlignRight().Text("Qty");
+                                header.Cell().Element(CellStyle).Text("UOM");
                                 header.Cell().Element(CellStyle).AlignRight().Text("Unit Price");
                                 header.Cell().Element(CellStyle).AlignRight().Text("Total");
                             });
 
-                            foreach (var item in quote.QuoteItems.Select((x, i) => new { x, i }))
+                            foreach (var item in orderedItems.Select((x, i) => new { x, i }))
                             {
                                 var backgroundColor = item.i % 2 == 0 ? Colors.White : Colors.Grey.Lighten5;
 
                                 IContainer RowStyle(IContainer container) => container.Background(backgroundColor).BorderBottom(1).BorderColor(Colors.Grey.Lighten4).PaddingVertical(8).PaddingHorizontal(5);
 
-                                table.Cell().Element(RowStyle).Text((item.i + 1).ToString());
+                                // The buyer's own line reference lets them match this line against
+                                // their RFQ; the synthetic 1,2,3 is only the legacy-row fallback.
+                                table.Cell().Element(RowStyle).Text(
+                                    string.IsNullOrWhiteSpace(item.x.CustomerLineRef) ? (item.i + 1).ToString() : item.x.CustomerLineRef);
                                 table.Cell().Element(RowStyle).Column(c =>
                                 {
                                     c.Item().Text(item.x.ItemDescription).SemiBold();
@@ -826,6 +873,7 @@ namespace ERP_RFQ_Automation.Services
                                         c.Item().Text($"Discount: {quote.Currency?.Code} {item.x.Discount:N2}").FontSize(8).Italic().FontColor(Colors.Red.Medium);
                                 });
                                 table.Cell().Element(RowStyle).AlignRight().Text(item.x.Quantity.ToString("N0"));
+                                table.Cell().Element(RowStyle).Text(item.x.UnitOfMeasure ?? string.Empty);
                                 table.Cell().Element(RowStyle).AlignRight().Text(item.x.UnitPrice.ToString("N2"));
                                 table.Cell().Element(RowStyle).AlignRight().Text(item.x.TotalAmount.ToString("N2")).Bold();
                             }
@@ -1129,6 +1177,8 @@ namespace ERP_RFQ_Automation.Services
                     ProductId = i.ProductId,
                     ItemDescription = i.ItemDescription,
                     Quantity = i.Quantity,
+                    UnitOfMeasure = i.UnitOfMeasure,
+                    CustomerLineRef = i.CustomerLineRef,
                     UnitPrice = i.UnitPrice,
                     DiscountTypeId = i.DiscountTypeId,
                     DiscountValue = i.DiscountValue,

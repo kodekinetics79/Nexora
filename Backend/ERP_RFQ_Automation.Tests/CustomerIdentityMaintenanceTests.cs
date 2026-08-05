@@ -98,6 +98,66 @@ public sealed class CustomerIdentityMaintenanceTests
         Assert.Empty(active);
     }
 
+    [Fact]
+    public async Task Synchronize_never_expires_what_a_reviewer_taught()
+    {
+        // The learning loop writes Source = "LeadReviewLearned", which is deliberately
+        // ABSENT from ManagedSources. If a customer-profile sync could expire it, every
+        // client correction a rep made would quietly evaporate the next time someone edited
+        // the customer record — and the same document would come back unresolved.
+        using var database = new TestDb();
+        await using var db = database.ContextFor(null);
+        Seed.EnsureBusinessUnit(db, 41);
+        var customer = Customer(41, "CU00000041", "Saudi Electricity Company", "profile@se.com.sa");
+        db.Customers.Add(customer);
+        await db.SaveChangesAsync();
+        await CustomerIdentityMaintenance.SynchronizeAsync(db, 41, customer.Id, "CustomerProfile");
+        await db.SaveChangesAsync();
+
+        db.AddRange(
+            Learned(customer.Id, CustomerIdentifierType.Alias, "SEC", "SEC", true, 0.90m),
+            Learned(customer.Id, CustomerIdentifierType.PortalAccount,
+                "MATERIALS E BIDDING SYSTEM|2004414", "MATERIALS E-BIDDING SYSTEM / 2004414", true, 0.92m),
+            Learned(customer.Id, CustomerIdentifierType.RfqNumberPattern,
+                "^C\\d{9}$", "C001046556", false, 0.50m));
+        await db.SaveChangesAsync();
+
+        // The customer record is renamed and re-synced: everything MANAGED is rebuilt.
+        customer.Name = "Saudi Electricity Co.";
+        customer.ContactEmail = "newprofile@se.com.sa";
+        await db.SaveChangesAsync();
+        await CustomerIdentityMaintenance.SynchronizeAsync(db, 41, customer.Id, "CustomerProfile");
+        await db.SaveChangesAsync();
+
+        var active = await db.Set<CustomerIdentifier>().AsNoTracking()
+            .Where(i => i.BusinessUnitId == 41 && i.CustomerId == customer.Id && i.EffectiveTo == null)
+            .ToListAsync();
+        var learned = active.Where(i => i.Source == "LeadReviewLearned").ToList();
+        Assert.Equal(3, learned.Count);
+        Assert.Contains(learned, i => i.IdentifierType == CustomerIdentifierType.Alias && i.NormalizedValue == "SEC");
+        Assert.Contains(learned, i => i.IdentifierType == CustomerIdentifierType.PortalAccount);
+        Assert.Contains(learned, i => i.IdentifierType == CustomerIdentifierType.RfqNumberPattern && !i.IsVerified);
+        // The managed side still did its job.
+        Assert.Contains(active, i => i.NormalizedValue == "newprofile@se.com.sa");
+
+        static CustomerIdentifier Learned(
+            long customerId, CustomerIdentifierType type, string normalized, string display,
+            bool verified, decimal confidence) => new()
+            {
+                BusinessUnitId = 41,
+                CustomerId = customerId,
+                IdentifierType = type,
+                NormalizedValue = normalized,
+                DisplayValue = display,
+                IsVerified = verified,
+                Confidence = confidence,
+                Source = "LeadReviewLearned",
+                EffectiveFrom = DateTime.UtcNow,
+                ObservationCount = 1,
+                LastObservedOn = DateTime.UtcNow
+            };
+    }
+
     private static Customer Customer(long tenantId, string docId, string name, string email) => new()
     {
         Buid = tenantId,

@@ -37,6 +37,13 @@ namespace ERP_RFQ_Automation.Interfaces
 
         Task<LeadResponseDTO?> GetLeadByIdAsync(long id, long businessUnitId);
 
+        /// <summary>
+        /// The ranked client-organisation proposals the resolver persisted for this lead,
+        /// each with the reason a rep can read. Read-only — confirming one goes through the
+        /// review endpoint, like every other human decision about a lead.
+        /// </summary>
+        Task<List<ClientCandidateDTO>> GetClientCandidatesAsync(long id, long businessUnitId);
+
         Task<LeadStatsDTO> GetLeadStatsAsync(long businessUnitId);
 
         // Extraction review workbench

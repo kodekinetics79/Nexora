@@ -1,4 +1,6 @@
 using ERP_RFQ_Automation.Models;
+using Microsoft.EntityFrameworkCore;
+using Models = ERP_RFQ_Automation.Models;
 
 namespace ERP_RFQ_Automation.Tests.Support;
 
@@ -104,6 +106,68 @@ public static class Seed
             foreach (var it in items) lead.LeadItems.Add(it);
 
         ctx.Leads.Add(lead);
+        return lead;
+    }
+
+    /// <summary>
+    /// A Lead row for MIGRATION REHEARSALS — tests that migrate down to a historical
+    /// migration, seed data, and migrate forward again.
+    ///
+    /// Those tests run the CURRENT EF model against an OLD schema, so seeding through
+    /// <see cref="Lead"/> (or <see cref="EmailIngest"/>) breaks the moment ANY later
+    /// migration adds a column: EF names every column the model knows and PostgreSQL answers
+    /// 42703. That is not a defect in the migration under test, and pinning each rehearsal to
+    /// its own era is the fix already used by
+    /// <c>Module03SalesRoutingMigrationPostgreSqlTests.SeedOwnersAsync</c>.
+    ///
+    /// So: raw SQL naming ONLY columns that predate every rehearsal target (everything else
+    /// is nullable or database-defaulted, and CommercialCaseId/CommercialCaseReference come
+    /// from the reference trigger), no EmailIngest at all, and the returned entity is
+    /// ATTACHED as Unchanged so navigation properties still work without EF ever selecting or
+    /// writing the lead itself.
+    /// </summary>
+    public static Lead HistoricalLead(
+        ErpRfqAutomationContext ctx, long leadId, long businessUnitId, string? buyersName = "Acme Buyer")
+    {
+        if (ctx.BusinessUnits.Find(businessUnitId) is null)
+            BusinessUnit(ctx, businessUnitId);
+        // Flush whatever the caller staged (its own business units and their reference
+        // configuration) so the raw INSERT below has its foreign-key targets.
+        if (ctx.ChangeTracker.HasChanges())
+            ctx.SaveChanges();
+
+        ctx.Database.ExecuteSql($"""
+            INSERT INTO "Leads" ("ID", "BusinessUnitID", "RFQNo", "BuyersName", "RecDate", "LeadSource", "CreatedBy")
+            VALUES ({leadId}, {businessUnitId}, {$"RFQ-{leadId}"}, {buyersName}, now(), 'Email', 'seed')
+            """);
+
+        // The Nexora Serial is allocated by the reference trigger, and downstream commercial
+        // records refuse a lead without one. Read it back with a two-column PROJECTION —
+        // loading the entity would select every column the current model knows and defeat
+        // the whole point of this helper.
+        var identity = ctx.Leads.IgnoreQueryFilters()
+            .Where(x => x.Id == leadId)
+            .Select(x => new { x.CommercialCaseId, x.CommercialCaseReference })
+            .Single();
+
+        var lead = new Lead
+        {
+            Id = leadId,
+            Rfqno = $"RFQ-{leadId}",
+            BuyersName = buyersName,
+            RecDate = Now,
+            LeadSource = "Email",
+            CreatedBy = "seed",
+            CreatedDate = Now,
+            BusinessUnitId = businessUnitId
+        };
+        // Private setters, deliberately: the commercial identity is assigned by the domain,
+        // never by a caller. Mirroring the database values onto the stub keeps that rule.
+        typeof(Models.Lead).GetProperty(nameof(Models.Lead.CommercialCaseId))!.SetValue(lead, identity.CommercialCaseId);
+        typeof(Models.Lead).GetProperty(nameof(Models.Lead.CommercialCaseReference))!.SetValue(lead, identity.CommercialCaseReference);
+
+        // Unchanged, so EF never re-inserts it and never selects its columns.
+        ctx.Attach(lead);
         return lead;
     }
 

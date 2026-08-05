@@ -18,6 +18,15 @@ export interface NeedsReviewItem {
   reviewReason: string | null;
   receivedOn: string | null;
   reviewVersion: number;
+  /**
+   * Lines on this document with a blank required field or a flagged source
+   * check. Optional: older backends do not compute it, and the queue then shows
+   * the line count alone rather than inventing a figure.
+   *
+   * NOTE: `aiconfidence` is still on the wire but is deliberately not rendered
+   * anywhere. It is not a measured accuracy — see pages/ExtractionReview/needsCheck.ts.
+   */
+  linesNeedingCheck?: number | null;
 }
 
 export interface NeedsReviewParams {
@@ -27,12 +36,28 @@ export interface NeedsReviewParams {
 }
 
 // Editable header fields the reviewer can correct before saving/approving.
+// Only fields present in the payload are applied server-side (LeadReviewHeaderDTO:
+// "Only non-null fields are applied to the lead on save/approve").
 export interface ReviewHeaderPayload {
   rfqno?: string;
   buyersName?: string;
   bidClosingDate?: string;
   opportunityNo?: string;
   headerRemarks?: string;
+  /**
+   * The client organisation this lead came from. Accepted by the backend since
+   * LeadReviewHeaderDTO gained CustomerId/ContactId, and the ONLY write path that
+   * sets a lead's customer — a human confirming it here is also what seeds the
+   * alias learning loop. Omit to leave the current link untouched; the endpoint
+   * has no "clear the customer" instruction.
+   */
+  customerId?: number;
+  /**
+   * The buying contact inside that customer. The backend rejects a contact
+   * without a customer (unless the lead already has one) and rejects a contact
+   * that belongs to a different customer.
+   */
+  contactId?: number;
 }
 
 // Editable line-item fields. `id` is present for existing rows and omitted for
@@ -162,6 +187,78 @@ export interface LeadProcessingEvidence {
   externalCostStatus: string;
 }
 
+// ─── Glass-box field evidence ───────────────────────────────────────────────
+// One row per extracted value that the evidence ledger could tie back to a
+// place in the customer's document: FieldEvidence -> DocumentRegion (bbox +
+// SourceAddress, e.g. 'Sheet1'!B7) -> DocumentPage.
+//
+// The ledger is only written on the structured-spreadsheet path today; PDF/OCR
+// runs discard word boxes. Every consumer therefore has to treat "no entry" as
+// the normal case and say so plainly ("Source not mapped for this document")
+// rather than implying the value is unsourced or wrong.
+export interface LeadFieldEvidenceEntry {
+  /** Canonical field name, e.g. "quantity" or "productShortDescription". */
+  fieldName: string;
+  /** The LeadItem this value belongs to; null/absent for header-level fields. */
+  lineItemId?: number | null;
+  /** Human-quotable address inside the source document, e.g. "Sheet1!B7". */
+  sourceAddress?: string | null;
+  pageNumber?: number | null;
+  sheetName?: string | null;
+  rawValue?: string | null;
+  normalizedValue?: string | null;
+  valueKind?: string | null;
+  /** Unvalidated | Valid | Warning | Invalid (FieldValidationStatus). */
+  validationStatus?: string | null;
+  extractor?: string | null;
+  /**
+   * Normalisation steps applied between raw and normalized. The backend stores
+   * this as a JSON string (TransformationsJson); accept either shape so the UI
+   * works against whichever the endpoint settles on.
+   */
+  transformations?: string[] | null;
+  transformationsJson?: string | null;
+  runId?: string | null;
+  createdOn?: string | null;
+}
+
+export interface LeadFieldEvidenceResponse {
+  leadId: number;
+  entries: LeadFieldEvidenceEntry[];
+  /**
+   * Whether the extraction path for this document wrote a source-address
+   * ledger at all. Absent on older backends — callers should fall back to
+   * `entries.length > 0`.
+   */
+  mapped?: boolean;
+}
+
+/** Normalises the two accepted transformation shapes into a plain string list. */
+export const parseTransformations = (entry: LeadFieldEvidenceEntry): string[] => {
+  if (Array.isArray(entry.transformations)) {
+    return entry.transformations.filter((step): step is string => typeof step === 'string' && step.length > 0);
+  }
+  const raw = entry.transformationsJson;
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed.map((step) => (typeof step === 'string' ? step : JSON.stringify(step))).filter(Boolean);
+    }
+    if (parsed && typeof parsed === 'object') {
+      return Object.entries(parsed as Record<string, unknown>).map(([key, value]) => `${key}: ${String(value)}`);
+    }
+  } catch {
+    // Not JSON — show the stored string verbatim rather than dropping evidence.
+    return [raw];
+  }
+  return [];
+};
+
+/** Key used to look an entry up by (line item, field). Header fields use 0. */
+export const fieldEvidenceKey = (lineItemId: number | null | undefined, fieldName: string): string =>
+  `${lineItemId ?? 0}::${fieldName.toLowerCase()}`;
+
 export type ProcessingEvidenceResource = 'rfqs' | 'supplier-quotes' | 'client-purchase-orders';
 
 const readProcessingEvidence = async (path: string): Promise<LeadProcessingEvidence | null> => {
@@ -187,6 +284,33 @@ const extractionReviewService = {
 
   getProcessingEvidence: async (leadId: number): Promise<LeadProcessingEvidence | null> => {
     return readProcessingEvidence(`/api/processing-evidence/leads/${leadId}`);
+  },
+
+  /**
+   * Per-field source addresses for one lead. Returns null — never throws — when
+   * the endpoint is not deployed yet (404), returns no content (204), or the
+   * caller is not entitled to it (403), so the review screen degrades to an
+   * honest "Source not mapped for this document" instead of an error banner.
+   */
+  getFieldEvidence: async (leadId: number): Promise<LeadFieldEvidenceResponse | null> => {
+    try {
+      const response = await axiosInstance.get<LeadFieldEvidenceResponse>(
+        // Route is `/fields` — ProcessingEvidenceController.LeadFields. This read
+        // `/field-evidence`, which no controller has ever served, so every call 404'd
+        // and the 404 was swallowed into `null` by the catch below. The result was a
+        // per-field provenance panel that was fully built on both sides and permanently
+        // rendered "Source not mapped for this document" for every lead.
+        `/api/processing-evidence/leads/${leadId}/fields`,
+      );
+      if (response.status === 204 || !response.data) return null;
+      return { ...response.data, entries: response.data.entries ?? [] };
+    } catch (error: unknown) {
+      if (axios.isAxiosError(error)) {
+        const status = error.response?.status;
+        if (status === 404 || status === 403 || status === 501) return null;
+      }
+      throw error;
+    }
   },
 
   getCommercialProcessingEvidence: (

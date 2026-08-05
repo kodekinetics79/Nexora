@@ -61,7 +61,10 @@ public sealed class DocumentFileInspectionServiceTests
             "application/vnd.ms-excel");
 
         Assert.Equal(FileInspectionStatus.Rejected, result.Status);
-        Assert.Contains("Macro-enabled", result.Reason, StringComparison.OrdinalIgnoreCase);
+        // Blocking is the control; naming the cause and the remedy is the message. Both are pinned
+        // in detail by MacroPolicyAndRejectionTruthTests.
+        Assert.Equal(DocumentInspectionErrorCodes.MacroEnabledDocument, result.ErrorCode);
+        Assert.Contains("macros", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Theory]
@@ -115,7 +118,8 @@ public sealed class DocumentFileInspectionServiceTests
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             xlsxResult.DetectedContentType);
         Assert.Equal(FileInspectionStatus.Rejected, xlsmResult.Status);
-        Assert.Contains("Macro-enabled", xlsmResult.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(DocumentInspectionErrorCodes.MacroEnabledDocument, xlsmResult.ErrorCode);
+        Assert.Contains("macros", xlsmResult.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

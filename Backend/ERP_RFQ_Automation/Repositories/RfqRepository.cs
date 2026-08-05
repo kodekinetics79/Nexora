@@ -498,6 +498,28 @@ namespace ERP_RFQ_Automation.Repositories
             // the prices the customer is quoted.
             var headerCurrencyId = await ResolveQuoteHeaderCurrencyAsync(rfq);
 
+            // QUANTITY GATE. This method does not just create a Quote — RfqController.ApproveAsync
+            // calls SendQuoteEmailAsync in the SAME request, and QuoteDeliveryWorker then mails the
+            // PDF unattended. Nothing between this line and the customer's inbox displays a
+            // quantity, so this is the last place a bad one can be stopped.
+            //
+            // A quantity of 0 means "never established" (the ingestion doors write 0 when the
+            // source had no readable quantity). Quoting it would tell the customer we are
+            // offering zero of what they asked for; historically the Excel door wrote 1 instead,
+            // which is worse because it looks deliberate. Fail closed and name the lines.
+            var unquotableLines = rfq.Rfqitems
+                .Where(i => i.Quantity <= 0)
+                .Select(i => i.ProductShortName ?? i.ProductShortDescription ?? $"line {i.Id}")
+                .ToArray();
+
+            if (unquotableLines.Length > 0)
+            {
+                throw new InvalidOperationException(
+                    "Cannot approve: no quantity was established for " +
+                    $"{string.Join(", ", unquotableLines)}. Confirm the quantity in extraction review before approving — " +
+                    "approving sends the quote to the customer.");
+            }
+
             // Create Quote
             var quote = new Quote
             {
@@ -520,6 +542,11 @@ namespace ERP_RFQ_Automation.Repositories
                     ProductId = i.ProductId,
                     ItemDescription = i.ProductShortDescription ?? i.ProductShortName ?? i.ItemText,
                     Quantity = i.Quantity,
+                    // Carry the unit and the buyer's own line reference onto the quote line —
+                    // the printed document must say what "Qty 500" is 500 OF, and must let the
+                    // buyer match our line back to their RFQ line (SAP "00010", "OPT-29", …).
+                    UnitOfMeasure = i.UnitOfMeasure,
+                    CustomerLineRef = i.LineItemNo,
                     UnitPrice = i.UnitPrice ?? 0,
                     TotalAmount = i.Quantity * (i.UnitPrice ?? 0),
                     CreatedBy = approvedBy,

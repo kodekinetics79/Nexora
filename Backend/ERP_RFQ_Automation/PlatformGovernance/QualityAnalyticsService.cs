@@ -58,6 +58,11 @@ public sealed class QualityAnalyticsService(ErpRfqAutomationContext db)
             && x.CreatedOn >= fromDate.UtcDateTime && x.CreatedOn <= toDate.UtcDateTime).ToListAsync(ct);
         var actions = await db.HumanActionItems.AsNoTracking().Where(x => x.BusinessUnitId == tenantId
             && x.CreatedOn >= fromDate.UtcDateTime && x.CreatedOn <= toDate.UtcDateTime).ToListAsync(ct);
+        // Ground truth accumulated so far. Deliberately NOT windowed: a labelled document
+        // does not stop being a labelled document because the reporting window moved.
+        var labelledDocuments = await db.Set<ExtractionCorpusEntry>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == tenantId)
+            .Select(x => x.LeadReviewAuditId).Distinct().LongCountAsync(ct);
 
         var terminal = occurrences.Count(x => x.Occurrence.IntakeStatus is IntakeOccurrenceStatus.Resolved
             or IntakeOccurrenceStatus.ReviewRequired or IntakeOccurrenceStatus.Rejected
@@ -111,7 +116,21 @@ public sealed class QualityAnalyticsService(ErpRfqAutomationContext db)
             Duration("turnaround-p50", "Extraction turnaround p50", durationMinutes, .50m),
             Duration("turnaround-p95", "Extraction turnaround p95", durationMinutes, .95m),
             Rate("action-completion", "Human action completion", actions.Count(x => x.Status == HumanActionStatus.Completed),
-                actions.Count, "Completed governed human actions / governed human actions created in the period.", "actions", thresholds.MinimumSampleSize)
+                actions.Count, "Completed governed human actions / governed human actions created in the period.", "actions", thresholds.MinimumSampleSize),
+            // Progress toward a publishable accuracy figure. Carries a COUNT and no value:
+            // "4 of 30 approved documents" is the honest state of the evidence, and a
+            // percentage here would be read as an accuracy the moment it appeared on a
+            // screen next to nine other percentages.
+            new("accuracy-corpus", "Labelled documents toward a published accuracy figure", null,
+                "documents", labelledDocuments,
+                ERP_RFQ_Automation.Services.Measurement.AccuracyMeasurementService.MinimumDocuments,
+                "Documents whose extraction a reviewer has approved, becoming ground truth. "
+                + $"At {ERP_RFQ_Automation.Services.Measurement.AccuracyMeasurementService.MinimumDocuments} "
+                + "per field and extraction path, a 95% Wilson lower bound is published. "
+                + "This row is a sample size, never an accuracy.",
+                labelledDocuments >= ERP_RFQ_Automation.Services.Measurement.AccuracyMeasurementService.MinimumDocuments
+                    ? "Measured" : "InsufficientEvidence",
+                "accuracy-corpus")
         };
 
         var causes = occurrences.Where(x => !string.IsNullOrWhiteSpace(x.Occurrence.LastErrorCode))
@@ -133,7 +152,13 @@ public sealed class QualityAnalyticsService(ErpRfqAutomationContext db)
         }).Where(x => MatchesDrilldown(x, drilldown)).OrderByDescending(x => x.IngestedOn).Take(100).ToList();
         var recommendations = Recommendations(metrics, causes, thresholds);
         return new(fromDate, toDate, metrics, causes, records, recommendations, thresholds.DefinitionVersion,
-            "True extraction and document-type accuracy require an independently labeled evaluation corpus. Until that corpus exists, Nexora reports validation and acceptance rates separately and marks unsupported denominators as insufficient evidence.");
+            "None of the rates on this page is an extraction accuracy, and none should be quoted as one. "
+            + "They describe validation outcomes, routing and throughput. Measured accuracy requires labelled "
+            + "ground truth, which Nexora now harvests from reviewers' own corrections on approved documents "
+            + $"({labelledDocuments} collected so far). A per-field figure is published, as a 95% Wilson lower "
+            + $"bound, once {ERP_RFQ_Automation.Services.Measurement.AccuracyMeasurementService.MinimumDocuments} "
+            + "approved documents exist for a given field and extraction path; below that the accuracy endpoint "
+            + "returns counts and no percentage.");
     }
 
     private static QualityMetric Rate(string key, string label, long numerator, long denominator,

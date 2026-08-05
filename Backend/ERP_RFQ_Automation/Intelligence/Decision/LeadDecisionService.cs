@@ -218,9 +218,22 @@ public sealed class LeadDecisionService : ILeadDecisionService
             Customer = customer,
             Deadline = deadline
         };
-        (brief.Recommendation, brief.Reasons) = Recommend(brief, lead.Aiconfidence);
+        // Coverage is only evidence when there is a catalog to be covered BY. A tenant
+        // with no product identities scores 0% on every lead, which the rules below used
+        // to read as "skip" — on 100% of inbound enquiries.
+        var catalogAssessable = await CatalogHasIdentitiesAsync(businessUnitId, ct);
+        (brief.Recommendation, brief.Reasons) = Recommend(brief, lead.Aiconfidence, catalogAssessable);
         return brief;
     }
+
+    /// <summary>
+    /// Does this tenant hold any product the coverage rule could match against? One cheap
+    /// existence check. False means coverage is unmeasurable, not zero — the distinction
+    /// between "we stock none of this" and "we have not loaded a catalog" is the whole
+    /// difference between advice and noise.
+    /// </summary>
+    private async Task<bool> CatalogHasIdentitiesAsync(long businessUnitId, CancellationToken ct) =>
+        await ActiveProducts(businessUnitId).AnyAsync(p => p.PartNo != "", ct);
 
     // ================================================================ summaries
 
@@ -266,6 +279,11 @@ public sealed class LeadDecisionService : ILeadDecisionService
                    .ToListAsync(ct))
               .ToHashSet(StringComparer.Ordinal);
 
+        // Same guard as the full brief: with no catalog loaded, coverage is 0% on every
+        // lead and the skip rule fires on 100% of inbound. One existence check, hoisted
+        // out of the per-lead loop.
+        var catalogAssessable = await CatalogHasIdentitiesAsync(businessUnitId, ct);
+
         var now = DateTime.UtcNow;
         foreach (var lead in leads)
         {
@@ -294,9 +312,14 @@ public sealed class LeadDecisionService : ILeadDecisionService
 
             // Summaries intentionally cannot emit actionable Bid because customer
             // identity and weighted margin evidence are not evaluated in this path.
+            // Mirrors Recommend(): overdue is document evidence and still yields skip,
+            // but a coverage-driven skip requires a catalog to have measured coverage
+            // against, and a lead with no extracted lines has nothing to assess at all.
             var overdue = urgency == LeadDecisionUrgency.Overdue;
             var recommendation =
-                coveragePct < SkipCoveragePct || overdue ? LeadDecisionRecommendations.Skip
+                overdue ? LeadDecisionRecommendations.Skip
+                : !catalogAssessable || total == 0 ? LeadDecisionRecommendations.CannotAssess
+                : coveragePct < SkipCoveragePct ? LeadDecisionRecommendations.Skip
                 : LeadDecisionRecommendations.Review;
 
             result[lead.Id] = new LeadDecisionSummary
@@ -613,11 +636,22 @@ public sealed class LeadDecisionService : ILeadDecisionService
 
     /// <summary>
     /// Transparent rules + plain-language reasons:
-    ///   skip   = coverage &lt; 20% OR overdue
-    ///   bid    = coverage ≥ 60% AND not overdue AND (existing customer OR margin ≥ 15%)
-    ///   review = everything else
+    ///   cannot-assess = no catalog identities to measure coverage against, and not overdue
+    ///   skip          = overdue OR (coverage assessable AND coverage &lt; 20%)
+    ///   bid           = coverage ≥ 60% AND not overdue AND (existing customer OR margin ≥ 15%)
+    ///   review        = everything else
+    ///
+    /// <paramref name="catalogAssessable"/> is the guard that keeps the skip rule honest.
+    /// Coverage is computed as matched-lines / total-lines against the tenant's product
+    /// identities; with no products loaded that ratio is 0 for every lead ever received,
+    /// and the rule then advised skipping 100% of inbound enquiries. A 0% coverage figure
+    /// means "we stock none of this" only when there is a catalog; otherwise it means the
+    /// question was never asked, and the honest output is no recommendation at all.
+    /// Overdue is independent evidence — a passed bid date is a fact about the document,
+    /// not about the catalog — so it still yields skip.
     /// </summary>
-    private static (string recommendation, List<string> reasons) Recommend(LeadDecisionBrief b, decimal? aiConfidence)
+    private static (string recommendation, List<string> reasons) Recommend(
+        LeadDecisionBrief b, decimal? aiConfidence, bool catalogAssessable)
     {
         var reasons = new List<string>();
         var c = b.Coverage;
@@ -626,6 +660,8 @@ public sealed class LeadDecisionService : ILeadDecisionService
         // -- coverage / stock --
         if (c.TotalItems == 0)
             reasons.Add("No line items were extracted for this lead.");
+        else if (!catalogAssessable)
+            reasons.Add("Catalog coverage cannot be assessed — no product identities are loaded for this business unit.");
         else if (c.CoveredItems == 0)
             reasons.Add($"None of the {N0(c.TotalItems)} items match our catalog.");
         else
@@ -693,7 +729,11 @@ public sealed class LeadDecisionService : ILeadDecisionService
             reasons.Add("Low extraction confidence — verify the extracted lines before quoting.");
 
         string recommendation;
-        if (c.CoveragePct < SkipCoveragePct || overdue)
+        if (overdue)
+            recommendation = LeadDecisionRecommendations.Skip;
+        else if (!catalogAssessable || c.TotalItems == 0)
+            recommendation = LeadDecisionRecommendations.CannotAssess;
+        else if (c.CoveragePct < SkipCoveragePct)
             recommendation = LeadDecisionRecommendations.Skip;
         else if (c.CoveragePct >= BidCoveragePct
                  && (b.Customer.IsDecisionGradeIdentity || b.MarginPotentialPct >= BidMarginPct))

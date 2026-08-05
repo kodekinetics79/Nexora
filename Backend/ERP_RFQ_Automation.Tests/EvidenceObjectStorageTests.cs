@@ -104,6 +104,60 @@ public sealed class EvidenceObjectStorageTests : IDisposable
             S3EvidenceObjectStorage.EnsureVersioningEnabled(null));
     }
 
+    [Fact]
+    public async Task LocalStore_PurgesBytesAndReportsWhatItActuallyFreed()
+    {
+        var bytes = Encoding.UTF8.GetBytes("rfq,quantity\nA-1,10\n");
+        var hash = Sha256(bytes);
+        var storage = CreateStorage();
+        var written = await storage.WriteImmutableAsync(17, "cleared", hash, ".csv", bytes);
+
+        // Measured before deleting, so a dry run and the real run agree on the figure.
+        Assert.Equal(bytes.LongLength,
+            await storage.TryMeasureObjectAsync(written.Bucket, written.Key, written.Version));
+
+        var purged = await storage.TryDeletePurgedObjectAsync(written.Bucket, written.Key, written.Version);
+        Assert.True(purged.Deleted);
+        Assert.Equal(bytes.LongLength, purged.BytesFreed);
+        Assert.False(File.Exists(written.StorageUri));
+
+        // Re-running is a no-op that reports zero rather than throwing — the purge is
+        // idempotent and an absent object is a reconciliation, not a failure.
+        var again = await storage.TryDeletePurgedObjectAsync(written.Bucket, written.Key, written.Version);
+        Assert.False(again.Deleted);
+        Assert.Equal(0, again.BytesFreed);
+        Assert.Null(await storage.TryMeasureObjectAsync(written.Bucket, written.Key, written.Version));
+    }
+
+    [Fact]
+    public async Task LocalStore_RefusesToPurgeAKeyThatEscapesTheStorageRoot()
+    {
+        var storage = CreateStorage();
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+            storage.TryDeletePurgedObjectAsync("local", "../../escape.csv", "v1"));
+        // A key that belongs to a different provider is refused rather than resolved
+        // locally, so an S3-written object can never be "purged" by deleting a lookalike
+        // path on disk.
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            storage.TryDeletePurgedObjectAsync("some-s3-bucket", "Evidence/x.csv", "v1"));
+    }
+
+    [Fact]
+    public void S3Purge_TreatsAContentHashAsNoVersionId()
+    {
+        // Local storage records the content hash where S3 records a version id, and a bucket
+        // with versioning suspended returns none at all. Sending a 64-hex hash to S3 as a
+        // VersionId would simply 400; sending a real version id is mandatory, because a
+        // delete WITHOUT one on a versioned bucket only writes a delete marker and frees
+        // nothing while reporting success.
+        Assert.Null(S3EvidenceObjectStorage.NormalizeVersionId(new string('a', 64)));
+        Assert.Null(S3EvidenceObjectStorage.NormalizeVersionId(null));
+        Assert.Null(S3EvidenceObjectStorage.NormalizeVersionId("   "));
+        Assert.Equal("3sL4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY+MTRCxf3vjVBH40Nr8X8gdRQBpUMLUo",
+            S3EvidenceObjectStorage.NormalizeVersionId(
+                " 3sL4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY+MTRCxf3vjVBH40Nr8X8gdRQBpUMLUo "));
+    }
+
     private LocalEvidenceObjectStorage CreateStorage() =>
         new(new LocalFileStorage(_root, _root));
 

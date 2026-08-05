@@ -349,6 +349,12 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.ParseStatus).HasMaxLength(50);
             entity.Property(e => e.RawEmailPath).HasMaxLength(500);
             entity.Property(e => e.ToEmail).HasMaxLength(255);
+            // ING-07: the intake gate's decision, recorded on EVERY fetched message. A
+            // message stopped as noise is never silently dropped — it keeps its row, its raw
+            // .eml and, here, the machine-readable reason it was stopped, so a human can find
+            // a misjudged RFQ and replay it.
+            entity.Property(e => e.TriageOutcome).HasMaxLength(32);
+            entity.Property(e => e.TriageReasonJson).HasMaxLength(1000);
 
             entity.HasOne(d => d.EmailConfiguration).WithMany(p => p.EmailIngests)
                 .HasForeignKey(d => d.EmailConfigurationId)
@@ -407,7 +413,36 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.CreatedDate).HasDefaultValueSql("now()");
             entity.Property(e => e.CustomerId).HasColumnName("CustomerID");
             entity.Property(e => e.ContactId).HasColumnName("ContactID");
-            entity.Property(e => e.CustomerMatchStatus).HasMaxLength(32).HasDefaultValue("UNRESOLVED");
+            // 64, not 32. The vocabulary already contained
+            // "CUSTOMER_CONFIRMED_CONTACT_UNRESOLVED" — 37 characters — which
+            // SubmitLeadReviewAsync writes whenever a reviewer picks a customer without a
+            // contact. On PostgreSQL that is a 22001 "value too long" the moment it happens;
+            // it survived only because it was never exercised. AUTO_MATCHED_CONTACT_UNRESOLVED
+            // (31) would have sat one character from the same cliff.
+            entity.Property(e => e.CustomerMatchStatus).HasMaxLength(64).HasDefaultValue("UNRESOLVED");
+            // ── Client organisation identity ──────────────────────────────────
+            // Why the machine linked (or refused to link) a client, plus the raw evidence
+            // it read. The evidence columns are what let the UI replace a dead-end
+            // "Unresolved" with the sender, the extracted company, the portal and our
+            // vendor ref, so a rep can decide in seconds instead of opening the document.
+            entity.Property(e => e.CustomerMatchReasonCode).HasMaxLength(40);
+            entity.Property(e => e.CustomerMatchConfidence).HasColumnType("decimal(5, 4)");
+            entity.Property(e => e.CustomerMatchExplanation).HasMaxLength(500);
+            entity.Property(e => e.CustomerMatchedOn);
+            entity.Property(e => e.CustomerCompanyNameExtracted).HasMaxLength(320);
+            entity.Property(e => e.CustomerCompanyEvidence).HasMaxLength(200);
+            entity.Property(e => e.CustomerCompanyRegistrationId).HasMaxLength(100);
+            entity.Property(e => e.CustomerBuyerEmailExtracted).HasMaxLength(255).IsUnicode(false);
+            entity.Property(e => e.CustomerPortalNameExtracted).HasMaxLength(120);
+            entity.Property(e => e.SupplierNameOnDocument).HasMaxLength(320);
+            entity.Property(e => e.SupplierAccountRefOnDocument).HasMaxLength(100);
+            // THE invariant: a status that means "not decided" may never carry a customer,
+            // and a status that means "decided" must. Enforced in the database because a
+            // SUGGESTED lead that quietly wrote a CustomerID would be indistinguishable
+            // from a confirmed one, and a wrong client is worse than an unresolved one.
+            entity.HasCheckConstraint("CK_Leads_CustomerIdentityStatus",
+                "CASE WHEN \"CustomerMatchStatus\" IN ('UNRESOLVED','SUGGESTED','AMBIGUOUS') " +
+                "THEN \"CustomerID\" IS NULL ELSE \"CustomerID\" IS NOT NULL END");
             entity.Property(e => e.DurationAgreement).HasMaxLength(100);
             entity.Property(e => e.EmailIngestsId).HasColumnName("EmailIngestsID");
             entity.Property(e => e.EmailSource)
@@ -635,6 +670,11 @@ public partial class ErpRfqAutomationContext : DbContext
         {
             entity.HasKey(e => e.Id).HasName("PK__OrderIte__3214EC27F54B0F5F");
 
+            // Wrong-quantity backstop: by the time a row exists here a quantity has been
+            // established and must be real. LeadItems is deliberately unconstrained — it is
+            // the extraction landing zone where 0 means "never established" plus review flag.
+            entity.HasCheckConstraint("CK_OrderItems_Quantity_Positive", "\"Quantity\" > 0");
+
             entity.HasIndex(e => e.OrderId, "IX_OrderItems_OrderID");
 
             entity.HasIndex(e => e.ProductId, "IX_OrderItems_ProductID");
@@ -695,7 +735,16 @@ public partial class ErpRfqAutomationContext : DbContext
 
             entity.HasIndex(e => e.SubCategoryId, "IX_Products_SubCategoryID");
 
-            entity.HasIndex(e => e.PartNo, "UQ__Inventor__7C3FF6B67DFB4EBD").IsUnique();
+            // Part numbers are unique PER TENANT, not globally: two tenants may legitimately
+            // catalogue the same manufacturer part number. The scaffolded single-column
+            // unique index ("UQ__Inventor__7C3FF6B67DFB4EBD") made one tenant's PartNo block
+            // every other tenant's catalogue import. Same remedy as Suppliers
+            // (UX_Suppliers_BU_ContactEmail): scope the uniqueness to the business unit.
+            // The filter covers any legacy NULL-BUID row; EF itself will not track a new
+            // one (the (Id, BUID) principal key used by dependent FKs requires a tenant).
+            entity.HasIndex(e => new { e.Buid, e.PartNo }, "UQ_Products_BUID_PartNo")
+                .IsUnique()
+                .HasFilter("\"BUID\" IS NOT NULL");
 
             entity.Property(e => e.Id).HasColumnName("ID");
             entity.Property(e => e.Barcode).HasMaxLength(100);
@@ -920,9 +969,17 @@ public partial class ErpRfqAutomationContext : DbContext
         {
             entity.HasKey(e => e.Id).HasName("PK__QuoteIte__3214EC27B021232E");
 
+            // Wrong-quantity backstop: RfqController.ApproveAsync creates the Quote and
+            // emails it in the same request, so no screen between approval and the
+            // customer's inbox ever displays a quantity. The constraint is the only guard
+            // no future code path can bypass.
+            entity.HasCheckConstraint("CK_QuoteItems_Quantity_Positive", "\"Quantity\" > 0");
+
             entity.Property(e => e.Id).HasColumnName("ID");
             entity.Property(e => e.CreatedBy).HasMaxLength(255);
             entity.Property(e => e.CreatedDate).HasDefaultValueSql("now()");
+            // Mirrors Rfqitem.LineItemNo (max 100): the buyer's own line reference.
+            entity.Property(e => e.CustomerLineRef).HasMaxLength(100);
             entity.Property(e => e.Discount)
                 .HasDefaultValue(0m)
                 .HasColumnType("decimal(18, 6)");
@@ -936,6 +993,8 @@ public partial class ErpRfqAutomationContext : DbContext
                 .HasDefaultValue(0m)
                 .HasColumnType("decimal(18, 6)");
             entity.Property(e => e.TotalAmount).HasColumnType("decimal(18, 6)");
+            // Mirrors Rfqitem.UnitOfMeasure (max 200).
+            entity.Property(e => e.UnitOfMeasure).HasMaxLength(200);
             entity.Property(e => e.UnitPrice).HasColumnType("decimal(18, 6)");
 
             entity.HasOne(d => d.DiscountType).WithMany(p => p.QuoteItems)
@@ -1018,6 +1077,12 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.HasKey(e => e.Id).HasName("PK__RFQItems__3214EC2712F05C03");
 
             entity.ToTable("RFQItems");
+
+            // Wrong-quantity backstop (the "1,000 quoted as 1" defect): rows here are
+            // downstream of extraction review, so a non-positive quantity is always wrong.
+            // LeadItems, the extraction landing zone, deliberately carries NO such
+            // constraint — there 0 = "never established" plus a review flag.
+            entity.HasCheckConstraint("CK_RFQItems_Quantity_Positive", "\"Quantity\" > 0");
 
             entity.Property(e => e.Id).HasColumnName("ID");
             entity.Property(e => e.Aiconfidence)

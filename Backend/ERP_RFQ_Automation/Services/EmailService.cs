@@ -24,6 +24,7 @@ using Tesseract;
 using UglyToad.PdfPig;
 using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.AI;
+using ERP_RFQ_Automation.Ingestion.Triage;
 
 namespace ERP_RFQ_Automation.Services
 {
@@ -41,7 +42,7 @@ namespace ERP_RFQ_Automation.Services
         private const double MIN_CONFIDENCE_THRESHOLD = 0.3; // Minimum AI confidence to accept
         private const double MIN_CONFIDENCE_WITH_VALIDATION = 0.25; // Minimum if email passes validation
         private const int SEARCH_DAYS_BACK = 7; // Days to look back for emails
-        private const long MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024; // 25 MB
+        private const long MAX_ATTACHMENT_SIZE = Ingestion.Triage.EmailIngestEnqueuer.MaxAttachmentBytes; // 25 MB
         // Token/Text limiting for LLM to prevent context length errors and excessive costs
         private const int MAX_CHARS_FOR_LLM = 32000; // ~8k tokens (safe for most models)
         private const int MAX_CHARS_PER_ATTACHMENT = 10000; // Limit per attachment during extraction
@@ -53,7 +54,10 @@ namespace ERP_RFQ_Automation.Services
         // ING-05 (unified queue): body + attachments handed to the durable extraction
         // queue; the LeadPersister flips this to Success/NeedsReview when the job lands.
         private const string STATUS_QUEUED = "Queued";
-        private const string STATUS_REJECTED = "Rejected - Low Signal";        // <= 50 chars
+        // ING-07: a message stopped by the intake gate. The WHY now lives in structured
+        // columns (EmailIngest.TriageOutcome + TriageReasonJson) instead of in this string,
+        // and the raw .eml is retained so /api/email-triage can replay it on demand.
+        private const string STATUS_REJECTED = "Rejected";                      // <= 50 chars
         private const string STATUS_SCANNED_PDF = "NeedsReview - Scanned PDF";  // <= 50 chars
         // ING-04: internal marker returned by PDF extraction when a page image-only/scanned PDF
         // could not be OCR'd. Never fed to the LLM; used only to route the ingest to review.
@@ -172,25 +176,22 @@ namespace ERP_RFQ_Automation.Services
                 _logger.LogError(ex, "IMAP error for config: {Email}", config.EmailAddress);
             }
         }
+        /// <summary>
+        /// ING-07: fetch EVERY unseen message in the window and let the triage gate decide.
+        ///
+        /// This used to be a server-side keyword filter (rfq|quote|tender|inquiry|…). It was
+        /// the FIRST place a real deal could be lost and the hardest to notice, because a
+        /// message it excluded never produced a row, a log line or a rejection — it simply
+        /// never existed as far as the system was concerned. "Kindly send your best price for
+        /// 40 nos cable tray 300mm, delivery Jebel Ali" contains none of those keywords.
+        ///
+        /// The cost of the change is bounded and small: this segment sees tens of messages a
+        /// day per tenant, autoreplies/bulk mail/no-reply senders are stopped by the gate
+        /// WITHOUT an AI call, and everything else is one governed prose call under the
+        /// existing token ledger and per-tenant caps.
+        /// </summary>
         private SearchQuery BuildRFQSearchQuery(DateTime sinceDate)
-        {
-            // Expanded keyword set for broader detection
-            var keywords = new[] { 
-                "rfq", "rfp", "tender","quote" ,"quotation", "procurement", 
-                "bid invitation", "itb", "price inquiry", "price request", 
-                "quote request", "request for quote", "inquiry", "material request"
-            };
-
-            SearchQuery? keywordQuery = null;
-
-            foreach (var kw in keywords)
-            {
-                var q = SearchQuery.SubjectContains(kw).Or(SearchQuery.BodyContains(kw));
-                keywordQuery = keywordQuery == null ? q : keywordQuery.Or(q);
-            }
-
-            return SearchQuery.SentSince(sinceDate).And(keywordQuery ?? SearchQuery.All);
-        }
+            => SearchQuery.SentSince(sinceDate);
         /// <summary>
         /// Processes a single fetched message. Returns true when a durable record
         /// (EmailIngest row + raw .eml) exists for the message, meaning the caller may safely
@@ -262,11 +263,29 @@ namespace ERP_RFQ_Automation.Services
             // From here a durable record exists: the caller may mark the message \Seen regardless
             // of the classification/extraction outcome below.
 
-            // ING-01: classification no longer drops the message. A low-signal message is retained
-            // with a rejected status (raw bytes + DB row preserved) instead of vanishing.
-            if (!await IsLikelyRFQEmailAsync(message))
+            // ING-07: RECOGNITION. The old gate treated "quote"/"quotation" as strong RFQ
+            // evidence (so every supplier reply and order confirmation passed) while a bare
+            // prose enquiry with none of its 22 keywords was dropped — simultaneously too
+            // permissive and capable of losing a real deal. The gate now stops a message ONLY
+            // on positive, machine-verifiable evidence that it is not business mail; absence
+            // of RFQ vocabulary is never a reason to stop.
+            var bodyParts = EmailBodyNormalizer.Normalize(GetEmailBody(message));
+            var senderPartyType = await SenderPartyResolver.ResolveAsync(
+                context, config.BusinessUnitId, message.From.Mailboxes.FirstOrDefault()?.Address);
+            var triage = DeterministicEmailTriage.Evaluate(
+                BuildTriageSignals(message, bodyParts, senderPartyType));
+
+            // Persist the decision BEFORE branching on it: a message that is stopped must still
+            // be recorded, with its reason, and be retrievable (raw .eml is already on disk).
+            ingest.TriageOutcome = triage.Outcome.ToString();
+            ingest.TriageReasonJson = SerializeReasonCodes(triage.ReasonCodes);
+            ingest.TriageDecidedOn = DateTime.UtcNow;
+
+            if (triage.Outcome == EmailTriageOutcome.Noise)
             {
-                _logger.LogInformation("Email classified as low-signal (non-RFQ), retained for review: {Subject}", subject);
+                _logger.LogInformation(
+                    "Email triaged as noise ({Reasons}); no extraction job enqueued, raw message retained: {Subject}",
+                    string.Join(",", triage.ReasonCodes), subject);
                 ingest.ParseStatus = STATUS_REJECTED;
                 ingest.ParsedAt = DateTime.UtcNow;
                 await context.SaveChangesAsync();
@@ -280,7 +299,8 @@ namespace ERP_RFQ_Automation.Services
             // ingest (from/subject) instead of a synthetic one.
             if (_useUnifiedQueue && ingestion != null)
             {
-                var queued = await EnqueueEmailForExtractionAsync(message, ingest, config, ingestion);
+                var queued = await EnqueueEmailForExtractionAsync(
+                    message, ingest, config, ingestion, triage, bodyParts);
                 if (queued > 0)
                 {
                     ingest.ParseStatus = STATUS_QUEUED; // persister flips to Success/NeedsReview
@@ -315,201 +335,76 @@ namespace ERP_RFQ_Automation.Services
         }
 
         /// <summary>
-        /// ING-05: fans one RFQ email out to the durable extraction queue — the body text
-        /// as its own content-addressed .txt document plus one job per supported
-        /// attachment, all sharing one batch id and one provenance sidecar (real
-        /// EmailIngest id + from/subject). Per-document failures are isolated: one bad
-        /// attachment never blocks the body or the other attachments. Re-delivered
-        /// content dedups naturally on the queue's (BusinessUnitId, ContentHash) index.
+        /// ING-05/ING-07: fans one email out to the durable extraction queue — one job per
+        /// supported attachment plus one job for the sender's FRESH body text, all sharing a
+        /// batch id and a provenance sidecar that names the real EmailIngest. The fan-out
+        /// itself lives in <see cref="ERP_RFQ_Automation.Ingestion.Triage.EmailIngestEnqueuer"/>
+        /// so the mailbox poller and the manual reprocess endpoint cannot drift apart.
         /// Returns the number of jobs enqueued (duplicates count — they are handled work).
         /// </summary>
         internal async Task<int> EnqueueEmailForExtractionAsync(
             MimeMessage message, EmailIngest ingest, EmailConfiguration config,
-            ERP_RFQ_Automation.Extraction.IDocumentIngestion ingestion)
+            ERP_RFQ_Automation.Extraction.IDocumentIngestion ingestion,
+            EmailTriageDecision triage, EmailBodyParts bodyParts)
         {
-            var batchId = Guid.NewGuid();
-            var queued = 0;
-            // ING-06: a dropped attachment must never be silent — every skip is logged at
-            // Warning (filename + reason), summarized on the body job's durable provenance
-            // metadata, and surfaced on the ingest record when nothing could be enqueued.
-            var skippedAttachments = new List<string>();
-            var metadata = new ERP_RFQ_Automation.Extraction.ExtractionJobMetadata
-            {
-                SourceOccurrenceId = $"email:{message.MessageId ?? ingest.Id.ToString()}:body",
-                LogicalGroupKey = $"email:{message.MessageId ?? ingest.Id.ToString()}",
-                EmailIngestId = ingest.Id,
-                FromEmail = message.From.Mailboxes.FirstOrDefault()?.Address,
-                Subject = message.Subject ?? "",
-                SourceReceivedAtUtc = message.Date,
-                ClientEmail = config.EmailAddress,
-                LeadSource = "Email",
-                EmailSource = "Text Only" // per-attachment jobs override with their own label
-            };
-
-            // 1) Email body as its own document (Subject/From header lines give the
-            //    extractor the same context the legacy prompt had). Enqueued via a local
-            //    function so it can run AFTER the attachment pass and carry the complete
-            //    skipped-attachment summary in its provenance sidecar.
-            async Task EnqueueBodyAsync()
-            {
-                var body = GetEmailBody(message);
-                if (string.IsNullOrWhiteSpace(body)) return;
-                if (skippedAttachments.Count > 0)
-                    metadata.SkippedAttachments = skippedAttachments.ToArray();
-                var bodyDoc = $"Subject: {message.Subject}\nFrom: {message.From}\nDate: {message.Date:yyyy-MM-dd}\n\n{body}";
-                var bodyName = $"{SanitizeFileName(message.Subject ?? "email")}_body.txt";
-                var result = await ingestion.IngestAsync(
-                    Encoding.UTF8.GetBytes(bodyDoc), bodyName, config.BusinessUnitId,
-                    ERP_RFQ_Automation.Extraction.ExtractionSourceType.Email,
-                    batchId, priority: 0, metadata);
-                queued++;
-                _logger.LogInformation("Enqueued email body as job {JobId} ({Outcome}) for ingest {IngestId}.",
-                    result.JobId, result.Outcome, ingest.Id);
-            }
-
-            void RecordSkippedAttachment(string fileName, string reason)
-            {
-                skippedAttachments.Add($"{fileName} ({reason})");
-                _logger.LogWarning("Skipping email attachment {FileName} for ingest {IngestId}: {Reason}.",
-                    fileName, ingest.Id, reason);
-            }
-
-            // 2) Each supported attachment is its own job (same batch, same provenance).
-            var attachmentOrdinal = 0;
-            foreach (var att in message.Attachments)
-            {
-                attachmentOrdinal++;
-                if (att is not MimePart part)
-                {
-                    // MessagePart: an embedded email (.eml). Deliberately not ingested as a
-                    // document (parity with the legacy .eml skip), but never silently.
-                    RecordSkippedAttachment(
-                        att.ContentDisposition?.FileName ?? $"attachment #{attachmentOrdinal}",
-                        "embedded email message is not ingested");
-                    continue;
-                }
-                if (part.FileName == null)
-                {
-                    RecordSkippedAttachment($"attachment #{attachmentOrdinal}", "attachment has no filename");
-                    continue;
-                }
-                var ext = Path.GetExtension(part.FileName).ToLowerInvariant();
-                if (!IsSupportedExtension(ext))
-                {
-                    RecordSkippedAttachment(part.FileName, $"unsupported file type '{ext}'");
-                    continue;
-                }
-
-                try
-                {
-                    using var ms = new MemoryStream();
-                    await part.Content.DecodeToAsync(ms);
-                    if (ms.Length == 0)
-                    {
-                        RecordSkippedAttachment(part.FileName, "attachment content is empty");
-                        continue;
-                    }
-                    if (ms.Length > MAX_ATTACHMENT_SIZE)
-                    {
-                        RecordSkippedAttachment(part.FileName,
-                            $"exceeds the {MAX_ATTACHMENT_SIZE / (1024 * 1024)} MB size limit ({ms.Length} bytes)");
-                        continue;
-                    }
-
-                    var attMetadata = new ERP_RFQ_Automation.Extraction.ExtractionJobMetadata
-                    {
-                        SourceOccurrenceId = $"email:{message.MessageId ?? ingest.Id.ToString()}:attachment:{attachmentOrdinal}",
-                        LogicalGroupKey = metadata.LogicalGroupKey,
-                        EmailIngestId = ingest.Id,
-                        FromEmail = metadata.FromEmail,
-                        Subject = metadata.Subject,
-                        SourceReceivedAtUtc = metadata.SourceReceivedAtUtc,
-                        ClientEmail = metadata.ClientEmail,
-                        LeadSource = "Email",
-                        EmailSource = GetFileTypeLabel(ext)
-                    };
-                    var result = await ingestion.IngestAsync(
-                        ms.ToArray(), part.FileName, config.BusinessUnitId,
-                        ERP_RFQ_Automation.Extraction.ExtractionSourceType.Email,
-                        batchId, priority: 0, attMetadata);
-                    queued++;
-                    _logger.LogInformation("Enqueued attachment {FileName} as job {JobId} ({Outcome}) for ingest {IngestId}.",
-                        part.FileName, result.JobId, result.Outcome, ingest.Id);
-                }
-                catch (Exception ex)
-                {
-                    // Poison-attachment isolation: continue with the remaining documents.
-                    _logger.LogError(ex, "Failed to enqueue attachment {FileName} for ingest {IngestId}.",
-                        part.FileName, ingest.Id);
-                }
-            }
-
-            // 3) Body LAST so its provenance metadata carries the complete skip summary.
-            try
-            {
-                await EnqueueBodyAsync();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to enqueue email body for ingest {IngestId}.", ingest.Id);
-            }
+            var result = await EmailIngestEnqueuer.EnqueueAsync(
+                message, ingest, config.BusinessUnitId, config.EmailAddress,
+                ingestion, triage, bodyParts, _logger);
 
             // ING-06: nothing enqueued but attachments were dropped — surface the loss on
             // the tenant-visible ingest record (ParseStatus is limited to 50 chars; the
-            // per-file reasons are in the Warning logs above).
-            if (queued == 0 && skippedAttachments.Count > 0)
+            // per-file reasons are in the Warning logs).
+            if (result.Queued == 0 && result.SkippedAttachments.Count > 0)
             {
                 ingest.ParseStatus = Truncate(
-                    $"Failed - {skippedAttachments.Count} attachment(s) skipped", 50);
+                    $"Failed - {result.SkippedAttachments.Count} attachment(s) skipped", 50);
             }
 
-            return queued;
+            return result.Queued;
         }
-        private async Task<bool> IsLikelyRFQEmailAsync(MimeMessage message)
+        /// <summary>
+        /// Builds the pure input for <see cref="DeterministicEmailTriage"/>: the sender's own
+        /// words, the resolved party type, and the raw headers that constitute positive
+        /// evidence of automated/bulk mail.
+        /// </summary>
+        private static EmailTriageSignals BuildTriageSignals(
+            MimeMessage message, EmailBodyParts parts, string? senderPartyType)
         {
-            var subject = message.Subject?.ToLowerInvariant() ?? "";
-            var body = GetEmailBody(message).ToLowerInvariant();
-            // Strong RFQ indicators
-            var strongIndicators = new[]
+            var from = message.From.Mailboxes.FirstOrDefault()?.Address;
+            return new EmailTriageSignals
             {
-                "rfq", "request for quotation", "request for quote",
-                "tender", "bid invitation", "procurement notice", "rfp",
-                "invitation to bid", "itb", "price inquiry", "commercial inquiry",
-                "purchasing inquiry", "bid request", "quote", "quotation", "fresh quote"
+                Subject = message.Subject ?? "",
+                FreshBody = parts.Fresh,
+                Signature = parts.Signature,
+                FromAddress = from,
+                FromDomain = SenderPartyResolver.ExtractDomain(from),
+                SenderPartyType = senderPartyType,
+                HasInReplyTo = !string.IsNullOrWhiteSpace(message.InReplyTo),
+                HasReferences = message.References?.Count > 0,
+                HasAttachments = message.Attachments.Any(),
+                BodyEmptyAfterStrip = parts.BodyEmptyAfterStrip,
+                AutoSubmitted = Header(message, "Auto-Submitted"),
+                XAutoreply = Header(message, "X-Autoreply"),
+                XAutoResponseSuppress = Header(message, "X-Auto-Response-Suppress"),
+                Precedence = Header(message, "Precedence"),
+                ListId = Header(message, "List-Id"),
+                ListUnsubscribe = Header(message, "List-Unsubscribe"),
+                ContentClass = Header(message, "Content-Class")
             };
-            // Weak indicators (need multiple matches)
-            var weakIndicators = new[]
-            {
-                "bid", "proposal",
-                "purchase", "pricing", "delivery", "material list",
-                "boq", "bill of quantities", "specification", "compliance",
-                "datasheet", "sow", "scope of work", "technical requirement",
-                "procurement supervisor", "procurement manager", "supply chain",
-                "inquiry", "request", "project", "requirement", "urgent"
-            };
-            // Check strong indicators in subject (high priority)
-            if (strongIndicators.Any(ind => subject.Contains(ind)))
-                return true;
-            // Check for combination of weak indicators
-            var weakMatches = weakIndicators.Count(ind => subject.Contains(ind) || body.Contains(ind));
-            if (weakMatches >= 2)
-                return true;
+        }
 
-            // NEW: If there are attachments, we only need 1 weak indicator (like "Project" or "Inquiry")
-            if (message.Attachments.Any() && weakMatches >= 1)
-                return true;
-            // Check for RFQ numbers or reference patterns
-            if (Regex.IsMatch(subject + " " + body, @"RFQ[#:\s-]*[A-Z0-9-]+", RegexOptions.IgnoreCase))
-                return true;
-            // Check for attachments with RFQ-related names
-            if (message.Attachments.Any(att => att is MimePart part &&
-                HasRFQKeywordsInFilename(part.FileName)))
-                return true;
-            // NEW: Quick scan of attachment CONTENT for RFQ keywords
-            if (await QuickScanAttachmentContentAsync(message, strongIndicators))
-                return true;
-            _logger.LogDebug("Email does not appear to be RFQ: {Subject}", message.Subject);
-            return false;
+        private static string? Header(MimeMessage message, string name)
+        {
+            var value = message.Headers[name];
+            return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+        }
+
+        private static string SerializeReasonCodes(IReadOnlyList<string> reasonCodes)
+        {
+            // TriageReasonJson is varchar(1000); the codes are short and few, but the column
+            // must never be the thing that fails an ingest.
+            var json = JsonSerializer.Serialize(reasonCodes);
+            return json.Length <= 1000 ? json : json.Substring(0, 1000);
         }
         private bool IsDuplicateKeyException(DbUpdateException ex)
         {
@@ -630,7 +525,7 @@ namespace ERP_RFQ_Automation.Services
             {
                 var ai = await llmService.ExtractLeadDataAsync(limitedText,
                     new AiCallContext(config.BusinessUnitId, AiPurposes.RfqExtraction,
-                        $"email-ingest:{ingest.Id}", "rfq-extraction-v1"));
+                        $"email-ingest:{ingest.Id}", AiPromptVersions.StructuredRfqExtraction));
                 // Smart validation: Lower threshold if email clearly looks like RFQ
                 var minConfidence = HasStrongRFQIndicators(message, ai)
                     ? MIN_CONFIDENCE_WITH_VALIDATION
@@ -828,41 +723,11 @@ namespace ERP_RFQ_Automation.Services
             }
             return ai;
         }
+        // DRIFT GUARD: the field-by-field mapping — including the ONE unit-of-measure
+        // assignment — lives in LeadItemMapper, shared with the folder, manual-upload and
+        // async-worker doors. Only this door's date conventions stay here.
         private LeadItem CreateLeadItem(long leadId, LeadItemData aiItem)
-        {
-            int? leadTime = int.TryParse(aiItem.LeadTime ?? "", out int lt) ? lt : null;
-            DateTime? receivedDate = ParseDate(aiItem.ReceivedDate);
-            DateTime? bidClosingDateLine = ParseDate(aiItem.BidClosingDateLine);
-            return new LeadItem
-            {
-                LeadId = leadId,
-                CompanyRef = Truncate(aiItem.CompanyRef, 100),
-                CustomerAccountPortalId = Truncate(aiItem.CustomerAccountPortalId, 100),
-                CustomerRfqno = Truncate(aiItem.CustomerRfqno, 100),
-                ItemMaterialCode = Truncate(aiItem.ItemMaterialCode, 100),
-                CommodityProduct = Truncate(aiItem.CommodityProduct, 200),
-                BuyerName = Truncate(aiItem.BuyerName, 200),
-                LineItemNo = Truncate(aiItem.LineItemNo, 50),
-                ProductShortName = Truncate(aiItem.ProductShortName, 1000),
-                Alternative = Truncate(aiItem.Alternative, 100),
-                ProductShortDescription = Truncate(aiItem.ProductShortDescription, 1000),
-                Currency = Truncate(aiItem.Currency, 10),
-                UnitOfMeasure = Truncate(aiItem.UnitOfMeasure, 100),
-                UnitPrice = aiItem.UnitPrice,
-                Quantity = aiItem.Quantity ?? 0,
-                StorageLocation = Truncate(aiItem.StorageLocation, 100),
-                ManufacturerName = Truncate(aiItem.ManufacturerName, 200),
-                ManufacturerPartNumber = Truncate(aiItem.ManufacturerPartNumber, 100),
-                AlternateProductName = Truncate(aiItem.AlternateProductName, 200),
-                AlternatePartNumber = Truncate(aiItem.AlternatePartNumber, 100),
-                ItemText = Truncate(aiItem.ItemText, 2000),
-                MaterialPotext = Truncate(aiItem.MaterialPotext, 2000),
-                LeadTime = leadTime,
-                ReceivedDate = receivedDate,
-                BidClosingDateLine = bidClosingDateLine,
-                Aiconfidence = (decimal?)(aiItem.ItemConfidence ?? 0.0)
-            };
-        }
+            => LeadItemMapper.Map(aiItem, ParseDate, leadId);
         private async Task<string> ExtractTextFromAttachment(MemoryStream ms, string ext)
         {
             return ext switch
@@ -880,21 +745,10 @@ namespace ERP_RFQ_Automation.Services
                 _ => ""
             };
         }
-        private string GetFileTypeLabel(string ext) => ext switch
-        {
-            ".pdf" => "PDF",
-            ".doc" or ".docx" => "Word",
-            ".xls" or ".xlsx" or ".xlsm" => "Excel",
-            ".csv" => "CSV",
-            ".txt" => "Text",
-            ".jpg" or ".jpeg" => "JPEG",
-            ".png" => "PNG",
-            ".bmp" => "BMP",
-            ".gif" => "GIF",
-            ".tif" or ".tiff" => "TIFF",
-            ".webp" => "WebP",
-            _ => "Unknown"
-        };
+        // DRIFT GUARD: one owner for the file-type label, shared with the queue fan-out, so a
+        // lead ingested by the poller and the same lead replayed from the triage surface can
+        // never be labelled differently.
+        private string GetFileTypeLabel(string ext) => EmailIngestEnqueuer.GetFileTypeLabel(ext);
         // Text extraction methods
         private string ExtractTextFromPdf(byte[] bytes)
         {
@@ -1265,79 +1119,12 @@ namespace ERP_RFQ_Automation.Services
 
             return sb.ToString();
         }
-        // Helper methods for RFQ detection in attachments
-        private bool HasRFQKeywordsInFilename(string fileName)
-        {
-            if (string.IsNullOrWhiteSpace(fileName))
-                return false;
-
-            var lowerFileName = fileName.ToLowerInvariant();
-            var keywords = new[] { 
-                "rfq", "rfp", "tender", "quotation", "procurement", 
-                "quote", "pricing", "boq", "bill_of_quantities", 
-                "material_list", "spec", "drawing", "itb", "request" 
-            };
-
-            if (keywords.Any(k => lowerFileName.Contains(k)))
-                return true;
-
-            return Regex.IsMatch(fileName, @"(RFQ|RFP|ITB|Tender)[#:\s-]*[A-Z0-9-]+", RegexOptions.IgnoreCase);
-        }
-        private async Task<bool> QuickScanAttachmentContentAsync(MimeMessage message, string[] keywords)
-        {
-            // Only scan first 1000 chars of each attachment for performance
-            const int QUICK_SCAN_LENGTH = 1000;
-
-            foreach (var att in message.Attachments)
-            {
-                if (att is not MimePart part || part.FileName == null)
-                    continue;
-
-                var ext = Path.GetExtension(part.FileName).ToLowerInvariant();
-                if (!IsSupportedExtension(ext))
-                    continue;
-
-                try
-                {
-                    var ms = new MemoryStream();
-                    await part.Content.DecodeToAsync(ms);
-                    ms.Position = 0;
-
-                    // Quick extraction (first chunk only)
-                    string snippet = await ExtractTextSnippetAsync(ms, ext, QUICK_SCAN_LENGTH);
-                    ms.Dispose();
-
-                    // Check for RFQ keywords in snippet
-                    var lowerSnippet = snippet.ToLowerInvariant();
-                    if (keywords.Any(kw => lowerSnippet.Contains(kw)))
-                    {
-                        _logger.LogInformation("RFQ keyword found in attachment content: {FileName}", part.FileName);
-                        return true;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Error during quick scan of attachment: {FileName}", part.FileName);
-                    // Continue checking other attachments
-                }
-            }
-
-            return false;
-        }
-        private async Task<string> ExtractTextSnippetAsync(MemoryStream ms, string ext, int maxLength)
-        {
-            try
-            {
-                string fullText = await ExtractTextFromAttachment(ms, ext);
-                return fullText.Length > maxLength
-                    ? fullText.Substring(0, maxLength)
-                    : fullText;
-            }
-            catch
-            {
-                return "";
-            }
-        }
+        // ING-07: HasRFQKeywordsInFilename / QuickScanAttachmentContentAsync / ExtractTextSnippetAsync
+        // are GONE. They existed to answer "does this email deserve to be processed?" by
+        // keyword — a question the triage gate now answers on positive evidence instead. The
+        // attachment content pre-scan is additionally redundant: attachments are ALWAYS
+        // enqueued, so parsing every attachment twice bought nothing but latency and a second
+        // chance to lose an RFQ whose PDF happened to spell "quotation" as "Offer".
         private string Truncate(string? value, int maxLength)
         {
             if (string.IsNullOrEmpty(value)) return null;
@@ -1366,11 +1153,7 @@ namespace ERP_RFQ_Automation.Services
                     .Replace("\r\n", "\n")
                 : "";
         }
-        private string SanitizeFileName(string fileName)
-        {
-            return string.Join("_", fileName.Split(Path.GetInvalidFileNameChars(),
-                StringSplitOptions.RemoveEmptyEntries)).Replace(" ", "_");
-        }
+        private string SanitizeFileName(string fileName) => EmailIngestEnqueuer.SanitizeFileName(fileName);
         // DRIFT GUARD: the email attachment filter is DERIVED from the security
         // inspection allow-list — never keep a private copy here. A private list
         // previously accepted .pptx (which inspection then rejected) and silently

@@ -27,7 +27,8 @@ public sealed class Module04ProductInventoryMigrationPostgreSqlTests(PostgreSqlT
             var migrator = context.GetService<IMigrator>();
             await migrator.MigrateAsync(PreviousMigration);
 
-            var lead = Seed.Lead(context, 98_401, 98_400, buyersName: "Module 04 migration");
+            // Pinned to the rehearsal era (see Seed.HistoricalLead).
+            var lead = Seed.HistoricalLead(context, 98_401, 98_400, "Module 04 migration");
             context.Products.Add(new Product
             {
                 Id = 98_410, Buid = 98_400, PartNo = "M04-PART", ProductName = "Migration part",
