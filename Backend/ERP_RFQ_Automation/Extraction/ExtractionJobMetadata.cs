@@ -64,6 +64,14 @@ public sealed class ExtractionJobMetadata
     /// </summary>
     public string? CommercialDocumentTypeHint { get; set; }
 
+    /// <summary>
+    /// ING-06: "filename (reason)" entries for sibling attachments the intake door had to
+    /// skip (unsupported type, oversize, empty, unnamed). Set on the email BODY job so the
+    /// durable provenance record (job sidecar + SourceDocumentOccurrence.SourceMetadataJson)
+    /// shows a dropped attachment was never silent. Null when nothing was skipped.
+    /// </summary>
+    public IReadOnlyList<string>? SkippedAttachments { get; set; }
+
     public static bool IsNonLeadCommercialType(string? value) =>
         !string.IsNullOrWhiteSpace(value) &&
         !value.Equals("CUSTOMER_RFQ", StringComparison.OrdinalIgnoreCase) &&

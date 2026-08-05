@@ -9,6 +9,7 @@ using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -250,46 +251,78 @@ public sealed class AiExternalProviderAllowListTests
     }
 
     [Fact]
-    public async Task AuthorizedEndpoint_IsStillSubjectToTheExternalDependencyCeiling()
+    public async Task AuthorizedEndpoint_IsExemptFromTheExternalDependencyCeiling()
     {
-        // The allow-list decides WHETHER a destination may be used. It does not buy
-        // capacity: with no local call history the ledger's local-first dependency
-        // ceiling still denies the reservation, and the document is not extracted.
+        // The rescoped ceiling: it governs UNAUTHORIZED external usage only. On a
+        // deployment with no local model every governed call is external (the ratio is
+        // 100%), and the old ratio check denied ~9 in 10 extractions even for a tenant
+        // holding a valid authorization. An allow-list-authorized destination is exempt
+        // from the ratio; the ledger records the exempting authorization id and the
+        // deployment's declared posture, and every other control still applies.
         using var fixture = new Fixture();
-        await fixture.AuthorizeAsync(unstructuredAllowed: true);
+        var granted = await fixture.AuthorizeAsync(unstructuredAllowed: true);
+        // Deliberately NO local call history: the external ratio is 100%.
 
         var llm = new GovernedStubLlm(fixture.Descriptor, fixture.Governance,
             Ext.Result(Ext.Items(2, 0.9), 0.9));
         var outcome = await fixture.Extractor(llm).ExtractUnstructuredAsync(Doc(fixture.TenantId, 2));
 
-        Assert.Equal(ExtractionOutcomeStatus.Failed, outcome.Status);
-        Assert.Equal(1, llm.CallCount); // the gate allowed it; the ledger refused it
+        Assert.Equal(ExtractionOutcomeStatus.Ok, outcome.Status);
+        Assert.Equal(2, outcome.ExtractedItemCount);
+        Assert.Equal(1, llm.CallCount);
 
         using var db = fixture.Database.ContextFor(null);
-        var denied = Assert.Single(await db.AiRequests.IgnoreQueryFilters().ToListAsync());
-        Assert.Equal(AiCallStatuses.Denied, denied.Status);
-        Assert.Equal("external_dependency_cap", denied.ErrorCode);
+        var request = Assert.Single(await db.AiRequests.IgnoreQueryFilters().ToListAsync());
+        Assert.Equal(AiCallStatuses.Succeeded, request.Status);
+        Assert.Equal(granted.Authorization.Id, request.ExternalAuthorizationId);
+        Assert.Equal(nameof(InferencePosture.ExternalAuthorized), request.InferencePosture);
     }
 
     [Fact]
-    public async Task DependencyCeiling_HonoursThePerTenantPolicyValue()
+    public async Task DependencyCeiling_HonoursThePerTenantPolicyValue_ForUnauthorizedExternals()
     {
         // Nine local calls + one external is 10%, which the default ceiling permits.
         // A tenant that tightened its ceiling to 5% must be refused at the same ratio —
         // this is the assertion the previously hardcoded `.10m` literal could not make.
+        // No authorization exists, so the reservation is exactly the unauthorized
+        // external usage the rescoped ceiling still governs.
         using var fixture = new Fixture();
         fixture.SetDependencyCeilingPercent(5m);
-        await fixture.AuthorizeAsync(unstructuredAllowed: true);
         fixture.SeedLocalCallHistory(9);
 
-        var llm = new GovernedStubLlm(fixture.Descriptor, fixture.Governance,
-            Ext.Result(Ext.Items(2, 0.9), 0.9));
-        var outcome = await fixture.Extractor(llm).ExtractUnstructuredAsync(Doc(fixture.TenantId, 2));
+        var denied = await Assert.ThrowsAsync<AiPolicyDeniedException>(() => fixture.Governance.ReserveAsync(
+            new AiCallContext(fixture.TenantId, AiPurposes.RfqExtraction, "ceiling-5pct", "test-v1",
+                ProviderClass: AiProviderClass.External),
+            fixture.Descriptor.Provider, fixture.Descriptor.Model, "external", 32, 10, 1, default));
 
-        Assert.Equal(ExtractionOutcomeStatus.Failed, outcome.Status);
+        Assert.Equal("external_dependency_cap", denied.Code);
         using var db = fixture.Database.ContextFor(null);
         Assert.Equal("external_dependency_cap", (await db.AiRequests.IgnoreQueryFilters()
             .SingleAsync(x => x.ProviderClass == AiProviderClass.External)).ErrorCode);
+    }
+
+    [Fact]
+    public void Resolver_DeclaresAndLogsTheInferencePostureAtStartup()
+    {
+        // The posture is informational telemetry resolved once at startup: it must be
+        // visible on the resolver AND in the very startup line that already announces the
+        // endpoint resolution.
+        var externalLog = new CapturingLogger<AiProviderEndpointResolver>();
+        var external = new AiProviderEndpointResolver(
+            new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Ollama:BaseUrl"] = "https://ollama.com/",
+                ["Ollama:Model"] = AuthorizedModel
+            }).Build(), externalLog);
+        Assert.Equal(InferencePosture.ExternalAuthorized, external.Posture);
+        Assert.Contains(externalLog.Messages, m => m.Contains("Posture=ExternalAuthorized"));
+
+        var localLog = new CapturingLogger<AiProviderEndpointResolver>();
+        var local = new AiProviderEndpointResolver(
+            new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>()).Build(),
+            localLog);
+        Assert.Equal(InferencePosture.LocalFirst, local.Posture);
+        Assert.Contains(localLog.Messages, m => m.Contains("Posture=LocalFirst"));
     }
 
     [Fact]
@@ -400,9 +433,6 @@ public sealed class AiExternalProviderAllowListTests
                 .AddScoped(_ => Database.ContextFor(tenantScope.BusinessUnitId ?? tenantId))
                 .BuildServiceProvider();
 
-            Governance = new AiGovernanceService(
-                _provider.GetRequiredService<IServiceScopeFactory>(), tenantScope, tenantContext);
-
             var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Ollama:BaseUrl"] = "https://ollama.com/",
@@ -415,6 +445,12 @@ public sealed class AiExternalProviderAllowListTests
             _trustDb = Database.ContextFor(tenantId);
             Trust = new AiExternalProviderTrustService(
                 _trustDb, tenantContext, resolver, new NoopLogger<AiExternalProviderTrustService>());
+
+            // The gate is a REQUIRED dependency of the ledger: the external-dependency
+            // ceiling exempts allow-list-authorized destinations, and only the gate can
+            // say which those are.
+            Governance = new AiGovernanceService(
+                _provider.GetRequiredService<IServiceScopeFactory>(), tenantScope, tenantContext, Trust);
         }
 
         /// <summary>A second tenant sharing the same physical database.</summary>
@@ -533,5 +569,15 @@ public sealed class AiExternalProviderAllowListTests
         public Task<BoqDraftResult?> DraftServiceBoqAsync(
             string scopeText, AiCallContext context, CancellationToken cancellationToken = default)
             => Task.FromResult<BoqDraftResult?>(null);
+    }
+
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        public List<string> Messages { get; } = new();
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state,
+            Exception? exception, Func<TState, Exception?, string> formatter)
+            => Messages.Add(formatter(state, exception));
     }
 }

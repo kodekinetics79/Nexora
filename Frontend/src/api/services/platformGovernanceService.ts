@@ -86,6 +86,8 @@ export interface AiTrustCenterView {
     injectionDetected: boolean; errorCode?: string | null; createdOn: string; completedOn?: string | null;
   }>;
   audit: Array<{ id: number; action: string; reason: string; actorUserId: number; occurredOn: string }>;
+  /** Deployment stance resolved once at startup; read-only telemetry, not a control. */
+  inferencePosture: 'LocalFirst' | 'ExternalAuthorized';
 }
 
 export interface ConnectorSdkContract {

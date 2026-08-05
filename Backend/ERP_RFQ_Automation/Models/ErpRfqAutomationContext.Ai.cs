@@ -66,6 +66,11 @@ public partial class ErpRfqAutomationContext
             entity.Property(e => e.CostStatus).HasMaxLength(32).IsRequired();
             entity.Property(e => e.CostPricingVersion).HasMaxLength(100);
             entity.Property(e => e.ErrorCode).HasMaxLength(100);
+            // Ceiling-exemption audit linkage: which allow-list authorization covered this
+            // call, and the deployment posture at that moment. Nullable, no FK — the ledger
+            // row must survive even if the authorization row's lifecycle changes, exactly
+            // like the other denormalised audit fields here.
+            entity.Property(e => e.InferencePosture).HasMaxLength(32);
             entity.HasIndex(e => new { e.BusinessUnitId, e.IdempotencyKey }).IsUnique()
                 .HasDatabaseName("UX_AiRequests_BU_IdempotencyKey");
             entity.HasIndex(e => new { e.BusinessUnitId, e.CreatedOn })

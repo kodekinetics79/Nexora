@@ -104,18 +104,27 @@ namespace ERP_RFQ_Automation.Services
 
                 var fileName = file.FileName;
                 var ext = Path.GetExtension(fileName).ToLowerInvariant();
-                if (!IsSupportedExtension(ext)) continue;
+                if (!IsSupportedExtension(ext))
+                {
+                    // ING-06: a dropped document is never silent.
+                    _logger.LogWarning("Skipping uploaded file {FileName}: unsupported file type '{Extension}'.",
+                        fileName, ext);
+                    continue;
+                }
 
                 string fileType = ext switch
                 {
                     ".pdf" => "PDF",
                     ".doc" or ".docx" => "Word",
-                    ".xlsx" => "Excel",
-                    ".pptx" => "PowerPoint",
+                    ".xls" or ".xlsx" or ".xlsm" => "Excel",
+                    ".csv" => "CSV",
+                    ".txt" => "Text",
                     ".jpg" or ".jpeg" => "JPEG",
                     ".png" => "PNG",
                     ".bmp" => "BMP",
-                    ".tiff" => "TIFF",
+                    ".gif" => "GIF",
+                    ".tif" or ".tiff" => "TIFF",
+                    ".webp" => "WebP",
                     _ => "Unknown"
                 };
                 fileTypes.Add(fileType);
@@ -421,9 +430,21 @@ namespace ERP_RFQ_Automation.Services
 
             foreach (var file in files)
             {
-                if (file.Length == 0) { skipped++; continue; }
+                if (file.Length == 0)
+                {
+                    _logger.LogWarning("Skipping uploaded file {FileName}: file is empty.", file.FileName);
+                    skipped++;
+                    continue;
+                }
                 var ext = Path.GetExtension(file.FileName).ToLowerInvariant();
-                if (!IsSupportedExtension(ext)) { skipped++; continue; }
+                if (!IsSupportedExtension(ext))
+                {
+                    // ING-06: a dropped document is never silent.
+                    _logger.LogWarning("Skipping uploaded file {FileName}: unsupported file type '{Extension}'.",
+                        file.FileName, ext);
+                    skipped++;
+                    continue;
+                }
                 if (file.Length > maxBytes)
                 {
                     _logger.LogWarning("Skipping large file: {File} ({Size} bytes)", file.FileName, file.Length);
@@ -464,16 +485,17 @@ namespace ERP_RFQ_Automation.Services
         }
 
         // SEC-11: image content types accepted by the manual-upload attachment path. These mirror
-        // the image extensions IsSupportedExtension allows (jpg/jpeg/png/bmp/tiff) and are validated
-        // by magic bytes below so a disguised payload can never be persisted under a spoofed extension.
+        // the image extensions the DocumentIntakeAllowList admits (jpg/jpeg/png/gif/bmp/tif/tiff/webp)
+        // and are validated by magic bytes below so a disguised payload can never be persisted under
+        // a spoofed extension.
         private static readonly IReadOnlyCollection<string> AllowedAttachmentImageTypes = new[]
         {
-            "image/jpeg", "image/png", "image/bmp", "image/tiff"
+            "image/jpeg", "image/png", "image/gif", "image/bmp", "image/tiff", "image/webp"
         };
 
         private static bool IsImageExtension(string ext) => ext switch
         {
-            ".jpg" or ".jpeg" or ".png" or ".bmp" or ".tiff" => true,
+            ".jpg" or ".jpeg" or ".png" or ".gif" or ".bmp" or ".tif" or ".tiff" or ".webp" => true,
             _ => false
         };
 
@@ -962,11 +984,12 @@ namespace ERP_RFQ_Automation.Services
             return fullText.Substring(0, MAX_CHARS_FOR_LLM - 100) + "\n\n[... Text truncated due to length ...]";
         }
 
-        private bool IsSupportedExtension(string ext) => ext switch
-        {
-            ".pdf" or ".doc" or ".docx" or ".xlsx" or ".pptx" or ".jpg" or ".jpeg" or ".png" or ".bmp" or ".tiff" => true,
-            _ => false
-        };
+        // DRIFT GUARD: derived from the security inspection allow-list — never keep a
+        // private copy (a private list here previously accepted .pptx, which inspection
+        // then rejected, and dropped .xls/.csv uploads inspection would have accepted).
+        // See DocumentIntakeAllowList and its tests.
+        internal static bool IsSupportedExtension(string ext) =>
+            ERP_RFQ_Automation.Security.DocumentInspection.DocumentIntakeAllowList.IsAllowed(ext);
         /// <summary>
         /// Processes a specialized RFQ Excel file for a specific customer, bypassing AI.
         /// </summary>

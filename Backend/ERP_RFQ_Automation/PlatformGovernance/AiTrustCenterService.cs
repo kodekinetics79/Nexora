@@ -36,7 +36,8 @@ public sealed record AiTrustAuditItem(
 
 public sealed record AiTrustCenterView(
     AiTrustPolicyState Policy, AiTrustUsageSummary Usage,
-    IReadOnlyList<AiTrustRequestItem> Requests, IReadOnlyList<AiTrustAuditItem> Audit);
+    IReadOnlyList<AiTrustRequestItem> Requests, IReadOnlyList<AiTrustAuditItem> Audit,
+    string InferencePosture);
 
 public sealed record UpdateAiTrustPolicyCommand(
     long ExpectedVersion, bool IsEnabled, bool ExternalProcessingAllowed,
@@ -53,7 +54,8 @@ public sealed record UpdateAiTrustPolicyCommand(
 public sealed record RollbackAiTrustPolicyCommand(long ExpectedVersion, long AuditEventId, string Reason);
 public sealed record AiTrustPolicyMutationResult(AiTrustPolicyState Policy, bool IdempotentReplay);
 
-public sealed class AiTrustCenterService(ErpRfqAutomationContext db)
+public sealed class AiTrustCenterService(
+    ErpRfqAutomationContext db, IAiProviderEndpointResolver endpointResolver)
 {
     public async Task<AiTrustCenterView> GetAsync(long tenantId, CancellationToken ct)
     {
@@ -88,7 +90,11 @@ public sealed class AiTrustCenterService(ErpRfqAutomationContext db)
             requests.Select(x => new AiTrustRequestItem(x.Id, x.Operation, x.Provider,
                 x.ProviderClass, x.Model, x.Status, x.PromptVersion, x.InputTokens, x.OutputTokens,
                 x.EstimatedCost, x.CostCurrency, x.CostStatus, x.InjectionDetected, x.ErrorCode,
-                x.CreatedOn, x.CompletedOn)).ToList(), audit);
+                x.CreatedOn, x.CompletedOn)).ToList(), audit,
+            // Read-only, resolved once at startup: the deployment's declared inference
+            // stance (LocalFirst / ExternalAuthorized). Informational — enforcement lives
+            // in the allow-list gate and the ceiling logic, never here.
+            endpointResolver.Posture.ToString());
     }
 
     public async Task<AiTrustPolicyMutationResult> UpdateAsync(long tenantId, long actorUserId,
@@ -203,8 +209,11 @@ public sealed class AiTrustCenterService(ErpRfqAutomationContext db)
         if (string.IsNullOrWhiteSpace(command.AllowedPurposes) || string.IsNullOrWhiteSpace(command.AllowedDataClassifications)
             || string.IsNullOrWhiteSpace(command.EgressPolicy) || string.IsNullOrWhiteSpace(command.DataResidency))
             throw new PlatformGovernanceValidationException("Purposes, data classifications, egress policy and residency are required.");
+        // The 0..10 bound is deliberately unchanged: the ceiling now governs UNAUTHORIZED
+        // external usage only (allow-list-authorized calls are exempt), and for
+        // unauthorized egress tighter is strictly better.
         if (command.ExternalDependencyCeilingPercent is < 0 or > 10)
-            throw new PlatformGovernanceValidationException("External dependency ceiling must be between zero and 10 percent.");
+            throw new PlatformGovernanceValidationException("Unauthorized-external dependency ceiling must be between zero and 10 percent (allow-list-authorized calls are exempt).");
         if (command.RetentionDays is < 1 or > 3650)
             throw new PlatformGovernanceValidationException("Retention must be between one and 3650 days.");
         if (command.MonthlySoftTokenLimit < 0 || command.MonthlyHardTokenLimit < 0

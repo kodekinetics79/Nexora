@@ -609,11 +609,9 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
         }
     }
 
-    private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".xlsm", ".csv", ".txt",
-        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"
-    };
+    // Single source of truth shared with every intake door (email, manual upload,
+    // watched folders) so the intake filters and this inspection gate cannot drift.
+    private static readonly IReadOnlySet<string> SupportedExtensions = DocumentIntakeAllowList.Extensions;
 
     private static readonly IReadOnlyDictionary<string, HashSet<string>> ContentTypeAliases =
         new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase)

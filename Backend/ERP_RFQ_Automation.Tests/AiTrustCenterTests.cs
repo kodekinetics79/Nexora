@@ -2,6 +2,7 @@ using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.PlatformGovernance;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -15,7 +16,7 @@ public sealed class AiTrustCenterTests
         Seed.BusinessUnit(context, 62_001);
         context.AiProcessingPolicies.Add(Policy(62_001));
         await context.SaveChangesAsync();
-        var service = new AiTrustCenterService(context);
+        var service = new AiTrustCenterService(context, Resolver());
         var command = Command(1) with
         {
             ExternalProcessingAllowed = true,
@@ -48,7 +49,7 @@ public sealed class AiTrustCenterTests
         Seed.BusinessUnit(context, 62_011);
         context.AiProcessingPolicies.Add(Policy(62_011));
         await context.SaveChangesAsync();
-        var service = new AiTrustCenterService(context);
+        var service = new AiTrustCenterService(context, Resolver());
 
         await Assert.ThrowsAsync<PlatformGovernanceValidationException>(() => service.UpdateAsync(
             62_011, 52, "unsafe-egress", Command(1) with
@@ -75,14 +76,39 @@ public sealed class AiTrustCenterTests
             Request(62_021, AiProviderClass.External, 1.25m));
         await context.SaveChangesAsync();
 
-        var view = await new AiTrustCenterService(context).GetAsync(62_021, default);
+        var view = await new AiTrustCenterService(context, Resolver()).GetAsync(62_021, default);
 
         Assert.Equal(2, view.Usage.Requests);
         Assert.Equal(50m, view.Usage.ExternalDependencyPercent);
         Assert.True(view.Usage.DependencyCeilingBreached);
         Assert.Equal(1.25m, view.Usage.EstimatedExternalCost["USD"]);
         Assert.Equal(240, view.Usage.InputTokens + view.Usage.OutputTokens);
+        // Startup-resolved deployment stance, surfaced read-only in the payload.
+        Assert.Equal(nameof(InferencePosture.LocalFirst), view.InferencePosture);
     }
+
+    [Fact]
+    public async Task Trust_center_payload_declares_an_external_deployments_posture()
+    {
+        using var database = new TestDb();
+        await using var context = database.ContextFor(62_031);
+        Seed.BusinessUnit(context, 62_031);
+        context.AiProcessingPolicies.Add(Policy(62_031));
+        await context.SaveChangesAsync();
+
+        var view = await new AiTrustCenterService(context, Resolver("https://ollama.com/"))
+            .GetAsync(62_031, default);
+
+        Assert.Equal(nameof(InferencePosture.ExternalAuthorized), view.InferencePosture);
+    }
+
+    /// <summary>No base URL configured resolves to the loopback default → LocalFirst.</summary>
+    private static AiProviderEndpointResolver Resolver(string? baseUrl = null) => new(
+        new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Ollama:BaseUrl"] = baseUrl
+        }).Build(),
+        new NoopLogger<AiProviderEndpointResolver>());
 
     private static AiProcessingPolicy Policy(long tenantId) => new()
     {

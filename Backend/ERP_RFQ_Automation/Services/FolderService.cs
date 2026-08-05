@@ -166,7 +166,7 @@ namespace ERP_RFQ_Automation.Services
             await EnqueueFolderFilesAsync(
                 aramco, "Aramco Leads", ext => ext == ".docx", businessUnitId, report, cancellationToken);
             await EnqueueFolderFilesAsync(
-                shared, "Shared Leads", ext => ext is ".doc" or ".docx" or ".pdf" or ".xlsx" or ".xls",
+                shared, "Shared Leads", ext => SharedFolderExtensions.Contains(ext),
                 businessUnitId, report, cancellationToken);
             return report;
         }
@@ -1336,12 +1336,26 @@ namespace ERP_RFQ_Automation.Services
                 "Tenants", businessUnitId.ToString(CultureInfo.InvariantCulture), "Watched", folder);
         }
 
+        // The Shared watched-folder accepts general trading documents. This is a
+        // DELIBERATELY narrower set than the full DocumentIntakeAllowList (no images or
+        // free text from an unattended folder), but it must remain a SUBSET of that
+        // allow-list so nothing a folder accepts is later rejected by security
+        // inspection — asserted by DocumentIntakeAllowListTests. Both the upload gate
+        // and the watcher use THIS single set so the two sites cannot drift apart.
+        internal static readonly IReadOnlySet<string> SharedFolderExtensions =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ".doc", ".docx", ".pdf", ".xlsx", ".xls"
+            };
+
         private static bool IsAllowedUploadExtension(string folderType, string extension)
             => folderType.Trim().ToUpperInvariant() switch
             {
+                // SEC and Aramco are deliberately narrow, customer-specific doors
+                // (SEC sends legacy .doc, Aramco sends .docx) — do not widen them.
                 "SEC" or "CUSTOMER1" => extension == ".doc",
                 "ARAMCO" or "CUSTOMER2" => extension == ".docx",
-                "SHARED" => extension is ".doc" or ".docx" or ".pdf" or ".xlsx" or ".xls",
+                "SHARED" => SharedFolderExtensions.Contains(extension),
                 _ => false
             };
 

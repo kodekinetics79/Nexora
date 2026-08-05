@@ -181,6 +181,40 @@ public static class AiProviderEndpoint
 }
 
 /// <summary>
+/// The deployment's declared inference stance, resolved exactly once at startup from the
+/// same endpoint classification the enforcement uses.
+///
+/// <para>
+/// This is INFORMATIONAL/TELEMETRY, never an enforcement path: the per-tenant allow-list
+/// (<see cref="IAiExternalProviderTrust"/>) decides whether an external endpoint may be
+/// used, and the external-dependency ceiling in <see cref="AiGovernanceService"/> governs
+/// unauthorized external usage. The posture exists so an operator can see the
+/// deployment's stance in the product (AI Trust Center) and in the startup log without
+/// reading configuration or source.
+/// </para>
+/// </summary>
+public enum InferencePosture
+{
+    /// <summary>The configured inference endpoint is loopback: extraction runs locally.</summary>
+    LocalFirst,
+
+    /// <summary>
+    /// The configured inference endpoint is external: every governed call egresses, and is
+    /// lawful only under a per-tenant allow-list authorization for that exact endpoint.
+    /// </summary>
+    ExternalAuthorized
+}
+
+public static class InferencePostures
+{
+    /// <summary>One derivation rule, shared by the startup resolver and the ledger.</summary>
+    public static InferencePosture For(AiProviderClass providerClass) =>
+        providerClass == AiProviderClass.Local
+            ? InferencePosture.LocalFirst
+            : InferencePosture.ExternalAuthorized;
+}
+
+/// <summary>
 /// Resolves — once, at startup — the endpoint this process will actually call, and says
 /// so loudly in the log. Registered as a singleton and touched during startup so the
 /// line is always present in the deployment log, whether or not any document is ever
@@ -189,6 +223,9 @@ public static class AiProviderEndpoint
 public interface IAiProviderEndpointResolver
 {
     AiProviderDescriptor Current { get; }
+
+    /// <summary>The declared inference posture derived from <see cref="Current"/> at startup.</summary>
+    InferencePosture Posture { get; }
 }
 
 /// <inheritdoc />
@@ -205,19 +242,24 @@ public sealed class AiProviderEndpointResolver : IAiProviderEndpointResolver
             OllamaProvider,
             configuration["Ollama:BaseUrl"] ?? DefaultBaseUrl,
             configuration["Ollama:Model"] ?? DefaultModel);
+        Posture = InferencePostures.For(Current.ProviderClass);
 
         if (Current.ProviderClass == AiProviderClass.External)
             log.LogWarning(
-                "AI provider resolved as EXTERNAL. {Descriptor}. Unstructured document extraction " +
-                "requires a per-tenant allow-list authorization for this exact endpoint; tenants " +
-                "without one continue to fail closed.",
-                Current);
+                "AI provider resolved as EXTERNAL. Posture={Posture}. {Descriptor}. Unstructured document " +
+                "extraction requires a per-tenant allow-list authorization for this exact endpoint; tenants " +
+                "without one continue to fail closed. The external-dependency ceiling governs " +
+                "unauthorized external usage only; authorized calls are exempt from that ratio.",
+                Posture, Current);
         else
             log.LogInformation(
-                "AI provider resolved as LOCAL. {Descriptor}. Unstructured document extraction " +
-                "runs on the local model with no third-party egress.",
-                Current);
+                "AI provider resolved as LOCAL. Posture={Posture}. {Descriptor}. Unstructured document " +
+                "extraction runs on the local model with no third-party egress.",
+                Posture, Current);
     }
 
     public AiProviderDescriptor Current { get; }
+
+    /// <inheritdoc />
+    public InferencePosture Posture { get; }
 }

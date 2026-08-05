@@ -179,9 +179,9 @@ public sealed class QualityAnalyticsService(ErpRfqAutomationContext db)
         var external = metrics.Single(x => x.Key == "external-dependency");
         if (external.Denominator >= thresholds.MinimumSampleSize
             && external.Value > thresholds.ExternalDependencyCeilingPercent)
-            output.Add(new("Critical", "Restore local-first dependency ceiling",
+            output.Add(new("Critical", "Review external dependency against the allow-list",
                 "Inspect external call evidence and move supported operations to approved local paths.",
-                $"External dependency is {external.Value}% ({external.Numerator}/{external.Denominator}), above the {thresholds.ExternalDependencyCeilingPercent}% policy ceiling.",
+                $"External dependency is {external.Value}% ({external.Numerator}/{external.Denominator}), above the {thresholds.ExternalDependencyCeilingPercent}% ceiling that enforcement applies to unauthorized external calls (allow-list-authorized calls are exempt).",
                 "external-ai"));
         if (output.Count == 0)
             output.Add(new("Monitor", "No threshold breach in the selected cohort",
