@@ -268,20 +268,89 @@ namespace ERP_RFQ_Automation.Repositories
                     throw new ArgumentException($"RFQ Type ID {rfq.RfqtypeId} does not exist.");
             }
 
-            if (!rfq.LeadId.HasValue)
-                throw new ArgumentException("A tenant-owned lead is required so the RFQ belongs to a commercial case.");
-            var lead = await _context.Leads.SingleOrDefaultAsync(l =>
-                l.Id == rfq.LeadId.Value && l.BusinessUnitId == rfq.BusinessUnitId);
-            if (lead == null)
-                throw new ArgumentException($"Lead ID {rfq.LeadId} does not exist in this business unit.");
-            if (!lead.CustomerId.HasValue)
-                throw new ArgumentException("Resolve the lead customer before creating an RFQ.");
-            rfq.InheritCommercialIdentity(lead);
+            if (rfq.LeadId.HasValue)
+            {
+                // Tenant scoping is enforced here, not by the caller: a LeadId from another
+                // business unit is indistinguishable from a LeadId that does not exist.
+                var lead = await _context.Leads.SingleOrDefaultAsync(l =>
+                    l.Id == rfq.LeadId.Value && l.BusinessUnitId == rfq.BusinessUnitId);
+                if (lead == null)
+                    throw new ArgumentException($"Lead ID {rfq.LeadId} does not exist in this business unit.");
+                if (!lead.CustomerId.HasValue)
+                    throw new ArgumentException("Resolve the lead customer before creating an RFQ.");
+                rfq.InheritCommercialIdentity(lead);
+                await PersistNewRfqAsync(rfq);
+                return;
+            }
+
+            // Manual "Create RFQ" without a lead. The serial-lineage invariant — every RFQ
+            // belongs to a commercial case (Lead -> RFQ -> Quote share one Nexora Serial) —
+            // is PRESERVED, not bypassed: a governed manual-origin shell lead is created in
+            // the SAME transaction as the RFQ and the RFQ inherits its commercial identity.
+            //
+            // A customer is still required, because "an RFQ's lead has a resolved customer"
+            // is an existing gate on BOTH creation paths (see the lead branch above and
+            // LeadRepository.ConvertLeadToRfqAsync); a shell lead without a customer would
+            // produce an RFQ no quote can ever be addressed to.
+            if (!rfq.CustomerId.HasValue)
+                throw new ArgumentException(
+                    "Select a customer (or start from a lead) so the RFQ can be anchored to a commercial case.");
+
+            var customerId = rfq.CustomerId.Value;
+            var customerExists = await _context.Customers.AsNoTracking().AnyAsync(c =>
+                c.Id == customerId && c.Buid == rfq.BusinessUnitId && c.IsActive != false);
+            if (!customerExists)
+                throw new ArgumentException("The selected customer was not found in this business unit.");
+
+            // ExecuteAsync + an explicit transaction is the same pattern as
+            // LeadRepository.ConvertLeadToRfqAsync: production configures a retrying
+            // execution strategy (Program.cs EnableRetryOnFailure), which rejects
+            // user-initiated transactions outside a strategy delegate.
+            var strategy = _context.Database.CreateExecutionStrategy();
+            await strategy.ExecuteAsync(async () =>
+            {
+                _context.ChangeTracker.Clear();
+                await using var transaction = await _context.Database.BeginTransactionAsync();
+
+                var lead = BuildShellLead(rfq);
+                // "CUSTOMER_CONFIRMED": the creating user explicitly picked this customer;
+                // the null ContactId says the contact is unresolved. (The review flow's
+                // longer CUSTOMER_CONFIRMED_CONTACT_UNRESOLVED literal does not fit the
+                // production varchar(32) CustomerMatchStatus column.)
+                lead.ResolveCommercialIdentity(customerId, null, "CUSTOMER_CONFIRMED");
+                // Born already converted: this lead exists BECAUSE its RFQ exists. Seeding the
+                // status at INSERT (like the RFQ's DRAFT below) keeps it out of the triage
+                // queues (LeadStatusId == null means "new lead to review") and makes
+                // ConvertLeadToRfqAsync idempotent for it. The lifecycle governance
+                // interceptor only gates status CHANGES; the insert-time status is recorded
+                // in LeadStatusHistories by the database trigger / SQLite fallback.
+                lead.LeadStatusId = await LifecycleStatusCatalog.ResolveIdAsync(
+                    _context, rfq.BusinessUnitId, "Lead", "CONVERTED_TO_RFQ");
+                _context.Leads.Add(lead);
+                // First save: PostgreSQL's TR_Leads_AssignCommercialCase trigger (or the
+                // LeadPersistenceRules fallback on the relational-SQLite test lane) allocates
+                // the commercial case, and EF reads the generated CommercialCaseId /
+                // CommercialCaseReference back with the INSERT result.
+                await _context.SaveChangesAsync();
+
+                rfq.LeadId = lead.Id;
+                rfq.InheritCommercialIdentity(lead);
+                await PersistNewRfqAsync(rfq);
+
+                await transaction.CommitAsync();
+            });
+        }
+
+        /// <summary>
+        /// Shared tail of both creation paths: server-authoritative DRAFT status, the
+        /// server-generated RFQ number, and the insert itself.
+        /// </summary>
+        private async Task PersistNewRfqAsync(Rfq rfq)
+        {
             rfq.RfqstatusId = await LifecycleStatusCatalog.ResolveIdAsync(
                 _context, rfq.BusinessUnitId, "Rfq", "DRAFT");
 
-            var sequence = await _context.Database.SqlQueryRaw<long>(
-                "SELECT nextval('public.nexora_rfq_number_seq') AS \"Value\"").SingleAsync();
+            var sequence = await NextRfqSequenceAsync();
             rfq.Rfqno = $"NXR-RFQ-{rfq.BusinessUnitId}-{DateTime.UtcNow:yyyy}-{sequence:D8}";
 
             rfq.CreatedDate = DateTime.UtcNow;
@@ -289,6 +358,63 @@ namespace ERP_RFQ_Automation.Repositories
             _context.Rfqs.Add(rfq);
             await _context.SaveChangesAsync();
         }
+
+        private async Task<long> NextRfqSequenceAsync()
+        {
+            if (_context.Database.IsNpgsql())
+                return await _context.Database.SqlQueryRaw<long>(
+                    "SELECT nextval('public.nexora_rfq_number_seq') AS \"Value\"").SingleAsync();
+
+            // Relational-SQLite test lane has no PostgreSQL sequences. Mirror the sequence's
+            // monotonic high-water behaviour (same approach as LeadPersistenceRules for the
+            // commercial-case allocation): one more than the highest issued numeric suffix.
+            var issuedNumbers = await _context.Rfqs.IgnoreQueryFilters().AsNoTracking()
+                .Select(r => r.Rfqno).ToListAsync();
+            var highWater = 0L;
+            foreach (var issued in issuedNumbers)
+            {
+                var match = System.Text.RegularExpressions.Regex.Match(issued ?? string.Empty, "([0-9]+)$");
+                if (match.Success && long.TryParse(match.Groups[1].Value, out var value) && value > highWater)
+                    highWater = value;
+            }
+            return highWater + 1;
+        }
+
+        /// <summary>
+        /// The governed manual-origin lead that anchors a leadless "Create RFQ" to a
+        /// commercial case. It mirrors the commercial header facts the user typed, marks
+        /// its provenance ("manual-rfq", the creating actor, no AI confidence), and needs
+        /// no extraction review (RequiresCommercialReview=false: the facts are
+        /// human-entered, not AI-extracted). Line items stay on the RFQ — the lead is the
+        /// lineage anchor, not a copy of the document.
+        /// </summary>
+        private static Lead BuildShellLead(Rfq rfq) => new()
+        {
+            BuyersName = Truncate(rfq.BuyersName, 510),
+            RecDate = rfq.RecDate == default ? DateTime.UtcNow : rfq.RecDate,
+            BidClosingDate = rfq.BidClosingDate,
+            AcknowledgmentDate = rfq.AcknowledgmentDate,
+            SubDate = rfq.SubDate,
+            HeaderRemarks = rfq.HeaderRemarks,
+            OpportunityNo = Truncate(rfq.OpportunityNo, 100),
+            NoOfLineItems = rfq.Rfqitems?.Count ?? rfq.NoOfLineItems ?? 0,
+            Rfqtype = Truncate(rfq.Rfqtype, 50),
+            DurationAgreement = Truncate(rfq.DurationAgreement, 100),
+            LeadSource = "manual-rfq",
+            Aiconfidence = null,
+            ReviewVersion = 1,
+            RequiresCommercialReview = false,
+            CommercialFactsVerified = false,
+            // Leads.CreatedBy is varchar(20) in the production schema; the full actor
+            // identity is preserved on the RFQ itself (CreatedBy varchar(40)).
+            CreatedBy = Truncate(string.IsNullOrWhiteSpace(rfq.CreatedBy) ? "System" : rfq.CreatedBy, 20)!,
+            CreatedDate = DateTime.UtcNow,
+            BusinessUnitId = rfq.BusinessUnitId,
+            EmailIngestsId = null
+        };
+
+        private static string? Truncate(string? value, int maxLength)
+            => value is null || value.Length <= maxLength ? value : value[..maxLength];
 
         public async Task UpdateAsync(Rfq rfq)
         {

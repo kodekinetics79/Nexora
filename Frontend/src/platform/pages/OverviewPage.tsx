@@ -26,7 +26,7 @@ import {
 import { useAppTheme } from '../../context/ThemeContext';
 import { platformApi } from '../api/client';
 import { platformKeys } from '../api/queryKeys';
-import type { HealthStatus, PlanTier } from '../types';
+import type { HealthStatus } from '../types';
 import PageHeader from '../components/PageHeader';
 import StatTile from '../components/StatTile';
 import { ErrorState, LoadingState, TilesSkeleton } from '../components/States';
@@ -38,12 +38,15 @@ const HEALTH_COLOR: Record<HealthStatus, string> = {
   down: '#ef4444',
 };
 
-const PLAN_COLOR: Record<PlanTier, string> = {
+// The buckets are REAL plan codes (plus "none" for plan-less tenants), so any
+// unknown code needs a deterministic fallback colour.
+const PLAN_COLOR: Record<string, string> = {
   free: '#94a3b8',
   pro: '#3b82f6',
   enterprise: '#10b981',
-  unassigned: '#64748b',
+  none: '#64748b',
 };
+const planColor = (tier: string) => PLAN_COLOR[tier] ?? '#8b5cf6';
 
 export default function OverviewPage() {
   const { mode, primaryColor } = useAppTheme();
@@ -109,7 +112,7 @@ export default function OverviewPage() {
             value={fmtNumber(data.tenantCount)}
             icon={<TenantsIcon />}
             color={primaryColor}
-            caption={`${data.activeTenants} active`}
+            caption={`${data.activeTenants} active · ${fmtCompact(data.activeUsersFleetWide)} users fleet-wide`}
           />
         </Grid>
         <Grid size={{ xs: 12, sm: 6, md: 4, lg: 2.4 }}>
@@ -249,7 +252,7 @@ export default function OverviewPage() {
                   <RTooltip contentStyle={tooltipStyle} cursor={{ fill: gridColor }} />
                   <Bar dataKey="count" radius={[6, 6, 0, 0]} barSize={44}>
                     {data.tenantsByPlan.map((entry) => (
-                      <Cell key={entry.tier} fill={PLAN_COLOR[entry.tier]} />
+                      <Cell key={entry.tier} fill={planColor(entry.tier)} />
                     ))}
                   </Bar>
                 </BarChart>
@@ -258,7 +261,7 @@ export default function OverviewPage() {
             <Stack direction="row" spacing={2} justifyContent="center" sx={{ mt: 1 }}>
               {data.tenantsByPlan.map((e) => (
                 <Stack key={e.tier} direction="row" alignItems="center" spacing={0.5}>
-                  <Box sx={{ width: 9, height: 9, borderRadius: '50%', bgcolor: PLAN_COLOR[e.tier] }} />
+                  <Box sx={{ width: 9, height: 9, borderRadius: '50%', bgcolor: planColor(e.tier) }} />
                   <Typography variant="caption" sx={{ fontWeight: 600, textTransform: 'capitalize' }}>
                     {e.tier}
                   </Typography>

@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.MultiTenancy;
+using ERP_RFQ_Automation.Platform.Entitlements;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Logging;
@@ -28,6 +29,7 @@ public sealed class ExtractionQueue : IExtractionQueue
     private readonly ErpRfqAutomationContext _context;
     private readonly ILogger<ExtractionQueue> _log;
     private readonly ITenantContext? _tenantContext;
+    private readonly IEntitlementService? _entitlements;
 
     public ExtractionQueue(ErpRfqAutomationContext context, ILogger<ExtractionQueue> log)
     {
@@ -38,10 +40,12 @@ public sealed class ExtractionQueue : IExtractionQueue
     public ExtractionQueue(
         ErpRfqAutomationContext context,
         ILogger<ExtractionQueue> log,
-        ITenantContext tenantContext)
+        ITenantContext tenantContext,
+        IEntitlementService? entitlements = null)
         : this(context, log)
     {
         _tenantContext = tenantContext;
+        _entitlements = entitlements;
     }
 
     // All entity columns default to their property names (case-sensitive, quoted).
@@ -55,8 +59,30 @@ public sealed class ExtractionQueue : IExtractionQueue
     // Atomic weighted-fair claim. Live (non-expired) leases per tenant are counted so a
     // tenant already at its cap is skipped; among eligible jobs the highest Priority then
     // the lowest WFQ SchedulerTag wins. Expired leases (crashed workers) are reclaimable.
+    //
+    // Per-tenant concurrency entitlement (P0): the effective cap for a tenant is its
+    // plan's MaxConcurrentExtractionJobs (resolved via platform.Tenants →
+    // platform.Plans on PrimaryBusinessUnitId, inside the same atomic statement), and
+    // @cap — the ExtractionWorkerOptions.PerTenantConcurrencyCap config default —
+    // remains the fallback for tenants without a plan or without a Tenant row.
     private static readonly string ClaimSql = $@"
-WITH exhausted AS (
+WITH plan_caps AS (
+    SELECT t.""PrimaryBusinessUnitId"" AS buid,
+           MAX(p.""MaxConcurrentExtractionJobs"") AS cap
+    FROM platform.""Tenants"" t
+    JOIN platform.""Plans"" p ON p.""Id"" = t.""PlanId""
+    WHERE t.""PrimaryBusinessUnitId"" IS NOT NULL
+    GROUP BY t.""PrimaryBusinessUnitId""
+),
+blocked_tenants AS (
+    -- P2-A8: Suspended/Archived tenants' queued jobs must not be claimed. Legacy BUs
+    -- without a platform.Tenants row are unaffected (fail open per LEDGER contract).
+    SELECT t.""PrimaryBusinessUnitId"" AS buid
+    FROM platform.""Tenants"" t
+    WHERE t.""PrimaryBusinessUnitId"" IS NOT NULL
+      AND t.""Status"" IN ('Suspended','Archived')
+),
+exhausted AS (
     UPDATE ""ExtractionJobs""
     SET ""Status"" = 'DeadLetter',
         ""LeasedBy"" = NULL,
@@ -82,6 +108,8 @@ candidate AS (
     SELECT j.""Id""
     FROM ""ExtractionJobs"" j
     LEFT JOIN inflight f ON f.buid = j.""BusinessUnitId""
+    LEFT JOIN plan_caps pc ON pc.buid = j.""BusinessUnitId""
+    LEFT JOIN blocked_tenants bt ON bt.buid = j.""BusinessUnitId""
     WHERE (
             j.""Status"" = 'Pending'
             OR (j.""Status"" IN ('Leased','Extracting','Persisting')
@@ -89,7 +117,10 @@ candidate AS (
           )
       AND j.""NextAttemptAt"" <= @now
       AND j.""Attempts"" < j.""MaxAttempts""
-      AND COALESCE(f.cnt, 0) < @cap
+      AND bt.buid IS NULL
+      -- P1-A3: a plan cap of 0 is 'not configured' → fall back to @cap, matching
+      -- EntitlementService's <= 0 semantics (NULLIF), never a silent clamp to 1.
+      AND COALESCE(f.cnt, 0) < GREATEST(COALESCE(NULLIF(pc.cap, 0), @cap), 1)
     ORDER BY j.""Priority"" DESC, j.""SchedulerTag"" ASC, j.""CreatedOn"" ASC
     FOR UPDATE OF j SKIP LOCKED
     LIMIT 1
@@ -141,11 +172,48 @@ RETURNING {ReturningColumns};";
                     Outcome = EnqueueOutcome.Duplicate, ExistingStatus = existing.Status
                 };
 
+            // Plan entitlement (P0): monthly document quota, checked AFTER the duplicate
+            // short-circuit (re-submitting known bytes consumes no quota) and BEFORE the
+            // insert. Counts this tenant's jobs created since the first of the current
+            // UTC month; the ~60s-cached plan resolution means no per-enqueue platform
+            // query. No plan / no Tenant row → unlimited (contracted fail-open).
+            if (_entitlements is not null)
+            {
+                var quota = await _entitlements.CheckDocumentQuotaAsync(request.BusinessUnitId, ct);
+                if (!quota.Allowed)
+                {
+                    _log.LogWarning(
+                        "Enqueue denied for tenant {BusinessUnitId}: monthly document quota reached ({Used}/{Limit}).",
+                        request.BusinessUnitId, quota.Current, quota.Limit);
+                    throw new DocumentQuotaExceededException(request.BusinessUnitId, quota);
+                }
+            }
+
+            // WFQ share weight comes from the tenant's plan when one exists (heavier
+            // plan → larger scheduling share), else the 1.0 default. P2-A6: the weight
+            // is refreshed from the plan on EVERY enqueue — not only when the state row
+            // is first created — so a plan change takes effect within the ~60s plan
+            // cache window instead of being frozen at the tenant's first enqueue.
+            var planWeight = _entitlements is null
+                ? 1.0
+                : await _entitlements.GetQueueWeightAsync(request.BusinessUnitId, 1.0, ct);
+            if (planWeight <= 0) planWeight = 1.0;
+
             var state = await tenants.FindAsync(new object[] { request.BusinessUnitId }, ct);
             if (state is null)
             {
-                state = new TenantQueueState { BusinessUnitId = request.BusinessUnitId, Weight = 1.0, LastVTime = 0, InFlight = 0 };
+                state = new TenantQueueState
+                {
+                    BusinessUnitId = request.BusinessUnitId,
+                    Weight = planWeight,
+                    LastVTime = 0,
+                    InFlight = 0
+                };
                 tenants.Add(state);
+            }
+            else if (state.Weight != planWeight)
+            {
+                state.Weight = planWeight;
             }
 
             // WFQ virtual finish tag: advance the tenant's virtual clock by 1/Weight so a

@@ -236,9 +236,14 @@ public sealed class ExtractionWorker : BackgroundService
 
             if (outcome.Status == ExtractionOutcomeStatus.Failed || outcome.Result is null)
             {
+                // Retryable failure (NOT FailPermanentlyAsync): includes the allow-list
+                // fail-closed refusal for unstructured extraction, which must hold the
+                // document for review/retry, never dead-letter it on the first attempt.
+                var failureReason = outcome.ReviewReason ?? "Extraction produced no usable result.";
+                if (!string.IsNullOrWhiteSpace(input.StructuredFallbackNote))
+                    failureReason = $"{input.StructuredFallbackNote} {failureReason}";
                 if (!await queue.FailAsync(
-                        job.Id, workerId, job.Attempts,
-                        outcome.ReviewReason ?? "Extraction produced no usable result.", workToken))
+                        job.Id, workerId, job.Attempts, failureReason, workToken))
                     LogLeaseLost(job.Id, workerId, "recording extraction failure");
                 else
                     await MarkIntakeFailureAsync(job, "extraction_failed", workToken);

@@ -16,32 +16,61 @@ services:
     runtime: docker
     rootDir: Backend
     dockerfilePath: ./Dockerfile
-    # /ready aggregates database + evidence-storage + malware-scanner + the three
-    # worker heartbeats. It stays strict on purpose (docs/nexora/releases/
-    # module-01-governed-ingestion-lead-intelligence.md): an unreachable scanner
-    # must not look healthy. Consequence: a clamd outage makes this service
-    # unhealthy too, and Render restarts an instance after 60s of consecutive
-    # failures. See the "When the scanner is down" section of the runbook.
-    healthCheckPath: /ready
+    # LIVENESS ONLY. /ready additionally aggregates evidence-storage + malware-scanner
+    # + worker heartbeats, and today the evidence-storage check reports Unhealthy for a
+    # local (disk-backed) store by design — pointing the platform health check at /ready
+    # would restart-loop a service that is actually serving traffic correctly.
+    # /health is tag-filtered to "live" checks (Program.cs MapHealthChecks).
+    healthCheckPath: /health
+    # Persistent disk. Documents are content-addressed evidence and are NEVER deleted by
+    # the application, so losing this volume is unrecoverable data loss, not a cache miss.
+    # Render preserves ONLY paths under mountPath across deploys and restarts.
+    disk:
+      name: nexora-evidence
+      mountPath: /var/data
+      sizeGB: 5
     envVars:
       - key: ASPNETCORE_ENVIRONMENT
         value: Production
+      # MUST sit under the disk mountPath above. This previously read /tmp with
+      # enforcement disabled — a Blueprint sync of that value would have silently
+      # relocated every upload onto the ephemeral container filesystem and destroyed
+      # the document estate on the next restart, with no error at any layer.
       - key: Storage__RootPath
-        value: /tmp/nexora/uploads
+        value: /var/data/nexora/uploads
+      - key: Storage__RequiredMountPath
+        value: /var/data
+      # Fail-closed: LocalFileStorage verifies the mount exists and write-probes it at
+      # startup, and REFUSES TO BOOT if the volume is missing. A loud failed deploy is
+      # the correct outcome; silently writing to ephemeral storage is not.
       - key: Storage__EnforcePersistentMount
-        value: "false"
+        value: "true"
+      # Evidence object storage: LOCAL (disk-backed), decided deliberately for the pilot.
+      # Program.cs selects S3EvidenceObjectStorage only when this equals "S3"; any other
+      # value falls through to LocalEvidenceObjectStorage over the persistent disk above.
+      # This previously read "S3" while production had it UNSET — a Blueprint sync would
+      # have constructed the S3 client with EMPTY credentials (the four vars below are
+      # sync:false and were never populated) and broken evidence storage outright.
+      #
+      # To move to object storage later: set this to S3 and populate the four commented
+      # variables. NOTE for whoever does that — Cloudflare R2 does NOT implement object
+      # versioning, and VerifyBucketVersioningAsync swallows the resulting 501, so the
+      # versioning guarantee the S3 path advertises is silently absent on R2. Prefer a
+      # provider with real versioning, and convert the legacy physical-path writers
+      # (FolderService, EmailService, ManualUploadService) at the same time or the
+      # document estate ends up split across two stores with two restore procedures.
       - key: EvidenceStorage__Provider
-        value: S3
-      - key: EvidenceStorage__ServiceUrl
-        sync: false
-      - key: EvidenceStorage__Region
-        value: auto
-      - key: EvidenceStorage__AccessKeyId
-        sync: false
-      - key: EvidenceStorage__SecretAccessKey
-        sync: false
-      - key: EvidenceStorage__Bucket
-        sync: false
+        value: Local
+      # - key: EvidenceStorage__ServiceUrl
+      #   sync: false
+      # - key: EvidenceStorage__Region
+      #   value: auto
+      # - key: EvidenceStorage__AccessKeyId
+      #   sync: false
+      # - key: EvidenceStorage__SecretAccessKey
+      #   sync: false
+      # - key: EvidenceStorage__Bucket
+      #   sync: false
       # PILOT POSTURE — READ BEFORE PRODUCTION.
       # BuiltIn is NOT an anti-virus engine. It performs structural inspection
       # only (content-type sniffing, size caps, OOXML archive validation,

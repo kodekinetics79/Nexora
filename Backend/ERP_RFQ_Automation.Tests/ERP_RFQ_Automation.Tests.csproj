@@ -28,6 +28,9 @@
 
   <ItemGroup>
     <Content Include="Fixtures\legacy-rfq.xls" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Fixtures\unrecognized-layout-rfq.xls" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Fixtures\recognized-layout-rfq.xls" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Fixtures\empty-workbook.xls" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

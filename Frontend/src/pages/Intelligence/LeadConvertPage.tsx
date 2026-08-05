@@ -12,6 +12,7 @@ import {
   ErrorOutlined as AttentionIcon,
 } from '@mui/icons-material';
 import { useSnackbar } from 'notistack';
+import { presentableErrorMessage } from '../../utils/apiErrors';
 import intelligenceService from '../../api/services/intelligenceService';
 import type { ConversionPreviewItem } from '../../api/services/intelligenceService';
 import { ConfidenceChip, parseUserNumber } from './common';
@@ -108,8 +109,15 @@ const LeadConvertPage: React.FC = () => {
       enqueueSnackbar('RFQ created — here it is.', { variant: 'success' });
       navigate(`/procurement/rfqs/view/${result.rfqId}`);
     },
-    onError: () => {
-      enqueueSnackbar("Couldn't create the RFQ. Nothing was changed — please try again.", { variant: 'error' });
+    onError: (err: unknown) => {
+      // Render the server's actual reason when it is safe to show (ProblemDetails
+      // detail or a vetted plain-string 4xx body); the generic sentence is only the
+      // fallback for genuinely unrenderable bodies. This page previously discarded
+      // the error object entirely, which hid an honest 403/400 behind this text.
+      enqueueSnackbar(
+        presentableErrorMessage(err, "Couldn't create the RFQ. Nothing was changed — please try again."),
+        { variant: 'error' },
+      );
     },
   });
 

@@ -233,7 +233,7 @@ public sealed class LeadDuplicateDetector : ILeadDuplicateDetector
 
         recipient ??= await _context.Users.AsNoTracking()
             .Where(u => u.Buid == businessUnitId && u.IsActive == true && u.RoleId != null)
-            .Join(_context.SetupMasters.AsNoTracking().Where(s => s.SetupType.ToLower() == "role"),
+            .Join(_context.SetupMasters.AsNoTracking().Where(ERP_RFQ_Automation.Authorization.SetupTypes.IsRoleRow),
                   u => u.RoleId, s => (long?)s.SetupId, (u, s) => new { User = u, Role = s })
             .Where(x => x.Role.SetupValue.ToLower().Contains("admin")
                         || x.Role.SetupValue.ToLower().Contains("manager")

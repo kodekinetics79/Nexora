@@ -85,9 +85,9 @@ public static class DemoUserSeeder
         }
 
         var role = await db.SetupMasters
+            .Where(ERP_RFQ_Automation.Authorization.SetupTypes.IsRoleRow)
             .FirstOrDefaultAsync(s =>
                 s.BusinessUnitId == businessUnit.Id &&
-                s.SetupType.ToLower() == "role" &&
                 s.SetupValue == roleName);
 
         if (role == null)
@@ -165,6 +165,7 @@ public static class DemoUserSeeder
                 user.RoleId = role.SetupId;
                 user.Buid = businessUnit.Id;
                 user.IsActive = true;
+                user.DeactivatedAtUtc = null; // reactivation clears the deactivation stamp
                 user.ModifiedBy = "system:demo-seed";
                 user.ModifiedOn = now;
             }

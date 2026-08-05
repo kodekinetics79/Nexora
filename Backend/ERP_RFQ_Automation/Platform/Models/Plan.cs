@@ -29,6 +29,9 @@ public class Plan
     /// <summary>JSON map of feature entitlements (stored as jsonb — see WIRING.md).</summary>
     public string Features { get; set; } = "{}";
 
+    /// <summary>List price per month in USD (precision 10,2). Null = not priced yet.</summary>
+    public decimal? MonthlyPriceUsd { get; set; }
+
     public bool IsActive { get; set; } = true;
 
     public DateTime CreatedOn { get; set; } = DateTime.UtcNow;

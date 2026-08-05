@@ -53,11 +53,13 @@ namespace ERP_RFQ_Automation.Controllers
                     return Unauthorized();
 
                 if (pageNumber < 1)
-                    return BadRequest("Page number must be greater than or equal to 1.");
+                    return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid RFQ query",
+                        "Page number must be greater than or equal to 1."));
 
                 // Relaxed validation: Allow any page size up to 1000
                 if (pageSize < 1 || pageSize > 1000)
-                    return BadRequest("Page size must be between 1 and 1000.");
+                    return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid RFQ query",
+                        "Page size must be between 1 and 1000."));
 
                 var (items, totalItems) = await _repository.GetAllAsync(businessUnitId, pageNumber, pageSize, search, isActive, assignedToId, createdBy, rfqStatusId, rfqStatusCode, readiness);
                 
@@ -105,8 +107,9 @@ namespace ERP_RFQ_Automation.Controllers
         {
             try
             {
-                var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                if (businessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+                if (!TryGetAuthenticatedBusinessUnitId(out var businessUnitId))
+                    return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid request",
+                        "Business Unit ID is required."));
                 var actor = User.FindFirst(ClaimTypes.Email)?.Value ?? User.Identity?.Name;
                 if (string.IsNullOrWhiteSpace(actor)) return Unauthorized();
 
@@ -119,7 +122,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (InvalidOperationException ex)
             {
-                return Conflict(new { message = ex.Message });
+                return Conflict(Problem(StatusCodes.Status409Conflict, "Quote draft not prepared", ex.Message));
             }
         }
 
@@ -133,7 +136,11 @@ namespace ERP_RFQ_Automation.Controllers
 
                 if (!long.TryParse(User.FindFirst("businessUnitId")?.Value, out var claimBUId) || claimBUId <= 0)
                     return Unauthorized();
-                if (!request.LeadId.HasValue) return BadRequest("A tenant-owned lead is required so the RFQ belongs to a commercial case.");
+                // No LeadId is NOT rejected here any more: the repository preserves the
+                // serial-lineage invariant by creating a governed manual-origin shell lead
+                // in the same transaction as the RFQ (Lead -> RFQ -> Quote keep sharing one
+                // commercial case). Requests that cannot be anchored to a commercial case
+                // (no lead AND no tenant-owned customer) surface as a structured 400 below.
                 var actor = User.FindFirst(ClaimTypes.Email)?.Value ?? User.Identity?.Name;
                 if (string.IsNullOrWhiteSpace(actor)) return Unauthorized();
 
@@ -157,7 +164,7 @@ namespace ERP_RFQ_Automation.Controllers
                 CreatedDate = DateTime.UtcNow,
                 BusinessUnitId = claimBUId,
                 NoOfLineItems = request.Rfqitems?.Count ?? 0,
-                Rfqitems = request.Rfqitems.Select(i => new Rfqitem
+                Rfqitems = (request.Rfqitems ?? new List<RfqitemCreateRequestDTO>()).Select(i => new Rfqitem
                 {
                     CompanyRef = i.CompanyRef,
                     CustomerAccountPortalId = i.CustomerAccountPortalId,
@@ -201,9 +208,16 @@ namespace ERP_RFQ_Automation.Controllers
 
             return CreatedAtAction(nameof(GetById), new { id = rfq.Id }, response);
             }
+            catch (ArgumentException ex)
+            {
+                // The repository's request-validation failures (missing customer, a lead or
+                // customer that is not owned by this tenant, unknown RFQ type). The message
+                // is written for the user and safe to render.
+                return BadRequest(Problem(StatusCodes.Status400BadRequest, "RFQ not created", ex.Message));
+            }
             catch (InvalidOperationException ex)
             {
-                return Conflict(new { error = ex.Message });
+                return Conflict(Problem(StatusCodes.Status409Conflict, "RFQ not created", ex.Message));
             }
             catch (Exception ex)
             {
@@ -289,9 +303,17 @@ namespace ERP_RFQ_Automation.Controllers
 
             return NoContent();
             }
+            catch (KeyNotFoundException ex)
+            {
+                return NotFound(Problem(StatusCodes.Status404NotFound, "RFQ not found", ex.Message));
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(Problem(StatusCodes.Status400BadRequest, "RFQ not updated", ex.Message));
+            }
             catch (InvalidOperationException ex)
             {
-                return Conflict(new { error = ex.Message });
+                return Conflict(Problem(StatusCodes.Status409Conflict, "RFQ not updated", ex.Message));
             }
             catch (Exception ex)
             {
@@ -307,8 +329,9 @@ namespace ERP_RFQ_Automation.Controllers
         {
             // SEC-07: the business unit and the approver identity come from the token,
             // never from client input (was a spoofable ?approvedBy= query param).
-            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-            if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
+            if (!TryGetAuthenticatedBusinessUnitId(out var businessUnitId))
+                return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid request",
+                    "Business Unit ID is required."));
             var approvedBy = User.Identity?.Name ?? "System";
 
             using var transaction = await _context.Database.BeginTransactionAsync();
@@ -330,7 +353,8 @@ namespace ERP_RFQ_Automation.Controllers
                     && !string.Equals(request.RecipientEmail.Trim(), selectedEmail, StringComparison.OrdinalIgnoreCase))
                 {
                     await transaction.RollbackAsync();
-                    return BadRequest(new { error = "The recipient must match the verified customer contact for this RFQ." });
+                    return BadRequest(Problem(StatusCodes.Status400BadRequest, "RFQ not approved",
+                        "The recipient must match the verified customer contact for this RFQ."));
                 }
 
                 string? emailWarning = null;
@@ -395,12 +419,12 @@ namespace ERP_RFQ_Automation.Controllers
             catch (KeyNotFoundException ex)
             {
                 try { await transaction.RollbackAsync(); } catch { /* already rolled back */ }
-                return NotFound(ex.Message);
+                return NotFound(Problem(StatusCodes.Status404NotFound, "RFQ not found", ex.Message));
             }
             catch (InvalidOperationException ex)
             {
                 try { await transaction.RollbackAsync(); } catch { /* already rolled back */ }
-                return Conflict(new { error = ex.Message });
+                return Conflict(Problem(StatusCodes.Status409Conflict, "RFQ not approved", ex.Message));
             }
             catch (Exception ex)
             {
@@ -415,9 +439,10 @@ namespace ERP_RFQ_Automation.Controllers
         {
             try
             {
-                var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
-                
+                if (!TryGetAuthenticatedBusinessUnitId(out var businessUnitId))
+                    return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid request",
+                        "Business Unit ID is required."));
+
                 var stats = await _repository.GetRfqStatsAsync(businessUnitId);
                 return Ok(stats);
             }
@@ -457,6 +482,19 @@ namespace ERP_RFQ_Automation.Controllers
             };
             problem.Extensions["traceId"] = HttpContext.TraceIdentifier;
             return StatusCode(StatusCodes.Status500InternalServerError, problem);
+        }
+
+        /// <summary>
+        /// RFC 7807 body carrying the request's trace identifier, so a caller reporting a
+        /// failure gives support an id that ties straight back to the server log entry.
+        /// Same pattern as SupplierController: the bare-string / anonymous-object bodies
+        /// these replaced were not renderable by the frontend's error surface.
+        /// </summary>
+        private ProblemDetails Problem(int status, string title, string detail)
+        {
+            var problem = new ProblemDetails { Status = status, Title = title, Detail = detail };
+            problem.Extensions["traceId"] = HttpContext.TraceIdentifier;
+            return problem;
         }
 
         public sealed record ApproveRfqRequest(

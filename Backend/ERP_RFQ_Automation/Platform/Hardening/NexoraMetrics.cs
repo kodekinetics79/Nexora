@@ -38,6 +38,9 @@ public sealed class NexoraMetrics : IDisposable
     private readonly Counter<long> _llmCalls;
     private readonly Histogram<double> _llmLatencyMs;
 
+    // --- Platform enforcement instruments ---------------------------------
+    private readonly Counter<long> _tenantAccessFailOpen;
+
     public NexoraMetrics(IMeterFactory meterFactory)
     {
         // IMeterFactory (net8.0) ties the Meter lifetime to DI and lets the OTel
@@ -73,7 +76,22 @@ public sealed class NexoraMetrics : IDisposable
             "nexora.llm.latency",
             unit: "ms",
             description: "Latency of a single LLM provider call.");
+
+        _tenantAccessFailOpen = _meter.CreateCounter<long>(
+            "nexora.platform.tenant_access.fail_open",
+            unit: "{resolution}",
+            description: "Tenant/plan resolutions that failed and fell back to the contracted "
+                + "fail-open snapshot (no status enforcement, no plan limits). A sustained "
+                + "non-zero rate means the platform plane is unreadable (missing grant/outage) "
+                + "and enforcement is silently disabled — alert on it. (Sec2)");
     }
+
+    /// <summary>
+    /// Sec2: record that a tenant-access resolution failed and the contracted
+    /// fail-open path was taken for the given BusinessUnit.
+    /// </summary>
+    public void TenantAccessFailOpen(long? businessUnitId = null) =>
+        _tenantAccessFailOpen.Add(1, Tenant(businessUnitId));
 
     /// <summary>Record that a job was enqueued (optionally tagged with the tenant).</summary>
     public void JobEnqueued(long? businessUnitId = null) =>

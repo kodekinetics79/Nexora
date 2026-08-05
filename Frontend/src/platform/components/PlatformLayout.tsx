@@ -24,8 +24,11 @@ import {
   Dns as PipelineIcon,
   Insights as OverviewIcon,
   Logout as ExitIcon,
+  ManageAccounts as UsersIcon,
   Menu as MenuIcon,
+  Paid as BillingIcon,
   ReceiptLong as AuditIcon,
+  Shield as SecurityIcon,
   Tune as PlansIcon,
   Workspaces as TenantsIcon,
   LightMode as SunIcon,
@@ -43,6 +46,9 @@ const NAV = [
   { to: '/platform/tenants', label: 'Tenants', icon: <TenantsIcon /> },
   { to: '/platform/pipeline', label: 'Pipeline', icon: <PipelineIcon /> },
   { to: '/platform/plans', label: 'Plans', icon: <PlansIcon /> },
+  { to: '/platform/users', label: 'Users', icon: <UsersIcon /> },
+  { to: '/platform/billing', label: 'Billing', icon: <BillingIcon /> },
+  { to: '/platform/security', label: 'Security', icon: <SecurityIcon /> },
   { to: '/platform/audit', label: 'Audit Log', icon: <AuditIcon /> },
 ];
 

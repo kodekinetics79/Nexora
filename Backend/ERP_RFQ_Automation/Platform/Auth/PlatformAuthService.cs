@@ -15,9 +15,11 @@ public interface IPlatformAuthService
     /// <summary>
     /// Mint the short-lived, read-only TENANT token used for support impersonation.
     /// It is signed/validated by the tenant scheme (audience "RFQ") — NOT the
-    /// platform scheme — and is stamped act_sub / impersonated / read-only.
+    /// platform scheme — and is stamped act_sub / impersonated / read-only. The
+    /// returned <c>Jti</c> keys the revocable <see cref="ImpersonationSession"/> row
+    /// that the caller MUST persist alongside issuance.
     /// </summary>
-    (string Token, DateTime ExpiresAtUtc) IssueImpersonationToken(
+    (string Token, DateTime ExpiresAtUtc, string Jti) IssueImpersonationToken(
         long actingPlatformUserId, Tenant tenant, long businessUnitId, string reason);
 }
 
@@ -126,7 +128,11 @@ public class PlatformAuthService : IPlatformAuthService
         return (new JwtSecurityTokenHandler().WriteToken(token), expires);
     }
 
-    public (string Token, DateTime ExpiresAtUtc) IssueImpersonationToken(
+    /// <summary>Inclusive bounds for the impersonation-token lifetime, in minutes.</summary>
+    public const double MinImpersonationExpiryMinutes = 5;
+    public const double MaxImpersonationExpiryMinutes = 60;
+
+    public (string Token, DateTime ExpiresAtUtc, string Jti) IssueImpersonationToken(
         long actingPlatformUserId, Tenant tenant, long businessUnitId, string reason)
     {
         // Impersonation mints a TENANT token: tenant signing key + tenant audience
@@ -139,6 +145,11 @@ public class PlatformAuthService : IPlatformAuthService
         var audience = _config["Jwt:Audience"];
         var minutes = double.TryParse(_config["Jwt:ImpersonationExpiryMinutes"], out var m) ? m : 15;
 
+        // Clamp to [5, 60] minutes: a misconfigured (or hostile) value can neither
+        // mint an effectively non-expiring support token nor one too short to use.
+        minutes = Math.Clamp(minutes, MinImpersonationExpiryMinutes, MaxImpersonationExpiryMinutes);
+
+        var jti = Guid.NewGuid().ToString();
         var claims = new[]
         {
             new Claim(JwtRegisteredClaimNames.Sub, $"impersonation:{tenant.Id}"),
@@ -148,7 +159,7 @@ public class PlatformAuthService : IPlatformAuthService
             new Claim(PlatformAuthConstants.ImpersonatedClaim, "true"),
             new Claim(PlatformAuthConstants.ReadOnlyClaim, "true"),
             new Claim(PlatformAuthConstants.ImpersonationReasonClaim, reason),
-            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
+            new Claim(JwtRegisteredClaimNames.Jti, jti)
         };
 
         var creds = new SigningCredentials(
@@ -158,6 +169,6 @@ public class PlatformAuthService : IPlatformAuthService
         var token = new JwtSecurityToken(
             issuer: issuer, audience: audience, claims: claims, expires: expires, signingCredentials: creds);
 
-        return (new JwtSecurityTokenHandler().WriteToken(token), expires);
+        return (new JwtSecurityTokenHandler().WriteToken(token), expires, jti);
     }
 }

@@ -94,8 +94,11 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
     {
         public string? Rfqno { get; set; }
         public string? BuyersName { get; set; }
-        [Required]
-
+        // A stray [Required] used to sit here on Id. [Required] can never fire on a
+        // non-nullable value type (the binder always materializes a value), so it was
+        // dead wherever it pointed — including RecDate, where it would be equally
+        // inert. Removed rather than relocated; the server supplies authoritative
+        // values for everything a client omits.
         public long Id { get; set; }
         public DateTime RecDate { get; set; }
         public DateTime? BidClosingDate { get; set; }

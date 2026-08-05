@@ -17,6 +17,7 @@ import {
   OpenInNew as WorkspaceIcon,
 } from '@mui/icons-material';
 import leadService from '../../api/services/leadService';
+import LateIngestedBadge from './LateIngestedBadge';
 import LifecycleActions from '../../components/common/LifecycleActions';
 import CommercialLineIntelligence from '../../components/common/CommercialLineIntelligence';
 import { parseDateSafe, formatDateSafe } from '../../utils/dates';
@@ -151,6 +152,13 @@ const LeadDetailPage: React.FC = () => {
               {lead.rfqno}
             </Typography>
             <DeadlineChip bidClosingDate={lead.bidClosingDate} />
+            {/* Audit fairness: this lead entered Nexora after its deadline, so it
+                is excluded from response-time / aging performance metrics. */}
+            <LateIngestedBadge
+              lateIngested={lead.lateIngested}
+              ingestedOn={lead.ingestedOn || lead.ingestedAtUtc || lead.createdDate}
+              dueDate={lead.bidClosingDate || lead.subDate}
+            />
           </Stack>
           <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>
             {t('lead_detail_analysis') || 'Lead Details Analysis Engine'}
@@ -270,7 +278,20 @@ const LeadDetailPage: React.FC = () => {
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Bid Close" value={formatDate(lead.bidClosingDate)} /></Grid>
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Source" value={lead.leadSource} /></Grid>
 
-              <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Nexora Ingestion Date" value={formatDate(lead.ingestedAtUtc || lead.createdDate || null)} /></Grid>
+              {/* Audit-grade ingestion timestamp (earliest source received_on;
+                  legacy pipeline timestamp / createdDate as display fallbacks),
+                  deliberately distinct from the business dates above. */}
+              <Grid size={{ xs: 12, md: 4 }} component="div">
+                <DataField
+                  label="Nexora Ingestion Date"
+                  value={`Ingested ${formatDate(lead.ingestedOn || lead.ingestedAtUtc || lead.createdDate || null)}`}
+                />
+                <LateIngestedBadge
+                  lateIngested={lead.lateIngested}
+                  ingestedOn={lead.ingestedOn || lead.ingestedAtUtc || lead.createdDate}
+                  dueDate={lead.bidClosingDate || lead.subDate}
+                />
+              </Grid>
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Current Revision" value={`Revision ${lead.currentRevisionNumber || 1}`} /></Grid>
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Customer" value={lead.customerName || (lead.customerId ? `Customer #${lead.customerId}` : 'Unresolved')} /></Grid>
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Account Owner" value={lead.accountOwnerName || 'Unassigned'} /></Grid>

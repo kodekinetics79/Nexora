@@ -25,26 +25,38 @@ import {
 } from '@mui/x-data-grid';
 import {
   Add as AddIcon,
+  Inventory2Outlined as ArchiveIcon,
   Login as ImpersonateIcon,
   PauseCircleOutlined as SuspendIcon,
   PlayCircleOutlined as ResumeIcon,
+  RestorePageOutlined as RestoreIcon,
   Search as SearchIcon,
 } from '@mui/icons-material';
 import { useSnackbar } from 'notistack';
 import { platformApi } from '../api/client';
+import { platformErrorMessage } from '../api/apiError';
 import { platformKeys } from '../api/queryKeys';
-import type { PlanTier, Tenant, TenantStatus } from '../types';
+import { setImpersonation } from '../../api/impersonation';
+import type { Tenant, TenantStatus } from '../types';
 import PageHeader from '../components/PageHeader';
 import { PlanChip, TenantStatusChip } from '../components/StatusChip';
 import { ErrorState } from '../components/States';
 import { fmtRelative } from '../components/format';
 
-type ActionKind = 'suspend' | 'resume' | 'impersonate';
+type ActionKind = 'suspend' | 'resume' | 'archive' | 'restore' | 'impersonate';
+
+const ACTION_COPY: Record<ActionKind, { title: string; verb: string }> = {
+  suspend: { title: 'Suspend tenant', verb: 'Suspend' },
+  resume: { title: 'Resume tenant', verb: 'Resume' },
+  archive: { title: 'Archive tenant', verb: 'Archive' },
+  restore: { title: 'Restore tenant', verb: 'Restore' },
+  impersonate: { title: 'Impersonate tenant', verb: 'Impersonate' },
+};
 
 const emptyForm = {
   name: '',
   slug: '',
-  planTier: 'pro' as PlanTier,
+  planId: '',
 };
 
 export default function TenantsPage() {
@@ -53,7 +65,7 @@ export default function TenantsPage() {
   const { enqueueSnackbar } = useSnackbar();
 
   const [search, setSearch] = useState('');
-  const [planFilter, setPlanFilter] = useState<PlanTier | 'all'>('all');
+  const [planFilter, setPlanFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<TenantStatus | 'all'>('all');
 
   const [provisionOpen, setProvisionOpen] = useState(false);
@@ -66,44 +78,71 @@ export default function TenantsPage() {
     queryFn: () => platformApi.listTenants(),
   });
 
+  const { data: plans } = useQuery({
+    queryKey: platformKeys.plans(),
+    queryFn: () => platformApi.listPlans(),
+  });
+
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: platformKeys.tenants() });
     queryClient.invalidateQueries({ queryKey: platformKeys.overview() });
   };
 
   const provisionMutation = useMutation({
-    mutationFn: () => platformApi.provisionTenant(form),
+    mutationFn: () => platformApi.provisionTenant({ ...form, planId: form.planId || null }),
     onSuccess: (t) => {
       enqueueSnackbar(`${t.name} provisioned`, { variant: 'success' });
       setProvisionOpen(false);
       setForm(emptyForm);
       invalidate();
     },
-    onError: () => enqueueSnackbar('Failed to provision tenant', { variant: 'error' }),
+    onError: (error) =>
+      enqueueSnackbar(platformErrorMessage(error, 'Failed to provision tenant'), { variant: 'error' }),
   });
 
   const actionMutation = useMutation({
     mutationFn: async ({ kind, tenant }: { kind: ActionKind; tenant: Tenant }) => {
-      if (kind === 'suspend') return { kind, result: await platformApi.suspendTenant(tenant.id, actionReason.trim()) };
-      if (kind === 'resume') return { kind, result: await platformApi.resumeTenant(tenant.id, actionReason.trim()) };
-      return { kind, result: await platformApi.impersonateTenant(tenant.id, actionReason.trim()) };
+      const reason = actionReason.trim();
+      if (kind === 'suspend') return { kind, ticket: null, result: await platformApi.suspendTenant(tenant.id, reason) };
+      if (kind === 'resume') return { kind, ticket: null, result: await platformApi.resumeTenant(tenant.id, reason) };
+      if (kind === 'archive') return { kind, ticket: null, result: await platformApi.archiveTenant(tenant.id, reason) };
+      if (kind === 'restore') return { kind, ticket: null, result: await platformApi.restoreTenant(tenant.id, reason) };
+      return { kind, ticket: await platformApi.impersonateTenant(tenant.id, reason), result: null };
     },
     onSuccess: (res, vars) => {
-      if (res.kind === 'impersonate') {
-        enqueueSnackbar(`Impersonation session issued for ${vars.tenant.name} (expires in 15m)`, { variant: 'info' });
-      } else {
-        enqueueSnackbar(`${vars.tenant.name} ${res.kind === 'suspend' ? 'suspended' : 'resumed'}`, { variant: 'success' });
-        invalidate();
+      if (res.kind === 'impersonate' && res.ticket) {
+        // Store the read-only ticket in its dedicated sessionStorage record —
+        // never in the tenant localStorage 'token' — then enter the tenant app
+        // with a full navigation so its auth context boots from the record.
+        setImpersonation({
+          token: res.ticket.token,
+          jti: res.ticket.jti,
+          tenantId: res.ticket.tenantId,
+          tenantName: vars.tenant.name,
+          expiresAt: res.ticket.expiresAt,
+          reason: actionReason.trim(),
+        });
+        window.location.assign('/dashboard');
+        return;
       }
+      enqueueSnackbar(`${vars.tenant.name} ${res.kind}d`, { variant: 'success' });
+      invalidate();
       setConfirm(null);
       setActionReason('');
     },
-    onError: () => enqueueSnackbar('Action failed', { variant: 'error' }),
+    onError: (error) =>
+      enqueueSnackbar(platformErrorMessage(error, 'Action failed'), { variant: 'error' }),
   });
+
+  const planCodes = useMemo(() => {
+    const codes = new Set<string>();
+    (tenants ?? []).forEach((t) => codes.add(t.planCode ?? 'none'));
+    return [...codes].sort();
+  }, [tenants]);
 
   const rows = useMemo(() => {
     let list = tenants ?? [];
-    if (planFilter !== 'all') list = list.filter((t) => t.planTier === planFilter);
+    if (planFilter !== 'all') list = list.filter((t) => (t.planCode ?? 'none') === planFilter);
     if (statusFilter !== 'all') list = list.filter((t) => t.status === statusFilter);
     if (search.trim()) {
       const q = search.toLowerCase();
@@ -137,10 +176,10 @@ export default function TenantsPage() {
       ),
     },
     {
-      field: 'planTier',
+      field: 'planCode',
       headerName: 'Plan',
       width: 130,
-      renderCell: (p) => <PlanChip tier={p.row.planTier} />,
+      renderCell: (p) => <PlanChip tier={p.row.planCode ?? 'none'} />,
     },
     {
       field: 'status',
@@ -162,15 +201,19 @@ export default function TenantsPage() {
     {
       field: 'actions',
       headerName: 'Actions',
-      width: 150,
+      width: 190,
       sortable: false,
       filterable: false,
       renderCell: (p) => (
         <Stack direction="row" spacing={0.5} onClick={(e) => e.stopPropagation()}>
-          {p.row.status === 'suspended' ? (
-            <Tooltip title="Resume">
-              <IconButton size="small" color="success" onClick={() => openConfirm('resume', p.row)}>
-                <ResumeIcon fontSize="small" />
+          {p.row.status === 'suspended' || p.row.status === 'archived' ? (
+            <Tooltip title={p.row.status === 'archived' ? 'Restore to suspended' : 'Resume'}>
+              <IconButton
+                size="small"
+                color="success"
+                onClick={() => openConfirm(p.row.status === 'archived' ? 'restore' : 'resume', p.row)}
+              >
+                {p.row.status === 'archived' ? <RestoreIcon fontSize="small" /> : <ResumeIcon fontSize="small" />}
               </IconButton>
             </Tooltip>
           ) : (
@@ -185,15 +228,29 @@ export default function TenantsPage() {
               </IconButton>
             </Tooltip>
           )}
+          <Tooltip title="Archive (suspended tenants only)">
+            <span>
+              <IconButton
+                size="small"
+                color="error"
+                disabled={p.row.status !== 'suspended'}
+                onClick={() => openConfirm('archive', p.row)}
+              >
+                <ArchiveIcon fontSize="small" />
+              </IconButton>
+            </span>
+          </Tooltip>
           <Tooltip title="Impersonate">
-            <IconButton
-              size="small"
-              color="primary"
-              disabled={p.row.status !== 'active'}
-              onClick={() => openConfirm('impersonate', p.row)}
-            >
-              <ImpersonateIcon fontSize="small" />
-            </IconButton>
+            <span>
+              <IconButton
+                size="small"
+                color="primary"
+                disabled={p.row.status !== 'active'}
+                onClick={() => openConfirm('impersonate', p.row)}
+              >
+                <ImpersonateIcon fontSize="small" />
+              </IconButton>
+            </span>
           </Tooltip>
         </Stack>
       ),
@@ -222,12 +279,13 @@ export default function TenantsPage() {
             sx={{ flex: 1 }}
             slotProps={{ input: { startAdornment: <InputAdornment position="start"><SearchIcon fontSize="small" /></InputAdornment> } }}
           />
-          <TextField size="small" select label="Plan" value={planFilter} onChange={(e) => setPlanFilter(e.target.value as PlanTier | 'all')} sx={{ minWidth: 160 }}>
+          <TextField size="small" select label="Plan" value={planFilter} onChange={(e) => setPlanFilter(e.target.value)} sx={{ minWidth: 160 }}>
             <MenuItem value="all">All Plans</MenuItem>
-            <MenuItem value="free">Free</MenuItem>
-            <MenuItem value="pro">Pro</MenuItem>
-            <MenuItem value="enterprise">Enterprise</MenuItem>
-            <MenuItem value="unassigned">Unassigned</MenuItem>
+            {planCodes.map((code) => (
+              <MenuItem key={code} value={code} sx={{ textTransform: 'capitalize' }}>
+                {code}
+              </MenuItem>
+            ))}
           </TextField>
           <TextField size="small" select label="Status" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as TenantStatus | 'all')} sx={{ minWidth: 160 }}>
             <MenuItem value="all">All Statuses</MenuItem>
@@ -285,10 +343,20 @@ export default function TenantsPage() {
               fullWidth
               required
             />
-            <TextField label="Plan" select value={form.planTier} onChange={(e) => setForm({ ...form, planTier: e.target.value as PlanTier })} fullWidth>
-              <MenuItem value="free">Free</MenuItem>
-              <MenuItem value="pro">Pro</MenuItem>
-              <MenuItem value="enterprise">Enterprise</MenuItem>
+            <TextField
+              label="Plan"
+              select
+              value={form.planId}
+              onChange={(e) => setForm({ ...form, planId: e.target.value })}
+              helperText="Optional — a tenant without a plan runs without plan limits."
+              fullWidth
+            >
+              <MenuItem value="">No plan</MenuItem>
+              {(plans ?? []).map((plan) => (
+                <MenuItem key={plan.id} value={plan.id}>
+                  {plan.name} ({plan.code})
+                </MenuItem>
+              ))}
             </TextField>
           </Stack>
         </DialogContent>
@@ -304,7 +372,7 @@ export default function TenantsPage() {
 
       {/* Confirm action dialog */}
       <Dialog open={!!confirm} onClose={() => setConfirm(null)} maxWidth="xs" fullWidth>
-        <DialogTitle sx={{ fontWeight: 800, textTransform: 'capitalize' }}>{confirm?.kind} tenant</DialogTitle>
+        <DialogTitle sx={{ fontWeight: 800 }}>{confirm ? ACTION_COPY[confirm.kind].title : ''}</DialogTitle>
         <DialogContent>
           <DialogContentText>
             {confirm?.kind === 'suspend' && (
@@ -313,8 +381,14 @@ export default function TenantsPage() {
             {confirm?.kind === 'resume' && (
               <>Return <strong>{confirm.tenant.name}</strong> to active status and record the action?</>
             )}
+            {confirm?.kind === 'archive' && (
+              <>Archive <strong>{confirm.tenant.name}</strong>? Archived tenants stay fully blocked until restored, and the reason is recorded in the audit trail.</>
+            )}
+            {confirm?.kind === 'restore' && (
+              <>Restore <strong>{confirm.tenant.name}</strong> from archive back to suspended? Resume it separately to reactivate access.</>
+            )}
             {confirm?.kind === 'impersonate' && (
-              <>Issue a 15-minute impersonation session for <strong>{confirm.tenant.name}</strong>? This is recorded in the platform audit log.</>
+              <>Issue a 15-minute read-only impersonation session for <strong>{confirm.tenant.name}</strong> and enter its workspace? This is recorded in the platform audit log.</>
             )}
           </DialogContentText>
           <TextField
@@ -333,12 +407,17 @@ export default function TenantsPage() {
           </Button>
           <Button
             variant="contained"
-            color={confirm?.kind === 'suspend' ? 'warning' : confirm?.kind === 'resume' ? 'success' : 'primary'}
+            color={
+              confirm?.kind === 'suspend' ? 'warning'
+                : confirm?.kind === 'archive' ? 'error'
+                : confirm?.kind === 'impersonate' ? 'primary'
+                : 'success'
+            }
             onClick={() => confirm && actionMutation.mutate(confirm)}
             disabled={actionMutation.isPending || actionReason.trim().length < 3}
-            sx={{ fontWeight: 700, textTransform: 'capitalize' }}
+            sx={{ fontWeight: 700 }}
           >
-            {actionMutation.isPending ? 'Working…' : confirm?.kind}
+            {actionMutation.isPending ? 'Working…' : confirm ? ACTION_COPY[confirm.kind].verb : ''}
           </Button>
         </DialogActions>
       </Dialog>

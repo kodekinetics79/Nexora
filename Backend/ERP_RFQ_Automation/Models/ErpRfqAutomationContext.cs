@@ -86,6 +86,11 @@ public partial class ErpRfqAutomationContext : DbContext
 
     public virtual DbSet<RolePermission> RolePermissions { get; set; }
 
+    /// <summary>Append-only IAM audit trail (RC-7). Shape and tenant filter live in
+    /// ErpRfqAutomationContext.Tenancy.cs; PostgreSQL additionally blocks UPDATE/DELETE with a
+    /// trigger, so even direct SQL cannot rewrite it.</summary>
+    public virtual DbSet<IamAuditEvent> IamAuditEvents { get; set; }
+
     public virtual DbSet<SetCity> SetCities { get; set; }
 
     public virtual DbSet<SetCountry> SetCountries { get; set; }
@@ -1093,6 +1098,10 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.CanCreate).HasDefaultValue(false);
             entity.Property(e => e.CanDelete).HasDefaultValue(false);
             entity.Property(e => e.CanEdit).HasDefaultValue(false);
+            // Defaults TRUE, unlike its siblings: every row that existed before this column was
+            // added granted view by virtue of existing, so `true` is the value that makes the
+            // deploy a no-op. A caller that wants no access now has to say so explicitly.
+            entity.Property(e => e.CanView).HasDefaultValue(true);
             entity.Property(e => e.CreatedBy).HasMaxLength(255);
             entity.Property(e => e.ModifiedBy).HasMaxLength(255);
             entity.Property(e => e.ModuleId).HasColumnName("ModuleID");
@@ -1508,6 +1517,9 @@ public partial class ErpRfqAutomationContext : DbContext
                 .HasMaxLength(100)
                 .HasColumnName("ImageURL");
             entity.Property(e => e.IsActive).HasDefaultValue(true);
+            // Seats-meter reproducibility: nullable UTC timestamp maintained wherever
+            // IsActive flips (set on true→false, cleared on reactivation).
+            entity.Property(e => e.DeactivatedAtUtc).HasColumnName("DeactivatedAtUtc");
             entity.Property(e => e.LastName).HasMaxLength(100);
             entity.Property(e => e.ManagerId).HasColumnName("ManagerID");
             entity.Property(e => e.MiddleName).HasMaxLength(100);

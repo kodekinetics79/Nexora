@@ -43,6 +43,14 @@ export interface LeadResponseDTO {
   commercialFactsVerified: boolean;
   currentRevisionNumber: number;
   ingestedAtUtc?: string | null;
+  // Ingestion audit (owner requirement): when the lead actually ENTERED Nexora —
+  // the earliest source-document received_on, falling back server-side to
+  // createdDate for manual leads. Distinct from recDate/bidClosingDate.
+  ingestedOn?: string | null;
+  // Server-computed: ingestedOn is after the business due date (bidClosingDate,
+  // falling back to subDate). Late-ingested leads are excluded from Nexora's
+  // response-time / aging performance metrics.
+  lateIngested?: boolean;
   headerRemarks?: string;
   opportunityNo?: string;
   biddingDecision?: string;

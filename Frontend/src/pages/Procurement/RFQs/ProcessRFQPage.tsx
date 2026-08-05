@@ -30,9 +30,11 @@ import leadService from '../../../api/services/leadService';
 import type { AcceptedLeadFullResponseDTO, AcceptedLeadItemDTO } from '../../../api/services/leadService';
 import productService from '../../../api/services/productService';
 import rfqService from '../../../api/services/rfqService';
+import type { RfqCreatePayload, RfqResponseDTO } from '../../../api/services/rfqService';
 import customerService from '../../../api/services/customerService';
 import supplierService from '../../../api/services/supplierService';
 import { useAuth } from '../../../context/AuthContext';
+import { presentableErrorMessage, toPresentableError } from '../../../utils/apiErrors';
 import { toast } from 'react-hot-toast';
 import supplierQuotedItemService from '../../../api/services/supplierQuotedItemService';
 import { useTranslation } from 'react-i18next';
@@ -485,13 +487,15 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
         </Stack>
       </TableCell>
 
-      {/* Qty */}
+      {/* Qty — the backend requires a whole-number quantity >= 1 on every submitted line */}
       <TableCell align="center">
         <TextField
           size="small"
           type="number"
           value={item.quantity}
           onChange={handleQtyChange}
+          error={!Number.isInteger(item.quantity) || item.quantity < 1}
+          slotProps={{ htmlInput: { min: 1, step: 1, 'aria-label': `Quantity for ${item.productShortName || 'item'}` } }}
           sx={{ width: 80, '& .MuiInputBase-root': { height: 32, fontSize: '0.75rem', fontWeight: 700 } }}
         />
       </TableCell>
@@ -1193,21 +1197,44 @@ const ProcessRFQPage: React.FC = () => {
   // ── Submit ─────────────────────────────────────────────────────────────────
 
   const createRfqMutation = useMutation({
-    mutationFn: (payload: any) => rfqService.create(payload),
-    onSuccess: (createdRfq: any) => {
-      toast.success('Draft RFQ created successfully');
-      const createdId = Number(createdRfq?.id ?? createdRfq?.rfqId);
+    mutationFn: (payload: RfqCreatePayload) => rfqService.create(payload),
+    onSuccess: (createdRfq: RfqResponseDTO) => {
+      // The backend guarantees commercial-case lineage (the chosen lead, or a governed shell lead
+      // when none was sent); name the case when the response carries it.
+      const caseRef = createdRfq?.commercialCaseReference?.trim();
+      if (caseRef) {
+        toast.success(`Draft RFQ created — linked to commercial case ${caseRef}.`);
+      } else if (createdRfq?.commercialCaseId != null || createdRfq?.leadId != null) {
+        toast.success('Draft RFQ created — linked to its commercial case.');
+      } else {
+        toast.success('Draft RFQ created successfully');
+      }
+      const createdId = Number(createdRfq?.id ?? 0);
       navigate(createdId > 0 ? `/procurement/rfqs/${createdId}/sourcing` : '/procurement/rfqs/draft');
     },
-    onError: (err: any) => {
-      toast.error(err.response?.data?.message ?? 'Failed to create RFQ');
+    onError: (err: unknown) => {
+      // The server's honest reason (e.g. "A tenant-owned lead is required so the RFQ belongs to a
+      // commercial case.") renders when it is safe; the fallback covers unrenderable bodies only.
+      toast.error(presentableErrorMessage(err, 'The RFQ could not be created. Nothing was changed — please try again.'));
     },
   });
 
   const handleSubmit = useCallback(() => {
+    // This page turns an accepted lead into an RFQ; without the loaded lead there is nothing to
+    // send (and the payload would silently drop leadId/recDate, which the backend requires).
+    if (!lead) return;
+
     const includedItems = items.filter(i => i.include);
     if (includedItems.length === 0) {
       toast.error('Please select at least one item to include');
+      return;
+    }
+
+    // The backend requires a whole-number Quantity >= 1 on every line; catch it here so the user
+    // fixes the field instead of getting a round-trip 400.
+    const invalidQtyCount = includedItems.filter(i => !Number.isInteger(i.quantity) || i.quantity < 1).length;
+    if (invalidQtyCount > 0) {
+      toast.error(`${invalidQtyCount === 1 ? '1 line needs' : `${invalidQtyCount} lines need`} a whole-number quantity of at least 1 before the RFQ can be created.`);
       return;
     }
 
@@ -1222,15 +1249,17 @@ const ProcessRFQPage: React.FC = () => {
       toast(`${sourcingRequired} unresolved line${sourcingRequired === 1 ? '' : 's'} will be carried to governed supplier sourcing.`);
     }
 
+    const nowIso = new Date().toISOString();
     createRfqMutation.mutate({
-      buyersName: lead?.buyersName,
-      recDate: lead?.recDate,
-      bidClosingDate: lead?.bidClosingDate,
-      headerRemarks: lead?.headerRemarks,
-      opportunityNo: lead?.opportunityNo,
-      rfqtype: lead?.rfqtype,
+      buyersName: lead.buyersName,
+      // RecDate is a non-nullable DateTime server-side; never let it fall out of the payload.
+      recDate: lead.recDate ?? nowIso,
+      bidClosingDate: lead.bidClosingDate,
+      headerRemarks: lead.headerRemarks,
+      opportunityNo: lead.opportunityNo,
+      rfqtype: lead.rfqtype,
       customerId: matchedCustomer?.id,
-      leadId: lead?.id,
+      leadId: lead.id,
       rfqitems: includedItems.map(item => ({
         companyRef: item.companyRef,
         customerAccountPortalId: item.customerAccountPortalId,
@@ -1244,7 +1273,7 @@ const ProcessRFQPage: React.FC = () => {
         unitPrice: item.unitPrice,
         manufacturerName: item.manufacturerName,
         manufacturerPartNumber: item.manufacturerPartNumber,
-        bidClosingDateLine: item.bidClosingDateLine ?? lead?.bidClosingDate ?? new Date().toISOString(),
+        bidClosingDateLine: item.bidClosingDateLine ?? lead.bidClosingDate ?? nowIso,
       })),
     });
   }, [items, lead, matchedCustomer, createRfqMutation]);
@@ -1253,7 +1282,9 @@ const ProcessRFQPage: React.FC = () => {
 
   if (isLoading) return <Box sx={{ p: 4, textAlign: 'center' }}><CircularProgress /></Box>;
   if (isLeadError) {
-    const message = (leadError as any)?.response?.data?.message || (leadError as Error)?.message || 'The lead could not be loaded.';
+    // Same presentation boundary as the create call: server reasons render only when safe, and an
+    // axios `.message` (which bakes in the API hostname) never reaches the screen.
+    const message = toPresentableError(leadError, { fallbackMessage: 'The lead could not be loaded.' }).message;
     return (
       <Box sx={{ p: 4 }}>
         <Alert severity="error" action={<Button onClick={() => refetchLead()}>Retry</Button>}>

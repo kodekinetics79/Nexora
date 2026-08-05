@@ -86,6 +86,101 @@ public sealed class NativeSpreadsheetParser
         return rows;
     }
 
+    /// <summary>
+    /// Renders every worksheet of an OOXML workbook as plain text — a bracketed sheet-name
+    /// line followed by each non-empty row with its cells tab-joined (the same shape the
+    /// DOCX reader produces for tables). Used as the unstructured fallback when
+    /// <see cref="ParseXlsx"/> recognizes none of the RFQ column headers.
+    /// </summary>
+    public string RenderXlsxText(byte[] bytes)
+    {
+        ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
+        using var stream = new MemoryStream(bytes, writable: false);
+        using var package = new ExcelPackage(stream);
+        var text = new StringBuilder();
+
+        foreach (var worksheet in package.Workbook.Worksheets.Where(sheet => sheet.Dimension != null))
+        {
+            var dimension = worksheet.Dimension!;
+            var rows = new List<string>();
+            for (var rowNumber = dimension.Start.Row; rowNumber <= dimension.End.Row; rowNumber++)
+            {
+                var cells = new List<string?>();
+                for (var column = dimension.Start.Column; column <= dimension.End.Column; column++)
+                    cells.Add(worksheet.Cells[rowNumber, column].Text);
+                AppendRenderedRow(rows, cells);
+            }
+            AppendRenderedSheet(text, worksheet.Name, rows);
+        }
+
+        return text.ToString();
+    }
+
+    /// <summary>
+    /// Renders every worksheet of a legacy BIFF workbook as plain text (sheet name +
+    /// tab-joined rows). Used as the unstructured fallback when <see cref="ParseXls"/>
+    /// recognizes none of the RFQ column headers.
+    /// </summary>
+    public string RenderXlsText(byte[] bytes)
+    {
+        using var stream = new MemoryStream(bytes, writable: false);
+        using var reader = ExcelReaderFactory.CreateBinaryReader(stream, new ExcelReaderConfiguration
+        {
+            FallbackEncoding = Encoding.GetEncoding(1252),
+            LeaveOpen = false
+        });
+        var text = new StringBuilder();
+
+        do
+        {
+            var rows = new List<string>();
+            while (reader.Read())
+            {
+                var cells = new List<string?>();
+                for (var column = 0; column < reader.FieldCount; column++)
+                    cells.Add(CellText(reader.GetValue(column)));
+                AppendRenderedRow(rows, cells);
+            }
+            AppendRenderedSheet(text, string.IsNullOrWhiteSpace(reader.Name) ? "Worksheet" : reader.Name, rows);
+        } while (reader.NextResult());
+
+        return text.ToString();
+    }
+
+    /// <summary>
+    /// Renders a CSV document as plain text (constant sheet name + tab-joined records).
+    /// Used as the unstructured fallback when <see cref="ParseCsv"/> recognizes none of
+    /// the RFQ column headers.
+    /// </summary>
+    public string RenderCsvText(byte[] bytes)
+    {
+        var text = new StringBuilder();
+        var rows = new List<string>();
+        foreach (var record in ParseCsvRecords(DecodeUtf8(bytes)))
+            AppendRenderedRow(rows, record.Values.ToList());
+        AppendRenderedSheet(text, CsvWorksheetName, rows);
+        return text.ToString();
+    }
+
+    private static void AppendRenderedRow(List<string> rows, List<string?> cells)
+    {
+        // Trim trailing empty cells; keep interior blanks so column alignment survives.
+        while (cells.Count > 0 && string.IsNullOrWhiteSpace(cells[^1]))
+            cells.RemoveAt(cells.Count - 1);
+        if (cells.Count == 0)
+            return;
+        rows.Add(string.Join('\t', cells.Select(cell => (cell ?? string.Empty).Trim())));
+    }
+
+    private static void AppendRenderedSheet(StringBuilder text, string worksheetName, List<string> rows)
+    {
+        if (rows.Count == 0)
+            return;
+        text.Append("[Worksheet: ").Append(worksheetName).Append("]\n");
+        foreach (var row in rows)
+            text.Append(row).Append('\n');
+    }
+
     public IReadOnlyList<RfqSpreadsheetRow> ParseXls(byte[] bytes, string sourceDocumentName)
     {
         using var stream = new MemoryStream(bytes, writable: false);

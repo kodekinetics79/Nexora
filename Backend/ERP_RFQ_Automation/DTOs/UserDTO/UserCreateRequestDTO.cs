@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Http;
 
 namespace ERP_RFQ_Automation.DTOs.UserDTO
@@ -39,6 +40,12 @@ namespace ERP_RFQ_Automation.DTOs.UserDTO
 
         public bool? IsActive { get; set; }
 
+        /// <summary>
+        /// RC-7: retained for wire compatibility ONLY. The server derives the actor from the
+        /// validated token (see Authorization/ActorContext.cs) and NEVER reads this value —
+        /// accepting it let a caller name anyone as the author of their own privilege change.
+        /// </summary>
+        [JsonIgnore]
         public string? CreatedBy { get; set; }
 
         public IFormFile? ImageFile { get; set; }

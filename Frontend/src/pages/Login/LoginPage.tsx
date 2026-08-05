@@ -34,7 +34,8 @@ import { useAppTheme } from '../../context/ThemeContext';
 import Branding from '../../components/common/Branding';
 import axiosInstance from '../../api/axiosInstance';
 import { useNavigate } from 'react-router-dom';
-import rolePermissionService from '../../api/services/rolePermissionService';
+import userService, { type MePermissionsResponse } from '../../api/services/userService';
+import { presentableErrorMessage } from '../../utils/apiErrors';
 import { MAIN_CONTENT_ID } from '../../components/layout/SkipLink';
 
 /** Ties the failure Alert to the fields it describes (SC 3.3.1 / SC 3.3.3). */
@@ -417,27 +418,43 @@ const LoginPage: React.FC = () => {
       }
 
       setToken(data.token);
-      
-      // Fetch permissions for the logged in role
-      let permissions: any[] = [];
-      if (data.roleId != null && data.businessUnitId != null) {
-        try {
-          permissions = await rolePermissionService.getPermissionsByRole(data.roleId, data.businessUnitId);
-        } catch (permErr) {
-          console.error("Failed to fetch permissions", permErr);
-        }
+
+      // Bootstrap the caller's own grants.
+      //
+      // This used to read the whole role-permission table through an endpoint gated on
+      // "Roles & Permissions: View". Any role without that specific module got a 403, the failure
+      // was logged to the console and swallowed, and the user was navigated into an app with zero
+      // permissions — empty sidebar, Access Denied everywhere, and nothing on screen explaining
+      // why. `/api/User/me/permissions` needs authentication only, and a failure now BLOCKS the
+      // login instead of producing a silently crippled session.
+      let me: MePermissionsResponse;
+      try {
+        me = await userService.getMyPermissions();
+      } catch (permErr) {
+        // Roll the half-established session back so the user lands on a clean login screen
+        // rather than a shell they cannot use.
+        setToken(null);
+        setError(
+          presentableErrorMessage(
+            permErr,
+            'Signed in, but your permissions could not be loaded. Contact your administrator.',
+          ),
+        );
+        return;
       }
 
       setUserData({
-        id: data.id,
+        id: me.userId ?? data.id,
         email: data.email,
         userName: data.userName,
-        roleName: data.roleName,
-        isSuperAdmin: data.isSuperAdmin === true,
-        isManager: data.isManager === true,
-        roleId: data.roleId ?? undefined,
-        businessUnitId: data.businessUnitId ?? undefined,
-        permissions: permissions,
+        roleName: me.roleName ?? data.roleName,
+        // Authority comes from the server's own RoleGate, not from a second derivation on the
+        // login response — the two could disagree, rendering a UI every API call then rejects.
+        isSuperAdmin: me.isSuperAdmin === true,
+        isManager: me.isManager === true,
+        roleId: me.roleId ?? data.roleId ?? undefined,
+        businessUnitId: me.businessUnitId ?? data.businessUnitId ?? undefined,
+        permissions: me.permissions ?? [],
       });
       navigate('/dashboard');
     } catch (err: any) {

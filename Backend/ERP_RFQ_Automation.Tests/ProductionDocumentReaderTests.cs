@@ -38,7 +38,7 @@ public sealed class ProductionDocumentReaderTests
 
     [Theory]
     [InlineData("rfq.xlsx", "xlsx", "not-an-openxml-workbook")]
-    [InlineData("rfq.csv", "csv", "heading-only")]
+    [InlineData("rfq.csv", "csv", "col1,\"unterminated quoted field")]
     public async Task InvalidStructuredDocument_StopsWithTypedParseFailure(
         string fileName,
         string fileType,

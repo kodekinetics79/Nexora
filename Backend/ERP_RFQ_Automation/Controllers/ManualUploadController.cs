@@ -90,6 +90,11 @@ namespace ERP_RFQ_Automation.Controllers
                 }
                 return Accepted(new { success = true, message = "Files accepted for governed extraction.", data = accepted });
             }
+            catch (Platform.Entitlements.EntitlementDeniedException ex)
+            {
+                _logger.LogWarning("Upload denied for tenant {BusinessUnitId}: {Reason}", targetBUId, ex.Message);
+                return EntitlementProblem(ex);
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error during file upload.");
@@ -155,6 +160,11 @@ namespace ERP_RFQ_Automation.Controllers
                     message = ex.Inspection.Reason
                 });
             }
+            catch (Platform.Entitlements.EntitlementDeniedException ex)
+            {
+                _logger.LogWarning("RFQ Excel upload denied for tenant {BusinessUnitId}: {Reason}", targetBUId, ex.Message);
+                return EntitlementProblem(ex);
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error during customer RFQ Excel upload.");
@@ -208,5 +218,13 @@ namespace ERP_RFQ_Automation.Controllers
         private bool TryGetAuthenticatedBusinessUnitId(out long businessUnitId)
             => long.TryParse(User.FindFirstValue("businessUnitId"), out businessUnitId)
                && businessUnitId > 0;
+
+        /// <summary>
+        /// Typed plan-entitlement denial (e.g. monthly document quota) as problem+json.
+        /// P2-A10: rendered by the single canonical <see cref="Platform.Entitlements.EntitlementProblemFilter"/>
+        /// shape so every denial in the product shares one payload and one type base URI.
+        /// </summary>
+        private static IActionResult EntitlementProblem(Platform.Entitlements.EntitlementDeniedException ex)
+            => Platform.Entitlements.EntitlementProblemFilter.ToResult(ex);
     }
 }

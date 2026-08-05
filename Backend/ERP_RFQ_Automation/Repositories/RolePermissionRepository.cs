@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
@@ -60,9 +61,9 @@ namespace ERP_RFQ_Automation.Repositories
             // Validate RoleId exists (if provided)
             if (rolePermission.RoleId.HasValue)
             {
-                var roleExists = await _context.SetupMasters.AnyAsync(sm => sm.SetupId == rolePermission.RoleId.Value
-                    && sm.BusinessUnitId == rolePermission.BusinessUnitId && sm.SetupType.ToLower() == "role"
-                    && sm.IsActive != false);
+                var roleExists = await _context.SetupMasters.Where(SetupTypes.IsRoleRow)
+                    .AnyAsync(sm => sm.SetupId == rolePermission.RoleId.Value
+                        && sm.BusinessUnitId == rolePermission.BusinessUnitId && sm.IsActive != false);
                 if (!roleExists)
                     throw new ArgumentException($"Role with ID {rolePermission.RoleId} does not exist.");
             }
@@ -100,9 +101,9 @@ namespace ERP_RFQ_Automation.Repositories
             // Validate RoleId exists (if provided)
             if (rolePermission.RoleId.HasValue)
             {
-                var roleExists = await _context.SetupMasters.AnyAsync(sm => sm.SetupId == rolePermission.RoleId.Value
-                    && sm.BusinessUnitId == rolePermission.BusinessUnitId && sm.SetupType.ToLower() == "role"
-                    && sm.IsActive != false);
+                var roleExists = await _context.SetupMasters.Where(SetupTypes.IsRoleRow)
+                    .AnyAsync(sm => sm.SetupId == rolePermission.RoleId.Value
+                        && sm.BusinessUnitId == rolePermission.BusinessUnitId && sm.IsActive != false);
                 if (!roleExists)
                     throw new ArgumentException($"Role with ID {rolePermission.RoleId} does not exist in Business Unit {rolePermission.BusinessUnitId}.");
             }
@@ -145,9 +146,12 @@ namespace ERP_RFQ_Automation.Repositories
             switch (action.ToLower())
             {
                 case "canview":
-                    // Mirrors the frontend PermissionGuard: there is no CanView column —
-                    // having ANY RolePermission row for the module grants view.
-                    return await query.AnyAsync();
+                    // RC-3/RC-4: this used to be a bare `AnyAsync()` — row EXISTENCE was the view
+                    // grant, because there was no CanView column. That made the matrix's
+                    // uncheck-everything path write an all-false row which still granted read, so
+                    // "Revoke All Access" silently GRANTED view on every module it touched. The
+                    // column now exists and read access is stated, not inferred.
+                    return await query.AnyAsync(rp => rp.CanView == true);
                 case "cancreate":
                     return await query.AnyAsync(rp => rp.CanCreate == true);
                 case "canedit":

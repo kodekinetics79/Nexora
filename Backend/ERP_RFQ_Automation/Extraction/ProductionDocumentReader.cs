@@ -102,21 +102,26 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             throw new EvidenceIntegrityException(job.Id, "verified_read_failed", ex);
         }
 
-        // Structured spreadsheets/CSV bypass the LLM entirely via the deterministic normalizer.
+        // Structured spreadsheets/CSV bypass the LLM entirely via the deterministic
+        // normalizer. A readable workbook whose column layout is NOT recognized falls
+        // back to the same unstructured text path PDFs use (see ReadSpreadsheet).
         if (bytes.Length > 0 && (ext == "xlsx" || ext == "xlsm"))
         {
-            return Structured(job, name,
-                ParseSpreadsheet(() => _spreadsheetParser.ParseXlsx(bytes, name), name, "XLSX"));
+            return ReadSpreadsheet(job, name, "XLSX",
+                () => _spreadsheetParser.ParseXlsx(bytes, name),
+                () => _spreadsheetParser.RenderXlsxText(bytes));
         }
         if (bytes.Length > 0 && ext == "xls")
         {
-            return Structured(job, name,
-                ParseSpreadsheet(() => _spreadsheetParser.ParseXls(bytes, name), name, "XLS"));
+            return ReadSpreadsheet(job, name, "XLS",
+                () => _spreadsheetParser.ParseXls(bytes, name),
+                () => _spreadsheetParser.RenderXlsText(bytes));
         }
         if (bytes.Length > 0 && ext == "csv")
         {
-            return Structured(job, name,
-                ParseSpreadsheet(() => _spreadsheetParser.ParseCsv(bytes, name), name, "CSV"));
+            return ReadSpreadsheet(job, name, "CSV",
+                () => _spreadsheetParser.ParseCsv(bytes, name),
+                () => _spreadsheetParser.RenderCsvText(bytes));
         }
 
         // Unstructured formats -> extract raw text, then chunk over line-item regions.
@@ -152,7 +157,8 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             LineItemRegions = rows.Select(r => r.ProductName ?? string.Empty).ToList()
         };
 
-    private static DocumentExtractionInput Unstructured(ExtractionJob job, string name, DocumentReadResult read)
+    private static DocumentExtractionInput Unstructured(
+        ExtractionJob job, string name, DocumentReadResult read, string? structuredFallbackNote = null)
     {
         var lines = read.Text
             .Replace("\r\n", "\n")
@@ -180,7 +186,8 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             OcrTruncated = read.OcrTruncated,
             IsStructured = false,
             HeaderText = header,
-            LineItemRegions = regions
+            LineItemRegions = regions,
+            StructuredFallbackNote = structuredFallbackNote
         };
     }
 
@@ -482,29 +489,75 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             status, pageCount, false);
     }
 
-    // ---- spreadsheets -> structured rows ---------------------------------
+    // ---- spreadsheets -> structured rows (with unstructured fallback) ----
 
-    private List<RfqSpreadsheetRow> ParseSpreadsheet(
-        Func<IReadOnlyList<RfqSpreadsheetRow>> parse,
+    /// <summary>
+    /// Reads a spreadsheet/CSV. Recognized column layouts take the deterministic
+    /// structured fast-path (LLM bypassed) exactly as before. A workbook that was READ
+    /// successfully but whose column layout the deterministic mapper does not recognize
+    /// is the NORMAL case for first-contact customer files — it is NOT a terminal
+    /// failure. Such documents fall back to the same unstructured path PDFs/Word
+    /// documents use: sheet content rendered to text (sheet name + tab-joined rows) and
+    /// routed to AI-assisted extraction, still subject to the per-tenant
+    /// external-provider allow-list, which fail-closes into a retryable review hold —
+    /// never a dead-letter — when no provider is authorized. Only a workbook that
+    /// cannot be parsed at all, or that contains no cell content whatsoever, remains a
+    /// permanent <see cref="DocumentParsingException"/>.
+    /// </summary>
+    private DocumentExtractionInput ReadSpreadsheet(
+        ExtractionJob job,
         string name,
-        string format)
+        string format,
+        Func<IReadOnlyList<RfqSpreadsheetRow>> parse,
+        Func<string> renderText)
     {
+        List<RfqSpreadsheetRow> rows;
         try
         {
-            var rows = parse().ToList();
-            if (rows.Count == 0)
-                throw new DocumentParsingException($"The {format} workbook contains no recognizable RFQ rows.");
-            return rows;
-        }
-        catch (DocumentParsingException)
-        {
-            throw;
+            rows = parse().ToList();
         }
         catch (Exception ex)
         {
             _log.LogWarning(ex, "{Format} structured parse failed for {Name}.", format, name);
             throw new DocumentParsingException($"The {format} workbook could not be parsed safely.", ex);
         }
+
+        if (rows.Count > 0)
+            return Structured(job, name, rows); // deterministic fast-path, unchanged
+
+        string rendered;
+        try
+        {
+            rendered = renderText();
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "{Format} text rendering failed for {Name} after the structured parse recognized no rows.",
+                format, name);
+            throw new DocumentParsingException($"The {format} workbook could not be parsed safely.", ex);
+        }
+
+        if (string.IsNullOrWhiteSpace(rendered))
+            throw new DocumentParsingException(
+                $"The {format} workbook was read successfully but contains no cell content to extract.");
+
+        _log.LogInformation(
+            "{Format} workbook {Name} was read but no RFQ column layout was recognized; " +
+            "falling back to unstructured text extraction.",
+            format, name);
+
+        var fallbackNote =
+            $"The {format} spreadsheet was read successfully, but its column layout was not recognized " +
+            "by the deterministic RFQ mapper. Its sheet content was rendered to text and routed to " +
+            "AI-assisted extraction; if no authorized AI provider is available for this tenant, the " +
+            "document is held for review instead.";
+
+        return Unstructured(job, name,
+            Native("[SPREADSHEET LAYOUT NOT RECOGNIZED - the workbook was read successfully but the " +
+                   "deterministic column mapping found no known RFQ headers; tab-separated sheet text follows]\n"
+                   + rendered),
+            fallbackNote);
     }
 
     // ---- image encoding helpers (Docnet BGRA -> 24-bit BMP for Tesseract) -

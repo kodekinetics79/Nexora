@@ -1,7 +1,11 @@
-﻿using ERP_RFQ_Automation.DTOs.AuthDTOs;
+using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.DTOs.AuthDTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.Platform.Entitlements;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
@@ -14,12 +18,27 @@ namespace ERP_RFQ_Automation.Repositories
         private readonly ErpRfqAutomationContext _context;
         private readonly IConfiguration _configuration;
         private readonly ILogger<AuthRepository> _logger;
+        private readonly ITenantAccessService? _tenantAccess;
+        private readonly IRoleGate? _roleGate;
 
-        public AuthRepository(ErpRfqAutomationContext context, IConfiguration configuration, ILogger<AuthRepository> logger)
+        public AuthRepository(
+            ErpRfqAutomationContext context,
+            IConfiguration configuration,
+            ILogger<AuthRepository> logger,
+            ITenantAccessService? tenantAccess = null,
+            IRoleGate? roleGate = null)
         {
             _context = context;
             _configuration = configuration;
             _logger = logger;
+            _tenantAccess = tenantAccess;
+            // Fall back to a self-constructed gate rather than leaving this null. A null
+            // gate made ResolveRoleAuthorityAsync return (false, false) for EVERY user,
+            // so a caller that omitted the optional argument silently reported the tenant's
+            // super admin as an ordinary user — the login response then hid the admin
+            // surfaces and the UI rendered as "unwired". That degradation was invisible:
+            // no exception, no log, just an authority answer of "no" for everyone.
+            _roleGate = roleGate ?? new RoleGate(context, new MemoryCache(new MemoryCacheOptions()));
         }
 
         public async Task<LoginResponseDTO> LoginAsync(LoginRequestDTO request)
@@ -131,49 +150,98 @@ namespace ERP_RFQ_Automation.Repositories
                 throw new UnauthorizedAccessException("User account is not active.");
             }
 
+            // Tenant-status enforcement (P0): a Suspended/Archived platform Tenant must
+            // never receive a token, even with valid credentials. Runs AFTER password
+            // verification so nothing about tenant existence leaks to guessers, and
+            // fails OPEN for legacy business units without a platform Tenant row.
+            if (_tenantAccess is not null && user.Buid is { } tenantBusinessUnitId)
+            {
+                var access = await _tenantAccess.GetAccessAsync(tenantBusinessUnitId);
+                if (access.IsAccessDenied)
+                {
+                    _logger.LogWarning(
+                        "Login blocked for email {Email}: tenant for business unit {BusinessUnitId} is {Status}.",
+                        request.Email, tenantBusinessUnitId, access.Status);
+                    throw new TenantAccessDeniedException(tenantBusinessUnitId, access.Status);
+                }
+            }
+
             _logger.LogInformation("Login successful for email: {Email}", request.Email);
 
-            var token = GenerateJwtToken(user);
+            await RecordLastLoginAsync(user);
+
+            var userName = user.FirstName +
+                           (string.IsNullOrEmpty(user.MiddleName) ? "" : " " + user.MiddleName) +
+                           (string.IsNullOrEmpty(user.LastName) ? "" : " " + user.LastName);
+
+            var token = GenerateJwtToken(user, userName);
+
+            // RC-8: this used to answer "is this a super admin?" from its OWN copy of the
+            // name-matching rule, applied to a plain FK Include with no business-unit, SetupType or
+            // IsActive predicate — while RoleGate.ResolveRoleAsync requires all three. When the two
+            // disagreed the UI rendered the whole product and every API call 403'd. There is now
+            // exactly ONE authority for that question, and this is a call into it.
+            var (isSuperAdmin, isManager) = await ResolveRoleAuthorityAsync(user);
 
             return new LoginResponseDTO
             {
                 Id = user.Id,
                 Email = user.Email,
-                UserName = user.FirstName +
-                           (string.IsNullOrEmpty(user.MiddleName) ? "" : " " + user.MiddleName) +
-                           (string.IsNullOrEmpty(user.LastName) ? "" : " " + user.LastName),
+                UserName = userName,
                 RoleId = user.RoleId,
                 RoleName = user.Role?.SetupValue ?? "No Role Assigned",
-                IsSuperAdmin = IsSuperAdminRole(user.Role?.SetupCode, user.Role?.SetupValue),
-                IsManager = IsManagerRole(user.Role?.SetupCode, user.Role?.SetupValue),
+                IsSuperAdmin = isSuperAdmin,
+                IsManager = isManager,
                 BusinessUnitId = user.Buid,
                 BusinessUnitName = user.Bu?.BusinessUnitName,
                 Token = token
             };
         }
 
-        private static bool IsSuperAdminRole(string? code, string? value)
-            => IsSuperAdminName(code) || IsSuperAdminName(value);
+        private async Task<(bool IsSuperAdmin, bool IsManager)> ResolveRoleAuthorityAsync(User user)
+        {
+            if (_roleGate is null || user.RoleId is not { } roleId || user.Buid is not { } businessUnitId)
+                return (false, false);
 
-        private static bool IsManagerRole(string? code, string? value)
-            => IsManagerName(code) || IsManagerName(value);
+            return (
+                await _roleGate.IsSuperAdminAsync(roleId, businessUnitId),
+                await _roleGate.IsManagerOrAdminAsync(roleId, businessUnitId));
+        }
 
-        private static bool IsSuperAdminName(string? value)
-            => value is not null
-               && value.Contains("super", StringComparison.OrdinalIgnoreCase)
-               && value.Contains("admin", StringComparison.OrdinalIgnoreCase);
+        /// <summary>
+        /// Best-effort <c>Users.LastLogin</c> stamp, mirroring
+        /// <c>Platform/Auth/PlatformAuthService.cs</c>. The column existed and was surfaced in the
+        /// users grid but was never written, so "last active" read blank for every account — and
+        /// that is the column an access review needs to spot dormant privileged users. A failure
+        /// here must never block an otherwise valid login.
+        /// </summary>
+        private async Task RecordLastLoginAsync(User user)
+        {
+            try
+            {
+                var tracked = new User { Id = user.Id };
+                _context.Users.Attach(tracked);
+                tracked.LastLogin = DateTime.UtcNow;
+                _context.Entry(tracked).Property(u => u.LastLogin).IsModified = true;
+                await _context.SaveChangesAsync();
+                _context.Entry(tracked).State = Microsoft.EntityFrameworkCore.EntityState.Detached;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not update LastLogin for user {UserId}.", user.Id);
+            }
+        }
 
-        private static bool IsManagerName(string? value)
-            => value is not null
-               && (value.Contains("admin", StringComparison.OrdinalIgnoreCase)
-                   || value.Contains("manager", StringComparison.OrdinalIgnoreCase));
-
-        private string GenerateJwtToken(User user)
+        private string GenerateJwtToken(User user, string userName)
         {
             var claims = new[]
             {
                 new Claim(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
                 new Claim(JwtRegisteredClaimNames.Email, user.Email),
+                // RC-7: without a name claim — and the matching NameClaimType in Program.cs —
+                // User.Identity.Name was ALWAYS null, which is exactly why every "CreatedBy"
+                // expression in the IAM controllers fell through to the client-supplied value.
+                new Claim(JwtRegisteredClaimNames.Name, string.IsNullOrWhiteSpace(userName) ? user.Email : userName),
                 new Claim("roleId", user.RoleId?.ToString() ?? "none"),
                 new Claim("businessUnitId", user.Buid?.ToString() ?? "none"), // Include BusinessUnitId in token
                 new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())

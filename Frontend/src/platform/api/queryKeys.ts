@@ -11,4 +11,12 @@ export const platformKeys = {
   plans: () => [...platformKeys.all, 'plans'] as const,
   flags: () => [...platformKeys.all, 'flags'] as const,
   audit: (filter?: unknown) => [...platformKeys.all, 'audit', filter ?? null] as const,
+  platformUsers: () => [...platformKeys.all, 'users'] as const,
+  impersonationSessions: () => [...platformKeys.all, 'impersonation-sessions'] as const,
+  billingUsage: (tenantId: string, period: string) =>
+    [...platformKeys.all, 'billing', 'usage', tenantId, period] as const,
+  billingCost: (tenantId: string, period: string) =>
+    [...platformKeys.all, 'billing', 'cost', tenantId, period] as const,
+  rateCards: () => [...platformKeys.all, 'billing', 'rate-cards'] as const,
+  statements: (filter?: unknown) => [...platformKeys.all, 'billing', 'statements', filter ?? null] as const,
 };

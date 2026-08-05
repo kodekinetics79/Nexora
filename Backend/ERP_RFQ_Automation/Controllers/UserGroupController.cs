@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DTOs.UserGroup;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
@@ -20,8 +21,9 @@ namespace ERP_RFQ_Automation.Controllers
             _repository = repository;
         }
 
-        // GET: api/UserGroup?pageNumber=1&pageSize=10&id=1&userGroupsName=admin&businessUnitId=1
+        // GET: api/UserGroup?pageNumber=1&pageSize=10&id=1&userGroupsName=admin
         [HttpGet]
+        [RequireModulePermission("Users", PermissionAction.View)]
         public async Task<ActionResult<PaginatedResponseDTO<UserGroupResponseDTO>>> GetAll(
             [FromQuery] long? businessUnitId = null,
             [FromQuery] int pageNumber = 1,
@@ -31,8 +33,8 @@ namespace ERP_RFQ_Automation.Controllers
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
+                // SEC: claim-only tenant scope — the businessUnitId query value is ignored.
+                var targetBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
 
                 if (targetBUId <= 0)
                     return BadRequest("Business Unit ID is required.");
@@ -65,12 +67,13 @@ namespace ERP_RFQ_Automation.Controllers
 
         // GET: api/UserGroup/5
         [HttpGet("{id}")]
+        [RequireModulePermission("Users", PermissionAction.View)]
         public async Task<ActionResult<UserGroupResponseDTO>> GetById(long id, [FromQuery] long? businessUnitId = null)
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
+                // SEC: claim-only tenant scope — the businessUnitId query value is ignored.
+                var targetBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
 
                 if (targetBUId <= 0)
                     return BadRequest("Business Unit ID is required.");
@@ -90,6 +93,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // POST: api/UserGroup
         [HttpPost]
+        [RequireModulePermission("Users", PermissionAction.Create)]
         public async Task<ActionResult<UserGroupResponseDTO>> Create([FromBody] UserGroupCreateRequestDTO request)
         {
             try
@@ -97,10 +101,10 @@ namespace ERP_RFQ_Automation.Controllers
                 if (!ModelState.IsValid)
                     return BadRequest(ModelState);
 
+                // SEC: claim-only tenant scope — a client-supplied BusinessUnitId is overwritten.
                 var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                if (claimBUId > 0) request.BusinessUnitId = claimBUId;
-
-                if (request.BusinessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+                if (claimBUId <= 0) return Forbid();
+                request.BusinessUnitId = claimBUId;
 
                 var userGroup = new UserGroup
                 {
@@ -127,6 +131,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // PUT: api/UserGroup/5
         [HttpPut("{id}")]
+        [RequireModulePermission("Users", PermissionAction.Edit)]
         public async Task<ActionResult> Update(long id, [FromBody] UserGroupUpdateRequestDTO request)
         {
             try
@@ -134,10 +139,10 @@ namespace ERP_RFQ_Automation.Controllers
                 if (!ModelState.IsValid)
                     return BadRequest(ModelState);
 
+                // SEC: claim-only tenant scope — a client-supplied BusinessUnitId is overwritten.
                 var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                if (claimBUId > 0) request.BusinessUnitId = claimBUId;
-
-                if (request.BusinessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+                if (claimBUId <= 0) return Forbid();
+                request.BusinessUnitId = claimBUId;
 
                 var existing = await _repository.GetByIdAsync(id, request.BusinessUnitId);
 
@@ -165,12 +170,13 @@ namespace ERP_RFQ_Automation.Controllers
 
         // DELETE: api/UserGroup/5
         [HttpDelete("{id}")]
+        [RequireModulePermission("Users", PermissionAction.Delete)]
         public async Task<ActionResult> Delete(long id, [FromQuery] long? businessUnitId = null)
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
+                // SEC: claim-only tenant scope — the businessUnitId query value is ignored.
+                var targetBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
 
                 if (targetBUId <= 0)
                     return BadRequest("Business Unit ID is required.");

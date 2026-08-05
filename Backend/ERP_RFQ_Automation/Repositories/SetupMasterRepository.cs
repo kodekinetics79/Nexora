@@ -6,6 +6,17 @@ using System.Threading.Tasks;
 
 namespace ERP_RFQ_Automation.Repositories
 {
+    /// <summary>
+    /// A role is still referenced by users or permission rows (B4). Distinct from the generic
+    /// <see cref="InvalidOperationException"/> the repository throws for other dependency
+    /// violations so the controller can answer 409 Conflict — "this is a state problem you can
+    /// resolve" — rather than 400 Bad Request.
+    /// </summary>
+    public sealed class RoleInUseException : InvalidOperationException
+    {
+        public RoleInUseException(string message) : base(message) { }
+    }
+
     public class SetupMasterRepository : ISetupMasterRepository
     {
         private readonly ErpRfqAutomationContext _context;
@@ -131,6 +142,22 @@ namespace ERP_RFQ_Automation.Repositories
             var hasChildren = await _context.SetupMasters.AnyAsync(sm => sm.ParentSetupId == id);
             if (hasChildren)
                 throw new InvalidOperationException($"Cannot delete SetupMaster with ID {id} because it has dependent records.");
+
+            // B4(5): a role row is referenced by Users.RoleID and RolePermissions.RoleID. The FK on
+            // RolePermission is composite (BusinessUnitID, RoleID) and Users.RoleID is nullable, so
+            // the database would not necessarily stop this — and orphaning a user's role silently
+            // strips their access with no diagnosable cause. Mirrors the actionable-message pattern
+            // in UserRepository.DeleteAsync.
+            if (ERP_RFQ_Automation.Authorization.SetupTypes.IsRole(setupMaster.SetupType))
+            {
+                var assignedUsers = await _context.Users.CountAsync(u => u.RoleId == id);
+                var grantRows = await _context.RolePermissions.CountAsync(rp => rp.RoleId == id);
+                if (assignedUsers > 0 || grantRows > 0)
+                    throw new RoleInUseException(
+                        $"Cannot delete role '{setupMaster.SetupValue}' (ID {id}): it is still assigned to " +
+                        $"{assignedUsers} user(s) and holds {grantRows} permission row(s). Reassign those " +
+                        "users and clear the role's permissions first.");
+            }
 
             _context.SetupMasters.Remove(setupMaster);
             await _context.SaveChangesAsync();

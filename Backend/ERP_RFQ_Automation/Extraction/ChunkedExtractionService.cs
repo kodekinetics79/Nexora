@@ -71,6 +71,15 @@ public sealed class DocumentExtractionInput
 
     /// <summary>Deterministic-path rows (spreadsheet/CSV). Required when <see cref="IsStructured"/>.</summary>
     public IReadOnlyList<RfqSpreadsheetRow>? StructuredRows { get; init; }
+
+    /// <summary>
+    /// Honest, user-facing context set by the reader when a spreadsheet was READ
+    /// successfully but its column layout was not recognized by the deterministic
+    /// mapper, so the document fell back to the unstructured text path. The worker
+    /// prefixes failure/hold reasons with it so operators see the document was
+    /// readable and WHY an AI path (or a review hold) followed.
+    /// </summary>
+    public string? StructuredFallbackNote { get; init; }
 }
 
 public sealed class ChunkedExtractionOutcome
