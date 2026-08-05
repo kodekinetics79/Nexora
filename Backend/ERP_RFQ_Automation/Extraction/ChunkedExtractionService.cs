@@ -134,12 +134,16 @@ public interface IChunkedExtractionService
 }
 
 /// <summary>
-/// Chunked map/reduce extraction. Line items are split into bounded chunks
-/// (~150–250 items / ~24k chars), each extracted independently via <see cref="ILLMService"/>,
-/// then unioned in order. Item-count conservation is asserted (Σ chunk items ==
-/// parsed row count) so nothing is ever silently truncated; a mismatch, a partial
-/// chunk failure, or low confidence routes the document to NeedsReview instead of
-/// being saved as "complete". Per-field confidence is preserved end-to-end.
+/// Chunked map/reduce extraction. Line items are split into bounded chunks — sized first
+/// by the model's OUTPUT-token budget (<see cref="ExtractionOutputBudget"/>) and then by
+/// the ~24k-character input budget, whichever binds first — each extracted independently
+/// via <see cref="ILLMService"/>, then unioned in order. Item-count conservation is
+/// asserted (Σ chunk items == parsed row count) so nothing is ever silently truncated; a
+/// mismatch, a partial chunk failure, or low confidence routes the document to NeedsReview
+/// instead of being saved as "complete". Per-field confidence is preserved end-to-end.
+/// When a chunk still overflows the completion ceiling the provider says so explicitly
+/// (<see cref="AiErrorCodes.OutputTruncated"/>) and the chunk is halved and re-issued,
+/// never replayed unchanged.
 /// </summary>
 public sealed class ChunkedExtractionService : IChunkedExtractionService
 {
@@ -158,12 +162,30 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
     private readonly ILogger<ChunkedExtractionService> _log;
     private readonly IAiExternalProviderTrust? _externalProviderTrust;
 
-    // Chunk bounds: cap by item count AND character budget so a chunk fits the model
-    // context and stays inside the request timeout. Chunk COUNT scales with the document.
+    // Chunk bounds. A chunk must satisfy ALL THREE constraints:
+    //   1. OUTPUT-token budget (ExtractionOutputBudget) — the binding one in practice, and
+    //      the one whose absence caused the 2026-08-05 outage. The extraction schema costs
+    //      ~450 output tokens per line item, so 200 items would demand ~90,000 output
+    //      tokens against a 4,096–8,192 ceiling: every real multi-line RFQ came back cut
+    //      mid-JSON, unparseable, and the whole document dead-lettered.
+    //   2. Character budget — keeps the chunk inside the model context and the request
+    //      timeout, and bounds the blast radius of one failed chunk.
+    //   3. This absolute item ceiling, unchanged.
     private const int MaxItemsPerChunk = 200;
     private const int MaxChunkChars = 24_000;
     private const int HeaderContextBudget = 6_000;
     private const double MinAcceptableConfidence = 0.60;
+
+    /// <summary>
+    /// Ceiling on provider calls per document while truncation-driven re-splitting is in
+    /// play. Splitting already terminates on its own — every split strictly halves and a
+    /// 1-item chunk is never split again, so the worst case is bounded by (2 × items) − 1
+    /// calls — but the budget makes that guarantee explicit instead of emergent, and it is
+    /// set ABOVE the worst legitimate case so it can only ever catch pathology, never a
+    /// document that was going to finish.
+    /// </summary>
+    private static int TruncationCallBudget(int expectedItems, int plannedChunks)
+        => (2 * Math.Max(1, expectedItems)) + Math.Max(1, plannedChunks);
 
     /// <param name="externalProviderTrust">
     /// Per-tenant external-provider allow-list. Optional, and its ABSENCE IS A REFUSAL:
@@ -239,14 +261,20 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                 return Failed(0, "The local parser/OCR produced no readable content.", input);
 
             // No detected line-item rows: a single whole-document pass (header + any body).
-            var single = await _llm.ExtractLeadDataAsync(
+            // There is nothing to chunk here — the parser found no rows to split on — so the
+            // only correction available on truncation is an honest failure reason.
+            var wholeDocument = await _llm.ExtractLeadDataDetailedAsync(
                 Clip(input.HeaderText, MaxChunkChars),
                 new AiCallContext(input.BusinessUnitId, AiPurposes.RfqExtraction,
                     $"extraction:{input.SourceId}:whole", "rfq-extraction-v1",
                     ExtractionJobId: input.ExtractionJobId,
                     SourceDocumentOccurrenceId: input.SourceDocumentOccurrenceId), ct);
+            var single = wholeDocument.Result;
             if (single is null)
-                return Failed(0, "LLM returned no result for the document.", input);
+                return Failed(0, wholeDocument.OutputTruncated
+                    ? $"The model ran out of output budget ({_llm.MaxOutputTokens} tokens) before it finished "
+                      + "this document, and no line-item rows were detected to split it on."
+                    : "LLM returned no result for the document.", input);
             var items0 = single.Items ?? new List<LeadItemData>();
             var incompleteOcr = input.OcrTruncated
                                 || input.OcrStatus is ExtractionOcrStatus.Partial or ExtractionOcrStatus.Failed;
@@ -285,8 +313,14 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             };
         }
 
-        var chunks = BuildChunks(input.LineItemRegions);
+        var itemsPerChunk = ItemsPerChunk();
+        var chunks = BuildChunks(input.LineItemRegions, itemsPerChunk);
         diagnostics.Add($"Document split into {chunks.Count} chunk(s) for {expected} line item(s).");
+        _log.LogInformation(
+            "Chunk plan for {Document}: {Chunks} chunk(s), {Expected} item(s), <={ItemsPerChunk} item(s) per chunk "
+            + "(projected <={ProjectedTokens} output tokens against a {MaxOutputTokens}-token ceiling).",
+            input.SourceDocumentName, chunks.Count, expected, itemsPerChunk,
+            ExtractionOutputBudget.ProjectedOutputTokens(itemsPerChunk), _llm.MaxOutputTokens);
 
         var headerContext = Clip(input.HeaderText, HeaderContextBudget);
         var mergedItems = new List<LeadItemData>(expected);
@@ -295,35 +329,92 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
 
         // MAP: extract each chunk independently. A failed chunk is recorded (its items are
         // "missing" from the union) rather than silently dropped — the count assert catches it.
-        for (var i = 0; i < chunks.Count; i++)
+        //
+        // `pending` starts as the planned chunks and may GROW: when the provider reports it
+        // ran out of output budget (AiErrorCodes.OutputTruncated) the chunk is replaced
+        // in-place by its two halves and reprocessed, preserving document order. The planned
+        // size is derived from an ESTIMATE, so an unusually verbose document can still
+        // overflow it; this is the honest correction, and it re-issues a SMALLER request
+        // rather than replaying the identical failing one.
+        var pending = new List<List<string>>(chunks);
+        var attemptedCalls = 0;
+        var callBudget = TruncationCallBudget(expected, chunks.Count);
+
+        for (var i = 0; i < pending.Count; i++)
         {
             ct.ThrowIfCancellationRequested();
-            var prompt = BuildChunkText(headerContext, chunks[i]);
-            LeadExtractionResult? chunkResult;
+            var chunk = pending[i];
+            var prompt = BuildChunkText(headerContext, chunk);
+            LlmExtractionOutcome outcome;
             try
             {
-                chunkResult = await _llm.ExtractLeadDataAsync(prompt,
+                attemptedCalls++;
+                outcome = await _llm.ExtractLeadDataDetailedAsync(prompt,
                     new AiCallContext(input.BusinessUnitId, AiPurposes.RfqExtraction,
-                        $"extraction:{input.SourceId}:chunk:{i + 1}", "rfq-extraction-v1",
+                        $"extraction:{input.SourceId}:chunk:{i + 1}:{chunk.Count}", "rfq-extraction-v1",
                         ExtractionJobId: input.ExtractionJobId,
-                        SourceDocumentOccurrenceId: input.SourceDocumentOccurrenceId), ct);
+                        SourceDocumentOccurrenceId: input.SourceDocumentOccurrenceId,
+                        ItemsInPayload: chunk.Count), ct);
             }
             catch (Exception ex)
             {
-                _log.LogWarning(ex, "Chunk {Index}/{Total} extraction threw.", i + 1, chunks.Count);
-                chunkResult = null;
+                _log.LogWarning(ex, "Chunk {Index}/{Total} extraction threw.", i + 1, pending.Count);
+                outcome = new LlmExtractionOutcome(null, AiErrorCodes.AttemptsExhausted);
             }
 
-            if (chunkResult is null)
+            if (outcome.Result is null && outcome.OutputTruncated)
             {
-                failedChunks++;
-                diagnostics.Add($"Chunk {i + 1}/{chunks.Count} failed ({chunks[i].Count} item(s) not extracted).");
+                // A single line item is indivisible. If even that overflows the ceiling,
+                // fail THAT item honestly — never loop, never silently drop it.
+                if (chunk.Count <= 1)
+                {
+                    failedChunks++;
+                    var reason =
+                        $"Chunk {i + 1}/{pending.Count} failed: one line item alone exceeds the model's "
+                        + $"{_llm.MaxOutputTokens}-token output budget (1 item not extracted).";
+                    diagnostics.Add(reason);
+                    _log.LogWarning(
+                        "Single line item exceeded the output budget for {Document}; failing the item rather "
+                        + "than retrying. Code={Code}.", input.SourceDocumentName,
+                        AiErrorCodes.SingleItemExceedsOutputBudget);
+                    continue;
+                }
+
+                if (attemptedCalls >= callBudget)
+                {
+                    failedChunks++;
+                    diagnostics.Add(
+                        $"Chunk {i + 1}/{pending.Count} failed: output truncated and the re-split budget "
+                        + $"is exhausted ({chunk.Count} item(s) not extracted).");
+                    continue;
+                }
+
+                var half = chunk.Count / 2;
+                pending[i] = chunk.Skip(half).ToList();
+                pending.Insert(i, chunk.Take(half).ToList());
+                diagnostics.Add(
+                    $"Chunk {i + 1} output was truncated at {chunk.Count} item(s); retrying as "
+                    + $"{half} + {chunk.Count - half} item(s).");
+                _log.LogWarning(
+                    "Output truncated for {Document} chunk {Index} at {Items} item(s); halving and retrying "
+                    + "({First} + {Second}).", input.SourceDocumentName, i + 1, chunk.Count,
+                    half, chunk.Count - half);
+                i--; // reprocess this position, which now holds the first half
                 continue;
             }
 
-            headerSource ??= chunkResult; // header fields come from the first successful chunk
-            if (chunkResult.Items is { Count: > 0 })
-                mergedItems.AddRange(chunkResult.Items); // REDUCE: union in order
+            if (outcome.Result is null)
+            {
+                failedChunks++;
+                diagnostics.Add(
+                    $"Chunk {i + 1}/{pending.Count} failed ({chunk.Count} item(s) not extracted)."
+                    + (outcome.ErrorCode is null ? "" : $" [{outcome.ErrorCode}]"));
+                continue;
+            }
+
+            headerSource ??= outcome.Result; // header fields come from the first successful chunk
+            if (outcome.Result.Items is { Count: > 0 })
+                mergedItems.AddRange(outcome.Result.Items); // REDUCE: union in order
         }
 
         if (headerSource is null)
@@ -448,8 +539,16 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
 
     // ---- chunking --------------------------------------------------------
 
-    private static List<List<string>> BuildChunks(IReadOnlyList<string> regions)
+    /// <summary>
+    /// Items per chunk for the currently bound provider: the OUTPUT-token budget and the
+    /// absolute ceiling, whichever is smaller.
+    /// </summary>
+    internal int ItemsPerChunk()
+        => Math.Min(MaxItemsPerChunk, ExtractionOutputBudget.MaxItemsPerChunk(_llm.MaxOutputTokens));
+
+    internal static List<List<string>> BuildChunks(IReadOnlyList<string> regions, int maxItemsPerChunk)
     {
+        var itemCap = Math.Clamp(maxItemsPerChunk, 1, MaxItemsPerChunk);
         var chunks = new List<List<string>>();
         var current = new List<string>();
         var currentChars = 0;
@@ -457,7 +556,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         foreach (var region in regions)
         {
             var len = region?.Length ?? 0;
-            if (current.Count > 0 && (current.Count >= MaxItemsPerChunk || currentChars + len > MaxChunkChars))
+            if (current.Count > 0 && (current.Count >= itemCap || currentChars + len > MaxChunkChars))
             {
                 chunks.Add(current);
                 current = new List<string>();

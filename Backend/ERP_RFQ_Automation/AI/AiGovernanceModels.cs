@@ -24,6 +24,42 @@ public static class AiTokenSources
     public const string Estimated = "Estimated";
 }
 
+/// <summary>
+/// Canonical provider-attempt error codes written to the AI ledger. These used to be
+/// scattered string literals; they are constants because operators triage on them and
+/// because <see cref="OutputTruncated"/> in particular has to be distinguishable from
+/// <see cref="InvalidOutput"/> — the two look identical at the parser (unparseable JSON)
+/// but mean completely different things and have completely different remedies.
+/// </summary>
+public static class AiErrorCodes
+{
+    /// <summary>Provider returned a non-success HTTP status.</summary>
+    public const string ProviderHttpError = "provider_http_error";
+
+    /// <summary>Provider returned HTTP 200 with no assistant content at all.</summary>
+    public const string EmptyResponse = "empty_response";
+
+    /// <summary>
+    /// The model produced a COMPLETE response that is not valid/trustworthy JSON.
+    /// A genuine model or prompt-quality failure — retrying the same request is pointless.
+    /// </summary>
+    public const string InvalidOutput = "invalid_output";
+
+    /// <summary>
+    /// The model hit its output-token ceiling (<c>done_reason == "length"</c>) and the JSON
+    /// was cut mid-object. NOT a model-quality failure: the request asked for more output
+    /// than the budget allows. The only useful retry is a SMALLER request (fewer line
+    /// items), which is why this code is retryable and is surfaced to the chunking caller.
+    /// </summary>
+    public const string OutputTruncated = "output_truncated";
+
+    /// <summary>All provider attempts were spent without a usable result.</summary>
+    public const string AttemptsExhausted = "attempts_exhausted";
+
+    /// <summary>The provider signalled truncation for a payload that is already one line item.</summary>
+    public const string SingleItemExceedsOutputBudget = "single_item_exceeds_output_budget";
+}
+
 public static class AiCostStatuses
 {
     public const string LocalUnpriced = "LocalUnpriced";

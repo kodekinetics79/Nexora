@@ -23,8 +23,18 @@ public sealed class StubLlm : ILLMService
 {
     private readonly Queue<LeadExtractionResult?> _responses;
     public List<string> Prompts { get; } = new();
+
+    /// <summary>Items the extractor declared it packed into each successive call.</summary>
+    public List<int?> RequestedItemCounts { get; } = new();
     public int CallCount { get; private set; }
     public AiProviderClass ProviderClass { get; }
+
+    /// <summary>
+    /// Output-token ceiling this stub advertises. Chunk sizing is derived from it, so
+    /// tests that care about chunk boundaries set it explicitly rather than depending on
+    /// whatever the interface default happens to be.
+    /// </summary>
+    public int MaxOutputTokens { get; init; } = 4096;
 
     public StubLlm(params LeadExtractionResult?[] responses)
         : this(AiProviderClass.Local, responses) { }
@@ -40,12 +50,73 @@ public sealed class StubLlm : ILLMService
     {
         CallCount++;
         Prompts.Add(fullText);
+        RequestedItemCounts.Add(context.ItemsInPayload);
         var result = _responses.Count > 0 ? _responses.Dequeue() : null;
         return Task.FromResult(result);
     }
 
     // WP-BOQ member of ILLMService — not exercised by the extraction tests; returns
     // null ("model produced nothing usable") so any accidental call degrades safely.
+    public Task<BoqDraftResult?> DraftServiceBoqAsync(
+        string scopeText, AiCallContext context, CancellationToken cancellationToken = default)
+        => Task.FromResult<BoqDraftResult?>(null);
+}
+
+/// <summary>
+/// An LLM fake with a REAL output-token ceiling. It answers a request only when the number
+/// of line items the caller packed into it stays at or below <see cref="TruncateAboveItems"/>;
+/// anything larger comes back the way ollama.com/deepseek-v4-pro actually came back on a
+/// 40-line RFQ — <c>done_reason="length"</c>, no parseable JSON, and
+/// <see cref="AiErrorCodes.OutputTruncated"/>.
+///
+/// The advertised <see cref="MaxOutputTokens"/> and the point at which it truncates are
+/// SEPARATE knobs on purpose: that is what lets a test model the case the estimate cannot
+/// cover — an unusually verbose document that overflows a correctly-planned chunk — and
+/// prove the extractor responds by asking for LESS rather than by asking again.
+/// </summary>
+public sealed class BudgetedStubLlm : ILLMService
+{
+    /// <summary>Item count for each successive call, in order. The proof of what was asked for.</summary>
+    public List<int> RequestedItemCounts { get; } = new();
+    public List<string> Prompts { get; } = new();
+    public int CallCount => RequestedItemCounts.Count;
+    public AiProviderClass ProviderClass => AiProviderClass.Local;
+    public int MaxOutputTokens { get; }
+
+    /// <summary>Largest item count this fake can answer. Above it, output truncates.</summary>
+    public int TruncateAboveItems { get; }
+
+    /// <summary>
+    /// When set, ANY chunk whose text contains this marker truncates no matter how small it
+    /// is — the "one pathological line item" case, where halving eventually isolates a
+    /// single row that still cannot fit and the extractor has nothing left to shrink.
+    /// </summary>
+    public string? AlwaysTruncatesMarker { get; init; }
+
+    public BudgetedStubLlm(int maxOutputTokens, int truncateAboveItems)
+    {
+        MaxOutputTokens = maxOutputTokens;
+        TruncateAboveItems = truncateAboveItems;
+    }
+
+    public Task<LlmExtractionOutcome> ExtractLeadDataDetailedAsync(
+        string fullText, AiCallContext context, CancellationToken cancellationToken = default)
+    {
+        var items = context.ItemsInPayload ?? 1;
+        RequestedItemCounts.Add(items);
+        Prompts.Add(fullText);
+        var truncates = items > TruncateAboveItems
+            || (AlwaysTruncatesMarker is not null
+                && fullText.Contains(AlwaysTruncatesMarker, StringComparison.Ordinal));
+        return Task.FromResult(truncates
+            ? new LlmExtractionOutcome(null, AiErrorCodes.OutputTruncated)
+            : new LlmExtractionOutcome(Ext.Result(Ext.Items(items, 0.9), 0.9), null));
+    }
+
+    public async Task<LeadExtractionResult?> ExtractLeadDataAsync(
+        string fullText, AiCallContext context, CancellationToken cancellationToken = default)
+        => (await ExtractLeadDataDetailedAsync(fullText, context, cancellationToken)).Result;
+
     public Task<BoqDraftResult?> DraftServiceBoqAsync(
         string scopeText, AiCallContext context, CancellationToken cancellationToken = default)
         => Task.FromResult<BoqDraftResult?>(null);
