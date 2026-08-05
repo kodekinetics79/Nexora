@@ -18,7 +18,7 @@ namespace ERP_RFQ_Automation.Tests;
 /// </summary>
 public class ChunkedExtractionServiceTests
 {
-    private static ChunkedExtractionService NewService(StubLlm llm)
+    private static ChunkedExtractionService NewService(ILLMService llm)
         => new(llm, new CanonicalRfqNormalizer(), new NoopLogger<ChunkedExtractionService>());
 
     private static DocumentExtractionInput Doc(IReadOnlyList<string> regions, string header = "buyer: Acme")
@@ -62,18 +62,24 @@ public class ChunkedExtractionServiceTests
         Assert.Contains("confidence", outcome.ReviewReason, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>Items the service will pack into one chunk for a stub with this ceiling.</summary>
+    private static int PerChunk(StubLlm llm) => ExtractionOutputBudget.MaxItemsPerChunk(llm.MaxOutputTokens);
+
     [Fact]
     public async Task PartialChunkFailure_RoutesToNeedsReview_AndReportsFailedChunk()
     {
-        // 250 rows -> two chunks (200 + 50). Second chunk fails (null) -> its 50 items are
-        // absent from the union and the failure is surfaced, not swallowed.
-        var llm = new StubLlm(Ext.Result(Ext.Items(200, 0.9), 0.9), null);
-        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(250)));
+        // One full chunk + a remainder. The second chunk fails (null) -> its items are absent
+        // from the union and the failure is surfaced, not swallowed.
+        var probe = new StubLlm();
+        var full = PerChunk(probe);
+        var remainder = 3;
+        var llm = new StubLlm(Ext.Result(Ext.Items(full, 0.9), 0.9), null);
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(full + remainder)));
 
         Assert.Equal(2, llm.CallCount);
         Assert.Equal(ExtractionOutcomeStatus.NeedsReview, outcome.Status);
-        Assert.Equal(250, outcome.ExpectedItemCount);
-        Assert.Equal(200, outcome.ExtractedItemCount);
+        Assert.Equal(full + remainder, outcome.ExpectedItemCount);
+        Assert.Equal(full, outcome.ExtractedItemCount);
         Assert.Contains("chunk", outcome.ReviewReason, StringComparison.OrdinalIgnoreCase);
         Assert.Contains(outcome.Diagnostics, d => d.Contains("2 chunk"));
     }
@@ -92,17 +98,135 @@ public class ChunkedExtractionServiceTests
     [Fact]
     public async Task ManyRows_SplitByItemCap_ConserveAcrossChunks()
     {
-        // 250 rows -> 200 + 50; both chunks succeed and the union conserves the count.
+        // One full chunk + a remainder; both chunks succeed and the union conserves the count.
+        var probe = new StubLlm();
+        var full = PerChunk(probe);
+        var remainder = 3;
         var llm = new StubLlm(
-            Ext.Result(Ext.Items(200, 0.9), 0.9),
-            Ext.Result(Ext.Items(50, 0.9), 0.9));
-        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(250)));
+            Ext.Result(Ext.Items(full, 0.9), 0.9),
+            Ext.Result(Ext.Items(remainder, 0.9), 0.9));
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(full + remainder)));
 
         Assert.Equal(2, llm.CallCount);
         Assert.Equal(ExtractionOutcomeStatus.Ok, outcome.Status);
-        Assert.Equal(250, outcome.ExpectedItemCount);
-        Assert.Equal(250, outcome.ExtractedItemCount);
+        Assert.Equal(full + remainder, outcome.ExpectedItemCount);
+        Assert.Equal(full + remainder, outcome.ExtractedItemCount);
         Assert.Contains(outcome.Diagnostics, d => d.Contains("2 chunk(s)"));
+    }
+
+    [Fact]
+    public async Task ChunkSize_NeverProjectsMoreOutputThanTheModelCanEmit()
+    {
+        // THE REGRESSION THIS SUITE EXISTS FOR (2026-08-05). Chunking used to be sized by
+        // input characters alone, so a 200-item chunk was planned against a 4,096-token
+        // completion ceiling that it needed ~90,000 tokens to satisfy. Every real RFQ came
+        // back cut mid-JSON and the whole document dead-lettered. Whatever the ceiling is,
+        // the planned chunk must be projected to FIT it.
+        const int ceiling = 4096;
+        var perChunk = ExtractionOutputBudget.MaxItemsPerChunk(ceiling);
+        var responses = Enumerable.Repeat<LeadExtractionResult?>(
+            Ext.Result(Ext.Items(perChunk, 0.9), 0.9), 3).ToArray();
+        var llm = new StubLlm(AiProviderClass.Local, responses) { MaxOutputTokens = ceiling };
+
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(perChunk * 3)));
+
+        Assert.Equal(3, llm.CallCount);
+        Assert.All(llm.RequestedItemCounts, count =>
+        {
+            Assert.NotNull(count);
+            Assert.True(
+                ExtractionOutputBudget.FitsBudget(count!.Value, 4096),
+                $"A chunk of {count} item(s) projects "
+                + $"{ExtractionOutputBudget.ProjectedOutputTokens(count.Value)} output tokens, which does not "
+                + "fit a 4096-token ceiling with margin.");
+        });
+        Assert.Equal(perChunk * 3, outcome.ExtractedItemCount);
+        Assert.Equal(ExtractionOutcomeStatus.Ok, outcome.Status);
+    }
+
+    [Fact]
+    public void ChunkSize_ScalesWithTheCeiling_AndNeverFallsBelowOneItem()
+    {
+        // The budget is arithmetic, not a magic number: bigger ceiling -> bigger chunk, and
+        // the projection always stays under the ceiling with the safety margin applied.
+        foreach (var ceiling in new[] { 1024, 2048, 4096, 8192, 16384 })
+        {
+            var items = ExtractionOutputBudget.MaxItemsPerChunk(ceiling);
+            Assert.True(items >= 1, $"ceiling {ceiling} produced {items} items per chunk");
+            if (items > 1)
+                Assert.True(ExtractionOutputBudget.FitsBudget(items, ceiling),
+                    $"ceiling {ceiling}: {items} items project "
+                    + $"{ExtractionOutputBudget.ProjectedOutputTokens(items)} tokens");
+            Assert.False(ExtractionOutputBudget.FitsBudget(items + 1, ceiling),
+                $"ceiling {ceiling}: {items + 1} items should NOT fit — the budget is leaving room unused");
+        }
+
+        Assert.True(ExtractionOutputBudget.MaxItemsPerChunk(8192)
+                    > ExtractionOutputBudget.MaxItemsPerChunk(4096));
+        // A ceiling too small for even one item still yields one: an item is indivisible,
+        // and the caller fails it honestly instead of looping.
+        Assert.Equal(1, ExtractionOutputBudget.MaxItemsPerChunk(64));
+    }
+
+    [Fact]
+    public async Task OutputTruncation_RetriesWithASmallerChunk_NeverTheSameRequestTwice()
+    {
+        // The document plans 12 items per chunk against the advertised 8,192-token ceiling,
+        // but this document is verbose enough that the model truncates above 4 items. The
+        // extractor must respond by asking for LESS — halving, floor 1 — not by replaying
+        // the identical failing request.
+        var llm = new BudgetedStubLlm(maxOutputTokens: 8192, truncateAboveItems: 4);
+        var planned = ExtractionOutputBudget.MaxItemsPerChunk(8192);
+        Assert.Equal(12, planned); // guards the documented arithmetic
+
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(planned)));
+
+        // 12 truncates -> 6 + 6; each 6 truncates -> 3 + 3; every 3 succeeds.
+        Assert.Equal(new[] { 12, 6, 3, 3, 6, 3, 3 }, llm.RequestedItemCounts);
+        // No truncated size is ever re-issued at that same size.
+        Assert.Single(llm.RequestedItemCounts.Where(c => c == 12));
+        Assert.Equal(2, llm.RequestedItemCounts.Count(c => c == 6));
+        // Conservation still holds: every parsed row came back.
+        Assert.Equal(ExtractionOutcomeStatus.Ok, outcome.Status);
+        Assert.Equal(planned, outcome.ExpectedItemCount);
+        Assert.Equal(planned, outcome.ExtractedItemCount);
+        Assert.Contains(outcome.Diagnostics, d => d.Contains("truncated") && d.Contains("retrying"));
+    }
+
+    [Fact]
+    public async Task OutputTruncation_OfASingleItem_FailsThatItemHonestly_AndDoesNotLoop()
+    {
+        // Nothing left to halve. The item must fail — visibly, with the count mismatch
+        // guard firing — rather than the extractor looping forever trying to shrink it.
+        var llm = new BudgetedStubLlm(maxOutputTokens: 8192, truncateAboveItems: 0);
+
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(3)));
+
+        Assert.Equal(ExtractionOutcomeStatus.Failed, outcome.Status);
+        Assert.Equal(0, outcome.ExtractedItemCount);
+        Assert.True(llm.CallCount <= 8, $"re-splitting did not terminate promptly: {llm.CallCount} calls");
+        Assert.All(llm.RequestedItemCounts, c => Assert.True(c >= 1));
+    }
+
+    [Fact]
+    public async Task OutputTruncation_PartialDocument_StillRefusesToDropItemsSilently()
+    {
+        // One pathological line item overflows on its own; the other three extract cleanly.
+        // The document must NOT be reported complete — conservation is the whole point of
+        // this service, and truncation is not allowed to become a silent item drop.
+        var llm = new BudgetedStubLlm(maxOutputTokens: 8192, truncateAboveItems: 12)
+        {
+            AlwaysTruncatesMarker = "OVERSIZED"
+        };
+        var rows = new List<string> { "row 0", "row 1", "OVERSIZED row", "row 3" };
+
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(rows));
+
+        Assert.Equal(4, outcome.ExpectedItemCount);
+        Assert.Equal(3, outcome.ExtractedItemCount);
+        Assert.Equal(ExtractionOutcomeStatus.NeedsReview, outcome.Status);
+        Assert.Contains(outcome.Diagnostics,
+            d => d.Contains("one line item alone exceeds", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

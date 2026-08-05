@@ -22,7 +22,12 @@ public sealed record AiCallContext(
     bool InjectionDetected = false,
     AiProviderClass ProviderClass = AiProviderClass.External,
     long? ExtractionJobId = null,
-    long? SourceDocumentOccurrenceId = null);
+    long? SourceDocumentOccurrenceId = null,
+    // How many line items the caller packed into this payload. Diagnostic only — it is
+    // never sent to the provider. It exists so that when the provider reports output
+    // truncation the log says WHICH chunk size overflowed, which is the single fact an
+    // operator needs to tell "the model is broken" apart from "we asked for too much".
+    int? ItemsInPayload = null);
 
 public sealed record AiReservation(
     Guid RequestId,

@@ -20,8 +20,38 @@ namespace ERP_RFQ_Automation.Services.Interfaces
         /// </summary>
         AiProviderDescriptor ProviderDescriptor => AiProviderDescriptor.Unresolved();
 
+        /// <summary>
+        /// The hard ceiling on OUTPUT tokens this client will let the provider generate for
+        /// one call (Ollama's <c>num_predict</c>). Callers that decide how much work to pack
+        /// into a single request MUST size against this — the extraction schema costs
+        /// hundreds of output tokens per line item, so an input-sized chunk that "fits the
+        /// context window" can still overflow the completion budget and come back as
+        /// unparseable, half-written JSON. See
+        /// <c>ERP_RFQ_Automation.Extraction.ExtractionOutputBudget</c>.
+        /// The default matches the client default so an implementation that does not say
+        /// otherwise is assumed to be modest, never generous.
+        /// </summary>
+        int MaxOutputTokens => 4096;
+
         Task<LeadExtractionResult?> ExtractLeadDataAsync(
             string fullText, AiCallContext context, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Same call as <see cref="ExtractLeadDataAsync"/> but it also reports WHY a null
+        /// result is null. Callers that can change the shape of the request — the chunked
+        /// extractor, which can re-issue a chunk with fewer line items — need to tell
+        /// "the model wrote bad JSON" (pointless to retry) apart from "the model ran out of
+        /// output budget mid-JSON" (retry smaller, and only smaller).
+        /// The default implementation preserves every existing implementation unchanged: it
+        /// simply reports the failure as non-retryable, which is exactly today's behaviour.
+        /// </summary>
+        async Task<LlmExtractionOutcome> ExtractLeadDataDetailedAsync(
+            string fullText, AiCallContext context, CancellationToken cancellationToken = default)
+        {
+            var result = await ExtractLeadDataAsync(fullText, context, cancellationToken);
+            return new LlmExtractionOutcome(
+                result, result is null ? AiErrorCodes.AttemptsExhausted : null);
+        }
 
         /// <summary>
         /// WP-BOQ (additive): reads a service request / scope-of-work text and drafts a
@@ -35,6 +65,20 @@ namespace ERP_RFQ_Automation.Services.Interfaces
         Task<BoqDraftResult?> DraftServiceBoqAsync(
             string scopeText, AiCallContext context, CancellationToken cancellationToken = default);
     }
+    /// <summary>
+    /// The result of one extraction call plus the reason it failed, if it failed.
+    /// <paramref name="ErrorCode"/> is one of <see cref="AiErrorCodes"/> and is null on success.
+    /// </summary>
+    public sealed record LlmExtractionOutcome(LeadExtractionResult? Result, string? ErrorCode)
+    {
+        /// <summary>
+        /// True when the provider stopped because it hit the output-token ceiling. The only
+        /// meaningful retry is a smaller request; replaying the identical request re-truncates
+        /// at the identical point.
+        /// </summary>
+        public bool OutputTruncated => ErrorCode == AiErrorCodes.OutputTruncated;
+    }
+
     public record LeadExtractionResult(
         string? Rfqno, double? RfqnoConfidence,
         string? BuyersName, double? BuyersNameConfidence,
