@@ -67,10 +67,15 @@ public sealed class SupplierGovernanceService(ErpRfqAutomationContext db)
                     || replay.AggregateId != command.SupplierId)
                     throw new SupplierGovernanceConflictException(
                         "The idempotency key was already used for a different Supplier decision.");
-                var current = await RequireSupplierAsync(command.BusinessUnitId, command.SupplierId,
-                    cancellationToken);
+                var root = payload.RootElement;
                 await transaction.CommitAsync(cancellationToken);
-                return ToResult(current, true);
+                return new GovernedSupplierResult(command.SupplierId,
+                    root.GetProperty("GovernanceStatus").GetString()!,
+                    root.GetProperty("VerificationStatus").GetString()!,
+                    root.GetProperty("ComplianceStatus").GetString()!,
+                    root.GetProperty("RiskStatus").GetString()!,
+                    root.GetProperty("ReadinessStatus").GetString()!,
+                    root.GetProperty("ConcurrencyToken").GetGuid(), true);
             }
 
             var supplier = await RequireSupplierAsync(command.BusinessUnitId, command.SupplierId,
@@ -89,15 +94,20 @@ public sealed class SupplierGovernanceService(ErpRfqAutomationContext db)
             supplier.ModifiedBy = command.Actor.Trim();
             supplier.ModifiedOn = supplier.GovernanceReviewedOn;
             supplier.ConcurrencyToken = Guid.NewGuid();
-            if (command.GovernanceStatus == SupplierGovernanceStatuses.Inactive)
-                supplier.IsActive = false;
+            supplier.IsActive = command.GovernanceStatus != SupplierGovernanceStatuses.Inactive;
+
+            var aggregateVersion = await db.ProcurementEvents.CountAsync(x =>
+                x.BusinessUnitId == command.BusinessUnitId
+                && x.AggregateType == "Supplier"
+                && x.AggregateId == supplier.Id
+                && x.EventType == "SUPPLIER_GOVERNANCE_DECIDED", cancellationToken) + 1;
 
             db.ProcurementEvents.Add(new ProcurementEvent
             {
                 BusinessUnitId = command.BusinessUnitId,
                 AggregateType = "Supplier",
                 AggregateId = supplier.Id,
-                AggregateVersion = 1,
+                AggregateVersion = aggregateVersion,
                 EventType = "SUPPLIER_GOVERNANCE_DECIDED",
                 Actor = command.Actor.Trim(),
                 CorrelationId = command.CorrelationId.Trim(),
@@ -110,6 +120,7 @@ public sealed class SupplierGovernanceService(ErpRfqAutomationContext db)
                     supplier.ComplianceStatus,
                     supplier.RiskStatus,
                     supplier.ReadinessStatus,
+                    supplier.ConcurrencyToken,
                     Reason = command.Reason.Trim()
                 }),
                 OccurredOn = supplier.GovernanceReviewedOn.Value
@@ -155,19 +166,18 @@ public sealed class SupplierGovernanceService(ErpRfqAutomationContext db)
             SupplierReadinessStatuses.ReviewRequired, SupplierReadinessStatuses.Ready,
             SupplierReadinessStatuses.Restricted, SupplierReadinessStatuses.Blocked);
 
-        if (command.GovernanceStatus is SupplierGovernanceStatuses.Approved
-            or SupplierGovernanceStatuses.Preferred)
+        if (command.ReadinessStatus == SupplierReadinessStatuses.Ready)
         {
-            if (command.VerificationStatus != SupplierVerificationStatuses.Verified
+            if (command.GovernanceStatus is not (SupplierGovernanceStatuses.Approved
+                    or SupplierGovernanceStatuses.Preferred or SupplierGovernanceStatuses.Provisional)
+                || command.VerificationStatus != SupplierVerificationStatuses.Verified
                 || command.ComplianceStatus != SupplierComplianceStatuses.Cleared
-                || command.RiskStatus is not (SupplierRiskStatuses.Low or SupplierRiskStatuses.Medium)
-                || command.ReadinessStatus != SupplierReadinessStatuses.Ready)
+                || command.RiskStatus is not (SupplierRiskStatuses.Low or SupplierRiskStatuses.Medium))
                 throw new ArgumentException(
-                    "Approved and preferred Suppliers require verified identity, cleared compliance, acceptable risk, and READY outreach status.");
+                    "READY Suppliers require an approved, preferred, or provisional decision, verified identity, cleared compliance, and acceptable risk.");
         }
         if (command.GovernanceStatus == SupplierGovernanceStatuses.Provisional
             && (command.ComplianceStatus is SupplierComplianceStatuses.Blocked
-                or SupplierComplianceStatuses.Failed or SupplierComplianceStatuses.Restricted
                 || command.RiskStatus is SupplierRiskStatuses.High or SupplierRiskStatuses.Blocked))
             throw new ArgumentException("A provisional Supplier cannot override compliance or high-risk blocks.");
         if (command.GovernanceStatus == SupplierGovernanceStatuses.Blocked
@@ -176,6 +186,18 @@ public sealed class SupplierGovernanceService(ErpRfqAutomationContext db)
         if (command.GovernanceStatus == SupplierGovernanceStatuses.Restricted
             && command.ReadinessStatus != SupplierReadinessStatuses.Restricted)
             throw new ArgumentException("A restricted Supplier must have RESTRICTED readiness.");
+        if (command.GovernanceStatus == SupplierGovernanceStatuses.Inactive
+            && command.ReadinessStatus != SupplierReadinessStatuses.Blocked)
+            throw new ArgumentException("An inactive Supplier must have BLOCKED readiness.");
+        if (command.ComplianceStatus is SupplierComplianceStatuses.Blocked or SupplierComplianceStatuses.Failed
+            && command.ReadinessStatus != SupplierReadinessStatuses.Blocked)
+            throw new ArgumentException("Blocked or failed compliance requires BLOCKED readiness.");
+        if (command.ComplianceStatus == SupplierComplianceStatuses.Restricted
+            && command.ReadinessStatus == SupplierReadinessStatuses.Ready)
+            throw new ArgumentException("Restricted compliance cannot be READY for outreach.");
+        if (command.RiskStatus is SupplierRiskStatuses.High or SupplierRiskStatuses.Blocked
+            && command.ReadinessStatus == SupplierReadinessStatuses.Ready)
+            throw new ArgumentException("High or blocked risk cannot be READY for outreach.");
     }
 
     private static GovernedSupplierResult ToResult(Supplier supplier, bool replayed) => new(

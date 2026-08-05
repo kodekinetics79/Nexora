@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DTOs.Warehouse;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
@@ -19,8 +20,12 @@ namespace ERP_RFQ_Automation.Controllers
             _repository = repository;
         }
 
+        private bool TryGetTenantId(out long businessUnitId) =>
+            long.TryParse(User.FindFirst("businessUnitId")?.Value, out businessUnitId) && businessUnitId > 0;
+
         // GET: api/Warehouse?pageNumber=1&pageSize=10&warehouseCode=WH1&warehouseName=Main&location=City&country=USA&isActive=true&businessUnitId=1
         [HttpGet]
+        [RequireModulePermission("Products", PermissionAction.View)]
         public async Task<ActionResult<PaginatedWarehouseResponseDTO>> GetAll(
             [FromQuery] long? businessUnitId = null,
             [FromQuery] int pageNumber = 1,
@@ -33,11 +38,9 @@ namespace ERP_RFQ_Automation.Controllers
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-                if (targetBUId <= 0)
-                    return BadRequest("Business Unit ID is required.");
+                _ = businessUnitId; // Retained for client compatibility; authenticated tenant is authoritative.
+                if (!TryGetTenantId(out var targetBUId))
+                    return BadRequest("A valid businessUnitId claim is required.");
 
                 // Validate pagination parameters
                 if (pageNumber < 1)
@@ -88,39 +91,41 @@ namespace ERP_RFQ_Automation.Controllers
 
                 return Ok(response);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving data: {ex.Message}");
+                return Problem(statusCode: StatusCodes.Status500InternalServerError,
+                    title: "The warehouse list could not be loaded.");
             }
         }
 
         // GET: api/Warehouse/5
         [HttpGet("{id}")]
+        [RequireModulePermission("Products", PermissionAction.View)]
         public async Task<ActionResult<WarehouseResponseDTO>> GetById(long id, [FromQuery] long? businessUnitId = null)
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-                if (targetBUId <= 0)
-                    return BadRequest("Business Unit ID is required.");
+                _ = businessUnitId;
+                if (!TryGetTenantId(out var targetBUId))
+                    return BadRequest("A valid businessUnitId claim is required.");
 
                 var warehouse = await _repository.GetByIdAsync(id, targetBUId);
                 return Ok(MapToResponse(warehouse));
             }
-            catch (KeyNotFoundException ex)
+            catch (KeyNotFoundException)
             {
-                return NotFound(ex.Message);
+                return NotFound();
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving data: {ex.Message}");
+                return Problem(statusCode: StatusCodes.Status500InternalServerError,
+                    title: "The warehouse could not be loaded.");
             }
         }
 
         // POST: api/Warehouse
         [HttpPost]
+        [RequireModulePermission("Products", PermissionAction.Create)]
         public async Task<ActionResult<WarehouseResponseDTO>> Create([FromBody] WarehouseCreateRequestDTO request)
         {
             try
@@ -128,10 +133,9 @@ namespace ERP_RFQ_Automation.Controllers
                 if (!ModelState.IsValid)
                     return BadRequest(ModelState);
 
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                if (claimBUId > 0) request.BusinessUnitId = claimBUId;
-
-                if (request.BusinessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+                if (!TryGetTenantId(out var claimBUId))
+                    return BadRequest("A valid businessUnitId claim is required.");
+                request.BusinessUnitId = claimBUId;
 
                 var warehouse = new Warehouse
                 {
@@ -157,20 +161,26 @@ namespace ERP_RFQ_Automation.Controllers
                 await _repository.AddAsync(warehouse);
 
                 var response = MapToResponse(warehouse);
-                return CreatedAtAction(nameof(GetById), new { id = warehouse.Id, businessUnitId = warehouse.BusinessUnitId }, response);
+                return CreatedAtAction(nameof(GetById), new { id = warehouse.Id }, response);
             }
-            catch (ArgumentException ex)
+            catch (ArgumentException)
             {
-                return BadRequest(ex.Message);
+                return BadRequest("The warehouse data is invalid.");
             }
-            catch (Exception ex)
+            catch (InvalidOperationException)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error creating data: {ex.Message}");
+                return Conflict("The warehouse conflicts with an existing record or operation.");
+            }
+            catch (Exception)
+            {
+                return Problem(statusCode: StatusCodes.Status500InternalServerError,
+                    title: "The warehouse could not be created.");
             }
         }
 
         // PUT: api/Warehouse/5
         [HttpPut("{id}")]
+        [RequireModulePermission("Products", PermissionAction.Edit)]
         public async Task<ActionResult> Update(long id, [FromBody] WarehouseUpdateRequestDTO request)
         {
             try
@@ -178,10 +188,9 @@ namespace ERP_RFQ_Automation.Controllers
                 if (!ModelState.IsValid)
                     return BadRequest(ModelState);
 
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                if (claimBUId > 0) request.BusinessUnitId = claimBUId;
-
-                if (request.BusinessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+                if (!TryGetTenantId(out var claimBUId))
+                    return BadRequest("A valid businessUnitId claim is required.");
+                request.BusinessUnitId = claimBUId;
 
                 var existing = await _repository.GetByIdAsync(id, request.BusinessUnitId);
 
@@ -206,46 +215,55 @@ namespace ERP_RFQ_Automation.Controllers
                 await _repository.UpdateAsync(existing);
                 return NoContent();
             }
-            catch (KeyNotFoundException ex)
+            catch (KeyNotFoundException)
             {
-                return NotFound(ex.Message);
+                return NotFound();
             }
-            catch (ArgumentException ex)
+            catch (ArgumentException)
             {
-                return BadRequest(ex.Message);
+                return BadRequest("The warehouse data is invalid.");
             }
-            catch (Exception ex)
+            catch (InvalidOperationException)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error updating data: {ex.Message}");
+                return Conflict("The warehouse conflicts with an existing record or operation.");
+            }
+            catch (Exception)
+            {
+                return Problem(statusCode: StatusCodes.Status500InternalServerError,
+                    title: "The warehouse could not be updated.");
             }
         }
 
         // DELETE: api/Warehouse/5
         [HttpDelete("{id}")]
+        [RequireModulePermission("Products", PermissionAction.Delete)]
         public async Task<ActionResult> Delete(long id, [FromQuery] long? businessUnitId = null)
         {
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-                if (targetBUId <= 0)
-                    return BadRequest("Business Unit ID is required.");
+                _ = businessUnitId;
+                if (!TryGetTenantId(out var targetBUId))
+                    return BadRequest("A valid businessUnitId claim is required.");
 
                 await _repository.DeleteAsync(id, targetBUId);
                 return NoContent();
             }
-            catch (KeyNotFoundException ex)
+            catch (KeyNotFoundException)
             {
-                return NotFound(ex.Message);
+                return NotFound();
             }
-            catch (InvalidOperationException ex)
+            catch (InvalidOperationException)
             {
-                return BadRequest(ex.Message);
+                return Conflict("The warehouse cannot be deleted in its current state.");
             }
-            catch (Exception ex)
+            catch (ArgumentException)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error deleting data: {ex.Message}");
+                return BadRequest("The warehouse request is invalid.");
+            }
+            catch (Exception)
+            {
+                return Problem(statusCode: StatusCodes.Status500InternalServerError,
+                    title: "The warehouse could not be deleted.");
             }
         }
 

@@ -88,7 +88,15 @@ namespace ERP_RFQ_Automation.Controllers
         {
             try
             {
-                var (businessUnits, _) = await _repository.GetAllAsync(1, 1000, null, null); // Fetch all for dropdown
+                // SEC-H3: this used to call GetAllAsync(1, 1000, null, null), which applies no
+                // tenant predicate — BusinessUnit carries no EF global query filter, so any
+                // authenticated user of any tenant enumerated every tenant on the platform.
+                // The dropdown only ever needs the caller's own business unit; scope it to the
+                // businessUnitId claim and fail closed when that claim is absent.
+                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+                if (claimBUId <= 0) return Forbid();
+
+                var (businessUnits, _) = await _repository.GetAllAsync(1, 1000, claimBUId, null);
                 var response = businessUnits.Select(MapToResponse).ToList();
                 return Ok(response);
             }

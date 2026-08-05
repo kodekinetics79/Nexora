@@ -16,6 +16,7 @@ public interface ILeadIdentityApplicationService
     Task<LeadReconciliationResult> ReconcileAsync(Lead candidate, LeadIntakeDescriptor intake, CancellationToken ct = default);
     Task<BatchReconciliationDto?> GetBatchAsync(long businessUnitId, Guid batchId, CancellationToken ct = default);
     Task<IReadOnlyList<PossibleMatchQueueItemDto>> GetPossibleMatchesAsync(long businessUnitId, CancellationToken ct = default);
+    Task<IReadOnlyList<DuplicateUploadDto>> GetDuplicateUploadsAsync(long businessUnitId, CancellationToken ct = default);
     Task<IReadOnlyList<LeadRevisionDto>> GetRevisionsAsync(long businessUnitId, long leadId, CancellationToken ct = default);
     Task<LeadReconciliationResult> DecideMatchAsync(long businessUnitId, long occurrenceId, MatchDecisionRequest request, string actorId, CancellationToken ct = default);
     Task<LeadIdentityAnalyticsDto> GetAnalyticsAsync(long businessUnitId, DateTimeOffset from, DateTimeOffset to, CancellationToken ct = default);
@@ -238,40 +239,79 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
                 occurrence.Id,
                 occurrence.ExtractionJobId,
                 occurrence.IntakeStatus,
+                occurrence.OutcomeState,
+                occurrence.OriginalOccurrenceId,
                 occurrence.LastErrorCode,
                 occurrence.LastErrorDetailsJson,
+                occurrence.SourceMetadataJson,
                 occurrence.ReceivedOn,
-                document.OriginalFileName
+                occurrence.UpdatedOn,
+                document.OriginalFileName,
+                document.SecurityStatus
             }).ToListAsync(ct);
         var extractionJobIds = intakeOccurrences.Where(x => x.ExtractionJobId.HasValue)
             .Select(x => x.ExtractionJobId!.Value).Distinct().ToArray();
-        var extractionErrors = await _db.Set<ExtractionJob>().AsNoTracking()
-            .Where(x => x.BusinessUnitId == bu && extractionJobIds.Contains(x.Id) && x.LastError != null)
-            .ToDictionaryAsync(x => x.Id, x => x.LastError!, ct);
+        var extractionJobs = await _db.Set<ExtractionJob>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == bu && extractionJobIds.Contains(x.Id))
+            .Select(x => new { x.Id, x.Status, x.LastError, x.UpdatedOn })
+            .ToDictionaryAsync(x => x.Id, ct);
         var rows = await _db.Set<LeadIngestionOccurrence>().AsNoTracking().Where(x => x.BusinessUnitId == bu && x.BatchId == batchId)
             .Include(x => x.Lead).ThenInclude(x => x!.AssignToNavigation)
             .Include(x => x.MatchCandidates).ThenInclude(x => x.CandidateLead)
             .OrderBy(x => x.Id).ToListAsync(ct);
-        var items = rows.Select(x => new BatchReconciliationItemDto(x.Id, x.LeadId, x.Lead?.CommercialCaseReference,
-            x.Classification.ToString(), x.Lead?.CurrentRevisionNumber, x.OriginalFileName, x.IngestedAtUtc,
-            x.ProcessingPath.ToString(), x.ExternalAiUsed, x.Confidence, x.DecisionReasons(),
-            x.MatchCandidates.Select(c => new LeadMatchCandidateDto(c.Id, c.CandidateLeadId,
-                c.CandidateLead.CommercialCaseReference, c.CandidateLead.Rfqno, c.Confidence,
-                c.MatchEvidenceJson, c.DifferencesJson, c.DownstreamImpactJson,
-                c.ReviewState.ToString(), c.Version)).ToArray(),
-            x.Lead?.CustomerMatchStatus ?? "Awaiting customer resolution",
-            x.Lead?.AssignToNavigation is null ? null
-                : $"{x.Lead.AssignToNavigation.FirstName} {x.Lead.AssignToNavigation.LastName}".Trim(),
-            "Reconciled", null, x.SourceDocumentOccurrenceId)).ToList();
+        var intakeById = intakeOccurrences.ToDictionary(x => x.Id);
+        var items = rows.Select(x =>
+        {
+            var intake = x.SourceDocumentOccurrenceId.HasValue
+                ? intakeById.GetValueOrDefault(x.SourceDocumentOccurrenceId.Value)
+                : null;
+            var job = intake?.ExtractionJobId.HasValue == true
+                ? extractionJobs.GetValueOrDefault(intake.ExtractionJobId.Value)
+                : null;
+            return new BatchReconciliationItemDto(x.Id, x.LeadId, x.Lead?.CommercialCaseReference,
+                x.Classification.ToString(), x.Lead?.CurrentRevisionNumber, x.OriginalFileName, x.IngestedAtUtc,
+                x.ProcessingPath.ToString(), x.ExternalAiUsed, x.Confidence, x.DecisionReasons(),
+                x.MatchCandidates.Select(c => new LeadMatchCandidateDto(c.Id, c.CandidateLeadId,
+                    c.CandidateLead.CommercialCaseReference, c.CandidateLead.Rfqno, c.Confidence,
+                    c.MatchEvidenceJson, c.DifferencesJson, c.DownstreamImpactJson,
+                    c.ReviewState.ToString(), c.Version)).ToArray(),
+                x.Lead?.CustomerMatchStatus ?? "Awaiting customer resolution",
+                x.Lead?.AssignToNavigation is null ? null
+                    : $"{x.Lead.AssignToNavigation.FirstName} {x.Lead.AssignToNavigation.LastName}".Trim(),
+                "Reconciled", null, x.SourceDocumentOccurrenceId)
+            {
+                SecurityStatus = intake?.SecurityStatus.ToString(),
+                SecurityScanUpdatedAtUtc = intake?.UpdatedOn,
+                LastUpdatedAtUtc = intake?.UpdatedOn ?? x.IngestedAtUtc,
+                ExtractionStatus = job?.Status.ToString(),
+                ExtractionUpdatedAtUtc = job is null ? null : AsUtc(job.UpdatedOn),
+                RecoverableSecurityHold = intake is not null && IsRecoverableSecurityHold(
+                    intake.IntakeStatus, intake.LastErrorCode, intake.SourceMetadataJson)
+            };
+        }).ToList();
 
         var reconciledIntakeIds = rows.Where(x => x.SourceDocumentOccurrenceId.HasValue)
             .Select(x => x.SourceDocumentOccurrenceId!.Value).ToHashSet();
         foreach (var intake in intakeOccurrences.Where(x => !reconciledIntakeIds.Contains(x.Id)))
         {
-            var rejected = intake.IntakeStatus is IntakeOccurrenceStatus.Rejected or IntakeOccurrenceStatus.DeadLetter;
+            var awaitingSecurityScan = IsRecoverableSecurityHold(
+                intake.IntakeStatus, intake.LastErrorCode, intake.SourceMetadataJson);
+            var exactDuplicate = intake.OriginalOccurrenceId.HasValue
+                || intake.OutcomeState is IngestionOutcomeState.EXACT_DUPLICATE_PENDING_SECURITY
+                    or IngestionOutcomeState.EXACT_DUPLICATE_CONFIRMED
+                    or IngestionOutcomeState.DUPLICATE_RESCAN_REQUIRED;
+            var rejected = !awaitingSecurityScan
+                && intake.IntakeStatus is IntakeOccurrenceStatus.Rejected or IntakeOccurrenceStatus.DeadLetter;
+            var displayedIntakeStatus = awaitingSecurityScan
+                ? IntakeOccurrenceStatus.AwaitingSecurityScan
+                : intake.IntakeStatus;
             items.Add(new BatchReconciliationItemDto(
                 0, null, null,
-                rejected ? LeadOccurrenceClassification.RejectedOrUnprocessable.ToString() : "Pending",
+                rejected
+                    ? LeadOccurrenceClassification.RejectedOrUnprocessable.ToString()
+                    : exactDuplicate
+                        ? LeadOccurrenceClassification.ExactDuplicate.ToString()
+                        : "Pending",
                 null, intake.OriginalFileName, intake.ReceivedOn,
                 $"Intake{intake.IntakeStatus}", false, rejected ? 1m : 0m,
                 IntakeReasons(
@@ -279,21 +319,60 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
                     intake.LastErrorCode,
                     intake.IntakeStatus,
                     intake.ExtractionJobId.HasValue
-                        ? extractionErrors.GetValueOrDefault(intake.ExtractionJobId.Value)
+                        ? extractionJobs.GetValueOrDefault(intake.ExtractionJobId.Value)?.LastError
                         : null),
                 Array.Empty<LeadMatchCandidateDto>(), "Awaiting customer resolution", null,
-                intake.IntakeStatus.ToString(), intake.LastErrorCode, intake.Id));
+                displayedIntakeStatus.ToString(),
+                awaitingSecurityScan ? "security_scanner_unavailable" : intake.LastErrorCode,
+                intake.Id)
+            {
+                RecoverableSecurityHold = awaitingSecurityScan,
+                SecurityStatus = intake.SecurityStatus.ToString(),
+                SecurityScanUpdatedAtUtc = intake.UpdatedOn,
+                LastUpdatedAtUtc = intake.UpdatedOn,
+                ExtractionStatus = intake.ExtractionJobId.HasValue
+                    ? extractionJobs.GetValueOrDefault(intake.ExtractionJobId.Value)?.Status.ToString()
+                    : null,
+                ExtractionUpdatedAtUtc = intake.ExtractionJobId.HasValue
+                    && extractionJobs.GetValueOrDefault(intake.ExtractionJobId.Value) is { } job
+                        ? AsUtc(job.UpdatedOn)
+                        : null
+            });
         }
 
         var intakeRejected = intakeOccurrences.Count(x =>
             !reconciledIntakeIds.Contains(x.Id)
+            && !IsRecoverableSecurityHold(x.IntakeStatus, x.LastErrorCode, x.SourceMetadataJson)
             && x.IntakeStatus is IntakeOccurrenceStatus.Rejected or IntakeOccurrenceStatus.DeadLetter);
+        var preReconciliationExactDuplicates = intakeOccurrences.Count(x =>
+            !reconciledIntakeIds.Contains(x.Id)
+            && (x.OriginalOccurrenceId.HasValue
+                || x.OutcomeState is IngestionOutcomeState.EXACT_DUPLICATE_PENDING_SECURITY
+                    or IngestionOutcomeState.EXACT_DUPLICATE_CONFIRMED
+                    or IngestionOutcomeState.DUPLICATE_RESCAN_REQUIRED));
         return new(batchId, intakeOccurrences.Count, rows.Count,
-            Count(LeadOccurrenceClassification.New), Count(LeadOccurrenceClassification.ExactDuplicate), Count(LeadOccurrenceClassification.Revision),
+            Count(LeadOccurrenceClassification.New), Count(LeadOccurrenceClassification.ExactDuplicate) + preReconciliationExactDuplicates, Count(LeadOccurrenceClassification.Revision),
             Count(LeadOccurrenceClassification.PossibleMatchReviewRequired), Count(LeadOccurrenceClassification.RejectedOrUnprocessable) + intakeRejected,
-            rows.Count(x => x.ExternalAiUsed), rows.Sum(x => x.ExternalCost), items.OrderBy(x => x.IngestedAtUtc).ToArray());
+            rows.Count(x => x.ExternalAiUsed), rows.Sum(x => x.ExternalCost), items.OrderBy(x => x.IngestedAtUtc).ToArray())
+        {
+            AwaitingSecurityScan = intakeOccurrences.Count(x =>
+                !reconciledIntakeIds.Contains(x.Id)
+                && IsRecoverableSecurityHold(x.IntakeStatus, x.LastErrorCode, x.SourceMetadataJson)),
+            LocalFirstOccurrences = rows.Count(x => !x.ExternalAiUsed)
+        };
         int Count(LeadOccurrenceClassification c) => rows.Count(x => x.Classification == c);
+        static DateTimeOffset AsUtc(DateTime value) =>
+            new(DateTime.SpecifyKind(value, DateTimeKind.Utc));
     }
+
+    // Single source of truth, shared with SecurityScanRecoveryService: what this read model counts as
+    // "awaiting security scan" must be exactly what the retry endpoint is willing to replay.
+    private static bool IsRecoverableSecurityHold(
+        IntakeOccurrenceStatus intakeStatus,
+        string? lastErrorCode,
+        string sourceMetadataJson) =>
+        ERP_RFQ_Automation.Extraction.SecurityHoldRecovery.IsRecoverableSecurityHold(
+            intakeStatus, lastErrorCode, sourceMetadataJson);
 
     private static IReadOnlyList<string> IntakeReasons(
         string? detailsJson,
@@ -323,6 +402,113 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         return new[] { !string.IsNullOrWhiteSpace(errorCode)
             ? $"Intake stopped: {errorCode.Replace('_', ' ')}."
             : $"Intake status: {status}." };
+    }
+
+    public async Task<IReadOnlyList<DuplicateUploadDto>> GetDuplicateUploadsAsync(
+        long businessUnitId, CancellationToken ct = default)
+    {
+        var duplicateStates = new[]
+        {
+            IngestionOutcomeState.EXACT_DUPLICATE_PENDING_SECURITY,
+            IngestionOutcomeState.EXACT_DUPLICATE_CONFIRMED,
+            IngestionOutcomeState.BUSINESS_DUPLICATE_CONFIRMED,
+            IngestionOutcomeState.DUPLICATE_RESCAN_REQUIRED
+        };
+        var occurrences = await _db.Set<SourceDocumentOccurrence>().AsNoTracking()
+            .Include(x => x.SourceDocument)
+            .Include(x => x.Corpus)
+            .Where(x => x.BusinessUnitId == businessUnitId
+                        && (x.OriginalOccurrenceId.HasValue || duplicateStates.Contains(x.OutcomeState)))
+            .OrderByDescending(x => x.ReceivedOn)
+            .Take(500)
+            .ToListAsync(ct);
+        if (occurrences.Count == 0)
+            return Array.Empty<DuplicateUploadDto>();
+
+        var occurrenceIds = occurrences
+            .SelectMany(x => new long?[] { x.Id, x.OriginalOccurrenceId })
+            .Where(x => x.HasValue).Select(x => x!.Value).Distinct().ToArray();
+        var identities = await _db.Set<LeadIngestionOccurrence>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId
+                        && x.SourceDocumentOccurrenceId.HasValue
+                        && occurrenceIds.Contains(x.SourceDocumentOccurrenceId.Value)
+                        && x.LeadId.HasValue)
+            .Select(x => new
+            {
+                SourceOccurrenceId = x.SourceDocumentOccurrenceId!.Value,
+                LeadId = x.LeadId!.Value,
+                NexoraSerial = x.Lead!.CommercialCaseReference,
+                x.CreatedAtUtc
+            })
+            .ToListAsync(ct);
+        var identityByOccurrence = identities
+            .GroupBy(x => x.SourceOccurrenceId)
+            .ToDictionary(x => x.Key, x => x.OrderByDescending(y => y.CreatedAtUtc).First());
+        var batchIds = occurrences.Select(x => x.Corpus.BatchId).Distinct().ToArray();
+        var batches = await _db.Set<LeadIngestionBatch>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && batchIds.Contains(x.Id))
+            .ToDictionaryAsync(x => x.Id, ct);
+
+        return occurrences.Select(x =>
+        {
+            var identity = identityByOccurrence.GetValueOrDefault(x.Id)
+                           ?? (x.OriginalOccurrenceId.HasValue
+                               ? identityByOccurrence.GetValueOrDefault(x.OriginalOccurrenceId.Value)
+                               : null);
+            var actions = new List<string> { "Open batch" };
+            if (x.IntakeStatus == IntakeOccurrenceStatus.AwaitingSecurityScan
+                || x.OutcomeState is IngestionOutcomeState.DUPLICATE_RESCAN_REQUIRED
+                    or IngestionOutcomeState.SECURITY_SCAN_BLOCKED)
+                actions.Add("Retry security scan");
+            if (identity is not null)
+                actions.Add("Open canonical lead");
+            var batch = batches.GetValueOrDefault(x.Corpus.BatchId);
+            return new DuplicateUploadDto(
+                x.Id,
+                x.SourceDocument.OriginalFileName,
+                x.Corpus.BatchId,
+                x.ReceivedOn,
+                ResolveUploadedBy(x.SourceMetadataJson, batch?.CreatedBy),
+                batch?.SourceChannel ?? x.Corpus.SourceType.ToString(),
+                x.OutcomeState.ToString(),
+                x.OriginalOccurrenceId,
+                identity?.LeadId,
+                identity?.NexoraSerial,
+                x.SourceDocument.SecurityStatus.ToString(),
+                x.ProcessingReused,
+                new DuplicateResourceAccountingDto(
+                    x.BytesUploaded, x.HashingDurationMs, x.StoragePhysicalBytes,
+                    x.StorageLogicalBytes, x.MalwareScanReused, x.MalwareScanRerun,
+                    x.ParserReused, x.OcrReused, x.LocalModelReused, x.ExternalModelReused,
+                    x.LocalComputeCost, x.ExternalProcessingCost, x.TotalActualCost,
+                    x.EstimatedProcessingAvoided, x.CostStatus),
+                actions);
+        }).ToArray();
+    }
+
+    private static string ResolveUploadedBy(string sourceMetadataJson, string? fallback)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(sourceMetadataJson);
+            if (document.RootElement.TryGetProperty("metadata", out var metadata)
+                && metadata.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var property in new[] { "UploadedBy", "FromEmail", "ClientEmail" })
+                {
+                    if (metadata.TryGetProperty(property, out var value)
+                        && value.ValueKind == JsonValueKind.String
+                        && !string.IsNullOrWhiteSpace(value.GetString()))
+                        return value.GetString()!;
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            // Older occurrence metadata remains readable through the batch fallback.
+        }
+
+        return string.IsNullOrWhiteSpace(fallback) ? "system" : fallback;
     }
 
     public async Task<IReadOnlyList<PossibleMatchQueueItemDto>> GetPossibleMatchesAsync(

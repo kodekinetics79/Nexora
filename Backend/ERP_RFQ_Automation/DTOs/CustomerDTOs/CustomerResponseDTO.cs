@@ -6,9 +6,6 @@
         public string Name { get; set; } = null!;
         public string? ContactEmail { get; set; }
         public string ImageUrl { get; set; } = null!;
-        public string? TaxId { get; set; }
-        public decimal? CreditLimit { get; set; }
-        public string? PaymentTerms { get; set; }
         public string? BillingAddressLine1 { get; set; }
         public string? BillingAddressLine2 { get; set; }
         public string? BillingCity { get; set; }
@@ -21,8 +18,6 @@
         public string? ShippingState { get; set; }
         public string? ShippingCountry { get; set; }
         public string? ShippingPostalCode { get; set; }
-        public long? CurrencyId { get; set; }
-        public string? CurrencyName { get; set; }
         public long? Buid { get; set; }
         public string? BusinessUnitName { get; set; }
         public bool? IsActive { get; set; }
@@ -30,6 +25,7 @@
         public DateTime CreatedOn { get; set; }
         public string? ModifiedBy { get; set; }
         public DateTime? ModifiedOn { get; set; }
+        public Guid ConcurrencyToken { get; set; }
 
         public string? DocId { get; set; }
     }

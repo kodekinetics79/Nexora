@@ -221,10 +221,14 @@ public sealed class SalesApplicationService(
             .Where(x => x.FollowUpTaskId == task.Id && x.OccurredAtUtc <= asOfUtc)
             .OrderByDescending(x => x.ToVersion).ThenByDescending(x => x.Id)
             .Select(x => (FollowUpStatus?)x.ToStatus).FirstOrDefault() ?? FollowUpStatus.Open;
-        var won = activities.Where(x => x.ActivityType == CommercialActivityType.Won)
-            .Select(x => (x.AggregateType, x.AggregateId)).Distinct().Count();
-        var lost = activities.Where(x => x.ActivityType == CommercialActivityType.Lost)
-            .Select(x => (x.AggregateType, x.AggregateId)).Distinct().Count();
+        var latestOutcomes = activities
+            .Where(x => x.ActivityType is CommercialActivityType.Won or CommercialActivityType.Lost)
+            .GroupBy(x => (x.AggregateType, x.AggregateId))
+            .Select(group => group.OrderByDescending(x => x.OccurredAtUtc)
+                .ThenByDescending(x => x.Id).First().ActivityType)
+            .ToArray();
+        var won = latestOutcomes.Count(x => x == CommercialActivityType.Won);
+        var lost = latestOutcomes.Count(x => x == CommercialActivityType.Lost);
         var decisions = won + lost;
         var responseHours = activities.Where(x => x.ActivityType == CommercialActivityType.QuoteSent)
             .Select(sent => allActivities.Where(response => response.SalesRepUserId == userId &&
@@ -233,8 +237,19 @@ public sealed class SalesApplicationService(
                 .OrderBy(response => response.OccurredAtUtc).Select(response =>
                     (double?)(response.OccurredAtUtc - sent.OccurredAtUtc).TotalHours).FirstOrDefault())
             .Where(hours => hours.HasValue).Select(hours => hours!.Value).ToArray();
+        // FX fix: `GroupBy(x => x.CurrencyCode ?? string.Empty)` funnelled every revenue-bearing
+        // contribution whose currency code was absent into ONE bucket keyed "", and reported that
+        // bucket's sum as if it were a currency total. RecordContributionAsync does require a
+        // currency alongside revenue, so this cannot be produced through this service — but
+        // GetPerformanceAsync reads whatever ISalesPersistence returns, including rows written
+        // before that rule and by any other writer, so the read path has to stand on its own.
+        //
+        // Codes are normalised on read (so "usd" and " USD " are one bucket rather than three,
+        // which was the mirror-image defect), and rows with no usable code land in an explicitly
+        // named UNSPECIFIED bucket that is never merged with, or presented as, a real currency.
         var revenue = allContributions.Where(x => x.SalesRepUserId == userId && x.RevenueAmount.HasValue)
-            .GroupBy(x => x.CurrencyCode ?? string.Empty).OrderBy(x => x.Key)
+            .GroupBy(x => NormalizeCurrencyCode(x.CurrencyCode), StringComparer.Ordinal)
+            .OrderBy(group => group.Key, StringComparer.Ordinal)
             .Select(group => new CurrencyContributionPerformance(group.Key,
                 group.Sum(x => x.RevenueAmount!.Value),
                 group.Sum(x => x.RevenueAmount!.Value * x.ContributionPercent / 100m))).ToArray();
@@ -272,6 +287,19 @@ public sealed class SalesApplicationService(
         if (leadAssignmentId.HasValue &&
             !await persistence.LeadAssignmentExistsAsync(tenant, leadAssignmentId.Value, ct))
             throw new SalesNotFoundException("The referenced lead assignment was not found in this tenant.");
+    }
+
+    /// <summary>
+    /// The bucket revenue with no identifiable currency is reported under. It is deliberately not
+    /// an ISO code: a consumer must be able to tell at a glance that this figure is NOT a
+    /// currency total and must not be added to one.
+    /// </summary>
+    public const string UnspecifiedCurrencyCode = "UNSPECIFIED";
+
+    private static string NormalizeCurrencyCode(string? value)
+    {
+        var normalized = value?.Trim().ToUpperInvariant();
+        return string.IsNullOrEmpty(normalized) ? UnspecifiedCurrencyCode : normalized;
     }
 
     private static string[] NormalizeKeys(IEnumerable<string> values) => values

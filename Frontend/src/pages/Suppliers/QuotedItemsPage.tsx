@@ -39,10 +39,13 @@ const emptyItem: Partial<SupplierQuotedItemDTO> = {
 
 const QuotedItemsPage: React.FC = () => {
   const { t } = useTranslation();
-  const { userData } = useAuth();
+  const { userData, hasPermission } = useAuth();
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
   const buid = userData?.businessUnitId || 0;
+  const canCreate = hasPermission('Supplier History', 'create');
+  const canEdit = hasPermission('Supplier History', 'edit');
+  const canDelete = hasPermission('Supplier History', 'delete');
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [selectedItem, setSelectedItem] = useState<SupplierQuotedItemDTO | null>(null);
@@ -107,12 +110,14 @@ const QuotedItemsPage: React.FC = () => {
 
   // ── Handlers ──
   const handleAddNew = () => {
+    if (!canCreate) return;
     setSelectedItem(null);
     setFormData(emptyItem);
     setIsModalOpen(true);
   };
 
   const handleEdit = (item: SupplierQuotedItemDTO) => {
+    if (!canEdit) return;
     setSelectedItem(item);
     setFormData({
       ...item,
@@ -123,6 +128,7 @@ const QuotedItemsPage: React.FC = () => {
   };
 
   const handleSave = () => {
+    if (selectedItem ? !canEdit : !canCreate) return;
     const data = {
       ...formData,
       businessUnitId: buid,
@@ -180,8 +186,8 @@ const QuotedItemsPage: React.FC = () => {
       sortable: false,
       renderCell: (p) => (
         <Box>
-          <IconButton size="small" color="primary" onClick={() => handleEdit(p.row)}><EditIcon fontSize="small" /></IconButton>
-          <IconButton size="small" color="error" onClick={() => deleteMutation.mutate(p.row.id)}><DeleteIcon fontSize="small" /></IconButton>
+          {canEdit && <IconButton aria-label="Edit quoted item" size="small" color="primary" onClick={() => handleEdit(p.row)}><EditIcon fontSize="small" /></IconButton>}
+          {canDelete && <IconButton aria-label="Delete quoted item" size="small" color="error" onClick={() => deleteMutation.mutate(p.row.id)}><DeleteIcon fontSize="small" /></IconButton>}
         </Box>
       )
     }
@@ -201,9 +207,9 @@ const QuotedItemsPage: React.FC = () => {
           <Typography variant="h4" sx={{ fontWeight: 800, letterSpacing: '-0.02em', mb: 0.5 }}>Supplier Quoted Items</Typography>
           <Typography variant="body2" color="text.secondary">Maintain a master list of all prices and items quoted by your vendors</Typography>
         </Box>
-        <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3, borderRadius: 2, height: 48 }}>
+        {canCreate && <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3, borderRadius: 2, height: 48 }}>
           New Quote Item
-        </Button>
+        </Button>}
       </Box>
 
       {/* Search */}

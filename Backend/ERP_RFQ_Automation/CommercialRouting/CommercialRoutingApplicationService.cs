@@ -4,6 +4,7 @@ using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Notifications;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Npgsql;
 
 namespace ERP_RFQ_Automation.CommercialRouting;
 
@@ -11,6 +12,7 @@ public interface ICommercialRoutingApplicationService
 {
     Task<RoutingDecisionResponse> RouteLeadAsync(long businessUnitId, RouteLeadCommand command, CancellationToken ct);
     Task<RoutingDecisionResponse> AssignLeadAsync(long businessUnitId, ManualAssignLeadCommand command, CancellationToken ct);
+    Task<IReadOnlyList<RoutingOwnerOptionResponse>> GetOwnerOptionsAsync(long businessUnitId, CancellationToken ct);
     Task<QueuePageResponse> GetQueueAsync(long businessUnitId, WorkItemStatus? status, string? search,
         bool overdueOnly, int pageNumber, int pageSize, CancellationToken ct);
     Task<UnassignedQueueItemResponse> ClaimAsync(long businessUnitId, long workItemId, QueueLeaseCommand command, CancellationToken ct);
@@ -135,7 +137,8 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
             _db.ChangeTracker.Clear();
             var concurrentResult = await FindDecisionByKeyAsync(
                 businessUnitId, command.IdempotencyKey, requestHash, ct);
-            if (concurrentResult == null) throw;
+            if (concurrentResult == null)
+                throw new RoutingConflictException("Queue assignment changed concurrently. Refresh and retry.");
             assigned = concurrentResult;
         }
         await TryNotifyAssignmentAsync(businessUnitId, assigned, ct);
@@ -193,6 +196,62 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
         return new QueuePageResponse(rows, total, pageNumber, pageSize);
     }
 
+    public async Task<IReadOnlyList<RoutingOwnerOptionResponse>> GetOwnerOptionsAsync(
+        long businessUnitId, CancellationToken ct)
+    {
+        var measuredAt = DateTime.UtcNow;
+        var profiledUserIds = _db.SalesRepProfiles.AsNoTracking()
+            .Where(profile => profile.BusinessUnitId == businessUnitId &&
+                profile.EffectiveFromUtc <= measuredAt &&
+                (!profile.EffectiveToUtc.HasValue || profile.EffectiveToUtc > measuredAt))
+            .Select(profile => profile.UserId);
+        var teamUserIds = _db.SalesTeamMemberships.AsNoTracking()
+            .Where(membership => membership.BusinessUnitId == businessUnitId &&
+                membership.EffectiveFromUtc <= measuredAt &&
+                (!membership.EffectiveToUtc.HasValue || membership.EffectiveToUtc > measuredAt))
+            .Select(membership => membership.UserId);
+        var activeOwnerships = _db.Set<CustomerOwnership>().AsNoTracking()
+            .Where(ownership => ownership.BusinessUnitId == businessUnitId && ownership.IsActive &&
+                ownership.EffectiveFrom <= measuredAt &&
+                (!ownership.EffectiveTo.HasValue || ownership.EffectiveTo > measuredAt));
+        var ownershipUserIds = activeOwnerships.Select(ownership => ownership.PrimaryUserId)
+            .Concat(activeOwnerships.Where(ownership => ownership.BackupUserId.HasValue)
+                .Select(ownership => ownership.BackupUserId!.Value));
+        var assignmentUserIds = _db.Set<LeadAssignment>().AsNoTracking()
+            .Where(assignment => assignment.BusinessUnitId == businessUnitId && assignment.EffectiveTo == null)
+            .Select(assignment => assignment.ToUserId);
+        var candidateUserIds = await profiledUserIds.Concat(teamUserIds)
+            .Concat(ownershipUserIds).Concat(assignmentUserIds).Distinct().ToArrayAsync(ct);
+        if (candidateUserIds.Length == 0) return Array.Empty<RoutingOwnerOptionResponse>();
+        var users = await _db.Users.AsNoTracking()
+            .Where(user => user.Buid == businessUnitId && user.IsActive == true && candidateUserIds.Contains(user.Id))
+            .Select(user => new
+            {
+                user.Id,
+                Name = (user.FirstName + " " + user.LastName).Trim(),
+                user.Email,
+                RoleName = user.Role == null ? null : user.Role.SetupValue
+            })
+            .ToListAsync(ct);
+        var availability = (await LoadUserAvailabilityAsync(
+                businessUnitId, users.Select(user => user.Id).ToArray(), measuredAt, ct))
+            .ToDictionary(value => value.UserId);
+
+        return users.Select(user =>
+            {
+                var current = availability[user.Id];
+                return new RoutingOwnerOptionResponse(
+                    user.Id, user.Name, user.Email, user.RoleName, current.IsAvailable,
+                    current.CapacityPercent, current.Workload!, current.HasGovernedProfile,
+                    current.EligibilityReason, measuredAt, _policy.Version);
+            })
+            .OrderByDescending(user => user.IsAvailable)
+            .ThenBy(user => user.Workload.WorkloadPoints)
+            .ThenBy(user => user.Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(user => user.UserId)
+            .ToArray();
+    }
+
     public Task<UnassignedQueueItemResponse> ClaimAsync(
         long businessUnitId, long workItemId, QueueLeaseCommand command, CancellationToken ct) =>
         MutateLeaseAsync(businessUnitId, workItemId, command.ExpectedVersion, command.UserId, true,
@@ -231,12 +290,16 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
                 return await AssignCoreAsync(businessUnitId, lead, assign, item, requestHash, ct);
             }, ct);
         }
-        catch (DbUpdateException)
+        catch (Exception ex)
         {
+            if (!IsQueueAssignmentConflict(ex))
+                throw;
+
             _db.ChangeTracker.Clear();
             var concurrentResult = await FindDecisionByKeyAsync(
                 businessUnitId, command.IdempotencyKey, requestHash, ct);
-            if (concurrentResult == null) throw;
+            if (concurrentResult == null)
+                throw new RoutingConflictException("Queue assignment changed concurrently. Refresh and retry.");
             assigned = concurrentResult;
         }
         await TryNotifyAssignmentAsync(businessUnitId, assigned, ct);
@@ -398,6 +461,10 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
         var assigneeExists = await _db.Users.AnyAsync(u =>
             u.Id == command.AssignedToUserId && u.Buid == businessUnitId && u.IsActive == true, ct);
         if (!assigneeExists) throw new RoutingConflictException("Assignee must be an active user in the same tenant.");
+        var ownerOption = (await GetOwnerOptionsAsync(businessUnitId, ct))
+            .SingleOrDefault(option => option.UserId == command.AssignedToUserId);
+        if (ownerOption == null || !ownerOption.IsAvailable)
+            throw new RoutingConflictException("Assignee is not currently eligible for governed routing.");
 
         var now = DateTime.UtcNow;
         var previous = await _db.Set<LeadAssignment>().SingleOrDefaultAsync(a =>
@@ -568,6 +635,11 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
             .Where(user => user.Buid == businessUnitId && userIds.Contains(user.Id))
             .Select(user => new { user.Id, IsActive = user.IsActive == true })
             .ToListAsync(ct);
+        var profiles = await _db.SalesRepProfiles.AsNoTracking()
+            .Where(profile => profile.BusinessUnitId == businessUnitId && userIds.Contains(profile.UserId) &&
+                profile.EffectiveFromUtc <= measuredOn &&
+                (!profile.EffectiveToUtc.HasValue || profile.EffectiveToUtc > measuredOn))
+            .ToDictionaryAsync(profile => profile.UserId, ct);
         var journeys = await _db.Leads.AsNoTracking()
             .Where(lead => lead.BusinessUnitId == businessUnitId &&
                 lead.AssignTo.HasValue && userIds.Contains(lead.AssignTo.Value))
@@ -612,16 +684,25 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
                 approaching * _policy.ApproachingDeadlineWeight + openRfqs * _policy.OpenRfqWeight +
                 openQuotes * _policy.OpenQuoteWeight + followUps * _policy.FollowUpWeight;
             var boundedPoints = Math.Max(0, points);
-            var capacity = Math.Max(0, 100 - (int)Math.Ceiling(
+            var measuredCapacity = Math.Max(0, 100 - (int)Math.Ceiling(
                 boundedPoints * 100m / _policy.MaximumWorkloadPoints));
+            profiles.TryGetValue(user.Id, out var profile);
+            var configuredCapacity = profile == null ? 100 : Math.Clamp(profile.CapacityPercent, 0, 100);
+            var capacity = Math.Min(measuredCapacity, configuredCapacity);
+            var profileEligible = profile?.IsRoutingEligible == true;
             var workload = new RoutingWorkloadSnapshot(
                 activeLeadCount, lineCount, overdue, urgent, approaching,
                 openRfqs, openQuotes, followUps, boundedPoints);
             return new RoutingUserAvailability(
                 businessUnitId, user.Id, user.IsActive,
-                user.IsActive && boundedPoints < _policy.MaximumWorkloadPoints,
+                user.IsActive && profileEligible && boundedPoints < _policy.MaximumWorkloadPoints && capacity > 0,
                 user.IsActive ? capacity : 0,
-                workload);
+                workload,
+                profile != null,
+                !user.IsActive ? "User is inactive" : profile == null ? "Governed Sales Rep profile is required"
+                    : !profileEligible ? "Governed Sales Rep profile is not routing eligible"
+                    : capacity <= 0 ? "Configured or measured capacity is exhausted"
+                    : "Governed Sales Rep profile is active and eligible");
         }).ToList();
     }
 
@@ -687,6 +768,7 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
         var names = Values(CustomerIdentifierType.CustomerName);
         return await _db.Set<CustomerIdentifier>().AsNoTracking()
             .Where(i => i.BusinessUnitId == businessUnitId && i.EffectiveTo == null &&
+                _db.Customers.Any(c => c.Buid == businessUnitId && c.Id == i.CustomerId && c.IsActive != false) &&
                 ((i.IdentifierType == CustomerIdentifierType.Email && emails.Contains(i.NormalizedValue)) ||
                  (i.IdentifierType == CustomerIdentifierType.Domain && domains.Contains(i.NormalizedValue)) ||
                  (i.IdentifierType == CustomerIdentifierType.ErpAccount && accounts.Contains(i.NormalizedValue)) ||
@@ -785,6 +867,22 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
     {
         if (item.Version != expectedVersion)
             throw new RoutingConflictException("Queue item changed since it was loaded. Refresh and retry.");
+    }
+
+    private static bool IsQueueAssignmentConflict(Exception exception)
+    {
+        if (exception is DbUpdateConcurrencyException)
+            return true;
+
+        if (exception is PostgresException postgresException)
+        {
+            return postgresException.SqlState is
+                PostgresErrorCodes.SerializationFailure or
+                PostgresErrorCodes.DeadlockDetected or
+                PostgresErrorCodes.UniqueViolation;
+        }
+
+        return exception.InnerException != null && IsQueueAssignmentConflict(exception.InnerException);
     }
 
     private static void ValidateKey(string value, string name)

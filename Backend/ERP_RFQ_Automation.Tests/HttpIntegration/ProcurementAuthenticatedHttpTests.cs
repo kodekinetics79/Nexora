@@ -13,6 +13,11 @@ public sealed class ProcurementAuthenticatedHttpTests(Release01BHttpApplication 
     public static TheoryData<string, string> CriticalRoutes => new()
     {
         { HttpMethod.Get.Method, $"/api/procurement/rfqs/{Release01BHttpApplication.TenantAProcurementRfqId}/workbench" },
+        { HttpMethod.Post.Method, "/api/procurement/sourcing-cases" },
+        { HttpMethod.Get.Method, "/api/procurement/sourcing-cases/1" },
+        { HttpMethod.Post.Method, "/api/procurement/sourcing-cases/1/supplier-candidates/search" },
+        { HttpMethod.Post.Method, "/api/procurement/sourcing-cases/1/supplier-rfqs" },
+        { HttpMethod.Post.Method, "/api/procurement/sourcing-cases/1/supplier-rfqs/1/queue" },
         { HttpMethod.Post.Method, "/api/procurement/solicitations" },
         { HttpMethod.Post.Method, "/api/procurement/supplier-quotes" },
         { HttpMethod.Get.Method, $"/api/procurement/rfq-items/{Release01BHttpApplication.TenantAProcurementRfqItemId}/quote-comparison" },
@@ -72,6 +77,21 @@ public sealed class ProcurementAuthenticatedHttpTests(Release01BHttpApplication 
     }
 
     [Fact]
+    public async Task Direct_solicitation_route_is_retired_in_favour_of_governed_sourcing_cases()
+    {
+        using var client = Client(Release01BHttpApplication.AllowedRole, Release01BHttpApplication.TenantA);
+
+        using var response = await SendJsonAsync(client, HttpMethod.Post, "/api/procurement/solicitations", new
+        {
+            RfqId = Release01BHttpApplication.TenantAProcurementRfqId,
+            SupplierId = Release01BHttpApplication.TenantAProcurementSupplierId,
+            RfqItemIds = new[] { Release01BHttpApplication.TenantAProcurementRfqItemId }
+        }, "retired-direct-solicitation");
+
+        Assert.Equal(HttpStatusCode.Gone, response.StatusCode);
+    }
+
+    [Fact]
     public async Task Permitted_procurement_journey_is_tenant_scoped_from_workbench_through_receipt()
     {
         using var client = Client(Release01BHttpApplication.AllowedRole, Release01BHttpApplication.TenantA);
@@ -87,17 +107,7 @@ public sealed class ProcurementAuthenticatedHttpTests(Release01BHttpApplication 
                 payload.RootElement.GetProperty("lines")[0].GetProperty("id").GetInt64());
         }
 
-        using var solicitation = await SendJsonAsync(client, HttpMethod.Post, "/api/procurement/solicitations", new
-        {
-            BusinessUnitId = Release01BHttpApplication.TenantB,
-            RfqId = Release01BHttpApplication.TenantAProcurementRfqId,
-            SupplierId = Release01BHttpApplication.TenantAProcurementSupplierId,
-            RfqItemIds = new[] { Release01BHttpApplication.TenantAProcurementRfqItemId },
-            DueOn = DateTime.UtcNow.AddDays(2)
-        }, "solicitation");
-        await AssertStatusAsync(solicitation, HttpStatusCode.Created);
-        var solicitationId = await IdAsync(solicitation);
-        await app.MarkSolicitationSentAsync(solicitationId);
+        var solicitationId = await app.CreateLegacyFixtureSolicitationAsync();
 
         using var quote = await SendJsonAsync(client, HttpMethod.Post, "/api/procurement/supplier-quotes", new
         {

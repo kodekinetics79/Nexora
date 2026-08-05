@@ -725,7 +725,7 @@ public sealed class PostgreSqlProductionDialectTests
             JOIN pg_namespace schema_definition ON schema_definition.oid = sequence_definition.relnamespace
             WHERE schema_definition.nspname = 'public'
               AND sequence_definition.relkind = 'S'
-              AND sequence_definition.relname NOT IN ('CommercialCaseReferenceSequence', 'nexora_rfq_number_seq')
+              AND sequence_definition.relname NOT IN ('CommercialCaseReferenceSequence', 'nexora_rfq_number_seq', 'nexora_supplier_po_doc_seq')
               AND CASE WHEN sequence_definition.relkind = 'S' THEN has_sequence_privilege(
                       'nexora_tenant_app',
                       format('%I.%I', schema_definition.nspname, sequence_definition.relname),
@@ -767,6 +767,24 @@ public sealed class PostgreSqlProductionDialectTests
                 """;
             Assert.True(Convert.ToInt64(await rfqSequenceCommand.ExecuteScalarAsync()) > 0);
             await rfqSequenceTransaction.RollbackAsync();
+        }
+
+        // The purchase-history PO document number is server-authoritative for the same reason
+        // the RFQ number is: the tenant role must be able to draw from the sequence, and only
+        // from the sequence, so two concurrent callers can never be issued the same number.
+        await using (var poSequenceTransaction = await connection.BeginTransactionAsync())
+        {
+            await using var poSequenceCommand = connection.CreateCommand();
+            poSequenceCommand.Transaction = poSequenceTransaction;
+            poSequenceCommand.CommandText = """
+                SET LOCAL ROLE nexora_tenant_app;
+                SELECT nextval('public.nexora_supplier_po_doc_seq');
+                """;
+            var firstPoNumber = Convert.ToInt64(await poSequenceCommand.ExecuteScalarAsync());
+            var secondPoNumber = Convert.ToInt64(await poSequenceCommand.ExecuteScalarAsync());
+            Assert.True(firstPoNumber > 0);
+            Assert.True(secondPoNumber > firstPoNumber);
+            await poSequenceTransaction.RollbackAsync();
         }
 
         await using var futureSequenceCommand = connection.CreateCommand();

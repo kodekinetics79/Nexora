@@ -153,6 +153,7 @@ namespace ERP_RFQ_Automation.Repositories
                 Aiconfidence = l.Aiconfidence,
                 CreatedBy = l.CreatedBy,
                 CreatedDate = l.CreatedDate,
+                IngestedAtUtc = l.IngestedAtUtc,
                 BusinessUnitId = l.BusinessUnitId,
                 BusinessUnitName = l.BusinessUnit?.BusinessUnitName,
                 EmailIngestsId = l.EmailIngestsId,
@@ -892,6 +893,8 @@ namespace ERP_RFQ_Automation.Repositories
                     $"Line item(s) {string.Join(", ", staleIds)} are stale or do not belong to this lead.");
             if (action == "approve" && string.IsNullOrWhiteSpace(review.Reason))
                 throw new LeadReviewValidationException("An approval reason is required.");
+            if (action == "approve")
+                await EnsureApprovalEvidenceAsync(lead.Id, businessUnitId);
 
             var beforeJson = SerializeReviewSnapshot(lead);
             var fromVersion = lead.ReviewVersion;
@@ -1069,6 +1072,43 @@ namespace ERP_RFQ_Automation.Repositories
 
             // Reuse the canonical mapping for the response.
             return await GetLeadByIdAsync(id, businessUnitId);
+        }
+
+        private async Task EnsureApprovalEvidenceAsync(long leadId, long businessUnitId)
+        {
+            var occurrenceIds = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadIngestionOccurrence>()
+                .AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.LeadId == leadId
+                    && x.SourceDocumentOccurrenceId.HasValue)
+                .Select(x => x.SourceDocumentOccurrenceId!.Value)
+                .ToListAsync();
+            occurrenceIds.AddRange(await _context.Set<ERP_RFQ_Automation.Extraction.ExtractionJob>()
+                .AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.ResultLeadId == leadId
+                    && x.SourceDocumentOccurrenceId.HasValue)
+                .Select(x => x.SourceDocumentOccurrenceId!.Value)
+                .ToListAsync());
+            occurrenceIds = occurrenceIds.Distinct().ToList();
+            if (occurrenceIds.Count == 0)
+                throw new LeadReviewValidationException(
+                    "Approval requires authoritative source-document evidence.");
+
+            var evidence = await _context.Set<ERP_RFQ_Automation.DocumentIntelligence.Persistence.SourceDocumentOccurrence>()
+                .AsNoTracking()
+                .Include(x => x.SourceDocument)
+                .Where(x => x.BusinessUnitId == businessUnitId && occurrenceIds.Contains(x.Id))
+                .ToListAsync();
+            var eligible = evidence.Count == occurrenceIds.Count && evidence.All(x =>
+                x.SourceDocument.SecurityStatus
+                    == ERP_RFQ_Automation.DocumentIntelligence.Persistence.DocumentSecurityStatus.Cleared
+                && x.IntakeStatus is ERP_RFQ_Automation.DocumentIntelligence.Persistence.IntakeOccurrenceStatus.Resolved
+                    or ERP_RFQ_Automation.DocumentIntelligence.Persistence.IntakeOccurrenceStatus.ReviewRequired
+                && !string.IsNullOrWhiteSpace(x.SourceDocument.ObjectBucket)
+                && !string.IsNullOrWhiteSpace(x.SourceDocument.ObjectKey)
+                && !string.IsNullOrWhiteSpace(x.SourceDocument.ObjectVersion));
+            if (!eligible)
+                throw new LeadReviewValidationException(
+                    "Approval requires cleared, integrity-valid source-document evidence.");
         }
 
         // WP-B4: field-level diff between a stored lead item and the reviewer's

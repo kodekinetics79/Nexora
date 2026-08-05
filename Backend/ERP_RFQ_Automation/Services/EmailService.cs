@@ -323,12 +323,16 @@ namespace ERP_RFQ_Automation.Services
         /// content dedups naturally on the queue's (BusinessUnitId, ContentHash) index.
         /// Returns the number of jobs enqueued (duplicates count — they are handled work).
         /// </summary>
-        private async Task<int> EnqueueEmailForExtractionAsync(
+        internal async Task<int> EnqueueEmailForExtractionAsync(
             MimeMessage message, EmailIngest ingest, EmailConfiguration config,
             ERP_RFQ_Automation.Extraction.IDocumentIngestion ingestion)
         {
             var batchId = Guid.NewGuid();
             var queued = 0;
+            // ING-06: a dropped attachment must never be silent — every skip is logged at
+            // Warning (filename + reason), summarized on the body job's durable provenance
+            // metadata, and surfaced on the ingest record when nothing could be enqueued.
+            var skippedAttachments = new List<string>();
             var metadata = new ERP_RFQ_Automation.Extraction.ExtractionJobMetadata
             {
                 SourceOccurrenceId = $"email:{message.MessageId ?? ingest.Id.ToString()}:body",
@@ -343,26 +347,31 @@ namespace ERP_RFQ_Automation.Services
             };
 
             // 1) Email body as its own document (Subject/From header lines give the
-            //    extractor the same context the legacy prompt had).
-            try
+            //    extractor the same context the legacy prompt had). Enqueued via a local
+            //    function so it can run AFTER the attachment pass and carry the complete
+            //    skipped-attachment summary in its provenance sidecar.
+            async Task EnqueueBodyAsync()
             {
                 var body = GetEmailBody(message);
-                if (!string.IsNullOrWhiteSpace(body))
-                {
-                    var bodyDoc = $"Subject: {message.Subject}\nFrom: {message.From}\nDate: {message.Date:yyyy-MM-dd}\n\n{body}";
-                    var bodyName = $"{SanitizeFileName(message.Subject ?? "email")}_body.txt";
-                    var result = await ingestion.IngestAsync(
-                        Encoding.UTF8.GetBytes(bodyDoc), bodyName, config.BusinessUnitId,
-                        ERP_RFQ_Automation.Extraction.ExtractionSourceType.Email,
-                        batchId, priority: 0, metadata);
-                    queued++;
-                    _logger.LogInformation("Enqueued email body as job {JobId} ({Outcome}) for ingest {IngestId}.",
-                        result.JobId, result.Outcome, ingest.Id);
-                }
+                if (string.IsNullOrWhiteSpace(body)) return;
+                if (skippedAttachments.Count > 0)
+                    metadata.SkippedAttachments = skippedAttachments.ToArray();
+                var bodyDoc = $"Subject: {message.Subject}\nFrom: {message.From}\nDate: {message.Date:yyyy-MM-dd}\n\n{body}";
+                var bodyName = $"{SanitizeFileName(message.Subject ?? "email")}_body.txt";
+                var result = await ingestion.IngestAsync(
+                    Encoding.UTF8.GetBytes(bodyDoc), bodyName, config.BusinessUnitId,
+                    ERP_RFQ_Automation.Extraction.ExtractionSourceType.Email,
+                    batchId, priority: 0, metadata);
+                queued++;
+                _logger.LogInformation("Enqueued email body as job {JobId} ({Outcome}) for ingest {IngestId}.",
+                    result.JobId, result.Outcome, ingest.Id);
             }
-            catch (Exception ex)
+
+            void RecordSkippedAttachment(string fileName, string reason)
             {
-                _logger.LogError(ex, "Failed to enqueue email body for ingest {IngestId}.", ingest.Id);
+                skippedAttachments.Add($"{fileName} ({reason})");
+                _logger.LogWarning("Skipping email attachment {FileName} for ingest {IngestId}: {Reason}.",
+                    fileName, ingest.Id, reason);
             }
 
             // 2) Each supported attachment is its own job (same batch, same provenance).
@@ -370,18 +379,40 @@ namespace ERP_RFQ_Automation.Services
             foreach (var att in message.Attachments)
             {
                 attachmentOrdinal++;
-                if (att is not MimePart part || part.FileName == null) continue;
+                if (att is not MimePart part)
+                {
+                    // MessagePart: an embedded email (.eml). Deliberately not ingested as a
+                    // document (parity with the legacy .eml skip), but never silently.
+                    RecordSkippedAttachment(
+                        att.ContentDisposition?.FileName ?? $"attachment #{attachmentOrdinal}",
+                        "embedded email message is not ingested");
+                    continue;
+                }
+                if (part.FileName == null)
+                {
+                    RecordSkippedAttachment($"attachment #{attachmentOrdinal}", "attachment has no filename");
+                    continue;
+                }
                 var ext = Path.GetExtension(part.FileName).ToLowerInvariant();
-                if (!IsSupportedExtension(ext)) continue;
+                if (!IsSupportedExtension(ext))
+                {
+                    RecordSkippedAttachment(part.FileName, $"unsupported file type '{ext}'");
+                    continue;
+                }
 
                 try
                 {
                     using var ms = new MemoryStream();
                     await part.Content.DecodeToAsync(ms);
-                    if (ms.Length == 0) continue;
+                    if (ms.Length == 0)
+                    {
+                        RecordSkippedAttachment(part.FileName, "attachment content is empty");
+                        continue;
+                    }
                     if (ms.Length > MAX_ATTACHMENT_SIZE)
                     {
-                        _logger.LogWarning("Skipping large attachment {FileName} ({Size} bytes).", part.FileName, ms.Length);
+                        RecordSkippedAttachment(part.FileName,
+                            $"exceeds the {MAX_ATTACHMENT_SIZE / (1024 * 1024)} MB size limit ({ms.Length} bytes)");
                         continue;
                     }
 
@@ -411,6 +442,25 @@ namespace ERP_RFQ_Automation.Services
                     _logger.LogError(ex, "Failed to enqueue attachment {FileName} for ingest {IngestId}.",
                         part.FileName, ingest.Id);
                 }
+            }
+
+            // 3) Body LAST so its provenance metadata carries the complete skip summary.
+            try
+            {
+                await EnqueueBodyAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to enqueue email body for ingest {IngestId}.", ingest.Id);
+            }
+
+            // ING-06: nothing enqueued but attachments were dropped — surface the loss on
+            // the tenant-visible ingest record (ParseStatus is limited to 50 chars; the
+            // per-file reasons are in the Warning logs above).
+            if (queued == 0 && skippedAttachments.Count > 0)
+            {
+                ingest.ParseStatus = Truncate(
+                    $"Failed - {skippedAttachments.Count} attachment(s) skipped", 50);
             }
 
             return queued;
@@ -488,9 +538,22 @@ namespace ERP_RFQ_Automation.Services
             var attachmentStreams = new List<(string FileName, MemoryStream Stream, string Extension)>();
             foreach (var att in message.Attachments)
             {
-                if (att is not MimePart part || part.FileName == null) continue;
+                if (att is not MimePart part || part.FileName == null)
+                {
+                    _logger.LogWarning(
+                        "Skipping email attachment for ingest {IngestId}: unnamed or embedded-message attachment.",
+                        ingest.Id);
+                    continue;
+                }
                 var ext = Path.GetExtension(part.FileName).ToLowerInvariant();
-                if (!IsSupportedExtension(ext)) continue;
+                if (!IsSupportedExtension(ext))
+                {
+                    // ING-06: a dropped attachment is never silent.
+                    _logger.LogWarning(
+                        "Skipping email attachment {FileName} for ingest {IngestId}: unsupported file type '{Extension}'.",
+                        part.FileName, ingest.Id, ext);
+                    continue;
+                }
                 fileTypes.Add(GetFileTypeLabel(ext));
                 try
                 {
@@ -805,23 +868,31 @@ namespace ERP_RFQ_Automation.Services
             return ext switch
             {
                 ".pdf" => ExtractTextFromPdf(ms.ToArray()),
+                ".doc" => ExtractTextFromLegacyDoc(ms),
                 ".docx" => ExtractTextFromDocx(ms),
-                ".xlsx" => ExtractTextFromExcel(ms),
-                ".pptx" => ExtractTextFromPptx(ms),
-                ".jpg" or ".jpeg" or ".png" or ".bmp" or ".tiff" => ExtractTextFromImage(ms.ToArray()),
+                ".xlsx" or ".xlsm" => ExtractTextFromExcel(ms),
+                ".xls" => ExtractTextFromLegacyXls(ms),
+                // .pptx is intentionally absent: the intake filter refuses it because the
+                // security inspection allow-list does not include PowerPoint.
+                ".csv" or ".txt" => ExtractTextFromPlainText(ms),
+                ".jpg" or ".jpeg" or ".png" or ".bmp" or ".tif" or ".tiff" or ".gif" or ".webp"
+                    => ExtractTextFromImage(ms.ToArray()),
                 _ => ""
             };
         }
         private string GetFileTypeLabel(string ext) => ext switch
         {
             ".pdf" => "PDF",
-            ".docx" => "Word",
-            ".xlsx" => "Excel",
-            ".pptx" => "PowerPoint",
+            ".doc" or ".docx" => "Word",
+            ".xls" or ".xlsx" or ".xlsm" => "Excel",
+            ".csv" => "CSV",
+            ".txt" => "Text",
             ".jpg" or ".jpeg" => "JPEG",
             ".png" => "PNG",
             ".bmp" => "BMP",
-            ".tiff" => "TIFF",
+            ".gif" => "GIF",
+            ".tif" or ".tiff" => "TIFF",
+            ".webp" => "WebP",
             _ => "Unknown"
         };
         // Text extraction methods
@@ -1040,6 +1111,71 @@ namespace ERP_RFQ_Automation.Services
                 return "";
             }
         }
+        /// <summary>Legacy Word 97-2003 (.doc) binary — shared OLE/piece-table reader.</summary>
+        private string ExtractTextFromLegacyDoc(MemoryStream ms)
+        {
+            try
+            {
+                return ERP_RFQ_Automation.Services.DocumentIntelligence
+                    .WordBinaryTextExtractor.Extract(ms.ToArray(), _logger);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Legacy DOC extraction failed");
+                return "";
+            }
+        }
+        // ExcelDataReader needs the code-pages provider for legacy .xls encodings.
+        private static int _codePagesRegistered;
+        private string ExtractTextFromLegacyXls(MemoryStream ms)
+        {
+            try
+            {
+                if (Interlocked.Exchange(ref _codePagesRegistered, 1) == 0)
+                    Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+                ms.Position = 0;
+                using var reader = ExcelDataReader.ExcelReaderFactory.CreateBinaryReader(
+                    ms, new ExcelDataReader.ExcelReaderConfiguration
+                    {
+                        FallbackEncoding = Encoding.GetEncoding(1252),
+                        LeaveOpen = true
+                    });
+                var sb = new StringBuilder();
+                do
+                {
+                    while (reader.Read())
+                    {
+                        for (var i = 0; i < reader.FieldCount; i++)
+                        {
+                            var value = reader.GetValue(i);
+                            if (value != null) sb.Append(value).Append(' ');
+                        }
+                        sb.AppendLine();
+                    }
+                } while (reader.NextResult());
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Legacy XLS extraction failed");
+                return "";
+            }
+        }
+        private string ExtractTextFromPlainText(MemoryStream ms)
+        {
+            try
+            {
+                ms.Position = 0;
+                using var reader = new StreamReader(ms, Encoding.UTF8,
+                    detectEncodingFromByteOrderMarks: true, leaveOpen: true);
+                return reader.ReadToEnd();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Plain-text extraction failed");
+                return "";
+            }
+        }
         private string ExtractTextFromPptx(MemoryStream ms)
         {
             try
@@ -1235,12 +1371,13 @@ namespace ERP_RFQ_Automation.Services
             return string.Join("_", fileName.Split(Path.GetInvalidFileNameChars(),
                 StringSplitOptions.RemoveEmptyEntries)).Replace(" ", "_");
         }
-        private bool IsSupportedExtension(string ext) => ext switch
-        {
-            ".pdf" or ".doc" or ".docx" or ".xlsx" or ".pptx" or
-            ".jpg" or ".jpeg" or ".png" or ".bmp" or ".tiff" => true,
-            _ => false
-        };
+        // DRIFT GUARD: the email attachment filter is DERIVED from the security
+        // inspection allow-list — never keep a private copy here. A private list
+        // previously accepted .pptx (which inspection then rejected) and silently
+        // dropped .xls/.csv supplier quotes and customer RFQs (which inspection
+        // accepts), losing leads. See DocumentIntakeAllowList and its tests.
+        internal static bool IsSupportedExtension(string ext) =>
+            ERP_RFQ_Automation.Security.DocumentInspection.DocumentIntakeAllowList.IsAllowed(ext);
         private async Task SaveAttachmentsAsync(MimeMessage message, long leadId,
             ErpRfqAutomationContext context)
         {

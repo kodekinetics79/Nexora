@@ -19,8 +19,8 @@ const permission = (id, roleId, moduleName, write = false) => ({
 });
 
 const permissions = {
-  1: ['Dashboard', 'Leads', 'RFQ Management', 'Quotations', 'Orders'].map((name, index) => permission(index + 1, 1, name, true)),
-  2: [permission(1, 2, 'Dashboard'), permission(2, 2, 'Leads', true), permission(3, 2, 'RFQ Management', true), permission(4, 2, 'Quotations', true)],
+  1: ['Dashboard', 'Leads', 'RFQ Management', 'Supplier History', 'Quotations', 'Orders'].map((name, index) => permission(index + 1, 1, name, true)),
+  2: [permission(1, 2, 'Dashboard'), permission(2, 2, 'Leads', true), permission(3, 2, 'RFQ Management', true), permission(4, 2, 'Supplier History', true), permission(5, 2, 'Quotations', true)],
   3: [permission(1, 3, 'Dashboard')],
 };
 

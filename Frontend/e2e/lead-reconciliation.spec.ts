@@ -18,26 +18,38 @@ test('authorized bulk upload reaches governed reconciliation', async ({ page }) 
   await expect(page.getByRole('button', { name: /\d+ New leads/ })).toBeVisible({ timeout: 60_000 });
 });
 
-test('quarantined upload remains visible with its inspection reason', async ({ page }) => {
+test('scanner outage remains recoverable and retries the stored occurrence', async ({ page }) => {
   const batchId = 'c4ee65d2-6e99-47b1-b894-f0e1723037a8';
+  let retried = false;
   await page.route('**/api/Extraction/upload', async (route) => {
     await route.fulfill({ status: 202, contentType: 'application/json', body: JSON.stringify({
       batchId,
-      jobs: [{ jobId: 0, occurrenceId: 901, fileName: 'customer-rfq.csv', outcome: 'Quarantined', errorCode: 'document_quarantined', reason: 'Malware scanner unavailable; the file remains quarantined.' }],
+      jobs: [{ jobId: 0, occurrenceId: 901, fileName: 'customer-rfq.csv', outcome: 'AwaitingSecurityScan', errorCode: 'security_scanner_unavailable', reason: 'Malware scanner unavailable; the file remains quarantined.' }],
+    }) });
+  });
+  await page.route(`**/api/LeadIngestion/batches/${batchId}/retry-blocked-files`, async (route) => {
+    retried = true;
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      batchId, eligible: 1, queued: 1, stillAwaiting: 0, rejected: 0, sourceObjectUnavailable: 0,
+      items: [{ sourceDocumentOccurrenceId: 901, fileName: 'customer-rfq.csv', status: 'Queued', extractionJobId: 902 }],
     }) });
   });
   await page.route(`**/api/LeadIngestion/batches/${batchId}`, async (route) => {
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
       batchId, filesReceived: 1, logicalInquiries: 0, newLeads: 0, exactDuplicates: 0,
-      revisions: 0, possibleMatches: 0, rejected: 1, externalOccurrences: 0, externalCost: 0,
+      revisions: 0, possibleMatches: 0, rejected: 0, awaitingSecurityScan: retried ? 0 : 1,
+      localFirstOccurrences: 0, externalOccurrences: 0, externalCost: 0,
       items: [{
         occurrenceId: 0, sourceDocumentOccurrenceId: 901, leadId: null, nexoraSerial: null,
-        classification: 'RejectedOrUnprocessable', revisionNumber: null,
+        classification: 'Pending', revisionNumber: null,
         fileName: 'customer-rfq.csv', ingestedAtUtc: '2026-07-28T18:45:37Z',
-        processingPath: 'IntakeRejected', externalAiUsed: false, confidence: 1,
+        processingPath: retried ? 'IntakeQueued' : 'IntakeAwaitingSecurityScan', externalAiUsed: false, confidence: 0,
         reasons: ['Malware scanner unavailable; the file remains quarantined.'], matchCandidates: [],
         customerResolutionStatus: 'Awaiting customer resolution', assignedOpportunityOwner: null,
-        intakeStatus: 'Rejected', errorCode: 'document_quarantined',
+        intakeStatus: retried ? 'Queued' : 'AwaitingSecurityScan',
+        errorCode: retried ? null : 'security_scanner_unavailable', securityStatus: retried ? 'Cleared' : 'Quarantined',
+        securityScanUpdatedAtUtc: '2026-07-28T18:46:00Z', lastUpdatedAtUtc: '2026-07-28T18:46:00Z',
+        extractionStatus: retried ? 'Pending' : null, extractionUpdatedAtUtc: retried ? '2026-07-28T18:47:00Z' : null,
       }],
     }) });
   });
@@ -47,9 +59,15 @@ test('quarantined upload remains visible with its inspection reason', async ({ p
   await page.getByRole('button', { name: 'Queue for reconciliation' }).click();
 
   await expect(page).toHaveURL(new RegExp(`/procurement/leads/ingestion/${batchId}$`));
-  await expect(page.getByText('Rejected or unsupported', { exact: true })).toBeVisible();
+  await expect(page.getByText('Awaiting Security Scan', { exact: true }).first()).toBeVisible();
   await expect(page.getByText('Malware scanner unavailable; the file remains quarantined.')).toBeVisible();
-  await expect(page.getByText(/Intake: Rejected/)).toBeVisible();
+  await expect(page.getByText(/Intake: Awaiting Security Scan/)).toBeVisible();
+  await expect(page.getByText(/Security Quarantined updated/)).toBeVisible();
+
+  await page.getByRole('button', { name: 'Retry Blocked Files' }).click();
+  await expect(page.getByText('Retry complete: 1 queued, 0 still awaiting security scan, 0 rejected, 0 source objects unavailable.')).toBeVisible();
+  await expect(page.getByText(/Intake: Queued/)).toBeVisible();
+  await expect(page.getByText(/Extraction Pending updated/)).toBeVisible();
 });
 
 test('known batch exposes new, duplicate, revision and possible-match outcomes', async ({ page }) => {

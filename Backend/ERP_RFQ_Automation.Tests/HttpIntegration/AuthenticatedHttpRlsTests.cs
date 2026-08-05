@@ -88,6 +88,49 @@ public sealed class AuthenticatedHttpRlsTests(Release01BHttpApplication app)
     }
 
     [Fact]
+    public async Task Duplicate_uploads_requires_permission_and_never_discloses_other_tenant_metadata()
+    {
+        using var anonymous = app.CreateClient();
+        using var denied = Client(Release01BHttpApplication.DeniedRole, Release01BHttpApplication.TenantA);
+        using var allowed = Client(Release01BHttpApplication.AllowedRole, Release01BHttpApplication.TenantA);
+        const string path = "/api/LeadIngestion/duplicates";
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.GetAsync(path)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await denied.GetAsync(path)).StatusCode);
+
+        var response = await allowed.GetAsync(path);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var row = Assert.Single(payload.RootElement.EnumerateArray());
+        Assert.Equal("tenant-a.txt", row.GetProperty("fileName").GetString());
+        Assert.Equal("tenant-a-uploader@nexora.invalid", row.GetProperty("uploadedBy").GetString());
+        Assert.Equal("EXACT_DUPLICATE_CONFIRMED", row.GetProperty("duplicateType").GetString());
+        Assert.True(row.GetProperty("originalOccurrenceId").GetInt64() > 0);
+        Assert.DoesNotContain("tenant-b", payload.RootElement.GetRawText(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Security_scan_retry_requires_create_permission_and_authenticated_tenant_scope()
+    {
+        using var anonymous = app.CreateClient();
+        using var denied = Client(Release01BHttpApplication.DeniedRole, Release01BHttpApplication.TenantA);
+        using var allowed = Client(Release01BHttpApplication.AllowedRole, Release01BHttpApplication.TenantA);
+        var ownPath = $"{BatchPath(app.TenantABatchId)}/retry-blocked-files";
+        var crossTenantPath = $"{BatchPath(app.TenantBBatchId)}/retry-blocked-files";
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.PostAsync(ownPath, null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await denied.PostAsync(ownPath, null)).StatusCode);
+
+        var own = await allowed.PostAsync(ownPath, null);
+        Assert.Equal(HttpStatusCode.OK, own.StatusCode);
+        using var payload = JsonDocument.Parse(await own.Content.ReadAsStringAsync());
+        Assert.Equal(app.TenantABatchId, payload.RootElement.GetProperty("batchId").GetGuid());
+
+        Assert.Equal(HttpStatusCode.NotFound,
+            (await allowed.PostAsync(crossTenantPath, null)).StatusCode);
+    }
+
+    [Fact]
     public async Task Query_tenant_forgery_cannot_change_analytics_scope()
     {
         using var client = Client(Release01BHttpApplication.AllowedRole, Release01BHttpApplication.TenantA);
@@ -221,6 +264,108 @@ public sealed class AuthenticatedHttpRlsTests(Release01BHttpApplication app)
             (await allowed.GetAsync($"/api/Contact/{Release01BHttpApplication.TenantBContactId}?businessUnitId={Release01BHttpApplication.TenantB}")).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden,
             (await denied.GetAsync($"/api/Contact/{Release01BHttpApplication.TenantAContactId}")).StatusCode);
+
+        using var supplierOnly = Client(
+            Release01BHttpApplication.SupplierHistoryViewerRole,
+            Release01BHttpApplication.TenantA);
+        Assert.Equal(HttpStatusCode.OK,
+            (await supplierOnly.GetAsync($"/api/Contact/{Release01BHttpApplication.TenantASupplierContactId}")).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden,
+            (await supplierOnly.GetAsync($"/api/Contact/{Release01BHttpApplication.TenantAContactId}")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Customer_and_contact_mutations_context_and_deactivation_use_authenticated_tenant()
+    {
+        using var allowed = Client(Release01BHttpApplication.AllowedRole, Release01BHttpApplication.TenantA);
+        using var denied = Client(Release01BHttpApplication.DeniedRole, Release01BHttpApplication.TenantA);
+        var name = $"HTTP continuity {Guid.NewGuid():N}";
+        using var createCustomer = new MultipartFormDataContent
+        {
+            { new StringContent(name), "Name" },
+            { new StringContent("continuity@nexora.invalid"), "ContactEmail" }
+        };
+
+        var createdCustomerResponse = await allowed.PostAsync("/api/Customer", createCustomer);
+        Assert.Equal(HttpStatusCode.Created, createdCustomerResponse.StatusCode);
+        using var createdCustomer = JsonDocument.Parse(await createdCustomerResponse.Content.ReadAsStringAsync());
+        var customerId = createdCustomer.RootElement.GetProperty("id").GetInt64();
+        var customerToken = createdCustomer.RootElement.GetProperty("concurrencyToken").GetGuid();
+        Assert.NotEqual(Guid.Empty, customerToken);
+
+        using var updateCustomer = new MultipartFormDataContent
+        {
+            { new StringContent($"{name} updated"), "Name" },
+            { new StringContent(customerToken.ToString()), "ConcurrencyToken" },
+            { new StringContent("false"), "IsActive" }
+        };
+        Assert.Equal(HttpStatusCode.NoContent,
+            (await allowed.PutAsync($"/api/Customer/{customerId}", updateCustomer)).StatusCode);
+
+        var currentCustomerResponse = await allowed.GetAsync($"/api/Customer/{customerId}");
+        Assert.Equal(HttpStatusCode.OK, currentCustomerResponse.StatusCode);
+        using var currentCustomer = JsonDocument.Parse(await currentCustomerResponse.Content.ReadAsStringAsync());
+        Assert.True(currentCustomer.RootElement.GetProperty("isActive").GetBoolean());
+        customerToken = currentCustomer.RootElement.GetProperty("concurrencyToken").GetGuid();
+
+        var contactCreateResponse = await allowed.PostAsJsonAsync("/api/Contact", new
+        {
+            customerId,
+            firstName = "HTTP",
+            lastName = "Continuity",
+            email = "http-continuity@nexora.invalid",
+            isPrimary = true,
+            isActive = true
+        });
+        Assert.Equal(HttpStatusCode.Created, contactCreateResponse.StatusCode);
+        using var createdContact = JsonDocument.Parse(await contactCreateResponse.Content.ReadAsStringAsync());
+        var contactId = createdContact.RootElement.GetProperty("id").GetInt64();
+        var contactToken = createdContact.RootElement.GetProperty("concurrencyToken").GetGuid();
+
+        var contactUpdateResponse = await allowed.PutAsJsonAsync($"/api/Contact/{contactId}", new
+        {
+            customerId,
+            firstName = "Updated",
+            lastName = "Continuity",
+            email = "http-continuity@nexora.invalid",
+            isPrimary = true,
+            isActive = false,
+            concurrencyToken = contactToken
+        });
+        Assert.Equal(HttpStatusCode.NoContent, contactUpdateResponse.StatusCode);
+        using var currentContact = JsonDocument.Parse(
+            await (await allowed.GetAsync($"/api/Contact/{contactId}")).Content.ReadAsStringAsync());
+        Assert.True(currentContact.RootElement.GetProperty("isActive").GetBoolean());
+        contactToken = currentContact.RootElement.GetProperty("concurrencyToken").GetGuid();
+
+        Assert.Equal(HttpStatusCode.Forbidden,
+            (await denied.GetAsync($"/api/Contact/{contactId}")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound,
+            (await allowed.PutAsJsonAsync($"/api/Contact/{Release01BHttpApplication.TenantBContactId}", new
+            {
+                customerId = Release01BHttpApplication.TenantBCustomerId,
+                firstName = "Cross",
+                lastName = "Tenant",
+                concurrencyToken = Guid.NewGuid()
+            })).StatusCode);
+
+        var contextResponse = await allowed.GetAsync(
+            $"/api/intelligence/customers/{customerId}/context");
+        Assert.Equal(HttpStatusCode.OK, contextResponse.StatusCode);
+        using var context = JsonDocument.Parse(await contextResponse.Content.ReadAsStringAsync());
+        Assert.Equal(customerId, context.RootElement.GetProperty("customerId").GetInt64());
+
+        Assert.Equal(HttpStatusCode.NoContent,
+            (await allowed.DeleteAsync($"/api/Contact/{contactId}?concurrencyToken={contactToken}")).StatusCode);
+        using var deactivatedContact = JsonDocument.Parse(
+            await (await allowed.GetAsync($"/api/Contact/{contactId}")).Content.ReadAsStringAsync());
+        Assert.False(deactivatedContact.RootElement.GetProperty("isActive").GetBoolean());
+
+        Assert.Equal(HttpStatusCode.NoContent,
+            (await allowed.DeleteAsync($"/api/Customer/{customerId}?concurrencyToken={customerToken}")).StatusCode);
+        using var deactivatedCustomer = JsonDocument.Parse(
+            await (await allowed.GetAsync($"/api/Customer/{customerId}")).Content.ReadAsStringAsync());
+        Assert.False(deactivatedCustomer.RootElement.GetProperty("isActive").GetBoolean());
     }
 
     [Fact]

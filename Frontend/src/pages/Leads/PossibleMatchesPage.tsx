@@ -4,6 +4,7 @@ import { FactCheck as ReviewIcon } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
 import dayjs from 'dayjs';
 import leadService from '../../api/services/leadService';
+import ApiErrorNotice from '../../components/common/ApiErrorNotice';
 
 export default function PossibleMatchesPage() {
   const navigate = useNavigate();
@@ -21,9 +22,11 @@ export default function PossibleMatchesPage() {
 
       {query.isLoading && <Stack sx={{ alignItems: 'center', py: 6 }}><CircularProgress /></Stack>}
       {query.isError && (
-        <Alert severity="error" action={<Button color="inherit" onClick={() => query.refetch()}>Retry</Button>}>
-          Possible matches could not be loaded.
-        </Alert>
+        <ApiErrorNotice
+          error={query.error}
+          fallbackMessage="Possible matches could not be loaded. Nothing was changed — try again."
+          onRetry={() => query.refetch()}
+        />
       )}
       {query.data?.length === 0 && <Alert severity="success">No possible matches are awaiting review.</Alert>}
 

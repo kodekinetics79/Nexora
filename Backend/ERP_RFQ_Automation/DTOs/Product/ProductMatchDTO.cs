@@ -7,6 +7,7 @@ namespace ERP_RFQ_Automation.DTOs.ProductDTOs
         public string? Manufacturer { get; set; }
         public string? Description { get; set; }
         public long BusinessUnitId { get; set; }
+        public decimal Quantity { get; set; } = 1m;
     }
 
     // Response DTO for product matching
@@ -37,6 +38,15 @@ namespace ERP_RFQ_Automation.DTOs.ProductDTOs
         public string? PreferredSupplierEmail { get; set; }
         public int MatchConfidence { get; set; } // 0-100
         public string MatchReason { get; set; } = null!;
+        public decimal AvailableToPromise { get; set; }
+        public decimal IncomingAvailable { get; set; }
+        public decimal ProjectedShortage { get; set; }
+        public string AvailabilityStatus { get; set; } = "UnknownProduct";
+        public int? LeadTimeDays { get; set; }
+        public DateOnly? ExpectedAvailableOn { get; set; }
+        public string? CostCurrencyCode { get; set; }
+        public string DecisionState { get; set; } = "ReviewRequired";
+        public string? EvidenceReference { get; set; }
     }
 
     // Purchase history DTO

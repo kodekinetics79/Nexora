@@ -18,7 +18,7 @@ public sealed class SourcingToolTests
         { BusinessUnitId = Bu1, UserId = 42, UserName = "tester" };
 
     [Fact]
-    public async Task SendRfqToSuppliers_QueuesThroughGovernedService_WithCanonicalReplayKey()
+    public async Task SendRfqToSuppliers_FailsClosed_AndRequiresExplicitSourcingCaseApproval()
     {
         using var db = new TestDb();
         SeedGraph(db, includeSolicitation: false);
@@ -26,22 +26,12 @@ public sealed class SourcingToolTests
 
         using var context = db.ContextFor(Bu1);
         var tool = new SendRfqToSuppliersTool(context, service);
-        var first = await tool.ExecuteAsync(AgentSeed.Json(
+        var result = await tool.ExecuteAsync(AgentSeed.Json(
             "{\"rfqId\":700,\"supplierIds\":[500],\"message\":\"First wording\"}"), AgentContext, default);
-        var retry = await tool.ExecuteAsync(AgentSeed.Json(
-            "{\"message\":\"Different wording\",\"supplierIds\":[500,500],\"rfqId\":700}"), AgentContext, default);
 
-        Assert.True(first.Success, first.Error);
-        Assert.True(retry.Success, retry.Error);
-        Assert.Equal(2, service.Solicitations.Count);
-        Assert.Equal(service.Solicitations[0].IdempotencyKey, service.Solicitations[1].IdempotencyKey);
-        Assert.Equal(new long[] { 7001, 7002 }, service.Solicitations[0].RfqItemIds);
-        Assert.All(service.Solicitations, command =>
-        {
-            Assert.Equal(Bu1, command.BusinessUnitId);
-            Assert.Equal(SupplierId, command.SupplierId);
-            Assert.Equal("tester", command.Actor);
-        });
+        Assert.False(result.Success);
+        Assert.Contains("explicitly approve", result.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(service.Solicitations);
     }
 
     [Fact]

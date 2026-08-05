@@ -22,6 +22,7 @@ import { useSnackbar } from 'notistack';
 import leadService from '../../api/services/leadService';
 import SearchField from '../../components/common/SearchField';
 import { useAuth } from '../../context/AuthContext';
+import { presentableErrorMessage } from '../../utils/apiErrors';
 
 const AssignedLeadsPage: React.FC = () => {
   const { t } = useTranslation();
@@ -78,7 +79,10 @@ const AssignedLeadsPage: React.FC = () => {
       queryClient.invalidateQueries({ queryKey: ['leads-assigned'] });
       queryClient.invalidateQueries({ queryKey: ['leads-outstanding'] });
     },
-    onError: (err: any) => enqueueSnackbar(err.response?.data?.error || 'Failed to reassign lead', { variant: 'error' }),
+    onError: (error: unknown) => enqueueSnackbar(
+      presentableErrorMessage(error, 'The lead could not be reassigned. Its current owner is unchanged — try again.'),
+      { variant: 'error' },
+    ),
   });
 
   const columns: GridColDef[] = [

@@ -45,6 +45,7 @@ public static class SupplierQuoteModelConfiguration
             entity.ToTable("supplier_quote_revisions");
             entity.HasKey(x => x.Id);
             entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
+            entity.HasAlternateKey(x => new { x.BusinessUnitId, x.SupplierQuoteId, x.Id });
             entity.Property(x => x.CaptureChannel).HasMaxLength(24).IsRequired();
             entity.Property(x => x.SourceIdentity).HasMaxLength(500).IsRequired();
             entity.Property(x => x.SourceSha256).HasMaxLength(64).IsRequired();
@@ -141,6 +142,39 @@ public static class SupplierQuoteModelConfiguration
             entity.HasOne<SupplierQuoteFieldEvidence>().WithMany()
                 .HasForeignKey(x => new { x.BusinessUnitId, x.SupplierQuoteFieldEvidenceId })
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<SupplierNegotiationDecision>(entity =>
+        {
+            entity.ToTable("supplier_negotiation_decisions");
+            entity.HasKey(x => x.Id);
+            entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
+            entity.Property(x => x.RecommendationCode).HasMaxLength(64).IsRequired();
+            entity.Property(x => x.Disposition).HasMaxLength(24).IsRequired();
+            entity.Property(x => x.Reason).HasMaxLength(1000).IsRequired();
+            entity.Property(x => x.EvidenceSnapshotJson).HasColumnType("jsonb").IsRequired();
+            entity.Property(x => x.PolicyVersion).HasMaxLength(80).IsRequired();
+            entity.Property(x => x.IdempotencyKey).HasMaxLength(160).IsRequired();
+            entity.Property(x => x.RequestHash).HasMaxLength(64).IsRequired();
+            entity.Property(x => x.Actor).HasMaxLength(255).IsRequired();
+            entity.Property(x => x.CorrelationId).HasMaxLength(160).IsRequired();
+            entity.HasCheckConstraint("CK_supplier_negotiation_decisions_Disposition",
+                "\"Disposition\" IN ('PREPARED','DEFERRED','DISMISSED')");
+            entity.HasCheckConstraint("CK_supplier_negotiation_decisions_ExpectedVersion",
+                "\"ExpectedQuoteVersion\" > 0");
+            entity.HasCheckConstraint("CK_supplier_negotiation_decisions_RecommendationCode",
+                "\"RecommendationCode\" IN ('BEST_AND_FINAL_PRICE','QUANTITY_BREAK','FASTER_DELIVERY','FREIGHT_INCLUSIVE_OFFER','IMPROVED_PAYMENT_TERMS','PARTIAL_IMMEDIATE_AVAILABILITY','APPROVED_ALTERNATE')");
+            entity.HasIndex(x => new { x.BusinessUnitId, x.IdempotencyKey }).IsUnique();
+            entity.HasIndex(x => new
+                { x.BusinessUnitId, x.SupplierQuoteId, x.SupplierQuoteRevisionId, x.DecidedOn });
+            entity.HasOne(x => x.SupplierQuote).WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.SupplierQuoteId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(x => x.SupplierQuoteRevision).WithMany(x => x.NegotiationDecisions)
+                .HasForeignKey(x => new
+                    { x.BusinessUnitId, x.SupplierQuoteId, x.SupplierQuoteRevisionId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.SupplierQuoteId, Id = x.Id })
+                .OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<CustomerQuoteSourcingDecision>(entity =>

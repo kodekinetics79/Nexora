@@ -1,5 +1,6 @@
 import React, {
   createContext,
+  useCallback,
   useContext,
   useState,
   type ReactNode,
@@ -49,6 +50,8 @@ interface UserData {
   userName?: string;
   roleId?: number;
   roleName?: string;
+  isSuperAdmin?: boolean;
+  isManager?: boolean;
   businessUnitId?: number;
   permissions?: Permission[];
 }
@@ -103,14 +106,12 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     window.location.href = "/login";
   };
 
-  const hasPermission = (moduleName: string, action: 'view' | 'create' | 'edit' | 'delete' = 'view') => {
-    const normalizedRoleName = (userData.roleName ?? '').replace(/[_-]/g, ' ').toLowerCase();
-    if (normalizedRoleName.includes('admin')) return true;
-
+  const hasPermission = useCallback((moduleName: string, action: 'view' | 'create' | 'edit' | 'delete' = 'view') => {
+    if (userData.isSuperAdmin === true) return true;
     if (!userData.permissions) return false;
 
     const permission = userData.permissions.find(
-      p => p.moduleName.toLowerCase() === moduleName.toLowerCase()
+      p => p.moduleName.trim().toLowerCase() === moduleName.trim().toLowerCase()
     );
 
     if (!permission) return false;
@@ -122,7 +123,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       case 'view': return true; // If they are in the list, they can at least view
       default: return false;
     }
-  };
+  }, [userData.isSuperAdmin, userData.permissions]);
 
   // FE-12: while the app is open, schedule a proactive logout for the moment
   // the current token expires, redirecting to /login with a friendly notice

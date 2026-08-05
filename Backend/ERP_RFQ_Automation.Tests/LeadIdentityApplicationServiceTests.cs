@@ -9,7 +9,7 @@ namespace ERP_RFQ_Automation.Tests;
 public sealed class LeadIdentityApplicationServiceTests
 {
     [Fact]
-    public async Task Batch_includes_security_rejected_intake_before_lead_reconciliation()
+    public async Task Batch_reports_scanner_outage_as_awaiting_without_rejected_kpi()
     {
         using var db = new TestDb();
         await using var context = db.ContextFor(70);
@@ -34,7 +34,7 @@ public sealed class LeadIdentityApplicationServiceTests
         await context.SaveChangesAsync();
         var intake = SourceDocumentOccurrence.Create(70, source.Id, corpus.Id, "batch-rejected",
             "{\"fileName\":\"customer-rfq.doc\"}");
-        intake.MarkRejected("SecurityInspection", "document_quarantined",
+        intake.MarkAwaitingSecurityScan("security_scanner_unavailable",
             "{\"status\":\"Quarantined\",\"reason\":\"Malware scanner unavailable; the file remains quarantined.\"}");
         context.Add(intake);
         await context.SaveChangesAsync();
@@ -43,12 +43,57 @@ public sealed class LeadIdentityApplicationServiceTests
 
         Assert.NotNull(result);
         Assert.Equal(1, result.FilesReceived);
-        Assert.Equal(1, result.Rejected);
+        Assert.Equal(0, result.Rejected);
+        Assert.Equal(1, result.AwaitingSecurityScan);
         var item = Assert.Single(result.Items);
-        Assert.Equal("RejectedOrUnprocessable", item.Classification);
-        Assert.Equal("Rejected", item.IntakeStatus);
-        Assert.Equal("document_quarantined", item.ErrorCode);
+        Assert.Equal("Pending", item.Classification);
+        Assert.Equal("AwaitingSecurityScan", item.IntakeStatus);
+        Assert.Equal("security_scanner_unavailable", item.ErrorCode);
+        Assert.Equal("Quarantined", item.SecurityStatus);
         Assert.Contains(item.Reasons, reason => reason.Contains("scanner unavailable", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Batch_presents_legacy_scanner_quarantine_as_recoverable_without_rewriting_history()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(72);
+        Seed.BusinessUnit(context, 72);
+        var batchId = Guid.NewGuid();
+        context.Add(new LeadIngestionBatch
+        {
+            Id = batchId,
+            BusinessUnitId = 72,
+            SourceChannel = "ManualUpload",
+            CreatedBy = "test",
+            CreatedAtUtc = DateTimeOffset.UtcNow,
+            UpdatedAtUtc = DateTimeOffset.UtcNow
+        });
+        var corpus = DocumentCorpus.Create(72, batchId, CorpusSourceType.ManualUpload);
+        context.Add(corpus);
+        await context.SaveChangesAsync();
+        var source = SourceDocument.Create(72, corpus.Id, new string('b', 64), "legacy-rfq.pdf",
+            "application/pdf", "evidence", "quarantine/legacy-rfq.pdf", "v1", 256);
+        source.MarkSecurityStatus(DocumentSecurityStatus.Quarantined);
+        context.Add(source);
+        await context.SaveChangesAsync();
+        var intake = SourceDocumentOccurrence.Create(72, source.Id, corpus.Id, "legacy-rejected",
+            "{\"fileName\":\"legacy-rfq.pdf\",\"inspection\":{\"ScannerSignature\":null}}");
+        intake.MarkRejected("SecurityInspection", "document_quarantined",
+            "{\"status\":\"Quarantined\",\"reason\":\"Malware scanner unavailable.\"}");
+        context.Add(intake);
+        await context.SaveChangesAsync();
+
+        var result = await new LeadIdentityApplicationService(context).GetBatchAsync(72, batchId);
+
+        Assert.NotNull(result);
+        Assert.Equal(0, result.Rejected);
+        Assert.Equal(1, result.AwaitingSecurityScan);
+        var item = Assert.Single(result.Items);
+        Assert.Equal("AwaitingSecurityScan", item.IntakeStatus);
+        Assert.Equal("security_scanner_unavailable", item.ErrorCode);
+        Assert.Equal(IntakeOccurrenceStatus.Rejected,
+            (await context.Set<SourceDocumentOccurrence>().SingleAsync()).IntakeStatus);
     }
 
     [Fact]

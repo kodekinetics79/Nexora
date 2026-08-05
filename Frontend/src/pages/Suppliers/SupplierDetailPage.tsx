@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Box, Typography, Paper, Button, Chip, Grid,
-  CircularProgress, Divider, Avatar, Dialog, DialogTitle, DialogContent,
+  CircularProgress, Divider, Avatar, Dialog, DialogTitle, DialogContent, Alert,
   DialogActions, FormControl, InputLabel, MenuItem, Select, TextField,
 } from '@mui/material';
 import {
@@ -62,18 +62,20 @@ const SupplierDetailPage: React.FC = () => {
     readinessStatus: 'REVIEW_REQUIRED', reason: '',
   });
 
-  const { data: supplier, isLoading } = useQuery({
+  const { data: supplier, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['supplier-detail', Number(id)],
     queryFn: () => supplierService.getById(Number(id)),
     enabled: !!id,
   });
 
   if (isLoading) return <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '60vh' }}><CircularProgress /></Box>;
+  if (isError) return <Box sx={{ p: 4 }}><Alert severity="error" action={<Button onClick={() => refetch()}>Retry</Button>}>
+    {(error as any)?.response?.data?.detail || (error as Error)?.message || 'The Supplier could not be loaded.'}
+  </Alert></Box>;
   if (!supplier) return <Box sx={{ p: 4 }}><Typography>Supplier not found.</Typography></Box>;
 
-  const apiBase = import.meta.env.VITE_API_BASE_URL ?? import.meta.env.VITE_API_URL ?? '';
-  const role = (userData.roleName || '').toLowerCase();
-  const canGovern = hasPermission('Suppliers', 'edit') && (role.includes('manager') || role.includes('admin'));
+  const canEdit = hasPermission('Suppliers', 'edit');
+  const canGovern = userData.isManager === true && canEdit;
   const openGovernance = () => {
     setGovernance({
       governanceStatus: supplier.governanceStatus || 'UNVERIFIED',
@@ -96,7 +98,10 @@ const SupplierDetailPage: React.FC = () => {
       setGovernanceOpen(false);
       enqueueSnackbar('Supplier governance decision recorded.', { variant: 'success' });
     },
-    onError: () => enqueueSnackbar('Supplier governance decision was not recorded.', { variant: 'error' }),
+    onError: (mutationError: any) => enqueueSnackbar(
+      mutationError?.response?.data?.detail || mutationError?.response?.data || 'Supplier governance decision was not recorded.',
+      { variant: 'error' },
+    ),
   });
 
   return (
@@ -120,9 +125,9 @@ const SupplierDetailPage: React.FC = () => {
           {canGovern && <Button variant="outlined" onClick={openGovernance} sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 1.5 }}>
             Review Governance
           </Button>}
-          <Button variant="contained" startIcon={<EditIcon />} onClick={() => setEditOpen(true)} disableElevation sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 1.5 }}>
+          {canEdit && <Button variant="contained" startIcon={<EditIcon />} onClick={() => setEditOpen(true)} disableElevation sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 1.5 }}>
             Edit Supplier
-          </Button>
+          </Button>}
         </Box>
       </Box>
 
@@ -130,7 +135,6 @@ const SupplierDetailPage: React.FC = () => {
       <Paper sx={{ p: 3, mb: 3, borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 2.5 }}>
           <Avatar
-            src={supplier.imageUrl ? `${apiBase}${supplier.imageUrl}` : undefined}
             sx={{ width: 64, height: 64, bgcolor: 'primary.main', fontSize: '1.5rem', fontWeight: 900 }}
           >
             {supplier.name?.[0]?.toUpperCase()}
@@ -152,14 +156,6 @@ const SupplierDetailPage: React.FC = () => {
               {supplier.countryName && <Chip label={supplier.countryName} size="small" variant="outlined" />}
             </Box>
           </Box>
-          {supplier.successRate != null && (
-            <Box sx={{ textAlign: 'center', minWidth: 90 }}>
-              <Typography variant="h4" sx={{ fontWeight: 900, color: supplier.successRate >= 70 ? 'success.main' : supplier.successRate >= 40 ? 'warning.main' : 'error.main', lineHeight: 1 }}>
-                {supplier.successRate}%
-              </Typography>
-              <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Success Rate</Typography>
-            </Box>
-          )}
         </Box>
 
         {/* Stats Strip */}
@@ -167,7 +163,7 @@ const SupplierDetailPage: React.FC = () => {
         <Box sx={{ display: 'flex', gap: 0 }}>
           {[
             { label: 'Payment Terms', value: supplier.paymentTerms },
-            { label: 'Avg Response Time', value: supplier.avgResponseTime != null ? `${supplier.avgResponseTime}h` : null },
+            { label: 'RFQ Readiness', value: readableStatus(supplier.readinessStatus) },
             { label: 'Country', value: supplier.countryName },
             { label: 'Currency', value: supplier.currencyName },
           ].map(({ label, value }) => (
@@ -186,7 +182,6 @@ const SupplierDetailPage: React.FC = () => {
             <Section title="Contact" icon={<EmailIcon sx={{ fontSize: 16 }} />}>
               <InfoRow label="Email" value={supplier.contactEmail} />
               <InfoRow label="Payment Terms" value={supplier.paymentTerms} />
-              <InfoRow label="Avg Response Time" value={supplier.avgResponseTime != null ? `${supplier.avgResponseTime} hours` : null} />
             </Section>
 
             <Section title="Tags & Notes" icon={<TagIcon sx={{ fontSize: 16 }} />}>
@@ -212,7 +207,7 @@ const SupplierDetailPage: React.FC = () => {
 
             <Section title="Financial" icon={<PaymentIcon sx={{ fontSize: 16 }} />}>
               <InfoRow label="Currency" value={supplier.currencyName} />
-              <InfoRow label="Success Rate" value={supplier.successRate != null ? `${supplier.successRate}%` : null} />
+              <InfoRow label="Governance reviewed" value={supplier.governanceReviewedOn ? new Date(supplier.governanceReviewedOn).toLocaleString() : null} />
             </Section>
 
             <Section title="Governance" icon={<SupplierIcon sx={{ fontSize: 16 }} />}>
@@ -227,7 +222,7 @@ const SupplierDetailPage: React.FC = () => {
         </Grid>
       </Grid>
 
-      <SupplierFormDialog open={editOpen} onClose={() => setEditOpen(false)} supplierId={Number(id)} />
+      {canEdit && <SupplierFormDialog open={editOpen} onClose={() => setEditOpen(false)} supplierId={Number(id)} />}
       <Dialog open={governanceOpen} onClose={() => setGovernanceOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle>Supplier Governance Review</DialogTitle>
         <DialogContent dividers sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 2 }}>

@@ -1,7 +1,14 @@
 import React, { createContext, useContext, useState, useMemo } from 'react';
 import type { ReactNode } from 'react';
 import { ThemeProvider, createTheme } from '@mui/material';
+import { alpha } from '@mui/material/styles';
 import type { PaletteMode } from '@mui/material';
+import {
+  AA_NON_TEXT_CONTRAST,
+  AA_TEXT_CONTRAST,
+  buildAccessiblePaletteColor,
+  readableOn,
+} from '../utils/contrast';
 
 interface ThemeContextType {
   mode: PaletteMode;
@@ -30,18 +37,36 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
     localStorage.setItem('themeMode', newMode);
   };
 
-  const theme = useMemo(() => createTheme({
+  const theme = useMemo(() => {
+    const primaryPalette = buildAccessiblePaletteColor(primaryColor);
+
+    // Worst-case surface the brand colour is drawn *on* as text: in light mode
+    // the off-white page background, in dark mode the lighter paper surface.
+    const worstCaseSurface = mode === 'dark' ? '#1e293b' : '#f8fafc';
+    // Text/outlined buttons paint `primary.main` as their label. Several brand
+    // colours fail AA in that role (Steel Blue 3.92:1 on the light page;
+    // Executive Navy 1.40:1 on dark paper), so derive a readable variant.
+    const primaryOnSurface = readableOn(primaryColor, worstCaseSurface, AA_TEXT_CONTRAST);
+    const primaryBorderOnSurface = readableOn(primaryColor, worstCaseSurface, AA_NON_TEXT_CONTRAST);
+
+    return createTheme({
     palette: {
       mode,
-      primary: {
-        main: primaryColor,
-        light: `${primaryColor}aa`,
-        dark: `${primaryColor}ee`,
-        contrastText: '#ffffff',
-      },
+      // WCAG 2.1 SC 1.4.3. The brand colour is user-selectable (12 options in
+      // the Navbar), so the foreground has to be derived from the chosen
+      // colour's luminance rather than hardcoded: white on "Professional
+      // Green" (#16a34a) is only 3.29:1, and white on the default "Steel Blue"
+      // (#4682b4) is 4.10:1 — both below the 4.5:1 AA floor. The old
+      // `${primaryColor}aa` / `${primaryColor}ee` light/dark values were alpha
+      // hexes, not real shades (the "dark" one composited *lighter* than main
+      // over a white page).
+      primary: primaryPalette,
       secondary: {
         main: '#0ea5e9', // Sky Blue
       },
+      // Make MUI's own contrastText derivation (secondary/error/warning/...)
+      // target AA body text instead of its 3:1 default.
+      contrastThreshold: AA_TEXT_CONTRAST,
       background: {
         default: mode === 'dark' ? '#0f172a' : '#f8fafc',
         paper: mode === 'dark' ? '#1e293b' : '#ffffff',
@@ -73,7 +98,7 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
             padding: '8px 16px',
             boxShadow: 'none',
             '&:hover': {
-              boxShadow: `0 4px 12px ${primaryColor}33`,
+              boxShadow: `0 4px 12px ${alpha(primaryColor, 0.2)}`,
             },
           },
         },
@@ -81,8 +106,28 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
           {
             props: { variant: 'contained', color: 'primary' },
             style: {
-              background: `linear-gradient(135deg, ${primaryColor} 0%, ${primaryColor}dd 100%)`,
+              // The gradient used to fade to `${primaryColor}dd` — a 87%-alpha
+              // stop that composites *lighter* over the page, so the right-hand
+              // side of every primary CTA sat below 4.5:1 against its label.
+              // Both stops are now opaque shades that clear AA against
+              // primary.contrastText.
+              background: `linear-gradient(135deg, ${primaryPalette.main} 0%, ${primaryPalette.dark} 100%)`,
+              color: primaryPalette.contrastText,
             },
+          },
+          {
+            // Outlined/text buttons render the brand colour *as text* on the
+            // page surface, where several brand colours fall under 4.5:1
+            // (SC 1.4.3). The border keeps the 3:1 non-text floor (SC 1.4.11).
+            props: { variant: 'outlined', color: 'primary' },
+            style: {
+              color: primaryOnSurface,
+              borderColor: primaryBorderOnSurface,
+            },
+          },
+          {
+            props: { variant: 'text', color: 'primary' },
+            style: { color: primaryOnSurface },
           },
         ],
       },
@@ -140,10 +185,22 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
               backgroundColor: mode === 'dark' ? '#475569' : '#94a3b8',
             },
           },
+          // SC 2.2.2 / SC 2.3.3 mitigation — several surfaces (notably the
+          // login page) run infinite decorative animations. Honour the OS
+          // "reduce motion" setting globally.
+          '@media (prefers-reduced-motion: reduce)': {
+            '*, *::before, *::after': {
+              animationDuration: '0.01ms !important',
+              animationIterationCount: '1 !important',
+              transitionDuration: '0.01ms !important',
+              scrollBehavior: 'auto !important',
+            },
+          },
         },
       },
     },
-  }), [mode, primaryColor]);
+    });
+  }, [mode, primaryColor]);
 
   return (
     <ThemeContext.Provider value={{ mode, setMode, primaryColor, setPrimaryColor }}>

@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.CommercialRouting;
+using ERP_RFQ_Automation.CommercialIntelligence.Sales;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
@@ -14,6 +15,7 @@ public sealed class CommercialRoutingApplicationServiceTests
         using var db = new TestDb();
         await SeedRoutingGraphAsync(db, includeIdentifier: true, includeOwnership: true);
         await using var context = db.ContextFor(71);
+        await AddEligibleProfileAsync(context, 7101);
         var service = Service(context);
 
         var result = await service.RouteLeadAsync(71,
@@ -105,6 +107,8 @@ public sealed class CommercialRoutingApplicationServiceTests
             await seed.SaveChangesAsync();
         }
         await using var context = db.ContextFor(71);
+        await AddEligibleProfileAsync(context, 7101);
+        await AddEligibleProfileAsync(context, 7102);
         var service = Service(context);
 
         var result = await service.RouteLeadAsync(71,
@@ -130,11 +134,59 @@ public sealed class CommercialRoutingApplicationServiceTests
     }
 
     [Fact]
+    public async Task Owner_options_honor_effective_governed_eligibility_and_capacity()
+    {
+        using var db = new TestDb();
+        await SeedRoutingGraphAsync(db, includeIdentifier: false, includeOwnership: false);
+        await using var context = db.ContextFor(71);
+        var now = DateTime.UtcNow;
+        context.SalesRepProfiles.AddRange(
+            new SalesRepProfile
+            {
+                BusinessUnitId = 71, UserId = 7101, IsRoutingEligible = false,
+                CapacityPercent = 100, DistributionWeight = 1, EffectiveFromUtc = now.AddDays(-1),
+                Version = 1, UpdatedAtUtc = now, UpdatedBy = "test", LastMutationIdempotencyKey = "profile-ineligible"
+            },
+            new SalesRepProfile
+            {
+                BusinessUnitId = 71, UserId = 7102, IsRoutingEligible = true,
+                CapacityPercent = 40, DistributionWeight = 1, EffectiveFromUtc = now.AddDays(-1),
+                Version = 1, UpdatedAtUtc = now, UpdatedBy = "test", LastMutationIdempotencyKey = "profile-capacity"
+            });
+        await context.SaveChangesAsync();
+
+        var options = await Service(context).GetOwnerOptionsAsync(71, CancellationToken.None);
+
+        var eligible = options.Single(option => option.UserId == 7102);
+        Assert.True(eligible.IsAvailable);
+        Assert.True(eligible.HasGovernedProfile);
+        Assert.Equal(40, eligible.CapacityPercent);
+        var ineligible = options.Single(option => option.UserId == 7101);
+        Assert.False(ineligible.IsAvailable);
+        Assert.Contains("not routing eligible", ineligible.EligibilityReason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Owner_options_reject_an_established_owner_without_a_governed_profile()
+    {
+        using var db = new TestDb();
+        await SeedRoutingGraphAsync(db, includeIdentifier: true, includeOwnership: true);
+        await using var context = db.ContextFor(71);
+
+        var options = await Service(context).GetOwnerOptionsAsync(71, CancellationToken.None);
+
+        Assert.All(options, option => Assert.False(option.IsAvailable));
+        Assert.All(options, option => Assert.Contains("profile is required",
+            option.EligibilityReason, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public async Task Manual_assignment_rejects_a_stale_expected_assignee()
     {
         using var db = new TestDb();
         await SeedRoutingGraphAsync(db, includeIdentifier: false, includeOwnership: false);
         await using var context = db.ContextFor(71);
+        await AddEligibleProfileAsync(context, 7101);
         var service = Service(context);
         await service.AssignLeadAsync(71, new ManualAssignLeadCommand(
             701, 7101, 7102, "manual-1", "corr-1", AssignmentScope.LeadOnly,
@@ -155,6 +207,7 @@ public sealed class CommercialRoutingApplicationServiceTests
         using var db = new TestDb();
         await SeedRoutingGraphAsync(db, includeIdentifier: false, includeOwnership: false);
         await using var context = db.ContextFor(71);
+        await AddEligibleProfileAsync(context, 7101);
         var service = Service(context);
         await service.AssignLeadAsync(71, new ManualAssignLeadCommand(
             701, 7101, 7102, "manual-content-bound", "manual-correlation",
@@ -196,6 +249,7 @@ public sealed class CommercialRoutingApplicationServiceTests
         using var db = new TestDb();
         await SeedRoutingGraphAsync(db, includeIdentifier: false, includeOwnership: false);
         await using var context = db.ContextFor(71);
+        await AddEligibleProfileAsync(context, 7101);
         var service = Service(context);
         var routed = await service.RouteLeadAsync(71,
             new RouteLeadCommand(701, "queue-for-assignment", "corr-queue"), CancellationToken.None);
@@ -228,6 +282,7 @@ public sealed class CommercialRoutingApplicationServiceTests
         using var db = new TestDb();
         await SeedRoutingGraphAsync(db, includeIdentifier: false, includeOwnership: false);
         await using var context = db.ContextFor(71);
+        await AddEligibleProfileAsync(context, 7101);
         var service = Service(context);
         var routed = await service.RouteLeadAsync(71,
             new RouteLeadCommand(701, "bulk-route", "bulk-route-corr"), CancellationToken.None);
@@ -313,6 +368,19 @@ public sealed class CommercialRoutingApplicationServiceTests
 
     private static CommercialRoutingApplicationService Service(ErpRfqAutomationContext context) =>
         new(context, new DeterministicRoutingEngine(), new RoutingPolicy());
+
+    private static async Task AddEligibleProfileAsync(ErpRfqAutomationContext context, long userId)
+    {
+        var now = DateTime.UtcNow;
+        context.SalesRepProfiles.Add(new SalesRepProfile
+        {
+            BusinessUnitId = 71, UserId = userId, IsRoutingEligible = true,
+            CapacityPercent = 100, DistributionWeight = 1, EffectiveFromUtc = now.AddDays(-1),
+            Version = 1, UpdatedAtUtc = now, UpdatedBy = "test",
+            LastMutationIdempotencyKey = $"eligible-profile-{userId}"
+        });
+        await context.SaveChangesAsync();
+    }
 
     private static async Task SeedRoutingGraphAsync(TestDb db, bool includeIdentifier, bool includeOwnership)
     {

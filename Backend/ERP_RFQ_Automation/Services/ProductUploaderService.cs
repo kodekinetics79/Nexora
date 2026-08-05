@@ -1,5 +1,6 @@
 using OfficeOpenXml;
 using OfficeOpenXml.DataValidation;
+using ERP_RFQ_Automation.Inventory;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using System.Drawing;
@@ -10,11 +11,16 @@ namespace ERP_RFQ_Automation.Services
     {
         private readonly ErpRfqAutomationContext _context;
         private readonly ILogger<ProductUploaderService> _logger;
+        private readonly IStockLedgerService _ledger;
 
-        public ProductUploaderService(ErpRfqAutomationContext context, ILogger<ProductUploaderService> logger)
+        public ProductUploaderService(ErpRfqAutomationContext context, ILogger<ProductUploaderService> logger,
+            IStockLedgerService? ledger = null)
         {
             _context = context;
             _logger = logger;
+            // Defaulted so the existing call sites keep compiling, but never null: writing the
+            // opening stock anywhere other than the ledger is exactly the defect being closed.
+            _ledger = ledger ?? new StockLedgerService(context);
         }
 
         public async Task<byte[]> GenerateTemplateAsync(long businessUnitId)
@@ -133,6 +139,13 @@ namespace ERP_RFQ_Automation.Services
             int errorCount = 0;
             var errors = new List<string>();
 
+            // Opening stock declared on the sheet, captured per row and posted to the stock ledger
+            // after the products exist. RecordCountAsync opens its own transaction (it has to: the
+            // balance and its balancing movement must commit together), so it cannot run inside the
+            // product-insert transaction below.
+            var openingStock = new List<(int Row, Product Product, long WarehouseId, decimal Quantity)>();
+            var importBatchId = Guid.NewGuid().ToString("N");
+
             using var transaction = await _context.Database.BeginTransactionAsync();
             try
             {
@@ -173,6 +186,17 @@ namespace ERP_RFQ_Automation.Services
                         long? warehouseId = await GetOrCreateWarehouse(warehouseName, businessUnitId, createdBy);
                         long? supplierId = await GetSupplierIdByName(supplierName, businessUnitId);
 
+                        var countedQuantity = decimal.TryParse(worksheet.Cells[row, 10].Text, out var qty) ? qty : 0m;
+                        if (countedQuantity < 0m)
+                            throw new InvalidOperationException(
+                                $"Qty On Hand ({countedQuantity}) cannot be negative.");
+                        // The sheet's Warehouse column is the only place a physical location can
+                        // come from; stock with no warehouse cannot be represented in the ledger,
+                        // and silently dropping it is how an opening balance disappears.
+                        if (countedQuantity > 0m && warehouseId is null)
+                            throw new InvalidOperationException(
+                                "Qty On Hand was supplied without a Warehouse. Stock must be located in a warehouse.");
+
                         var product = new Product
                         {
                             DocId = "PR" + (nextNum++).ToString("D8"),
@@ -185,7 +209,12 @@ namespace ERP_RFQ_Automation.Services
                             UomId = uomId,
                             WarehouseId = warehouseId,
                             PreferredSupplierId = supplierId,
-                            QtyOnHand = decimal.TryParse(worksheet.Cells[row, 10].Text, out var qty) ? qty : 0,
+                            // LEDGER AUTHORITY: this used to be the import's stock write. Product
+                            // .QtyOnHand is a legacy denormalised column that posts no inventory
+                            // movement and is invisible to the availability engine, so a client's
+                            // opening stock upload landed nowhere any warehouse or ATP screen could
+                            // see it. The real quantity is posted to Inventory below.
+                            QtyOnHand = 0m,
                             ReorderPoint = decimal.TryParse(worksheet.Cells[row, 11].Text, out var rp) ? rp : 0,
                             UnitCost = decimal.TryParse(worksheet.Cells[row, 12].Text, out var uc) ? uc : 0,
                             SellingPrice = decimal.TryParse(worksheet.Cells[row, 13].Text, out var sp) ? sp : 0,
@@ -212,6 +241,8 @@ namespace ERP_RFQ_Automation.Services
                         };
 
                         _context.Products.Add(product);
+                        if (countedQuantity > 0m)
+                            openingStock.Add((row, product, warehouseId!.Value, countedQuantity));
                         successCount++;
                     }
                     catch (Exception ex)
@@ -223,8 +254,6 @@ namespace ERP_RFQ_Automation.Services
 
                 await _context.SaveChangesAsync();
                 await transaction.CommitAsync();
-
-                return ServiceResult<string>.CreateSuccess($"{successCount} products imported successfully. {errorCount} errors.", "Import Complete");
             }
             catch (Exception ex)
             {
@@ -232,6 +261,49 @@ namespace ERP_RFQ_Automation.Services
                 _logger.LogError(ex, "Product upload failed.");
                 return ServiceResult<string>.CreateFailure($"Transaction failed: {ex.Message}");
             }
+
+            var stockedRows = await PostOpeningStockAsync(businessUnitId, createdBy, importBatchId, openingStock, errors);
+            errorCount += openingStock.Count - stockedRows;
+
+            return ServiceResult<string>.CreateSuccess(
+                $"{successCount} products imported successfully. {stockedRows} opening stock balances posted to inventory. {errorCount} errors.",
+                "Import Complete");
+        }
+
+        /// <summary>
+        /// Posts each row's declared quantity to the authoritative per-warehouse stock ledger.
+        ///
+        /// <para><c>RecordCountAsync</c> creates the <c>Inventory</c> row on first use and posts the
+        /// balancing <c>InventoryMovement</c> in the same transaction, so an imported balance is
+        /// immediately visible to available-to-promise and reconciles against the movement ledger.
+        /// The idempotency key is derived from the import batch, so a retried batch replays rather
+        /// than double-counting.</para>
+        ///
+        /// <para>This runs after the product transaction has committed because the ledger owns its
+        /// own transaction. A product whose stock posting fails is therefore imported with zero
+        /// stock and reported as an error row, rather than the whole import being lost.</para>
+        /// </summary>
+        private async Task<int> PostOpeningStockAsync(long businessUnitId, string createdBy, string importBatchId,
+            IReadOnlyList<(int Row, Product Product, long WarehouseId, decimal Quantity)> openingStock,
+            List<string> errors)
+        {
+            var posted = 0;
+            foreach (var (row, product, warehouseId, quantity) in openingStock)
+            {
+                try
+                {
+                    await _ledger.RecordCountAsync(businessUnitId, product.Id, warehouseId, quantity,
+                        $"product-import:{importBatchId}:{product.Id}:{warehouseId}", createdBy,
+                        "Opening stock import");
+                    posted++;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Opening stock could not be posted for product {ProductId}.", product.Id);
+                    errors.Add($"Row {row}: product imported but opening stock was not posted: {ex.Message}");
+                }
+            }
+            return posted;
         }
 
         public async Task<byte[]> ExportProductsAsync(long businessUnitId)
@@ -244,6 +316,15 @@ namespace ERP_RFQ_Automation.Services
                 .Include(p => p.Warehouse)
                 .OrderBy(p => p.ProductName)
                 .ToListAsync();
+
+            // Export the authoritative per-warehouse balance, not the legacy product column. The
+            // export is the round-trip of the import; reading a column the import no longer writes
+            // would report every imported product as having zero stock.
+            var onHandByProduct = await _context.Set<Models.Inventory>().AsNoTracking()
+                .Where(x => x.Buid == businessUnitId && x.ProductId != null)
+                .GroupBy(x => x.ProductId!.Value)
+                .Select(x => new { ProductId = x.Key, Quantity = x.Sum(y => y.QtyOnHand) })
+                .ToDictionaryAsync(x => x.ProductId, x => x.Quantity);
 
             using var package = new ExcelPackage();
             var ws = package.Workbook.Worksheets.Add("Products");
@@ -275,7 +356,7 @@ namespace ERP_RFQ_Automation.Services
                 ws.Cells[row, 7].Value = p.SubCategory?.SubCategoryName;
                 ws.Cells[row, 8].Value = p.Uom?.UomName;
                 ws.Cells[row, 9].Value = p.Warehouse?.WarehouseName;
-                ws.Cells[row, 10].Value = p.QtyOnHand;
+                ws.Cells[row, 10].Value = onHandByProduct.GetValueOrDefault(p.Id);
                 ws.Cells[row, 11].Value = p.UnitCost;
                 ws.Cells[row, 12].Value = p.SellingPrice;
                 ws.Cells[row, 13].Value = (p.IsActive ?? true) ? "Active" : "Inactive";

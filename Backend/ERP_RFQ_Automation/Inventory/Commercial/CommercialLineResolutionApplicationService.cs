@@ -134,10 +134,22 @@ public sealed class CommercialLineResolutionApplicationService(
             var incoming = productId.HasValue
                 ? await db.IncomingInventory.AsNoTracking().Where(x => x.BusinessUnitId == businessUnitId
                     && x.ProductId == productId.Value).ToListAsync(ct) : [];
+            var productEvidence = productId.HasValue
+                ? await db.Products.AsNoTracking()
+                    .Where(x => x.Buid == businessUnitId && x.Id == productId.Value)
+                    .Select(x => new { x.LeadTime, x.UnitCost }).SingleAsync(ct)
+                : null;
+            var baseCurrencies = productEvidence?.UnitCost is not null
+                ? await db.Currencies.AsNoTracking()
+                    .Where(x => x.BusinessUnitId == businessUnitId && x.IsActive == true && x.IsBaseCurrency == true)
+                    .OrderBy(x => x.Id).Take(2).Select(x => x.Code).ToArrayAsync(ct)
+                : [];
+            var evidencedCurrency = baseCurrencies.Length == 1 ? baseCurrencies[0] : null;
             var resolved = await commercialResolver.ResolveAsync(new CommercialResolutionRequest(
                 businessUnitId, leadId, revision.Id, line.Id, requestedPart, quantity, productId,
                 product.DecisionState == ProductResolutionDecisionState.ReviewRequired,
-                inventory, incoming, resourceLimit), ct);
+                inventory, incoming, resourceLimit, productEvidence?.LeadTime,
+                evidencedCurrency is null ? null : productEvidence?.UnitCost, evidencedCurrency), ct);
             resolved.ProductResolutionJson = JsonSerializer.Serialize(product, EvidenceJson);
             resolved.ResolutionBatchId = batchId;
             resolved.ResourceLimit = resourceLimit;
@@ -158,8 +170,36 @@ public sealed class CommercialLineResolutionApplicationService(
         if (!validRfq) throw new KeyNotFoundException("The RFQ does not belong to this tenant and lead.");
         var rows = await db.Set<LeadLineCommercialResolution>().Where(x => x.BusinessUnitId == businessUnitId
             && x.LeadId == leadId && x.RfqId == null).ToListAsync(ct);
-        rows.ForEach(x => x.RfqId = rfqId);
+        var revisionLineNumbers = await db.Set<LeadItemRevision>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && rows.Select(r => r.LeadLineId).Contains(x.Id))
+            .ToDictionaryAsync(x => x.Id, x => x.LineNumber, ct);
+        var rfqItems = await db.Rfqitems.AsNoTracking().Where(x => x.Rfqid == rfqId)
+            .OrderBy(x => x.Id).ToListAsync(ct);
+        var unassigned = new HashSet<long>(rfqItems.Select(x => x.Id));
+        foreach (var row in rows.OrderBy(x => revisionLineNumbers.GetValueOrDefault(x.LeadLineId)).ThenBy(x => x.LeadLineId))
+        {
+            row.RfqId = rfqId;
+            var lineNumber = revisionLineNumbers.GetValueOrDefault(row.LeadLineId);
+            var exact = rfqItems.FirstOrDefault(x => unassigned.Contains(x.Id)
+                && int.TryParse(x.LineItemNo, out var rfqLineNumber) && rfqLineNumber == lineNumber);
+            exact ??= rfqItems.FirstOrDefault(x => unassigned.Contains(x.Id)
+                && x.ProductId.HasValue && x.ProductId == row.ProductId);
+            exact ??= rfqItems.FirstOrDefault(x => unassigned.Contains(x.Id)
+                && PartIdentity(x) == CommercialInventoryNormalization.PartNumber(row.RequestedPartNumber));
+            if (exact is null && unassigned.Count == rows.Count(r => r.RfqItemId is null))
+                exact = rfqItems.FirstOrDefault(x => unassigned.Contains(x.Id));
+            if (exact is null) continue;
+            row.RfqItemId = exact.Id;
+            unassigned.Remove(exact.Id);
+        }
         await db.SaveChangesAsync(ct);
+    }
+
+    private static string PartIdentity(Rfqitem item)
+    {
+        var value = First(item.ManufacturerPartNumber, item.ItemMaterialCode, item.ProductShortName,
+            item.ProductShortDescription, $"LINE-{item.Id}");
+        return CommercialInventoryNormalization.PartNumber(value);
     }
 
     private async Task<IReadOnlyCollection<InventorySnapshot>> InventorySnapshotsAsync(

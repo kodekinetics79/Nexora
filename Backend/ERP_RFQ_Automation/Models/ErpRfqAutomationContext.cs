@@ -199,6 +199,7 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.Id).HasColumnName("ID");
             entity.Property(e => e.BusinessUnitId).HasColumnName("BusinessUnitID");
             entity.Property(e => e.CreatedBy).HasMaxLength(255);
+            entity.Property(e => e.ConcurrencyToken).IsConcurrencyToken();
             entity.Property(e => e.CustomerId).HasColumnName("CustomerID");
             entity.Property(e => e.Email).HasColumnType("citext"); // case-insensitive unique email
             entity.Property(e => e.FirstName).HasMaxLength(100);
@@ -258,6 +259,10 @@ public partial class ErpRfqAutomationContext : DbContext
 
             entity.HasIndex(e => e.Name, "IX_Customers_Name");
 
+            entity.HasIndex(e => new { e.Buid, e.DocId }, "UX_Customers_BU_DocId")
+                .IsUnique()
+                .HasFilter("\"DocId\" IS NOT NULL");
+
             entity.HasIndex(e => new { e.Buid, e.ContactEmail }, "UQ_Customers_BUID_ContactEmail")
                 .IsUnique()
                 .HasFilter("\"ContactEmail\" IS NOT NULL");
@@ -272,6 +277,7 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.Buid).HasColumnName("BUID");
             entity.Property(e => e.ContactEmail).HasColumnType("citext"); // case-insensitive unique email (was nvarchar(255) CI in SQL Server)
             entity.Property(e => e.CreatedBy).HasMaxLength(255);
+            entity.Property(e => e.ConcurrencyToken).IsConcurrencyToken();
             entity.Property(e => e.DocId)
                 .HasMaxLength(10)
                 .IsUnicode(false);

@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DTOs.ModuleDTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
@@ -7,21 +8,33 @@ using Microsoft.AspNetCore.Http;
 
 namespace ERP_RFQ_Automation.Controllers
 {
+    /// <summary>
+    /// SEC-H2: <see cref="Module"/> is platform-global reference data — it has no
+    /// BusinessUnitId and no EF global query filter, and its rows are the keys that
+    /// <see cref="RequireModulePermissionAttribute"/> resolves against. Renaming or deleting
+    /// one voids RBAC resolution for EVERY tenant on the platform, so mutations are
+    /// restricted to the tenant super-admin role (the highest tenant-plane authority
+    /// <see cref="IRoleGate"/> recognises). Reads stay available to RBAC administrators so
+    /// the Roles &amp; Permissions matrix can still be rendered.
+    /// </summary>
     [Route("api/[controller]")]
     [ApiController]
     [Authorize]
     public class ModuleController : ControllerBase
     {
         private readonly IModuleRepository _repository;
+        private readonly IRoleGate _roleGate;
         private static readonly int[] AllowedPageSizes = { 5, 10, 25, 50 };
 
-        public ModuleController(IModuleRepository repository)
+        public ModuleController(IModuleRepository repository, IRoleGate roleGate)
         {
             _repository = repository;
+            _roleGate = roleGate;
         }
 
         // GET: api/Module?pageNumber=1&pageSize=10&id=1&moduleName=admin&isActive=true&businessUnitId=1
         [HttpGet]
+        [RequireModulePermission("Roles & Permissions", PermissionAction.View)]
         public async Task<ActionResult<PaginatedResponseDTO<ModuleResponseDTO>>> GetAll(
            
             [FromQuery] int pageNumber = 1,
@@ -62,6 +75,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // GET: api/Module/5
         [HttpGet("{id}")]
+        [RequireModulePermission("Roles & Permissions", PermissionAction.View)]
         public async Task<ActionResult<ModuleResponseDTO>> GetById(long id)
         {
             try
@@ -82,12 +96,16 @@ namespace ERP_RFQ_Automation.Controllers
 
         // POST: api/Module
         [HttpPost]
+        [RequireModulePermission("Roles & Permissions", PermissionAction.Create)]
         public async Task<ActionResult<ModuleResponseDTO>> Create([FromBody] ModuleCreateRequestDTO request)
         {
             try
             {
                 if (!ModelState.IsValid)
                     return BadRequest(ModelState);
+
+                if (!await IsPlatformReferenceDataAdministratorAsync())
+                    return Forbid();
 
                 var module = new Module
                 {
@@ -115,12 +133,16 @@ namespace ERP_RFQ_Automation.Controllers
 
         // PUT: api/Module/5
         [HttpPut("{id}")]
+        [RequireModulePermission("Roles & Permissions", PermissionAction.Edit)]
         public async Task<ActionResult> Update(long id, [FromBody] ModuleUpdateRequestDTO request)
         {
             try
             {
                 if (!ModelState.IsValid)
                     return BadRequest(ModelState);
+
+                if (!await IsPlatformReferenceDataAdministratorAsync())
+                    return Forbid();
 
                 var existing = await _repository.GetByIdAsync(id);
 
@@ -149,10 +171,14 @@ namespace ERP_RFQ_Automation.Controllers
 
         // DELETE: api/Module/5
         [HttpDelete("{id}")]
+        [RequireModulePermission("Roles & Permissions", PermissionAction.Delete)]
         public async Task<ActionResult> Delete(long id)
         {
             try
             {
+                if (!await IsPlatformReferenceDataAdministratorAsync())
+                    return Forbid();
+
                 await _repository.DeleteAsync(id);
                 return NoContent();
             }
@@ -168,6 +194,23 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 return StatusCode(StatusCodes.Status500InternalServerError, $"Error deleting data: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// SEC-H2: only a tenant super admin may mutate the platform-global Modules table.
+        /// Uses the shared <see cref="IRoleGate"/> imperatively (same shape as
+        /// <c>UserController.CanManageRoleAsync</c>) rather than a new attribute, so no new
+        /// authorization abstraction or DI registration is introduced.
+        /// Fail-closed: missing/unparseable roleId or businessUnitId claims are denied.
+        /// </summary>
+        private async Task<bool> IsPlatformReferenceDataAdministratorAsync()
+        {
+            if (!long.TryParse(User.FindFirst("roleId")?.Value, out var roleId) || roleId <= 0)
+                return false;
+            if (!long.TryParse(User.FindFirst("businessUnitId")?.Value, out var businessUnitId) || businessUnitId <= 0)
+                return false;
+
+            return await _roleGate.IsSuperAdminAsync(roleId, businessUnitId);
         }
 
         private ModuleResponseDTO MapToResponse(Module module)

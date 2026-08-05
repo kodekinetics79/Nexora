@@ -1,9 +1,27 @@
 services:
+  # ---------------------------------------------------------------------------
+  # NOTE: the ClamAV private service is intentionally NOT deployed right now.
+  # DocumentInspection__Scanner__Provider is set to BuiltIn below, which is a
+  # structural inspector (content-type sniffing, size caps, OOXML archive and
+  # zip-bomb defence, macro rejection) but is NOT an anti-virus engine and
+  # detects no real malware. It logs REDUCED SECURITY POSTURE on every boot.
+  #
+  # To enable real scanning: paste the `nexora-clamav` service and the
+  # ClamAV__Host fromService reference from docs/RUNBOOK-CLAMAV-RENDER.md
+  # ("Deferred configuration" section), set Provider back to ClamAV, and sync
+  # the Blueprint. Cost: +$85/mo on Render `pro`.
+  # ---------------------------------------------------------------------------
   - type: web
     name: nexora-fyjw
     runtime: docker
     rootDir: Backend
     dockerfilePath: ./Dockerfile
+    # /ready aggregates database + evidence-storage + malware-scanner + the three
+    # worker heartbeats. It stays strict on purpose (docs/nexora/releases/
+    # module-01-governed-ingestion-lead-intelligence.md): an unreachable scanner
+    # must not look healthy. Consequence: a clamd outage makes this service
+    # unhealthy too, and Render restarts an instance after 60s of consecutive
+    # failures. See the "When the scanner is down" section of the runbook.
     healthCheckPath: /ready
     envVars:
       - key: ASPNETCORE_ENVIRONMENT
@@ -24,10 +42,28 @@ services:
         sync: false
       - key: EvidenceStorage__Bucket
         sync: false
-      - key: DocumentInspection__ClamAV__Host
-        sync: false
+      # PILOT POSTURE — READ BEFORE PRODUCTION.
+      # BuiltIn is NOT an anti-virus engine. It performs structural inspection
+      # only (content-type sniffing, size caps, OOXML archive validation,
+      # zip-bomb and zip-slip defence, macro rejection) plus EICAR detection.
+      # It will NOT detect real malware. MalwareScannerFactory logs a
+      # REDUCED SECURITY POSTURE warning on every boot while this is set.
+      # Chosen deliberately to defer the +$85/mo ClamAV service until after the
+      # client pilot. Restore ClamAV per docs/RUNBOOK-CLAMAV-RENDER.md before
+      # any production tenant uploads documents.
+      - key: DocumentInspection__Scanner__Provider
+        value: BuiltIn
+      # Hardcoded rather than `property: port`: that property is documented as
+      # "the port of the service's HTTP server" and clamd does not speak HTTP.
+      # 3310 is clamd's fixed listener in the upstream image.
       - key: DocumentInspection__ClamAV__Port
         value: "3310"
+      # Per-scan deadline. Covers connect + INSTREAM upload + verdict for a
+      # 25 MB file over the private network.
+      - key: DocumentInspection__ClamAV__Timeout
+        value: "00:00:30"
+      - key: DocumentInspection__MalwareVerdictPolicy__MaximumCleanVerdictAge
+        value: "24:00:00"
       - key: ConnectionStrings__DefaultConnection
         sync: false
       - key: ConnectionStrings__MigrationConnection
@@ -37,6 +73,8 @@ services:
       - key: Database__AllowManagedOwnerRoleMigrationCompatibility
         value: "true"
       - key: Jwt__Key
+        sync: false
+      - key: Jwt__PlatformKey
         sync: false
       - key: CommercialFinance__DunningProviderWebhookSecret
         sync: false

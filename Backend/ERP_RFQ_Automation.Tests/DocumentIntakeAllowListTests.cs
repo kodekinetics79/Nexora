@@ -1,0 +1,313 @@
+using System.Collections.Concurrent;
+using ERP_RFQ_Automation.Extraction;
+using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Security.DocumentInspection;
+using ERP_RFQ_Automation.Services;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Logging;
+using MimeKit;
+
+namespace ERP_RFQ_Automation.Tests;
+
+/// <summary>
+/// P1 lead-loss regression + drift guard: the email intake attachment filter and the
+/// document-inspection allow-list had drifted apart in BOTH directions — email accepted
+/// .pptx (which inspection then rejected, a confusing tenant-facing rejection) and
+/// silently dropped .xls/.csv attachments (which inspection accepts) — losing supplier
+/// quotes and customer RFQs that routinely arrive in those formats. The fix makes every
+/// intake filter DERIVE from <see cref="DocumentIntakeAllowList"/>; these tests pin that
+/// contract so the lists can never drift again.
+/// </summary>
+public sealed class DocumentIntakeAllowListTests
+{
+    // ------------------------------------------------------------------ P1 regression
+
+    [Theory]
+    [InlineData(".xls")]
+    [InlineData(".csv")]
+    [InlineData(".XLS")] // filters receive lower-cased extensions, but the set itself is case-insensitive
+    public void EmailAttachmentFilter_Accepts_LegacyExcel_And_Csv(string extension)
+    {
+        Assert.True(EmailService.IsSupportedExtension(extension));
+    }
+
+    [Fact]
+    public void EmailAttachmentFilter_Refuses_Pptx_AtTheFilter()
+    {
+        // Refused up front — never accepted-then-quarantined by inspection.
+        Assert.False(EmailService.IsSupportedExtension(".pptx"));
+        Assert.False(DocumentIntakeAllowList.Extensions.Contains(".pptx"));
+    }
+
+    // ------------------------------------------------------------------ drift guards
+
+    // A probe universe: everything on the allow-list plus formats that must stay out.
+    public static TheoryData<string> ProbeExtensions()
+    {
+        var data = new TheoryData<string>();
+        foreach (var ext in DocumentIntakeAllowList.Extensions) data.Add(ext);
+        foreach (var ext in new[]
+                 { ".pptx", ".ppt", ".exe", ".zip", ".msg", ".eml", ".html", ".js", ".svg", ".dll", ".rar", ".bat", "" })
+            data.Add(ext);
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(ProbeExtensions))]
+    public void EmailFilter_EqualsInspectionAllowList(string extension)
+    {
+        Assert.Equal(
+            DocumentIntakeAllowList.Extensions.Contains(extension),
+            EmailService.IsSupportedExtension(extension));
+    }
+
+    [Theory]
+    [MemberData(nameof(ProbeExtensions))]
+    public void ManualUploadFilter_EqualsInspectionAllowList(string extension)
+    {
+        Assert.Equal(
+            DocumentIntakeAllowList.Extensions.Contains(extension),
+            ManualUploadService.IsSupportedExtension(extension));
+    }
+
+    [Fact]
+    public void InspectionService_UsesTheSharedAllowListAsItsExtensionGate()
+    {
+        // Anything OFF the list is rejected by inspection with the unsupported-extension
+        // reason; anything ON the list gets past the extension gate (content checks may
+        // still reject garbage bytes, but never for its extension).
+        var rejected = Inspect([0x01, 0x02], "deck.pptx");
+        Assert.Equal(FileInspectionStatus.Rejected, rejected.Status);
+        Assert.Contains("not supported", rejected.Reason, StringComparison.OrdinalIgnoreCase);
+
+        foreach (var ext in DocumentIntakeAllowList.Extensions)
+        {
+            var result = Inspect([0x01, 0x02], $"probe{ext}");
+            Assert.DoesNotContain("is not supported", result.Reason, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Fact]
+    public void FolderDoors_AreSubsetsOfTheInspectionAllowList()
+    {
+        // The watched-folder doors are deliberately NARROW (SEC accepts only legacy .doc,
+        // Aramco only .docx, Shared a fixed document set) — that scoping is intentional and
+        // preserved. But nothing a folder door accepts may ever be rejected by inspection.
+        Assert.True(FolderService.SharedFolderExtensions.IsSubsetOf(DocumentIntakeAllowList.Extensions));
+        Assert.Contains(".doc", DocumentIntakeAllowList.Extensions);  // SEC door
+        Assert.Contains(".docx", DocumentIntakeAllowList.Extensions); // Aramco door
+    }
+
+    // ------------------------------------- newly accepted formats clear real inspection
+
+    [Fact]
+    public void Inspection_Clears_RealLegacyXls_And_Csv()
+    {
+        var xls = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", "legacy-rfq.xls"));
+        var csv = "product,qty\n6\" ball valve,10\n"u8.ToArray();
+
+        Assert.Equal(FileInspectionStatus.Cleared, Inspect(xls, "legacy-rfq.xls").Status);
+        Assert.Equal(FileInspectionStatus.Cleared, Inspect(csv, "rates.csv").Status);
+    }
+
+    // ------------------------------------------- end-to-end email intake filter/skips
+
+    [Fact]
+    public async Task EmailIntake_Enqueues_Xls_And_Csv_But_Refuses_Pptx_BeforeIngestion()
+    {
+        var (service, logger, temp) = CreateEmailService();
+        try
+        {
+            var ingestion = new RecordingIngestion();
+            var ingest = new EmailIngest { Id = 42, MessageId = "m-1", FromEmail = "buyer@gulf.example" };
+            var message = BuildMessage("RFQ 4711", "Please quote the attached.",
+                ("quote.xls", "application/vnd.ms-excel"),
+                ("rates.csv", "text/csv"),
+                ("deck.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"));
+
+            var queued = await service.EnqueueEmailForExtractionAsync(
+                message, ingest, Config(), ingestion);
+
+            // body + the two supported attachments
+            Assert.Equal(3, queued);
+            Assert.Contains(ingestion.Calls, c => c.FileName == "quote.xls");
+            Assert.Contains(ingestion.Calls, c => c.FileName == "rates.csv");
+            // .pptx never reaches the ingestion gateway (and therefore never inspection/quarantine)
+            Assert.DoesNotContain(ingestion.Calls, c => c.FileName == "deck.pptx");
+
+            // The skip was not silent: a Warning names the file and the reason...
+            Assert.Contains(logger.Entries, e =>
+                e.Level == LogLevel.Warning &&
+                e.Message.Contains("deck.pptx") &&
+                e.Message.Contains("unsupported file type '.pptx'"));
+
+            // ...and the durable body-job provenance metadata carries the summary.
+            var body = Assert.Single(ingestion.Calls, c => c.FileName.EndsWith("_body.txt", StringComparison.Ordinal));
+            Assert.NotNull(body.Metadata?.SkippedAttachments);
+            Assert.Contains(body.Metadata!.SkippedAttachments!,
+                s => s.Contains("deck.pptx") && s.Contains(".pptx"));
+
+            // Supported attachments carry the correct file-type label.
+            Assert.Equal("Excel", Assert.Single(ingestion.Calls, c => c.FileName == "quote.xls").Metadata?.EmailSource);
+            Assert.Equal("CSV", Assert.Single(ingestion.Calls, c => c.FileName == "rates.csv").Metadata?.EmailSource);
+        }
+        finally
+        {
+            try { Directory.Delete(temp, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public async Task EmailIntake_SurfacesSkippedAttachments_OnTheIngestRecord_WhenNothingWasQueued()
+    {
+        var (service, logger, temp) = CreateEmailService();
+        try
+        {
+            var ingestion = new RecordingIngestion();
+            var ingest = new EmailIngest { Id = 7, MessageId = "m-2", FromEmail = "buyer@gulf.example", ParseStatus = "Pending" };
+            // No body text and only an unsupported attachment -> nothing enqueuable.
+            var message = BuildMessage("RFQ 4712", body: null,
+                ("deck.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"));
+
+            var queued = await service.EnqueueEmailForExtractionAsync(
+                message, ingest, Config(), ingestion);
+
+            Assert.Equal(0, queued);
+            Assert.Empty(ingestion.Calls);
+            Assert.Contains(logger.Entries, e => e.Level == LogLevel.Warning && e.Message.Contains("deck.pptx"));
+            // Tenant-visible ingest record shows the loss instead of a bare "Failed".
+            Assert.Equal("Failed - 1 attachment(s) skipped", ingest.ParseStatus);
+        }
+        finally
+        {
+            try { Directory.Delete(temp, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    // ------------------------------------------------------------------ test plumbing
+
+    private static FileInspectionResult Inspect(byte[] bytes, string fileName)
+    {
+        var service = new DocumentFileInspectionService(new EicarMalwareScanner());
+        using var stream = new MemoryStream(bytes, writable: false);
+        return service.InspectAsync(new FileInspectionRequest(
+            stream, fileName, DeclaredLength: bytes.LongLength)).GetAwaiter().GetResult();
+    }
+
+    private static EmailConfiguration Config() => new()
+    {
+        Id = 1,
+        BusinessUnitId = 9,
+        ConfigurationName = "intake",
+        EmailAddress = "intake@tenant.example",
+        Protocol = "IMAP",
+        Host = "localhost",
+        Port = 993,
+        Username = "u",
+        Password = "p"
+    };
+
+    private static MimeMessage BuildMessage(
+        string subject, string? body, params (string FileName, string ContentType)[] attachments)
+    {
+        var message = new MimeMessage();
+        message.From.Add(new MailboxAddress("Buyer", "buyer@gulf.example"));
+        message.To.Add(new MailboxAddress("Intake", "intake@tenant.example"));
+        message.Subject = subject;
+        message.MessageId = MimeKit.Utils.MimeUtils.GenerateMessageId();
+
+        var builder = new BodyBuilder();
+        if (body != null) builder.TextBody = body;
+        foreach (var (fileName, contentType) in attachments)
+        {
+            builder.Attachments.Add(fileName, new byte[] { 0x01, 0x02, 0x03 },
+                MimeKit.ContentType.Parse(contentType));
+        }
+        message.Body = builder.ToMessageBody();
+        return message;
+    }
+
+    private static (EmailService Service, CapturingLogger Logger, string TempRoot) CreateEmailService()
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "nexora-intake-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        var logger = new CapturingLogger();
+        var service = new EmailService(
+            context: null!, // EnqueueEmailForExtractionAsync never touches the DbContext
+            env: new StubEnvironment(temp),
+            logger: logger,
+            llmService: new Support.StubLlm(),
+            scopeFactory: new StubScopeFactory(),
+            configuration: new ConfigurationBuilder().Build(),
+            storage: new TempStorage(temp));
+        return (service, logger, temp);
+    }
+
+    private sealed class RecordingIngestion : IDocumentIngestion
+    {
+        public sealed record Call(string FileName, long BusinessUnitId, ExtractionSourceType SourceType,
+            ExtractionJobMetadata? Metadata);
+
+        public ConcurrentQueue<Call> Calls { get; } = new();
+        private long _nextJobId;
+
+        public Task<IngestedDocument> IngestAsync(
+            byte[] bytes, string fileName, long businessUnitId, ExtractionSourceType sourceType,
+            Guid? batchId = null, int priority = 0, ExtractionJobMetadata? metadata = null,
+            CancellationToken ct = default)
+        {
+            Calls.Enqueue(new Call(fileName, businessUnitId, sourceType, metadata));
+            return Task.FromResult(new IngestedDocument
+            {
+                JobId = Interlocked.Increment(ref _nextJobId),
+                SourceDocumentOccurrenceId = 1,
+                BatchId = batchId ?? Guid.NewGuid(),
+                ContentHash = new string('a', 64),
+                StoragePath = "test",
+                Outcome = EnqueueOutcome.Enqueued
+            });
+        }
+    }
+
+    private sealed class CapturingLogger : ILogger<EmailService>
+    {
+        public sealed record Entry(LogLevel Level, string Message);
+        public ConcurrentQueue<Entry> Entries { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+            => Entries.Enqueue(new Entry(logLevel, formatter(state, exception)));
+    }
+
+    private sealed class StubEnvironment(string root) : IWebHostEnvironment
+    {
+        public string WebRootPath { get; set; } = root;
+        public IFileProvider WebRootFileProvider { get; set; } = new NullFileProvider();
+        public string ApplicationName { get; set; } = "tests";
+        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
+        public string ContentRootPath { get; set; } = root;
+        public string EnvironmentName { get; set; } = "Test";
+    }
+
+    private sealed class StubScopeFactory : IServiceScopeFactory
+    {
+        public IServiceScope CreateScope() =>
+            throw new InvalidOperationException("The intake tests never resolve a scope.");
+    }
+
+    private sealed class TempStorage(string root) : ERP_RFQ_Automation.Infrastructure.Storage.IFileStorage
+    {
+        public string RootPath => root;
+        public string ResolvePath(string storagePath) => Path.Combine(root, storagePath);
+        public string GetPath(params string[] segments) => Path.Combine([root, .. segments]);
+        public Task<string> WriteImmutableAsync(string relativePath, ReadOnlyMemory<byte> content, CancellationToken ct = default)
+            => throw new InvalidOperationException("The intake tests never write immutable objects.");
+        public Task<Stream> OpenReadAsync(string storagePath, CancellationToken ct = default)
+            => throw new InvalidOperationException("The intake tests never read storage.");
+    }
+}

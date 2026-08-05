@@ -51,6 +51,8 @@ public partial class Customer
 
     public DateTime? ModifiedOn { get; set; }
 
+    public Guid ConcurrencyToken { get; set; }
+
     public virtual BusinessUnit? Bu { get; set; }
 
     public virtual ICollection<Contact> Contacts { get; set; } = new List<Contact>();

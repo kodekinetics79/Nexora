@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.Infrastructure;
+using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.Platform.Models;
@@ -61,7 +62,7 @@ public sealed class DemoUserSeederTests : IDisposable
         var provider = BuildProvider();
 
         // No DemoUser:Enabled key at all — must fail closed.
-        await DemoUserSeeder.EnsureAsync(provider, Config(new()), new FakeEnv());
+        await DemoUserSeeder.EnsureAsync(provider, Config(new()), new FakeEnv { EnvironmentName = "Development" });
 
         await using var db = NewContext();
         Assert.Equal(0, await db.Users.CountAsync());
@@ -74,7 +75,7 @@ public sealed class DemoUserSeederTests : IDisposable
         var provider = BuildProvider();
         var config = Config(new() { ["DemoUser:Enabled"] = "true" }); // enabled, but no passwords supplied
 
-        await DemoUserSeeder.EnsureAsync(provider, config, new FakeEnv());
+        await DemoUserSeeder.EnsureAsync(provider, config, new FakeEnv { EnvironmentName = "Development" });
 
         await using var db = NewContext();
         Assert.Equal(0, await db.Users.CountAsync());
@@ -92,7 +93,7 @@ public sealed class DemoUserSeederTests : IDisposable
         });
 
         // First run creates the users.
-        await DemoUserSeeder.EnsureAsync(BuildProvider(), config, new FakeEnv());
+        await DemoUserSeeder.EnsureAsync(BuildProvider(), config, new FakeEnv { EnvironmentName = "Development" });
 
         string userHashAfterFirstRun;
         string ownerHashAfterFirstRun;
@@ -109,7 +110,7 @@ public sealed class DemoUserSeederTests : IDisposable
             ["DemoUser:Password"] = "AttackerControlled!2",
             ["PlatformOwner:Password"] = "AttackerControlled!2",
         });
-        await DemoUserSeeder.EnsureAsync(BuildProvider(), rotatedConfig, new FakeEnv());
+        await DemoUserSeeder.EnsureAsync(BuildProvider(), rotatedConfig, new FakeEnv { EnvironmentName = "Development" });
 
         await using (var db = NewContext())
         {
@@ -118,6 +119,113 @@ public sealed class DemoUserSeederTests : IDisposable
             // The password hash must be unchanged from the first run — the restart must not reset it.
             Assert.Equal(userHashAfterFirstRun, user.PasswordHash);
             Assert.Equal(ownerHashAfterFirstRun, owner.PasswordHash);
+        }
+    }
+
+    [Fact]
+    public async Task Seeder_provisions_one_fail_closed_ai_policy()
+    {
+        var config = Config(new()
+        {
+            ["DemoUser:Enabled"] = "true",
+            ["DemoUser:Password"] = "FirstRunSecret!1",
+            ["PlatformOwner:Password"] = "FirstRunSecret!1",
+        });
+
+        await DemoUserSeeder.EnsureAsync(BuildProvider(), config, new FakeEnv { EnvironmentName = "Development" });
+        await DemoUserSeeder.EnsureAsync(BuildProvider(), config, new FakeEnv { EnvironmentName = "Development" });
+
+        await using var db = NewContext();
+        var policy = await db.Set<AiProcessingPolicy>().SingleAsync();
+        Assert.False(policy.ExternalProcessingAllowed);
+        Assert.True(policy.RedactionRequired);
+        Assert.True(policy.PrivacyReviewRequired);
+        Assert.Equal(10m, policy.ExternalDependencyCeilingPercent);
+    }
+
+    [Fact]
+    public async Task Seeder_refuses_to_run_in_production()
+    {
+        var config = Config(new()
+        {
+            ["DemoUser:Enabled"] = "true",
+            ["DemoUser:Password"] = "FirstRunSecret!1",
+            ["PlatformOwner:Password"] = "FirstRunSecret!1",
+        });
+
+        // Fully configured and explicitly enabled — Production must still refuse. The seeder runs
+        // outside any HttpContext, so it executes with a null tenant (EF filters off) under the
+        // BYPASSRLS pipeline role, and it grants Super Admin. That combination has no place in
+        // Production even when an operator switched it on.
+        await DemoUserSeeder.EnsureAsync(BuildProvider(), config, new FakeEnv { EnvironmentName = "Production" });
+
+        await using var db = NewContext();
+        Assert.Equal(0, await db.Users.CountAsync());
+        Assert.Equal(0, await db.Set<PlatformUser>().CountAsync());
+        Assert.Equal(0, await db.BusinessUnits.CountAsync());
+    }
+
+    [Fact]
+    public async Task Seeder_never_adopts_an_existing_account_from_another_business_unit()
+    {
+        const string sharedEmail = "robert@example.com";
+
+        // A REAL tenant, with a real user whose address happens to match DemoUser:Email.
+        // Users.Email is globally unique, so an email-only lookup finds this row.
+        await using (var db = NewContext())
+        {
+            db.BusinessUnits.Add(new BusinessUnit
+            {
+                Id = 77,
+                BusinessUnitCode = "REAL-TENANT",
+                BusinessUnitName = "Real Tenant",
+                IsActive = true,
+                CreatedBy = "test",
+                CreatedOn = DateTime.UtcNow
+            });
+            db.Users.Add(new User
+            {
+                Id = 501,
+                FirstName = "Real",
+                LastName = "Customer",
+                Email = sharedEmail,
+                PasswordHash = "$2a$11$realcustomerhash",
+                ImageUrl = string.Empty,
+                RoleId = null,
+                Buid = 77,
+                IsActive = true,
+                CreatedBy = "test",
+                CreatedOn = DateTime.UtcNow
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var config = Config(new()
+        {
+            ["DemoUser:Enabled"] = "true",
+            ["DemoUser:Email"] = sharedEmail,
+            ["DemoUser:Password"] = "FirstRunSecret!1",
+            ["PlatformOwner:Password"] = "FirstRunSecret!1",
+        });
+
+        await DemoUserSeeder.EnsureAsync(
+            BuildProvider(), config, new FakeEnv { EnvironmentName = "Development" });
+
+        await using (var db = NewContext())
+        {
+            var demoBusinessUnit = await db.BusinessUnits.SingleAsync(b => b.BusinessUnitCode == "CUSTOMER-POC");
+            var superAdmin = await db.SetupMasters.SingleAsync(s => s.SetupCode == "SUPER_ADMIN");
+            var untouched = await db.Users.SingleAsync(u => u.Id == 501);
+
+            // The real account must still belong to its own tenant, keep its own password, and
+            // must NOT have been handed the demo tenant's Super Admin role.
+            Assert.Equal(77, untouched.Buid);
+            Assert.Equal("$2a$11$realcustomerhash", untouched.PasswordHash);
+            Assert.NotEqual(superAdmin.SetupId, untouched.RoleId);
+            Assert.NotEqual(demoBusinessUnit.Id, untouched.Buid);
+
+            // And no duplicate demo user was created behind it.
+            Assert.Equal(1, await db.Users.CountAsync(u => u.Email == sharedEmail));
         }
     }
 

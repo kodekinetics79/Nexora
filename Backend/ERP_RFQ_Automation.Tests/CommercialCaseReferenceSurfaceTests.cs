@@ -8,6 +8,23 @@ namespace ERP_RFQ_Automation.Tests;
 public sealed class CommercialCaseReferenceSurfaceTests
 {
     [Fact]
+    public async Task Lead_list_exposes_the_persisted_ingestion_timestamp()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(null);
+        var ingestedAt = new DateTimeOffset(2026, 7, 29, 14, 30, 0, TimeSpan.Zero);
+        var lead = Seed.Lead(context, 700, 70);
+        lead.IngestedAtUtc = ingestedAt;
+        await context.SaveChangesAsync();
+
+        var (rows, count) = await new LeadRepository(context)
+            .GetLeadListAsync(1, 10, null, null, null, null, 70);
+
+        Assert.Equal(1, count);
+        Assert.Equal(ingestedAt, Assert.Single(rows).IngestedAtUtc);
+    }
+
+    [Fact]
     public async Task Lead_detail_exposes_the_commercial_case_reference()
     {
         using var db = new TestDb();

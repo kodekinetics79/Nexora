@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Security.Claims;
 using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Controllers;
+using ERP_RFQ_Automation.DTOs.Contact;
 using ERP_RFQ_Automation.DTOs.CustomerDTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
@@ -9,6 +10,7 @@ using ERP_RFQ_Automation.Security.DocumentInspection;
 using ERP_RFQ_Automation.Services;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Routing;
@@ -20,30 +22,46 @@ namespace ERP_RFQ_Automation.Tests;
 public sealed class CustomerContactAuthorizationTests
 {
     [Fact]
-    public void ContactActions_RequireCustomerModulePermissions()
+    public void ContactActions_UseParentAwarePermissionsWhileDropdownsRemainStatic()
     {
-        var expected = new Dictionary<string, PermissionAction>
+        var parentAware = new[]
         {
-            [nameof(ContactController.GetAll)] = PermissionAction.View,
-            [nameof(ContactController.GetById)] = PermissionAction.View,
-            [nameof(ContactController.Create)] = PermissionAction.Create,
-            [nameof(ContactController.Update)] = PermissionAction.Edit,
-            [nameof(ContactController.Delete)] = PermissionAction.Delete,
-            [nameof(ContactController.GetCustomers)] = PermissionAction.View,
-            [nameof(ContactController.GetSuppliers)] = PermissionAction.View
+            nameof(ContactController.GetAll), nameof(ContactController.GetById),
+            nameof(ContactController.Create), nameof(ContactController.Update),
+            nameof(ContactController.Delete)
         };
-        var actions = typeof(ContactController).GetMethods(
-                BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly)
-            .Where(method => method.GetCustomAttributes<HttpMethodAttribute>(true).Any())
-            .ToArray();
+        foreach (var actionName in parentAware)
+            Assert.Empty(typeof(ContactController).GetMethod(actionName)!
+                .GetCustomAttributes<RequireModulePermissionAttribute>(true));
 
-        Assert.Equal(expected.Keys.Order(), actions.Select(action => action.Name).Order());
-        foreach (var action in actions)
-        {
-            var permission = Assert.Single(action.GetCustomAttributes<RequireModulePermissionAttribute>(true));
-            Assert.Equal("Customers", permission.ModuleName);
-            Assert.Equal(expected[action.Name], permission.Action);
-        }
+        var customers = Assert.Single(typeof(ContactController).GetMethod(nameof(ContactController.GetCustomers))!
+            .GetCustomAttributes<RequireModulePermissionAttribute>(true));
+        Assert.Equal("Customers", customers.ModuleName);
+        Assert.Equal(PermissionAction.View, customers.Action);
+
+        var suppliers = Assert.Single(typeof(ContactController).GetMethod(nameof(ContactController.GetSuppliers))!
+            .GetCustomAttributes<RequireModulePermissionAttribute>(true));
+        Assert.Equal("Suppliers", suppliers.ModuleName);
+        Assert.Equal(PermissionAction.View, suppliers.Action);
+    }
+
+    [Fact]
+    public async Task SupplierContactRead_UsesSupplierPermissionAndCustomerContactUsesCustomerPermission()
+    {
+        using var database = new TestDb();
+        await using var context = database.ContextFor(41);
+        var repository = new CapturingContactRepository();
+        var authorization = new RecordingAuthorizationService(policy =>
+            policy.Contains("Suppliers:View", StringComparison.Ordinal));
+        var controller = CreateContactController(repository, context, authorization, 41);
+
+        repository.Result = new Contact { Id = 7, SupplierId = 11, FirstName = "Supply", LastName = "Owner" };
+        Assert.IsType<OkObjectResult>((await controller.GetById(7)).Result);
+        Assert.Contains(authorization.Policies, policy => policy.Contains("Suppliers:View", StringComparison.Ordinal));
+
+        repository.Result = new Contact { Id = 8, CustomerId = 12, FirstName = "Buyer", LastName = "Owner" };
+        Assert.IsType<ForbidResult>((await controller.GetById(8)).Result);
+        Assert.Contains(authorization.Policies, policy => policy.Contains("Customers:View", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -97,30 +115,45 @@ public sealed class CustomerContactAuthorizationTests
         Assert.IsType<BadRequestObjectResult>((await controller.GetById(7)).Result);
         Assert.IsType<BadRequestObjectResult>((await controller.Create(new CustomerCreateRequestDTO
         {
-            Name = "Forged customer", Buid = 999, CreatedBy = "attacker"
+            Name = "Forged customer"
         })).Result);
         Assert.IsType<BadRequestObjectResult>(await controller.Update(7, new CustomerUpdateRequestDTO
         {
-            Name = "Forged customer", Buid = 999, ModifiedBy = "attacker"
+            Name = "Forged customer", ConcurrencyToken = Guid.NewGuid()
         }));
-        Assert.IsType<BadRequestObjectResult>(await controller.Delete(7));
+        Assert.IsType<BadRequestObjectResult>(await controller.Delete(7, Guid.NewGuid()));
         Assert.False(repository.WasAccessed);
     }
 
     [Fact]
-    public async Task CustomerCreate_OverridesForgedFormTenantWithAuthenticatedTenant()
+    public async Task CustomerCreate_UsesAuthenticatedTenantAndActor()
     {
         var repository = new CapturingCustomerRepository();
         var controller = CreateCustomerController(repository, "41");
 
         var result = await controller.Create(new CustomerCreateRequestDTO
         {
-            Name = "Authorized customer", Buid = 999, CreatedBy = "test-user"
+            Name = "Authorized customer"
         });
 
         Assert.IsType<CreatedAtActionResult>(result.Result);
         Assert.Equal(41, repository.AddedCustomer?.Buid);
         Assert.Equal("test-user", repository.AddedCustomer?.CreatedBy);
+    }
+
+    [Fact]
+    public async Task CustomerCreate_MapsDatabase_identity_race_to_safe_conflict()
+    {
+        var repository = new CapturingCustomerRepository
+        {
+            Exception = new Microsoft.EntityFrameworkCore.DbUpdateException("provider details")
+        };
+        var controller = CreateCustomerController(repository, "41");
+
+        var result = await controller.Create(new CustomerCreateRequestDTO { Name = "Racing customer" });
+
+        var conflict = Assert.IsType<ConflictObjectResult>(result.Result);
+        Assert.DoesNotContain("provider", conflict.Value?.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -135,7 +168,7 @@ public sealed class CustomerContactAuthorizationTests
 
         var result = await controller.Create(new CustomerCreateRequestDTO
         {
-            Name = "Customer", Buid = 41, CreatedBy = "forged", ImageFile = image
+            Name = "Customer", ImageFile = image
         });
 
         Assert.IsType<BadRequestObjectResult>(result.Result);
@@ -262,6 +295,21 @@ public sealed class CustomerContactAuthorizationTests
         };
     }
 
+    private static ContactController CreateContactController(
+        IContactRepository repository,
+        ErpRfqAutomationContext context,
+        IAuthorizationService authorization,
+        long tenant)
+    {
+        return new ContactController(repository, context, authorization)
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = new DefaultHttpContext { User = Principal(tenant) }
+            }
+        };
+    }
+
     private static ClaimsPrincipal Principal(long tenant) => new(new ClaimsIdentity(
         [new Claim(ClaimTypes.NameIdentifier, "test-user"), new Claim("businessUnitId", tenant.ToString())],
         "Test"));
@@ -322,26 +370,66 @@ public sealed class CustomerContactAuthorizationTests
             return Task.FromResult(Result ?? new Customer { Id = id, Name = "Customer", Buid = businessUnitId });
         }
 
-        public Task AddAsync(Customer customer)
+        public Task AddAsync(Customer customer, long businessUnitId, string actor)
         {
             WasAccessed = true;
+            if (Exception is not null)
+                throw Exception;
+            customer.Buid = businessUnitId;
+            customer.CreatedBy = actor;
             AddedCustomer = customer;
             return Task.CompletedTask;
         }
 
-        public Task UpdateAsync(Customer customer, long businessUnitId)
+        public Task UpdateAsync(Customer customer, long businessUnitId, string actor, Guid expectedConcurrencyToken)
         {
             WasAccessed = true;
             CapturedBusinessUnitId = businessUnitId;
             return Task.CompletedTask;
         }
 
-        public Task DeleteAsync(long id, long businessUnitId)
+        public Task DeleteAsync(long id, long businessUnitId, string actor, Guid expectedConcurrencyToken)
         {
             WasAccessed = true;
             CapturedBusinessUnitId = businessUnitId;
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class CapturingContactRepository : IContactRepository
+    {
+        public Contact Result { get; set; } = null!;
+
+        public Task<Contact> GetByIdAsync(long id, long businessUnitId) => Task.FromResult(Result);
+        public Task<(IEnumerable<ContactResponseDTO>, int TotalCount)> GetAllAsync(
+            int pageNumber, int pageSize, long? id, string? firstName, string? lastName,
+            string? email, long? customerId, long? supplierId, bool? isPrimary,
+            bool? isActive, long businessUnitId) => throw new NotSupportedException();
+        public Task AddAsync(Contact contact, long businessUnitId, string actor) => throw new NotSupportedException();
+        public Task UpdateAsync(Contact contact, long businessUnitId, string actor, Guid expectedConcurrencyToken) => throw new NotSupportedException();
+        public Task DeleteAsync(long id, long businessUnitId, string actor, Guid expectedConcurrencyToken) => throw new NotSupportedException();
+        public Task<IEnumerable<CustomerDropdown>> GetCustomersAsync(long businessUnitId) => throw new NotSupportedException();
+        public Task<IEnumerable<SupplierDropDown>> GetSuppliersAsync(long businessUnitId) => throw new NotSupportedException();
+    }
+
+    private sealed class RecordingAuthorizationService(Func<string, bool> authorize) : IAuthorizationService
+    {
+        public List<string> Policies { get; } = [];
+
+        public Task<AuthorizationResult> AuthorizeAsync(
+            ClaimsPrincipal user, object? resource, string policyName)
+        {
+            Policies.Add(policyName);
+            return Task.FromResult(authorize(policyName)
+                ? AuthorizationResult.Success()
+                : AuthorizationResult.Failed());
+        }
+
+        public Task<AuthorizationResult> AuthorizeAsync(
+            ClaimsPrincipal user,
+            object? resource,
+            IEnumerable<IAuthorizationRequirement> requirements) =>
+            Task.FromResult(AuthorizationResult.Failed());
     }
 
     private sealed class TestWebHostEnvironment : IWebHostEnvironment

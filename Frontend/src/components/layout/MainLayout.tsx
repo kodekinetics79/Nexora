@@ -3,9 +3,13 @@ import { Box, Drawer, Toolbar, CssBaseline, useMediaQuery, useTheme } from '@mui
 import Sidebar from './Sidebar';
 import Navbar from './Navbar';
 import Branding from '../common/Branding';
+import SkipLink, { MAIN_CONTENT_ID } from './SkipLink';
 
 const drawerWidth = 280;
 const collapsedWidth = 88;
+
+/** Referenced by the Navbar toggle's `aria-controls`. */
+export const SIDEBAR_NAV_ID = 'app-sidebar';
 
 interface MainLayoutProps {
   children: React.ReactNode;
@@ -23,16 +27,28 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
   };
 
   const currentWidth = collapsed ? collapsedWidth : drawerWidth;
+  // On mobile the sidebar is shown/hidden; on desktop it is expanded/collapsed.
+  const sidebarExpanded = isMobile ? mobileOpen : !collapsed;
 
   return (
     <Box sx={{ display: 'flex' }}>
       <CssBaseline />
-      
-      <Navbar onToggleSidebar={toggleSidebar} drawerWidth={currentWidth} />
+
+      {/* SC 2.4.1 — first tab stop on every authenticated page. */}
+      <SkipLink />
+
+      <Navbar
+        onToggleSidebar={toggleSidebar}
+        drawerWidth={currentWidth}
+        sidebarExpanded={sidebarExpanded}
+        sidebarId={SIDEBAR_NAV_ID}
+      />
 
       <Box
         component="nav"
-        sx={{ 
+        id={SIDEBAR_NAV_ID}
+        aria-label="Main"
+        sx={{
           width: { sm: currentWidth }, 
           flexShrink: { sm: 0 },
           transition: (theme) => theme.transitions.create('width', {
@@ -82,8 +98,18 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
 
       <Box
         component="main"
-        sx={{ 
-          flexGrow: 1, 
+        id={MAIN_CONTENT_ID}
+        // tabIndex -1 makes the landmark programmatically focusable so the skip
+        // link and RouteAnnouncer can move focus here (SC 2.4.1 / SC 2.4.3)
+        // without adding it to the natural tab order.
+        tabIndex={-1}
+        sx={{
+          flexGrow: 1,
+          '&:focus': { outline: 'none' },
+          '&:focus-visible': {
+            outline: (theme) => `3px solid ${theme.palette.primary.main}`,
+            outlineOffset: -3,
+          },
           p: 1.5, 
           width: { sm: `calc(100% - ${currentWidth}px)` },
           minWidth: 0,

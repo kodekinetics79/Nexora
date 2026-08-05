@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
-  Box, Typography, Paper, Button, Chip, IconButton,
+  Box, Typography, Paper, Button, Chip, IconButton, Alert,
   Dialog, DialogTitle, DialogContent, DialogActions,
   Grid, FormControlLabel, Switch, TextField, CircularProgress,
   Table, TableHead, TableRow, TableCell, TableBody,
@@ -13,11 +13,10 @@ import { DataGrid, type GridColDef, type GridPaginationModel } from '@mui/x-data
 import {
   Add as AddIcon, Edit as EditIcon, Delete as DeleteIcon,
   PersonAdd as PersonAddIcon, Save as SaveIcon, Close as CloseIcon,
-  CloudUpload as UploadIcon, Business as BusinessIcon,
   LocationOn as LocationIcon, Paid as CurrencyIcon,
   Visibility as ViewIcon,
 } from '@mui/icons-material';
-import { Avatar, Badge, Stack } from '@mui/material';
+import { Stack } from '@mui/material';
 import supplierService, { type SupplierDTO } from '../../api/services/supplierService';
 import contactService, { type ContactDTO } from '../../api/services/contactService';
 import currencyService from '../../api/services/currencyService';
@@ -34,10 +33,10 @@ const emptySupplier = {
   addressLine1: '', addressLine2: '', postalCode: '',
   tags: '', comments: '', isActive: true,
   cityId: '' as any, countryId: '' as any, currencyId: '' as any,
-  successRate: 0, avgResponseTime: 0,
+  concurrencyToken: '',
 };
 
-type SupplierFormState = typeof emptySupplier & { imageFile?: File | null };
+type SupplierFormState = typeof emptySupplier;
 
 const emptyContact = {
   firstName: '', middleName: '', lastName: '', email: '',
@@ -89,10 +88,12 @@ const ContactSubForm: React.FC<{
             control={<Switch size="small" checked={value.isPrimary} onChange={(e) => onChange({ ...value, isPrimary: e.target.checked })} />}
             label={<Typography variant="caption" sx={{ fontWeight: 700 }}>Primary</Typography>}
           />
-          <FormControlLabel
-            control={<Switch size="small" checked={value.isActive} onChange={(e) => onChange({ ...value, isActive: e.target.checked })} />}
-            label={<Typography variant="caption" sx={{ fontWeight: 700 }}>Active</Typography>}
-          />
+          {isEdit
+            ? <Chip size="small" label={value.isActive ? 'Active' : 'Inactive'} color={value.isActive ? 'success' : 'default'} variant="outlined" />
+            : <FormControlLabel
+                control={<Switch size="small" checked={value.isActive} onChange={(e) => onChange({ ...value, isActive: e.target.checked })} />}
+                label={<Typography variant="caption" sx={{ fontWeight: 700 }}>Active</Typography>}
+              />}
         </Grid>
         <Grid size={{ xs: 12 }} sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1 }}>
           <Button size="small" onClick={onCancel} color="inherit" startIcon={<CloseIcon />}>Cancel</Button>
@@ -109,9 +110,15 @@ const ContactSubForm: React.FC<{
 const SuppliersPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { userData } = useAuth();
+  const { userData, hasPermission } = useAuth();
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
+  const canCreateSupplier = hasPermission('Suppliers', 'create');
+  const canEditSupplier = hasPermission('Suppliers', 'edit');
+  const canViewContacts = hasPermission('Suppliers');
+  const canCreateContact = hasPermission('Suppliers', 'create');
+  const canEditContact = hasPermission('Suppliers', 'edit');
+  const canDeleteContact = hasPermission('Suppliers', 'delete');
 
   // List state
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
@@ -128,7 +135,7 @@ const SuppliersPage: React.FC = () => {
   const [contactForm, setContactForm] = useState(emptyContact);
 
   // ── Queries ──
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['suppliers', paginationModel, search],
     queryFn: () => supplierService.getAll({
       pageNumber: paginationModel.page + 1,
@@ -140,7 +147,7 @@ const SuppliersPage: React.FC = () => {
   const { data: contacts = [], isLoading: contactsLoading } = useQuery({
     queryKey: ['supplier-contacts', selectedRecord?.id],
     queryFn: () => contactService.getBySupplier(selectedRecord!.id),
-    enabled: !!selectedRecord?.id && isModalOpen,
+    enabled: !!selectedRecord?.id && isModalOpen && canViewContacts,
   });
 
   const f = (field: string) => (e: React.ChangeEvent<HTMLInputElement | { name?: string; value: unknown }>) =>
@@ -178,7 +185,10 @@ const SuppliersPage: React.FC = () => {
       enqueueSnackbar('Supplier created!', { variant: 'success' });
       setIsModalOpen(false);
     },
-    onError: () => enqueueSnackbar('Failed to create supplier', { variant: 'error' }),
+    onError: (error: any) => enqueueSnackbar(
+      error?.response?.data?.detail || error?.response?.data || 'Failed to create supplier',
+      { variant: 'error' },
+    ),
   });
 
   const updateMutation = useMutation({
@@ -188,7 +198,10 @@ const SuppliersPage: React.FC = () => {
       enqueueSnackbar('Supplier updated!', { variant: 'success' });
       setIsModalOpen(false);
     },
-    onError: () => enqueueSnackbar('Failed to update supplier', { variant: 'error' }),
+    onError: (error: any) => enqueueSnackbar(
+      error?.response?.data?.detail || error?.response?.data || 'Failed to update supplier',
+      { variant: 'error' },
+    ),
   });
 
   // ── Contact mutations ──
@@ -216,7 +229,7 @@ const SuppliersPage: React.FC = () => {
   });
 
   const deleteContactMutation = useMutation({
-    mutationFn: (id: number) => contactService.delete(id),
+    mutationFn: (contact: ContactDTO) => contactService.delete(contact.id, contact.concurrencyToken),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['supplier-contacts', selectedRecord?.id] });
       enqueueSnackbar('Contact removed', { variant: 'info' });
@@ -226,6 +239,7 @@ const SuppliersPage: React.FC = () => {
 
   // ── Handlers ──
   const handleEdit = (record: SupplierDTO) => {
+    if (!canEditSupplier) return;
     setSelectedRecord(record);
     setFormData({
       name: record.name ?? '', contactEmail: record.contactEmail ?? '',
@@ -233,13 +247,14 @@ const SuppliersPage: React.FC = () => {
       addressLine2: record.addressLine2 ?? '', postalCode: record.postalCode ?? '',
       tags: record.tags ?? '', comments: record.comments ?? '', isActive: record.isActive ?? true,
       cityId: record.cityId ?? '', countryId: record.countryId ?? '', currencyId: record.currencyId ?? '',
-      successRate: record.successRate ?? 0, avgResponseTime: record.avgResponseTime ?? 0,
+      concurrencyToken: record.concurrencyToken ?? '',
     });
     setShowContactForm(false);
     setIsModalOpen(true);
   };
 
   const handleAddNew = () => {
+    if (!canCreateSupplier) return;
     setSelectedRecord(null);
     setFormData(emptySupplier);
     setShowContactForm(false);
@@ -248,13 +263,18 @@ const SuppliersPage: React.FC = () => {
   };
 
   const handleSaveSupplier = () => {
+    if (selectedRecord ? !canEditSupplier : !canCreateSupplier) return;
+    if (!formData.name.trim()) {
+      enqueueSnackbar('Supplier name is required.', { variant: 'warning' });
+      return;
+    }
+    if (formData.contactEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.contactEmail)) {
+      enqueueSnackbar('Enter a valid Supplier contact email.', { variant: 'warning' });
+      return;
+    }
     const fd = new FormData();
     Object.entries(formData).forEach(([k, v]) => {
-      if (k === 'imageFile') {
-        if (v) fd.append('ImageFile', v as File);
-      } else {
-        fd.append(k, String(v));
-      }
+      if (k !== 'isActive' && v !== '') fd.append(k, String(v));
     });
     fd.append(selectedRecord ? 'modifiedBy' : 'createdBy', userData.userName || 'System');
     selectedRecord
@@ -274,11 +294,12 @@ const SuppliersPage: React.FC = () => {
       }
     }
 
+    const { isActive, ...editableContact } = contactForm;
     const body: Partial<ContactDTO> = {
-      ...contactForm,
+      ...editableContact,
       supplierId: selectedRecord.id,
-      createdBy: userData.userName || 'System',
-      ...(editingContact ? { modifiedBy: userData.userName || 'System' } : {}),
+      ...(!editingContact ? { isActive } : {}),
+      ...(editingContact ? { concurrencyToken: editingContact.concurrencyToken } : {}),
     };
     editingContact
       ? updateContactMutation.mutate({ id: editingContact.id, body })
@@ -318,9 +339,9 @@ const SuppliersPage: React.FC = () => {
           <Tooltip title="View Details">
             <IconButton size="small" color="primary" onClick={() => navigate(`/suppliers/${p.row.id}`)}><ViewIcon fontSize="small" /></IconButton>
           </Tooltip>
-          <Tooltip title="Edit">
+          {canEditSupplier && <Tooltip title="Edit">
             <IconButton size="small" color="info" onClick={() => handleEdit(p.row)}><EditIcon fontSize="small" /></IconButton>
-          </Tooltip>
+          </Tooltip>}
         </Stack>
       )
     },
@@ -335,8 +356,8 @@ const SuppliersPage: React.FC = () => {
           <Typography variant="body2" color="text.secondary">{t('manage_supplier_network')}</Typography>
         </Box>
         <Box sx={{ display: 'flex', gap: 1.5, alignItems: 'center' }}>
-          <UploadExportToolbar onDownloadTemplate={supplierService.downloadTemplate} onUpload={supplierService.uploadTemplate} onExport={supplierService.export} templateFileName="SupplierTemplate.xlsx" exportFileName="Suppliers.xlsx" />
-          <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3 }}>{t('add_supplier')}</Button>
+          <UploadExportToolbar canUpload={canCreateSupplier} onDownloadTemplate={supplierService.downloadTemplate} onUpload={supplierService.uploadTemplate} onExport={supplierService.export} templateFileName="SupplierTemplate.xlsx" exportFileName="Suppliers.xlsx" />
+          {canCreateSupplier && <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3 }}>{t('add_supplier')}</Button>}
         </Box>
       </Box>
 
@@ -346,6 +367,9 @@ const SuppliersPage: React.FC = () => {
       </Paper>
 
       {/* Grid */}
+      {isError && <Alert severity="error" sx={{ mb: 1.5 }} action={<Button onClick={() => refetch()}>Retry</Button>}>
+        {(error as any)?.response?.data?.detail || (error as Error)?.message || 'Suppliers could not be loaded.'}
+      </Alert>}
       <Paper sx={{ height: 'calc(100vh - 220px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
         <DataGrid rows={data?.items ?? []} columns={columns} rowCount={data?.totalCount ?? 0} loading={isLoading} pageSizeOptions={[10, 25, 50]} paginationModel={paginationModel} paginationMode="server" onPaginationModelChange={setPaginationModel} getRowId={(r) => r.id} disableRowSelectionOnClick />
       </Paper>
@@ -358,59 +382,8 @@ const SuppliersPage: React.FC = () => {
 
         <DialogContent dividers sx={{ p: 3 }}>
 
-          {/* ── Logo & General Info ── */}
-          <Box sx={{ display: 'flex', gap: 3, mb: 4, alignItems: 'flex-start' }}>
-            <Box sx={{ textAlign: 'center' }}>
-              <Badge
-                overlap="circular"
-                anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
-                badgeContent={
-                  <IconButton
-                    component="label"
-                    sx={{
-                      bgcolor: 'primary.main',
-                      color: 'white',
-                      '&:hover': { bgcolor: 'primary.dark' },
-                      width: 32,
-                      height: 32,
-                      boxShadow: 2,
-                    }}
-                  >
-                    <UploadIcon sx={{ fontSize: 18 }} />
-                    <input
-                      type="file"
-                      hidden
-                      accept="image/*"
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        if (file) setFormData(p => ({ ...p, imageFile: file }));
-                      }}
-                    />
-                  </IconButton>
-                }
-              >
-                <Avatar
-                  src={formData.imageFile ? URL.createObjectURL(formData.imageFile) : selectedRecord?.imageUrl}
-                  sx={{
-                    width: 120,
-                    height: 120,
-                    border: '4px solid',
-                    borderColor: 'background.paper',
-                    boxShadow: 3,
-                    fontSize: '3rem',
-                    bgcolor: 'grey.100',
-                    color: 'grey.400'
-                  }}
-                >
-                  <BusinessIcon sx={{ fontSize: 'inherit' }} />
-                </Avatar>
-              </Badge>
-              <Typography variant="caption" sx={{ display: 'block', mt: 1, fontWeight: 700, color: 'text.secondary' }}>
-                Supplier Logo
-              </Typography>
-            </Box>
-
-            <Grid container spacing={2} sx={{ flex: 1 }}>
+          <Box sx={{ mb: 4 }}>
+            <Grid container spacing={2}>
               <Grid size={{ xs: 12, sm: 6 }}>
                 <TextField fullWidth label={`${t('supplier_name')} *`} value={formData.name} onChange={f('name')} variant="outlined" />
               </Grid>
@@ -424,10 +397,11 @@ const SuppliersPage: React.FC = () => {
                 <TextField fullWidth label={t('tags')} value={formData.tags} onChange={f('tags')} placeholder="electronics, preferred" />
               </Grid>
               <Grid size={{ xs: 12 }}>
-                <FormControlLabel
-                  control={<Switch checked={formData.isActive} onChange={(e) => setFormData(p => ({ ...p, isActive: e.target.checked }))} color="success" />}
-                  label={<Typography variant="subtitle2" sx={{ fontWeight: 700 }}>{t('active_status')}</Typography>}
-                />
+                <Chip size="small" label={selectedRecord?.isActive === false ? 'Inactive' : 'Active'}
+                  color={selectedRecord?.isActive === false ? 'default' : 'success'} variant="outlined" />
+                <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
+                  Activation and deactivation are recorded through Supplier Governance.
+                </Typography>
               </Grid>
             </Grid>
           </Box>
@@ -485,12 +459,12 @@ const SuppliersPage: React.FC = () => {
             </Grid>
           </Box>
 
-          {/* ── Financials & Performance ── */}
+          {/* ── Commercial defaults ── */}
           <Box sx={{ mb: 4, p: 2, borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
             <Stack direction="row" spacing={1} sx={{ mb: 2, alignItems: 'center' }}>
               <CurrencyIcon color="primary" fontSize="small" />
               <Typography variant="subtitle2" sx={{ fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                {t('financials_metrics')}
+                Commercial defaults
               </Typography>
             </Stack>
             <Grid container spacing={2}>
@@ -509,12 +483,6 @@ const SuppliersPage: React.FC = () => {
                   </Select>
                 </FormControl>
               </Grid>
-              <Grid size={{ xs: 12, sm: 4 }}>
-                <TextField fullWidth type="number" label={t('success_rate')} value={formData.successRate} onChange={f('successRate')} size="small" />
-              </Grid>
-              <Grid size={{ xs: 12, sm: 4 }}>
-                <TextField fullWidth type="number" label={t('avg_response_time')} value={formData.avgResponseTime} onChange={f('avgResponseTime')} size="small" />
-              </Grid>
               <Grid size={{ xs: 12 }}>
                 <TextField fullWidth multiline rows={2} label={t('comments')} value={formData.comments} onChange={f('comments')} size="small" />
               </Grid>
@@ -527,7 +495,7 @@ const SuppliersPage: React.FC = () => {
             <Typography variant="overline" sx={{ fontWeight: 800, color: 'text.secondary', letterSpacing: '0.08em' }}>
               {t('contacts')} {selectedRecord && !contactsLoading && `(${contacts.length})`}
             </Typography>
-            {selectedRecord && !showContactForm && (
+            {selectedRecord && canCreateContact && !showContactForm && (
               <Button size="small" variant="outlined" startIcon={<PersonAddIcon />}
                 onClick={() => { setEditingContact(null); setContactForm(emptyContact); setShowContactForm(true); }}
                 sx={{ fontWeight: 700, textTransform: 'none' }}>
@@ -544,7 +512,7 @@ const SuppliersPage: React.FC = () => {
           )}
 
           {/* Inline contact sub-form */}
-          {selectedRecord && showContactForm && (
+          {selectedRecord && canViewContacts && showContactForm && (
             <ContactSubForm
               value={contactForm}
               onChange={setContactForm}
@@ -585,14 +553,14 @@ const SuppliersPage: React.FC = () => {
                       <Chip label={c.isActive ? 'Active' : 'Inactive'} color={c.isActive ? 'success' : 'default'} size="small" variant="outlined" sx={{ height: 18, fontSize: '0.65rem', fontWeight: 800 }} />
                     </TableCell>
                     <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>
-                      <Tooltip title="Edit">
+                      {canEditContact && <Tooltip title="Edit">
                         <IconButton size="small" onClick={() => openEditContact(c)}><EditIcon fontSize="small" /></IconButton>
-                      </Tooltip>
-                      <Tooltip title="Remove">
-                        <IconButton size="small" color="error" onClick={() => deleteContactMutation.mutate(c.id)}>
+                      </Tooltip>}
+                      {canDeleteContact && <Tooltip title="Remove">
+                        <IconButton size="small" color="error" onClick={() => deleteContactMutation.mutate(c)}>
                           <DeleteIcon fontSize="small" />
                         </IconButton>
-                      </Tooltip>
+                      </Tooltip>}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -603,7 +571,7 @@ const SuppliersPage: React.FC = () => {
           {selectedRecord && !contactsLoading && contacts.length === 0 && !showContactForm && (
             <Box sx={{ textAlign: 'center', py: 3 }}>
               <PersonAddIcon sx={{ fontSize: 36, color: 'action.disabled', mb: 0.5 }} />
-              <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>No contacts yet. Click "Add Contact" to add one.</Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>{canCreateContact ? 'No contacts yet. Add the first contact.' : 'No contacts are recorded.'}</Typography>
             </Box>
           )}
 

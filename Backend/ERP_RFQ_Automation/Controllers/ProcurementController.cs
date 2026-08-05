@@ -39,7 +39,7 @@ public sealed class ProcurementController(
             TenantId(), sourcingCaseId, RequestAborted)));
 
     [HttpPost("sourcing-cases/{sourcingCaseId:long}/supplier-candidates/search")]
-    [RequireModulePermission("Supplier History", PermissionAction.View)]
+    [RequireModulePermission("Supplier History", PermissionAction.Edit)]
     public Task<IActionResult> SearchSourcingCandidates(long sourcingCaseId,
         [FromBody] SearchSourcingCandidatesRequest request)
         => ExecuteAsync(async () => Ok(await service.SearchSourcingCandidatesAsync(
@@ -58,6 +58,21 @@ public sealed class ProcurementController(
             return Created($"/api/procurement/solicitations/{result.SupplierSolicitationId}", result);
         });
 
+    [HttpPost("sourcing-cases/{sourcingCaseId:long}/supplier-rfqs/{supplierSolicitationId:long}/queue")]
+    [RequireModulePermission("RFQ Management", PermissionAction.Edit)]
+    [RequireModulePermission("Supplier History", PermissionAction.Create)]
+    public Task<IActionResult> QueuePreparedSupplierRfq(
+        long sourcingCaseId,
+        long supplierSolicitationId,
+        [FromBody] QueuePreparedSupplierRfqRequest request)
+        => ExecuteAsync(async () =>
+        {
+            var result = await service.QueuePreparedSupplierRfqAsync(new QueuePreparedSupplierRfqCommand(
+                TenantId(), sourcingCaseId, supplierSolicitationId, request.ExpectedSourcingCaseVersion,
+                request.ExpectedSolicitationVersion, IdempotencyKey(), Actor(), CorrelationId()), RequestAborted);
+            return Ok(result);
+        });
+
     [HttpGet("purchase-orders")]
     [RequireModulePermission("Orders", PermissionAction.View)]
     public Task<IActionResult> SearchPurchaseOrders([FromQuery] string? search = null, [FromQuery] int limit = 50)
@@ -66,14 +81,14 @@ public sealed class ProcurementController(
     [HttpPost("solicitations")]
     [RequireModulePermission("RFQ Management", PermissionAction.Edit)]
     [RequireModulePermission("Supplier History", PermissionAction.Create)]
-    public Task<IActionResult> CreateSolicitation([FromBody] CreateSolicitationRequest request)
-        => ExecuteAsync(async () =>
-        {
-            var result = await service.CreateSolicitationAsync(new CreateSolicitationCommand(
-                TenantId(), request.RfqId, request.SupplierId, request.RfqItemIds, request.DueOn,
-                IdempotencyKey(), Actor(), CorrelationId()), RequestAborted);
-            return Created($"/api/procurement/solicitations/{result.Id}", result);
-        });
+    public IActionResult CreateSolicitation([FromBody] CreateSolicitationRequest request)
+    {
+        _ = request;
+        return Problem(
+            statusCode: StatusCodes.Status410Gone,
+            title: "Direct Supplier RFQ creation has been retired.",
+            detail: "Open a persisted Sourcing Case, select a governed candidate, then approve the numbered Supplier RFQ for delivery.");
+    }
 
     [HttpPost("solicitations/{solicitationId:long}/retry")]
     [RequireModulePermission("RFQ Management", PermissionAction.Edit)]
@@ -129,6 +144,19 @@ public sealed class ProcurementController(
             TenantId(), purchaseOrderId, request.ExpectedVersion, request.DeliveryEvidenceReference,
             IdempotencyKey(), Actor(), CorrelationId(), request.DeliveryEvidenceSha256,
             request.DeliveredOn), RequestAborted)));
+
+    /// <summary>
+    /// Cancels a purchase order that will never be received. Until this route existed a stranded
+    /// DRAFT purchase order permanently suppressed its RFQ line's net sourcing requirement, so the
+    /// line could never be re-sourced and the customer demand was unfulfillable with no operator
+    /// recourse.
+    /// </summary>
+    [HttpPost("purchase-orders/{purchaseOrderId:long}/cancel")]
+    [RequireModulePermission("Orders", PermissionAction.Edit)]
+    public Task<IActionResult> CancelPurchaseOrder(long purchaseOrderId, [FromBody] CancelSupplierPurchaseOrderRequest request)
+        => ExecuteAsync(async () => Ok(await service.CancelPurchaseOrderAsync(new CancelPurchaseOrderCommand(
+            TenantId(), purchaseOrderId, request.ExpectedVersion, request.Reason,
+            IdempotencyKey(), Actor(), CorrelationId()), RequestAborted)));
 
     [HttpPost("goods-receipts")]
     [RequireModulePermission("Orders", PermissionAction.Edit)]
@@ -267,6 +295,7 @@ public sealed record CreateSourcingCaseRequest(
 public sealed record SearchSourcingCandidatesRequest(int Limit, long ExpectedVersion);
 
 public sealed record PrepareSupplierRfqRequest(long SupplierId, DateTime? DueOn, long ExpectedVersion);
+public sealed record QueuePreparedSupplierRfqRequest(long ExpectedSourcingCaseVersion, long ExpectedSolicitationVersion);
 
 public sealed record CaptureSupplierQuoteRequest(
     long SolicitationId,
@@ -296,6 +325,10 @@ public sealed class IssueSupplierPurchaseOrderRequest
     public string DeliveryEvidenceSha256 { get; init; } = string.Empty;
     public DateTime DeliveredOn { get; init; }
 }
+
+public sealed record CancelSupplierPurchaseOrderRequest(
+    long ExpectedVersion,
+    string Reason);
 
 public sealed record PostGoodsReceiptRequest(
     long PurchaseOrderId,

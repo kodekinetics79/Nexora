@@ -16,7 +16,8 @@ namespace ERP_RFQ_Automation.Controllers;
 [Route("api/operations/readiness")]
 public sealed class OperationsReadinessController(
     ErpRfqAutomationContext db,
-    HealthCheckService healthChecks) : ControllerBase
+    HealthCheckService healthChecks,
+    ExtractionDeadLetterService deadLetters) : ControllerBase
 {
     [HttpGet]
     [RequireModulePermission("Users", PermissionAction.View)]
@@ -31,6 +32,22 @@ public sealed class OperationsReadinessController(
             .GroupBy(x => x.Status)
             .Select(group => new { Status = group.Key, Count = group.Count() })
             .ToDictionaryAsync(x => x.Status, x => x.Count, ct);
+        var unresolvedExtractionDeadLetters = await db.Set<ExtractionJob>().AsNoTracking()
+            .CountAsync(job => job.BusinessUnitId == tenantId
+                && job.Status == ExtractionStatus.DeadLetter
+                && (db.ExtractionDeadLetterEvents
+                        .Where(disposition => disposition.BusinessUnitId == tenantId
+                            && disposition.ExtractionJobId == job.Id
+                            && disposition.AttemptNumber == job.Attempts)
+                        .OrderByDescending(disposition => disposition.Id)
+                        .Select(disposition => (ExtractionDeadLetterAction?)disposition.Action)
+                        .FirstOrDefault() != ExtractionDeadLetterAction.SourceObjectUnavailable
+                    || db.ExtractionDeadLetterEvents.Any(disposition =>
+                        disposition.BusinessUnitId == tenantId
+                        && disposition.ExtractionJobId == job.Id
+                        && disposition.AttemptNumber == job.Attempts
+                        && (disposition.Action == ExtractionDeadLetterAction.MalwareDetected
+                            || disposition.Action == ExtractionDeadLetterAction.EvidenceIntegrityFailure))), ct);
         var procurement = await db.ProcurementOutboxMessages.AsNoTracking()
             .Where(x => x.BusinessUnitId == tenantId)
             .GroupBy(x => x.Status)
@@ -60,7 +77,7 @@ public sealed class OperationsReadinessController(
         {
             new QueueStatus("extraction", "Lead extraction", Sum(extraction, ExtractionStatus.Pending),
                 Sum(extraction, ExtractionStatus.Leased, ExtractionStatus.Extracting, ExtractionStatus.Persisting),
-                Sum(extraction, ExtractionStatus.DeadLetter)),
+                unresolvedExtractionDeadLetters),
             new QueueStatus("supplier-rfq", "Supplier RFQ dispatch",
                 Sum(procurement, ProcurementOutboxStatuses.Pending, ProcurementOutboxStatuses.Failed),
                 Sum(procurement, ProcurementOutboxStatuses.Processing),
@@ -94,6 +111,45 @@ public sealed class OperationsReadinessController(
             queues,
             aiSummary);
         return Ok(response);
+    }
+
+    [HttpGet("extraction-dead-letters")]
+    [RequireModulePermission("Users", PermissionAction.View)]
+    public async Task<ActionResult<IReadOnlyList<ExtractionDeadLetterItem>>> GetExtractionDeadLetters(
+        CancellationToken ct) => Ok(await deadLetters.ListAsync(TenantId(), ct));
+
+    [HttpPost("extraction-dead-letters/{jobId:long}/recover")]
+    [RequireModulePermission("Users", PermissionAction.Edit)]
+    [RequireModulePermission("Leads", PermissionAction.Create)]
+    public async Task<ActionResult<RecoverExtractionDeadLetterResult>> RecoverExtractionDeadLetter(
+        long jobId,
+        [FromBody] RecoverExtractionDeadLetterCommand command,
+        CancellationToken ct)
+    {
+        var actorId = User.FindFirstValue(ClaimTypes.NameIdentifier)
+            ?? User.FindFirstValue(ClaimTypes.Email)
+            ?? "authenticated-operator";
+        try
+        {
+            return Ok(await deadLetters.RecoverAsync(TenantId(), jobId, actorId, command, ct));
+        }
+        catch (KeyNotFoundException exception)
+        {
+            return NotFound(new ProblemDetails { Title = exception.Message, Status = StatusCodes.Status404NotFound });
+        }
+        catch (ArgumentException exception)
+        {
+            return BadRequest(new ProblemDetails { Title = exception.Message, Status = StatusCodes.Status400BadRequest });
+        }
+        catch (DeadLetterDependencyUnavailableException exception)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                new ProblemDetails { Title = exception.Message, Status = StatusCodes.Status503ServiceUnavailable });
+        }
+        catch (InvalidOperationException exception)
+        {
+            return Conflict(new ProblemDetails { Title = exception.Message, Status = StatusCodes.Status409Conflict });
+        }
     }
 
     private long TenantId()

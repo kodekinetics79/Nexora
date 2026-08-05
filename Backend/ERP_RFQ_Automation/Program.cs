@@ -36,6 +36,7 @@ using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.QuoteDelivery;
 using ERP_RFQ_Automation.Security;
 using ERP_RFQ_Automation.Security.DocumentInspection;
+using Microsoft.AspNetCore.HttpOverrides;
 using ERP_RFQ_Automation.Procurement;
 using ERP_RFQ_Automation.CommercialDocuments;
 using ERP_RFQ_Automation.SupplierGovernance;
@@ -112,6 +113,8 @@ builder.Services.AddScoped<ERP_RFQ_Automation.MultiTenancy.ITenantContext, ERP_R
 builder.Services.AddSingleton<IFileStorage, LocalFileStorage>();
 builder.Services.Configure<S3EvidenceStorageOptions>(
     builder.Configuration.GetSection(S3EvidenceStorageOptions.SectionName));
+builder.Services.Configure<MalwareVerdictPolicyOptions>(
+    builder.Configuration.GetSection(MalwareVerdictPolicyOptions.SectionName));
 builder.Services.AddSingleton<IEvidenceObjectStorage>(services =>
 {
     var options = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<S3EvidenceStorageOptions>>();
@@ -119,21 +122,37 @@ builder.Services.AddSingleton<IEvidenceObjectStorage>(services =>
         ? new S3EvidenceObjectStorage(options)
         : new LocalEvidenceObjectStorage(services.GetRequiredService<IFileStorage>());
 });
-builder.Services.AddSingleton<IMalwareScanner>(_ =>
+// Malware scanner provider is chosen EXPLICITLY by configuration
+// (DocumentInspection:Scanner:Provider = ClamAV | BuiltIn), never implicitly by environment.
+// Absent configuration stays fail-closed: ClamAV everywhere except a Development host.
+// The decision is logged immediately, and MalwareScannerStartupProbe probes the endpoint once at
+// boot so an unreachable scanner is never discovered by a tenant instead of by an operator.
+builder.Services.Configure<MalwareScannerOptions>(
+    builder.Configuration.GetSection(MalwareScannerOptions.SectionName));
+var malwareScannerSelection = MalwareScannerFactory.Select(
+    builder.Configuration, builder.Environment.IsDevelopment());
+using (var malwareScannerStartupLoggerFactory = LoggerFactory.Create(logging =>
 {
-    if (builder.Environment.IsDevelopment())
-        return new EicarMalwareScanner();
-
-    var scanner = builder.Configuration.GetSection("DocumentInspection:ClamAV")
-        .Get<ClamAvScannerOptions>() ?? new ClamAvScannerOptions();
-    return new ClamAvInstreamMalwareScanner(scanner);
-});
+    logging.AddConsole();
+    logging.SetMinimumLevel(LogLevel.Information);
+}))
+{
+    MalwareScannerFactory.LogSelection(
+        malwareScannerStartupLoggerFactory.CreateLogger("ERP_RFQ_Automation.Security.MalwareScanner"),
+        malwareScannerSelection,
+        builder.Environment.EnvironmentName);
+}
+builder.Services.AddSingleton(malwareScannerSelection);
+builder.Services.AddSingleton<IMalwareScanner>(_ =>
+    MalwareScannerFactory.Create(malwareScannerSelection, builder.Configuration));
+builder.Services.AddHostedService<MalwareScannerStartupProbe>();
 builder.Services.AddSingleton<IFileInspectionService>(services =>
 {
     var options = builder.Configuration.GetSection("DocumentInspection:Limits")
         .Get<DocumentInspectionOptions>() ?? new DocumentInspectionOptions();
     return new DocumentFileInspectionService(services.GetRequiredService<IMalwareScanner>(), options);
 });
+builder.Services.AddScoped<ExtractionDeadLetterService>();
 
 // Platform-Owner control-plane services (ADR-0005)
 builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Auth.IPlatformAuthService, ERP_RFQ_Automation.Platform.Auth.PlatformAuthService>();
@@ -145,13 +164,21 @@ builder.Services.AddSingleton<ERP_RFQ_Automation.HealthChecks.IExtractionWorkerH
 builder.Services.AddSingleton<IProcurementDispatchHeartbeat, ProcurementDispatchHeartbeat>();
 builder.Services.AddSingleton<ERP_RFQ_Automation.HealthChecks.IQuoteDeliveryWorkerHeartbeat,
     ERP_RFQ_Automation.HealthChecks.QuoteDeliveryWorkerHeartbeat>();
+// Liveness for the workers that previously had NO heartbeat at all: routing
+// reconciliation, the SLA sweep, the email poller and AI reservation reconciliation.
+// Each registers itself in its constructor and beats once per loop iteration; the
+// health check below names any that stop.
+builder.Services.AddSingleton<ERP_RFQ_Automation.HealthChecks.IBackgroundWorkerHeartbeats,
+    ERP_RFQ_Automation.HealthChecks.BackgroundWorkerHeartbeats>();
 builder.Services.AddHealthChecks()
     .AddCheck<ERP_RFQ_Automation.HealthChecks.DatabaseHealthCheck>("database", tags: new[] { "live", "ready" })
     .AddCheck<ERP_RFQ_Automation.HealthChecks.EvidenceStorageHealthCheck>("evidence-storage", tags: new[] { "ready" })
     .AddCheck<ERP_RFQ_Automation.HealthChecks.MalwareScannerHealthCheck>("malware-scanner", tags: new[] { "ready" })
     .AddCheck<ERP_RFQ_Automation.HealthChecks.ExtractionWorkerHealthCheck>("extraction-worker", tags: new[] { "ready" })
     .AddCheck<ERP_RFQ_Automation.HealthChecks.QuoteDeliveryWorkerHealthCheck>("quote-delivery-worker", tags: new[] { "ready" })
-    .AddCheck<ProcurementDispatchHealthCheck>("procurement-dispatch-worker", tags: new[] { "ready" });
+    .AddCheck<ProcurementDispatchHealthCheck>("procurement-dispatch-worker", tags: new[] { "ready" })
+    .AddCheck<ERP_RFQ_Automation.HealthChecks.BackgroundWorkerHealthCheck>(
+        "background-workers", tags: new[] { "ready" });
 // Register repositories
 builder.Services.AddScoped<ISetupMasterRepository, SetupMasterRepository>();
 builder.Services.AddScoped<ICurrencyRepository, CurrencyRepository>();
@@ -185,6 +212,7 @@ builder.Services.AddScoped<IProcurementHandoffService, ProcurementHandoffService
 builder.Services.AddScoped<IProcurementIntegrationService, ProcurementIntegrationService>();
 builder.Services.AddSingleton<IProcurementDeliveryConfiguration, ProcurementDeliveryConfiguration>();
 builder.Services.AddScoped<SupplierQuoteInboxService>();
+builder.Services.AddScoped<SupplierNegotiationService>();
 builder.Services.AddScoped<SupplierQuoteCommercialService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialLearning.CommercialLearningService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialLearning.LearningGovernanceService>();
@@ -211,9 +239,21 @@ builder.Services.AddScoped<IShipmentRepository, ShipmentRepository>();
 builder.Services.AddScoped<IQuoteConfigurationRepository, QuoteConfigurationRepository>();
 builder.Services.AddScoped<IDashboardRepository, DashboardRepository>();
 builder.Services.AddScoped<ICommercialCaseQueryService, CommercialCaseQueryService>();
+// Currency conversion authority: effective-dated, approval-gated rates plus frozen
+// per-document snapshots, so a later rate correction can never restate an issued quote.
+// Seven call sites currently construct this directly because Program.cs was locked while
+// the FX module landed; they can migrate to injection now that this registration exists.
+builder.Services.AddScoped<ERP_RFQ_Automation.Fx.IFxConversionService, ERP_RFQ_Automation.Fx.FxConversionService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.IInventoryAvailabilityService, ERP_RFQ_Automation.Inventory.InventoryAvailabilityService>();
+// The single gate permitted to write Inventory.QtyOnHand: every count, adjustment,
+// reclassification and transfer posts a balancing InventoryMovement in the same
+// transaction, so on-hand can be reconciled against the ledger.
+builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.IStockLedgerService, ERP_RFQ_Automation.Inventory.StockLedgerService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialIntelligence.Sales.ISalesPersistence, ERP_RFQ_Automation.CommercialIntelligence.Sales.EfSalesPersistence>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialIntelligence.Sales.ISalesApplicationService, ERP_RFQ_Automation.CommercialIntelligence.Sales.SalesApplicationService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.CommercialIntelligence.Exceptions.ICommercialExceptionApplicationService, ERP_RFQ_Automation.CommercialIntelligence.Exceptions.CommercialExceptionApplicationService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.CommercialIntelligence.Opportunity.IOpportunityPriorityApplicationService, ERP_RFQ_Automation.CommercialIntelligence.Opportunity.OpportunityPriorityApplicationService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.CommercialIntelligence.Growth.GrowthIntelligenceService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.IOrderStockReservationService, ERP_RFQ_Automation.Inventory.OrderStockReservationService>();
 builder.Services.AddSingleton<ERP_RFQ_Automation.Inventory.Commercial.IProductIdentityResolver, ERP_RFQ_Automation.Inventory.Commercial.ProductIdentityResolver>();
 builder.Services.AddSingleton<ERP_RFQ_Automation.Inventory.Commercial.IFulfilmentRouteService, ERP_RFQ_Automation.Inventory.Commercial.FulfilmentRouteService>();
@@ -264,6 +304,21 @@ builder.Services.AddAuthorization(options =>
 
     // Platform-Owner control plane: PlatformScope (default-deny) + role sub-policies (ADR-0005)
     options.AddPlatformPolicies();
+
+    // SEC-H4: authorization was opt-in — an action with no [Authorize] attribute was
+    // anonymous. The fallback policy applies to every endpoint that declares NO
+    // authorization metadata of its own, so a newly added controller is authenticated by
+    // default and anonymity must be requested explicitly with [AllowAnonymous].
+    //
+    // NOTE the scheme list: the fallback must accept BOTH bearer schemes, otherwise a
+    // platform token would be rejected on any platform endpoint that does not carry its
+    // own [Authorize(Policy = PlatformPolicies.*)] attribute. Endpoints that DO carry an
+    // explicit policy are unaffected — the fallback only fires when there is no metadata.
+    options.FallbackPolicy = new AuthorizationPolicyBuilder(
+            JwtBearerDefaults.AuthenticationScheme,
+            PlatformAuthConstants.Scheme)
+        .RequireAuthenticatedUser()
+        .Build();
 });
 // Register email processing services
 builder.Services.AddHostedService<EmailBackgroundService>();
@@ -280,6 +335,15 @@ builder.Services.AddScoped<FolderService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<ILLMService, OllamaLlmService>();
 builder.Services.AddScoped<IAiGovernanceService, AiGovernanceService>();
+// One authoritative answer to "which inference endpoint is this deployment pointed at,
+// and why is it Local/External" (AI/AiProviderEndpoint.cs). Singleton: it is read from
+// configuration once and logged at startup, so the resolution can never again be
+// discoverable only by reading source.
+builder.Services.AddSingleton<IAiProviderEndpointResolver, AiProviderEndpointResolver>();
+// Per-tenant allow-list of external inference endpoints (AI/AiExternalProviderTrustService.cs).
+// Scoped: it reads the tenant-filtered ErpRfqAutomationContext. Its ABSENCE is a refusal,
+// so a missing registration degrades to today's fail-closed behaviour, never to open egress.
+builder.Services.AddScoped<IAiExternalProviderTrust, AiExternalProviderTrustService>();
 builder.Services.AddSingleton<IAiReservationReconciler, AiReservationReconciler>();
 builder.Services.AddHostedService<AiReservationReconciliationWorker>();
 builder.Services.AddHttpClient<OllamaLlmService>(client =>
@@ -387,6 +451,7 @@ builder.Services.AddHostedService<ExtractionWorker>();
 // modern upload endpoint, the email poller, the folder watcher and manual upload
 // (each door still honours Ingestion:UseUnifiedQueue, default true).
 builder.Services.AddScoped<IDocumentIngestion, DocumentIngestionService>();
+builder.Services.AddScoped<ISecurityScanRecoveryService, SecurityScanRecoveryService>();
 
 // Transactional email / notifications (Notifications/): provider-agnostic sender
 // (defaults to the safe console provider until an SMTP/SendGrid provider is
@@ -446,8 +511,54 @@ builder.Services.AddScoped<ERP_RFQ_Automation.MultiTenancy.ISlaPolicyReader,
 builder.Services.AddScoped<ERP_RFQ_Automation.Sla.IQuoteOutcomeService, ERP_RFQ_Automation.Sla.QuoteOutcomeService>();
 builder.Services.AddSingleton<ERP_RFQ_Automation.Sla.ISlaNotifications, ERP_RFQ_Automation.Sla.SlaNotifications>();
 builder.Services.AddHostedService<ERP_RFQ_Automation.Sla.SlaSweepWorker>();
+builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.PlatformGovernanceService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.HumanActionService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.AiTrustCenterService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.ReleaseSimulationService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.CommercialDocumentArchiveService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.QualityAnalyticsService>();
+
+// SEC-H6: the app sits behind a TLS-terminating reverse proxy, so the socket peer is the
+// proxy, not the client. Without this, the rate limiter's per-IP partition
+// (RateLimitingExtensions.PartitionKey) buckets the entire internet together and request
+// logs attribute everything to the proxy.
+//
+// KnownNetworks/KnownProxies are cleared and then populated from configuration. Leaving
+// them EMPTY would trust the header from any caller, which lets an attacker spoof
+// X-Forwarded-For and evade per-IP limits entirely — so set ForwardedHeaders:KnownProxies
+// (or :KnownNetworks) in appsettings for each environment before deploying behind a proxy.
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    options.ForwardLimit = 1;
+    options.KnownNetworks.Clear();
+    options.KnownProxies.Clear();
+
+    foreach (var proxy in builder.Configuration.GetSection("ForwardedHeaders:KnownProxies")
+                 .Get<string[]>() ?? Array.Empty<string>())
+    {
+        if (System.Net.IPAddress.TryParse(proxy, out var address))
+            options.KnownProxies.Add(address);
+    }
+
+    foreach (var network in builder.Configuration.GetSection("ForwardedHeaders:KnownNetworks")
+                 .Get<string[]>() ?? Array.Empty<string>())
+    {
+        var parts = network.Split('/', 2);
+        if (parts.Length == 2 && System.Net.IPAddress.TryParse(parts[0], out var prefix)
+            && int.TryParse(parts[1], out var length))
+        {
+            options.KnownNetworks.Add(new Microsoft.AspNetCore.HttpOverrides.IPNetwork(prefix, length));
+        }
+    }
+});
 
 var app = builder.Build();
+
+// Startup provider telemetry (loud on purpose). Constructing this singleton emits one
+// WARNING when the configured inference endpoint is external and one INFO when it is
+// loopback. Production ran external for weeks with nothing in the log saying so.
+app.Services.GetRequiredService<IAiProviderEndpointResolver>();
 
 // Production defaults to applying migrations before serving traffic. This guarantees
 // tenant-role/RLS policy installation is atomic with the application rollout. Set
@@ -564,6 +675,10 @@ app.Use(async (ctx, next) =>
     await next();
 });
 
+// SEC-H6: must run before ANY middleware that reads the client IP or scheme — in
+// particular UsePlatformObservability and UseRateLimiter further down.
+app.UseForwardedHeaders();
+
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
@@ -582,15 +697,20 @@ app.UseTenantClaimGuard();
 app.UseAuthorization();
 // Built-in rate limiter — AFTER auth so the per-tenant partition uses the claim.
 app.UseRateLimiter();
-app.MapControllers();
+// SEC-H4: belt-and-braces with the FallbackPolicy above — every controller endpoint
+// carries authorization metadata, so a future `options.FallbackPolicy = null` or a
+// mis-ordered middleware registration cannot silently reopen the whole API.
+app.MapControllers().RequireAuthorization();
+// SEC-H4: probes must stay reachable once the FallbackPolicy makes authentication the
+// default. These expose only status + tag-filtered check names, never tenant data.
 app.MapHealthChecks("/health", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
 {
     Predicate = registration => registration.Tags.Contains("live")
-});
+}).AllowAnonymous();
 app.MapHealthChecks("/ready", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
 {
     Predicate = registration => registration.Tags.Contains("ready")
-});
+}).AllowAnonymous();
 app.Run();
 
 public partial class Program;

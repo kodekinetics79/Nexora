@@ -11,25 +11,20 @@ using Microsoft.EntityFrameworkCore;
 namespace ERP_RFQ_Automation.Agent.Tools;
 
 /// <summary>
-/// Queue an RFQ for governed supplier dispatch. The procurement application service
-/// atomically records the solicitation, event, and outbox message; only the outbox
-/// worker is allowed to perform the external delivery.
+/// Retained as an explicit fail-closed boundary for older agent plans. Supplier
+/// outreach now requires an operator-approved Sourcing Case command.
 /// </summary>
 public sealed class SendRfqToSuppliersTool : IAgentTool
 {
-    private readonly ErpRfqAutomationContext _db;
-    private readonly IProcurementApplicationService _procurement;
-
     public SendRfqToSuppliersTool(ErpRfqAutomationContext db, IProcurementApplicationService procurement)
     {
-        _db = db;
-        _procurement = procurement;
+        _ = db;
+        _ = procurement;
     }
 
     public string Name => AgentToolNames.SendRfqToSuppliers;
     public string Description =>
-        "Queue an RFQ invitation to multiple suppliers. Each invitation is recorded with an auditable " +
-        "outbox message before the delivery worker contacts the supplier.";
+        "Supplier outreach requires a persisted Sourcing Case, governed candidate selection, and explicit operator approval.";
     public string InputJsonSchema =>
         "{\"type\":\"object\",\"properties\":{" +
         "\"rfqId\":{\"type\":\"integer\"}," +
@@ -38,100 +33,20 @@ public sealed class SendRfqToSuppliersTool : IAgentTool
         "\"required\":[\"rfqId\",\"supplierIds\"]}";
     public bool IsMutation => true;
 
-    public async Task<AgentToolResult> ExecuteAsync(JsonElement input, AgentToolContext ctx, CancellationToken ct)
+    public Task<AgentToolResult> ExecuteAsync(JsonElement input, AgentToolContext ctx, CancellationToken ct)
     {
+        _ = ctx;
+        _ = ct;
         var rfqId = input.GetInt64OrNull("rfqId");
-        if (rfqId is null) return AgentToolResult.Fail("rfqId is required.");
+        if (rfqId is null) return Task.FromResult(AgentToolResult.Fail("rfqId is required."));
 
         var supplierIds = ReadLongArray(input, "supplierIds");
-        if (supplierIds.Count == 0) return AgentToolResult.Fail("supplierIds must contain at least one supplier id.");
+        if (supplierIds.Count == 0)
+            return Task.FromResult(AgentToolResult.Fail("supplierIds must contain at least one supplier id."));
 
-        // Rfq set IS tenant-filtered — this both loads context and enforces ownership.
-        var rfq = await _db.Set<Rfq>().AsNoTracking()
-            .Where(r => r.Id == rfqId.Value)
-            .Select(r => new { r.Id, r.Rfqno, r.BidClosingDate })
-            .FirstOrDefaultAsync(ct);
-        if (rfq is null) return AgentToolResult.Fail($"RFQ {rfqId} not found.");
-
-        var rfqItemIds = await _db.Set<Rfqitem>().AsNoTracking()
-            .Where(item => item.Rfqid == rfq.Id)
-            .OrderBy(item => item.Id)
-            .Select(item => item.Id)
-            .ToArrayAsync(ct);
-        if (rfqItemIds.Length == 0) return AgentToolResult.Fail("The RFQ has no lines to solicit.");
-
-        var suppliers = await _db.Set<Supplier>().AsNoTracking()
-            .Where(s => supplierIds.Contains(s.Id))
-            .Select(s => new { s.Id, s.Name, s.ContactEmail })
-            .ToListAsync(ct);
-        var byId = suppliers.ToDictionary(s => s.Id);
-
-        var results = new List<object>();
-        var solicitedCount = 0;
-        foreach (var sid in supplierIds.Distinct())
-        {
-            if (!byId.TryGetValue(sid, out var supplier))
-            {
-                results.Add(new { supplierId = sid, solicited = false, notified = false, reason = "supplier not found in this tenant" });
-                continue;
-            }
-
-            var semanticHash = SemanticHash($"rfq={rfq.Id}|supplier={sid}|lines={string.Join(',', rfqItemIds)}|due={rfq.BidClosingDate:O}");
-            var idempotencyKey = $"agent-solicit:{semanticHash}";
-            try
-            {
-                var result = await _procurement.CreateSolicitationAsync(new CreateSolicitationCommand(
-                    ctx.BusinessUnitId,
-                    rfq.Id,
-                    supplier.Id,
-                    rfqItemIds,
-                    rfq.BidClosingDate,
-                    idempotencyKey,
-                    Actor(ctx),
-                    $"agent-solicit:{semanticHash}"), ct);
-
-                results.Add(new
-                {
-                    supplierId = sid,
-                    supplierName = supplier.Name,
-                    solicited = true,
-                    queued = true,
-                    notified = false,
-                    replayed = result.Replayed,
-                    solicitationId = result.Id,
-                    status = result.Status
-                });
-                solicitedCount++;
-            }
-            catch (Exception exception) when (exception is ProcurementValidationException or ProcurementConflictException)
-            {
-                results.Add(new
-                {
-                    supplierId = sid,
-                    supplierName = supplier.Name,
-                    solicited = false,
-                    queued = false,
-                    notified = false,
-                    reason = exception.Message
-                });
-            }
-        }
-
-        return AgentToolResult.Ok(new
-        {
-            rfqId = rfq.Id,
-            rfqNo = rfq.Rfqno,
-            requested = supplierIds.Distinct().Count(),
-            solicited = solicitedCount,
-            recipients = results
-        });
+        return Task.FromResult(AgentToolResult.Fail(
+            "Direct agent dispatch is disabled. Use the Sourcing Case workspace to select governed candidates and explicitly approve numbered Supplier RFQs."));
     }
-
-    private static string Actor(AgentToolContext ctx) =>
-        string.IsNullOrWhiteSpace(ctx.UserName) ? $"agent:{ctx.UserId?.ToString() ?? "system"}" : ctx.UserName.Trim();
-
-    private static string SemanticHash(string canonical) =>
-        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
 
     private static List<long> ReadLongArray(JsonElement input, string prop)
     {

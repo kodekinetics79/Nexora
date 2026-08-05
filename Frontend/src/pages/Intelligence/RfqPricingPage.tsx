@@ -1,6 +1,6 @@
 import React from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { useQuery, useMutation } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import {
   Box, Typography, Paper, Button, Stack, Chip, TextField,
   CircularProgress, Alert, Breadcrumbs, Link, Collapse, InputAdornment, Divider,
@@ -13,18 +13,13 @@ import {
   ExpandLess as CollapseIcon,
   ErrorOutlined as AttentionIcon,
 } from '@mui/icons-material';
-import { useSnackbar } from 'notistack';
 import intelligenceService from '../../api/services/intelligenceService';
 import type { PriceSignal, PriceSignalSource } from '../../api/services/intelligenceService';
 import { ConfidenceChip, formatMoney, parseUserNumber } from './common';
 
 // Friendly names for where a suggestion came from — no jargon.
 const SOURCE_LABELS: Record<PriceSignalSource, string> = {
-  priceList: 'Your price list',
   recentQuote: 'A recent quote you won',
-  supplierQuote: 'Supplier quotes for this RFQ',
-  purchaseHistory: 'What you paid before',
-  productMaster: 'Product list price',
 };
 
 const sourceLabel = (source: PriceSignalSource): string =>
@@ -51,7 +46,6 @@ const SignalRow: React.FC<{ signal: PriceSignal; currency: string | null }> = ({
 const RfqPricingPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { enqueueSnackbar } = useSnackbar();
   const rfqId = Number(id);
 
   const { data: preview, isLoading, isError, refetch } = useQuery({
@@ -63,44 +57,20 @@ const RfqPricingPage: React.FC = () => {
   // Editable unit prices, keyed by rfqItemId, kept as strings while typing.
   const [prices, setPrices] = React.useState<Record<number, string>>({});
   const [expanded, setExpanded] = React.useState<Record<number, boolean>>({});
+  const initializedRfqId = React.useRef<number | null>(null);
 
   React.useEffect(() => {
-    if (!preview) return;
-    setPrices((prev) => {
-      if (Object.keys(prev).length > 0) return prev;
-      const next: Record<number, string> = {};
-      for (const line of preview.lines) {
-        next[line.rfqItemId] = line.recommendedUnitPrice != null ? String(line.recommendedUnitPrice) : '';
-      }
-      return next;
-    });
+    if (!preview || initializedRfqId.current === preview.rfqId) return;
+    initializedRfqId.current = preview.rfqId;
+    const next: Record<number, string> = {};
+    for (const line of preview.lines) {
+      next[line.rfqItemId] = line.recommendedUnitPrice && line.recommendedUnitPrice > 0
+        ? String(line.recommendedUnitPrice)
+        : '';
+    }
+    setPrices(next);
+    setExpanded({});
   }, [preview]);
-
-  const applyMutation = useMutation({
-    mutationFn: () => {
-      const lines = (preview?.lines ?? [])
-        .map((line) => ({ rfqItemId: line.rfqItemId, unitPrice: parseUserNumber(prices[line.rfqItemId] ?? '') }))
-        .filter((l): l is { rfqItemId: number; unitPrice: number } => l.unitPrice != null);
-      return intelligenceService.applyPricing(rfqId, { lines });
-    },
-    onSuccess: () => {
-      enqueueSnackbar('Pricing applied — ready to quote', { variant: 'success' });
-      navigate(`/procurement/rfqs/view/${rfqId}`);
-    },
-    onError: (error: any) => {
-      // WP-B3: a 409 with queuedForApproval means nothing was applied — the
-      // below-floor prices are parked in the Approvals inbox for a manager.
-      const data = error?.response?.data;
-      if (error?.response?.status === 409 && data?.queuedForApproval) {
-        enqueueSnackbar(
-          data.message || 'Sent for approval — pricing is below your floor. Track it in Approvals.',
-          { variant: 'info', autoHideDuration: 8000 },
-        );
-        return;
-      }
-      enqueueSnackbar("Couldn't apply the pricing. Your edits are still here — please try again.", { variant: 'error' });
-    },
-  });
 
   if (isLoading) {
     return (
@@ -146,21 +116,24 @@ const RfqPricingPage: React.FC = () => {
     );
   }
 
-  const currency = preview.currency;
-
-  // Live total: sum of qty × typed price for every line where both are known.
-  const liveTotal = preview.lines.reduce((sum, line) => {
+  const liveTotals = preview.lines.reduce<Record<string, number>>((totals, line) => {
     const price = parseUserNumber(prices[line.rfqItemId] ?? '');
-    if (price == null || line.quantity == null) return sum;
-    return sum + price * line.quantity;
-  }, 0);
+    if (price == null || price <= 0 || line.quantity == null || line.quantity <= 0 || !line.currency) return totals;
+    totals[line.currency] = (totals[line.currency] ?? 0) + price * line.quantity;
+    return totals;
+  }, {});
 
-  const pricedCount = preview.lines.filter((l) => parseUserNumber(prices[l.rfqItemId] ?? '') != null).length;
+  const pricedCount = preview.lines.filter((line) => {
+    const price = parseUserNumber(prices[line.rfqItemId] ?? '');
+    return price != null && price > 0 && line.quantity != null && line.quantity > 0 && !!line.currency;
+  }).length;
   const hasInvalidPrice = preview.lines.some((l) => {
     const raw = prices[l.rfqItemId] ?? '';
-    return raw.trim() !== '' && parseUserNumber(raw) == null;
+    const price = parseUserNumber(raw);
+    return raw.trim() !== '' && (price == null || price <= 0);
   });
-  const canApply = pricedCount > 0 && !hasInvalidPrice && !applyMutation.isPending;
+  const hasUnresolvedCurrency = preview.lines.some((line) => !line.currency);
+  const hasInvalidQuantity = preview.lines.some((line) => line.quantity == null || line.quantity <= 0);
 
   return (
     <Box sx={{ p: 3, pb: 12, maxWidth: 1100, mx: 'auto' }}>
@@ -178,23 +151,30 @@ const RfqPricingPage: React.FC = () => {
 
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 3, gap: 2, flexWrap: 'wrap' }}>
         <Box>
-          <Typography variant="h5" sx={{ fontWeight: 950, letterSpacing: '-0.02em', mb: 0.5 }}>
-            Here's my suggested pricing
+          <Typography variant="h5" sx={{ fontWeight: 950, letterSpacing: 0, mb: 0.5 }}>
+            Shadow pricing workspace
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>
-            Each price comes from your own history. Adjust anything, then apply.
+            Compare evidence-backed price scenarios without changing the RFQ or Customer Quote.
           </Typography>
         </Box>
         <ConfidenceChip score={preview.overallConfidence} />
       </Box>
 
+      <Alert severity="info" sx={{ mb: 2 }}>
+        {preview.applyBlocker} What-if edits are temporary and are discarded when you leave this page.
+      </Alert>
+
       <Stack spacing={2}>
         {preview.lines.map((line, idx) => {
+          const currency = line.currency;
           const raw = prices[line.rfqItemId] ?? '';
           const typedPrice = parseUserNumber(raw);
-          const priceInvalid = raw.trim() !== '' && typedPrice == null;
+          const priceInvalid = raw.trim() !== '' && (typedPrice == null || typedPrice <= 0);
           const belowFloor = typedPrice != null && line.floorUnitPrice != null && typedPrice < line.floorUnitPrice;
-          const lineTotal = typedPrice != null && line.quantity != null ? typedPrice * line.quantity : null;
+          const lineTotal = typedPrice != null && typedPrice > 0 && line.quantity != null && line.quantity > 0
+            ? typedPrice * line.quantity
+            : null;
           const isOpen = expanded[line.rfqItemId] ?? false;
 
           return (
@@ -244,19 +224,19 @@ const RfqPricingPage: React.FC = () => {
               <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ alignItems: { sm: 'flex-start' } }}>
                 <TextField
                   size="small"
-                  label="Unit price"
+                  label="What-if unit price"
                   value={raw}
                   onChange={(e) => setPrices((prev) => ({ ...prev, [line.rfqItemId]: e.target.value }))}
                   error={priceInvalid}
                   helperText={
                     priceInvalid
-                      ? 'Please enter a number.'
+                      ? 'Enter a price greater than zero.'
                       : belowFloor
                         ? `Below ${formatMoney(line.floorUnitPrice, currency)} — you could lose money on this line.`
                         : line.floorUnitPrice != null
                           ? `Try not to go below ${formatMoney(line.floorUnitPrice, currency)}.`
                           : raw.trim() === ''
-                            ? 'No suggestion — leave blank to skip this line.'
+                            ? 'No evidence-backed suggestion; this line is excluded from shadow totals.'
                             : ' '
                   }
                   slotProps={{
@@ -273,10 +253,10 @@ const RfqPricingPage: React.FC = () => {
 
                 <Box sx={{ pt: 0.5 }}>
                   <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase', display: 'block', fontSize: '0.65rem' }}>
-                    Margin
+                    Suggested margin
                   </Typography>
                   <Typography sx={{ fontWeight: 800, fontSize: '0.85rem' }}>
-                    {line.marginPct != null ? `${Math.round(line.marginPct)}%` : '—'}
+                    {line.marginPct != null ? `${Math.round(line.marginPct * 100)}%` : '—'}
                   </Typography>
                 </Box>
 
@@ -297,13 +277,14 @@ const RfqPricingPage: React.FC = () => {
                     size="small"
                     onClick={() => setExpanded((prev) => ({ ...prev, [line.rfqItemId]: !isOpen }))}
                     startIcon={isOpen ? <CollapseIcon /> : <ExpandIcon />}
-                    aria-expanded={isOpen}
+                      aria-expanded={isOpen}
+                      aria-controls={`pricing-evidence-${line.rfqItemId}`}
                     sx={{ mt: 1, fontWeight: 800, textTransform: 'none', color: 'text.secondary' }}
                   >
                     How I got this
                   </Button>
                   <Collapse in={isOpen}>
-                    <Box sx={{ mt: 1, p: 1.5, borderRadius: 2, bgcolor: 'action.hover' }}>
+                    <Box id={`pricing-evidence-${line.rfqItemId}`} role="region" aria-label={`Pricing evidence for ${line.description || `line ${idx + 1}`}`} sx={{ mt: 1, p: 1.5, borderRadius: 2, bgcolor: 'action.hover' }}>
                       {line.signals.map((signal, sIdx) => (
                         <SignalRow key={sIdx} signal={signal} currency={currency} />
                       ))}
@@ -337,34 +318,31 @@ const RfqPricingPage: React.FC = () => {
       >
         <Box>
           <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase', fontSize: '0.65rem', display: 'block' }}>
-            Total with these prices
+            Shadow totals by currency
           </Typography>
-          <Typography sx={{ fontWeight: 950, fontSize: '1.25rem', color: 'success.main' }}>
-            {formatMoney(liveTotal, currency)}
-          </Typography>
+          <Stack direction="row" spacing={2} useFlexGap sx={{ flexWrap: 'wrap' }}>
+            {Object.entries(liveTotals).map(([currencyCode, total]) => (
+              <Typography key={currencyCode} sx={{ fontWeight: 950, fontSize: '1.1rem', color: 'success.main' }}>
+                {formatMoney(total, currencyCode)}
+              </Typography>
+            ))}
+            {Object.keys(liveTotals).length === 0 && <Typography sx={{ fontWeight: 800 }}>No priced currency totals</Typography>}
+          </Stack>
           <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700 }}>
-            {pricedCount === preview.lines.length
+            {hasInvalidPrice ? 'Correct invalid prices to recalculate.' : hasInvalidQuantity
+              ? 'Lines without a positive quantity are excluded.' : hasUnresolvedCurrency
+              ? 'Lines without verified currency are excluded.' : pricedCount === preview.lines.length
               ? `All ${preview.lines.length} lines priced.`
-              : `${pricedCount} of ${preview.lines.length} lines priced — blank lines will be skipped.`}
+              : `${pricedCount} of ${preview.lines.length} lines are included in shadow totals.`}
           </Typography>
         </Box>
         <Stack direction="row" spacing={1.5}>
           <Button
             variant="outlined"
             onClick={() => navigate(`/procurement/rfqs/view/${rfqId}`)}
-            disabled={applyMutation.isPending}
             sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
           >
-            Cancel
-          </Button>
-          <Button
-            variant="contained"
-            startIcon={applyMutation.isPending ? <CircularProgress size={18} color="inherit" /> : <SparkleIcon />}
-            onClick={() => applyMutation.mutate()}
-            disabled={!canApply}
-            sx={{ fontWeight: 800, borderRadius: 2, px: 4 }}
-          >
-            {applyMutation.isPending ? 'Applying…' : 'Apply pricing'}
+            Return to RFQ
           </Button>
         </Stack>
       </Paper>

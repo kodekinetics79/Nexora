@@ -54,6 +54,78 @@ public sealed class Release02SupplierGovernanceServiceTests
     }
 
     [Fact]
+    public async Task Governance_replay_returns_the_original_decision_after_a_later_change()
+    {
+        using var database = new TestDb();
+        var token = Guid.NewGuid();
+        await using (var setup = database.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(setup, 501);
+            setup.Suppliers.Add(Supplier(9001, 501, token));
+            await setup.SaveChangesAsync();
+        }
+
+        GovernedSupplierResult first;
+        await using (var firstContext = database.ContextFor(501))
+            first = await new SupplierGovernanceService(firstContext).GovernAsync(Command(token));
+        await using (var secondContext = database.ContextFor(501))
+            await new SupplierGovernanceService(secondContext).GovernAsync(Command(first.ConcurrencyToken) with
+            {
+                GovernanceStatus = SupplierGovernanceStatuses.Inactive,
+                VerificationStatus = SupplierVerificationStatuses.Expired,
+                ComplianceStatus = SupplierComplianceStatuses.Pending,
+                RiskStatus = SupplierRiskStatuses.Medium,
+                ReadinessStatus = SupplierReadinessStatuses.Blocked,
+                Reason = "temporarily inactive",
+                IdempotencyKey = "supplier-governance-2"
+            });
+        await using var replayContext = database.ContextFor(501);
+        var replay = await new SupplierGovernanceService(replayContext).GovernAsync(Command(token));
+
+        Assert.True(replay.Replayed);
+        Assert.Equal(first.GovernanceStatus, replay.GovernanceStatus);
+        Assert.Equal(first.ReadinessStatus, replay.ReadinessStatus);
+        Assert.Equal(first.ConcurrencyToken, replay.ConcurrencyToken);
+        var aggregateVersions = await replayContext.ProcurementEvents
+            .Where(x => x.AggregateType == "Supplier" && x.AggregateId == 9001)
+            .OrderBy(x => x.AggregateVersion).Select(x => x.AggregateVersion).ToArrayAsync();
+        Assert.Equal(new long[] { 1, 2 }, aggregateVersions);
+    }
+
+    [Theory]
+    [InlineData(SupplierGovernanceStatuses.Inactive, SupplierReadinessStatuses.Ready)]
+    [InlineData(SupplierGovernanceStatuses.Approved, SupplierReadinessStatuses.Ready,
+        SupplierVerificationStatuses.Verified, SupplierComplianceStatuses.Failed, SupplierRiskStatuses.Low)]
+    [InlineData(SupplierGovernanceStatuses.Provisional, SupplierReadinessStatuses.Ready,
+        SupplierVerificationStatuses.Verified, SupplierComplianceStatuses.Cleared, SupplierRiskStatuses.High)]
+    public async Task Contradictory_governance_states_fail_closed(
+        string governanceStatus,
+        string readinessStatus,
+        string verificationStatus = SupplierVerificationStatuses.Verified,
+        string complianceStatus = SupplierComplianceStatuses.Cleared,
+        string riskStatus = SupplierRiskStatuses.Low)
+    {
+        using var database = new TestDb();
+        var token = Guid.NewGuid();
+        await using (var setup = database.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(setup, 501);
+            setup.Suppliers.Add(Supplier(9001, 501, token));
+            await setup.SaveChangesAsync();
+        }
+        await using var context = database.ContextFor(501);
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            new SupplierGovernanceService(context).GovernAsync(Command(token) with
+            {
+                GovernanceStatus = governanceStatus,
+                ReadinessStatus = readinessStatus,
+                VerificationStatus = verificationStatus,
+                ComplianceStatus = complianceStatus,
+                RiskStatus = riskStatus
+            }));
+    }
+
+    [Fact]
     public async Task Cross_tenant_and_unverified_approval_fail_closed()
     {
         using var database = new TestDb();

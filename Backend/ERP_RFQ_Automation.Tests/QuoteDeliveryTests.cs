@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.QuoteDelivery;
 using ERP_RFQ_Automation.Services;
 using ERP_RFQ_Automation.Services.Interfaces;
@@ -162,48 +163,98 @@ public sealed class QuoteDeliveryTests
             1, Tenant, 95_011, "buyer@nexora.invalid", "Quote", "Body",
             null, "quote.pdf", 1, Guid.NewGuid());
         var store = new RecordingDeliveryStore(envelope);
-        await using var provider = new ServiceCollection()
+        using var host = new TenantScopedHost(services => services
             .AddSingleton<IQuoteDeliveryStore>(store)
-            .AddSingleton<IQuoteDeliverySender>(new ThrowingDeliverySender())
-            .BuildServiceProvider();
+            .AddSingleton<IQuoteDeliverySender>(new ThrowingDeliverySender()));
+        store.TenantScope = host.TenantScope;
+        await using (var seed = host.ContextFor(null))
+        {
+            SeedQuote(seed);
+            seed.QuoteDeliveryRequests.Add(NewDelivery());
+            await seed.SaveChangesAsync();
+        }
         var dispatcher = new QuoteDeliveryDispatcher(
-            provider.GetRequiredService<IServiceScopeFactory>(),
-            NullLogger<QuoteDeliveryDispatcher>.Instance);
+            host.ScopeFactory, NullLogger<QuoteDeliveryDispatcher>.Instance, host.TenantScope);
 
         Assert.Equal(1, await dispatcher.DispatchOnceAsync(default));
         Assert.Equal(0, store.RetriableFailureCount);
         Assert.Equal(1, store.UncertainFailureCount);
         Assert.Equal(nameof(InvalidOperationException), store.LastErrorCode);
+        // The tenant scope was pushed around the CLAIM, not merely around the send.
+        Assert.Equal(new long?[] { Tenant }, store.ClaimTenants);
+    }
+
+    /// <summary>
+    /// Tenant isolation. QuoteDeliveryRequest's query filter is
+    /// "CurrentTenantId == null || BusinessUnitId == CurrentTenantId", and a background worker
+    /// has no ambient tenant — so the dispatcher's single unscoped ClaimAsync used to degrade the
+    /// filter to "do not filter" and lease the oldest N rows across EVERY tenant in one batch.
+    /// Claiming is now done once per tenant inside a pushed scope, so each claim sees only its
+    /// own tenant's rows.
+    /// </summary>
+    [Fact]
+    public async Task Dispatcher_ClaimsPerTenantInsideAPushedScope_NeverInOneCrossTenantBatch()
+    {
+        const long other = Tenant + 1;
+        using var host = new TenantScopedHost(services => services
+            .AddScoped<IQuoteDeliveryStore, QuoteDeliveryStore>()
+            .AddSingleton<IQuoteDeliverySender>(new ThrowingDeliverySender()));
+        await using (var seed = host.ContextFor(null))
+        {
+            SeedQuote(seed);
+            SeedQuoteFor(seed, other, 95_021, "Q-DELIVERY-2");
+            seed.QuoteDeliveryRequests.Add(NewDelivery());
+            seed.QuoteDeliveryRequests.Add(NewDelivery(other, 95_021));
+            await seed.SaveChangesAsync();
+        }
+        var dispatcher = new QuoteDeliveryDispatcher(
+            host.ScopeFactory, NullLogger<QuoteDeliveryDispatcher>.Instance, host.TenantScope);
+
+        Assert.Equal(2, await dispatcher.DispatchOnceAsync(default));
+
+        // Each row was leased under, and failed under, its own tenant — no row crossed over.
+        await using var assertions = host.ContextFor(null);
+        var rows = await assertions.QuoteDeliveryRequests.IgnoreQueryFilters()
+            .OrderBy(x => x.BusinessUnitId).ToListAsync();
+        Assert.Equal(new[] { Tenant, other }, rows.Select(x => x.BusinessUnitId).ToArray());
+        Assert.All(rows, row => Assert.StartsWith("DeliveryOutcomeUncertain", row.LastErrorCode!));
+        Assert.All(rows, row => Assert.Equal(1, row.AttemptCount));
     }
 
     private static void SeedQuote(ErpRfqAutomationContext context)
     {
         if (!context.BusinessUnits.IgnoreQueryFilters().Any(x => x.Id == Tenant))
         {
-            context.BusinessUnits.Add(new BusinessUnit
-            {
-                Id = Tenant, BusinessUnitCode = "QD", BusinessUnitName = "Quote Delivery",
-                CreatedBy = "tests", CreatedOn = DateTime.UtcNow
-            });
             context.SetupMasters.Add(new SetupMaster
             {
                 SetupId = 95_002, BusinessUnitId = Tenant, SetupType = "QuoteStatus",
                 SetupCode = "SENT", SetupValue = "Sent", CreatedBy = "tests", CreatedOn = DateTime.UtcNow
             });
-            context.Quotes.Add(new Quote
-            {
-                Id = 95_011, QuoteNo = "Q-DELIVERY-1", BusinessUnitId = Tenant,
-                QuoteDate = DateTime.UtcNow, ValidUntil = DateTime.UtcNow.AddDays(30),
-                TotalAmount = 100, CreatedBy = "tests", CreatedDate = DateTime.UtcNow
-            });
+            SeedQuoteFor(context, Tenant, 95_011, "Q-DELIVERY-1");
             context.SaveChanges();
         }
     }
 
-    private static QuoteDeliveryRequest NewDelivery() => new()
+    private static void SeedQuoteFor(ErpRfqAutomationContext context, long tenant, long quoteId, string quoteNo)
     {
-        BusinessUnitId = Tenant,
-        QuoteId = 95_011,
+        if (!context.BusinessUnits.IgnoreQueryFilters().Any(x => x.Id == tenant))
+            context.BusinessUnits.Add(new BusinessUnit
+            {
+                Id = tenant, BusinessUnitCode = $"QD{tenant}", BusinessUnitName = "Quote Delivery",
+                CreatedBy = "tests", CreatedOn = DateTime.UtcNow
+            });
+        context.Quotes.Add(new Quote
+        {
+            Id = quoteId, QuoteNo = quoteNo, BusinessUnitId = tenant,
+            QuoteDate = DateTime.UtcNow, ValidUntil = DateTime.UtcNow.AddDays(30),
+            TotalAmount = 100, CreatedBy = "tests", CreatedDate = DateTime.UtcNow
+        });
+    }
+
+    private static QuoteDeliveryRequest NewDelivery(long tenant = Tenant, long quoteId = 95_011) => new()
+    {
+        BusinessUnitId = tenant,
+        QuoteId = quoteId,
         IdempotencyKey = Guid.NewGuid().ToString("N"),
         RecipientEmail = "buyer@nexora.invalid",
         Subject = "Test quote",
@@ -240,13 +291,19 @@ public sealed class QuoteDeliveryTests
         public int UncertainFailureCount { get; private set; }
         public string? LastErrorCode { get; private set; }
 
+        /// <summary>The tenant in scope at each ClaimAsync — null means the claim ran unscoped.</summary>
+        public List<long?> ClaimTenants { get; } = [];
+
         public Task<IReadOnlyList<QuoteDeliveryEnvelope>> ClaimAsync(
             string workerId, int batchSize, TimeSpan lease, CancellationToken ct)
         {
+            ClaimTenants.Add(TenantScope.BusinessUnitId);
             IReadOnlyList<QuoteDeliveryEnvelope> result = _claimed ? [] : [envelope];
             _claimed = true;
             return Task.FromResult(result);
         }
+
+        public ITenantScopeAccessor TenantScope { get; set; } = null!;
 
         public Task CompleteAsync(long id, string workerId, Guid leaseToken, CancellationToken ct) =>
             Task.CompletedTask;

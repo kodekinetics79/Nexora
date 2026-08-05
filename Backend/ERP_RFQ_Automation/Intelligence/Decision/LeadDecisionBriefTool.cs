@@ -61,7 +61,8 @@ public sealed class LeadDecisionBriefTool : IAgentTool
                     pastLeads = brief.Customer.PastLeads,
                     quotes = brief.Customer.Quotes,
                     orders = brief.Customer.Orders,
-                    totalOrderValue = brief.Customer.TotalOrderValue
+                    totalOrderValue = brief.Customer.TotalOrderValue,
+                    totalOrderCurrency = brief.Customer.TotalOrderCurrency
                 },
                 deadline = new
                 {

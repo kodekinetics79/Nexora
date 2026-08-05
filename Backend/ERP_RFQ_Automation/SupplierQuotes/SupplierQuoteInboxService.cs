@@ -51,7 +51,8 @@ public sealed class EfSupplierQuoteStore(ErpRfqAutomationContext context) : ISup
             return null;
 
         var demandLines = await context.Set<CommercialDemandLine>().AsNoTracking()
-            .Where(x => x.BusinessUnitId == businessUnitId && x.RfqId == solicitation.RfqId)
+            .Where(x => x.BusinessUnitId == businessUnitId && x.RfqId == solicitation.RfqId &&
+                x.NexoraSerial == sourcingCase.NexoraSerial)
             .ToDictionaryAsync(x => x.RfqItemId, x => x.Id, cancellationToken);
         return new SupplierQuoteAnchor(supplierId, solicitation.Id, sourcingCase.Id,
             solicitation.RfqId, sourcingCase.NexoraSerial, demandLines);
@@ -192,8 +193,13 @@ public sealed class EfSupplierQuoteStore(ErpRfqAutomationContext context) : ISup
             var unresolved = requiredEvidenceIds.Any(id =>
                 !latestByEvidence.TryGetValue(id, out var latest) ||
                 latest.Status is not (SupplierQuoteReviewStatuses.Accepted or SupplierQuoteReviewStatuses.Corrected));
+            var projectionEvidenceIds = revision.Evidence.Where(x =>
+                    NormalizeEvidenceField(x.FieldName) is not ("ALTERNATEAUTHORIZATION" or
+                        "ALTERNATEAPPROVAL" or "APPROVEDALTERNATE"))
+                .Select(x => x.Id).ToHashSet();
             var latestCorrection = latestByEvidence.Values
-                .Where(x => x.Status == SupplierQuoteReviewStatuses.Corrected)
+                .Where(x => x.Status == SupplierQuoteReviewStatuses.Corrected &&
+                    projectionEvidenceIds.Contains(x.SupplierQuoteFieldEvidenceId))
                 .Select(x => (DateTime?)x.ReviewedOn).Max();
             if (latestCorrection.HasValue)
             {
@@ -265,11 +271,16 @@ public sealed class EfSupplierQuoteStore(ErpRfqAutomationContext context) : ISup
         };
         if (!valid) throw new SupplierQuoteValidationException($"The corrected {fieldName} value is invalid.");
     }
+
+    private static string NormalizeEvidenceField(string value) => new(value.Where(char.IsLetterOrDigit)
+        .Select(char.ToUpperInvariant).ToArray());
 }
 
 public sealed class SupplierQuoteInboxService
 {
     private const decimal CriticalConfidenceThreshold = 0.85m;
+    internal const int MaxLinesPerQuote = 1000;
+    internal const int MaxEvidencePerQuote = 5000;
     private static readonly HashSet<string> Channels = new(StringComparer.OrdinalIgnoreCase)
     {
         SupplierQuoteCaptureChannels.Manual, SupplierQuoteCaptureChannels.Offline,
@@ -572,7 +583,12 @@ public sealed class SupplierQuoteInboxService
         if (string.IsNullOrWhiteSpace(command.NexoraSerial)) throw new SupplierQuoteValidationException("Nexora Serial is required.");
         if (command.FreightAmount < 0 || command.TaxAmount < 0)
             throw new SupplierQuoteValidationException("Freight and tax cannot be negative.");
-        if (command.Lines.Count == 0) throw new SupplierQuoteValidationException("At least one Supplier Quote line is required.");
+        if (command.Lines.Count is 0 or > MaxLinesPerQuote)
+            throw new SupplierQuoteValidationException(
+                $"A Supplier Quote requires between 1 and {MaxLinesPerQuote} lines.");
+        if (command.Evidence.Count + command.Lines.Sum(x => x.Evidence.Count) > MaxEvidencePerQuote)
+            throw new SupplierQuoteValidationException(
+                $"A Supplier Quote cannot contain more than {MaxEvidencePerQuote} evidence facts.");
         if (command.Lines.Select(x => x.LineNumber).Distinct().Count() != command.Lines.Count)
             throw new SupplierQuoteValidationException("Supplier Quote line numbers must be unique.");
         foreach (var line in command.Lines)

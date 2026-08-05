@@ -35,6 +35,10 @@ import Branding from '../../components/common/Branding';
 import axiosInstance from '../../api/axiosInstance';
 import { useNavigate } from 'react-router-dom';
 import rolePermissionService from '../../api/services/rolePermissionService';
+import { MAIN_CONTENT_ID } from '../../components/layout/SkipLink';
+
+/** Ties the failure Alert to the fields it describes (SC 3.3.1 / SC 3.3.3). */
+const LOGIN_ERROR_ID = 'login-error';
 
 // --- Animations ---
 const gridFloat = keyframes`
@@ -356,6 +360,8 @@ interface LoginResponse {
   userName: string;
   roleId: number | null;
   roleName: string;
+  isSuperAdmin: boolean;
+  isManager: boolean;
   businessUnitId: number | null;
   businessUnitName: string | null;
   token: string;
@@ -427,6 +433,8 @@ const LoginPage: React.FC = () => {
         email: data.email,
         userName: data.userName,
         roleName: data.roleName,
+        isSuperAdmin: data.isSuperAdmin === true,
+        isManager: data.isManager === true,
         roleId: data.roleId ?? undefined,
         businessUnitId: data.businessUnitId ?? undefined,
         permissions: permissions,
@@ -457,6 +465,15 @@ const LoginPage: React.FC = () => {
 
   const nodeCenters = industrialFlow.map((_, i) => getNodeCenter(i));
 
+  // StyledTextField strips the outlined fieldset border, so MUI's default
+  // `error` treatment is invisible. Restore a visible invalid state.
+  const errorFieldSx = {
+    '& .MuiOutlinedInput-root.Mui-error': {
+      border: '1px solid',
+      borderColor: 'error.main',
+    },
+  } as const;
+
   return (
     <Container theme={theme}>
       <DigitalGrid primary={primaryColor} />
@@ -464,7 +481,10 @@ const LoginPage: React.FC = () => {
 
       <GlassCard mode={mode}>
         <VisualArea mode={mode}>
-          <RadialWrapper>
+          {/* Purely decorative animated pipeline diagram — hidden from
+              assistive tech so screen-reader users are not read ~15 orphan
+              labels before reaching the sign-in form (SC 1.1.1). */}
+          <RadialWrapper aria-hidden="true">
             <SVGOverlay viewBox={`0 0 ${SVG_SIZE} ${SVG_SIZE}`}>
               <defs>
                 {industrialFlow.map((node, i) => (
@@ -538,22 +558,27 @@ const LoginPage: React.FC = () => {
           </Box>
         </VisualArea>
 
-        <FormSection>
+        <FormSection as="main" id={MAIN_CONTENT_ID} tabIndex={-1}>
           <Box sx={{ position: 'absolute', top: 40, right: 40, display: 'flex', gap: 2 }}>
-            <IconButton onClick={() => setMode(mode === 'dark' ? 'light' : 'dark')}>
+            <IconButton
+              onClick={() => setMode(mode === 'dark' ? 'light' : 'dark')}
+              aria-label={mode === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+            >
               {mode === 'dark' ? <SunIcon /> : <MoonIcon />}
             </IconButton>
           </Box>
 
           <Box sx={{ maxWidth: 400, width: '100%', mx: 'auto' }}>
-            <Typography variant="h3" sx={{ fontWeight: 900, mb: 1, letterSpacing: '-0.03em' }}>
+            {/* variant keeps the visual scale; component makes it the page's
+                only <h1> so the document has a heading structure (SC 1.3.1). */}
+            <Typography variant="h3" component="h1" sx={{ fontWeight: 900, mb: 1, letterSpacing: '-0.03em' }}>
               Welcome back
             </Typography>
             <Typography variant="body1" sx={{ color: 'text.secondary', mb: 6 }}>
               Enter your operational credentials to continue.
             </Typography>
 
-            {notice && <Alert severity="info" sx={{ mb: 3, borderRadius: 3 }}>{notice}</Alert>}
+            {notice && <Alert role="status" severity="info" sx={{ mb: 3, borderRadius: 3 }}>{notice}</Alert>}
 
             <form onSubmit={handleLogin}>
               {businessUnitOptions ? (
@@ -565,11 +590,15 @@ const LoginPage: React.FC = () => {
                     <InputLabel id="bu-label">Which organization?</InputLabel>
                     <StyledSelect
                       mode={mode}
+                      id="business-unit"
+                      name="businessUnitId"
                       labelId="bu-label"
                       label="Which organization?"
                       value={selectedBusinessUnitId}
                       onChange={(e) => setSelectedBusinessUnitId(Number(e.target.value))}
                       required
+                      error={Boolean(error)}
+                      aria-describedby={error ? LOGIN_ERROR_ID : undefined}
                     >
                       {businessUnitOptions.map((bu) => (
                         <MenuItem key={bu.id} value={bu.id}>
@@ -584,12 +613,21 @@ const LoginPage: React.FC = () => {
                   <StyledTextField
                     mode={mode}
                     fullWidth
+                    id="email"
+                    name="email"
+                    // type=email gets the right mobile keyboard and native
+                    // validation; autoComplete lets password managers and
+                    // browser autofill work (SC 1.3.5 Identify Input Purpose).
+                    type="email"
+                    autoComplete="username"
+                    inputMode="email"
                     label="Email Address"
                     variant="outlined"
-                    sx={{ mb: 3 }}
+                    sx={{ mb: 3, ...errorFieldSx }}
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     required
+                    error={Boolean(error)}
                     slotProps={{
                       input: {
                         startAdornment: (
@@ -597,20 +635,28 @@ const LoginPage: React.FC = () => {
                             <MailIcon sx={{ color: 'primary.main', opacity: 0.7 }} />
                           </InputAdornment>
                         ),
-                      }
+                      },
+                      htmlInput: {
+                        'aria-invalid': Boolean(error),
+                        'aria-describedby': error ? LOGIN_ERROR_ID : undefined,
+                      },
                     }}
                   />
 
                   <StyledTextField
                     mode={mode}
                     fullWidth
+                    id="password"
+                    name="password"
+                    autoComplete="current-password"
                     label="Password"
                     type={showPassword ? 'text' : 'password'}
                     variant="outlined"
-                    sx={{ mb: 4 }}
+                    sx={{ mb: 4, ...errorFieldSx }}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     required
+                    error={Boolean(error)}
                     slotProps={{
                       input: {
                         startAdornment: (
@@ -620,18 +666,36 @@ const LoginPage: React.FC = () => {
                         ),
                         endAdornment: (
                           <InputAdornment position="end">
-                            <IconButton onClick={() => setShowPassword(!showPassword)} edge="end">
+                            <IconButton
+                              onClick={() => setShowPassword(!showPassword)}
+                              edge="end"
+                              // Icon-only control: needs a name, and the toggle
+                              // state has to be exposed, not just implied by
+                              // which icon is drawn (SC 4.1.2).
+                              aria-label={showPassword ? 'Hide password' : 'Show password'}
+                              aria-pressed={showPassword}
+                            >
                               {showPassword ? <VisibilityOff /> : <Visibility />}
                             </IconButton>
                           </InputAdornment>
                         ),
-                      }
+                      },
+                      htmlInput: {
+                        'aria-invalid': Boolean(error),
+                        'aria-describedby': error ? LOGIN_ERROR_ID : undefined,
+                      },
                     }}
                   />
                 </>
               )}
 
-              {error && <Alert severity="error" sx={{ mb: 3, borderRadius: 3 }}>{error}</Alert>}
+              {/* id lets the fields point at this message via
+                  aria-describedby; role="alert" announces it on failure. */}
+              {error && (
+                <Alert id={LOGIN_ERROR_ID} role="alert" severity="error" sx={{ mb: 3, borderRadius: 3 }}>
+                  {error}
+                </Alert>
+              )}
 
               <Button
                 fullWidth

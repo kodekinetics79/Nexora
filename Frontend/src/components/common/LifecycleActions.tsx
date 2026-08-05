@@ -4,6 +4,7 @@ import { AccountTree as LifecycleIcon } from '@mui/icons-material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSnackbar } from 'notistack';
 import lifecycleService, { type LifecycleAggregate, type LifecycleTransitionOption } from '../../api/services/commercialLifecycleService';
+import { presentableErrorMessage } from '../../utils/apiErrors';
 
 interface Props { aggregate: LifecycleAggregate; id: number; onChanged?: () => void; }
 
@@ -27,7 +28,10 @@ const LifecycleActions: React.FC<Props> = ({ aggregate, id, onChanged }) => {
       await queryClient.invalidateQueries({ queryKey: ['lifecycle', aggregate, id] });
       onChanged?.();
     },
-    onError: (error: any) => enqueueSnackbar(error.response?.data?.error || error.message || 'Lifecycle update failed', { variant: 'error' }),
+    onError: (error: unknown) => enqueueSnackbar(
+      presentableErrorMessage(error, 'The lifecycle update could not be applied. The record is unchanged — try again.'),
+      { variant: 'error' },
+    ),
   });
   const state = stateQuery.data;
   return <>

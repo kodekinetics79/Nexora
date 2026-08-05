@@ -24,6 +24,7 @@ import leadService from '../../api/services/leadService';
 import SearchField from '../../components/common/SearchField';
 import { useSnackbar } from 'notistack';
 import { useAuth } from '../../context/AuthContext';
+import { presentableErrorMessage } from '../../utils/apiErrors';
 
 const OutstandingLeadsPage: React.FC = () => {
   const { t } = useTranslation();
@@ -92,7 +93,10 @@ const OutstandingLeadsPage: React.FC = () => {
       queryClient.invalidateQueries({ queryKey: ['leads-outstanding'] });
       queryClient.invalidateQueries({ queryKey: ['leads-assigned'] });
     },
-    onError: (err: any) => enqueueSnackbar(err.response?.data?.error || 'Failed to assign lead', { variant: 'error' }),
+    onError: (error: unknown) => enqueueSnackbar(
+      presentableErrorMessage(error, 'The lead could not be assigned. Its current owner is unchanged — try again.'),
+      { variant: 'error' },
+    ),
   });
 
   const handleAssignClick = (id: number) => {

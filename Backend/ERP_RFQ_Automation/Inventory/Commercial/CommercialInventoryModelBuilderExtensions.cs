@@ -91,12 +91,26 @@ public static class CommercialInventoryModelBuilderExtensions
         });
         modelBuilder.Entity<LeadLineCommercialResolution>(entity =>
         {
-            entity.ToTable("lead_line_commercial_resolutions"); entity.HasKey(x => x.Id);
+            entity.ToTable("lead_line_commercial_resolutions", table =>
+            {
+                table.HasCheckConstraint("CK_commercial_resolution_quantities",
+                    "\"RequestedQuantity\" > 0 AND \"AvailableToPromise\" >= 0 AND \"IncomingAvailable\" >= 0 AND \"ProjectedShortage\" >= 0");
+                table.HasCheckConstraint("CK_commercial_resolution_cost_evidence",
+                    "(\"UnitCost\" IS NULL AND \"CostCurrencyCode\" IS NULL) OR (\"UnitCost\" >= 0 AND \"CostCurrencyCode\" IS NOT NULL)");
+                table.HasCheckConstraint("CK_commercial_resolution_lead_time",
+                    "\"LeadTimeDays\" IS NULL OR \"LeadTimeDays\" >= 0");
+                table.HasCheckConstraint("CK_commercial_resolution_rfq_item",
+                    "\"RfqItemId\" IS NULL OR \"RfqId\" IS NOT NULL");
+            });
+            entity.HasKey(x => x.Id);
             entity.Property(x => x.Classification).HasConversion<string>().HasMaxLength(40);
             entity.Property(x => x.RequestedPartNumber).HasMaxLength(200).IsRequired();
             entity.Property(x => x.RequestedQuantity).HasPrecision(18, 4);
             entity.Property(x => x.AvailableToPromise).HasPrecision(18, 4);
             entity.Property(x => x.IncomingAvailable).HasPrecision(18, 4);
+            entity.Property(x => x.ProjectedShortage).HasPrecision(18, 4);
+            entity.Property(x => x.UnitCost).HasPrecision(18, 4);
+            entity.Property(x => x.CostCurrencyCode).HasMaxLength(10);
             entity.Property(x => x.FulfilmentJson).HasColumnType("jsonb");
             entity.Property(x => x.RelatedResourcesJson).HasColumnType("jsonb");
             entity.Property(x => x.ProductResolutionJson).HasColumnType("jsonb");
@@ -106,12 +120,25 @@ public static class CommercialInventoryModelBuilderExtensions
             entity.HasIndex(x => new { x.BusinessUnitId, x.LeadRevisionId, x.LeadLineId, x.ResolutionBatchId }).IsUnique();
             entity.HasIndex(x => new { x.BusinessUnitId, x.LeadRevisionId, x.LeadLineId, x.ResolvedOn });
             entity.HasIndex(x => new { x.BusinessUnitId, x.RfqId });
+            entity.HasIndex(x => new { x.BusinessUnitId, x.RfqId, x.RfqItemId });
+            entity.HasOne<Lead>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.LeadId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne<ERP_RFQ_Automation.LeadIdentity.LeadRevision>().WithMany()
                 .HasForeignKey(x => new { x.BusinessUnitId, x.LeadRevisionId })
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne<ERP_RFQ_Automation.LeadIdentity.LeadItemRevision>().WithMany()
                 .HasForeignKey(x => new { x.BusinessUnitId, x.LeadLineId })
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Rfq>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.RfqId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Rfqitem>().WithMany()
+                .HasForeignKey(x => new { Id = x.RfqItemId, Rfqid = x.RfqId })
+                .HasPrincipalKey(x => new { x.Id, x.Rfqid }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Product>().WithMany()
+                .HasForeignKey(x => new { BusinessUnitId = x.BusinessUnitId, ProductId = x.ProductId })
+                .HasPrincipalKey(x => new { BusinessUnitId = x.Buid, ProductId = x.Id }).OnDelete(DeleteBehavior.Restrict);
         });
         return modelBuilder;
     }

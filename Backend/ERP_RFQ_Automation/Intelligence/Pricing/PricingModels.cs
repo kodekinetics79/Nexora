@@ -7,7 +7,7 @@ namespace ERP_RFQ_Automation.Intelligence.Pricing;
 // exact contract the frontend builds against:
 //   PricePreview = { rfqId, currency, lines:[...], totals:{ recommendedTotal }, overallConfidence }
 
-/// <summary>Full multi-signal pricing preview for one RFQ.</summary>
+/// <summary>Shadow-only pricing preview for one RFQ.</summary>
 public sealed class PricePreview
 {
     public long RfqId { get; set; }
@@ -17,7 +17,14 @@ public sealed class PricePreview
     /// falling back to the tenant's base currency). No FX conversion is performed —
     /// signals in a different explicit currency are excluded from the blend.
     /// </summary>
-    public string Currency { get; set; } = string.Empty;
+    public string? Currency { get; set; }
+
+    public string Mode { get; set; } = "SHADOW";
+
+    public bool ApplyAllowed { get; set; }
+
+    public string ApplyBlocker { get; set; } =
+        "Create or revise the Customer Quote through the governed Supplier award pricing bridge.";
 
     public List<PriceLine> Lines { get; set; } = new();
 
@@ -34,16 +41,19 @@ public sealed class PriceLine
     public string Description { get; set; } = string.Empty;
     public decimal Quantity { get; set; }
 
-    /// <summary>Priority-weighted blend of every signal that fired (sell price).</summary>
+    /// <summary>Resolved line currency. Null means the line is not safe to recommend.</summary>
+    public string? Currency { get; set; }
+
+    /// <summary>Advisory sell price from admitted accepted-Quote evidence.</summary>
     public decimal RecommendedUnitPrice { get; set; }
 
-    /// <summary>Cost basis with NO margin — the do-not-sell-below line.</summary>
-    public decimal FloorUnitPrice { get; set; }
+    /// <summary>Reserved for an authoritative governed cost floor; currently null.</summary>
+    public decimal? FloorUnitPrice { get; set; }
 
-    /// <summary>(recommended − floor) / floor. 0 when no floor could be established.</summary>
-    public decimal MarginPct { get; set; }
+    /// <summary>Reserved for a governed margin calculation; null without authoritative cost.</summary>
+    public decimal? MarginPct { get; set; }
 
-    /// <summary>0–1: strength/recency/plenty of the signals behind the recommendation.</summary>
+    /// <summary>0-1: strength and recency of admitted evidence.</summary>
     public decimal Confidence { get; set; }
 
     /// <summary>One plain-English sentence explaining the dominant signal.</summary>
@@ -58,7 +68,7 @@ public sealed class PriceLine
 /// <summary>One contributing signal. Source is a stable enum-like string.</summary>
 public sealed class PriceSignal
 {
-    /// <summary>"priceList" | "recentQuote" | "supplierQuote" | "purchaseHistory" | "productMaster"</summary>
+    /// <summary>Stable source code. The current policy admits only "recentQuote".</summary>
     public string Source { get; set; } = string.Empty;
 
     public string Label { get; set; } = string.Empty;
@@ -66,14 +76,21 @@ public sealed class PriceSignal
     /// <summary>The sell-side unit price this signal contributed to the blend.</summary>
     public decimal Value { get; set; }
 
-    /// <summary>Human detail: raw cost, date, supplier, quantity, currency.</summary>
+    /// <summary>Human-readable quote reference, date, quantity and currency.</summary>
     public string Detail { get; set; } = string.Empty;
 }
 
 public sealed class PriceTotals
 {
-    public decimal RecommendedTotal { get; set; }
+    /// <summary>Present only when every priced line uses one verified currency.</summary>
+    public decimal? RecommendedTotal { get; set; }
+
+    public List<CurrencyPriceTotal> ByCurrency { get; set; } = new();
+    public int PricedLineCount { get; set; }
+    public int UnpricedLineCount { get; set; }
 }
+
+public sealed record CurrencyPriceTotal(string Currency, decimal RecommendedTotal, int LineCount);
 
 /// <summary>POST body for apply-pricing: { lines:[{ rfqItemId, unitPrice }] }.</summary>
 public sealed class ApplyPricingRequest

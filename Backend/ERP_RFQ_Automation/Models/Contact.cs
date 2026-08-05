@@ -39,6 +39,8 @@ public partial class Contact
 
     public DateTime? ModifiedOn { get; set; }
 
+    public Guid ConcurrencyToken { get; set; }
+
     public virtual Customer? Customer { get; set; }
 
     public virtual Supplier? Supplier { get; set; }

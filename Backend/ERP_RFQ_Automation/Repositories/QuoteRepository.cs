@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.DTOs.QuoteDTOs;
+using ERP_RFQ_Automation.Fx;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
@@ -291,6 +292,7 @@ namespace ERP_RFQ_Automation.Repositories
             var quotes = await _context.Quotes
                 .AsNoTracking()
                 .Where(q => q.BusinessUnitId == businessUnitId)
+                .Select(q => new { q.Id, q.StatusId, q.ValidUntil, q.TotalAmount, q.CurrencyId })
                 .ToListAsync();
 
             var now = DateTime.UtcNow;
@@ -303,13 +305,43 @@ namespace ERP_RFQ_Automation.Repositories
             var acceptedStatusIds = await GetQuoteStatusIdsAsync("ACCEPTED", legacyId: 44);
             var pendingStatusIds = await GetQuoteStatusIdsAsync("SENT", legacyId: 43); // pending = sent, awaiting the customer
 
+            // FX fix: this used to be `quotes.Sum(q => q.TotalAmount ?? 0)`, which added AED, USD
+            // and EUR quote totals together as bare decimals and reported the result as one
+            // number. Quote.TotalAmount is denominated by Quote.CurrencyId, so that sum was only
+            // ever correct for a single-currency tenant. Amounts are now converted into the
+            // business unit's base currency using approved, effective-dated rates, and the total
+            // FAILS CLOSED (null + a surfaced reason + a per-currency breakdown) when any quote's
+            // currency has no approved rate — matching the Procurement read-path philosophy of
+            // never emitting an uncomparable figure.
+            var fx = new FxConversionService(_context);
+            var total = await fx.TotalAsync(
+                businessUnitId,
+                quotes.Select(q => new FxAmount(q.TotalAmount ?? 0m, q.CurrencyId)).ToArray(),
+                now);
+
             return new QuoteStatsDTO
             {
                 TotalQuotes = quotes.Count,
                 AcceptedQuotes = quotes.Count(q => q.StatusId.HasValue && acceptedStatusIds.Contains(q.StatusId.Value)),
                 PendingQuotes = quotes.Count(q => q.StatusId.HasValue && pendingStatusIds.Contains(q.StatusId.Value)),
                 ExpiredQuotes = quotes.Count(q => q.ValidUntil.HasValue && q.ValidUntil.Value < now),
-                TotalQuotedAmount = quotes.Sum(q => q.TotalAmount ?? 0)
+                TotalQuotedAmount = total.Total,
+                TotalQuotedAmountCurrency = total.TargetCurrencyCode,
+                TotalQuotedAmountConverted = total.Converted,
+                TotalQuotedAmountUnavailableReason = total.UnavailableReason,
+                QuotedAmountsByCurrency = total.Components
+                    .Select(c => new QuoteStatsCurrencyBreakdownDTO
+                    {
+                        CurrencyId = c.CurrencyId,
+                        CurrencyCode = c.CurrencyCode,
+                        Subtotal = c.Subtotal,
+                        QuoteCount = c.RowCount,
+                        Converted = c.Converted,
+                        ExchangeRate = c.Rate,
+                        ConvertedSubtotal = c.ConvertedSubtotal,
+                        Reason = c.Reason
+                    })
+                    .ToList()
             };
         }
 

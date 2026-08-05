@@ -45,6 +45,9 @@ public sealed class ExtractionJobMetadata
 
     public DateTimeOffset? SourceReceivedAtUtc { get; set; }
 
+    /// <summary>Authenticated uploader or governed source actor recorded for audit display.</summary>
+    public string? UploadedBy { get; set; }
+
     /// <summary>Legacy mailbox metadata. Customer identity must use <see cref="FromEmail"/>.</summary>
     public string? ClientEmail { get; set; }
 
@@ -60,6 +63,14 @@ public sealed class ExtractionJobMetadata
     /// Non-customer documents are completed by the extraction worker without creating a Lead.
     /// </summary>
     public string? CommercialDocumentTypeHint { get; set; }
+
+    /// <summary>
+    /// ING-06: "filename (reason)" entries for sibling attachments the intake door had to
+    /// skip (unsupported type, oversize, empty, unnamed). Set on the email BODY job so the
+    /// durable provenance record (job sidecar + SourceDocumentOccurrence.SourceMetadataJson)
+    /// shows a dropped attachment was never silent. Null when nothing was skipped.
+    /// </summary>
+    public IReadOnlyList<string>? SkippedAttachments { get; set; }
 
     public static bool IsNonLeadCommercialType(string? value) =>
         !string.IsNullOrWhiteSpace(value) &&

@@ -1,6 +1,7 @@
 import React from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { isAxiosError } from 'axios';
 import {
   Box,
   Breadcrumbs,
@@ -23,6 +24,15 @@ import {
   TableCell,
   TableHead,
   TableRow,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  FormControl,
+  InputLabel,
+  MenuItem,
+  Select,
+  TextField,
 } from '@mui/material';
 import {
   ArrowForward as OpenIcon,
@@ -46,6 +56,10 @@ import { formatDateSafe } from '../../utils/dates';
 import procurementService from '../../api/services/procurementService';
 import commercialIntelligenceService from '../../api/services/commercialIntelligenceService';
 import commercialLearningService from '../../api/services/commercialLearningService';
+import opportunityPriorityService, {
+  createOpportunityCommandIdentity,
+  type OpportunityFeedbackCode,
+} from '../../api/services/opportunityPriorityService';
 import { useAuth } from '../../context/AuthContext';
 
 const DOC_ORDER: CommercialCaseDocument['documentType'][] = [
@@ -111,13 +125,30 @@ const caseAge = (createdOn: string) => {
   return `${days} days old`;
 };
 
+const percent = (value: number) => `${value <= 1 ? Math.round(value * 100) : Math.round(value)}%`;
+
+const feedbackLabels: Record<OpportunityFeedbackCode, string> = {
+  Accepted: 'Agree with recommendation',
+  Rejected: 'Reject recommendation',
+  Replaced: 'Suggest another action',
+  Deferred: 'Defer assessment',
+  Reverted: 'Revert latest feedback',
+};
+
 const CommercialCaseWorkspacePage: React.FC = () => {
   const navigate = useNavigate();
-  const { hasPermission } = useAuth();
+  const queryClient = useQueryClient();
+  const { hasPermission, userData } = useAuth();
   const { id } = useParams<{ id?: string }>();
   const [searchParams] = useSearchParams();
   const [query, setQuery] = React.useState(() => searchParams.get('search') ?? '');
   const [tab, setTab] = React.useState(0);
+  const [feedbackOpen, setFeedbackOpen] = React.useState(false);
+  const [feedbackCode, setFeedbackCode] = React.useState<OpportunityFeedbackCode>('Accepted');
+  const [feedbackReason, setFeedbackReason] = React.useState('');
+  const [replacementActionCode, setReplacementActionCode] = React.useState('');
+  const [feedbackRecorded, setFeedbackRecorded] = React.useState(false);
+  const feedbackReasonInputRef = React.useRef<HTMLTextAreaElement | null>(null);
 
   const searchTerm = query.trim();
   const { data: searchResults, isLoading: searchLoading, isError: searchError, refetch: retrySearch } = useQuery({
@@ -136,7 +167,49 @@ const CommercialCaseWorkspacePage: React.FC = () => {
     queryFn: () => commercialCaseService.getById(selectedCaseId ?? 0),
     enabled: !!selectedCaseId,
   });
-  const primaryRfqId = detail?.documents.find(document => document.documentType === 'RFQ')?.documentId;
+  const priorityQueryKey = ['opportunity-priority', 'commercial-case', selectedCaseId] as const;
+  const opportunityPriority = useQuery({
+    queryKey: priorityQueryKey,
+    queryFn: () => opportunityPriorityService.getForCommercialCase(selectedCaseId ?? 0),
+    enabled: !!selectedCaseId,
+    retry: (failureCount, error) => !isAxiosError(error) || error.response?.status !== 404 ? failureCount < 1 : false,
+  });
+  const feedbackMutation = useMutation({
+    mutationFn: () => {
+      if (!opportunityPriority.data) throw new Error('No current recommendation is available.');
+      const identity = createOpportunityCommandIdentity();
+      return opportunityPriorityService.recordFeedback(opportunityPriority.data.recommendationId, {
+        ...identity,
+        expectedRecommendationId: opportunityPriority.data.recommendationId,
+        decision: feedbackCode,
+        replacementActionCode: feedbackCode === 'Replaced' ? replacementActionCode.trim() : undefined,
+        reason: feedbackReason.trim(),
+        supersedesFeedbackId: feedbackCode === 'Reverted'
+          ? opportunityPriority.data.latestFeedback?.id
+          : undefined,
+      });
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: priorityQueryKey });
+      setFeedbackOpen(false);
+      setFeedbackReason('');
+      setReplacementActionCode('');
+      setFeedbackRecorded(true);
+    },
+    onError: (error) => {
+      if (isAxiosError(error) && error.response?.status === 409) {
+        void queryClient.invalidateQueries({ queryKey: priorityQueryKey });
+      }
+    },
+  });
+  const primaryRfqId = detail?.documents
+    .filter(document => document.documentType === 'RFQ')
+    .sort((left, right) => {
+      const rightOccurredOn = right.occurredOn ? new Date(right.occurredOn).getTime() : 0;
+      const leftOccurredOn = left.occurredOn ? new Date(left.occurredOn).getTime() : 0;
+      return rightOccurredOn - leftOccurredOn || right.documentId - left.documentId;
+    })[0]
+    ?.documentId;
   const workbench = useQuery({
     queryKey: ['commercial-case', selectedCaseId, 'rfq-workbench', primaryRfqId],
     queryFn: () => procurementService.getWorkbench(primaryRfqId),
@@ -178,7 +251,17 @@ const CommercialCaseWorkspacePage: React.FC = () => {
 
   React.useEffect(() => {
     setTab(0);
+    setFeedbackOpen(false);
+    setFeedbackRecorded(false);
   }, [selectedCaseId]);
+
+  const canRecordFeedback = hasPermission('Leads', 'edit');
+  const canRevertFeedback = canRecordFeedback &&
+    (userData.isManager === true || userData.isSuperAdmin === true) &&
+    !!opportunityPriority.data?.latestFeedback;
+  const priorityMissing = isAxiosError(opportunityPriority.error) && opportunityPriority.error.response?.status === 404;
+  const feedbackValid = feedbackReason.trim().length > 0
+    && (feedbackCode !== 'Replaced' || replacementActionCode.trim().length > 0);
 
   const documentsByType = React.useMemo(() => {
     const entries = new Map<CommercialCaseDocument['documentType'], CommercialCaseDocument[]>();
@@ -208,7 +291,7 @@ const CommercialCaseWorkspacePage: React.FC = () => {
         <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2} sx={{ justifyContent: 'space-between', alignItems: { xs: 'flex-start', lg: 'center' } }}>
           <Box>
             <Stack direction="row" spacing={1.25} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
-              <Typography sx={{ fontSize: '1.45rem', fontWeight: 950, letterSpacing: '-0.02em' }}>
+              <Typography sx={{ fontSize: '1.45rem', fontWeight: 950, letterSpacing: 0 }}>
                 {current.masterReference}
               </Typography>
               <Chip
@@ -276,6 +359,83 @@ const CommercialCaseWorkspacePage: React.FC = () => {
             </Grid>
           </Grid>
         </Paper>
+        {feedbackRecorded && <Alert severity="success">Recommendation feedback recorded. No commercial workflow state was changed.</Alert>}
+        {opportunityPriority.isLoading && <Paper variant="outlined" sx={{ p: 3, textAlign: 'center' }}><CircularProgress size={24} aria-label="Loading shadow recommendation" /></Paper>}
+        {!opportunityPriority.isLoading && priorityMissing && (
+          <Paper variant="outlined" sx={{ p: 3 }}>
+            <Typography sx={{ fontWeight: 900 }}>Opportunity priority</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.75 }}>No persisted shadow recommendation is available for this commercial case.</Typography>
+          </Paper>
+        )}
+        {!opportunityPriority.isLoading && opportunityPriority.isError && !priorityMissing && (
+          <Alert severity="error" action={<Button color="inherit" onClick={() => void opportunityPriority.refetch()}>Retry</Button>}>
+            The persisted shadow recommendation could not be loaded. No recommendation has been assumed.
+          </Alert>
+        )}
+        {opportunityPriority.data && (
+          <Paper component="section" aria-labelledby="opportunity-priority-title" sx={{ p: 3, borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
+            <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} sx={{ justifyContent: 'space-between', alignItems: { xs: 'stretch', md: 'flex-start' } }}>
+              <Box sx={{ minWidth: 0 }}>
+                <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
+                  <Typography id="opportunity-priority-title" sx={{ fontWeight: 900 }}>Opportunity priority</Typography>
+                  <Chip size="small" label="Shadow" variant="outlined" />
+                  <Chip size="small" label={`${opportunityPriority.data.priorityBand} priority`} />
+                </Stack>
+                <Typography variant="h6" sx={{ fontWeight: 900, mt: 1 }}>{opportunityPriority.data.recommendedActionLabel}</Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                  Advisory guidance only. Feedback records your assessment and does not execute an action or change workflow state.
+                </Typography>
+              </Box>
+              {canRecordFeedback && <Button variant="outlined" onClick={() => { feedbackMutation.reset(); setFeedbackRecorded(false); setFeedbackOpen(true); }}>Record feedback</Button>}
+            </Stack>
+            <Grid container spacing={2} sx={{ mt: 1 }}>
+              <Grid size={{ xs: 6, md: 2.4 }}><DataField label="Rank" value={`#${opportunityPriority.data.rank}`} /></Grid>
+              <Grid size={{ xs: 6, md: 2.4 }}><DataField label="Score" value={opportunityPriority.data.priorityScore} /></Grid>
+              <Grid size={{ xs: 6, md: 2.4 }}><DataField label="Confidence" value={percent(opportunityPriority.data.confidence)} /></Grid>
+              <Grid size={{ xs: 6, md: 2.4 }}><DataField label="Completeness" value={percent(opportunityPriority.data.completeness)} /></Grid>
+              <Grid size={{ xs: 6, md: 2.4 }}><DataField label="Sample size" value={opportunityPriority.data.sampleSize} /></Grid>
+            </Grid>
+            <Divider sx={{ my: 2 }} />
+            <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>Expected Commercial Value components</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+              {opportunityPriority.data.expectedCommercialValue == null
+                ? `Not measured: ${opportunityPriority.data.currentBlocker}`
+                : `${opportunityPriority.data.expectedCommercialValueCurrency ?? ''} ${opportunityPriority.data.expectedCommercialValue.toLocaleString(undefined, { maximumFractionDigits: 2 })} in shadow mode.`}
+            </Typography>
+            <Typography variant="body2" sx={{ mt: 0.75 }}><strong>Current blocker:</strong> {opportunityPriority.data.currentBlocker}</Typography>
+            <Typography variant="body2"><strong>Response deadline:</strong> {opportunityPriority.data.responseDeadline ? formatDateSafe(opportunityPriority.data.responseDeadline) : 'Not available'}</Typography>
+            <Typography variant="caption" color="text.secondary">Expected Commercial Value is not used to rank opportunities across currencies.</Typography>
+            <Grid container spacing={1.5} sx={{ mt: 0.5 }}>
+              {opportunityPriority.data.components.map(component => (
+                <Grid key={component.code} size={{ xs: 12, sm: 6, md: 4 }}>
+                  <Box sx={{ p: 1.5, height: '100%', border: '1px solid', borderColor: 'divider' }}>
+                    <Typography variant="caption" color="text.secondary">{component.label}</Typography>
+                    <Typography sx={{ fontWeight: 900 }}>
+                      {component.value == null ? 'Not measured' : `${component.value.toLocaleString(undefined, { maximumFractionDigits: 2 })}${component.unit === 'percent' ? '%' : component.unit === 'ratio' ? '' : ` ${component.unit ?? ''}`}`}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">Sample {component.sampleSize} | Confidence {percent(component.confidence)} | {component.status.replaceAll('_', ' ')}</Typography>
+                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>{component.sourceType} | {component.sourceReference} | {formatDateSafe(component.evidenceAsOfUtc)}</Typography>
+                    <Typography variant="body2" sx={{ mt: 0.75 }}>{component.evidence}</Typography>
+                  </Box>
+                </Grid>
+              ))}
+            </Grid>
+            <Divider sx={{ my: 2 }} />
+            <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>Recommendation rationale</Typography>
+            {opportunityPriority.data.reasons.length ? (
+              <Stack component="ul" spacing={0.75} sx={{ pl: 2.5, my: 1 }}>
+                {opportunityPriority.data.reasons.map((reason) => <Typography component="li" variant="body2" key={reason}>{reason}</Typography>)}
+              </Stack>
+            ) : <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>No rationale was supplied.</Typography>}
+            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ mt: 2, flexWrap: 'wrap' }}>
+              <Chip size="small" variant="outlined" label={`Policy ${opportunityPriority.data.policyVersion}`} />
+              <Chip size="small" variant="outlined" label={`Evidence through ${formatDateSafe(opportunityPriority.data.evidenceCutoffAtUtc)}`} />
+              <Chip size="small" variant="outlined" label={`Generated ${formatDateSafe(opportunityPriority.data.generatedAtUtc)}`} />
+              {opportunityPriority.data.latestFeedback && <Chip size="small" variant="outlined" label={`Latest feedback: ${opportunityPriority.data.latestFeedback.decision}`} />}
+              {opportunityPriority.data.outcomes.at(-1) && <Chip size="small" variant="outlined" label={`Observed outcome: ${opportunityPriority.data.outcomes.at(-1)?.outcomeCode}`} />}
+            </Stack>
+          </Paper>
+        )}
         {primaryRfqId && !hasPermission('RFQ Management') && <Alert severity="info">RFQ Management view permission is required to see line readiness and sourcing evidence.</Alert>}
         {workbench.isLoading && <Paper variant="outlined" sx={{ p: 4, textAlign: 'center' }}><CircularProgress size={24} /></Paper>}
         {workbench.isError && <Alert severity="error" action={<Button color="inherit" onClick={() => void workbench.refetch()}>Retry</Button>}>RFQ command evidence could not be loaded.</Alert>}
@@ -410,6 +570,72 @@ const CommercialCaseWorkspacePage: React.FC = () => {
           ))}
         </Stack>
       )}
+
+      <Dialog
+        open={feedbackOpen}
+        onClose={() => !feedbackMutation.isPending && setFeedbackOpen(false)}
+        fullWidth
+        maxWidth="sm"
+        slotProps={{ transition: { onEntered: () => feedbackReasonInputRef.current?.focus() } }}
+      >
+        <DialogTitle>Record recommendation feedback</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={2}>
+            <Alert severity="info">This feedback is advisory evidence. It does not execute the recommendation or change Lead, RFQ, Quote, Order, ownership, pricing, or inventory state.</Alert>
+            <FormControl fullWidth>
+              <InputLabel id="opportunity-feedback-label">Decision</InputLabel>
+              <Select
+                labelId="opportunity-feedback-label"
+                label="Decision"
+                value={feedbackCode}
+                onChange={(event) => setFeedbackCode(event.target.value as OpportunityFeedbackCode)}
+              >
+                {(['Accepted', 'Rejected', 'Replaced', 'Deferred'] as OpportunityFeedbackCode[]).map((code) => <MenuItem key={code} value={code}>{feedbackLabels[code]}</MenuItem>)}
+                {canRevertFeedback && <MenuItem value="Reverted">{feedbackLabels.Reverted}</MenuItem>}
+              </Select>
+            </FormControl>
+            {feedbackCode === 'Replaced' && (
+              <FormControl required fullWidth>
+                <InputLabel id="replacement-action-label">Suggested action</InputLabel>
+                <Select
+                  labelId="replacement-action-label"
+                  label="Suggested action"
+                  value={replacementActionCode}
+                  onChange={(event) => setReplacementActionCode(event.target.value)}
+                >
+                  {opportunityPriority.data?.availableActions.map(action => (
+                    <MenuItem key={action.code} value={action.code}>{action.label}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            )}
+            <TextField
+              required
+              autoFocus
+              inputRef={feedbackReasonInputRef}
+              multiline
+              minRows={3}
+              label="Reason"
+              value={feedbackReason}
+              onChange={(event) => setFeedbackReason(event.target.value)}
+              slotProps={{ htmlInput: { maxLength: 1000 } }}
+            />
+            {feedbackMutation.isError && (
+              <Alert severity="error">
+                {isAxiosError(feedbackMutation.error) && feedbackMutation.error.response?.status === 409
+                  ? 'The recommendation changed before feedback was recorded. The latest persisted version is being loaded.'
+                  : 'Feedback could not be recorded. No workflow state was changed.'}
+              </Alert>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setFeedbackOpen(false)} disabled={feedbackMutation.isPending}>Cancel</Button>
+          <Button variant="contained" disabled={!feedbackValid || feedbackMutation.isPending} onClick={() => feedbackMutation.mutate()}>
+            {feedbackMutation.isPending ? 'Recording...' : 'Record feedback'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Stack>
   );
 
@@ -426,7 +652,7 @@ const CommercialCaseWorkspacePage: React.FC = () => {
 
       <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2} sx={{ justifyContent: 'space-between', alignItems: { xs: 'flex-start', lg: 'center' }, mb: 2.5 }}>
         <Box>
-          <Typography variant="h4" sx={{ fontWeight: 950, letterSpacing: '-0.02em' }}>
+          <Typography variant="h4" sx={{ fontWeight: 950, letterSpacing: 0 }}>
             Commercial Workspace
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>

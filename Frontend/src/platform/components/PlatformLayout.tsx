@@ -33,6 +33,10 @@ import {
 } from '@mui/icons-material';
 import { useAppTheme } from '../../context/ThemeContext';
 import { usePlatformAuth } from '../auth/usePlatformAuth';
+import SkipLink, { MAIN_CONTENT_ID } from '../../components/layout/SkipLink';
+
+/** Referenced by the mobile drawer toggle's `aria-controls`. */
+const PLATFORM_NAV_ID = 'platform-sidebar';
 
 const NAV = [
   { to: '/platform/overview', label: 'Overview', icon: <OverviewIcon /> },
@@ -147,8 +151,16 @@ export default function PlatformLayout() {
 
   return (
     <Box sx={{ display: 'flex', minHeight: '100vh', bgcolor: 'background.default' }}>
+      {/* SC 2.4.1 — first tab stop, lets keyboard users bypass the nav rail. */}
+      <SkipLink />
+
       {/* Sidebar */}
-      <Box component="nav" sx={{ width: { md: DRAWER_WIDTH }, flexShrink: { md: 0 } }}>
+      <Box
+        component="nav"
+        id={PLATFORM_NAV_ID}
+        aria-label="Platform console"
+        sx={{ width: { md: DRAWER_WIDTH }, flexShrink: { md: 0 } }}
+      >
         <Drawer
           variant={isMobile ? 'temporary' : 'permanent'}
           open={isMobile ? mobileOpen : true}
@@ -183,7 +195,14 @@ export default function PlatformLayout() {
         >
           <Toolbar sx={{ gap: 1 }}>
             {isMobile && (
-              <IconButton edge="start" onClick={() => setMobileOpen(true)} sx={{ mr: 1 }}>
+              <IconButton
+                edge="start"
+                onClick={() => setMobileOpen(true)}
+                aria-label="Open platform navigation"
+                aria-expanded={mobileOpen}
+                aria-controls={PLATFORM_NAV_ID}
+                sx={{ mr: 1 }}
+              >
                 <MenuIcon />
               </IconButton>
             )}
@@ -198,7 +217,7 @@ export default function PlatformLayout() {
 
             <Box sx={{ flexGrow: 1 }} />
 
-            <Tooltip title="Toggle theme">
+            <Tooltip title={mode === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}>
               <IconButton onClick={() => setMode(mode === 'dark' ? 'light' : 'dark')} sx={{ bgcolor: 'action.hover', borderRadius: 2 }}>
                 {mode === 'dark' ? <SunIcon fontSize="small" /> : <MoonIcon fontSize="small" />}
               </IconButton>
@@ -207,7 +226,9 @@ export default function PlatformLayout() {
             <Divider orientation="vertical" flexItem sx={{ mx: 1, my: 1.5 }} />
 
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
-              <Avatar sx={{ width: 34, height: 34, bgcolor: 'primary.main', fontSize: 13, fontWeight: 800 }}>{initials}</Avatar>
+              {/* color: MUI's Avatar default (background.default) is only
+                  3.92:1 on the default brand colour — SC 1.4.3. */}
+              <Avatar sx={{ width: 34, height: 34, bgcolor: 'primary.main', color: 'primary.contrastText', fontSize: 13, fontWeight: 800 }}>{initials}</Avatar>
               <Box sx={{ display: { xs: 'none', sm: 'block' }, lineHeight: 1.1 }}>
                 <Typography variant="body2" sx={{ fontWeight: 700 }}>
                   {displayName}
@@ -226,7 +247,23 @@ export default function PlatformLayout() {
           </Toolbar>
         </AppBar>
 
-        <Box component="main" sx={{ flexGrow: 1, p: { xs: 2, md: 3 }, maxWidth: 1600, width: '100%', mx: 'auto' }}>
+        <Box
+          component="main"
+          id={MAIN_CONTENT_ID}
+          tabIndex={-1}
+          sx={{
+            flexGrow: 1,
+            p: { xs: 2, md: 3 },
+            maxWidth: 1600,
+            width: '100%',
+            mx: 'auto',
+            '&:focus': { outline: 'none' },
+            '&:focus-visible': {
+              outline: (t) => `3px solid ${t.palette.primary.main}`,
+              outlineOffset: -3,
+            },
+          }}
+        >
           <Outlet />
         </Box>
       </Box>

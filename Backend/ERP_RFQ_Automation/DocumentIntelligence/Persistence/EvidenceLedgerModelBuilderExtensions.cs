@@ -24,7 +24,17 @@ public static class EvidenceLedgerModelBuilderExtensions
         modelBuilder.Entity<SourceDocumentOccurrence>(entity =>
         {
             entity.ToTable("source_document_occurrences", table =>
-                table.HasCheckConstraint("ck_source_document_occurrences_business_unit", "business_unit_id > 0"));
+            {
+                table.HasCheckConstraint("ck_source_document_occurrences_business_unit", "business_unit_id > 0");
+                table.HasCheckConstraint("ck_source_document_occurrences_outcome_state",
+                    "outcome_state IN ('NONE','EXACT_DUPLICATE_PENDING_SECURITY','EXACT_DUPLICATE_CONFIRMED','BUSINESS_DUPLICATE_CONFIRMED','DUPLICATE_RESCAN_REQUIRED','REVISION','POSSIBLE_MATCH','SECURITY_SCAN_BLOCKED','MALWARE_DETECTED','UNSUPPORTED_FORMAT','SOURCE_OBJECT_UNAVAILABLE','EVIDENCE_INTEGRITY_FAILURE')");
+                table.HasCheckConstraint("ck_source_document_occurrences_resource_counts",
+                    "bytes_uploaded >= 0 AND hashing_duration_ms >= 0 AND storage_physical_bytes >= 0 AND storage_logical_bytes >= 0");
+                table.HasCheckConstraint("ck_source_document_occurrences_resource_costs",
+                    "local_compute_cost >= 0 AND external_processing_cost >= 0 AND total_actual_cost >= 0 AND estimated_processing_avoided >= 0 AND length(cost_status) > 0");
+                table.HasCheckConstraint("ck_source_document_occurrences_original",
+                    "original_occurrence_id IS NULL OR original_occurrence_id <> id");
+            });
             entity.HasKey(x => x.Id);
             entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id })
                 .HasName("ak_source_document_occurrences_tenant_id");
@@ -33,15 +43,33 @@ public static class EvidenceLedgerModelBuilderExtensions
             entity.Property(x => x.SourceDocumentId).HasColumnName("source_document_id");
             entity.Property(x => x.CorpusId).HasColumnName("corpus_id");
             entity.Property(x => x.ExtractionJobId).HasColumnName("extraction_job_id");
+            entity.Property(x => x.OriginalOccurrenceId).HasColumnName("original_occurrence_id");
             entity.Property(x => x.IdempotencyKey).HasColumnName("idempotency_key").HasMaxLength(256);
             entity.Property(x => x.SourceMetadataJson).HasColumnName("source_metadata").HasColumnType("jsonb");
             entity.Property(x => x.LogicalGroupKey).HasColumnName("logical_group_key").HasMaxLength(256);
             entity.Property(x => x.IntakeStatus).HasColumnName("intake_status").HasConversion<string>().HasMaxLength(32);
+            entity.Property(x => x.OutcomeState).HasColumnName("outcome_state").HasConversion<string>().HasMaxLength(48);
             entity.Property(x => x.LastErrorCategory).HasColumnName("last_error_category").HasMaxLength(64);
             entity.Property(x => x.LastErrorCode).HasColumnName("last_error_code").HasMaxLength(128);
             entity.Property(x => x.LastErrorDetailsJson).HasColumnName("last_error_details").HasColumnType("jsonb");
             entity.Property(x => x.ReceivedOn).HasColumnName("received_on").HasColumnType("timestamp with time zone");
             entity.Property(x => x.UpdatedOn).HasColumnName("updated_on").HasColumnType("timestamp with time zone");
+            entity.Property(x => x.BytesUploaded).HasColumnName("bytes_uploaded");
+            entity.Property(x => x.HashingDurationMs).HasColumnName("hashing_duration_ms");
+            entity.Property(x => x.StoragePhysicalBytes).HasColumnName("storage_physical_bytes");
+            entity.Property(x => x.StorageLogicalBytes).HasColumnName("storage_logical_bytes");
+            entity.Property(x => x.MalwareScanReused).HasColumnName("malware_scan_reused");
+            entity.Property(x => x.MalwareScanRerun).HasColumnName("malware_scan_rerun");
+            entity.Property(x => x.ParserReused).HasColumnName("parser_reused");
+            entity.Property(x => x.OcrReused).HasColumnName("ocr_reused");
+            entity.Property(x => x.LocalModelReused).HasColumnName("local_model_reused");
+            entity.Property(x => x.ExternalModelReused).HasColumnName("external_model_reused");
+            entity.Property(x => x.ProcessingReused).HasColumnName("processing_reused");
+            entity.Property(x => x.LocalComputeCost).HasColumnName("local_compute_cost").HasPrecision(18, 6);
+            entity.Property(x => x.ExternalProcessingCost).HasColumnName("external_processing_cost").HasPrecision(18, 6);
+            entity.Property(x => x.TotalActualCost).HasColumnName("total_actual_cost").HasPrecision(18, 6);
+            entity.Property(x => x.EstimatedProcessingAvoided).HasColumnName("estimated_processing_avoided").HasPrecision(18, 6);
+            entity.Property(x => x.CostStatus).HasColumnName("cost_status").HasMaxLength(48);
             entity.HasIndex(x => new { x.BusinessUnitId, x.IdempotencyKey }).IsUnique()
                 .HasDatabaseName("ux_source_document_occurrences_tenant_idempotency");
             entity.HasIndex(x => new { x.BusinessUnitId, x.SourceDocumentId, x.ReceivedOn })
@@ -50,11 +78,18 @@ public static class EvidenceLedgerModelBuilderExtensions
                 .HasDatabaseName("ix_source_document_occurrences_tenant_group");
             entity.HasIndex(x => x.ExtractionJobId)
                 .HasDatabaseName("ix_source_document_occurrences_extraction_job");
+            entity.HasIndex(x => new { x.BusinessUnitId, x.OutcomeState, x.ReceivedOn })
+                .HasDatabaseName("ix_source_document_occurrences_tenant_outcome");
+            entity.HasIndex(x => new { x.BusinessUnitId, x.OriginalOccurrenceId })
+                .HasDatabaseName("ix_source_document_occurrences_tenant_original");
             entity.HasOne(x => x.SourceDocument).WithMany(x => x.Occurrences)
                 .HasForeignKey(x => new { x.BusinessUnitId, x.SourceDocumentId })
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne(x => x.Corpus).WithMany(x => x.Occurrences)
                 .HasForeignKey(x => new { x.BusinessUnitId, x.CorpusId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(x => x.OriginalOccurrence).WithMany(x => x.DuplicateOccurrences)
+                .HasForeignKey(x => new { x.BusinessUnitId, x.OriginalOccurrenceId })
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
         });
     }
@@ -159,6 +194,8 @@ public static class EvidenceLedgerModelBuilderExtensions
                 table.HasCheckConstraint("ck_source_documents_byte_size", "byte_size >= 0");
                 table.HasCheckConstraint("ck_source_documents_page_count", "page_count >= 0");
                 table.HasCheckConstraint("ck_source_documents_content_hash", "content_hash ~ '^[0-9a-f]{64}$'");
+                table.HasCheckConstraint("ck_source_documents_malware_verdict",
+                    "(malware_verdict_status IS NULL AND malware_scanned_on IS NULL) OR (malware_verdict_status IN ('Clean','Infected','Unavailable','Error') AND malware_scanned_on IS NOT NULL AND malware_scanner_engine IS NOT NULL)");
             });
             entity.HasKey(x => x.Id);
             entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id })
@@ -177,6 +214,10 @@ public static class EvidenceLedgerModelBuilderExtensions
             entity.Property(x => x.PageCount).HasColumnName("page_count");
             entity.Property(x => x.SecurityStatus).HasColumnName("security_status").HasConversion<string>().HasMaxLength(32);
             entity.Property(x => x.ProcessingStatus).HasColumnName("processing_status").HasConversion<string>().HasMaxLength(32);
+            entity.Property(x => x.MalwareVerdictStatus).HasColumnName("malware_verdict_status").HasMaxLength(32);
+            entity.Property(x => x.MalwareScannerEngine).HasColumnName("malware_scanner_engine").HasMaxLength(128);
+            entity.Property(x => x.MalwareSignatureVersion).HasColumnName("malware_signature_version").HasMaxLength(256);
+            entity.Property(x => x.MalwareScannedOn).HasColumnName("malware_scanned_on").HasColumnType("timestamp with time zone");
             entity.Property(x => x.CreatedOn).HasColumnName("created_on").HasColumnType("timestamp with time zone");
             entity.Property(x => x.UpdatedOn).HasColumnName("updated_on").HasColumnType("timestamp with time zone");
             entity.HasIndex(x => new { x.BusinessUnitId, x.ContentHash }).IsUnique()

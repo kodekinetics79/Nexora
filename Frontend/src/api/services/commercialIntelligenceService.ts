@@ -19,6 +19,8 @@ export interface CommercialAttentionItem {
   reason: string;
   dueAt?: string | null;
   priority: string;
+  actionRoute?: string | null;
+  requiredModule?: string | null;
 }
 
 export interface SalesTodayDTO {
@@ -39,6 +41,32 @@ export interface RepSummaryDTO {
   draftQuotes: number;
   followUpsDue: number;
   pipelineGroups: CurrencyPipelineGroupDTO[];
+}
+
+export interface RoutingWorkloadDTO {
+  activeLeadCount: number;
+  leadLineCount: number;
+  overdueDeadlineCount: number;
+  urgentDeadlineCount: number;
+  approachingDeadlineCount: number;
+  openRfqCount: number;
+  openQuoteCount: number;
+  followUpCount: number;
+  workloadPoints: number;
+}
+
+export interface RoutingOwnerOptionDTO {
+  userId: number;
+  name: string;
+  email: string;
+  roleName?: string | null;
+  isAvailable: boolean;
+  capacityPercent: number;
+  workload: RoutingWorkloadDTO;
+  hasGovernedProfile: boolean;
+  eligibilityReason: string;
+  measuredAtUtc: string;
+  policyVersion: string;
 }
 
 export interface CurrencyPipelineGroupDTO {
@@ -64,6 +92,10 @@ export interface RepProfileDTO extends RepSummaryDTO {
   accountCount: number;
   wonValueGroups: CurrencyAmountGroupDTO[];
   conversionRate?: number | null;
+  decidedQuotes: number;
+  conversionEligible: boolean;
+  performanceFrom: string;
+  performanceTo: string;
   recentActivity: CommercialAttentionItem[];
 }
 
@@ -80,6 +112,7 @@ export interface AccountOwnershipDTO {
 }
 
 export interface RoutingQueueItemDTO {
+  sourceId: number;
   leadId: number;
   nexoraSerial: string;
   customerName?: string | null;
@@ -89,6 +122,15 @@ export interface RoutingQueueItemDTO {
   recommendedOwnerUserId?: number | null;
   recommendedOwnerName?: string | null;
   recommendationReason?: string | null;
+  matchConfidence: number;
+  policyVersion: string;
+  recommendationMeasuredAt?: string | null;
+  recommendedOwnerAvailable?: boolean | null;
+  recommendedOwnerCapacityPercent?: number | null;
+  recommendedOwnerWorkloadPoints?: number | null;
+  priority: number;
+  status: string;
+  overdue: boolean;
   version: number;
 }
 
@@ -112,7 +154,150 @@ export interface PerformanceDTO {
   from: string;
   to: string;
   metrics: IntelligenceMetric[];
-  representatives: Array<RepSummaryDTO & { wonQuotes: number; lostQuotes: number; conversionRate?: number | null }>;
+  scope: 'tenant' | 'assigned_to_me';
+  minimumConversionSample: number;
+  outcomeReconciliation: {
+    recordedOutcomes?: number | null;
+    attributedOutcomes: number;
+    unattributedOutcomes?: number | null;
+    completenessPercent?: number | null;
+    isTenantComplete: boolean;
+  };
+  representatives: Array<RepSummaryDTO & {
+    wonQuotes: number;
+    lostQuotes: number;
+    decidedQuotes: number;
+    conversionEligible: boolean;
+    conversionRate?: number | null;
+    activityCount: number;
+    opportunities: number;
+    quoteSent: number;
+    customerResponses: number;
+    averageResponseHours?: number | null;
+    followUpsCreated: number;
+    completedFollowUps: number;
+    followUpsCompletedOnTime: number;
+    openFollowUps: number;
+    overdueFollowUps: number;
+    revenueByCurrency: CurrencyAmountGroupDTO[];
+  }>;
+}
+
+export interface CommercialIntelligenceEvidenceDTO {
+  recordType: string;
+  recordId: number;
+  reference: string;
+  occurredOn?: string | null;
+  role: string;
+}
+
+export interface CoachingAcknowledgementDTO {
+  disposition: string;
+  reason: string;
+  acknowledgedByName?: string | null;
+  acknowledgedAt: string;
+}
+
+export interface CoachingFindingDTO {
+  findingKey: string;
+  code: string;
+  salesRepUserId: number;
+  salesRepName: string;
+  customerId?: number | null;
+  customerName?: string | null;
+  aggregateType: string;
+  aggregateId: number;
+  sourceVersion?: string | null;
+  reference: string;
+  nexoraSerial?: string | null;
+  severity: string;
+  observedValue?: number | null;
+  observedUnit?: string | null;
+  thresholdValue?: number | null;
+  sampleSize: number;
+  confidence: number;
+  asOf: string;
+  recommendation: string;
+  actionRoute: string;
+  policyVersion: string;
+  evidence: CommercialIntelligenceEvidenceDTO[];
+  latestAcknowledgement?: CoachingAcknowledgementDTO | null;
+}
+
+export interface RecoveryOpportunityDTO {
+  recoveryKey: string;
+  code: string;
+  sourceType: string;
+  sourceId: number;
+  sourceVersion?: string | null;
+  customerId?: number | null;
+  customerName?: string | null;
+  ownerUserId?: number | null;
+  ownerName?: string | null;
+  nexoraSerial?: string | null;
+  severity: string;
+  title: string;
+  explanation: string;
+  recommendedAction: string;
+  actionRoute: string;
+  dueAt?: string | null;
+  sampleSize: number;
+  confidence: number;
+  evidence: CommercialIntelligenceEvidenceDTO[];
+}
+
+export interface CoachingRecoveryDTO {
+  generatedAt: string;
+  policyVersion: string;
+  scope: 'tenant' | 'assigned_to_me' | string;
+  dataCompleteness: { status: 'complete' | 'partial' | string; incompleteSources: string[] };
+  coachingFindings: CoachingFindingDTO[];
+  recoveryOpportunities: RecoveryOpportunityDTO[];
+}
+
+export interface CustomerHealthAcceptedPriceDTO {
+  productId?: number | null;
+  partNumber?: string | null;
+  description?: string | null;
+  currencyCode: string;
+  quantity: number;
+  unitPrice: number;
+  acceptedOn?: string | null;
+  evidence: CommercialIntelligenceEvidenceDTO;
+}
+
+export interface CustomerHealthStatusDTO {
+  status: string;
+  reason?: string | null;
+}
+
+export interface CustomerHealthDTO {
+  customerId: number;
+  generatedAt: string;
+  dataCompleteness: { status: 'complete' | 'partial' | string; incompleteSources: string[] };
+  period: { from: string; to: string; previousFrom?: string | null; previousTo?: string | null };
+  rfqTrend: CustomerHealthStatusDTO & { currentCount: number; previousCount: number; changePercent?: number | null };
+  quoteCoverage: CustomerHealthStatusDTO & { rfqCount: number; quotedRfqCount: number; coveragePercent?: number | null };
+  quoteDecisions: CustomerHealthStatusDTO & { decidedCount: number; wonCount: number; lostCount: number; pendingCount?: number | null };
+  conversion: CustomerHealthStatusDTO & { ratePercent?: number | null; sampleSize: number };
+  acceptedPrices: CustomerHealthAcceptedPriceDTO[];
+  margin: CustomerHealthStatusDTO & { grossMarginPercent?: number | null };
+  revisionBurden: CustomerHealthStatusDTO & {
+    revisionCount: number;
+    inquiryCount: number;
+    changedFieldCount: number;
+    comparedFieldCount: number;
+    fieldChangePercent?: number | null;
+    changedLineCount: number;
+    comparedLineCount: number;
+    lineChangePercent?: number | null;
+  };
+  followUp: CustomerHealthStatusDTO & { openCount: number; overdueCount: number; effectivenessPercent?: number | null };
+  lastCommercialActivity?: CommercialIntelligenceEvidenceDTO | null;
+  healthBand: string;
+  healthReasons: string[];
+  opportunities: Array<{ code: string; title: string; explanation: string; actionRoute: string; evidence: CommercialIntelligenceEvidenceDTO[] }>;
+  nextBestAction?: { title: string; explanation: string; actionRoute: string; evidence: CommercialIntelligenceEvidenceDTO[] } | null;
 }
 
 export interface InventoryOverviewDTO {
@@ -229,12 +414,18 @@ export interface CommercialLineResolutionDTO {
   leadRevisionId: number;
   leadLineId: number;
   rfqId?: number | null;
+  rfqItemId?: number | null;
   productId?: number | null;
   requestedPartNumber: string;
   requestedQuantity: number;
   classification: 'KnownInStock' | 'KnownIncoming' | 'KnownShortage' | 'UnknownProduct' | 'PossibleMatchReview' | 'NonInventoryService';
   availableToPromise: number;
   incomingAvailable: number;
+  projectedShortage: number;
+  leadTimeDays?: number | null;
+  expectedAvailableOn?: string | null;
+  unitCost?: number | null;
+  costCurrencyCode?: string | null;
   fulfilment: { classification?: string; allocatedQuantity?: number; shortageQuantity?: number };
   relatedResources: Array<{ resourceId: string; displayName: string; matchReason: string; score: number; evidenceReference: string }>;
   productResolution: { confidence?: number; method?: string; decisionState?: string };
@@ -248,6 +439,7 @@ export interface ListParams {
   search?: string;
   status?: string;
   customerId?: number;
+  sourceId?: number;
   ownerUserId?: number;
   warehouseId?: number;
   from?: string;
@@ -264,16 +456,20 @@ const commercialIntelligenceService = {
     (await axiosInstance.get<TeamOverviewDTO>(`${commercialRoot}/team-overview`)).data,
   getRepDirectory: async (): Promise<RepSummaryDTO[]> =>
     (await axiosInstance.get<RepSummaryDTO[]>(`${commercialRoot}/reps`)).data,
-  getRepProfile: async (userId: number): Promise<RepProfileDTO> =>
-    (await axiosInstance.get<RepProfileDTO>(`${commercialRoot}/reps/${userId}`)).data,
+  getRepProfile: async (userId: number, from?: string, to?: string): Promise<RepProfileDTO> =>
+    (await axiosInstance.get<RepProfileDTO>(`${commercialRoot}/reps/${userId}`, { params: { from, to } })).data,
   getAccountOwnership: async (params: ListParams = {}): Promise<AccountOwnershipDTO[]> =>
     (await axiosInstance.get<AccountOwnershipDTO[]>(`${commercialRoot}/account-ownership`, { params })).data,
-  assignAccount: async (customerId: number, ownerUserId: number, expectedVersion: number, idempotencyKey: string): Promise<AccountOwnershipDTO> =>
-    (await axiosInstance.post<AccountOwnershipDTO>(`${commercialRoot}/account-ownership/${customerId}/assign`, { ownerUserId, expectedVersion }, { headers: { 'Idempotency-Key': idempotencyKey } })).data,
-  getRoutingQueue: async (): Promise<RoutingQueueItemDTO[]> =>
-    (await axiosInstance.get<RoutingQueueItemDTO[]>(`${commercialRoot}/routing-queue`)).data,
-  assignRoutingItem: async (leadId: number, ownerUserId: number, expectedVersion: number, idempotencyKey: string): Promise<void> => {
-    await axiosInstance.post(`${commercialRoot}/routing-queue/${leadId}/assign`, { ownerUserId, expectedVersion }, { headers: { 'Idempotency-Key': idempotencyKey } });
+  assignAccount: async (customerId: number, ownerUserId: number, expectedVersion: number, reason: string | undefined, idempotencyKey: string): Promise<AccountOwnershipDTO> =>
+    (await axiosInstance.post<AccountOwnershipDTO>(`${commercialRoot}/account-ownership/${customerId}/assign`, { ownerUserId, expectedVersion, reason }, { headers: { 'Idempotency-Key': idempotencyKey } })).data,
+  getRoutingQueue: async (params: { sourceId?: number } = {}): Promise<RoutingQueueItemDTO[]> =>
+    (await axiosInstance.get<RoutingQueueItemDTO[]>(`${commercialRoot}/routing-queue`, { params })).data,
+  getRoutingOwnerOptions: async (): Promise<RoutingOwnerOptionDTO[]> =>
+    (await axiosInstance.get<RoutingOwnerOptionDTO[]>(`${commercialRoot}/routing-owner-options`)).data,
+  getAccountOwnerOptions: async (): Promise<RoutingOwnerOptionDTO[]> =>
+    (await axiosInstance.get<RoutingOwnerOptionDTO[]>(`${commercialRoot}/account-owner-options`)).data,
+  assignRoutingItem: async (sourceId: number, ownerUserId: number, expectedVersion: number, reason: string | undefined, idempotencyKey: string): Promise<void> => {
+    await axiosInstance.post(`${commercialRoot}/routing-queue/${sourceId}/assign`, { ownerUserId, expectedVersion, reason }, { headers: { 'Idempotency-Key': idempotencyKey } });
   },
   getFollowUps: async (params: ListParams = {}): Promise<FollowUpDTO[]> =>
     (await axiosInstance.get<FollowUpDTO[]>(`${commercialRoot}/follow-ups`, { params })).data,
@@ -282,6 +478,16 @@ const commercialIntelligenceService = {
   },
   getPerformance: async (from: string, to: string): Promise<PerformanceDTO> =>
     (await axiosInstance.get<PerformanceDTO>(`${commercialRoot}/performance`, { params: { from, to } })).data,
+  getCoachingRecovery: async (from: string, to: string): Promise<CoachingRecoveryDTO> =>
+    (await axiosInstance.get<CoachingRecoveryDTO>(`${commercialRoot}/coaching-recovery`, { params: { from, to } })).data,
+  acknowledgeCoachingFinding: async (findingKey: string, disposition: string, reason: string, from: string, to: string, idempotencyKey: string): Promise<CoachingAcknowledgementDTO> =>
+    (await axiosInstance.post<CoachingAcknowledgementDTO>(
+      `${commercialRoot}/coaching/${encodeURIComponent(findingKey)}/acknowledgements`,
+      { disposition, reason, from, to },
+      { headers: { 'Idempotency-Key': idempotencyKey } },
+    )).data,
+  getCustomerHealth: async (customerId: number, from: string, to: string): Promise<CustomerHealthDTO> =>
+    (await axiosInstance.get<CustomerHealthDTO>(`/api/intelligence/customers/${customerId}/health`, { params: { from, to } })).data,
 
   getInventoryOverview: async (): Promise<InventoryOverviewDTO> =>
     (await axiosInstance.get<InventoryOverviewDTO>(`${inventoryRoot}/overview`)).data,

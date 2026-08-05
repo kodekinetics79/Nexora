@@ -24,6 +24,13 @@ public static class SupplierQuoteCaptureChannels
     public const string Api = "API";
 }
 
+public static class SupplierNegotiationDispositions
+{
+    public const string Prepared = "PREPARED";
+    public const string Deferred = "DEFERRED";
+    public const string Dismissed = "DISMISSED";
+}
+
 /// <summary>Stable identity for all revisions of one Supplier Quote.</summary>
 public sealed class SupplierQuote
 {
@@ -73,6 +80,7 @@ public sealed class SupplierQuoteRevision
     public ICollection<SupplierQuoteLine> Lines { get; set; } = new List<SupplierQuoteLine>();
     public ICollection<SupplierQuoteFieldEvidence> Evidence { get; set; } = new List<SupplierQuoteFieldEvidence>();
     public ICollection<SupplierQuoteReviewDecision> ReviewDecisions { get; set; } = new List<SupplierQuoteReviewDecision>();
+    public ICollection<SupplierNegotiationDecision> NegotiationDecisions { get; set; } = new List<SupplierNegotiationDecision>();
 }
 
 public sealed class SupplierQuoteLine
@@ -134,6 +142,31 @@ public sealed class SupplierQuoteReviewDecision
     public string ReviewedBy { get; set; } = null!;
     public DateTime ReviewedOn { get; set; }
     public string CorrelationId { get; set; } = null!;
+}
+
+/// <summary>
+/// Append-only human disposition of a shadow negotiation recommendation. It records
+/// evidence and intent only; it cannot send, award, or change commercial values.
+/// </summary>
+public sealed class SupplierNegotiationDecision
+{
+    public long Id { get; set; }
+    public long BusinessUnitId { get; set; }
+    public long SupplierQuoteId { get; set; }
+    public long SupplierQuoteRevisionId { get; set; }
+    public string RecommendationCode { get; set; } = null!;
+    public string Disposition { get; set; } = null!;
+    public string Reason { get; set; } = null!;
+    public string EvidenceSnapshotJson { get; set; } = "{}";
+    public string PolicyVersion { get; set; } = null!;
+    public long ExpectedQuoteVersion { get; set; }
+    public string IdempotencyKey { get; set; } = null!;
+    public string RequestHash { get; set; } = null!;
+    public string Actor { get; set; } = null!;
+    public DateTime DecidedOn { get; set; }
+    public string CorrelationId { get; set; } = null!;
+    public SupplierQuote SupplierQuote { get; set; } = null!;
+    public SupplierQuoteRevision SupplierQuoteRevision { get; set; } = null!;
 }
 
 /// <summary>Immutable bridge from an approved supplier award to one customer Quote line.</summary>

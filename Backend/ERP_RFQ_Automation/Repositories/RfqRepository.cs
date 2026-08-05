@@ -356,6 +356,22 @@ namespace ERP_RFQ_Automation.Repositories
             if (customerId.HasValue && customerId != rfq.CustomerId)
                 throw new InvalidOperationException("The selected customer does not match the RFQ commercial identity.");
 
+            // FX fix (source of the corruption): the quote header currency used to be sampled
+            // from an ARBITRARY line — `rfq.Rfqitems.FirstOrDefault()?.CurrencyId` — and every
+            // line was then summed into Quote.TotalAmount regardless of its own currency. On a
+            // mixed-currency RFQ that wrote a header currency true of at most one line and a
+            // total true of none, and every downstream aggregate (quote stats, order revenue,
+            // margin floors, award scoring) inherited it. This is the write that manufactured
+            // the corrupt state, so it is fixed here rather than papered over on the read side.
+            //
+            // Rfqitem carries the only currency evidence in this graph: Rfq has no header
+            // currency column and QuoteItem has no currency column at all. The header currency
+            // is therefore DERIVED from unanimous line evidence, never sampled, and a disagreeing
+            // RFQ fails closed. Converting the lines instead is not an option — QuoteItem cannot
+            // record what currency a converted price is in, so conversion would silently restate
+            // the prices the customer is quoted.
+            var headerCurrencyId = await ResolveQuoteHeaderCurrencyAsync(rfq);
+
             // Create Quote
             var quote = new Quote
             {
@@ -370,7 +386,7 @@ namespace ERP_RFQ_Automation.Repositories
                 CreatedBy = approvedBy,
                 CreatedDate = DateTime.UtcNow,
                 HeaderRemarks = rfq.HeaderRemarks,
-                CurrencyId = rfq.Rfqitems.FirstOrDefault()?.CurrencyId,
+                CurrencyId = headerCurrencyId,
                 FinancialCalculationVersion = 2,
                 QuoteItems = rfq.Rfqitems.Select(i => new QuoteItem
                 {
@@ -386,12 +402,89 @@ namespace ERP_RFQ_Automation.Repositories
             };
             quote.InheritCommercialIdentity(rfq);
 
+            // Safe to add: ResolveQuoteHeaderCurrencyAsync has already established that every
+            // line is denominated in `headerCurrencyId` (or that no line declares a currency at
+            // all, in which case the header is left NULL and no reader can claim one).
             quote.TotalAmount = quote.QuoteItems.Sum(i => i.TotalAmount);
 
             _context.Quotes.Add(quote);
             await _context.SaveChangesAsync();
 
             return quote.Id;
+        }
+
+        /// <summary>
+        /// The single currency every RFQ line agrees on, or null when NO line carries any
+        /// currency evidence — that state is unchanged from before this fix and claims nothing.
+        ///
+        /// Throws when the lines disagree, or when only some of them declare a currency. Those
+        /// are exactly the two cases where a single header currency and a single summed total
+        /// would both be false, and the schema has nowhere to record the truth.
+        /// </summary>
+        private async Task<long?> ResolveQuoteHeaderCurrencyAsync(Rfq rfq)
+        {
+            var lines = rfq.Rfqitems.ToList();
+            if (lines.Count == 0) return null;
+
+            // The FK is authoritative; the free-text Rfqitem.Currency code is accepted as a
+            // fallback because extracted and legacy lines often carry only that. A code is
+            // admissible only when it resolves to exactly one ACTIVE currency in THIS business
+            // unit — an ambiguous code stays unresolved rather than picking a row.
+            var idByCode = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            if (lines.Any(i => i.CurrencyId == null && !string.IsNullOrWhiteSpace(i.Currency)))
+            {
+                var currencies = await _context.Currencies.AsNoTracking()
+                    .Where(c => c.BusinessUnitId == rfq.BusinessUnitId && c.IsActive == true)
+                    .Select(c => new { c.Id, c.Code })
+                    .ToListAsync();
+                foreach (var group in currencies.GroupBy(c => c.Code.Trim(), StringComparer.OrdinalIgnoreCase))
+                    if (group.Count() == 1)
+                        idByCode[group.Key] = group.Single().Id;
+            }
+
+            long? Resolve(Rfqitem item)
+            {
+                if (item.CurrencyId.HasValue) return item.CurrencyId.Value;
+                var code = item.Currency?.Trim();
+                return !string.IsNullOrEmpty(code) && idByCode.TryGetValue(code, out var id) ? id : null;
+            }
+
+            var resolved = lines.Select(Resolve).ToList();
+            var declared = resolved.Where(id => id.HasValue).Select(id => id!.Value).Distinct().ToList();
+
+            // Nothing anywhere declares a currency: there is no currency to get wrong. The quote
+            // keeps a NULL header currency so no downstream reader can assert one.
+            if (declared.Count == 0) return null;
+
+            if (declared.Count > 1)
+                throw new InvalidOperationException(
+                    $"RFQ {rfq.Rfqno} prices its lines in {declared.Count} different currencies " +
+                    $"({string.Join(", ", await CurrencyLabelsAsync(rfq.BusinessUnitId, declared))}). " +
+                    "A quote carries one header currency and one total, so the RFQ lines must be " +
+                    "normalised to a single currency, or quoted separately, before a quote can be generated.");
+
+            var undeclared = resolved.Count(id => id is null);
+            if (undeclared > 0)
+                throw new InvalidOperationException(
+                    $"RFQ {rfq.Rfqno} prices {undeclared} of {lines.Count} line(s) in no recognised currency " +
+                    $"while the rest are in {string.Join(", ", await CurrencyLabelsAsync(rfq.BusinessUnitId, declared))}. " +
+                    "Set a currency on every line before a quote can be generated, so the quote total is not a " +
+                    "sum of unlike amounts.");
+
+            return declared[0];
+        }
+
+        /// <summary>Human-readable ISO codes for an id set, for use in fail-closed messages.</summary>
+        private async Task<IReadOnlyList<string>> CurrencyLabelsAsync(long businessUnitId, IReadOnlyCollection<long> ids)
+        {
+            var codes = await _context.Currencies.AsNoTracking()
+                .Where(c => c.BusinessUnitId == businessUnitId && ids.Contains(c.Id))
+                .Select(c => new { c.Id, c.Code })
+                .ToListAsync();
+            var byId = codes.GroupBy(c => c.Id).ToDictionary(g => g.Key, g => g.First().Code);
+            return ids.OrderBy(id => id)
+                .Select(id => byId.TryGetValue(id, out var code) ? code : $"currency #{id}")
+                .ToList();
         }
 
         public async Task DeleteAsync(long id, long businessUnitId)

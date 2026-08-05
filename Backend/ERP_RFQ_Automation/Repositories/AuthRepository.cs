@@ -144,11 +144,29 @@ namespace ERP_RFQ_Automation.Repositories
                            (string.IsNullOrEmpty(user.LastName) ? "" : " " + user.LastName),
                 RoleId = user.RoleId,
                 RoleName = user.Role?.SetupValue ?? "No Role Assigned",
+                IsSuperAdmin = IsSuperAdminRole(user.Role?.SetupCode, user.Role?.SetupValue),
+                IsManager = IsManagerRole(user.Role?.SetupCode, user.Role?.SetupValue),
                 BusinessUnitId = user.Buid,
                 BusinessUnitName = user.Bu?.BusinessUnitName,
                 Token = token
             };
         }
+
+        private static bool IsSuperAdminRole(string? code, string? value)
+            => IsSuperAdminName(code) || IsSuperAdminName(value);
+
+        private static bool IsManagerRole(string? code, string? value)
+            => IsManagerName(code) || IsManagerName(value);
+
+        private static bool IsSuperAdminName(string? value)
+            => value is not null
+               && value.Contains("super", StringComparison.OrdinalIgnoreCase)
+               && value.Contains("admin", StringComparison.OrdinalIgnoreCase);
+
+        private static bool IsManagerName(string? value)
+            => value is not null
+               && (value.Contains("admin", StringComparison.OrdinalIgnoreCase)
+                   || value.Contains("manager", StringComparison.OrdinalIgnoreCase));
 
         private string GenerateJwtToken(User user)
         {

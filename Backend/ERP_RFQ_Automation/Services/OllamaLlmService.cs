@@ -18,10 +18,14 @@ namespace ERP_RFQ_Automation.Services
         private readonly string _model;
         private readonly IAiGovernanceService _governance;
         private readonly AiProviderClass _providerClass;
+        private readonly AiProviderDescriptor _descriptor;
         private readonly int _maximumOutputTokens;
         private readonly JsonSerializerOptions _jsonOptions;
 
         public AiProviderClass ProviderClass => _providerClass;
+
+        /// <inheritdoc />
+        public AiProviderDescriptor ProviderDescriptor => _descriptor;
 
         // Configuration constants
         private const int MAX_PROMPT_CHARS = 30000; // Increased for larger context to improve accuracy and confidence
@@ -44,12 +48,33 @@ namespace ERP_RFQ_Automation.Services
             _governance = governance;
             _maximumOutputTokens = int.TryParse(cfg["Ollama:MaxOutputTokens"], out var maximumOutputTokens)
                 && maximumOutputTokens > 0 ? Math.Min(maximumOutputTokens, 8192) : 4096;
-            var baseUrl = cfg["Ollama:BaseUrl"] ?? "http://127.0.0.1:11434/";
+            var baseUrl = cfg["Ollama:BaseUrl"] ?? AiProviderEndpointResolver.DefaultBaseUrl;
             var providerUri = new Uri(baseUrl);
-            _providerClass = providerUri.IsLoopback ? AiProviderClass.Local : AiProviderClass.External;
+
+            // Single source of truth for "which endpoint is this, and why is it
+            // Local/External" (AI/AiProviderEndpoint.cs). The classification rule is
+            // unchanged — loopback is Local, everything else is External — but the
+            // normalized origin and the reason are now first-class so the allow-list
+            // matches the exact destination this client calls, and so the resolution is
+            // legible in the log instead of only in source.
+            _descriptor = AiProviderEndpoint.Describe(
+                AiProviderEndpointResolver.OllamaProvider, baseUrl, _model);
+            _providerClass = _descriptor.ProviderClass;
             var apiKey = cfg["Ollama:ApiKey"];
             if (_providerClass == AiProviderClass.External && string.IsNullOrWhiteSpace(apiKey))
                 throw new InvalidOperationException("An API key is required for an explicitly configured external Ollama endpoint.");
+
+            // Loud, unmissable resolution telemetry. Production ran for weeks pointed at a
+            // paid external endpoint while silently refusing every unstructured extraction,
+            // and nothing in the log said so. This line always does.
+            if (_providerClass == AiProviderClass.External)
+                _log.LogWarning(
+                    "LLM client bound to an EXTERNAL provider. {Descriptor}. Unstructured document " +
+                    "extraction is refused unless the tenant has an active allow-list authorization " +
+                    "for this exact endpoint.",
+                    _descriptor);
+            else
+                _log.LogInformation("LLM client bound to a LOCAL provider. {Descriptor}.", _descriptor);
 
             // Configure HTTP client
             _http.BaseAddress = providerUri;
@@ -90,8 +115,9 @@ namespace ERP_RFQ_Automation.Services
             long totalOutputTokens = 0;
             var aggregateSource = AiTokenSources.ProviderExact;
 
-            _log.LogInformation("Sending governed extraction request. ProviderClass={ProviderClass}, TextLength={Length}",
-                _providerClass, processedText.Length);
+            _log.LogInformation(
+                "Sending governed extraction request. ProviderClass={ProviderClass}, {Descriptor}, TextLength={Length}",
+                _providerClass, _descriptor, processedText.Length);
 
             // Retry logic for transient failures
             for (int attempt = 1; attempt <= MAX_RETRIES; attempt++)

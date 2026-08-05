@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using ERP_RFQ_Automation.DTOs.CurrencyDTOs;
 
 namespace ERP_RFQ_Automation.DTOs.Dashboard
 {
@@ -12,13 +13,30 @@ namespace ERP_RFQ_Automation.DTOs.Dashboard
         public double BidRatio { get; set; }
         public int TotalLineItems { get; set; }
         public int L1Quoted { get; set; }
-        public decimal TotalOrderValue { get; set; }
+
+        /// <summary>
+        /// Order value converted to the business unit's base currency. NULL means "not
+        /// answerable", never zero — see <see cref="OrderValueFx"/> for the reason and the
+        /// per-currency breakdown. Was a raw cross-currency sum of Order.TotalAmount.
+        /// </summary>
+        public decimal? TotalOrderValue { get; set; }
+
         public double WinVolumeRatio { get; set; }
-        
-        public decimal AvgQuoteValue { get; set; }
-        public decimal AvgOrderValue { get; set; }
+
+        /// <summary>Mean quote value in base currency; NULL when any quote is unconvertible.</summary>
+        public decimal? AvgQuoteValue { get; set; }
+
+        /// <summary>Mean order value in base currency; NULL when any order is unconvertible.</summary>
+        public decimal? AvgOrderValue { get; set; }
+
         public int CustomerCount { get; set; }
-        
+
+        /// <summary>Conversion evidence behind <see cref="TotalOrderValue"/> and <see cref="AvgOrderValue"/>.</summary>
+        public FxTotalEvidenceDTO? OrderValueFx { get; set; }
+
+        /// <summary>Conversion evidence behind <see cref="AvgQuoteValue"/>.</summary>
+        public FxTotalEvidenceDTO? QuoteValueFx { get; set; }
+
         public ConversionRatesDTO ConversionRates { get; set; } = new();
 
         // Trends and comparisons could be added here later
@@ -44,7 +62,19 @@ namespace ERP_RFQ_Automation.DTOs.Dashboard
     {
         public string? Month { get; set; }
         public int Count { get; set; }
-        public decimal Value { get; set; }
+
+        /// <summary>
+        /// Monthly order value in base currency. NULL when that month contains an order whose
+        /// currency has no approved rate — the month is then genuinely unknown, and plotting 0
+        /// would fabricate a dip in the trend line.
+        /// </summary>
+        public decimal? Value { get; set; }
+
+        /// <summary>ISO code <see cref="Value"/> is expressed in.</summary>
+        public string? ValueCurrency { get; set; }
+
+        /// <summary>Why <see cref="Value"/> is null, when applicable.</summary>
+        public string? ValueUnavailableReason { get; set; }
     }
 
     public class CategoryDistributionDTO

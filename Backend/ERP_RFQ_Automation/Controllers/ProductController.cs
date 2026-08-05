@@ -422,9 +422,22 @@ namespace ERP_RFQ_Automation.Controllers
             _ = businessUnitId;
             if (!TryGetTenantId(out var targetBUId)) return Forbid();
 
-            await _repository.DeleteAsync(id, targetBUId);
-
-            return NoContent();
+            try
+            {
+                await _repository.DeleteAsync(id, targetBUId);
+                return NoContent();
+            }
+            catch (KeyNotFoundException)
+            {
+                return NotFound();
+            }
+            catch (InvalidOperationException ex)
+            {
+                // The repository blocks deletes that would orphan stock, movements or incoming
+                // supply. That is a conflict the caller can act on, not a server fault — this
+                // action had no handler at all, so those turned into bare 500s.
+                return Conflict(new { error = ex.Message });
+            }
         }
 
         // Dropdown endpoints

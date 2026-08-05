@@ -6,6 +6,7 @@ namespace ERP_RFQ_Automation.DTOs.SupplierDTOs
     {
         [Required]
         public string Name { get; set; } = null!;
+        [EmailAddress]
         public string? ContactEmail { get; set; }
 
 
@@ -18,7 +19,5 @@ namespace ERP_RFQ_Automation.DTOs.SupplierDTOs
         public string? Tags { get; set; }
         public string? Comments { get; set; }
         public long? CurrencyId { get; set; }
-        public bool? IsActive { get; set; }
-        public IFormFile? ImageFile { get; set; }
     }
 }

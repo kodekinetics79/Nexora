@@ -62,12 +62,42 @@ public sealed record RfqLineIntelligence(long RfqItemId, string PartNumber, deci
     int EligibleOfferCount, IReadOnlyCollection<string> Blockers,
     IReadOnlyCollection<BidQualityFlag> BidQualityFlags);
 
+public sealed record ScenarioQuantityAllocation(long RfqItemId, decimal RequestedQuantity,
+    decimal ImmediateStockQuantity, decimal SupplierQuantity, long? SupplierQuotedItemId,
+    DateTime? ExpectedDeliveryOn);
+
+public sealed record ScenarioCostSource(string SourceType, string Label, decimal? Amount,
+    long? CurrencyId, string Status, CommercialEvidenceLink? Evidence);
+
 public sealed record OpportunityScenario(string Code, string Label, bool Eligible, string Explanation,
-    decimal? EstimatedLandedCost, long? CurrencyId, int? EstimatedLeadTimeDays, decimal Confidence,
-    IReadOnlyCollection<string> Assumptions, IReadOnlyCollection<CommercialEvidenceLink> Evidence);
+    decimal? EstimatedLandedCost, long? CurrencyId, int? EstimatedLeadTimeDays,
+    DateTime? ExpectedDeliveryOn, DateTime? ValidUntil, decimal? GrossMarginPercent,
+    string RiskBand, string RiskExplanation, decimal Confidence,
+    IReadOnlyCollection<ScenarioQuantityAllocation> Quantities,
+    IReadOnlyCollection<ScenarioCostSource> CostSources,
+    IReadOnlyCollection<string> Assumptions, IReadOnlyCollection<string> ApprovalRequirements,
+    IReadOnlyCollection<CommercialEvidenceLink> Evidence, string? CurrencyCode = null);
+
+public sealed record CustomerTargetBridge(long RfqItemId, string Status, decimal CustomerTargetUnitPrice,
+    decimal RequiredGrossMarginPercent, decimal? MaximumLandedUnitCost, decimal? FreightDutyTaxOtherPerUnit,
+    decimal? MaximumSupplierUnitCost, long CurrencyId, string Formula, CommercialEvidenceLink Evidence);
+
+public sealed record PredictivePriceLine(long RfqItemId, string Status, string Mode,
+    decimal? RecommendedUnitPrice, decimal? LastWonUnitPrice, decimal? WinningRangeLow,
+    decimal? WinningRangeHigh, decimal? EstimatedWinProbability, int QuoteSampleSize,
+    int CustomerOrderSampleSize, decimal? BacktestMeanAbsolutePercentError,
+    string Context, IReadOnlyCollection<string> Limitations,
+    IReadOnlyCollection<CommercialEvidenceLink> Evidence, int BacktestHoldoutCount = 0,
+    decimal? CohortConversionBaseline = null, long? CurrencyId = null, string? CurrencyCode = null);
+
+public sealed record PricingBacktestSummary(string Status, int HoldoutCount,
+    decimal? MeanAbsolutePercentError, string Cohort, string Limitation);
 
 public sealed record OpportunityDigitalTwin(DateTime CalculatedOn, string Validity,
-    IReadOnlyCollection<OpportunityScenario> Scenarios, string OverrideAction);
+    string Mode, string PolicyVersion, IReadOnlyCollection<OpportunityScenario> Scenarios,
+    IReadOnlyCollection<CustomerTargetBridge> CustomerTargetBridges,
+    IReadOnlyCollection<PredictivePriceLine> PredictivePricing,
+    PricingBacktestSummary Backtest, string OverrideAction);
 
 public sealed record RfqCommercialIntelligence(long RfqId, string RfqNumber, string NexoraSerial,
     decimal ReadinessScore, string CommercialDecision, string SlaRisk, bool ClarificationRequired,

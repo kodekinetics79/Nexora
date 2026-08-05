@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Chip, Grid,
-  CircularProgress, Divider,
+  CircularProgress, Divider, Alert,
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
@@ -14,6 +14,7 @@ import {
 } from '@mui/icons-material';
 import productService from '../../api/services/productService';
 import ProductFormDialog from './ProductFormDialog';
+import { useAuth } from '../../context/AuthContext';
 
 // ─── Info Row ──────────────────────────────────────────────────────────────
 const InfoRow: React.FC<{ label: string; value: React.ReactNode; mono?: boolean }> = ({ label, value, mono }) => (
@@ -56,9 +57,11 @@ const ProductDetailPage: React.FC = () => {
   const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { hasPermission } = useAuth();
+  const canEdit = hasPermission('Products', 'edit');
   const [editOpen, setEditOpen] = useState(false);
 
-  const { data: product, isLoading } = useQuery({
+  const { data: product, isLoading, isError, refetch } = useQuery({
     queryKey: ['product-detail', id],
     queryFn: () => productService.getById(Number(id)),
     enabled: !!id,
@@ -70,6 +73,10 @@ const ProductDetailPage: React.FC = () => {
         <CircularProgress />
       </Box>
     );
+  }
+
+  if (isError) {
+    return <Box sx={{ p: 4 }}><Alert severity="error" action={<Button color="inherit" onClick={() => refetch()}>Retry</Button>}>The product could not be loaded.</Alert></Box>;
   }
 
   if (!product) {
@@ -110,15 +117,16 @@ const ProductDetailPage: React.FC = () => {
             </Typography>
           </Box>
         </Box>
-        <Button
+        {canEdit && <Button
           variant="contained"
           startIcon={<EditIcon />}
+          aria-label="Edit Product"
           onClick={() => setEditOpen(true)}
           disableElevation
           sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 1.5 }}
         >
           {t('edit') || 'Edit Product'}
-        </Button>
+        </Button>}
       </Box>
 
       {/* ── Product Header Card ─────────────────────────────────────── */}
@@ -182,10 +190,10 @@ const ProductDetailPage: React.FC = () => {
 
             {/* Pricing */}
             <Section title="Pricing">
-              <InfoRow label="Unit Cost" value={product.unitCost != null ? `$${product.unitCost.toFixed(2)}` : null} />
-              <InfoRow label={t('price') || 'Selling Price'} value={product.sellingPrice != null ? `$${product.sellingPrice.toFixed(2)}` : null} />
-              <InfoRow label="Final Landed Cost" value={product.finalLandedCost != null ? `$${product.finalLandedCost.toFixed(2)}` : null} />
-              <InfoRow label="Final Sales Price" value={product.finalSalesPrice != null ? `$${product.finalSalesPrice.toFixed(2)}` : null} />
+              <InfoRow label="Unit Cost" value={product.unitCost != null ? `${product.unitCost.toFixed(2)} (currency not recorded)` : null} />
+              <InfoRow label={t('price') || 'Selling Price'} value={product.sellingPrice != null ? `${product.sellingPrice.toFixed(2)} (currency not recorded)` : null} />
+              <InfoRow label="Final Landed Cost" value={product.finalLandedCost != null ? `${product.finalLandedCost.toFixed(2)} (currency not recorded)` : null} />
+              <InfoRow label="Final Sales Price" value={product.finalSalesPrice != null ? `${product.finalSalesPrice.toFixed(2)} (currency not recorded)` : null} />
             </Section>
 
             {/* Logistics */}
@@ -260,7 +268,7 @@ const ProductDetailPage: React.FC = () => {
             <Section title="Images">
               <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
                 {product.images.map((img) => (
-                  <Box key={img.attachmentId} component="a" href={`${apiBase}${img.location}`} target="_blank"
+                  <Box key={img.attachmentId} component="a" href={`${apiBase}${img.location}`} target="_blank" rel="noopener noreferrer"
                     sx={{ width: 130, height: 130, borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider', display: 'block', '&:hover': { borderColor: 'primary.main' }, transition: 'border-color 0.2s' }}>
                     <img src={`${apiBase}${img.location}`} alt={img.fileName} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                   </Box>
@@ -277,7 +285,7 @@ const ProductDetailPage: React.FC = () => {
               <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
                 {product.attachments.map((att) => (
                   <Chip key={att.attachmentId} icon={<AttachIcon />} label={att.fileName}
-                    component="a" href={`${apiBase}${att.location}`} target="_blank"
+                    component="a" href={`${apiBase}${att.location}`} target="_blank" rel="noopener noreferrer"
                     clickable variant="outlined" sx={{ fontWeight: 600 }} />
                 ))}
               </Box>
@@ -287,7 +295,7 @@ const ProductDetailPage: React.FC = () => {
 
       </Grid>
 
-      <ProductFormDialog open={editOpen} onClose={() => setEditOpen(false)} productId={Number(id)} />
+      <ProductFormDialog open={editOpen && canEdit} onClose={() => setEditOpen(false)} productId={Number(id)} />
     </Box>
   );
 };

@@ -81,6 +81,18 @@ public sealed class Release02SupplierQuoteInboxServiceTests
     }
 
     [Fact]
+    public async Task Oversized_quote_graph_is_rejected_before_revision_processing()
+    {
+        var lines = Enumerable.Range(1, SupplierQuoteInboxService.MaxLinesPerQuote + 1)
+            .Select(index => Line() with { LineNumber = index }).ToArray();
+
+        var exception = await Assert.ThrowsAsync<SupplierQuoteValidationException>(() =>
+            new SupplierQuoteInboxService(new FakeStore(7)).CaptureAsync(Command() with { Lines = lines }));
+
+        Assert.Contains(SupplierQuoteInboxService.MaxLinesPerQuote.ToString(), exception.Message);
+    }
+
+    [Fact]
     public async Task Same_idempotency_key_replays_but_changed_payload_conflicts()
     {
         var service = new SupplierQuoteInboxService(new FakeStore(7));

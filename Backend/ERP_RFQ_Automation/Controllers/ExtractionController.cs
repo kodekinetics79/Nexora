@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Security.Cryptography;
+using System.Security.Claims;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using ERP_RFQ_Automation.Authorization;
@@ -53,8 +56,8 @@ namespace ERP_RFQ_Automation.Controllers
         [RequireModulePermission("Leads", PermissionAction.Create)]
         public async Task<IActionResult> Upload([FromForm] List<IFormFile> files, CancellationToken ct = default)
         {
-            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-            if (businessUnitId <= 0)
+            if (!long.TryParse(User.FindFirst("businessUnitId")?.Value, out var businessUnitId)
+                || businessUnitId <= 0)
                 return BadRequest(new { success = false, message = "A valid businessUnitId claim is required." });
 
             if (files == null || files.Count == 0)
@@ -68,11 +71,19 @@ namespace ERP_RFQ_Automation.Controllers
             if (files.Any(file => file.Length > MaxBytesPerFile))
                 return BadRequest(new { success = false, message = "Each file must be 25 MB or smaller." });
 
-            var batchId = Guid.NewGuid();
+            var idempotencyKey = Request.Headers.TryGetValue("Idempotency-Key", out var key)
+                ? key.ToString().Trim()
+                : null;
+            if (idempotencyKey?.Length > 128)
+                return BadRequest(new { success = false, message = "Idempotency-Key must be 128 characters or fewer." });
+            var batchId = string.IsNullOrWhiteSpace(idempotencyKey)
+                ? Guid.NewGuid()
+                : StableBatchId(businessUnitId, idempotencyKey);
             var results = new List<object>(files.Count);
 
-            foreach (var file in files)
+            for (var fileIndex = 0; fileIndex < files.Count; fileIndex++)
             {
+                var file = files[fileIndex];
                 try
                 {
                     byte[] bytes;
@@ -88,9 +99,12 @@ namespace ERP_RFQ_Automation.Controllers
                         batchId, InteractivePriority,
                         metadata: new ExtractionJobMetadata
                         {
-                            SourceOccurrenceId = Request.Headers.TryGetValue("Idempotency-Key", out var key)
-                                ? $"{key}:{file.FileName}"
-                                : null
+                            SourceOccurrenceId = string.IsNullOrWhiteSpace(idempotencyKey)
+                                ? null
+                                : $"{idempotencyKey}:{fileIndex}:{file.FileName}",
+                            UploadedBy = User.FindFirst(ClaimTypes.Email)?.Value
+                                ?? User.Identity?.Name
+                                ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value
                         },
                         ct);
 
@@ -113,10 +127,10 @@ namespace ERP_RFQ_Automation.Controllers
                         jobId = 0L,
                         occurrenceId = ex.SourceDocumentOccurrenceId,
                         fileName = file.FileName,
-                        outcome = ex.Inspection.Status.ToString(),
-                        errorCode = ex.Inspection.Status == FileInspectionStatus.Rejected
-                            ? "document_rejected"
-                            : "document_quarantined",
+                        outcome = ex.Inspection.IsRetryable
+                            ? "AwaitingSecurityScan"
+                            : ex.Inspection.Status.ToString(),
+                        errorCode = ex.Inspection.ErrorCode,
                         reason = ex.Inspection.Reason
                     });
                 }
@@ -129,6 +143,12 @@ namespace ERP_RFQ_Automation.Controllers
             }
 
             return StatusCode(StatusCodes.Status202Accepted, new { batchId, jobs = results });
+        }
+
+        private static Guid StableBatchId(long businessUnitId, string idempotencyKey)
+        {
+            var digest = SHA256.HashData(Encoding.UTF8.GetBytes($"upload:{businessUnitId}:{idempotencyKey}"));
+            return new Guid(digest.AsSpan(0, 16));
         }
     }
 }

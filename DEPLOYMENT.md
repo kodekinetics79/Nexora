@@ -41,8 +41,24 @@ an existing service to the mounted root, copy any
 recoverable legacy files and rewrite absolute `Attachments.FilePath` values to portable
 `Uploads/...` paths; absolute paths outside the configured root are deliberately rejected.
 
-- Health check: `GET /health` → `Healthy`.
+- Health check: `GET /health` → `Healthy`. Render's deploy health check uses
+  `GET /ready`, which additionally requires the database, evidence storage **and a
+  reachable ClamAV daemon**.
 - The app URL is `https://nexora-fyjw.onrender.com`.
+
+### Malware scanning (required)
+
+`render.yaml` declares a second Render service, `nexora-clamav` — a **private
+service** running `docker.io/clamav/clamav:1.5` and reachable only over Render's
+private network on TCP 3310. The backend streams every upload to it, and both
+uploads and `/ready` **fail closed** without it.
+
+`DocumentInspection__ClamAV__Host` / `__Port` are wired automatically by the
+Blueprint; do not set them by hand. Before the first sync, confirm both services
+are in the **same Render region** — private networking depends on it and a
+service's region cannot be changed afterwards.
+
+Setup, verification and outage handling: **[`docs/RUNBOOK-CLAMAV-RENDER.md`](docs/RUNBOOK-CLAMAV-RENDER.md)**.
 - **Neon endpoint:** use the **direct** endpoint (no `-pooler`) for now. The
   pooled endpoint needs `Max Auto Prepare=0` + RLS-via-`SET LOCAL` (ADR-0005 Ph2).
 

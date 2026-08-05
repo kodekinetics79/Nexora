@@ -21,6 +21,7 @@ import {
   TableCell,
   TableHead,
   TableRow,
+  TextField,
   ToggleButton,
   ToggleButtonGroup,
   Typography,
@@ -48,7 +49,7 @@ const evidenceDate = (value?: string | null) =>
   value ? new Date(value).toLocaleDateString() : "No recorded activity";
 
 const isCandidateReady = (candidate: SourcingCaseCandidate) =>
-  candidate.eligibleForSupplierRfq !== false && Boolean(candidate.contactEmail);
+  candidate.eligibleForSupplierRfq === true && Boolean(candidate.contactEmail);
 
 function CandidateEvidence({ candidate }: { candidate: SourcingCaseCandidate }) {
   return (
@@ -71,6 +72,7 @@ function SourcingCasePage() {
   const [candidateLimit, setCandidateLimit] = useState<CandidateLimit>(10);
   const [selectedSupplierIds, setSelectedSupplierIds] = useState<number[]>([]);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [responseDueOn, setResponseDueOn] = useState("");
 
   const queryKey = ["sourcing-case", sourcingCaseId];
   const query = useQuery({
@@ -94,9 +96,18 @@ function SourcingCasePage() {
   const selectedCandidates = candidates.filter((candidate) =>
     selectedSupplierIds.includes(candidate.supplierId),
   );
+  const outreachAlreadySent = ["OUTREACH_SENT", "RESPONSES_PARTIAL", "RESPONSES_COMPLETE",
+    "COMPARISON_READY", "NEGOTIATION", "AWARD_REVIEW", "SUPPLIER_SELECTED",
+    "CUSTOMER_QUOTE_READY", "CLOSED", "CANCELLED"].includes(query.data?.status ?? "");
   const canPrepare =
     hasPermission("RFQ Management", "edit") &&
-    hasPermission("Supplier History", "create");
+    hasPermission("Supplier History", "create") &&
+    !outreachAlreadySent;
+  const canRefreshCandidates =
+    hasPermission("Supplier History", "edit") &&
+    !["OUTREACH_READY", "OUTREACH_SENT", "RESPONSES_PARTIAL", "RESPONSES_COMPLETE",
+      "COMPARISON_READY", "NEGOTIATION", "AWARD_REVIEW", "SUPPLIER_SELECTED",
+      "CUSTOMER_QUOTE_READY", "CLOSED", "CANCELLED"].includes(query.data?.status ?? "");
 
   const refreshCandidates = useMutation({
     mutationFn: (limit: CandidateLimit) =>
@@ -127,11 +138,27 @@ function SourcingCasePage() {
         selectedSupplierIds,
         query.data.version,
         crypto.randomUUID(),
+        // <input type="datetime-local"> yields a local wall-clock string with no
+        // zone. The API rejects non-UTC and past deadlines, so convert to a real
+        // UTC instant here rather than sending the raw field value.
+        responseDueOn ? new Date(responseDueOn).toISOString() : null,
       );
     },
-    onSuccess: (results) => {
-      toast.success(`${results.length} Supplier RFQ${results.length === 1 ? "" : "s"} prepared.`);
+    onSuccess: async (results) => {
+      const succeeded = results.filter((result) => result.succeeded);
+      const failed = results.find((result) => !result.succeeded);
+      setSelectedSupplierIds((current) =>
+        current.filter((supplierId) => !succeeded.some((result) => result.supplierId === supplierId)),
+      );
       setPreviewOpen(false);
+      await query.refetch();
+      if (succeeded.length > 0) {
+        toast.success(`${succeeded.length} Supplier RFQ${succeeded.length === 1 ? "" : "s"} prepared and queued.`);
+      }
+      if (failed) {
+        toast.error(errorMessage(failed.error, "A Supplier RFQ could not be prepared. Completed suppliers remain queued; retry the remaining selection."));
+        return;
+      }
       if (query.data) navigate(`/procurement/rfqs/${query.data.rfqId}/sourcing`);
     },
     onError: (error) => toast.error(errorMessage(error, "Supplier RFQs could not be prepared.")),
@@ -216,6 +243,10 @@ function SourcingCasePage() {
         </Stack>
       </Paper>
 
+      <Alert severity={sourcingCase.status === "OUTREACH_SENT" ? "success" : "info"} sx={{ mb: 2 }}>
+        <strong>Next action:</strong> {sourcingCase.nextAction}
+      </Alert>
+
       <Stack direction={{ xs: "column", sm: "row" }} spacing={2} sx={{ alignItems: { sm: "center" }, justifyContent: "space-between", mb: 2 }}>
         <Box>
           <Typography variant="h6" sx={{ fontWeight: 800 }}>Known Supplier candidates</Typography>
@@ -227,7 +258,7 @@ function SourcingCasePage() {
           <ToggleButtonGroup exclusive size="small" value={candidateLimit} onChange={changeLimit} aria-label="Supplier candidate count">
             {[10, 20, 50].map((limit) => <ToggleButton key={limit} value={limit} aria-label={`Show ${limit} Supplier candidates`}>{limit}</ToggleButton>)}
           </ToggleButtonGroup>
-          <Button startIcon={<Refresh />} onClick={() => refreshCandidates.mutate(candidateLimit)} disabled={refreshCandidates.isPending}>
+          <Button startIcon={<Refresh />} onClick={() => refreshCandidates.mutate(candidateLimit)} disabled={!canRefreshCandidates || refreshCandidates.isPending}>
             Refresh candidates
           </Button>
         </Stack>
@@ -317,7 +348,7 @@ function SourcingCasePage() {
           disabled={!canPrepare || selectedSupplierIds.length === 0}
           onClick={() => setPreviewOpen(true)}
         >
-          Prepare Supplier RFQ
+          Prepare and Queue Supplier RFQ
         </Button>
       </Stack>
       {!canPrepare && (
@@ -325,10 +356,10 @@ function SourcingCasePage() {
       )}
 
       <Dialog open={previewOpen} onClose={() => setPreviewOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Prepare Supplier RFQs</DialogTitle>
+        <DialogTitle>Approve Supplier RFQ Delivery</DialogTitle>
         <DialogContent dividers>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            One governed Supplier RFQ will be prepared for each selected Supplier for this demand line.
+            One numbered Supplier RFQ will be prepared and queued for governed email delivery to each selected Supplier.
           </Typography>
           <Stack spacing={1}>
             {selectedCandidates.map((candidate) => (
@@ -339,6 +370,16 @@ function SourcingCasePage() {
               />
             ))}
           </Stack>
+          <TextField
+            type="datetime-local"
+            label="Supplier response deadline (optional)"
+            value={responseDueOn}
+            onChange={(event: React.ChangeEvent<HTMLInputElement>) => setResponseDueOn(event.target.value)}
+            fullWidth
+            sx={{ mt: 2 }}
+            slotProps={{ inputLabel: { shrink: true } }}
+            helperText="Leave blank for no deadline. Sent to the supplier and recorded on the solicitation."
+          />
           <Alert severity="info" sx={{ mt: 2 }}>
             Customer target prices and margin data are not included.
           </Alert>
@@ -351,7 +392,7 @@ function SourcingCasePage() {
             onClick={() => prepareSupplierRfqs.mutate()}
             disabled={prepareSupplierRfqs.isPending || selectedSupplierIds.length === 0}
           >
-            {prepareSupplierRfqs.isPending ? "Preparing…" : "Create Supplier RFQs"}
+            {prepareSupplierRfqs.isPending ? "Preparing and queueing…" : "Approve and Queue"}
           </Button>
         </DialogActions>
       </Dialog>

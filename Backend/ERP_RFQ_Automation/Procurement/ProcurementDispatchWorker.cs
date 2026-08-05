@@ -90,6 +90,16 @@ public sealed class ProcurementDispatchWorker : BackgroundService
             return true;
         }
 
+        var governanceBlock = await CurrentDispatchBlockAsync(claim, payload, ct);
+        if (governanceBlock is not null)
+        {
+            _logger.LogWarning(
+                "Supplier RFQ dispatch {MessageId} was blocked by current Supplier governance: {ReasonCode}.",
+                claim.MessageId, governanceBlock);
+            await FinishAsync(claim, DispatchOutcome.PermanentFailure, governanceBlock, null, ct);
+            return true;
+        }
+
         if (!_deliveryConfiguration.IsConfigured)
         {
             await FinishAsync(claim, DispatchOutcome.PermanentFailure, "DELIVERY_PROVIDER_NOT_CONFIGURED", null, ct);
@@ -172,6 +182,43 @@ public sealed class ProcurementDispatchWorker : BackgroundService
             accepted ? receipt : null,
             ct);
         return true;
+    }
+
+    private async Task<string?> CurrentDispatchBlockAsync(
+        DispatchClaim claim,
+        SolicitationDispatchPayload payload,
+        CancellationToken ct)
+    {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        var current = await (
+            from solicitation in db.Set<SupplierSolicitation>().AsNoTracking()
+            join supplier in db.Suppliers.AsNoTracking()
+                on new { solicitation.SupplierId, Buid = (long?)solicitation.BusinessUnitId }
+                equals new { SupplierId = supplier.Id, supplier.Buid }
+            where solicitation.BusinessUnitId == claim.BusinessUnitId
+                && solicitation.Id == claim.SupplierSolicitationId
+            select new { Solicitation = solicitation, Supplier = supplier })
+            .SingleOrDefaultAsync(ct);
+        if (current is null || current.Solicitation.Status != SolicitationStatus.Dispatching)
+            return "SUPPLIER_RFQ_STATE_INVALID";
+        if (payload.SolicitationId != current.Solicitation.Id
+            || payload.BusinessUnitId != current.Solicitation.BusinessUnitId
+            || payload.RfqId != current.Solicitation.RfqId)
+            return "SUPPLIER_RFQ_ENVELOPE_MISMATCH";
+        if (current.Supplier.IsActive != true)
+            return "SUPPLIER_INACTIVE";
+        if (!string.Equals(current.Supplier.ContactEmail?.Trim(), payload.ToEmail.Trim(),
+                StringComparison.OrdinalIgnoreCase))
+            return "SUPPLIER_CONTACT_CHANGED";
+        if (current.Supplier.GovernanceStatus is not (SupplierGovernanceStatuses.Approved
+                or SupplierGovernanceStatuses.Preferred or SupplierGovernanceStatuses.Provisional)
+            || current.Supplier.VerificationStatus != SupplierVerificationStatuses.Verified
+            || current.Supplier.ComplianceStatus != SupplierComplianceStatuses.Cleared
+            || current.Supplier.RiskStatus is SupplierRiskStatuses.High or SupplierRiskStatuses.Blocked
+            || current.Supplier.ReadinessStatus != SupplierReadinessStatuses.Ready)
+            return "SUPPLIER_GOVERNANCE_NOT_READY";
+        return null;
     }
 
     private async Task<DispatchCandidate?> DiscoverCandidateAsync(CancellationToken ct)
@@ -322,6 +369,7 @@ public sealed class ProcurementDispatchWorker : BackgroundService
         solicitation.UpdatedOn = now;
         solicitation.Version++;
         AddEvent(db, message, solicitation, "SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN", now);
+        await UpdateSourcingCaseLifecycleAsync(db, message, solicitation, sent: false, terminalFailure: true, now, ct);
         await db.SaveChangesAsync(ct);
     }
 
@@ -395,6 +443,8 @@ public sealed class ProcurementDispatchWorker : BackgroundService
                         ? "SUPPLIER_SOLICITATION_DELIVERY_FAILED"
                         : "SUPPLIER_SOLICITATION_RETRY_SCHEDULED";
             AddEvent(db, message, solicitation, eventType, now);
+            await UpdateSourcingCaseLifecycleAsync(db, message, solicitation,
+                outcome == DispatchOutcome.Sent, terminalFailure, now, ct);
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
 
@@ -411,6 +461,75 @@ public sealed class ProcurementDispatchWorker : BackgroundService
                     "Supplier RFQ message {MessageId} completed attempt {Attempt} with status {Status} and code {ErrorCode}.",
                     message.Id, message.AttemptCount, message.Status, message.LastErrorCode);
             }
+        });
+    }
+
+    private static async Task UpdateSourcingCaseLifecycleAsync(
+        ErpRfqAutomationContext db,
+        ProcurementOutboxMessage message,
+        SupplierSolicitation solicitation,
+        bool sent,
+        bool terminalFailure,
+        DateTime now,
+        CancellationToken ct)
+    {
+        if (!solicitation.SourcingCaseId.HasValue) return;
+        var sourcingCase = await db.SourcingCases.SingleOrDefaultAsync(x =>
+            x.BusinessUnitId == message.BusinessUnitId && x.Id == solicitation.SourcingCaseId.Value, ct);
+        if (sourcingCase is null) return;
+        var anotherWasSent = await db.Set<SupplierSolicitation>().AsNoTracking().AnyAsync(x =>
+            x.BusinessUnitId == message.BusinessUnitId && x.SourcingCaseId == sourcingCase.Id
+            && x.Id != solicitation.Id
+            && (x.Status == SolicitationStatus.Sent || x.Status == SolicitationStatus.Responded), ct);
+
+        if (sent)
+        {
+            sourcingCase.Status = SourcingCaseStatuses.OutreachSent;
+            sourcingCase.NextAction = "Track Supplier response";
+        }
+        else if (terminalFailure)
+        {
+            sourcingCase.Status = anotherWasSent
+                ? SourcingCaseStatuses.OutreachSent
+                : SourcingCaseStatuses.OutreachReady;
+            sourcingCase.NextAction = anotherWasSent
+                ? "Track responses and review failed Supplier delivery"
+                : "Review failed Supplier RFQ delivery";
+        }
+        else
+        {
+            sourcingCase.Status = anotherWasSent
+                ? SourcingCaseStatuses.OutreachSent
+                : SourcingCaseStatuses.OutreachReady;
+            sourcingCase.NextAction = anotherWasSent
+                ? "Track responses; another Supplier RFQ delivery will retry automatically"
+                : "Supplier RFQ delivery will retry automatically";
+        }
+
+        sourcingCase.Version++;
+        sourcingCase.UpdatedOn = now;
+        sourcingCase.UpdatedBy = "procurement-dispatch-worker";
+        db.ProcurementEvents.Add(new ProcurementEvent
+        {
+            BusinessUnitId = message.BusinessUnitId,
+            AggregateType = "SourcingCase",
+            AggregateId = sourcingCase.Id,
+            AggregateVersion = sourcingCase.Version,
+            EventType = sent ? "SOURCING_CASE_OUTREACH_SENT"
+                : terminalFailure ? "SOURCING_CASE_DELIVERY_REVIEW_REQUIRED"
+                : "SOURCING_CASE_DELIVERY_RETRY_SCHEDULED",
+            Actor = "procurement-dispatch-worker",
+            CorrelationId = message.OriginCorrelationId ?? $"dispatch:{message.Id}:attempt:{message.AttemptCount}",
+            IdempotencyKey = $"dispatch:{message.Id}:attempt:{message.AttemptCount}:sourcing-case",
+            PayloadJson = JsonSerializer.Serialize(new
+            {
+                SupplierSolicitationId = solicitation.Id,
+                solicitation.SupplierRfqNumber,
+                sourcingCase.Status,
+                sourcingCase.NextAction,
+                message.LastErrorCode
+            }),
+            OccurredOn = now
         });
     }
 

@@ -3,6 +3,7 @@ using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace ERP_RFQ_Automation.Tests;
@@ -180,6 +181,108 @@ public sealed class AiGovernanceServiceTests
     }
 
     [Fact]
+    public async Task Authorized_endpoint_is_exempt_from_the_ceiling_even_at_full_external_ratio()
+    {
+        // The headline rescope: with no local model every governed call is external, the
+        // ratio is 100%, and the OLD ceiling denied ~9 in 10 extractions even for a tenant
+        // holding a valid authorization. An allow-list-authorized endpoint is now exempt
+        // from the ratio; the ledger records which authorization exempted it, and under
+        // which declared posture.
+        using var fixture = new Fixture(hardLimit: 100_000);
+        var authorizationId = fixture.AuthorizeResolvedEndpoint();
+
+        var reservation = await fixture.Service.ReserveAsync(
+            fixture.Context("authorized-full-ratio", AiProviderClass.External),
+            "Ollama", "test", "external", 10, 10, 1, default);
+
+        Assert.NotEqual(Guid.Empty, reservation.RequestId);
+        await using var db = fixture.Database.ContextFor(null);
+        var request = await db.AiRequests.IgnoreQueryFilters()
+            .SingleAsync(x => x.Id == reservation.RequestId);
+        Assert.Equal(AiCallStatuses.Reserved, request.Status);
+        Assert.Equal(authorizationId, request.ExternalAuthorizationId);
+        Assert.Equal(nameof(InferencePosture.ExternalAuthorized), request.InferencePosture);
+    }
+
+    [Fact]
+    public async Task Unauthorized_external_above_the_ceiling_is_still_denied()
+    {
+        // No authorization row: the ceiling applies unchanged. At 100% external ratio the
+        // reservation is denied with the original code, and the denied ledger row carries
+        // no authorization linkage.
+        using var fixture = new Fixture(hardLimit: 100_000);
+
+        var denied = await Assert.ThrowsAsync<AiPolicyDeniedException>(() => fixture.Service.ReserveAsync(
+            fixture.Context("unauthorized-full-ratio", AiProviderClass.External),
+            "Ollama", "test", "external", 10, 10, 1, default));
+
+        Assert.Equal("external_dependency_cap", denied.Code);
+        await using var db = fixture.Database.ContextFor(null);
+        var request = await db.AiRequests.IgnoreQueryFilters().SingleAsync();
+        Assert.Null(request.ExternalAuthorizationId);
+        Assert.Null(request.InferencePosture);
+    }
+
+    [Fact]
+    public async Task Authorization_for_a_different_model_does_not_exempt_the_ceiling()
+    {
+        // The exemption matches the exact resolved destination. A grant for another model
+        // at the same endpoint is not this destination — mismatch fails closed.
+        using var fixture = new Fixture(hardLimit: 100_000);
+        fixture.AuthorizeResolvedEndpoint(model: "some-other-model");
+
+        var denied = await Assert.ThrowsAsync<AiPolicyDeniedException>(() => fixture.Service.ReserveAsync(
+            fixture.Context("wrong-model-authorized", AiProviderClass.External),
+            "Ollama", "test", "external", 10, 10, 1, default));
+
+        Assert.Equal("external_dependency_cap", denied.Code);
+    }
+
+    [Fact]
+    public async Task Another_tenants_authorization_does_not_exempt_this_tenant()
+    {
+        using var fixture = new Fixture(hardLimit: 100_000);
+        fixture.AuthorizeResolvedEndpoint(businessUnitId: Fixture.OtherBusinessUnitId);
+
+        var denied = await Assert.ThrowsAsync<AiPolicyDeniedException>(() => fixture.Service.ReserveAsync(
+            fixture.Context("other-tenants-grant", AiProviderClass.External),
+            "Ollama", "test", "external", 10, 10, 1, default));
+
+        Assert.Equal("external_dependency_cap", denied.Code);
+    }
+
+    [Fact]
+    public async Task Authorized_endpoint_is_still_denied_when_the_hard_budget_is_exhausted()
+    {
+        // The exemption is CEILING-ONLY. The same authorized destination that passes the
+        // ratio is still stopped by the monthly hard token budget.
+        using var fixture = new Fixture(hardLimit: 10);
+        fixture.AuthorizeResolvedEndpoint();
+
+        var denied = await Assert.ThrowsAsync<AiPolicyDeniedException>(() => fixture.Service.ReserveAsync(
+            fixture.Context("authorized-over-hard-budget", AiProviderClass.External),
+            "Ollama", "test", new string('x', 40), 40, 10, 1, default));
+
+        Assert.Equal("hard_budget_exceeded", denied.Code);
+    }
+
+    [Fact]
+    public async Task Authorized_endpoint_is_still_denied_when_the_document_budget_is_exhausted()
+    {
+        using var fixture = new Fixture(hardLimit: 100_000, maxTokensPerDocument: 25);
+        fixture.AuthorizeResolvedEndpoint();
+        await fixture.Service.ReserveAsync(
+            fixture.Context("authorized-document-first", AiProviderClass.External, extractionJobId: 771),
+            "Ollama", "test", "external", 10, 10, 1, default);
+
+        var denied = await Assert.ThrowsAsync<AiPolicyDeniedException>(() => fixture.Service.ReserveAsync(
+            fixture.Context("authorized-document-second", AiProviderClass.External, extractionJobId: 771),
+            "Ollama", "test", "external", 10, 10, 1, default));
+
+        Assert.Equal("document_budget_exceeded", denied.Code);
+    }
+
+    [Fact]
     public async Task Per_document_budget_denies_additional_reservation_atomically()
     {
         using var fixture = new Fixture(hardLimit: 100_000, maxTokensPerDocument: 25);
@@ -233,8 +336,16 @@ public sealed class AiGovernanceServiceTests
 
     private sealed class Fixture : IDisposable
     {
-        private const long BusinessUnitId = 44_001;
+        public const long BusinessUnitId = 44_001;
+        public const long OtherBusinessUnitId = 44_002;
+
+        /// <summary>The deployment's configured external endpoint, as the resolver sees it.</summary>
+        private const string ResolvedBaseUrl = "https://ollama.example/";
+        private const string ResolvedEndpoint = "https://ollama.example";
+        private const string ResolvedModel = "test";
+
         private readonly ServiceProvider _provider;
+        private readonly ErpRfqAutomationContext _trustDb;
         public TestDb Database { get; } = new();
         public IAiGovernanceService Service { get; }
         public IServiceScopeFactory ScopeFactory => _provider.GetRequiredService<IServiceScopeFactory>();
@@ -271,15 +382,32 @@ public sealed class AiGovernanceServiceTests
             }
 
             var tenantScope = new TenantScopeAccessor();
+            var tenantContext = new StubTenant(BusinessUnitId);
             _provider = new ServiceCollection()
                 .AddSingleton<ITenantScopeAccessor>(tenantScope)
-                .AddSingleton<ITenantContext>(new StubTenant(BusinessUnitId))
+                .AddSingleton<ITenantContext>(tenantContext)
                 .AddScoped(_ => Database.ContextFor(tenantScope.BusinessUnitId))
                 .BuildServiceProvider();
+
+            // The REAL allow-list gate, wired exactly as production wires it: the ledger's
+            // ceiling exemption is only ever granted by a live authorization row, so these
+            // tests exercise the true fail-closed matching rather than a stub's opinion.
+            var resolver = new AiProviderEndpointResolver(
+                new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Ollama:BaseUrl"] = ResolvedBaseUrl,
+                    ["Ollama:Model"] = ResolvedModel
+                }).Build(),
+                new NoopLogger<AiProviderEndpointResolver>());
+            _trustDb = Database.ContextFor(BusinessUnitId);
+            var trust = new AiExternalProviderTrustService(
+                _trustDb, tenantContext, resolver, new NoopLogger<AiExternalProviderTrustService>());
+
             Service = new AiGovernanceService(
                 ScopeFactory,
                 tenantScope,
-                _provider.GetRequiredService<ITenantContext>());
+                _provider.GetRequiredService<ITenantContext>(),
+                trust);
         }
 
         public AiCallContext Context(
@@ -289,8 +417,38 @@ public sealed class AiGovernanceServiceTests
             new(BusinessUnitId, AiPurposes.RfqExtraction, key, "test-v1",
                 ProviderClass: providerClass, ExtractionJobId: extractionJobId);
 
+        /// <summary>
+        /// Inserts a live allow-list authorization row directly (the attributed admin
+        /// surface is covered by AiExternalProviderAllowListTests; here only the row's
+        /// effect on the ledger is under test).
+        /// </summary>
+        public long AuthorizeResolvedEndpoint(
+            long businessUnitId = BusinessUnitId, string model = ResolvedModel)
+        {
+            using var db = Database.ContextFor(null);
+            Seed.EnsureBusinessUnit(db, businessUnitId);
+            var row = new AiExternalProviderAuthorization
+            {
+                BusinessUnitId = businessUnitId,
+                Provider = "Ollama",
+                Endpoint = ResolvedEndpoint,
+                Model = model,
+                AllowedPurposes = AiPurposes.RfqExtraction,
+                UnstructuredDocumentsAllowed = true,
+                Justification = "DPA-2026-14 signed.",
+                AuthorizedByUserId = 4242,
+                AuthorizedBy = "user:4242",
+                AuthorizedOn = DateTime.UtcNow,
+                UpdatedOn = DateTime.UtcNow
+            };
+            db.AiExternalProviderAuthorizations.Add(row);
+            db.SaveChanges();
+            return row.Id;
+        }
+
         public void Dispose()
         {
+            _trustDb.Dispose();
             _provider.Dispose();
             Database.Dispose();
         }

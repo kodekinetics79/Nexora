@@ -28,6 +28,7 @@ import { useSnackbar } from 'notistack';
 import { formatDateSafe, parseDateSafe } from '../../utils/dates';
 import { confidenceLevel } from '../Intelligence/common';
 import { useAuth } from '../../context/AuthContext';
+import { presentableErrorMessage } from '../../utils/apiErrors';
 
 // ---------------------------------------------------------------------------
 // Per-user view preferences (column visibility + density), persisted locally.
@@ -60,6 +61,7 @@ const DEFAULT_COLUMN_VISIBILITY: GridColumnVisibilityModel = {
   rfqno: true,
   buyer: true,
   recDate: true,
+  ingestedAtUtc: true,
   bidClosingDate: true,
   itemCount: true,
   leadSource: true,
@@ -75,6 +77,7 @@ const HIDEABLE_COLUMNS: ReadonlyArray<{ field: string; label: string }> = [
   { field: 'rfqno', label: 'RFQ #' },
   { field: 'buyer', label: 'Buyer' },
   { field: 'recDate', label: 'Received' },
+  { field: 'ingestedAtUtc', label: 'Nexora Ingestion Date' },
   { field: 'bidClosingDate', label: 'Deadline' },
   { field: 'itemCount', label: 'Items' },
   { field: 'leadSource', label: 'Source' },
@@ -261,7 +264,10 @@ const LeadsPage: React.FC = () => {
       enqueueSnackbar('Email synchronization started successfully!', { variant: 'success' });
       queryClient.invalidateQueries({ queryKey: ['leads'] });
     },
-    onError: (err: any) => enqueueSnackbar(err.response?.data || 'Sync failed', { variant: 'error' }),
+    onError: (error: unknown) => enqueueSnackbar(
+      presentableErrorMessage(error, 'Email synchronization could not be started. Nothing was changed — try again.'),
+      { variant: 'error' },
+    ),
   });
 
   const { data, isLoading, isError, refetch } = useQuery({
@@ -382,6 +388,23 @@ const LeadsPage: React.FC = () => {
           <Typography variant="body2" sx={{ fontSize: '0.8rem', color: label === '—' ? 'text.disabled' : 'text.primary' }}>
             {label}
           </Typography>
+        );
+      },
+    },
+    {
+      field: 'ingestedAtUtc',
+      headerName: 'Ingested',
+      width: 150,
+      valueGetter: (_value, row) => row.ingestedAtUtc || row.createdDate || '',
+      renderCell: (p) => {
+        const value = p.row.ingestedAtUtc || p.row.createdDate;
+        const label = formatDateSafe(value);
+        return (
+          <Tooltip title={value ? new Date(value).toLocaleString() : 'Not recorded'}>
+            <Typography variant="body2" sx={{ fontSize: '0.8rem', color: label === '—' ? 'text.disabled' : 'text.primary' }}>
+              {label}
+            </Typography>
+          </Tooltip>
         );
       },
     },

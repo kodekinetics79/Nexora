@@ -14,7 +14,7 @@ export default function RepDirectoryPage() {
         <ResponsiveTable label="Sales representatives">
           <Table size="small">
             <TableHead><TableRow><TableCell>Representative</TableCell><TableCell>Role</TableCell><TableCell align="right">Active leads</TableCell><TableCell align="right">Follow-ups due</TableCell><TableCell align="right">Pipeline</TableCell><TableCell>Profile</TableCell></TableRow></TableHead>
-            <TableBody>{rows.map(row => <TableRow hover key={row.userId}><TableCell><Typography sx={{ fontWeight: 700 }}>{row.name}</Typography><Typography variant="caption" color="text.secondary">{row.email}</Typography></TableCell><TableCell>{row.roleName || 'Sales representative'}</TableCell><TableCell align="right">{row.activeLeads}</TableCell><TableCell align="right">{row.followUpsDue}</TableCell><TableCell align="right"><PipelineGroups groups={row.pipelineGroups} /></TableCell><TableCell><Button size="small" onClick={() => navigate(`/sales-management/reps/${row.userId}`)}>Open</Button></TableCell></TableRow>)}</TableBody>
+            <TableBody>{rows.map(row => <TableRow hover key={row.userId}><TableCell><Typography sx={{ fontWeight: 700 }}>{row.name}</Typography><Typography variant="caption" color="text.secondary">{row.email}</Typography></TableCell><TableCell>{row.roleName || 'Sales representative'}</TableCell><TableCell align="right">{row.activeLeads}</TableCell><TableCell align="right">{row.followUpsDue}</TableCell><TableCell align="right"><PipelineGroups groups={row.pipelineGroups} /></TableCell><TableCell><Button size="small" onClick={() => navigate(`/sales/reps/${row.userId}`)}>Open</Button></TableCell></TableRow>)}</TableBody>
           </Table>
         </ResponsiveTable>
       </QueryState>

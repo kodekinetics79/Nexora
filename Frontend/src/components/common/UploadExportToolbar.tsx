@@ -6,6 +6,7 @@ import {
   FileDownload as TemplateIcon,
 } from '@mui/icons-material';
 import { useSnackbar } from 'notistack';
+import { presentableErrorMessage } from '../../utils/apiErrors';
 
 interface Props {
   onDownloadTemplate: () => Promise<any>;
@@ -68,8 +69,11 @@ const UploadExportToolbar: React.FC<Props> = ({
       setLoading('upload');
       const res = await onUpload(file);
       enqueueSnackbar(res.data?.message || 'Upload successful!', { variant: 'success' });
-    } catch (err: any) {
-      enqueueSnackbar(err?.response?.data?.message || 'Upload failed', { variant: 'error' });
+    } catch (error: unknown) {
+      enqueueSnackbar(
+        presentableErrorMessage(error, 'The upload could not be completed. Nothing was imported — try again.'),
+        { variant: 'error' },
+      );
     } finally {
       setLoading(null);
       if (fileInputRef.current) fileInputRef.current.value = '';

@@ -225,6 +225,22 @@ export interface BatchReconciliationItemDTO {
   intakeStatus?: string;
   errorCode?: string | null;
   sourceDocumentOccurrenceId?: number | null;
+  securityStatus?: string | null;
+  securityScanUpdatedAtUtc?: string | null;
+  lastUpdatedAtUtc?: string | null;
+  extractionStatus?: string | null;
+  extractionUpdatedAtUtc?: string | null;
+  /**
+   * The backend's durable "our infrastructure failed" signal: this file is held by a malware
+   * scanner that never produced a verdict, so it can be replayed from its immutable source with no
+   * re-upload. Distinct from a real malware detection or a malformed document, neither of which is
+   * replayable. Source: BatchReconciliationItemDto in
+   * Backend/ERP_RFQ_Automation/LeadIdentity/LeadIdentityContracts.cs.
+   *
+   * Optional because older responses predate the field — treat `undefined` as "unknown" and fall
+   * back to the error code (see src/utils/intakeErrors.ts).
+   */
+  recoverableSecurityHold?: boolean;
 }
 
 export interface LeadMatchCandidateDTO {
@@ -251,7 +267,75 @@ export interface BatchReconciliationDTO {
   rejected: number;
   externalOccurrences: number;
   externalCost?: number | null;
+  awaitingSecurityScan: number;
+  localFirstOccurrences: number;
   items: BatchReconciliationItemDTO[];
+}
+
+export interface SecurityScanRetryResultDTO {
+  batchId: string;
+  eligible: number;
+  queued: number;
+  stillAwaiting: number;
+  rejected: number;
+  sourceObjectUnavailable: number;
+  items: Array<{
+    sourceDocumentOccurrenceId: number;
+    fileName: string;
+    status: string;
+    errorCode?: string | null;
+    extractionJobId?: number | null;
+  }>;
+  /** Every batch touched by the sweep. Single-element for a batch-scoped retry. */
+  batches?: string[];
+  /** True when the per-call cap was hit and the sweep should be invoked again. */
+  moreRemaining?: boolean;
+}
+
+/** GET /api/LeadIngestion/blocked-files — operator discovery of scanner-blocked files. */
+export interface BlockedBatchSummaryDTO {
+  batchId: string;
+  blockedFiles: number;
+  oldestReceivedOn: string;
+  newestReceivedOn: string;
+}
+
+export interface BlockedFilesDTO {
+  blockedFiles: number;
+  batches: BlockedBatchSummaryDTO[];
+}
+
+export interface DuplicateUploadDTO {
+  occurrenceId: number;
+  fileName: string;
+  uploadBatch: string;
+  ingestedAt: string;
+  uploadedBy: string;
+  source: string;
+  duplicateType: string;
+  originalOccurrenceId?: number | null;
+  canonicalLeadId?: number | null;
+  nexoraSerial?: string | null;
+  securityStatus: string;
+  processingReused: boolean;
+  resources: {
+    bytesUploaded: number;
+    hashingDurationMs: number;
+    storagePhysicalBytes: number;
+    storageLogicalBytes: number;
+    malwareScanReused: boolean;
+    malwareScanRerun: boolean;
+    parserReused: boolean;
+    ocrReused: boolean;
+    localModelReused: boolean;
+    externalModelReused: boolean;
+    localComputeCost: number;
+    externalCost: number;
+    totalActualCost: number;
+    estimatedProcessingAvoided: number;
+    costStatus: string;
+  };
+  actions: string[];
 }
 
 export interface PossibleMatchQueueItemDTO {
@@ -326,6 +410,43 @@ const leadService = {
 
   getIngestionBatch: async (batchId: string): Promise<BatchReconciliationDTO> => {
     const r = await axiosInstance.get<BatchReconciliationDTO>(`/api/LeadIngestion/batches/${encodeURIComponent(batchId)}`);
+    return r.data;
+  },
+
+  /**
+   * Replays one batch's scanner-blocked files from their stored source objects.
+   * POST /api/LeadIngestion/batches/{batchId}/retry-blocked-files
+   * (LeadIngestionController.RetryBlockedFiles, requires Leads:Create).
+   */
+  retryBlockedFiles: async (batchId: string): Promise<SecurityScanRetryResultDTO> => {
+    const r = await axiosInstance.post<SecurityScanRetryResultDTO>(
+      `/api/LeadIngestion/batches/${encodeURIComponent(batchId)}/retry-blocked-files`,
+    );
+    return r.data;
+  },
+
+  /**
+   * Tenant-wide replay — no batch id and no re-upload. The operator escape hatch for holds the
+   * batch page can no longer offer a control for.
+   * POST /api/LeadIngestion/retry-blocked-files
+   * (LeadIngestionController.RetryAllBlockedFiles, requires Leads:Create). Capped per call —
+   * re-invoke while `moreRemaining` is true.
+   */
+  retryAllBlockedFiles: async (): Promise<SecurityScanRetryResultDTO> => {
+    const r = await axiosInstance.post<SecurityScanRetryResultDTO>(
+      '/api/LeadIngestion/retry-blocked-files',
+    );
+    return r.data;
+  },
+
+  /** GET /api/LeadIngestion/blocked-files (LeadIngestionController.BlockedFiles). */
+  getBlockedFiles: async (): Promise<BlockedFilesDTO> => {
+    const r = await axiosInstance.get<BlockedFilesDTO>('/api/LeadIngestion/blocked-files');
+    return r.data;
+  },
+
+  getDuplicateUploads: async (): Promise<DuplicateUploadDTO[]> => {
+    const r = await axiosInstance.get<DuplicateUploadDTO[]>('/api/LeadIngestion/duplicates');
     return r.data;
   },
 

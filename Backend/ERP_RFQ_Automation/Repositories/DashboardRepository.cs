@@ -5,6 +5,8 @@ using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.DTOs.Dashboard;
+using ERP_RFQ_Automation.DTOs.CurrencyDTOs;
+using ERP_RFQ_Automation.Fx;
 using ERP_RFQ_Automation.Interfaces;
 
 namespace ERP_RFQ_Automation.Repositories
@@ -32,9 +34,29 @@ namespace ERP_RFQ_Automation.Repositories
             var rfqsQuoted = await _context.Rfqs.CountAsync(r => r.BusinessUnitId == businessUnitId && r.Quotes.Any());
             var totalLineItems = await _context.Rfqitems.CountAsync(ri => ri.Rfq.BusinessUnitId == businessUnitId);
             var l1Quoted = await _context.Rfqitems.CountAsync(ri => ri.Rfq.BusinessUnitId == businessUnitId && ri.UnitPrice > 0);
-            var totalOrderValue = await _context.Orders.Where(o => o.BusinessUnitId == businessUnitId).SumAsync(o => o.TotalAmount);
-            var orderCount = await _context.Orders.CountAsync(o => o.BusinessUnitId == businessUnitId);
-            var quoteCount = await _context.Quotes.CountAsync(q => q.BusinessUnitId == businessUnitId);
+
+            // FX fix: `SumAsync(o => o.TotalAmount)` and the two AverageAsync calls below used to
+            // add and average Order/Quote totals across currencies as bare decimals. Both entities
+            // carry a CurrencyId that was never read. Amounts are now pulled with their currency
+            // and converted to the base currency through approved, effective-dated rates; the
+            // figures fail closed to null (with a surfaced reason) rather than blend AED with USD.
+            var fx = new FxConversionService(_context);
+            var orderAmounts = await _context.Orders.AsNoTracking()
+                .Where(o => o.BusinessUnitId == businessUnitId)
+                .Select(o => new { o.TotalAmount, o.CurrencyId })
+                .ToListAsync();
+            var quoteAmounts = await _context.Quotes.AsNoTracking()
+                .Where(q => q.BusinessUnitId == businessUnitId)
+                .Select(q => new { q.TotalAmount, q.CurrencyId })
+                .ToListAsync();
+
+            var orderTotalFx = await fx.TotalAsync(businessUnitId,
+                orderAmounts.Select(o => new FxAmount(o.TotalAmount, o.CurrencyId)).ToArray(), today);
+            var quoteTotalFx = await fx.TotalAsync(businessUnitId,
+                quoteAmounts.Select(q => new FxAmount(q.TotalAmount ?? 0m, q.CurrencyId)).ToArray(), today);
+
+            var orderCount = orderAmounts.Count;
+            var quoteCount = quoteAmounts.Count;
             var customerCount = await _context.Customers.CountAsync(c => c.Buid == businessUnitId);
 
             // 2. Trend Calculations (Current 30d vs Previous 30d)
@@ -55,10 +77,19 @@ namespace ERP_RFQ_Automation.Repositories
                 RfqsQuoted = rfqsQuoted,
                 TotalLineItems = totalLineItems,
                 L1Quoted = l1Quoted,
-                TotalOrderValue = totalOrderValue,
+                TotalOrderValue = orderTotalFx.Total,
                 CustomerCount = customerCount,
-                AvgQuoteValue = quoteCount > 0 ? await _context.Quotes.Where(q => q.BusinessUnitId == businessUnitId).AverageAsync(q => (decimal)q.TotalAmount) : 0m,
-                AvgOrderValue = orderCount > 0 ? await _context.Orders.Where(o => o.BusinessUnitId == businessUnitId).AverageAsync(o => (decimal)o.TotalAmount) : 0m,
+                // The mean is taken on the CONVERTED total, so it is a mean of comparable
+                // quantities. When the total is unavailable the mean is too — an average of
+                // partially-converted values would be a different kind of lie.
+                AvgQuoteValue = quoteCount > 0 && quoteTotalFx.Total.HasValue
+                    ? FxConversionService.RoundMoney(quoteTotalFx.Total.Value / quoteCount)
+                    : (decimal?)null,
+                AvgOrderValue = orderCount > 0 && orderTotalFx.Total.HasValue
+                    ? FxConversionService.RoundMoney(orderTotalFx.Total.Value / orderCount)
+                    : (decimal?)null,
+                OrderValueFx = FxTotalEvidenceDTO.From(orderTotalFx),
+                QuoteValueFx = FxTotalEvidenceDTO.From(quoteTotalFx),
                 BidRatio = totalRfqs > 0 ? (double)rfqsQuoted / totalRfqs * 100 : 0,
                 WinVolumeRatio = totalRfqs > 0 ? (double)orderCount / totalRfqs * 100 : 0,
                 ConversionRates = new ConversionRatesDTO
@@ -81,11 +112,24 @@ namespace ERP_RFQ_Automation.Repositories
             data.VolumeTrend = new List<MonthlyTrendDTO>();
             foreach (var m in months)
             {
+                // FX fix: each bucket used to be a raw cross-currency SumAsync. Because the
+                // currency mix varies month to month, the SHAPE of the trend line — not just its
+                // level — was an artefact of that mix. Each month is now converted on its own and
+                // fails closed independently, so one unconvertible month cannot distort the rest.
+                var monthAmounts = await _context.Orders.AsNoTracking()
+                    .Where(o => o.BusinessUnitId == businessUnitId && o.OrderDate.Month == m.Month && o.OrderDate.Year == m.Year)
+                    .Select(o => new { o.TotalAmount, o.CurrencyId })
+                    .ToListAsync();
+                var monthFx = await fx.TotalAsync(businessUnitId,
+                    monthAmounts.Select(o => new FxAmount(o.TotalAmount, o.CurrencyId)).ToArray(), today);
+
                 data.VolumeTrend.Add(new MonthlyTrendDTO
                 {
                     Month = m.ToString("MMM"),
                     Count = await _context.Rfqs.CountAsync(r => r.BusinessUnitId == businessUnitId && r.CreatedDate.Month == m.Month && r.CreatedDate.Year == m.Year),
-                    Value = await _context.Orders.Where(o => o.BusinessUnitId == businessUnitId && o.OrderDate.Month == m.Month && o.OrderDate.Year == m.Year).SumAsync(o => o.TotalAmount)
+                    Value = monthFx.Total,
+                    ValueCurrency = monthFx.TargetCurrencyCode,
+                    ValueUnavailableReason = monthFx.UnavailableReason
                 });
             }
 
@@ -123,18 +167,44 @@ namespace ERP_RFQ_Automation.Repositories
                 new RadarDataDTO { Subject = "AI Accuracy", A = totalLeads > 0 ? (double)_context.Leads.Where(l => l.BusinessUnitId == businessUnitId).Average(l => l.Aiconfidence ?? 0) * 100 : 0, B = 90 }
             };
 
-            // 7. Response Integrity (Bubble chart simulation: Created Day vs Total Amount)
-            data.ResponseIntegrity = await _context.Rfqs
+            // 7. Response Integrity (Bubble chart: Created Day vs mean quote value)
+            // FX fix: the Y axis averaged sibling quote totals on one RFQ. Nothing constrains
+            // sibling quotes to share a CurrencyId, so the axis mixed denominations. Quotes are
+            // pulled with their currency and converted per RFQ; an RFQ whose quotes cannot be
+            // converted is plotted at Y = 0 with the bubble's own reason recorded, rather than
+            // being given a fabricated position.
+            var scatterRfqs = await _context.Rfqs.AsNoTracking()
                 .Where(r => r.BusinessUnitId == businessUnitId)
                 .OrderByDescending(r => r.CreatedDate)
                 .Take(15)
-                .Select(r => new ScatterDataDTO
+                .Select(r => new
+                {
+                    r.CreatedDate,
+                    r.Rfqno,
+                    ItemCount = r.Rfqitems.Count,
+                    Quotes = r.Quotes.Select(q => new { q.TotalAmount, q.CurrencyId }).ToList()
+                })
+                .ToListAsync();
+
+            data.ResponseIntegrity = new List<ScatterDataDTO>();
+            foreach (var r in scatterRfqs)
+            {
+                double y = 0;
+                if (r.Quotes.Count > 0)
+                {
+                    var rfqFx = await fx.TotalAsync(businessUnitId,
+                        r.Quotes.Select(q => new FxAmount(q.TotalAmount ?? 0m, q.CurrencyId)).ToArray(), today);
+                    if (rfqFx.Total.HasValue)
+                        y = (double)FxConversionService.RoundMoney(rfqFx.Total.Value / r.Quotes.Count);
+                }
+                data.ResponseIntegrity.Add(new ScatterDataDTO
                 {
                     X = r.CreatedDate.Day,
-                    Y = (double)(r.Quotes.Any() ? r.Quotes.Average(q => q.TotalAmount) : 0m),
-                    Z = r.Rfqitems.Count * 5,
+                    Y = y,
+                    Z = r.ItemCount * 5,
                     Name = r.Rfqno ?? "RFQ"
-                }).ToListAsync();
+                });
+            }
 
             // 8. Recent Activities (Real-time timeline)
             var recentLeads = await _context.Leads.Where(l => l.BusinessUnitId == businessUnitId).OrderByDescending(l => l.CreatedDate).Take(10).Select(l => new RecentItemDTO { Id = l.Rfqno, Type = "Lead", Description = l.BuyersName, Status = l.LeadStatus != null ? l.LeadStatus.SetupValue : "Open", Date = l.CreatedDate }).ToListAsync();
@@ -298,39 +368,67 @@ namespace ERP_RFQ_Automation.Repositories
                 && l.LeadStatusId != null && acceptedLeadStatusIds.Contains(l.LeadStatusId.Value)
                 && l.LeadRejectedReasonId == null);
 
-            // Value estimates from the leads' own priced lines (UnitPrice × Quantity);
-            // nullable SUM so an empty set materializes as null, not a throw.
-            var totalLeadValue = await _context.LeadItems
+            // FX: LeadItem carries a FREE-TEXT currency code with no FK to Currency, so codes are
+            // mapped to currency ids for this business unit; an unrecognised or blank code yields
+            // a null currency, which the conversion engine treats as unconvertible rather than
+            // silently folding into the total.
+            var fx = new FxConversionService(_context);
+            var currencyIdByCode = await _context.Currencies.AsNoTracking()
+                .Where(c => c.BusinessUnitId == businessUnitId)
+                .ToDictionaryAsync(c => c.Code.ToUpperInvariant(), c => c.Id);
+
+            long? MapCode(string? code) =>
+                !string.IsNullOrWhiteSpace(code) && currencyIdByCode.TryGetValue(code.Trim().ToUpperInvariant(), out var id)
+                    ? id
+                    : (long?)null;
+
+            // Value estimates from the leads' own priced lines (UnitPrice × Quantity).
+            var leadLines = await _context.LeadItems.AsNoTracking()
                 .Where(li => li.Lead.BusinessUnitId == businessUnitId && li.UnitPrice > 0 && li.Quantity > 0)
-                .SumAsync(li => (decimal?)(li.UnitPrice!.Value * li.Quantity)) ?? 0m;
-            var acceptedLeadValue = await _context.LeadItems
-                .Where(li => li.Lead.BusinessUnitId == businessUnitId
-                             && li.Lead.LeadStatusId != null && acceptedLeadStatusIds.Contains(li.Lead.LeadStatusId.Value)
-                             && li.Lead.LeadRejectedReasonId == null
-                             && li.UnitPrice > 0 && li.Quantity > 0)
-                .SumAsync(li => (decimal?)(li.UnitPrice!.Value * li.Quantity)) ?? 0m;
+                .Select(li => new
+                {
+                    li.UnitPrice,
+                    li.Quantity,
+                    li.Currency,
+                    Accepted = li.Lead.LeadStatusId != null && acceptedLeadStatusIds.Contains(li.Lead.LeadStatusId.Value)
+                               && li.Lead.LeadRejectedReasonId == null
+                })
+                .ToListAsync();
+
+            var totalLeadFx = await fx.TotalAsync(businessUnitId,
+                leadLines.Select(li => new FxAmount(li.UnitPrice!.Value * li.Quantity, MapCode(li.Currency))).ToArray(), now);
+            var acceptedLeadFx = await fx.TotalAsync(businessUnitId,
+                leadLines.Where(li => li.Accepted)
+                    .Select(li => new FxAmount(li.UnitPrice!.Value * li.Quantity, MapCode(li.Currency))).ToArray(), now);
 
             // ── Stage 3+4: quoted / won (quote totals) ──
-            var quotedCount = await _context.Quotes.CountAsync(q => q.BusinessUnitId == businessUnitId);
-            var quotedValue = await _context.Quotes
+            var pipelineQuotes = await _context.Quotes.AsNoTracking()
                 .Where(q => q.BusinessUnitId == businessUnitId)
-                .SumAsync(q => q.TotalAmount) ?? 0m;
+                .Select(q => new { q.TotalAmount, q.CurrencyId, q.StatusId, q.OutcomeReasonId, q.RespondedOn })
+                .ToListAsync();
 
-            var wonCount = await _context.Quotes.CountAsync(q =>
-                q.BusinessUnitId == businessUnitId
-                && q.StatusId != null && wonQuoteStatusIds.Contains(q.StatusId.Value));
-            var wonValue = await _context.Quotes
-                .Where(q => q.BusinessUnitId == businessUnitId
-                            && q.StatusId != null && wonQuoteStatusIds.Contains(q.StatusId.Value))
-                .SumAsync(q => q.TotalAmount) ?? 0m;
+            var quotedCount = pipelineQuotes.Count;
+            var quotedFx = await fx.TotalAsync(businessUnitId,
+                pipelineQuotes.Select(q => new FxAmount(q.TotalAmount ?? 0m, q.CurrencyId)).ToArray(), now);
+
+            var wonQuotes = pipelineQuotes
+                .Where(q => q.StatusId != null && wonQuoteStatusIds.Contains(q.StatusId.Value)).ToList();
+            var wonCount = wonQuotes.Count;
+            var wonFx = await fx.TotalAsync(businessUnitId,
+                wonQuotes.Select(q => new FxAmount(q.TotalAmount ?? 0m, q.CurrencyId)).ToArray(), now);
 
             // ── Losses grouped by outcome reason (name resolved via SetupMaster) ──
-            var lostGroups = await _context.Quotes.AsNoTracking()
-                .Where(q => q.BusinessUnitId == businessUnitId
-                            && q.StatusId != null && lostQuoteStatusIds.Contains(q.StatusId.Value))
-                .GroupBy(q => q.OutcomeReasonId)
-                .Select(g => new { ReasonId = g.Key, Count = g.Count(), Value = g.Sum(q => q.TotalAmount) ?? 0m })
-                .ToListAsync();
+            // Each reason group is converted independently, so one unconvertible group does not
+            // suppress the others.
+            var lostQuotes = pipelineQuotes
+                .Where(q => q.StatusId != null && lostQuoteStatusIds.Contains(q.StatusId.Value)).ToList();
+            var lostGroups = new List<(long? ReasonId, int Count, FxTotalResult Fx)>();
+            foreach (var group in lostQuotes.GroupBy(q => q.OutcomeReasonId))
+            {
+                var groupFx = await fx.TotalAsync(businessUnitId,
+                    group.Select(q => new FxAmount(q.TotalAmount ?? 0m, q.CurrencyId)).ToArray(), now);
+                lostGroups.Add((group.Key, group.Count(), groupFx));
+            }
 
             var reasonIds = lostGroups.Where(g => g.ReasonId.HasValue).Select(g => g.ReasonId!.Value).Distinct().ToList();
             var reasonNames = reasonIds.Count == 0
@@ -346,60 +444,115 @@ namespace ERP_RFQ_Automation.Repositories
                         ? name
                         : "No reason recorded",
                     Count = g.Count,
-                    Value = g.Value
+                    Value = g.Fx.Total,
+                    ValueCurrency = g.Fx.TargetCurrencyCode,
+                    ValueUnavailableReason = g.Fx.UnavailableReason
                 })
                 .OrderByDescending(r => r.Count)
                 .ToList();
 
             // ── Weighted forecast over the open SENT pipeline:
             //    still waiting × 0.3 + responded-but-undecided × 0.5 ──
-            var sentQuotes = await _context.Quotes.AsNoTracking()
-                .Where(q => q.BusinessUnitId == businessUnitId
-                            && q.StatusId != null && sentQuoteStatusIds.Contains(q.StatusId.Value))
-                .Select(q => new { q.TotalAmount, q.RespondedOn })
-                .ToListAsync();
+            // FX fix: both buckets used to be raw cross-currency sums that were then weighted and
+            // ADDED to each other. Each bucket is now converted to base currency first; if either
+            // cannot be converted the forecast fails closed to null rather than compounding the
+            // error through the weighting.
+            var sentQuotes = pipelineQuotes
+                .Where(q => q.StatusId != null && sentQuoteStatusIds.Contains(q.StatusId.Value)).ToList();
 
             var awaiting = sentQuotes.Where(q => q.RespondedOn == null).ToList();
             var responded = sentQuotes.Where(q => q.RespondedOn != null).ToList();
-            var awaitingValue = awaiting.Sum(q => q.TotalAmount ?? 0m);
-            var respondedValue = responded.Sum(q => q.TotalAmount ?? 0m);
+            var awaitingFx = await fx.TotalAsync(businessUnitId,
+                awaiting.Select(q => new FxAmount(q.TotalAmount ?? 0m, q.CurrencyId)).ToArray(), now);
+            var respondedFx = await fx.TotalAsync(businessUnitId,
+                responded.Select(q => new FxAmount(q.TotalAmount ?? 0m, q.CurrencyId)).ToArray(), now);
+
+            var forecastAvailable = awaitingFx.Total.HasValue && respondedFx.Total.HasValue;
+            var forecastReason = awaitingFx.UnavailableReason ?? respondedFx.UnavailableReason;
 
             // ── Quoted-vs-floor margin proxy. Floor = the pricing engine's cost
             //    basis (FinalLandedCost ?? UnitCost); only lines where that floor
             //    actually exists are sampled — never guessed. ──
+            // FX fix: this subtracted Product.FinalLandedCost/UnitCost from QuoteItem.UnitPrice.
+            // QuoteItem has no currency of its own (it inherits Quote.CurrencyId) and Product has
+            // NO currency column at all, so a EUR quote line was being differenced against a cost
+            // in an undeclared unit — a per-row unit error that was then averaged across rows.
+            // Product costs are treated as base-currency, which is the convention the rest of the
+            // codebase already relies on (ProductRepository nulls out cost when the base currency
+            // is ambiguous). The quote line's price is therefore converted INTO base currency
+            // before the subtraction, and any line whose currency has no approved rate is excluded
+            // from the sample and counted in MarginLinesExcludedForFx rather than contributing a
+            // fabricated margin.
             var marginRows = await _context.QuoteItems.AsNoTracking()
                 .Where(qi => qi.Quote.BusinessUnitId == businessUnitId && qi.UnitPrice > 0)
                 .Select(qi => new
                 {
                     qi.UnitPrice,
+                    CurrencyId = qi.Quote.CurrencyId,
                     Cost = qi.Product != null ? (qi.Product.FinalLandedCost ?? qi.Product.UnitCost) : null
                 })
                 .ToListAsync();
 
-            var marginSamples = marginRows
-                .Where(r => r.Cost.HasValue && r.Cost.Value > 0)
-                .Select(r => (r.UnitPrice - r.Cost!.Value) / r.UnitPrice)
-                .ToList();
+            var baseCurrencyId = await fx.ResolveBaseCurrencyIdAsync(businessUnitId);
+            var marginSamples = new List<decimal>();
+            var marginExcludedForFx = 0;
+            if (baseCurrencyId is not null)
+            {
+                // Rates are resolved once per currency, not once per line.
+                var rateByCurrency = new Dictionary<long, decimal?>();
+                foreach (var row in marginRows.Where(r => r.Cost.HasValue && r.Cost.Value > 0))
+                {
+                    if (row.CurrencyId is null) { marginExcludedForFx++; continue; }
+                    if (!rateByCurrency.TryGetValue(row.CurrencyId.Value, out var rate))
+                    {
+                        var resolution = await fx.ResolveRateAsync(businessUnitId, row.CurrencyId.Value, baseCurrencyId.Value, now);
+                        rate = resolution.Found ? resolution.Rate : (decimal?)null;
+                        rateByCurrency[row.CurrencyId.Value] = rate;
+                    }
+                    if (rate is null) { marginExcludedForFx++; continue; }
+
+                    var priceInBase = FxConversionService.RoundMoney(row.UnitPrice * rate.Value);
+                    if (priceInBase <= 0) { marginExcludedForFx++; continue; }
+                    marginSamples.Add((priceInBase - row.Cost!.Value) / priceInBase);
+                }
+            }
+            else
+            {
+                marginExcludedForFx = marginRows.Count(r => r.Cost.HasValue && r.Cost.Value > 0);
+            }
 
             return new PipelineAnalyticsDTO
             {
                 Funnel = new List<PipelineStageDTO>
                 {
-                    new() { Key = "leads", Label = "Requests received", Count = totalLeads, Value = Round2(totalLeadValue) },
-                    new() { Key = "accepted", Label = "Accepted to work on", Count = acceptedLeads, Value = Round2(acceptedLeadValue) },
-                    new() { Key = "quoted", Label = "Quotes created", Count = quotedCount, Value = Round2(quotedValue) },
-                    new() { Key = "won", Label = "Won", Count = wonCount, Value = Round2(wonValue) }
+                    new() { Key = "leads", Label = "Requests received", Count = totalLeads,
+                            Value = totalLeadFx.Total, ValueCurrency = totalLeadFx.TargetCurrencyCode,
+                            ValueUnavailableReason = totalLeadFx.UnavailableReason },
+                    new() { Key = "accepted", Label = "Accepted to work on", Count = acceptedLeads,
+                            Value = acceptedLeadFx.Total, ValueCurrency = acceptedLeadFx.TargetCurrencyCode,
+                            ValueUnavailableReason = acceptedLeadFx.UnavailableReason },
+                    new() { Key = "quoted", Label = "Quotes created", Count = quotedCount,
+                            Value = quotedFx.Total, ValueCurrency = quotedFx.TargetCurrencyCode,
+                            ValueUnavailableReason = quotedFx.UnavailableReason },
+                    new() { Key = "won", Label = "Won", Count = wonCount,
+                            Value = wonFx.Total, ValueCurrency = wonFx.TargetCurrencyCode,
+                            ValueUnavailableReason = wonFx.UnavailableReason }
                 },
                 LossReasons = lossReasons,
-                WeightedForecast = Round2(awaitingValue * 0.3m + respondedValue * 0.5m),
+                WeightedForecast = forecastAvailable
+                    ? Round2(awaitingFx.Total!.Value * 0.3m + respondedFx.Total!.Value * 0.5m)
+                    : (decimal?)null,
+                ForecastCurrency = awaitingFx.TargetCurrencyCode,
+                ForecastUnavailableReason = forecastAvailable ? null : forecastReason,
                 AwaitingResponseQuotes = awaiting.Count,
-                AwaitingResponseValue = Round2(awaitingValue),
+                AwaitingResponseValue = awaitingFx.Total,
                 RespondedQuotes = responded.Count,
-                RespondedValue = Round2(respondedValue),
+                RespondedValue = respondedFx.Total,
                 AvgMarginPct = marginSamples.Count > 0
                     ? Math.Round(marginSamples.Average() * 100m, 1, MidpointRounding.AwayFromZero)
                     : null,
                 MarginSampleLines = marginSamples.Count,
+                MarginLinesExcludedForFx = marginExcludedForFx,
                 TotalQuoteLines = marginRows.Count,
                 GeneratedAt = now
             };

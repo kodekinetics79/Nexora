@@ -70,15 +70,28 @@ public sealed class AiGovernanceService : IAiGovernanceService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ITenantScopeAccessor _tenantScope;
     private readonly ITenantContext _tenantContext;
+    private readonly IAiExternalProviderTrust _externalProviderTrust;
 
+    /// <param name="externalProviderTrust">
+    /// The per-tenant external-provider allow-list. REQUIRED, deliberately: here the gate
+    /// can only ever GRANT an exemption from the external-dependency ceiling, so an
+    /// optional-and-null dependency would be indistinguishable from "never exempt" — but a
+    /// required dependency keeps the invariant explicit and un-forgettable: no gate, no
+    /// exemption, and a misregistration fails at composition time instead of silently
+    /// changing ceiling semantics. Absence of a matching live authorization always reads
+    /// as "not authorized", never as "exempt".
+    /// </param>
     public AiGovernanceService(
         IServiceScopeFactory scopeFactory,
         ITenantScopeAccessor tenantScope,
-        ITenantContext tenantContext)
+        ITenantContext tenantContext,
+        IAiExternalProviderTrust externalProviderTrust)
     {
         _scopeFactory = scopeFactory;
         _tenantScope = tenantScope;
         _tenantContext = tenantContext;
+        _externalProviderTrust = externalProviderTrust
+            ?? throw new ArgumentNullException(nameof(externalProviderTrust));
     }
 
     public async Task<AiReservation> ReserveAsync(
@@ -100,6 +113,16 @@ public sealed class AiGovernanceService : IAiGovernanceService
         var period = new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Utc);
 
         using var tenant = _tenantScope.Push(context.BusinessUnitId);
+
+        // Consult the allow-list gate ONCE, before the serializable reservation
+        // transaction: the gate reads through its own scoped context, and its verdict is
+        // point-in-time either way (the extraction gate re-evaluates it independently).
+        // Null — no live authorization for this exact resolved destination, or a gate
+        // refusal of any kind — always reads as "not authorized", never as "exempt".
+        var liveCeilingAuthorizationId = context.ProviderClass == AiProviderClass.External
+            ? await CeilingExemptionAsync(context, provider, model, ct)
+            : null;
+
         using var strategyScope = _scopeFactory.CreateScope();
         var strategyDb = strategyScope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
         var strategy = strategyDb.Database.CreateExecutionStrategy();
@@ -123,13 +146,37 @@ public sealed class AiGovernanceService : IAiGovernanceService
             var policy = await db.AiProcessingPolicies
                 .SingleOrDefaultAsync(x => x.BusinessUnitId == context.BusinessUnitId, ct);
             var denial = PolicyDenial(policy, context.Purpose, provider, model, context.ProviderClass);
+            long? ceilingExemptAuthorizationId = null;
             if (denial is null && context.ProviderClass == AiProviderClass.External)
             {
                 var recentProviderClasses = await db.AiRequests.AsNoTracking()
                     .Where(x => x.BusinessUnitId == context.BusinessUnitId && x.Status != AiCallStatuses.Denied)
                     .OrderByDescending(x => x.CreatedOn).Take(100).Select(x => x.ProviderClass).ToListAsync(ct);
-                if ((recentProviderClasses.Count(x => x == AiProviderClass.External) + 1m) / (recentProviderClasses.Count + 1m) > .10m)
-                    denial = "external_dependency_cap";
+                // Honour the tenant's configured ceiling instead of a hardcoded 10%.
+                // AiProcessingPolicy.ExternalDependencyCeilingPercent has always been
+                // persisted, editable through the AI Trust Center and validated to 0..10,
+                // but this comparison used a literal .10m — so a tenant who tightened the
+                // ceiling to, say, 2% silently got 10%. A knob that does nothing is worse
+                // than no knob. `policy` is non-null here: PolicyDenial returns
+                // "policy_missing" for a null policy, which short-circuits this branch.
+                var externalCeiling = policy!.ExternalDependencyCeilingPercent / 100m;
+                if ((recentProviderClasses.Count(x => x == AiProviderClass.External) + 1m) / (recentProviderClasses.Count + 1m) > externalCeiling)
+                {
+                    // The ceiling governs UNAUTHORIZED external usage only. An endpoint the
+                    // tenant explicitly authorized through the allow-list is exempt from
+                    // this ratio — the allow-list is the precise, attributed control for
+                    // authorized egress, and on a deployment with no local model the ratio
+                    // is always 100%, which would otherwise deny work the tenant has
+                    // deliberately approved. The exemption is CEILING-ONLY: every other
+                    // control (monthly + per-document budgets, reserve/attempt/settle
+                    // ledger, redaction, injection nonce, count conservation) still runs
+                    // below, unchanged. Any non-allowed outcome — no matching live
+                    // authorization, endpoint/provider/model mismatch, gate refusal of any
+                    // kind — keeps the existing denial: not authorized never means exempt.
+                    ceilingExemptAuthorizationId = liveCeilingAuthorizationId;
+                    if (ceilingExemptAuthorizationId is null)
+                        denial = "external_dependency_cap";
+                }
             }
             if (denial is not null)
             {
@@ -209,6 +256,16 @@ public sealed class AiGovernanceService : IAiGovernanceService
             budget.UpdatedOn = now;
             var request = NewRequest(context, provider, model, input, inputHash, estimatedInput, reserve, now,
                 AiCallStatuses.Reserved, null);
+            if (ceilingExemptAuthorizationId is not null)
+            {
+                // Audit linkage: the ledger row records WHICH authorization exempted this
+                // reservation from the ceiling, and the deployment posture at that moment,
+                // so "which calls went external under whose authorization" is answerable
+                // from the ledger alone.
+                request.ExternalAuthorizationId = ceilingExemptAuthorizationId;
+                request.InferencePosture = InferencePostures
+                    .For(_externalProviderTrust.ResolvedProvider.ProviderClass).ToString();
+            }
             request.BudgetWarning = budget.SoftTokenLimit is { } soft
                 && budget.ReservedTokens + budget.SettledTokens > soft;
             db.AiRequests.Add(request);
@@ -355,6 +412,41 @@ public sealed class AiGovernanceService : IAiGovernanceService
     {
         if (_tenantContext.BusinessUnitId != businessUnitId)
             throw new AiPolicyDeniedException("tenant_context_mismatch");
+    }
+
+    /// <summary>
+    /// Returns the id of the live allow-list authorization covering this reservation's
+    /// destination, or null when the reservation must remain subject to the ceiling.
+    ///
+    /// <para>
+    /// The only endpoint identity this service can trust is the one resolved at startup
+    /// (<see cref="IAiExternalProviderTrust.ResolvedProvider"/>), so the exemption is
+    /// consulted ONLY when the reservation's provider and model are exactly that resolved
+    /// destination. Any other external reservation (for example the Anthropic agent
+    /// client, whose endpoint is not the resolved one) cannot be matched to an
+    /// authorization here and therefore stays under the ceiling — mismatch fails closed.
+    /// </para>
+    ///
+    /// <para>
+    /// <c>unstructuredPayload</c> is false because the ledger cannot see payload shape;
+    /// the unstructured-egress switch is enforced where the payload is known, at the
+    /// extraction gate (ChunkedExtractionService), BEFORE any reservation is attempted.
+    /// Purpose, endpoint, model, expiry, revocation and tenant scope are all still
+    /// enforced by <see cref="IAiExternalProviderTrust.EvaluateAsync"/> here.
+    /// </para>
+    /// </summary>
+    private async Task<long?> CeilingExemptionAsync(
+        AiCallContext context, string provider, string model, CancellationToken ct)
+    {
+        var resolved = _externalProviderTrust.ResolvedProvider;
+        if (!resolved.IsResolved
+            || !AiProviderEndpoint.ProviderMatches(resolved.Provider, provider)
+            || !string.Equals(resolved.Model, model, StringComparison.Ordinal))
+            return null;
+
+        var decision = await _externalProviderTrust.EvaluateAsync(
+            context.BusinessUnitId, resolved, context.Purpose, unstructuredPayload: false, ct);
+        return decision.Allowed ? decision.AuthorizationId : null;
     }
 
     private static string? PolicyDenial(

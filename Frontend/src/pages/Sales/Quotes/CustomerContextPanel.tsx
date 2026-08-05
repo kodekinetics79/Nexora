@@ -97,7 +97,9 @@ const CustomerContextPanel: React.FC<CustomerContextPanelProps> = ({ customerId 
                   Orders, last 2 years
                 </Typography>
                 <Typography variant="body2" sx={{ fontWeight: 700 }}>
-                  {data.ordersLast24Months} · {money(data.orderValueLast24Months)}
+                  {data.ordersLast24Months} · {data.orderValueLast24Months == null
+                    ? data.orderValueStatus.replaceAll('_', ' ')
+                    : money(data.orderValueLast24Months)}
                 </Typography>
               </Box>
             )}

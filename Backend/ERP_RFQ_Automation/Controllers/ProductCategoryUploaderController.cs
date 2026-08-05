@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using ERP_RFQ_Automation.Services;
+using ERP_RFQ_Automation.Authorization;
 using System.Security.Claims;
 
 namespace ERP_RFQ_Automation.Controllers
@@ -24,6 +25,7 @@ namespace ERP_RFQ_Automation.Controllers
         // ─── PRODUCT CATEGORY ───────────────────────────
 
         [HttpGet("category/download-template")]
+        [RequireModulePermission("Product Categories", PermissionAction.View)]
         public async Task<IActionResult> DownloadCategoryTemplate([FromQuery] long? businessUnitId = null)
         {
             try
@@ -47,6 +49,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPost("category/upload-template")]
+        [RequireModulePermission("Product Categories", PermissionAction.Create)]
         public async Task<IActionResult> UploadCategoryTemplate(IFormFile file, [FromForm] long? businessUnitId = null)
         {
             var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
@@ -77,6 +80,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet("category/export")]
+        [RequireModulePermission("Product Categories", PermissionAction.View)]
         public async Task<IActionResult> ExportCategoryData([FromQuery] long? businessUnitId = null)
         {
             try
@@ -102,6 +106,7 @@ namespace ERP_RFQ_Automation.Controllers
         // ─── PRODUCT SUB-CATEGORY ───────────────────────
 
         [HttpGet("sub-category/download-template")]
+        [RequireModulePermission("Product Categories", PermissionAction.View)]
         public async Task<IActionResult> DownloadSubCategoryTemplate([FromQuery] long? businessUnitId = null)
         {
             try
@@ -125,6 +130,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPost("sub-category/upload-template")]
+        [RequireModulePermission("Product Categories", PermissionAction.Create)]
         public async Task<IActionResult> UploadSubCategoryTemplate(IFormFile file, [FromForm] long? businessUnitId = null)
         {
             var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
@@ -155,6 +161,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet("sub-category/export")]
+        [RequireModulePermission("Product Categories", PermissionAction.View)]
         public async Task<IActionResult> ExportSubCategoryData([FromQuery] long? businessUnitId = null)
         {
             try

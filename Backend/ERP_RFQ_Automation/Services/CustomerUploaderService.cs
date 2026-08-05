@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.CommercialRouting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using OfficeOpenXml;
@@ -65,116 +66,96 @@ namespace ERP_RFQ_Automation.Services
             int rowCount = ws.Dimension?.Rows ?? 0;
             if (rowCount < 2) return ServiceResult<string>.CreateFailure("The uploaded file is empty or missing data.");
 
-            var customersToAdd = new List<Customer>();
-            int successCount = 0;
-            int skipCount = 0;
-
-            using var transaction = await _context.Database.BeginTransactionAsync();
             try
             {
-                var existingCustomers = await _context.Customers
-                    .Where(c => c.Buid == businessUnitId)
-                    .Select(c => new { c.Name, c.ContactEmail })
-                    .ToListAsync();
-
-                // DocId Generation setup
-                var maxDoc = await _context.Customers
-                    .Where(c => c.DocId != null && c.DocId.StartsWith("CU"))
-                    .OrderByDescending(c => c.DocId)
-                    .Select(c => c.DocId)
-                    .FirstOrDefaultAsync();
-
-                long nextNum = 1;
-                if (maxDoc != null && maxDoc.Length >= 10)
+                var strategy = _context.Database.CreateExecutionStrategy();
+                var counts = await strategy.ExecuteAsync(async () =>
                 {
-                    if (long.TryParse(maxDoc.Substring(2), out long lastNum))
+                    _context.ChangeTracker.Clear();
+                    await using var transaction = await _context.Database.BeginTransactionAsync();
+                    var customersToAdd = new List<Customer>();
+                    var successCount = 0;
+                    var skipCount = 0;
+                    var existingCustomers = await _context.Customers
+                        .Where(c => c.Buid == businessUnitId)
+                        .Select(c => new { c.Name, c.ContactEmail })
+                        .ToListAsync();
+
+                    for (int row = 2; row <= rowCount; row++)
                     {
-                        nextNum = lastNum + 1;
+                        var name = ws.Cells[row, 1].Text?.Trim();
+                        var email = ws.Cells[row, 2].Text?.Trim();
+                        if (string.IsNullOrEmpty(email)) email = null;
+                        if (string.IsNullOrEmpty(name)) continue;
+
+                        var isDuplicateInDb = existingCustomers.Any(e =>
+                            e.Name.Equals(name, StringComparison.OrdinalIgnoreCase) ||
+                            (email != null && e.ContactEmail != null &&
+                             e.ContactEmail.Equals(email, StringComparison.OrdinalIgnoreCase)));
+                        var isDuplicateInList = customersToAdd.Any(c =>
+                            c.Name.Equals(name, StringComparison.OrdinalIgnoreCase) ||
+                            (email != null && c.ContactEmail != null &&
+                             c.ContactEmail.Equals(email, StringComparison.OrdinalIgnoreCase)));
+                        if (isDuplicateInDb || isDuplicateInList)
+                        {
+                            skipCount++;
+                            continue;
+                        }
+
+                        customersToAdd.Add(new Customer
+                        {
+                            DocId = null,
+                            Name = name,
+                            ContactEmail = email,
+                            ImageUrl = "default-customer.png",
+                            BillingAddressLine1 = ws.Cells[row, 3].Text?.Trim(),
+                            BillingAddressLine2 = ws.Cells[row, 4].Text?.Trim(),
+                            BillingCity = ws.Cells[row, 5].Text?.Trim(),
+                            BillingState = ws.Cells[row, 6].Text?.Trim(),
+                            BillingCountry = ws.Cells[row, 7].Text?.Trim(),
+                            BillingPostalCode = ws.Cells[row, 8].Text?.Trim(),
+                            ShippingAddressLine1 = ws.Cells[row, 9].Text?.Trim(),
+                            ShippingAddressLine2 = ws.Cells[row, 10].Text?.Trim(),
+                            ShippingCity = ws.Cells[row, 11].Text?.Trim(),
+                            ShippingState = ws.Cells[row, 12].Text?.Trim(),
+                            ShippingCountry = ws.Cells[row, 13].Text?.Trim(),
+                            ShippingPostalCode = ws.Cells[row, 14].Text?.Trim(),
+                            Buid = businessUnitId,
+                            IsActive = true,
+                            CreatedBy = createdBy,
+                            CreatedOn = DateTime.UtcNow,
+                            ConcurrencyToken = Guid.NewGuid()
+                        });
+                        successCount++;
                     }
-                }
 
-                for (int row = 2; row <= rowCount; row++)
-                {
-                    var name = ws.Cells[row, 1].Text?.Trim();
-                    var email = ws.Cells[row, 2].Text?.Trim();
-                    
-                    // Handle empty email as null to avoid unique constraint issues with empty strings
-                    if (string.IsNullOrEmpty(email)) email = null;
-
-                    if (string.IsNullOrEmpty(name)) continue;
-
-                    // Check for duplicates in DB (Name or Email)
-                    bool isDuplicateInDb = existingCustomers.Any(e => 
-                        e.Name.Equals(name, StringComparison.OrdinalIgnoreCase) || 
-                        (email != null && e.ContactEmail != null && e.ContactEmail.Equals(email, StringComparison.OrdinalIgnoreCase))
-                    );
-
-                    if (isDuplicateInDb)
+                    if (customersToAdd.Count > 0)
                     {
-                        skipCount++;
-                        continue;
+                        _context.Customers.AddRange(customersToAdd);
+                        await _context.SaveChangesAsync();
+                        foreach (var customer in customersToAdd)
+                            customer.DocId = $"CU{customer.Id:D8}";
+                        await _context.SaveChangesAsync();
+                        foreach (var customer in customersToAdd)
+                            await CustomerIdentityMaintenance.SynchronizeAsync(
+                                _context, businessUnitId, customer.Id, "CustomerImport");
+                        await _context.SaveChangesAsync();
                     }
 
-                    // Check for duplicates in current list (Name or Email)
-                    bool isDuplicateInList = customersToAdd.Any(c => 
-                        c.Name.Equals(name, StringComparison.OrdinalIgnoreCase) || 
-                        (email != null && c.ContactEmail != null && c.ContactEmail.Equals(email, StringComparison.OrdinalIgnoreCase))
-                    );
+                    await transaction.CommitAsync();
+                    return (successCount, skipCount);
+                });
 
-                    if (isDuplicateInList)
-                    {
-                        skipCount++;
-                        continue;
-                    }
-
-                    var customer = new Customer
-                    {
-                        DocId = "CU" + (nextNum++).ToString("D8"),
-                        Name = name,
-                        ContactEmail = email,
-                        ImageUrl = "default-customer.png",
-                        BillingAddressLine1 = ws.Cells[row, 3].Text?.Trim(),
-                        BillingAddressLine2 = ws.Cells[row, 4].Text?.Trim(),
-                        BillingCity = ws.Cells[row, 5].Text?.Trim(),
-                        BillingState = ws.Cells[row, 6].Text?.Trim(),
-                        BillingCountry = ws.Cells[row, 7].Text?.Trim(),
-                        BillingPostalCode = ws.Cells[row, 8].Text?.Trim(),
-                        ShippingAddressLine1 = ws.Cells[row, 9].Text?.Trim(),
-                        ShippingAddressLine2 = ws.Cells[row, 10].Text?.Trim(),
-                        ShippingCity = ws.Cells[row, 11].Text?.Trim(),
-                        ShippingState = ws.Cells[row, 12].Text?.Trim(),
-                        ShippingCountry = ws.Cells[row, 13].Text?.Trim(),
-                        ShippingPostalCode = ws.Cells[row, 14].Text?.Trim(),
-                        Buid = businessUnitId,
-                        IsActive = true,
-                        CreatedBy = createdBy,
-                        CreatedOn = DateTime.UtcNow
-                    };
-
-                    customersToAdd.Add(customer);
-                    successCount++;
-                }
-
-                if (customersToAdd.Any())
-                {
-                    _context.Customers.AddRange(customersToAdd);
-                    await _context.SaveChangesAsync();
-                }
-
-                await transaction.CommitAsync();
-                
-                string msg = $"{successCount} customers imported successfully.";
-                if (skipCount > 0) msg += $" {skipCount} duplicates skipped.";
-                
+                string msg = $"{counts.successCount} customers imported successfully.";
+                if (counts.skipCount > 0) msg += $" {counts.skipCount} duplicates skipped.";
                 return ServiceResult<string>.CreateSuccess(msg, msg);
             }
             catch (Exception ex)
             {
-                await transaction.RollbackAsync();
                 _logger.LogError(ex, "Customer upload failed.");
                 
-                var innerMsg = ex.InnerException?.Message ?? ex.Message;
-                return ServiceResult<string>.CreateFailure($"Transaction failed: {innerMsg}");
+                return ServiceResult<string>.CreateFailure(
+                    "Customer import failed. No records were committed.");
             }
         }
 

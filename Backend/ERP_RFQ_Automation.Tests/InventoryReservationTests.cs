@@ -67,6 +67,57 @@ public class InventoryReservationTests
     }
 
     [Fact]
+    public async Task Availability_deducts_every_protected_inventory_bucket()
+    {
+        using var db = new TestDb();
+        using (var seed = db.ContextFor(null))
+        {
+            SeedInventory(seed, 17, Bu1, 100m);
+            var inventory = seed.Set<ERP_RFQ_Automation.Models.Inventory>().Single(x => x.Id == 17);
+            inventory.AllocatedQuantity = 5m;
+            inventory.QuarantineQuantity = 7m;
+            inventory.DamagedQuantity = 3m;
+            inventory.ExpiredQuantity = 4m;
+            inventory.SafetyStockQuantity = 11m;
+            seed.SaveChanges();
+        }
+
+        await Service(db, Bu1).ReserveAsync(Bu1, 17, 10m, "protected-buckets", orderId: 17);
+        var availability = await Service(db, Bu1).GetAvailabilityAsync(Bu1, 17);
+
+        Assert.Equal(60m, availability.Available);
+        Assert.Equal(5m, availability.Allocated);
+        Assert.Equal(7m, availability.Quarantine);
+        Assert.Equal(3m, availability.Damaged);
+        Assert.Equal(4m, availability.Expired);
+        Assert.Equal(11m, availability.SafetyStock);
+    }
+
+    [Fact]
+    public async Task Manual_release_is_versioned_and_idempotent()
+    {
+        using var db = new TestDb();
+        using (var seed = db.ContextFor(null)) SeedInventory(seed, 18, Bu1, 100m);
+        var reservation = await Service(db, Bu1).ReserveAsync(Bu1, 18, 25m, "release-source", orderId: 18);
+
+        await Service(db, Bu1).ReleaseAsync(Bu1, reservation.Id, reservation.Version,
+            "manual-release:18", "reviewer@example.com");
+        using var verify = db.ContextFor(Bu1);
+        var released = await verify.StockReservations.AsNoTracking().SingleAsync(x => x.Id == reservation.Id);
+        await Service(db, Bu1).ReleaseAsync(Bu1, reservation.Id, released.Version,
+            "manual-release:18", "reviewer@example.com");
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            Service(db, Bu1).ReleaseAsync(Bu1, reservation.Id, released.Version,
+                "manual-release:different-command", "reviewer@example.com"));
+
+        Assert.Equal(StockReservationStatus.Released, released.Status);
+        Assert.Equal(100m, (await Service(db, Bu1).GetAvailabilityAsync(Bu1, 18)).Available);
+        await Assert.ThrowsAsync<KeyNotFoundException>(() =>
+            Service(db, Bu2).ReleaseAsync(Bu2, reservation.Id, released.Version,
+                "manual-release:other-tenant", "reviewer@example.com"));
+    }
+
+    [Fact]
     public async Task Two_orders_cannot_promise_the_same_stock()
     {
         using var db = new TestDb();

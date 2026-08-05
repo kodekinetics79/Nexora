@@ -28,6 +28,15 @@ namespace ERP_RFQ_Automation.Repositories
 
             query = query.Where(sm => sm.SetupId == id);
 
+            // Defence in depth. SetupMaster carries a global query filter, so a request-scoped
+            // context already cannot see another tenant's row here — but this method's result is
+            // fed straight into UpdateAsync/DeleteAsync, so the tenant predicate is stated
+            // explicitly rather than left as an invariant of a file elsewhere. A null scope
+            // (background worker / migration path) keeps the previous unfiltered behaviour.
+            var tenantId = _context.ScopedTenantId;
+            if (tenantId is not null)
+                query = query.Where(sm => sm.BusinessUnitId == tenantId);
+
             var setupMaster = await query.FirstOrDefaultAsync();
 
             return setupMaster ?? throw new KeyNotFoundException($"SetupMaster with ID {id} not found.");
@@ -64,9 +73,21 @@ namespace ERP_RFQ_Automation.Repositories
 
         public async Task UpdateAsync(SetupMaster setupMaster)
         {
-            var existing = await _context.SetupMasters.AsNoTracking().FirstOrDefaultAsync(sm => sm.SetupId == setupMaster.SetupId);
+            var storedQuery = _context.SetupMasters.AsNoTracking()
+                .Where(sm => sm.SetupId == setupMaster.SetupId);
+
+            var tenantId = _context.ScopedTenantId;
+            if (tenantId is not null)
+                storedQuery = storedQuery.Where(sm => sm.BusinessUnitId == tenantId);
+
+            var existing = await storedQuery.FirstOrDefaultAsync();
             if (existing == null)
                 throw new KeyNotFoundException($"SetupMaster with ID {setupMaster.SetupId} not found.");
+
+            // An update may never move a row between tenants. Re-pin the stored owner regardless of
+            // what the caller supplied, so a rewritten BusinessUnitId in the incoming entity cannot
+            // reassign the row (the controller used to set it to 1 unconditionally).
+            setupMaster.BusinessUnitId = existing.BusinessUnitId;
 
             // Validate unique SetupCode (if SetupCode is provided)
             if (!string.IsNullOrEmpty(setupMaster.SetupCode))

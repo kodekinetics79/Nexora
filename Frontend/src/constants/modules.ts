@@ -23,5 +23,6 @@ export const SYSTEM_MODULES = [
   { name: 'File Management', description: 'System Files and Uploads' },
   { name: 'Bulk Uploaders', description: 'Data Import Utilities' },
   { name: 'Supplier History', description: 'Supplier Purchase and Quote History' },
+  { name: 'Supplier Negotiation', description: 'Evidence-backed Supplier negotiation decisions' },
   { name: 'Contacts', description: 'Global Contact Directory' },
 ];

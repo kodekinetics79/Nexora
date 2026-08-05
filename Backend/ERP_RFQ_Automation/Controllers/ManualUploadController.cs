@@ -78,7 +78,10 @@ namespace ERP_RFQ_Automation.Controllers
                     var metadata = new ExtractionJobMetadata
                     {
                         SourceOccurrenceId = Request.Headers.TryGetValue("Idempotency-Key", out var key)
-                            ? $"{key}:{file.FileName}" : null
+                            ? $"{key}:{file.FileName}" : null,
+                        UploadedBy = User.FindFirst(ClaimTypes.Email)?.Value
+                            ?? User.Identity?.Name
+                            ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value
                     };
                     var ingested = await _ingestion.IngestAsync(content.ToArray(), file.FileName, targetBUId,
                         ExtractionSourceType.ManualUpload, priority: 10, metadata: metadata,
@@ -126,7 +129,10 @@ namespace ERP_RFQ_Automation.Controllers
                 var metadata = new ExtractionJobMetadata
                 {
                     SourceOccurrenceId = Request.Headers.TryGetValue("Idempotency-Key", out var key)
-                        ? $"{key}:{file.FileName}" : null
+                        ? $"{key}:{file.FileName}" : null,
+                    UploadedBy = User.FindFirst(ClaimTypes.Email)?.Value
+                        ?? User.Identity?.Name
+                        ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value
                 };
                 var ingested = await _ingestion.IngestAsync(bytes, file.FileName, targetBUId,
                     ExtractionSourceType.ExcelTemplate, priority: 10,

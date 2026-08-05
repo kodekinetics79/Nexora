@@ -4,7 +4,6 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using ERP_RFQ_Automation.Authorization;
-using ERP_RFQ_Automation.CommercialLearning;
 using ERP_RFQ_Automation.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -13,27 +12,26 @@ using Microsoft.EntityFrameworkCore;
 namespace ERP_RFQ_Automation.Controllers
 {
     /// <summary>
-    /// WP-B2: "This customer" context at quoting time — win rate, recent order
-    /// history, average margin era and last-sold line prices, in one payload.
-    ///
-    /// Mirrors the CustomerHistory block of the Lead Decision Brief
-    /// (Intelligence/Decision/LeadDecisionService.ResolveCustomerHistoryAsync)
-    /// but keyed by customer id rather than by lead — that method is private and
-    /// lead-shaped, so the shared semantics (24-month order lookback, honest
-    /// nulls for unknowable numbers) are reproduced here instead of forced
-    /// through a lead. The business unit ALWAYS comes from the JWT claim.
+    /// Customer commercial context at quoting time. All tenant identity comes
+    /// from the authenticated claim; monetary history is never mixed across
+    /// currencies.
     /// </summary>
     [ApiController]
     [Authorize]
     [Route("api/intelligence/customers")]
     public class CustomerContextController : ControllerBase
     {
-        /// <summary>Same lookback as LeadDecisionService.OrderLookbackMonths.</summary>
         private const int OrderLookbackMonths = 24;
-
+        private const int DemandLookbackMonths = 24;
         private const int RecentQuotesCount = 10;
+        private const int RecentRfqsCount = 10;
+        private const int RecentOrdersCount = 10;
         private const int KeyLinesPerQuote = 3;
         private const int RecentItemPricesCount = 8;
+        private const int DemandLineEvaluationLimit = 1_000;
+        private const int SourceRfqIdsPerDemandLine = 50;
+        private const int SoldOrderEvidenceLimit = 250;
+        private const int QuoteItemEvidenceLimit = 5_000;
 
         private readonly ErpRfqAutomationContext _db;
 
@@ -42,7 +40,6 @@ namespace ERP_RFQ_Automation.Controllers
             _db = db;
         }
 
-        /// <summary>GET /api/intelligence/customers/{customerId}/context</summary>
         [HttpGet("{customerId:long}/context")]
         [RequireModulePermission("Customers", PermissionAction.View)]
         [RequireModulePermission("RFQ Management", PermissionAction.View)]
@@ -60,55 +57,120 @@ namespace ERP_RFQ_Automation.Controllers
             if (customer is null) return NotFound($"Customer {customerId} was not found.");
 
             var now = DateTime.UtcNow;
+            var quoteQuery = _db.Quotes.AsNoTracking()
+                .Where(q => q.BusinessUnitId == businessUnitId && q.CustomerId == customer.Id);
+            var totalQuotes = await quoteQuery.CountAsync(ct);
 
-            // ── All quotes to this customer (header level, one query) ──
-            var quotes = await _db.Quotes.AsNoTracking()
-                .Include(q => q.Status)
-                .Where(q => q.BusinessUnitId == businessUnitId && q.CustomerId == customer.Id)
+            // Outcome KPIs remain full-history SQL aggregates. Only an explicit
+            // outcome or a customer-award order makes a quote decided.
+            var won = await quoteQuery.CountAsync(q =>
+                _db.Orders.Any(o => o.BusinessUnitId == businessUnitId
+                    && o.CustomerId == customer.Id
+                    && o.SourceType == OrderSourceTypes.CustomerAward
+                    && o.QuoteId == q.Id)
+                || (q.OutcomeOn.HasValue
+                    && (q.StatusId == 44
+                        || (q.Status != null
+                            && (q.Status.SetupCode == "ACCEPTED" || q.Status.SetupCode == "ORDERED")))), ct);
+            var lost = await quoteQuery.CountAsync(q => q.OutcomeOn.HasValue
+                && q.StatusId != 44
+                && (q.Status == null
+                    || (q.Status.SetupCode != "ACCEPTED" && q.Status.SetupCode != "ORDERED"))
+                && !_db.Orders.Any(o => o.BusinessUnitId == businessUnitId
+                    && o.CustomerId == customer.Id
+                    && o.SourceType == OrderSourceTypes.CustomerAward
+                    && o.QuoteId == q.Id), ct);
+            var decided = won + lost;
+
+            var quoteCurrencyRows = await quoteQuery
+                .Where(q => q.TotalAmount.HasValue)
+                .GroupBy(q => new { q.CurrencyId, CurrencyCode = q.Currency != null ? q.Currency.Code : null })
+                .Select(group => new
+                {
+                    group.Key.CurrencyId,
+                    group.Key.CurrencyCode,
+                    RecordCount = group.Count(),
+                    TotalAmount = group.Sum(q => q.TotalAmount ?? 0m)
+                })
                 .ToListAsync(ct);
+            var quoteValueGroups = ToCurrencyGroups(quoteCurrencyRows.Select(row =>
+                (row.CurrencyId, row.CurrencyCode, row.RecordCount, row.TotalAmount)));
 
-            // A quote is decided only by an explicit outcome or a customer-award
-            // order. This is the same authoritative rule as Commercial Learning.
-            var orderWins = await _db.Orders.AsNoTracking()
-                .Where(o => o.BusinessUnitId == businessUnitId
-                            && o.CustomerId == customer.Id
-                            && o.SourceType == OrderSourceTypes.CustomerAward
-                            && o.QuoteId.HasValue)
-                .GroupBy(o => o.QuoteId!.Value)
-                .ToDictionaryAsync(group => group.Key, group => group.Max(o => o.OrderDate), ct);
-            var decidedQuotes = quotes.Where(q => q.OutcomeOn.HasValue || orderWins.ContainsKey(q.Id)).ToArray();
-            var wonQuoteIds = decidedQuotes
-                .Where(q => orderWins.ContainsKey(q.Id) || CommercialLearningRules.ResolveQuoteOutcome(q) == "WON")
-                .Select(q => q.Id).ToHashSet();
-            var lostQuoteIds = decidedQuotes
-                .Where(q => !orderWins.ContainsKey(q.Id)
-                            && CommercialLearningRules.ResolveQuoteOutcome(q) is "LOST" or "EXPIRED")
-                .Select(q => q.Id).ToHashSet();
-            var won = wonQuoteIds.Count;
-            var lost = lostQuoteIds.Count;
-            var decided = decidedQuotes.Length;
-
-            // ── Orders, last 24 months (the CustomerHistory definition) ──
-            var since = now.AddMonths(-OrderLookbackMonths);
-            var ordersInWindow = _db.Orders.AsNoTracking()
+            var orderCohortFrom = now.AddMonths(-OrderLookbackMonths);
+            var orderCurrencyRows = await _db.Orders.AsNoTracking()
                 .Where(o => o.CustomerId == customer.Id
-                            && o.BusinessUnitId == businessUnitId
-                            && o.OrderDate >= since);
-            var orderCount = await ordersInWindow.CountAsync(ct);
-            var orderValue = await ordersInWindow.SumAsync(o => (decimal?)o.TotalAmount, ct) ?? 0m;
+                    && o.BusinessUnitId == businessUnitId
+                    && o.OrderDate >= orderCohortFrom)
+                .GroupBy(o => new { o.CurrencyId, CurrencyCode = o.Currency != null ? o.Currency.Code : null })
+                .Select(group => new
+                {
+                    group.Key.CurrencyId,
+                    group.Key.CurrencyCode,
+                    RecordCount = group.Count(),
+                    TotalAmount = group.Sum(o => o.TotalAmount)
+                })
+                .ToListAsync(ct);
+            var orderValueGroups = ToCurrencyGroups(orderCurrencyRows.Select(row =>
+                (row.CurrencyId, row.CurrencyCode, row.RecordCount, row.TotalAmount)));
+            var orderCount = orderValueGroups.Sum(group => group.RecordCount);
 
-            // ── Last 10 quotes with their top line prices ──
-            var recentQuoteIds = quotes
+            var recentQuoteRows = await quoteQuery
                 .OrderByDescending(q => q.QuoteDate ?? DateTime.MinValue)
+                .ThenByDescending(q => q.Id)
                 .Take(RecentQuotesCount)
-                .Select(q => q.Id)
-                .ToList();
+                .Select(q => new
+                {
+                    q.Id,
+                    q.QuoteNo,
+                    q.QuoteDate,
+                    q.TotalAmount,
+                    q.CurrencyId,
+                    CurrencyCode = q.Currency != null ? q.Currency.Code : null,
+                    q.ContactId,
+                    q.StatusId,
+                    StatusCode = q.Status != null ? q.Status.SetupCode : null,
+                    StatusValue = q.Status != null ? q.Status.SetupValue : null,
+                    q.OutcomeOn,
+                    q.OutcomeReasonId
+                })
+                .ToListAsync(ct);
+            var recentQuoteIds = recentQuoteRows.Select(q => q.Id).ToList();
 
-            var quoteIdsForLines = recentQuoteIds.Concat(orderWins.Keys).Distinct().ToList();
-            var recentItems = await _db.QuoteItems.AsNoTracking()
+            var soldOrderCandidates = await _db.Orders.AsNoTracking()
+                .Where(o => o.BusinessUnitId == businessUnitId
+                    && o.CustomerId == customer.Id
+                    && o.SourceType == OrderSourceTypes.CustomerAward
+                    && o.QuoteId.HasValue)
+                .OrderByDescending(o => o.OrderDate)
+                .ThenByDescending(o => o.Id)
+                .Take(SoldOrderEvidenceLimit + 1)
+                .Select(o => new
+                {
+                    o.Id,
+                    QuoteId = o.QuoteId!.Value,
+                    o.OrderDate,
+                    o.CurrencyId,
+                    CurrencyCode = o.Currency != null ? o.Currency.Code : null
+                })
+                .ToListAsync(ct);
+            var soldOrdersTruncated = soldOrderCandidates.Count > SoldOrderEvidenceLimit;
+            var soldOrders = soldOrderCandidates.Take(SoldOrderEvidenceLimit).ToList();
+            var latestSaleByQuote = soldOrders
+                .GroupBy(order => order.QuoteId)
+                .ToDictionary(group => group.Key, group => group
+                    .OrderByDescending(order => order.OrderDate)
+                    .ThenByDescending(order => order.Id)
+                    .First());
+
+            var quoteIdsForLines = recentQuoteIds.Concat(latestSaleByQuote.Keys).Distinct().ToList();
+            var quoteItemCandidates = await _db.QuoteItems.AsNoTracking()
                 .Where(qi => quoteIdsForLines.Contains(qi.QuoteId))
+                .OrderByDescending(qi => qi.CreatedDate ?? DateTime.MinValue)
+                .ThenByDescending(qi => qi.Id)
+                .Take(QuoteItemEvidenceLimit + 1)
                 .Select(qi => new
                 {
+                    qi.Id,
                     qi.QuoteId,
                     qi.ProductId,
                     Description = qi.ItemDescription ?? (qi.Product != null ? qi.Product.ProductName : null),
@@ -117,10 +179,30 @@ namespace ERP_RFQ_Automation.Controllers
                     qi.TotalAmount
                 })
                 .ToListAsync(ct);
-            var itemsByQuote = recentItems.ToLookup(i => i.QuoteId);
+            var quoteItemsTruncated = quoteItemCandidates.Count > QuoteItemEvidenceLimit;
+            var recentItems = quoteItemCandidates.Take(QuoteItemEvidenceLimit).ToList();
+            var itemsByQuote = recentItems.ToLookup(item => item.QuoteId);
 
-            // Outcome reason names — loose FK to SetupMaster, batch-resolved.
-            var reasonIds = quotes.Where(q => q.OutcomeReasonId.HasValue)
+            var recentAwardQuoteIds = await _db.Orders.AsNoTracking()
+                .Where(o => o.BusinessUnitId == businessUnitId
+                    && o.CustomerId == customer.Id
+                    && o.SourceType == OrderSourceTypes.CustomerAward
+                    && o.QuoteId.HasValue
+                    && recentQuoteIds.Contains(o.QuoteId.Value))
+                .Select(o => o.QuoteId!.Value)
+                .Distinct()
+                .ToListAsync(ct);
+            var wonRecentQuoteIds = recentQuoteRows
+                .Where(q => recentAwardQuoteIds.Contains(q.Id)
+                    || (q.OutcomeOn.HasValue && IsWinningStatus(q.StatusCode, q.StatusId)))
+                .Select(q => q.Id)
+                .ToHashSet();
+            var lostRecentQuoteIds = recentQuoteRows
+                .Where(q => q.OutcomeOn.HasValue && !wonRecentQuoteIds.Contains(q.Id))
+                .Select(q => q.Id)
+                .ToHashSet();
+
+            var reasonIds = recentQuoteRows.Where(q => q.OutcomeReasonId.HasValue)
                 .Select(q => q.OutcomeReasonId!.Value).Distinct().ToList();
             var reasonNames = reasonIds.Count == 0
                 ? new Dictionary<long, string>()
@@ -128,111 +210,181 @@ namespace ERP_RFQ_Automation.Controllers
                     .Where(s => s.BusinessUnitId == businessUnitId && reasonIds.Contains(s.SetupId))
                     .ToDictionaryAsync(s => s.SetupId, s => s.Description ?? s.SetupValue, ct);
 
-            var recentQuotes = quotes
-                .Where(q => recentQuoteIds.Contains(q.Id))
-                .OrderByDescending(q => q.QuoteDate ?? DateTime.MinValue)
-                .Select(q => new CustomerQuoteSummaryDTO
-                {
-                    QuoteId = q.Id,
-                    QuoteNo = q.QuoteNo,
-                    QuoteDate = q.QuoteDate,
-                    TotalAmount = q.TotalAmount,
-                    StatusValue = q.Status != null ? q.Status.SetupValue : null,
-                    Outcome = wonQuoteIds.Contains(q.Id) ? "won"
-                        : lostQuoteIds.Contains(q.Id) ? "lost"
-                        : "open",
-                    OutcomeReasonName = q.OutcomeReasonId.HasValue && reasonNames.TryGetValue(q.OutcomeReasonId.Value, out var rn) ? rn : null,
-                    KeyLines = itemsByQuote[q.Id]
-                        .OrderByDescending(i => i.TotalAmount)
-                        .Take(KeyLinesPerQuote)
-                        .Select(i => new CustomerKeyLineDTO
-                        {
-                            Description = i.Description,
-                            Quantity = i.Quantity,
-                            UnitPrice = i.UnitPrice
-                        })
-                        .ToList()
-                })
-                .ToList();
-
-            // ── "Last sold at X, N months ago": most recent price per distinct
-            //    line (by product id when known, else by description) ──
-            var soldQuoteIds = orderWins.Keys.ToHashSet();
-            var quoteDateById = quotes.ToDictionary(q => q.Id, q => q.QuoteDate);
-            var recentItemPrices = recentItems
-                .Where(i => soldQuoteIds.Contains(i.QuoteId))
-                .Where(i => i.UnitPrice > 0)
-                .Select(i => new
-                {
-                    Item = i,
-                    Key = i.ProductId.HasValue ? $"p:{i.ProductId}" : $"d:{i.Description?.Trim().ToLowerInvariant()}",
-                    Date = quoteDateById.TryGetValue(i.QuoteId, out var d) ? d : null
-                })
-                .Where(x => x.Key != "d:" && x.Key != "d:null")
-                .GroupBy(x => x.Key)
-                .Select(g => g.OrderByDescending(x => x.Date ?? DateTime.MinValue).First())
-                .OrderByDescending(x => x.Date ?? DateTime.MinValue)
-                .Take(RecentItemPricesCount)
-                .Select(x => new CustomerItemPriceDTO
-                {
-                    ProductId = x.Item.ProductId,
-                    Description = x.Item.Description,
-                    UnitPrice = x.Item.UnitPrice,
-                    QuoteDate = x.Date,
-                    MonthsAgo = x.Date.HasValue ? Math.Max(0, MonthsBetween(x.Date.Value, now)) : null
-                })
-                .ToList();
-
-            var recentRfqs = await _db.Rfqs.AsNoTracking()
+            var recentRfqRows = await _db.Rfqs.AsNoTracking()
                 .Where(r => r.BusinessUnitId == businessUnitId && r.CustomerId == customer.Id)
                 .OrderByDescending(r => r.RecDate)
-                .Take(10)
-                .Select(r => new CustomerRfqSummaryDTO
+                .ThenByDescending(r => r.Id)
+                .Take(RecentRfqsCount)
+                .Select(r => new
                 {
-                    RfqId = r.Id,
-                    RfqNo = r.Rfqno,
-                    ReceivedOn = r.RecDate,
-                    BidClosingOn = r.BidClosingDate,
+                    r.Id,
+                    r.Rfqno,
+                    r.RecDate,
+                    r.BidClosingDate,
                     Status = r.Rfqstatus != null ? r.Rfqstatus.SetupValue : null,
-                    LineCount = r.Rfqitems.Count
+                    LineCount = r.Rfqitems.Count,
+                    r.ContactId
                 })
                 .ToListAsync(ct);
-
-            var recentOrderSummaries = await _db.Orders.AsNoTracking()
+            var recentOrderRows = await _db.Orders.AsNoTracking()
                 .Where(o => o.BusinessUnitId == businessUnitId && o.CustomerId == customer.Id)
                 .OrderByDescending(o => o.OrderDate)
-                .Take(10)
-                .Select(o => new CustomerOrderSummaryDTO
+                .ThenByDescending(o => o.Id)
+                .Take(RecentOrdersCount)
+                .Select(o => new
                 {
-                    OrderId = o.Id,
-                    OrderNo = o.OrderNo,
-                    OrderDate = o.OrderDate,
+                    o.Id,
+                    o.OrderNo,
+                    o.OrderDate,
                     Status = o.Status.SetupValue,
-                    TotalAmount = o.TotalAmount,
-                    QuoteId = o.QuoteId
+                    o.TotalAmount,
+                    o.QuoteId,
+                    o.CurrencyId,
+                    CurrencyCode = o.Currency != null ? o.Currency.Code : null,
+                    o.ContactId
                 })
                 .ToListAsync(ct);
 
-            var demandLines = await _db.Rfqitems.AsNoTracking()
-                .Where(line => line.Rfq.BusinessUnitId == businessUnitId && line.Rfq.CustomerId == customer.Id)
+            var contactIds = recentQuoteRows.Select(row => row.ContactId)
+                .Concat(recentRfqRows.Select(row => row.ContactId))
+                .Concat(recentOrderRows.Select(row => row.ContactId))
+                .Where(id => id.HasValue)
+                .Select(id => id!.Value)
+                .Distinct()
+                .ToList();
+            var contacts = contactIds.Count == 0
+                ? new Dictionary<long, string>()
+                : await _db.Contacts.AsNoTracking()
+                    .Where(contact => contact.BusinessUnitId == businessUnitId
+                        && contactIds.Contains(contact.Id))
+                    .ToDictionaryAsync(contact => contact.Id,
+                        contact => (contact.FirstName + " " + contact.LastName).Trim(), ct);
+
+            var recentQuotes = recentQuoteRows.Select(q => new CustomerQuoteSummaryDTO
+            {
+                QuoteId = q.Id,
+                QuoteNo = q.QuoteNo,
+                QuoteDate = q.QuoteDate,
+                TotalAmount = q.TotalAmount,
+                CurrencyId = q.CurrencyId,
+                CurrencyCode = q.CurrencyCode,
+                ContactId = q.ContactId,
+                ContactName = ContactName(q.ContactId, contacts),
+                StatusValue = q.StatusValue,
+                Outcome = wonRecentQuoteIds.Contains(q.Id) ? "won"
+                    : lostRecentQuoteIds.Contains(q.Id) ? "lost"
+                    : "open",
+                OutcomeReasonName = q.OutcomeReasonId.HasValue
+                    && reasonNames.TryGetValue(q.OutcomeReasonId.Value, out var reasonName)
+                        ? reasonName
+                        : null,
+                KeyLines = itemsByQuote[q.Id]
+                    .OrderByDescending(item => item.TotalAmount)
+                    .Take(KeyLinesPerQuote)
+                    .Select(item => new CustomerKeyLineDTO
+                    {
+                        Description = item.Description,
+                        Quantity = item.Quantity,
+                        UnitPrice = item.UnitPrice
+                    })
+                    .ToList()
+            }).ToList();
+
+            // The sale date and currency are authoritative customer-award order
+            // facts. QuoteDate remains as a compatibility alias for SoldOn.
+            var recentItemPrices = recentItems
+                .Where(item => latestSaleByQuote.ContainsKey(item.QuoteId) && item.UnitPrice > 0)
+                .Select(item => new
+                {
+                    Item = item,
+                    Key = item.ProductId.HasValue
+                        ? $"p:{item.ProductId}"
+                        : $"d:{item.Description?.Trim().ToLowerInvariant()}",
+                    Sale = latestSaleByQuote[item.QuoteId]
+                })
+                .Where(row => row.Key != "d:" && row.Key != "d:null")
+                .GroupBy(row => row.Key)
+                .Select(group => group.OrderByDescending(row => row.Sale.OrderDate)
+                    .ThenByDescending(row => row.Sale.Id).First())
+                .OrderByDescending(row => row.Sale.OrderDate)
+                .Take(RecentItemPricesCount)
+                .Select(row => new CustomerItemPriceDTO
+                {
+                    ProductId = row.Item.ProductId,
+                    Description = row.Item.Description,
+                    UnitPrice = row.Item.UnitPrice,
+                    AwardOrderId = row.Sale.Id,
+                    CurrencyId = row.Sale.CurrencyId,
+                    CurrencyCode = row.Sale.CurrencyCode,
+                    SoldOn = row.Sale.OrderDate,
+                    QuoteDate = row.Sale.OrderDate,
+                    MonthsAgo = Math.Max(0, MonthsBetween(row.Sale.OrderDate, now))
+                })
+                .ToList();
+
+            var recentRfqs = recentRfqRows.Select(r => new CustomerRfqSummaryDTO
+            {
+                RfqId = r.Id,
+                RfqNo = r.Rfqno,
+                ReceivedOn = r.RecDate,
+                BidClosingOn = r.BidClosingDate,
+                Status = r.Status,
+                LineCount = r.LineCount,
+                ContactId = r.ContactId,
+                ContactName = ContactName(r.ContactId, contacts)
+            }).ToList();
+            var recentOrders = recentOrderRows.Select(o => new CustomerOrderSummaryDTO
+            {
+                OrderId = o.Id,
+                OrderNo = o.OrderNo,
+                OrderDate = o.OrderDate,
+                Status = o.Status,
+                TotalAmount = o.TotalAmount,
+                QuoteId = o.QuoteId,
+                CurrencyId = o.CurrencyId,
+                CurrencyCode = o.CurrencyCode,
+                ContactId = o.ContactId,
+                ContactName = ContactName(o.ContactId, contacts)
+            }).ToList();
+
+            var demandFrom = now.AddMonths(-DemandLookbackMonths);
+            var demandLineCandidates = await _db.Rfqitems.AsNoTracking()
+                .Where(line => line.Rfq.BusinessUnitId == businessUnitId
+                    && line.Rfq.CustomerId == customer.Id
+                    && line.Rfq.RecDate >= demandFrom)
+                .OrderByDescending(line => line.Rfq.RecDate)
+                .ThenByDescending(line => line.Rfqid)
+                .ThenByDescending(line => line.Id)
+                .Take(DemandLineEvaluationLimit + 1)
                 .Select(line => new
                 {
+                    line.Id,
                     line.Rfqid,
                     line.ProductId,
                     PartNumber = line.ManufacturerPartNumber ?? line.ItemMaterialCode ?? line.AlternatePartNumber,
-                    Description = line.ProductShortName ?? line.ProductShortDescription ?? line.CommodityProduct ?? line.ItemText,
+                    Description = line.ProductShortName ?? line.ProductShortDescription
+                        ?? line.CommodityProduct ?? line.ItemText,
                     line.Quantity
                 })
                 .ToListAsync(ct);
+            var demandTruncated = demandLineCandidates.Count > DemandLineEvaluationLimit;
+            var demandLines = demandLineCandidates.Take(DemandLineEvaluationLimit).ToList();
             var demandProfile = demandLines
                 .GroupBy(line => new { line.ProductId, line.PartNumber, line.Description })
-                .Select(group => new CustomerDemandSummaryDTO
+                .Select(group =>
                 {
-                    ProductId = group.Key.ProductId,
-                    PartNumber = group.Key.PartNumber,
-                    Description = group.Key.Description,
-                    InquiryCount = group.Select(line => line.Rfqid).Distinct().Count(),
-                    RequestedQuantity = group.Sum(line => line.Quantity)
+                    var sourceRfqIds = group.Select(line => line.Rfqid).Distinct()
+                        .OrderByDescending(id => id).ToList();
+                    return new CustomerDemandSummaryDTO
+                    {
+                        ProductId = group.Key.ProductId,
+                        PartNumber = group.Key.PartNumber,
+                        Description = group.Key.Description,
+                        InquiryCount = sourceRfqIds.Count,
+                        RequestedQuantity = group.Sum(line => (long)line.Quantity),
+                        SourceRfqIds = sourceRfqIds.Take(SourceRfqIdsPerDemandLine).ToList(),
+                        SourceRfqsTruncated = sourceRfqIds.Count > SourceRfqIdsPerDemandLine
+                    };
                 })
                 .OrderByDescending(line => line.InquiryCount)
                 .ThenByDescending(line => line.RequestedQuantity)
@@ -243,29 +395,86 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 CustomerId = customer.Id,
                 CustomerName = customer.Name,
-                TotalQuotes = quotes.Count,
+                TotalQuotes = totalQuotes,
                 WonQuotes = won,
                 LostQuotes = lost,
                 WinRatePct = decided > 0
                     ? Math.Round(100m * won / decided, 1, MidpointRounding.AwayFromZero)
                     : null,
                 OrdersLast24Months = orderCount,
-                OrderValueLast24Months = Math.Round(orderValue, 2, MidpointRounding.AwayFromZero),
-                AvgQuoteTotal = quotes.Any(q => q.TotalAmount.HasValue)
-                    ? Math.Round(quotes.Where(q => q.TotalAmount.HasValue).Average(q => q.TotalAmount!.Value), 2, MidpointRounding.AwayFromZero)
-                    : null,
-                // QuoteItem does not carry the immutable cost snapshot needed to
-                // calculate historical realized margin. Null is more truthful than
-                // applying today's product cost to an older sale.
+                OrderValueLast24Months = SingleCurrencyValue(orderValueGroups, group => group.TotalAmount),
+                OrderValueStatus = CurrencyAggregateStatus(orderValueGroups),
+                OrderValueByCurrency = orderValueGroups,
+                AvgQuoteTotal = SingleCurrencyValue(quoteValueGroups, group => group.AverageAmount),
+                AvgQuoteTotalStatus = CurrencyAggregateStatus(quoteValueGroups),
+                QuoteValueByCurrency = quoteValueGroups,
                 AvgMarginPct = null,
-                LastQuoteDate = quotes.Select(q => q.QuoteDate).DefaultIfEmpty().Max(),
+                LastQuoteDate = await quoteQuery.MaxAsync(q => q.QuoteDate, ct),
                 RecentQuotes = recentQuotes,
                 RecentItemPrices = recentItemPrices,
                 RecentRfqs = recentRfqs,
-                RecentOrders = recentOrderSummaries,
+                RecentOrders = recentOrders,
                 DemandProfile = demandProfile,
+                Completeness = new CustomerContextCompletenessDTO
+                {
+                    QuoteAggregateScope = "all_history",
+                    RecentQuoteLimit = RecentQuotesCount,
+                    RecentQuotesTruncated = totalQuotes > RecentQuotesCount,
+                    SoldOrderEvidenceLimit = SoldOrderEvidenceLimit,
+                    SoldOrdersEvaluated = soldOrders.Count,
+                    SoldOrderEvidenceTruncated = soldOrdersTruncated,
+                    QuoteItemEvidenceLimit = QuoteItemEvidenceLimit,
+                    QuoteItemsEvaluated = recentItems.Count,
+                    QuoteItemEvidenceTruncated = quoteItemsTruncated,
+                    DemandLookbackMonths = DemandLookbackMonths,
+                    DemandCohortFrom = demandFrom,
+                    DemandCohortTo = now,
+                    DemandLineLimit = DemandLineEvaluationLimit,
+                    DemandLinesEvaluated = demandLines.Count,
+                    DemandLinesTruncated = demandTruncated
+                },
                 GeneratedAt = now
             });
+        }
+
+        private static List<CustomerCurrencyAggregateDTO> ToCurrencyGroups(
+            IEnumerable<(long? CurrencyId, string? CurrencyCode, int RecordCount, decimal TotalAmount)> rows) =>
+            rows.Select(row => new CustomerCurrencyAggregateDTO
+                {
+                    CurrencyId = row.CurrencyId,
+                    CurrencyCode = row.CurrencyCode,
+                    RecordCount = row.RecordCount,
+                    TotalAmount = Math.Round(row.TotalAmount, 2, MidpointRounding.AwayFromZero),
+                    AverageAmount = row.RecordCount == 0
+                        ? null
+                        : Math.Round(row.TotalAmount / row.RecordCount, 2, MidpointRounding.AwayFromZero)
+                })
+                .OrderBy(row => row.CurrencyCode ?? string.Empty, StringComparer.Ordinal)
+                .ThenBy(row => row.CurrencyId)
+                .ToList();
+
+        private static bool IsWinningStatus(string? statusCode, long? statusId) =>
+            statusId == 44 || statusCode is "ACCEPTED" or "ORDERED";
+
+        private static string? ContactName(long? contactId, IReadOnlyDictionary<long, string> contacts) =>
+            contactId.HasValue && contacts.TryGetValue(contactId.Value, out var name) ? name : null;
+
+        private static decimal? SingleCurrencyValue(
+            IReadOnlyCollection<CustomerCurrencyAggregateDTO> groups,
+            Func<CustomerCurrencyAggregateDTO, decimal?> selector) =>
+            groups.Count == 1 && groups.Single().CurrencyId.HasValue
+                && !string.IsNullOrWhiteSpace(groups.Single().CurrencyCode)
+                ? selector(groups.Single())
+                : null;
+
+        private static string CurrencyAggregateStatus(IReadOnlyCollection<CustomerCurrencyAggregateDTO> groups)
+        {
+            if (groups.Count == 0) return "no_data";
+            if (groups.Count == 1 && groups.Single().CurrencyId.HasValue
+                && !string.IsNullOrWhiteSpace(groups.Single().CurrencyCode)) return "single_currency";
+            if (groups.Any(group => !group.CurrencyId.HasValue || string.IsNullOrWhiteSpace(group.CurrencyCode)))
+                return groups.Count == 1 ? "currency_missing" : "mixed_currency_with_missing";
+            return "mixed_currency";
         }
 
         private static int MonthsBetween(DateTime from, DateTime to) =>
@@ -275,40 +484,64 @@ namespace ERP_RFQ_Automation.Controllers
             long.TryParse(User.FindFirst("businessUnitId")?.Value, out var id) ? id : 0;
     }
 
-    // ─── Wire contracts (camelCase via app-wide JSON defaults) ──────────────
-
     public sealed class CustomerContextDTO
     {
         public long CustomerId { get; set; }
         public string? CustomerName { get; set; }
-
         public int TotalQuotes { get; set; }
         public int WonQuotes { get; set; }
         public int LostQuotes { get; set; }
 
-        /// <summary>won / (won + lost) as 0–100; null while nothing has been decided yet.</summary>
+        /// <summary>Won divided by won plus lost; null while no quote is decided.</summary>
         public decimal? WinRatePct { get; set; }
 
         public int OrdersLast24Months { get; set; }
-        public decimal OrderValueLast24Months { get; set; }
-
+        public decimal? OrderValueLast24Months { get; set; }
+        public string OrderValueStatus { get; set; } = "no_data";
+        public List<CustomerCurrencyAggregateDTO> OrderValueByCurrency { get; set; } = new();
         public decimal? AvgQuoteTotal { get; set; }
+        public string AvgQuoteTotalStatus { get; set; } = "no_data";
+        public List<CustomerCurrencyAggregateDTO> QuoteValueByCurrency { get; set; } = new();
 
-        /// <summary>Historical realized margin; null until an immutable quote-time cost snapshot exists.</summary>
+        /// <summary>Null until an immutable quote-time cost snapshot exists.</summary>
         public decimal? AvgMarginPct { get; set; }
 
         public DateTime? LastQuoteDate { get; set; }
-
-        /// <summary>The last 10 quotes to this customer, newest first.</summary>
         public List<CustomerQuoteSummaryDTO> RecentQuotes { get; set; } = new();
-
-        /// <summary>Most recent unit price per distinct line ("Last sold at X, N months ago").</summary>
         public List<CustomerItemPriceDTO> RecentItemPrices { get; set; } = new();
         public List<CustomerRfqSummaryDTO> RecentRfqs { get; set; } = new();
         public List<CustomerOrderSummaryDTO> RecentOrders { get; set; } = new();
         public List<CustomerDemandSummaryDTO> DemandProfile { get; set; } = new();
-
+        public CustomerContextCompletenessDTO Completeness { get; set; } = new();
         public DateTime GeneratedAt { get; set; }
+    }
+
+    public sealed class CustomerCurrencyAggregateDTO
+    {
+        public long? CurrencyId { get; set; }
+        public string? CurrencyCode { get; set; }
+        public int RecordCount { get; set; }
+        public decimal TotalAmount { get; set; }
+        public decimal? AverageAmount { get; set; }
+    }
+
+    public sealed class CustomerContextCompletenessDTO
+    {
+        public string QuoteAggregateScope { get; set; } = "all_history";
+        public int RecentQuoteLimit { get; set; }
+        public bool RecentQuotesTruncated { get; set; }
+        public int SoldOrderEvidenceLimit { get; set; }
+        public int SoldOrdersEvaluated { get; set; }
+        public bool SoldOrderEvidenceTruncated { get; set; }
+        public int QuoteItemEvidenceLimit { get; set; }
+        public int QuoteItemsEvaluated { get; set; }
+        public bool QuoteItemEvidenceTruncated { get; set; }
+        public int DemandLookbackMonths { get; set; }
+        public DateTime DemandCohortFrom { get; set; }
+        public DateTime DemandCohortTo { get; set; }
+        public int DemandLineLimit { get; set; }
+        public int DemandLinesEvaluated { get; set; }
+        public bool DemandLinesTruncated { get; set; }
     }
 
     public sealed class CustomerQuoteSummaryDTO
@@ -317,11 +550,12 @@ namespace ERP_RFQ_Automation.Controllers
         public string QuoteNo { get; set; } = string.Empty;
         public DateTime? QuoteDate { get; set; }
         public decimal? TotalAmount { get; set; }
+        public long? CurrencyId { get; set; }
+        public string? CurrencyCode { get; set; }
+        public long? ContactId { get; set; }
+        public string? ContactName { get; set; }
         public string? StatusValue { get; set; }
-
-        /// <summary>"won" | "lost" | "open".</summary>
         public string Outcome { get; set; } = "open";
-
         public string? OutcomeReasonName { get; set; }
         public List<CustomerKeyLineDTO> KeyLines { get; set; } = new();
     }
@@ -338,7 +572,14 @@ namespace ERP_RFQ_Automation.Controllers
         public long? ProductId { get; set; }
         public string? Description { get; set; }
         public decimal UnitPrice { get; set; }
+        public long AwardOrderId { get; set; }
+        public long? CurrencyId { get; set; }
+        public string? CurrencyCode { get; set; }
+        public DateTime SoldOn { get; set; }
+
+        /// <summary>Compatibility alias for SoldOn; this is not the quote date.</summary>
         public DateTime? QuoteDate { get; set; }
+
         public int? MonthsAgo { get; set; }
     }
 
@@ -350,6 +591,8 @@ namespace ERP_RFQ_Automation.Controllers
         public DateTime? BidClosingOn { get; set; }
         public string? Status { get; set; }
         public int LineCount { get; set; }
+        public long? ContactId { get; set; }
+        public string? ContactName { get; set; }
     }
 
     public sealed class CustomerOrderSummaryDTO
@@ -360,6 +603,10 @@ namespace ERP_RFQ_Automation.Controllers
         public string? Status { get; set; }
         public decimal TotalAmount { get; set; }
         public long? QuoteId { get; set; }
+        public long? CurrencyId { get; set; }
+        public string? CurrencyCode { get; set; }
+        public long? ContactId { get; set; }
+        public string? ContactName { get; set; }
     }
 
     public sealed class CustomerDemandSummaryDTO
@@ -368,6 +615,8 @@ namespace ERP_RFQ_Automation.Controllers
         public string? PartNumber { get; set; }
         public string? Description { get; set; }
         public int InquiryCount { get; set; }
-        public int RequestedQuantity { get; set; }
+        public long RequestedQuantity { get; set; }
+        public List<long> SourceRfqIds { get; set; } = new();
+        public bool SourceRfqsTruncated { get; set; }
     }
 }

@@ -95,7 +95,13 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                     throw new SupplierQuoteConflictException(
                         "The commercial projection no longer matches the canonical Supplier Quote revision.");
 
-                var totalCorrectedQuantity = revision.Lines.Sum(x => EffectiveDecimal(x, "Quantity", x.Quantity));
+                // Shared charges are allocated by commercial VALUE, via the single definition in
+                // LandedCostFormula. This used to be quantity-weighted here and value-weighted in
+                // SupplierNegotiationService, and the disagreement fired a blocking CRITICAL
+                // POST_SELECTION_PRICE_INCREASE flag on quotes that had not moved. See
+                // LandedCostFormula for why value-weighting is the definition that survived.
+                var totalCorrectedValue = LandedCostFormula.TotalLineValue(revision.Lines.Select(x =>
+                    (EffectiveDecimal(x, "UnitPrice", x.UnitPrice), EffectiveDecimal(x, "Quantity", x.Quantity))));
                 var correctedOn = DateTime.UtcNow;
                 foreach (var line in revision.Lines)
                 {
@@ -104,8 +110,9 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                             "The commercial projection lost canonical Supplier Quote line identity.");
                     var quantity = EffectiveDecimal(line, "Quantity", line.Quantity);
                     var unitPrice = EffectiveDecimal(line, "UnitPrice", line.UnitPrice);
-                    var freight = decimal.Round(revision.FreightAmount * quantity / totalCorrectedQuantity, 4);
-                    var tax = decimal.Round(revision.TaxAmount * quantity / totalCorrectedQuantity, 4);
+                    var lineValue = LandedCostFormula.LineValue(unitPrice, quantity);
+                    var freight = LandedCostFormula.AllocateByValue(revision.FreightAmount, lineValue, totalCorrectedValue);
+                    var tax = LandedCostFormula.AllocateByValue(revision.TaxAmount, lineValue, totalCorrectedValue);
                     row.Quantity = quantity;
                     row.UnitPrice = unitPrice;
                     row.CurrencyId = effectiveCurrencyId;
@@ -113,7 +120,7 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                     row.AvailableQuantity = EffectiveNullableDecimal(line, "AvailableQuantity", line.AvailableQuantity);
                     row.FreightCost = freight;
                     row.TaxAmount = tax;
-                    row.LandedUnitCost = decimal.Round((unitPrice * quantity + freight + tax) / quantity, 4);
+                    row.LandedUnitCost = LandedCostFormula.UnitCost(unitPrice, quantity, freight, tax);
                     row.ValidUntil = effectiveValidUntil;
                     row.RequestHash = Hash(new { RevisionId = revision.Id, LineId = line.Id,
                         CorrectionReviewedOn = latestCorrection.Value });
@@ -158,7 +165,9 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                 row.Version++;
             }
 
-            var totalQuantity = revision.Lines.Sum(x => EffectiveDecimal(x, "Quantity", x.Quantity));
+            // Same single landed-cost definition as the correction branch above.
+            var totalLineValue = LandedCostFormula.TotalLineValue(revision.Lines.Select(x =>
+                (EffectiveDecimal(x, "UnitPrice", x.UnitPrice), EffectiveDecimal(x, "Quantity", x.Quantity))));
             var now = DateTime.UtcNow;
             var rows = revision.Lines.OrderBy(x => x.LineNumber).Select(line =>
             {
@@ -166,9 +175,10 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                 var unitPrice = EffectiveDecimal(line, "UnitPrice", line.UnitPrice);
                 var available = EffectiveNullableDecimal(line, "AvailableQuantity", line.AvailableQuantity);
                 var leadTime = EffectiveInt(line, "LeadTimeDays", line.LeadTimeDays);
-                var freight = decimal.Round(revision.FreightAmount * quantity / totalQuantity, 4);
-                var tax = decimal.Round(revision.TaxAmount * quantity / totalQuantity, 4);
-                var landed = decimal.Round((unitPrice * quantity + freight + tax) / quantity, 4);
+                var lineValue = LandedCostFormula.LineValue(unitPrice, quantity);
+                var freight = LandedCostFormula.AllocateByValue(revision.FreightAmount, lineValue, totalLineValue);
+                var tax = LandedCostFormula.AllocateByValue(revision.TaxAmount, lineValue, totalLineValue);
+                var landed = LandedCostFormula.UnitCost(unitPrice, quantity, freight, tax);
                 var rfqLine = rfqLines[line.RfqItemId];
                 return new SupplierQuotedItem
                 {
@@ -310,6 +320,16 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                 x.Id == quoteItem.Quote.Rfqid, cancellationToken);
             if (string.IsNullOrWhiteSpace(rfq.NexoraSerial))
                 throw new SupplierQuoteValidationException("The Customer Quote RFQ has no Nexora Serial lineage.");
+            // FX fix, half 1 of 2: the guard below only ran when Quote.CurrencyId was already set,
+            // so a quote with a NULL header currency skipped the currency check entirely and then
+            // adopted the award's currency further down — after which the cross-row total was
+            // computed over lines whose currency had never been established. The award's own
+            // currency is now mandatory (it is dereferenced unconditionally when the decision row
+            // is written), and the comparison runs on every path.
+            if (projected.CurrencyId is null)
+                throw new SupplierQuoteValidationException(
+                    "The awarded Supplier offer carries no currency, so it cannot price a Customer Quote line; " +
+                    "record the Supplier Quote currency and re-project the offer before pricing.");
             if (quoteItem.Quote.CurrencyId.HasValue && quoteItem.Quote.CurrencyId != projected.CurrencyId)
                 throw new SupplierQuoteValidationException("Customer Quote and Supplier award currencies differ; record an approved exchange rate before pricing.");
             var requiredOn = await context.Rfqitems.AsNoTracking().Where(x => x.Id == quoteItem.RfqitemId &&
@@ -354,10 +374,21 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                 (quoteItem.TaxAmount ?? 0), 2, MidpointRounding.AwayFromZero);
             quoteItem.ModifiedBy = command.Actor.Trim();
             quoteItem.ModifiedDate = DateTime.UtcNow;
+            // FX fix, half 2 of 2: this SumAsync adds every other line of the quote to the line
+            // just priced. QuoteItem has NO currency column, so the only thing that can vouch for
+            // those lines being in the award's currency is the quote header. When the header is
+            // still null and other lines already carry value, their denomination is unknown and
+            // the sum would be a total of unlike amounts — so the header currency is not adopted
+            // on the quiet and the pricing is refused instead.
+            var otherLineTotals = await context.QuoteItems.Where(x => x.QuoteId == quoteItem.QuoteId &&
+                x.Id != quoteItem.Id).Select(x => x.TotalAmount).ToListAsync(cancellationToken);
+            if (quoteItem.Quote.CurrencyId is null && otherLineTotals.Any(amount => amount != 0m))
+                throw new SupplierQuoteValidationException(
+                    "The Customer Quote has no header currency but already carries priced lines, so the currency of " +
+                    "those lines cannot be established and the quote total would sum unlike amounts; set the Customer " +
+                    "Quote currency before pricing this line.");
             quoteItem.Quote.CurrencyId ??= projected.CurrencyId;
-            var otherLineTotal = await context.QuoteItems.Where(x => x.QuoteId == quoteItem.QuoteId &&
-                x.Id != quoteItem.Id).SumAsync(x => x.TotalAmount, cancellationToken);
-            quoteItem.Quote.TotalAmount = otherLineTotal + quoteItem.TotalAmount;
+            quoteItem.Quote.TotalAmount = otherLineTotals.Sum() + quoteItem.TotalAmount;
             quoteItem.Quote.ModifiedBy = command.Actor.Trim();
             quoteItem.Quote.ModifiedDate = DateTime.UtcNow;
             context.CustomerQuoteSourcingDecisions.Add(decision);

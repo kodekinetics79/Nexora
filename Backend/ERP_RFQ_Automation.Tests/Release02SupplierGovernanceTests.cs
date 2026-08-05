@@ -9,12 +9,11 @@ using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Repositories;
 using ERP_RFQ_Automation.Tests.Support;
-using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Routing;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.FileProviders;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -76,7 +75,12 @@ public sealed class Release02SupplierGovernanceTests
 
         var unavailable = Assert.IsType<ObjectResult>(result.Result);
         Assert.Equal(StatusCodes.Status503ServiceUnavailable, unavailable.StatusCode);
-        Assert.Contains("disabled", Assert.IsType<string>(unavailable.Value), StringComparison.OrdinalIgnoreCase);
+        // The refusal is an RFC 7807 payload carrying a traceId, not a bare string, so a
+        // caller can quote one identifier that ties straight back to the server log entry.
+        var problem = Assert.IsType<ProblemDetails>(unavailable.Value);
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, problem.Status);
+        Assert.Contains("disabled", problem.Detail!, StringComparison.OrdinalIgnoreCase);
+        Assert.True(problem.Extensions.ContainsKey("traceId"));
         Assert.DoesNotContain(typeof(ISupplierRepository).GetMethods(), method =>
             method.Name.Contains("Web", StringComparison.OrdinalIgnoreCase));
     }
@@ -89,8 +93,7 @@ public sealed class Release02SupplierGovernanceTests
 
         var result = await controller.Create(new SupplierCreateRequestDTO
         {
-            Name = "Verified Parts Ltd",
-            IsActive = true
+            Name = "Verified Parts Ltd"
         });
 
         Assert.IsType<CreatedAtActionResult>(result.Result);
@@ -112,7 +115,7 @@ public sealed class Release02SupplierGovernanceTests
         {
             "Buid", "BusinessUnitId", "CreatedBy", "ModifiedBy", "SuccessRate",
             "AvgResponseTime", "GovernanceStatus", "VerificationStatus",
-            "ComplianceStatus", "RiskStatus", "ReadinessStatus"
+            "ComplianceStatus", "RiskStatus", "ReadinessStatus", "IsActive", "ImageFile"
         };
 
         foreach (var dtoType in new[] { typeof(SupplierCreateRequestDTO), typeof(SupplierUpdateRequestDTO) })
@@ -143,7 +146,7 @@ public sealed class Release02SupplierGovernanceTests
 
         var result = await controller.Update(9, new SupplierUpdateRequestDTO
         {
-            Name = "Approved Parts", ContactEmail = "new@supplier.test", IsActive = true,
+            Name = "Approved Parts", ContactEmail = "new@supplier.test",
             ConcurrencyToken = repository.CurrentSupplier.ConcurrencyToken
         });
 
@@ -179,7 +182,7 @@ public sealed class Release02SupplierGovernanceTests
             .Options;
         await using var context = new ErpRfqAutomationContext(options);
         var repository = new RecordingContactRepository();
-        var controller = new ContactController(repository, context)
+        var controller = new ContactController(repository, context, new AllowAuthorizationService())
         {
             ControllerContext = ControllerContext(null, "user-7")
         };
@@ -211,6 +214,35 @@ public sealed class Release02SupplierGovernanceTests
     }
 
     [Fact]
+    public async Task Supplier_repository_rejects_cross_tenant_currency_and_physical_deletion()
+    {
+        using var database = new TestDb();
+        await using var context = database.ContextFor(null);
+        Seed.EnsureBusinessUnit(context, 41);
+        Seed.EnsureBusinessUnit(context, 42);
+        context.Currencies.Add(new Currency
+        {
+            Id = 42_001,
+            BusinessUnitId = 42,
+            Code = "USD",
+            CurrencyName = "Other tenant USD",
+            CreatedBy = "seed",
+            CreatedOn = DateTime.UtcNow,
+            IsActive = true
+        });
+        await context.SaveChangesAsync();
+        var repository = new SupplierRepository(context, new DeterministicSupplierNumberGenerator());
+        var supplier = Supplier("Tenant A Parts", 41);
+        supplier.CurrencyId = 42_001;
+
+        await Assert.ThrowsAsync<ArgumentException>(() => repository.AddAsync(supplier));
+        supplier.CurrencyId = null;
+        await repository.AddAsync(supplier);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => repository.DeleteAsync(supplier.Id, 41));
+        Assert.True(await context.Suppliers.AnyAsync(x => x.Id == supplier.Id));
+    }
+
+    [Fact]
     public async Task Supplier_contact_repository_rejects_parent_from_another_tenant()
     {
         using var database = new TestDb();
@@ -231,7 +263,7 @@ public sealed class Release02SupplierGovernanceTests
             CreatedOn = DateTime.UtcNow
         };
 
-        await Assert.ThrowsAsync<ArgumentException>(() => repository.AddAsync(contact));
+        await Assert.ThrowsAsync<ArgumentException>(() => repository.AddAsync(contact, 7, "test-user"));
         Assert.Empty(context.Contacts);
     }
 
@@ -250,7 +282,7 @@ public sealed class Release02SupplierGovernanceTests
         string? tenantClaim,
         string actor = "test-user")
     {
-        return new SupplierController(repository, new TestWebHostEnvironment())
+        return new SupplierController(repository)
         {
             ControllerContext = ControllerContext(tenantClaim, actor)
         };
@@ -334,19 +366,25 @@ public sealed class Release02SupplierGovernanceTests
             string? email, long? customerId, long? supplierId, bool? isPrimary,
             bool? isActive, long businessUnitId) => throw new NotSupportedException();
         public Task<Contact> GetByIdAsync(long id, long businessUnitId) => throw new NotSupportedException();
-        public Task AddAsync(Contact contact) => throw new NotSupportedException();
-        public Task UpdateAsync(Contact contact) => throw new NotSupportedException();
-        public Task DeleteAsync(long id, long businessUnitId) => throw new NotSupportedException();
+        public Task AddAsync(Contact contact, long businessUnitId, string actor) => throw new NotSupportedException();
+        public Task UpdateAsync(Contact contact, long businessUnitId, string actor, Guid expectedConcurrencyToken) => throw new NotSupportedException();
+        public Task DeleteAsync(long id, long businessUnitId, string actor, Guid expectedConcurrencyToken) => throw new NotSupportedException();
         public Task<IEnumerable<CustomerDropdown>> GetCustomersAsync(long businessUnitId) => throw new NotSupportedException();
     }
 
-    private sealed class TestWebHostEnvironment : IWebHostEnvironment
+    private sealed class AllowAuthorizationService : IAuthorizationService
     {
-        public string ApplicationName { get; set; } = "Nexora.Tests";
-        public IFileProvider WebRootFileProvider { get; set; } = new NullFileProvider();
-        public string WebRootPath { get; set; } = Path.GetTempPath();
-        public string EnvironmentName { get; set; } = "Testing";
-        public string ContentRootPath { get; set; } = Path.GetTempPath();
-        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
+        public Task<AuthorizationResult> AuthorizeAsync(
+            ClaimsPrincipal user,
+            object? resource,
+            IEnumerable<IAuthorizationRequirement> requirements) =>
+            Task.FromResult(AuthorizationResult.Success());
+
+        public Task<AuthorizationResult> AuthorizeAsync(
+            ClaimsPrincipal user,
+            object? resource,
+            string policyName) =>
+            Task.FromResult(AuthorizationResult.Success());
     }
+
 }

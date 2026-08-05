@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.LeadIdentity;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -13,9 +14,13 @@ namespace ERP_RFQ_Automation.Controllers;
 public sealed class LeadIngestionController : ControllerBase
 {
     private readonly ILeadIdentityApplicationService _service;
+    private readonly ISecurityScanRecoveryService _securityScanRecovery;
     private readonly ILogger<LeadIngestionController> _log;
-    public LeadIngestionController(ILeadIdentityApplicationService service, ILogger<LeadIngestionController> log)
-    { _service = service; _log = log; }
+    public LeadIngestionController(
+        ILeadIdentityApplicationService service,
+        ISecurityScanRecoveryService securityScanRecovery,
+        ILogger<LeadIngestionController> log)
+    { _service = service; _securityScanRecovery = securityScanRecovery; _log = log; }
 
     [HttpGet("batches/{batchId:guid}")]
     [RequireModulePermission("Leads", PermissionAction.View)]
@@ -26,12 +31,64 @@ public sealed class LeadIngestionController : ControllerBase
         return result is null ? NotFound() : Ok(result);
     }
 
+    [HttpPost("batches/{batchId:guid}/retry-blocked-files")]
+    [RequireModulePermission("Leads", PermissionAction.Create)]
+    public async Task<IActionResult> RetryBlockedFiles(Guid batchId, CancellationToken ct)
+    {
+        if (!TryTenant(out var bu)) return BadRequest(new { message = "A valid businessUnitId claim is required." });
+        if (await _service.GetBatchAsync(bu, batchId, ct) is null)
+            return NotFound();
+        return Ok(await _securityScanRecovery.RetryBatchAsync(bu, batchId, ct));
+    }
+
+    /// <summary>
+    /// Operator discovery: which batches still hold files that a malware-scanner outage blocked.
+    /// Deliberately independent of the batch page, whose retry control disappears once a hold has
+    /// been recorded as Rejected — an infrastructure outage must never become a dead end.
+    /// </summary>
+    [HttpGet("blocked-files")]
+    [RequireModulePermission("Leads", PermissionAction.View)]
+    public async Task<IActionResult> BlockedFiles(CancellationToken ct)
+    {
+        if (!TryTenant(out var bu)) return BadRequest(new { message = "A valid businessUnitId claim is required." });
+        var batches = await _securityScanRecovery.ListBlockedBatchesAsync(bu, ct);
+        return Ok(new
+        {
+            blockedFiles = batches.Sum(x => x.BlockedFiles),
+            batches
+        });
+    }
+
+    /// <summary>
+    /// Tenant-wide replay of every scanner-blocked file from its immutable source object — no
+    /// batch id and no re-upload required. Capped per call; re-invoke while <c>moreRemaining</c> is true.
+    /// </summary>
+    [HttpPost("retry-blocked-files")]
+    [RequireModulePermission("Leads", PermissionAction.Create)]
+    public async Task<IActionResult> RetryAllBlockedFiles(CancellationToken ct)
+    {
+        if (!TryTenant(out var bu)) return BadRequest(new { message = "A valid businessUnitId claim is required." });
+        var result = await _securityScanRecovery.RetryTenantAsync(bu, ct);
+        _log.LogInformation(
+            "Tenant-wide security-scan recovery requested for business unit {BusinessUnitId}: Eligible={Eligible} Queued={Queued} StillAwaiting={StillAwaiting}.",
+            bu, result.Eligible, result.Queued, result.StillAwaiting);
+        return Ok(result);
+    }
+
     [HttpGet("match-reviews")]
     [RequireModulePermission("Leads", PermissionAction.View)]
     public async Task<IActionResult> PossibleMatches(CancellationToken ct)
     {
         if (!TryTenant(out var bu)) return BadRequest(new { message = "A valid businessUnitId claim is required." });
         return Ok(await _service.GetPossibleMatchesAsync(bu, ct));
+    }
+
+    [HttpGet("duplicates")]
+    [RequireModulePermission("Leads", PermissionAction.View)]
+    public async Task<IActionResult> DuplicateUploads(CancellationToken ct)
+    {
+        if (!TryTenant(out var bu)) return BadRequest(new { message = "A valid businessUnitId claim is required." });
+        return Ok(await _service.GetDuplicateUploadsAsync(bu, ct));
     }
 
     [HttpGet("leads/{leadId:long}/revisions")]

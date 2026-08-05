@@ -53,15 +53,68 @@ public sealed record BatchReconciliationItemDto(long OccurrenceId, long? LeadId,
     string ProcessingPath, bool ExternalAiUsed, decimal Confidence, IReadOnlyList<string> Reasons,
     IReadOnlyList<LeadMatchCandidateDto> MatchCandidates,
     string CustomerResolutionStatus, string? AssignedOpportunityOwner,
-    string IntakeStatus, string? ErrorCode, long? SourceDocumentOccurrenceId);
+    string IntakeStatus, string? ErrorCode, long? SourceDocumentOccurrenceId)
+{
+    public string? SecurityStatus { get; init; }
+    public DateTimeOffset? SecurityScanUpdatedAtUtc { get; init; }
+    public DateTimeOffset? LastUpdatedAtUtc { get; init; }
+    public string? ExtractionStatus { get; init; }
+    public DateTimeOffset? ExtractionUpdatedAtUtc { get; init; }
+
+    /// <summary>
+    /// True when this file is held by a malware scanner that never produced a verdict, so it can be
+    /// replayed from its immutable source without a re-upload. This is the durable "our
+    /// infrastructure failed" signal — distinct from a real malware detection
+    /// (<c>ErrorCode = malware_detected</c>) or a malformed document (<c>document_rejected</c>),
+    /// neither of which is ever replayable.
+    /// </summary>
+    public bool RecoverableSecurityHold { get; init; }
+}
 public sealed record LeadMatchCandidateDto(long CandidateId, long CandidateLeadId, string NexoraSerial,
     string? CustomerRfqReference, decimal Confidence, string MatchEvidenceJson, string DifferencesJson,
     string DownstreamImpactJson, string ReviewState, int Version);
 public sealed record BatchReconciliationDto(Guid BatchId, int FilesReceived, int LogicalInquiries,
     int NewLeads, int ExactDuplicates, int Revisions, int PossibleMatches, int Rejected,
-    int ExternalOccurrences, decimal? ExternalCost, IReadOnlyList<BatchReconciliationItemDto> Items);
+    int ExternalOccurrences, decimal? ExternalCost, IReadOnlyList<BatchReconciliationItemDto> Items)
+{
+    public int AwaitingSecurityScan { get; init; }
+    public int LocalFirstOccurrences { get; init; }
+}
 public sealed record PossibleMatchQueueItemDto(Guid BatchId, long OccurrenceId, string? FileName,
     DateTimeOffset IngestedAtUtc, decimal Confidence, IReadOnlyList<LeadMatchCandidateDto> MatchCandidates);
+
+public sealed record DuplicateResourceAccountingDto(
+    long BytesUploaded,
+    long HashingDurationMs,
+    long StoragePhysicalBytes,
+    long StorageLogicalBytes,
+    bool MalwareScanReused,
+    bool MalwareScanRerun,
+    bool ParserReused,
+    bool OcrReused,
+    bool LocalModelReused,
+    bool ExternalModelReused,
+    decimal LocalComputeCost,
+    decimal ExternalCost,
+    decimal TotalActualCost,
+    decimal EstimatedProcessingAvoided,
+    string CostStatus);
+
+public sealed record DuplicateUploadDto(
+    long OccurrenceId,
+    string FileName,
+    Guid UploadBatch,
+    DateTimeOffset IngestedAt,
+    string UploadedBy,
+    string Source,
+    string DuplicateType,
+    long? OriginalOccurrenceId,
+    long? CanonicalLeadId,
+    string? NexoraSerial,
+    string SecurityStatus,
+    bool ProcessingReused,
+    DuplicateResourceAccountingDto Resources,
+    IReadOnlyList<string> Actions);
 
 public sealed record MatchDecisionRequest(string Action, long? CandidateLeadId, int ExpectedVersion,
     string Reason, string IdempotencyKey);

@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Threading.RateLimiting;
+using ERP_RFQ_Automation.Security;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Configuration;
@@ -26,6 +27,14 @@ public static class RateLimitingExtensions
     public static IServiceCollection AddPlatformRateLimiting(
         this IServiceCollection services, IConfiguration configuration)
     {
+        // SEC-H6: the request-rate limiter below is volume-based and credential-blind — it
+        // cannot tell a legitimate burst from password guessing against one account. The
+        // durable per-account login lockout is registered here alongside it because this is
+        // the app's abuse-protection composition root and it already receives IConfiguration.
+        // (A reviewer may prefer to hoist this to its own explicit line in Program.cs; the
+        // registration is idempotent either way.)
+        services.AddLoginThrottling(configuration);
+
         // Generous defaults so the limiter protects against abuse without tripping
         // legitimate pilot traffic. All overridable via config.
         var permitLimit = GetInt(configuration, "RateLimiting:PermitLimit", 600);

@@ -47,7 +47,7 @@ public sealed class CoreSalesPostgreSqlTests
                     'FK_follow_up_tenant_customer', 'FK_follow_up_event_tenant_task',
                     'FK_sales_contribution_tenant_user', 'FK_sales_contribution_tenant_customer',
                     'FK_sales_profile_tenant_user', 'FK_sales_membership_tenant_user',
-                    'FK_sales_membership_tenant_team', 'FK_customer_owner_tenant_customer',
+                    'FK_sales_membership_tenant_team', 'FK_customer_ownerships_Customers_BusinessUnitId_CustomerId',
                     'FK_customer_owner_tenant_primary_user', 'FK_customer_owner_tenant_backup_user'])
                   AND array_length(conkey, 1) = 2;
                 """;

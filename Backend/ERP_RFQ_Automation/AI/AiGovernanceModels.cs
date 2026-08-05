@@ -47,9 +47,49 @@ public sealed class AiProcessingPolicy
     public decimal? ExternalOutputCostPerMillionTokens { get; set; }
     public string? ExternalCostCurrency { get; set; }
     public string? ExternalPricingVersion { get; set; }
+    /// <summary>
+    /// Ceiling on UNAUTHORIZED external usage, as a percentage of the last 100 governed
+    /// calls. A reservation whose endpoint holds a live per-tenant allow-list
+    /// authorization (<see cref="AiExternalProviderAuthorization"/>) is exempt from this
+    /// ratio — the allow-list is the precise control for authorized egress, and the
+    /// exempting authorization id is recorded on the ledger row. Everything else
+    /// (unauthorized external calls) remains subject to it unchanged, so tighter is
+    /// better: the value is validated to 0..10 in AiTrustCenterService and that bound is
+    /// deliberately not raised.
+    /// </summary>
+    public decimal ExternalDependencyCeilingPercent { get; set; } = 10m;
+    public bool RedactionRequired { get; set; } = true;
+    public string AllowedDataClassifications { get; set; } = "Public,Internal";
+    public string EgressPolicy { get; set; } = "RedactedFieldsOnly";
+    public string DataResidency { get; set; } = "TenantApprovedRegion";
+    public int RetentionDays { get; set; } = 30;
+    public bool InputOutputAuditAllowed { get; set; }
+    public bool PrivacyReviewRequired { get; set; } = true;
+    public decimal? LocalComputeCostPerHour { get; set; }
+    public decimal? OcrCostPerPage { get; set; }
+    public string? LocalCostCurrency { get; set; }
     public long Version { get; set; } = 1;
     public DateTime UpdatedOn { get; set; }
     public string UpdatedBy { get; set; } = null!;
+
+    public static AiProcessingPolicy CreateSecureDefault(long businessUnitId, string actor, DateTime now) => new()
+    {
+        BusinessUnitId = businessUnitId,
+        IsEnabled = true,
+        ExternalProcessingAllowed = false,
+        AllowedPurposes = "RfqExtraction,BoqDraft",
+        ExternalDependencyCeilingPercent = 10m,
+        RedactionRequired = true,
+        AllowedDataClassifications = "Public,Internal",
+        EgressPolicy = "RedactedFieldsOnly",
+        DataResidency = "TenantApprovedRegion",
+        RetentionDays = 30,
+        InputOutputAuditAllowed = false,
+        PrivacyReviewRequired = true,
+        Version = 1,
+        UpdatedOn = now,
+        UpdatedBy = actor
+    };
 }
 
 public sealed class AiRequest
@@ -82,6 +122,24 @@ public sealed class AiRequest
     public string? CostPricingVersion { get; set; }
     public string TokenSource { get; set; } = AiTokenSources.Estimated;
     public string? ErrorCode { get; set; }
+
+    /// <summary>
+    /// Set only when this reservation was EXEMPTED from the external-dependency ceiling:
+    /// the id of the live <see cref="AiExternalProviderAuthorization"/> that covered the
+    /// endpoint at reservation time. Lets the ledger answer "which calls went external
+    /// under whose authorization". Null for local calls, for external calls under the
+    /// ceiling (no exemption was needed), and for denied calls.
+    /// </summary>
+    public long? ExternalAuthorizationId { get; set; }
+
+    /// <summary>
+    /// The deployment's <see cref="AI.InferencePosture"/> at the moment of a ceiling
+    /// exemption, recorded alongside <see cref="ExternalAuthorizationId"/> so the audit
+    /// trail keeps the stance the deployment declared when the call egressed. Null
+    /// whenever no exemption applied.
+    /// </summary>
+    public string? InferencePosture { get; set; }
+
     public DateTime CreatedOn { get; set; }
     public DateTime? StartedOn { get; set; }
     public DateTime? CompletedOn { get; set; }

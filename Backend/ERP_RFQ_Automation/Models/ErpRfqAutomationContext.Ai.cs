@@ -10,8 +10,16 @@ public partial class ErpRfqAutomationContext
     public virtual DbSet<AiCallAttempt> AiCallAttempts { get; set; } = null!;
     public virtual DbSet<AiBudgetPeriod> AiBudgetPeriods { get; set; } = null!;
 
-    private static void ConfigureAiGovernance(ModelBuilder modelBuilder)
+    // Instance (not static) so the AI-provider allow-list partial below can declare its
+    // tenant global query filter, which must capture the context's CurrentTenantId.
+    // The single call site in ErpRfqAutomationContext.Tenancy.cs is unchanged.
+    private void ConfigureAiGovernance(ModelBuilder modelBuilder)
     {
+        // ==== Per-tenant external AI provider allow-list (AI/AiExternalProviderTrust.cs) ====
+        // Same partial-splice pattern as Agent/Sla/Metrics/Boq; implementation lives in
+        // ErpRfqAutomationContext.AiProviderTrust.cs.
+        ConfigureAiProviderTrustModel(modelBuilder);
+
         modelBuilder.Entity<AiProcessingPolicy>(entity =>
         {
             entity.ToTable("AiProcessingPolicies");
@@ -24,6 +32,13 @@ public partial class ErpRfqAutomationContext
             entity.Property(e => e.ExternalOutputCostPerMillionTokens).HasPrecision(18, 6);
             entity.Property(e => e.ExternalCostCurrency).HasMaxLength(3);
             entity.Property(e => e.ExternalPricingVersion).HasMaxLength(100);
+            entity.Property(e => e.ExternalDependencyCeilingPercent).HasPrecision(5, 2);
+            entity.Property(e => e.AllowedDataClassifications).HasMaxLength(300).IsRequired();
+            entity.Property(e => e.EgressPolicy).HasMaxLength(100).IsRequired();
+            entity.Property(e => e.DataResidency).HasMaxLength(100).IsRequired();
+            entity.Property(e => e.LocalComputeCostPerHour).HasPrecision(18, 6);
+            entity.Property(e => e.OcrCostPerPage).HasPrecision(18, 6);
+            entity.Property(e => e.LocalCostCurrency).HasMaxLength(3);
             entity.Property(e => e.Version).HasDefaultValue(1L).IsConcurrencyToken();
             entity.Property(e => e.UpdatedBy).HasMaxLength(255).IsRequired();
             entity.HasOne<BusinessUnit>().WithOne()
@@ -51,6 +66,11 @@ public partial class ErpRfqAutomationContext
             entity.Property(e => e.CostStatus).HasMaxLength(32).IsRequired();
             entity.Property(e => e.CostPricingVersion).HasMaxLength(100);
             entity.Property(e => e.ErrorCode).HasMaxLength(100);
+            // Ceiling-exemption audit linkage: which allow-list authorization covered this
+            // call, and the deployment posture at that moment. Nullable, no FK — the ledger
+            // row must survive even if the authorization row's lifecycle changes, exactly
+            // like the other denormalised audit fields here.
+            entity.Property(e => e.InferencePosture).HasMaxLength(32);
             entity.HasIndex(e => new { e.BusinessUnitId, e.IdempotencyKey }).IsUnique()
                 .HasDatabaseName("UX_AiRequests_BU_IdempotencyKey");
             entity.HasIndex(e => new { e.BusinessUnitId, e.CreatedOn })

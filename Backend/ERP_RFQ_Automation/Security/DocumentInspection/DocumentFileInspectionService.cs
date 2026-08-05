@@ -100,8 +100,14 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
         }
 
         MalwareScanResult scan;
-        await using (var scanStream = new MemoryStream(bytes, writable: false))
+        var verdictReused = request.ReusableMalwareVerdict is not null;
+        if (request.ReusableMalwareVerdict is { } reusable)
         {
+            scan = MalwareScanResult.Clean(reusable.Engine, reusable.SignatureVersion);
+        }
+        else
+        {
+            await using var scanStream = new MemoryStream(bytes, writable: false);
             try
             {
                 scan = await _malwareScanner.ScanAsync(scanStream, cancellationToken);
@@ -114,7 +120,9 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
             {
                 scan = MalwareScanResult.Error(
                     _malwareScanner.GetType().Name,
-                    $"The malware scanner failed: {exception.GetType().Name}.");
+                    MalwareScannerMessages.ScannerFailed,
+                    $"The malware scanner {_malwareScanner.GetType().Name} failed with " +
+                    $"{exception.GetType().Name}: {exception.Message}");
             }
         }
 
@@ -126,14 +134,23 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
                 bytes.LongLength,
                 "File signature, archive safety, and malware checks passed.",
                 scan.Engine,
-                scan.Signature),
+                scan.Signature)
+            {
+                MalwareStatus = scan.Status,
+                ErrorCode = "security_scan_cleared",
+                MalwareVerdictReused = verdictReused
+            },
             MalwareScanStatus.Infected => new FileInspectionResult(
                 FileInspectionStatus.Quarantined,
                 detection.ContentType,
                 bytes.LongLength,
                 scan.Reason,
                 scan.Engine,
-                scan.Signature),
+                scan.Signature)
+            {
+                MalwareStatus = scan.Status,
+                ErrorCode = "malware_detected"
+            },
             _ => new FileInspectionResult(
                 FileInspectionStatus.Quarantined,
                 detection.ContentType,
@@ -141,6 +158,12 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
                 scan.Reason,
                 scan.Engine,
                 scan.Signature)
+            {
+                MalwareStatus = scan.Status,
+                IsRetryable = true,
+                ErrorCode = "security_scanner_unavailable",
+                OperatorDiagnostics = scan.Diagnostics
+            }
         };
     }
 
@@ -586,11 +609,9 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
         }
     }
 
-    private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".xlsm", ".csv", ".txt",
-        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"
-    };
+    // Single source of truth shared with every intake door (email, manual upload,
+    // watched folders) so the intake filters and this inspection gate cannot drift.
+    private static readonly IReadOnlySet<string> SupportedExtensions = DocumentIntakeAllowList.Extensions;
 
     private static readonly IReadOnlyDictionary<string, HashSet<string>> ContentTypeAliases =
         new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase)

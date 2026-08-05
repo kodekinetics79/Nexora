@@ -1,8 +1,10 @@
 import { lazy, Suspense } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
-import { Box, CircularProgress } from '@mui/material';
+import { Box, CircularProgress, Typography } from '@mui/material';
 import MainLayout from './components/layout/MainLayout';
 import PermissionGuard from './components/common/PermissionGuard';
+import RouteAnnouncer from './components/layout/RouteAnnouncer';
+import useDocumentTitle from './hooks/useDocumentTitle';
 
 // FE-09: route-level code splitting. Each page is loaded on demand so the
 // initial bundle only ships the app shell (layout, guards, providers).
@@ -40,6 +42,7 @@ const AssignedLeadsPage = lazy(() => import('./pages/Leads/AssignedLeadsPage'));
 const ManualUploadLeadsPage = lazy(() => import('./pages/Leads/ManualUploadLeadsPage'));
 const LeadIngestionBatchPage = lazy(() => import('./pages/Leads/LeadIngestionBatchPage'));
 const PossibleMatchesPage = lazy(() => import('./pages/Leads/PossibleMatchesPage'));
+const DuplicateUploadsPage = lazy(() => import('./pages/Leads/DuplicateUploadsPage'));
 const LeadDetailPage = lazy(() => import('./pages/Leads/LeadDetailPage'));
 const CommercialCaseWorkspacePage = lazy(() => import('./pages/CommercialCases/CommercialCaseWorkspacePage'));
 const ExtractionReviewPage = lazy(() => import('./pages/ExtractionReview/ExtractionReviewPage'));
@@ -82,6 +85,7 @@ const AccountOwnershipPage = lazy(() => import('./pages/SalesManagement/AccountO
 const RoutingQueuePage = lazy(() => import('./pages/SalesManagement/RoutingQueuePage'));
 const FollowUpsPage = lazy(() => import('./pages/SalesManagement/FollowUpsPage'));
 const PerformancePage = lazy(() => import('./pages/SalesManagement/PerformancePage'));
+const CommercialExceptionCenterPage = lazy(() => import('./pages/SalesManagement/CommercialExceptionCenterPage'));
 const SourcingTodayPage = lazy(() => import('./pages/Today/SourcingTodayPage'));
 const TenantAdminOperationsPage = lazy(() => import('./pages/Today/TenantAdminOperationsPage'));
 
@@ -89,6 +93,14 @@ const TenantAdminOperationsPage = lazy(() => import('./pages/Today/TenantAdminOp
 const LeadConvertPage = lazy(() => import('./pages/Intelligence/LeadConvertPage'));
 const RfqPricingPage = lazy(() => import('./pages/Intelligence/RfqPricingPage'));
 const CommercialMemoryPage = lazy(() => import('./pages/Intelligence/CommercialMemoryPage'));
+const TaxonomySkillStudioPage = lazy(() => import('./pages/PlatformGovernance/TaxonomySkillStudioPage'));
+const HumanActionCenterPage = lazy(() => import('./pages/PlatformGovernance/HumanActionCenterPage'));
+const AiTrustCenterPage = lazy(() => import('./pages/PlatformGovernance/AiTrustCenterPage'));
+const LifecycleStudioPage = lazy(() => import('./pages/PlatformGovernance/LifecycleStudioPage'));
+const IntegrationHubPage = lazy(() => import('./pages/PlatformGovernance/IntegrationHubPage'));
+const ReleaseCenterPage = lazy(() => import('./pages/PlatformGovernance/ReleaseCenterPage'));
+const CommercialDocumentArchivePage = lazy(() => import('./pages/PlatformGovernance/CommercialDocumentArchivePage'));
+const QualityAnalyticsPage = lazy(() => import('./pages/PlatformGovernance/QualityAnalyticsPage'));
 
 // Service RFQ → BOQ engine — drafted bills of quantities for service work.
 const BoqListPage = lazy(() => import('./pages/Boq/BoqListPage'));
@@ -104,13 +116,40 @@ const CopilotActivityPage = lazy(() => import('./pages/Copilot/ActivityPage'));
 const PlatformRoutes = lazy(() => import('./platform/PlatformRoutes'));
 
 const PageLoader = () => (
-  <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '60vh', width: '100%' }}>
-    <CircularProgress />
+  <Box
+    role="status"
+    aria-live="polite"
+    sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '60vh', width: '100%' }}
+  >
+    <CircularProgress aria-label="Loading page" />
   </Box>
 );
 
+/**
+ * 404 view. Sets its own title (the route is by definition not in
+ * `routeTitles.ts`) and provides the page's `<h1>` — SC 2.4.2 / SC 1.3.1.
+ */
+const NotFoundPage = () => {
+  useDocumentTitle('Page Not Found');
+  return (
+    <Box component="main" id="main-content" tabIndex={-1} sx={{ p: 4 }}>
+      <Typography variant="h4" component="h1" gutterBottom>
+        Page not found
+      </Typography>
+      <Typography variant="body1" color="text.secondary">
+        The page you requested does not exist. Check the address, or use the navigation menu to
+        continue.
+      </Typography>
+    </Box>
+  );
+};
+
 function App() {
   return (
+    <>
+    {/* Per-route document title, focus reset, scroll reset and a polite
+        route-change announcement — SC 2.4.2 / 2.4.3 / 4.1.3. */}
+    <RouteAnnouncer />
     <Suspense fallback={<PageLoader />}>
     <Routes>
       <Route path="/" element={<Navigate to="/login" replace />} />
@@ -133,6 +172,14 @@ function App() {
       <Route path="/inventory/today" element={<MainLayout><PermissionGuard moduleName="Products" redirect><InventoryOverviewPage /></PermissionGuard></MainLayout>} />
       <Route path="/executive/today" element={<MainLayout><PermissionGuard moduleName="Dashboard" redirect><DashboardPage /></PermissionGuard></MainLayout>} />
       <Route path="/admin/operations" element={<MainLayout><PermissionGuard moduleName="Users" redirect><TenantAdminOperationsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/admin/platform/taxonomy" element={<MainLayout><PermissionGuard moduleName="Users" redirect><TaxonomySkillStudioPage /></PermissionGuard></MainLayout>} />
+      <Route path="/admin/platform/ai-trust" element={<MainLayout><PermissionGuard moduleName="Users" redirect><AiTrustCenterPage /></PermissionGuard></MainLayout>} />
+      <Route path="/admin/platform/lifecycle" element={<MainLayout><PermissionGuard moduleName="Users" redirect><LifecycleStudioPage /></PermissionGuard></MainLayout>} />
+      <Route path="/admin/platform/integrations" element={<MainLayout><PermissionGuard moduleName="Users" redirect><IntegrationHubPage /></PermissionGuard></MainLayout>} />
+      <Route path="/admin/platform/releases" element={<MainLayout><PermissionGuard moduleName="Users" redirect><ReleaseCenterPage /></PermissionGuard></MainLayout>} />
+      <Route path="/admin/platform/archive" element={<MainLayout><PermissionGuard moduleName="Users" redirect><CommercialDocumentArchivePage /></PermissionGuard></MainLayout>} />
+      <Route path="/admin/platform/quality" element={<MainLayout><PermissionGuard moduleName="Users" redirect><QualityAnalyticsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/actions" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><HumanActionCenterPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/team" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><TeamOverviewPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/reps" element={<MainLayout><PermissionGuard moduleName="Users" redirect><RepDirectoryPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/reps/:userId" element={<MainLayout><PermissionGuard moduleName="Users" redirect><RepProfilePage /></PermissionGuard></MainLayout>} />
@@ -140,6 +187,7 @@ function App() {
       <Route path="/sales/routing" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><RoutingQueuePage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/follow-ups" element={<MainLayout><PermissionGuard moduleName="Quotations" redirect><FollowUpsPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/performance" element={<MainLayout><PermissionGuard moduleName="Dashboard" redirect><PerformancePage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/exceptions" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><CommercialExceptionCenterPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/quotes" element={<MainLayout><PermissionGuard moduleName="Quotations" redirect><QuotesPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/quotes/create" element={<MainLayout><PermissionGuard moduleName="Quotations" action="create" redirect><CreateQuotePage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/quotes/view/:id" element={<MainLayout><PermissionGuard moduleName="Quotations" redirect><QuoteViewPage /></PermissionGuard></MainLayout>} />
@@ -173,7 +221,7 @@ function App() {
       <Route path="/procurement/rfqs/outstanding" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><OutstandingRFQsPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/rfqs/process/:id" element={<MainLayout><PermissionGuard moduleName="RFQ Management" action="edit" redirect><ProcessRFQPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/rfqs/view/:id" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><ViewRFQPage /></PermissionGuard></MainLayout>} />
-      <Route path="/procurement/rfqs/:id/pricing" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><RfqPricingPage /></PermissionGuard></MainLayout>} />
+      <Route path="/procurement/rfqs/:id/pricing" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><PermissionGuard moduleName="Quotations" redirect><RfqPricingPage /></PermissionGuard></PermissionGuard></MainLayout>} />
       <Route path="/procurement/rfqs/:rfqId/sourcing" element={<MainLayout><PermissionGuard moduleName="RFQ Management" redirect><SourcingWorkbenchPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/sourcing" element={<Navigate to="/procurement/sourcing-cases" replace />} />
       <Route path="/procurement/sourcing-cases" element={<Navigate to="/procurement/rfqs/all?state=requires-sourcing" replace />} />
@@ -238,6 +286,7 @@ function App() {
       <Route path="/procurement/leads/manual-upload" element={<MainLayout><PermissionGuard moduleName="Leads" action="create" redirect><ManualUploadLeadsPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/leads/ingestion/:batchId" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><LeadIngestionBatchPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/leads/possible-matches" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><PossibleMatchesPage /></PermissionGuard></MainLayout>} />
+      <Route path="/procurement/leads/duplicates" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><DuplicateUploadsPage /></PermissionGuard></MainLayout>} />
       {/* Customer 1 / Customer 2 folder-upload prototype removed from intake. Redirect legacy links to manual upload. */}
       <Route path="/procurement/leads/folder-upload" element={<Navigate to="/procurement/leads/manual-upload" replace />} />
       <Route path="/procurement/leads/view/:id" element={<MainLayout><PermissionGuard moduleName="Leads" redirect><LeadDetailPage /></PermissionGuard></MainLayout>} />
@@ -257,9 +306,10 @@ function App() {
       <Route path="/platform/*" element={<PlatformRoutes />} />
 
       <Route path="/login" element={<LoginPage />} />
-      <Route path="*" element={<Box sx={{ p: 4 }}>404 Not Found</Box>} />
+      <Route path="*" element={<NotFoundPage />} />
     </Routes>
     </Suspense>
+    </>
   );
 }
 

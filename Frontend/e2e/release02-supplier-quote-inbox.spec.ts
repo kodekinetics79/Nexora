@@ -27,6 +27,32 @@ const detail = {
       latestReviewStatus: null, correctedValue: null }],
   }],
 };
+const emptyNegotiation = {
+  currentRound: null,
+  bidQuality: [],
+  recommendations: [],
+  decisions: [],
+  quoteVersion: detail.version,
+};
+
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    const existing = JSON.parse(localStorage.getItem("userData") ?? "{}");
+    localStorage.setItem("userData", JSON.stringify({
+      ...existing,
+      isSuperAdmin: false,
+      permissions: [{
+        id: 101,
+        roleId: 1,
+        moduleId: 101,
+        moduleName: "Supplier History",
+        canCreate: true,
+        canEdit: true,
+        canDelete: false,
+      }],
+    }));
+  });
+});
 
 async function installApi(page: Page) {
   let capture: Request | null = null;
@@ -34,6 +60,8 @@ async function installApi(page: Page) {
   await page.route("**/api/supplier-quote-inbox**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (request.method() === "GET" && path.endsWith(`/${quoteId}/negotiation`))
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(emptyNegotiation) });
     if (request.method() === "GET" && path.endsWith(`/${quoteId}`))
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(detail) });
     if (request.method() === "GET")
@@ -106,6 +134,9 @@ test("reviewed Supplier Quote is promoted into the normal comparison workspace",
       evidence: revision.evidence.map((evidence) => ({ ...evidence, latestReviewStatus: "ACCEPTED" })) })) };
   await page.route("**/api/supplier-quote-inbox/**", async (route) => {
     const request = route.request();
+    if (request.method() === "GET" && request.url().endsWith(`/${quoteId}/negotiation`)) {
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...emptyNegotiation, quoteVersion: 4 }) });
+    }
     if (request.method() === "POST" && request.url().endsWith("/comparison-projections")) {
       projection = request;
       return route.fulfill({ status: 200, contentType: "application/json",

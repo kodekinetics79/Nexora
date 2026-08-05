@@ -25,6 +25,7 @@ import { useAuth } from '../../context/AuthContext';
 import LeadRevisionTimeline from './LeadRevisionTimeline';
 
 import { toast } from 'react-hot-toast';
+import { presentableErrorMessage } from '../../utils/apiErrors';
 
 /**
  * SLA deadline chip (WP-A2): urgency at a glance for the bid closing date.
@@ -114,8 +115,8 @@ const LeadDetailPage: React.FC = () => {
       setDuplicateAction(null);
       queryClient.invalidateQueries({ queryKey: ['lead-detail', Number(id)] });
     },
-    onError: (error: any) => {
-      toast.error(error.response?.data?.message || error.response?.data || 'Could not update the duplicate flag');
+    onError: (error: unknown) => {
+      toast.error(presentableErrorMessage(error, 'The duplicate flag could not be updated. Nothing was changed — try again.'));
     },
   });
 

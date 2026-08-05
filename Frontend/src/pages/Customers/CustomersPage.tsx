@@ -1,13 +1,13 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Chip, IconButton,
   Dialog, DialogTitle, DialogContent, DialogActions,
   Grid, FormControlLabel, Switch, TextField, CircularProgress,
   Table, TableHead, TableRow, TableCell, TableBody,
-  Tooltip, Divider, MenuItem, Select, FormControl, InputLabel,
+  Tooltip, Divider, MenuItem, Select, FormControl, InputLabel, Alert,
 } from '@mui/material';
 import { DataGrid, type GridColDef, type GridPaginationModel } from '@mui/x-data-grid';
 import {
@@ -19,7 +19,7 @@ import {
 } from '@mui/icons-material';
 import { Avatar, Badge, Stack } from '@mui/material';
 import customerService, { type CustomerDTO } from '../../api/services/customerService';
-import contactService, { type ContactDTO } from '../../api/services/contactService';
+import contactService, { type ContactDTO, type ContactMutationRequest } from '../../api/services/contactService';
 import countryService from '../../api/services/countryService';
 import stateService from '../../api/services/stateService';
 import cityService from '../../api/services/cityService';
@@ -45,6 +45,8 @@ const emptyContact = {
   phoneNo: '', mobileNo: '', position: '', isPrimary: false, isActive: true,
 };
 
+const validEmail = (value: string) => !value.trim() || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+
 // ─── Contact inline sub-form ───────────────────────────────────────────────
 const ContactSubForm: React.FC<{
   value: typeof emptyContact;
@@ -53,7 +55,8 @@ const ContactSubForm: React.FC<{
   onCancel: () => void;
   isSaving: boolean;
   isEdit: boolean;
-}> = ({ value, onChange, onSave, onCancel, isSaving, isEdit }) => {
+  errors: { firstName?: string; lastName?: string; email?: string };
+}> = ({ value, onChange, onSave, onCancel, isSaving, isEdit, errors }) => {
   const { t } = useTranslation();
   const f = (field: string) => (e: React.ChangeEvent<HTMLInputElement>) =>
     onChange({ ...value, [field]: e.target.value });
@@ -65,16 +68,16 @@ const ContactSubForm: React.FC<{
       </Typography>
       <Grid container spacing={1.5}>
         <Grid size={{ xs: 12, sm: 4 }}>
-          <TextField size="small" fullWidth label="First Name *" value={value.firstName} onChange={f('firstName')} />
+          <TextField size="small" fullWidth required label="First Name" value={value.firstName} onChange={f('firstName')} error={!!errors.firstName} helperText={errors.firstName} />
         </Grid>
         <Grid size={{ xs: 12, sm: 4 }}>
           <TextField size="small" fullWidth label="Middle Name" value={value.middleName} onChange={f('middleName')} />
         </Grid>
         <Grid size={{ xs: 12, sm: 4 }}>
-          <TextField size="small" fullWidth label="Last Name" value={value.lastName} onChange={f('lastName')} />
+          <TextField size="small" fullWidth required label="Last Name" value={value.lastName} onChange={f('lastName')} error={!!errors.lastName} helperText={errors.lastName} />
         </Grid>
         <Grid size={{ xs: 12, sm: 4 }}>
-          <TextField size="small" fullWidth label="Email" type="email" value={value.email} onChange={f('email')} />
+          <TextField size="small" fullWidth label="Email" type="email" value={value.email} onChange={f('email')} error={!!errors.email} helperText={errors.email} />
         </Grid>
         <Grid size={{ xs: 12, sm: 4 }}>
           <TextField size="small" fullWidth label="Phone No" value={value.phoneNo} onChange={f('phoneNo')} />
@@ -90,10 +93,12 @@ const ContactSubForm: React.FC<{
             control={<Switch size="small" checked={value.isPrimary} onChange={(e) => onChange({ ...value, isPrimary: e.target.checked })} />}
             label={<Typography variant="caption" sx={{ fontWeight: 700 }}>Primary</Typography>}
           />
-          <FormControlLabel
-            control={<Switch size="small" checked={value.isActive} onChange={(e) => onChange({ ...value, isActive: e.target.checked })} />}
-            label={<Typography variant="caption" sx={{ fontWeight: 700 }}>Active</Typography>}
-          />
+          {isEdit
+            ? <Chip size="small" label={value.isActive ? 'Active' : 'Inactive'} color={value.isActive ? 'success' : 'default'} variant="outlined" />
+            : <FormControlLabel
+                control={<Switch size="small" checked={value.isActive} onChange={(e) => onChange({ ...value, isActive: e.target.checked })} />}
+                label={<Typography variant="caption" sx={{ fontWeight: 700 }}>Active</Typography>}
+              />}
         </Grid>
         <Grid size={{ xs: 12 }} sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1 }}>
           <Button size="small" onClick={onCancel} color="inherit" startIcon={<CloseIcon />}>Cancel</Button>
@@ -111,11 +116,13 @@ const ContactSubForm: React.FC<{
 const CustomersPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { userData, hasPermission } = useAuth();
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
   const canCreate = hasPermission('Customers', 'create');
   const canEdit = hasPermission('Customers', 'edit');
+  const canDelete = hasPermission('Customers', 'delete');
 
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
   const [search, setSearch] = useState('');
@@ -123,14 +130,19 @@ const CustomersPage: React.FC = () => {
   const [selectedRecord, setSelectedRecord] = useState<CustomerDTO | null>(null);
   const [formData, setFormData] = useState<CustomerFormState>(emptyCustomer);
   const [sameAsB, setSameAsB] = useState(false);
+  const [customerErrors, setCustomerErrors] = useState<{ name?: string; contactEmail?: string }>({});
 
   // Contact state
   const [showContactForm, setShowContactForm] = useState(false);
   const [editingContact, setEditingContact] = useState<ContactDTO | null>(null);
   const [contactForm, setContactForm] = useState(emptyContact);
+  const [contactErrors, setContactErrors] = useState<{ firstName?: string; lastName?: string; email?: string }>({});
+  const [contactToDeactivate, setContactToDeactivate] = useState<ContactDTO | null>(null);
+  const [customerToDeactivate, setCustomerToDeactivate] = useState<CustomerDTO | null>(null);
+  const editCustomerId = Number(searchParams.get('edit'));
 
   // ── Queries ──
-  const { data, isLoading } = useQuery({
+  const customerListQuery = useQuery({
     queryKey: ['customers', paginationModel, search],
     queryFn: () => customerService.getAll({
       pageNumber: paginationModel.page + 1,
@@ -138,12 +150,21 @@ const CustomersPage: React.FC = () => {
       name: search || undefined,
     }),
   });
+  const { data, isLoading } = customerListQuery;
 
-  const { data: contacts = [], isLoading: contactsLoading } = useQuery({
+  const requestedCustomerQuery = useQuery({
+    queryKey: ['customer-detail', editCustomerId],
+    queryFn: () => customerService.getById(editCustomerId),
+    enabled: canEdit && Number.isInteger(editCustomerId) && editCustomerId > 0,
+    retry: false,
+  });
+
+  const contactsQuery = useQuery({
     queryKey: ['customer-contacts', selectedRecord?.id],
     queryFn: () => contactService.getByCustomer(selectedRecord!.id),
     enabled: !!selectedRecord?.id && isModalOpen,
   });
+  const { data: contacts = [], isLoading: contactsLoading } = contactsQuery;
 
   const f = (field: string) => (e: React.ChangeEvent<HTMLInputElement | { name?: string; value: unknown }>) =>
     setFormData(p => ({ ...p, [field]: e.target.value }));
@@ -210,27 +231,38 @@ const CustomersPage: React.FC = () => {
     onError: () => enqueueSnackbar('Failed to update customer', { variant: 'error' }),
   });
 
+  const deactivateCustomerMutation = useMutation({
+    mutationFn: (customer: CustomerDTO) => customerService.delete(customer.id, customer.concurrencyToken),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['customers'] });
+      enqueueSnackbar('Customer and active contacts deactivated', { variant: 'success' });
+      setCustomerToDeactivate(null);
+      setIsModalOpen(false);
+    },
+    onError: () => enqueueSnackbar('Failed to deactivate customer. Reload the record and try again.', { variant: 'error' }),
+  });
+
   // ── Contact mutations ──
   const createContactMutation = useMutation({
-    mutationFn: (body: Partial<ContactDTO>) => contactService.create(body),
+    mutationFn: (body: ContactMutationRequest) => contactService.create(body),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['customer-contacts', selectedRecord?.id] }); enqueueSnackbar('Contact added!', { variant: 'success' }); setShowContactForm(false); setContactForm(emptyContact); },
     onError: () => enqueueSnackbar('Failed to add contact', { variant: 'error' }),
   });
 
   const updateContactMutation = useMutation({
-    mutationFn: ({ id, body }: { id: number; body: Partial<ContactDTO> }) => contactService.update(id, body),
+    mutationFn: ({ id, body }: { id: number; body: ContactMutationRequest }) => contactService.update(id, body),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['customer-contacts', selectedRecord?.id] }); enqueueSnackbar('Contact updated!', { variant: 'success' }); setShowContactForm(false); setEditingContact(null); setContactForm(emptyContact); },
     onError: () => enqueueSnackbar('Failed to update contact', { variant: 'error' }),
   });
 
   const deleteContactMutation = useMutation({
-    mutationFn: (id: number) => contactService.delete(id),
+    mutationFn: (contact: ContactDTO) => contactService.delete(contact.id, contact.concurrencyToken),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['customer-contacts', selectedRecord?.id] }); enqueueSnackbar('Contact removed', { variant: 'info' }); },
     onError: () => enqueueSnackbar('Failed to delete contact', { variant: 'error' }),
   });
 
   // ── Handlers ──
-  const handleEdit = (record: CustomerDTO) => {
+  const handleEdit = React.useCallback((record: CustomerDTO) => {
     setSelectedRecord(record);
     setFormData({
       name: record.name ?? '', contactEmail: record.contactEmail ?? '',
@@ -244,8 +276,20 @@ const CustomersPage: React.FC = () => {
     });
     setSameAsB(false);
     setShowContactForm(false);
+    setCustomerErrors({});
+    setContactErrors({});
     setIsModalOpen(true);
-  };
+  }, []);
+
+  useEffect(() => {
+    if (!requestedCustomerQuery.data) return;
+    handleEdit(requestedCustomerQuery.data);
+    setSearchParams(current => {
+      const next = new URLSearchParams(current);
+      next.delete('edit');
+      return next;
+    }, { replace: true });
+  }, [handleEdit, requestedCustomerQuery.data, setSearchParams]);
 
   const handleAddNew = () => {
     setSelectedRecord(null);
@@ -253,19 +297,29 @@ const CustomersPage: React.FC = () => {
     setSameAsB(false);
     setShowContactForm(false);
     setContactForm(emptyContact);
+    setCustomerErrors({});
+    setContactErrors({});
     setIsModalOpen(true);
   };
 
   const handleSaveCustomer = () => {
+    const errors = {
+      name: formData.name.trim() ? undefined : 'Customer name is required.',
+      contactEmail: validEmail(formData.contactEmail) ? undefined : 'Enter a valid email address.',
+    };
+    setCustomerErrors(errors);
+    if (errors.name || errors.contactEmail) return;
+
     const fd = new FormData();
     Object.entries(formData).forEach(([k, v]) => {
+      if (selectedRecord && k === 'isActive') return;
       if (k === 'imageFile') {
         if (v) fd.append('ImageFile', v as File);
       } else {
         fd.append(k, String(v));
       }
     });
-    fd.append(selectedRecord ? 'modifiedBy' : 'createdBy', userData.userName || 'System');
+    if (selectedRecord) fd.append('ConcurrencyToken', selectedRecord.concurrencyToken);
     selectedRecord
       ? updateMutation.mutate({ id: selectedRecord.id, fd })
       : createMutation.mutate(fd);
@@ -273,6 +327,14 @@ const CustomersPage: React.FC = () => {
 
   const handleSaveContact = () => {
     if (!selectedRecord) return;
+
+    const errors = {
+      firstName: contactForm.firstName.trim() ? undefined : 'First name is required.',
+      lastName: contactForm.lastName.trim() ? undefined : 'Last name is required.',
+      email: validEmail(contactForm.email) ? undefined : 'Enter a valid email address.',
+    };
+    setContactErrors(errors);
+    if (errors.firstName || errors.lastName || errors.email) return;
 
     // Validate IsPrimary: Only one primary contact per parent
     if (contactForm.isPrimary) {
@@ -283,11 +345,12 @@ const CustomersPage: React.FC = () => {
       }
     }
 
-    const body: Partial<ContactDTO> = {
-      ...contactForm,
+    const { isActive, ...editableContact } = contactForm;
+    const body: ContactMutationRequest = {
+      ...editableContact,
       customerId: selectedRecord.id,
-      createdBy: userData.userName || 'System',
-      ...(editingContact ? { modifiedBy: userData.userName || 'System' } : {}),
+      ...(!editingContact ? { isActive } : {}),
+      ...(editingContact ? { concurrencyToken: editingContact.concurrencyToken } : {}),
     };
     editingContact
       ? updateContactMutation.mutate({ id: editingContact.id, body })
@@ -297,6 +360,7 @@ const CustomersPage: React.FC = () => {
   const openEditContact = (c: ContactDTO) => {
     setEditingContact(c);
     setContactForm({ firstName: c.firstName ?? '', middleName: c.middleName ?? '', lastName: c.lastName ?? '', email: c.email ?? '', phoneNo: c.phoneNo ?? '', mobileNo: c.mobileNo ?? '', position: c.position ?? '', isPrimary: c.isPrimary ?? false, isActive: c.isActive ?? true });
+    setContactErrors({});
     setShowContactForm(true);
   };
 
@@ -313,7 +377,7 @@ const CustomersPage: React.FC = () => {
     { 
       field: 'actions', 
       headerName: t('actions'), 
-      width: 120, 
+      width: 160,
       sortable: false, 
       renderCell: (p) => (
         <Stack direction="row" spacing={0.5}>
@@ -322,6 +386,9 @@ const CustomersPage: React.FC = () => {
           </Tooltip>
           {canEdit && <Tooltip title="Edit">
             <IconButton size="small" color="info" onClick={() => handleEdit(p.row)}><EditIcon fontSize="small" /></IconButton>
+          </Tooltip>}
+          {canDelete && p.row.isActive && <Tooltip title="Deactivate customer">
+            <IconButton size="small" color="error" onClick={() => setCustomerToDeactivate(p.row)}><DeleteIcon fontSize="small" /></IconButton>
           </Tooltip>}
         </Stack>
       )
@@ -354,9 +421,21 @@ const CustomersPage: React.FC = () => {
         <SearchField value={search} onChange={setSearch} placeholder="Search customers..." />
       </Paper>
 
+      {requestedCustomerQuery.isError && (
+        <Alert severity="error" sx={{ mb: 1.5 }} action={<Button color="inherit" onClick={() => void requestedCustomerQuery.refetch()}>Retry</Button>}>
+          The requested customer could not be opened for editing.
+        </Alert>
+      )}
+
+      {customerListQuery.isError && (
+        <Alert severity="error" sx={{ mb: 1.5 }} action={<Button color="inherit" onClick={() => void customerListQuery.refetch()}>Retry</Button>}>
+          Customers could not be loaded. No empty result has been assumed.
+        </Alert>
+      )}
+
       {/* Grid */}
       <Paper sx={{ height: 'calc(100vh - 220px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
-        <DataGrid rows={data?.items ?? []} columns={columns} rowCount={data?.totalCount ?? 0} loading={isLoading} pageSizeOptions={[10, 25, 50]} paginationModel={paginationModel} paginationMode="server" onPaginationModelChange={setPaginationModel} getRowId={(r) => r.id} disableRowSelectionOnClick />
+        <DataGrid aria-label="Customers" rows={customerListQuery.isError ? [] : data?.items ?? []} columns={columns} rowCount={customerListQuery.isError ? 0 : data?.totalCount ?? 0} loading={isLoading} pageSizeOptions={[10, 25, 50]} paginationModel={paginationModel} paginationMode="server" onPaginationModelChange={setPaginationModel} getRowId={(r) => r.id} disableRowSelectionOnClick />
       </Paper>
 
       {/* ── Dialog ─────────────────────────────────────────────────────────── */}
@@ -421,16 +500,18 @@ const CustomersPage: React.FC = () => {
 
             <Grid container spacing={2} sx={{ flex: 1 }}>
               <Grid size={{ xs: 12, sm: 6 }}>
-                <TextField fullWidth label="Customer Name *" value={formData.name} onChange={f('name')} />
+                <TextField fullWidth required label="Customer Name" value={formData.name} onChange={f('name')} error={!!customerErrors.name} helperText={customerErrors.name} />
               </Grid>
               <Grid size={{ xs: 12, sm: 6 }}>
-                <TextField fullWidth label="Contact Email" type="email" value={formData.contactEmail} onChange={f('contactEmail')} />
+                <TextField fullWidth label="Contact Email" type="email" value={formData.contactEmail} onChange={f('contactEmail')} error={!!customerErrors.contactEmail} helperText={customerErrors.contactEmail} />
               </Grid>
               <Grid size={{ xs: 12 }}>
-                <FormControlLabel
-                  control={<Switch checked={formData.isActive} onChange={(e) => setFormData(p => ({ ...p, isActive: e.target.checked }))} color="success" />}
-                  label={<Typography variant="subtitle2" sx={{ fontWeight: 700 }}>Active Status</Typography>}
-                />
+                {selectedRecord
+                  ? <Chip label={formData.isActive ? 'Active' : 'Inactive'} color={formData.isActive ? 'success' : 'default'} variant="outlined" />
+                  : <FormControlLabel
+                      control={<Switch checked={formData.isActive} onChange={(e) => setFormData(p => ({ ...p, isActive: e.target.checked }))} color="success" />}
+                      label={<Typography variant="subtitle2" sx={{ fontWeight: 700 }}>Active Status</Typography>}
+                    />}
               </Grid>
             </Grid>
           </Box>
@@ -572,7 +653,7 @@ const CustomersPage: React.FC = () => {
             <Typography variant="overline" sx={{ fontWeight: 800, color: 'text.secondary', letterSpacing: '0.08em' }}>
               Contacts {selectedRecord && !contactsLoading && `(${contacts.length})`}
             </Typography>
-            {selectedRecord && !showContactForm && (
+            {selectedRecord && canCreate && !showContactForm && (
               <Button size="small" variant="outlined" startIcon={<PersonAddIcon />}
                 onClick={() => { setEditingContact(null); setContactForm(emptyContact); setShowContactForm(true); }}
                 sx={{ fontWeight: 700, textTransform: 'none' }}>
@@ -595,11 +676,18 @@ const CustomersPage: React.FC = () => {
               onCancel={() => { setShowContactForm(false); setEditingContact(null); setContactForm(emptyContact); }}
               isSaving={createContactMutation.isPending || updateContactMutation.isPending}
               isEdit={!!editingContact}
+              errors={contactErrors}
             />
           )}
 
-          {selectedRecord && !contactsLoading && contacts.length > 0 && (
-            <Table size="small" sx={{ mt: 1 }}>
+          {selectedRecord && contactsQuery.isError && (
+            <Alert severity="error" action={<Button color="inherit" onClick={() => void contactsQuery.refetch()}>Retry</Button>}>
+              Contacts could not be loaded. No empty result has been assumed.
+            </Alert>
+          )}
+
+          {selectedRecord && !contactsQuery.isError && !contactsLoading && contacts.length > 0 && (
+            <Table size="small" aria-label="Customer contacts" sx={{ mt: 1 }}>
               <TableHead>
                 <TableRow sx={{ '& th': { fontWeight: 800, fontSize: '0.72rem', color: 'text.secondary', textTransform: 'uppercase', letterSpacing: '0.05em', py: 0.8 } }}>
                   <TableCell>Name</TableCell>
@@ -627,14 +715,14 @@ const CustomersPage: React.FC = () => {
                       <Chip label={c.isActive ? 'Active' : 'Inactive'} color={c.isActive ? 'success' : 'default'} size="small" variant="outlined" sx={{ height: 18, fontSize: '0.65rem', fontWeight: 800 }} />
                     </TableCell>
                     <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>
-                      <Tooltip title="Edit">
+                      {canEdit && <Tooltip title="Edit contact">
                         <IconButton size="small" onClick={() => openEditContact(c)}><EditIcon fontSize="small" /></IconButton>
-                      </Tooltip>
-                      <Tooltip title="Remove">
-                        <IconButton size="small" color="error" onClick={() => deleteContactMutation.mutate(c.id)}>
+                      </Tooltip>}
+                      {canDelete && c.isActive && <Tooltip title="Deactivate contact">
+                        <IconButton size="small" color="error" disabled={deleteContactMutation.isPending} onClick={() => setContactToDeactivate(c)}>
                           <DeleteIcon fontSize="small" />
                         </IconButton>
-                      </Tooltip>
+                      </Tooltip>}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -642,7 +730,7 @@ const CustomersPage: React.FC = () => {
             </Table>
           )}
 
-          {selectedRecord && !contactsLoading && contacts.length === 0 && !showContactForm && (
+          {selectedRecord && !contactsQuery.isError && !contactsLoading && contacts.length === 0 && !showContactForm && (
             <Box sx={{ textAlign: 'center', py: 3 }}>
               <PersonAddIcon sx={{ fontSize: 36, color: 'action.disabled', mb: 0.5 }} />
               <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>No contacts yet. Click "Add Contact" to add one.</Typography>
@@ -652,9 +740,48 @@ const CustomersPage: React.FC = () => {
         </DialogContent>
 
         <DialogActions sx={{ p: 2 }}>
+          {selectedRecord && canDelete && selectedRecord.isActive && (
+            <Button color="error" startIcon={<DeleteIcon />} onClick={() => setCustomerToDeactivate(selectedRecord)} sx={{ mr: 'auto' }}>
+              Deactivate
+            </Button>
+          )}
           <Button onClick={() => setIsModalOpen(false)} color="inherit">Cancel</Button>
           <Button variant="contained" onClick={handleSaveCustomer} disabled={isBusy}>
             {isBusy ? <CircularProgress size={22} /> : 'Save Customer'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={!!customerToDeactivate} onClose={() => !deactivateCustomerMutation.isPending && setCustomerToDeactivate(null)} aria-labelledby="deactivate-customer-title">
+        <DialogTitle id="deactivate-customer-title">Deactivate customer?</DialogTitle>
+        <DialogContent>
+          <Alert severity="warning" sx={{ mb: 1.5 }}>All active contacts for this customer will also be deactivated.</Alert>
+          <Typography variant="body2">
+            {customerToDeactivate ? `${customerToDeactivate.name} will no longer be available for new commercial work. Historical records remain intact.` : ''}
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button color="inherit" disabled={deactivateCustomerMutation.isPending} onClick={() => setCustomerToDeactivate(null)}>Cancel</Button>
+          <Button color="error" variant="contained" disabled={deactivateCustomerMutation.isPending} onClick={() => customerToDeactivate && deactivateCustomerMutation.mutate(customerToDeactivate)}>
+            {deactivateCustomerMutation.isPending ? <CircularProgress size={20} /> : 'Deactivate customer'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={!!contactToDeactivate} onClose={() => !deleteContactMutation.isPending && setContactToDeactivate(null)} aria-labelledby="deactivate-contact-title">
+        <DialogTitle id="deactivate-contact-title">Deactivate contact?</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            {contactToDeactivate ? `${[contactToDeactivate.firstName, contactToDeactivate.lastName].filter(Boolean).join(' ')} will no longer be available for new customer work.` : ''}
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button color="inherit" disabled={deleteContactMutation.isPending} onClick={() => setContactToDeactivate(null)}>Cancel</Button>
+          <Button color="error" variant="contained" disabled={deleteContactMutation.isPending} onClick={() => {
+            if (!contactToDeactivate) return;
+            deleteContactMutation.mutate(contactToDeactivate, { onSuccess: () => setContactToDeactivate(null) });
+          }}>
+            {deleteContactMutation.isPending ? <CircularProgress size={20} /> : 'Deactivate'}
           </Button>
         </DialogActions>
       </Dialog>

@@ -9,6 +9,8 @@ public static class CommercialRoutingModelBuilderExtensions
     {
         ArgumentNullException.ThrowIfNull(modelBuilder);
 
+        modelBuilder.Entity<Lead>().HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
+
         modelBuilder.Entity<CustomerIdentifier>(entity =>
         {
             entity.ToTable("customer_identifiers");
@@ -26,6 +28,7 @@ public static class CommercialRoutingModelBuilderExtensions
                 .HasFilter("\"EffectiveTo\" IS NULL AND \"IdentifierType\" IN ('ErpAccount', 'TaxRegistration', 'Email', 'Phone')")
                 .HasDatabaseName("UX_customer_identifiers_authoritative");
             entity.HasIndex(x => new { x.BusinessUnitId, x.CustomerId });
+            entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
             entity.HasOne<Customer>().WithMany()
                 .HasForeignKey(x => new { x.BusinessUnitId, x.CustomerId })
                 .HasPrincipalKey(x => new { x.Buid, x.Id }).OnDelete(DeleteBehavior.Restrict);
@@ -47,9 +50,12 @@ public static class CommercialRoutingModelBuilderExtensions
                 .HasFilter("\"IsActive\" = TRUE AND \"EffectiveTo\" IS NULL")
                 .HasDatabaseName("UX_customer_ownerships_single_active");
             entity.HasIndex(x => new { x.BusinessUnitId, x.Scope, x.ScopeKey });
+            entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
             entity.HasIndex(x => new { x.BusinessUnitId, x.MutationIdempotencyKey }).IsUnique()
                 .HasFilter("\"MutationIdempotencyKey\" IS NOT NULL");
-            entity.HasOne<Customer>().WithMany().HasForeignKey(x => x.CustomerId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Customer>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.CustomerId })
+                .HasPrincipalKey(x => new { x.Buid, x.Id }).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne<User>().WithMany().HasForeignKey(x => x.PrimaryUserId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne<User>().WithMany().HasForeignKey(x => x.BackupUserId).OnDelete(DeleteBehavior.Restrict);
         });
@@ -68,10 +74,19 @@ public static class CommercialRoutingModelBuilderExtensions
             entity.Property(x => x.IdempotencyKey).HasMaxLength(160).IsRequired();
             entity.HasIndex(x => new { x.BusinessUnitId, x.IdempotencyKey }).IsUnique();
             entity.HasIndex(x => new { x.BusinessUnitId, x.LeadId, x.CreatedOn });
-            entity.HasOne<Lead>().WithMany().HasForeignKey(x => x.LeadId).OnDelete(DeleteBehavior.Restrict);
-            entity.HasOne<Customer>().WithMany().HasForeignKey(x => x.CustomerId).OnDelete(DeleteBehavior.Restrict);
-            entity.HasOne<CustomerIdentifier>().WithMany().HasForeignKey(x => x.MatchedIdentifierId).OnDelete(DeleteBehavior.Restrict);
-            entity.HasOne<CustomerOwnership>().WithMany().HasForeignKey(x => x.OwnershipId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
+            entity.HasOne<Lead>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.LeadId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Customer>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.CustomerId })
+                .HasPrincipalKey(x => new { x.Buid, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<CustomerIdentifier>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.MatchedIdentifierId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<CustomerOwnership>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.OwnershipId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<LeadAssignment>(entity =>
@@ -89,9 +104,15 @@ public static class CommercialRoutingModelBuilderExtensions
             entity.HasIndex(x => new { x.BusinessUnitId, x.LeadId })
                 .IsUnique()
                 .HasFilter("\"EffectiveTo\" IS NULL");
-            entity.HasOne<Lead>().WithMany().HasForeignKey(x => x.LeadId).OnDelete(DeleteBehavior.Restrict);
-            entity.HasOne<CustomerOwnership>().WithMany().HasForeignKey(x => x.OwnershipId).OnDelete(DeleteBehavior.Restrict);
-            entity.HasOne(x => x.RoutingDecision).WithMany().HasForeignKey(x => x.RoutingDecisionId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Lead>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.LeadId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<CustomerOwnership>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.OwnershipId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(x => x.RoutingDecision).WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.RoutingDecisionId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne<User>().WithMany().HasForeignKey(x => x.ToUserId).OnDelete(DeleteBehavior.Restrict);
         });
 
@@ -113,8 +134,12 @@ public static class CommercialRoutingModelBuilderExtensions
             entity.HasIndex(x => new { x.BusinessUnitId, x.LeadId })
                 .IsUnique()
                 .HasFilter("\"Status\" IN ('Open', 'Claimed')");
-            entity.HasOne<Lead>().WithMany().HasForeignKey(x => x.LeadId).OnDelete(DeleteBehavior.Restrict);
-            entity.HasOne(x => x.RoutingDecision).WithMany().HasForeignKey(x => x.RoutingDecisionId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Lead>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.LeadId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(x => x.RoutingDecision).WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.RoutingDecisionId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
         });
 
         return modelBuilder;

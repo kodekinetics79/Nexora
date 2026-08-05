@@ -42,6 +42,154 @@ export interface SupplierQuoteLine {
   leadTimeDays: number | null;
 }
 
+export type NegotiationDisposition = "PREPARED" | "DEFERRED" | "DISMISSED";
+
+export interface NegotiationEvidence {
+  label: string;
+  value: string;
+  source?: string | null;
+}
+
+export interface SupplierBidQualityFlag {
+  code: string;
+  label: string;
+  severity: "INFO" | "WARNING" | "CRITICAL";
+  blocking: boolean;
+  explanation: string;
+  evidence: NegotiationEvidence[];
+  limitations: string[];
+  confidence?: number | null;
+  sampleSize?: number | null;
+}
+
+export interface SupplierNegotiationRecommendation {
+  code: string;
+  title: string;
+  summary: string;
+  rationale: string;
+  confidence: number | null;
+  targetValue?: number | null;
+  targetUnit?: string | null;
+  constraints: string[];
+  evidence: NegotiationEvidence[];
+  limitations: string[];
+  expiresOn?: string | null;
+  sampleSize?: number | null;
+  mode?: string | null;
+}
+
+export interface SupplierNegotiationDecision {
+  id: number;
+  supplierQuoteRevisionId: number;
+  recommendationCode: string;
+  disposition: NegotiationDisposition;
+  reason: string;
+  decidedOn: string;
+  decidedBy?: string | null;
+}
+
+export interface SupplierNegotiationRound {
+  roundNumber: number;
+  currencyCode: string;
+  validUntil?: string | null;
+  incoterms?: string | null;
+  paymentTerms?: string | null;
+  freightAmount?: number | null;
+  taxAmount?: number | null;
+  capturedOn?: string | null;
+}
+
+export interface SupplierQuoteNegotiation {
+  currentRound: SupplierNegotiationRound | null;
+  bidQuality: SupplierBidQualityFlag[];
+  recommendations: SupplierNegotiationRecommendation[];
+  decisions: SupplierNegotiationDecision[];
+  decisionTotal: number;
+  decisionsTruncated: boolean;
+  quoteVersion: number;
+}
+
+export interface RecordNegotiationDecisionRequest {
+  recommendationCode: string;
+  disposition: NegotiationDisposition;
+  reason: string;
+  expectedQuoteVersion: number;
+}
+
+interface SupplierQuoteNegotiationWire {
+  currentRound: SupplierNegotiationRound;
+  quoteVersion: number;
+  mode: string;
+  policyVersion: string;
+  priorDecisionTotal: number;
+  priorDecisionsTruncated: boolean;
+  recommendations: Array<Omit<SupplierNegotiationRecommendation, "summary" | "constraints" | "evidence"> & {
+    summary?: string;
+    constraints?: string[];
+    evidence: Array<NegotiationEvidence | string>;
+  }>;
+  bidFlags: Array<Omit<SupplierBidQualityFlag, "label" | "evidence" | "limitations"> & {
+    label?: string;
+    evidence: Array<NegotiationEvidence | string>;
+    limitations?: string[];
+  }>;
+  priorDecisions: Array<Omit<SupplierNegotiationDecision, "id" | "decidedBy"> & {
+    decisionId: number;
+    actor?: string | null;
+  }>;
+}
+
+const readableCode = (value: string) =>
+  value.replaceAll("_", " ").toLowerCase().replace(/(^|\s)\S/g, (letter) => letter.toUpperCase());
+
+const normalizeEvidence = (items?: Array<NegotiationEvidence | string>): NegotiationEvidence[] =>
+  (items ?? []).map((item) =>
+    typeof item === "string" ? { label: "Evidence", value: item } : item,
+  );
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const normalizeNegotiation = (value: unknown): SupplierQuoteNegotiation => {
+  if (!isRecord(value) || !isRecord(value.currentRound) ||
+    !Number.isInteger(value.quoteVersion) || Number(value.quoteVersion) <= 0 ||
+    !Number.isInteger(value.priorDecisionTotal) || Number(value.priorDecisionTotal) < 0 ||
+    typeof value.priorDecisionsTruncated !== "boolean" ||
+    !Array.isArray(value.bidFlags) || !Array.isArray(value.recommendations) ||
+    !Array.isArray(value.priorDecisions) || typeof value.mode !== "string" ||
+    typeof value.policyVersion !== "string") {
+    throw new Error("Supplier negotiation response does not match the required contract.");
+  }
+  const data = value as unknown as SupplierQuoteNegotiationWire;
+  if (!Number.isInteger(data.currentRound.roundNumber) || !data.currentRound.currencyCode) {
+    throw new Error("Supplier negotiation round is incomplete.");
+  }
+  return {
+    currentRound: data.currentRound,
+    quoteVersion: data.quoteVersion,
+    decisionTotal: data.priorDecisionTotal,
+    decisionsTruncated: data.priorDecisionsTruncated,
+    bidQuality: data.bidFlags.map((flag) => ({
+      ...flag,
+      label: flag.label ?? readableCode(flag.code),
+      evidence: normalizeEvidence(flag.evidence),
+      limitations: flag.limitations ?? [],
+    })),
+    recommendations: data.recommendations.map((item) => ({
+      ...item,
+      summary: item.summary ?? item.rationale,
+      constraints: item.constraints ?? [],
+      evidence: normalizeEvidence(item.evidence),
+      limitations: item.limitations ?? [],
+    })),
+    decisions: data.priorDecisions.map((item) => ({
+      ...item,
+      id: item.decisionId,
+      decidedBy: item.actor ?? null,
+    })),
+  };
+};
+
 export interface SupplierQuoteRevision {
   revisionId: number;
   revisionNumber: number;
@@ -140,6 +288,12 @@ const supplierQuoteService = {
     const response = await axiosInstance.get<SupplierQuoteDetail>(`/api/supplier-quote-inbox/${id}`);
     return response.data;
   },
+  getNegotiation: async (id: number): Promise<SupplierQuoteNegotiation> => {
+    const response = await axiosInstance.get<unknown>(
+      `/api/supplier-quote-inbox/${id}/negotiation`,
+    );
+    return normalizeNegotiation(response.data);
+  },
   capture: async (request: CaptureSupplierQuoteRequest) => {
     const response = await axiosInstance.post("/api/supplier-quote-inbox", request, {
       headers: headers(crypto.randomUUID()),
@@ -171,6 +325,18 @@ const supplierQuoteService = {
       `/api/supplier-quote-inbox/${supplierQuoteId}/comparison-projections`,
       { expectedVersion },
       { headers: headers(crypto.randomUUID()) },
+    );
+    return response.data;
+  },
+  recordNegotiationDecision: async (
+    supplierQuoteId: number,
+    request: RecordNegotiationDecisionRequest,
+    idempotencyKey: string,
+  ) => {
+    const response = await axiosInstance.post<SupplierNegotiationDecision>(
+      `/api/supplier-quote-inbox/${supplierQuoteId}/negotiation-decisions`,
+      request,
+      { headers: headers(idempotencyKey) },
     );
     return response.data;
   },
