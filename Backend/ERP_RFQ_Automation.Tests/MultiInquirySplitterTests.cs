@@ -183,13 +183,26 @@ public class MultiInquirySplitterTests
     [Fact]
     public async Task Unstructured_NeedsReview_NeverGuessSplits()
     {
-        // 3 parsed rows but only 2 extracted -> NeedsReview; grouped labels must NOT split.
+        // A TRUE review signal — incomplete OCR, content is known to be missing — must keep
+        // the document one flagged lead: grouped labels must NOT split it. (Fewer items
+        // than parsed text LINES is deliberately no longer such a signal: lines are not
+        // items, and that false "Item count mismatch" used to force NeedsReview on every
+        // unstructured document, which silently disabled this splitter entirely.)
         var items = new List<LeadItemData> { Grouped("RFQ-A"), Grouped("RFQ-B") };
         var llm = new StubLlm(Ext.Result(items, 0.9));
+        var input = new DocumentExtractionInput
+        {
+            BusinessUnitId = 1,
+            HeaderText = "buyer: Acme",
+            LineItemRegions = Enumerable.Range(0, 3).Select(i => $"row {i}").ToList(),
+            OcrStatus = ExtractionOcrStatus.Partial,
+            OcrTruncated = true
+        };
 
-        var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(3));
+        var outcome = await NewService(llm).ExtractUnstructuredAsync(input);
 
         Assert.Equal(ExtractionOutcomeStatus.NeedsReview, outcome.Status);
+        Assert.Contains("OCR was incomplete", outcome.ReviewReason);
         Assert.Null(outcome.SplitResults);
     }
 

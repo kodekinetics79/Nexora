@@ -1,3 +1,4 @@
+import axios from 'axios';
 import axiosInstance from '../axiosInstance';
 
 export interface LeadFilters {
@@ -16,6 +17,28 @@ export interface LeadFilters {
   view?: string;
 }
 
+/**
+ * One machine-proposed client organisation for a lead, ranked best-first.
+ *
+ * Produced by the deterministic customer resolver — never by an LLM — so every
+ * candidate carries the evidence that produced it (`reasonCode`) and, when the
+ * backend can phrase it, a human sentence (`explanation`, e.g. "shares sender
+ * domain se.com.sa"). A candidate is a SUGGESTION: the lead's `customerId`
+ * stays null until a person confirms one. Contract: §7 ClientCandidateDTO.
+ */
+export interface ClientCandidateDTO {
+  /** 1-based; 1 is the strongest candidate. */
+  rank: number;
+  customerId: number;
+  customerName?: string | null;
+  /** 0..1. */
+  confidence: number;
+  /** See `LeadResponseDTO.customerMatchReasonCode` for the vocabulary. */
+  reasonCode?: string | null;
+  /** Backend-authored plain sentence; the UI falls back to reason-code copy. */
+  explanation?: string | null;
+}
+
 export interface LeadResponseDTO {
   id: number;
   commercialCaseId?: number | null;
@@ -25,7 +48,35 @@ export interface LeadResponseDTO {
   contactId?: number | null;
   customerName?: string | null;
   accountOwnerName?: string | null;
+  /**
+   * UNRESOLVED | SUGGESTED | AMBIGUOUS | AUTO_MATCHED |
+   * AUTO_MATCHED_CONTACT_UNRESOLVED | CONFIRMED |
+   * CUSTOMER_CONFIRMED_CONTACT_UNRESOLVED | VERIFIED_EMAIL.
+   *
+   * Invariant enforced by the database: `customerId` is non-null only for the
+   * last five. SUGGESTED/AMBIGUOUS never carry a customer link.
+   */
   customerMatchStatus: string;
+  /**
+   * Why the machine reached that status. SENDER_EMAIL_EXACT | SENDER_DOMAIN |
+   * ERP_ACCOUNT_EXACT | TAX_REG_EXACT | LEARNED_ALIAS | LEARNED_PORTAL_ACCOUNT |
+   * NAME_EXACT_UNVERIFIED | NAME_FUZZY | RFQ_PATTERN | PRIOR_SENDER |
+   * CONTACT_PERSON | NO_EVIDENCE | NO_MATCH | AMBIGUOUS.
+   * Absent on payloads that predate client-organisation identity.
+   */
+  customerMatchReasonCode?: string | null;
+  /** 0..1 confidence behind `customerMatchStatus`. */
+  customerMatchConfidence?: number | null;
+  /** The buying organisation as printed on the document (never our own name). */
+  customerCompanyNameExtracted?: string | null;
+  /** ≤120-char verbatim snippet that names the buying organisation. */
+  customerCompanyEvidence?: string | null;
+  /** e.g. "MATERIALS E-BIDDING SYSTEM", "Ariba", "Etimad". */
+  customerPortalNameExtracted?: string | null;
+  /** OUR vendor code at the customer's portal, e.g. "2004414". */
+  supplierAccountRefOnDocument?: string | null;
+  /** ≤3 on list responses, ≤5 on detail. Empty/absent when nothing was proposed. */
+  clientCandidates?: ClientCandidateDTO[] | null;
   rfqno: string;
   buyersName: string;
   leadSource: string;
@@ -114,6 +165,18 @@ export interface AcceptedLeadResponseDTO {
   leadId: number;
   rfqno: string;
   buyersName: string;
+  clientemail?: string | null;
+  leadSource?: string;
+  // Client organisation identity. Optional across the board: /api/UnAssignedLead
+  // predates client-organisation identity, so these queues degrade to the
+  // "unresolved" cell (an explicit "Set client" affordance) rather than
+  // guessing a link. Same vocabulary as LeadResponseDTO.
+  customerId?: number | null;
+  customerName?: string | null;
+  customerMatchStatus?: string | null;
+  customerMatchReasonCode?: string | null;
+  customerMatchConfidence?: number | null;
+  clientCandidates?: ClientCandidateDTO[] | null;
   acceptedDate: string;
   assignedToFullName?: string;
   assignedToId?: number;
@@ -414,6 +477,27 @@ const leadService = {
   getById: async (id: number): Promise<LeadResponseDTO> => {
     const r = await axiosInstance.get(`/api/Lead/${id}`);
     return r.data;
+  },
+
+  /**
+   * Ranked client-organisation candidates the resolver proposed for this lead.
+   * GET /api/Lead/{id}/client-candidates (Leads:View).
+   *
+   * Returns `[]` rather than throwing when the endpoint is absent (404) or the
+   * caller lacks the permission (403): "no suggestion" is a legitimate, common
+   * state, and an unresolved client must still render its evidence and its
+   * "Set client" action instead of an error. Every other failure propagates so
+   * a genuine outage is not silently reported as "nothing to suggest".
+   */
+  getClientCandidates: async (id: number): Promise<ClientCandidateDTO[]> => {
+    try {
+      const r = await axiosInstance.get<ClientCandidateDTO[]>(`/api/Lead/${id}/client-candidates`);
+      return Array.isArray(r.data) ? r.data : [];
+    } catch (error: unknown) {
+      const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+      if (status === 404 || status === 403) return [];
+      throw error;
+    }
   },
 
   getIngestionBatch: async (batchId: string): Promise<BatchReconciliationDTO> => {

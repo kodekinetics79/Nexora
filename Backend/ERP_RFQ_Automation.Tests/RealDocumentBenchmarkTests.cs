@@ -20,6 +20,32 @@ using Xunit.Abstractions;
 
 namespace ERP_RFQ_Automation.Tests;
 
+/// <summary>
+/// A ROUND-TRIP TEST OF THE LOCAL READER PATHS. Not a benchmark, and no longer named or
+/// reported as one.
+///
+/// What it genuinely proves, and what makes it worth keeping: every supported file type
+/// is routed to the expected local processing path (deterministic rules for structured
+/// files, local OCR for images and scanned PDFs, never the external fallback); the
+/// spreadsheet reader finds both sheets; identical bytes read identically while a revised
+/// document reads differently; and a failed OCR does NOT silently return the value it
+/// failed to read.
+///
+/// What it CANNOT prove, and used to claim anyway: accuracy. Every fixture is generated
+/// by this file, so the "expected token" is a string this test planted seconds earlier and
+/// then searched for. The output line used to report that substring search as
+/// "criticalFieldAccuracy", alongside "localLeadRate=100%", "localPageRate=100%",
+/// "localFieldProcessingRate=100%" and "externalDependencyRate=0%" — four hardcoded
+/// literals that were not computed from anything at all, and three constants
+/// (leadProducingArtifacts=10, logicalPagesAndSheets=13, criticalFieldOpportunities=12)
+/// typed in by hand. Read out of context those numbers looked like a measured 100%
+/// extraction accuracy across a real corpus. They measured nothing.
+///
+/// Measured accuracy comes from labelled ground truth — reviewers' own corrections on
+/// approved documents, captured in ExtractionCorpusEntry and published, with a Wilson
+/// lower bound and a 30-document floor, by AccuracyMeasurementService. No percentage is
+/// emitted from this file.
+/// </summary>
 public sealed class RealDocumentBenchmarkTests
 {
     private readonly ITestOutputHelper _output;
@@ -123,24 +149,19 @@ public sealed class RealDocumentBenchmarkTests
             SearchableText(inputs["duplicate-original.txt"]),
             SearchableText(inputs["revision-02.txt"]));
 
+        // Counts and timings only — all facts about this run over these self-generated
+        // fixtures. No rate, no percentage, and nothing named "accuracy": every fixture's
+        // expected token was planted by this file, so finding it again measures the reader
+        // round-tripping its own input, which is worth asserting and worthless to publish.
         var ordered = elapsed.OrderBy(value => value).ToArray();
-        const int leadProducingArtifacts = 10;
-        const int logicalPagesAndSheets = 13;
-        const int criticalFieldOpportunities = 12;
         _output.WriteLine(
-            "fixtures={0}; leadProducingArtifacts={1}; logicalPagesAndSheets={2}; criticalFieldOpportunities={3}; " +
-            "localLeadRate=100%; localPageRate=100%; localFieldProcessingRate=100%; criticalFieldAccuracy={4:P1}; " +
-            "externalDependencyRate=0%; humanReviewRate={5:P1}; externalProcessingCostUsd=0.00; localComputeCostStatus=Unpriced; " +
-            "p50Ms={6:F1}; p95Ms={7:F1}; governedOcrFailures={8}",
+            "selfGeneratedFixtures={0}; tokenRoundTripped={1}; routedToHumanReviewOnOcrFailure={2}; "
+            + "externalFallbacksUsed=0 (asserted per fixture); readMsP50={3:F1}; readMsP95={4:F1}",
             fixtures.Length,
-            leadProducingArtifacts,
-            logicalPagesAndSheets,
-            criticalFieldOpportunities,
-            (double)usableCount / fixtures.Length,
-            (double)reviewCount / fixtures.Length,
+            usableCount,
+            reviewCount,
             Percentile(ordered, 0.50),
-            Percentile(ordered, 0.95),
-            reviewCount);
+            Percentile(ordered, 0.95));
     }
 
     private static string SearchableText(DocumentExtractionInput input)

@@ -20,6 +20,35 @@ public sealed class MalwareVerdictPolicyOptions
     public TimeSpan MaximumCleanVerdictAge { get; init; } = TimeSpan.FromHours(24);
 }
 
+/// <summary>
+/// The machine codes intake attaches to a stopped document. They are the ONLY stable contract the
+/// UI may branch on (Frontend/src/utils/intakeErrors.ts mirrors this list), so a code must name a
+/// distinct CAUSE rather than a status.
+///
+/// <para>
+/// <see cref="DocumentRejected"/> is deliberately a bucket of last resort: it means "inspection
+/// said no" and nothing more, so any surface rendering it must show the accompanying
+/// <see cref="FileInspectionResult.Reason"/> instead of guessing at the cause. Whenever a cause is
+/// both common and separately actionable it gets its own code here — that is what
+/// <see cref="MacroEnabledDocument"/> is: a macro-enabled workbook is not "damaged" and re-exporting
+/// it as a PDF is not the remedy, so telling the user that was actively wrong.
+/// </para>
+/// </summary>
+public static class DocumentInspectionErrorCodes
+{
+    /// <summary>Inspection reached a terminal verdict; the reason string carries the specifics.</summary>
+    public const string DocumentRejected = "document_rejected";
+
+    /// <summary>Held without a verdict. Replayable — see <c>SecurityHoldRecovery</c>.</summary>
+    public const string DocumentQuarantined = "document_quarantined";
+
+    /// <summary>
+    /// The document carries macros (VBA). A real malware vector, always refused; the remedy is a
+    /// macro-free re-save, never a re-export or a PDF.
+    /// </summary>
+    public const string MacroEnabledDocument = "macro_enabled_document";
+}
+
 public sealed record FileInspectionRequest(
     Stream Content,
     string FileName,
@@ -44,8 +73,8 @@ public sealed record FileInspectionResult(
     public MalwareScanStatus? MalwareStatus { get; init; }
     public bool IsRetryable { get; init; }
     public string ErrorCode { get; init; } = Status == FileInspectionStatus.Rejected
-        ? "document_rejected"
-        : "document_quarantined";
+        ? DocumentInspectionErrorCodes.DocumentRejected
+        : DocumentInspectionErrorCodes.DocumentQuarantined;
     public bool MalwareVerdictReused { get; init; }
 
     /// <summary>

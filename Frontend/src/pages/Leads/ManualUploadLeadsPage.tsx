@@ -259,7 +259,15 @@ const ManualUploadLeadsPage: React.FC = () => {
               </Typography>
               <Stack spacing={0.75}>
                 {failedJobs.map((job) => {
-                  const explanation = explainIntakeError(job.errorCode);
+                  /*
+                    `job.reason` is the backend's own account of why THIS file stopped
+                    (ExtractionController returns `reason = ex.Inspection.Reason`). It was being
+                    received, typed and thrown away, so a macro-enabled workbook was explained to
+                    the owner as "the file is damaged — re-export it or send it as a PDF". The
+                    reason outranks our per-code guess; `explainIntakeError` applies the shared
+                    presentability gate before rendering any of it.
+                  */
+                  const explanation = explainIntakeError(job.errorCode, job.reason);
                   return (
                     <Box key={`${job.jobId}:${job.fileName}`}>
                       <Typography variant="body2" sx={{ fontWeight: 700, overflowWrap: 'anywhere' }}>

@@ -57,6 +57,36 @@ public enum DocumentProcessingStatus
     Failed
 }
 
+/// <summary>
+/// Whether this document's stored BYTES still exist. Deliberately not a status of the
+/// evidence record: the record itself is immutable and undeletable by construction
+/// (<c>trg_source_documents_no_delete</c>, ERRCODE 55000), and its hash, filename, size and
+/// creation time are frozen by <c>trg_protect_source_document_identity</c>. Retention
+/// operates only on bytes, so lineage still answers "this value came from document X,
+/// hash Y, purged on DATE under policy N by user Z" after a purge — which is a stronger
+/// audit answer than the file it replaces, because the platform cannot rewrite it even
+/// under insider action.
+///
+/// <para>
+/// The order matters: <see cref="PurgeRequested"/> is written and committed BEFORE any
+/// byte is deleted, so the forbidden state (row says the bytes are present, disk says
+/// otherwise) is structurally impossible. The tolerable state (intent recorded, bytes
+/// still there) self-heals — the next run re-attempts and confirms.
+/// </para>
+/// </summary>
+public enum EvidencePurgeState
+{
+    /// <summary>Bytes are retained and readable.</summary>
+    Present,
+
+    /// <summary>Deletion intent is committed. Bytes may or may not still exist; readers must
+    /// not promise them.</summary>
+    PurgeRequested,
+
+    /// <summary>Bytes are gone. The record, its hash and every derived extraction survive.</summary>
+    Purged
+}
+
 public enum OcrStatus
 {
     NotRequired,
@@ -232,6 +262,19 @@ public sealed class SourceDocument
     public string? MalwareScannerEngine { get; private set; }
     public string? MalwareSignatureVersion { get; private set; }
     public DateTimeOffset? MalwareScannedOn { get; private set; }
+
+    // --- Byte retention. Additive columns only: ObjectBucket/ObjectKey/ObjectVersion,
+    // ContentHash, OriginalFileName, ByteSize and CreatedOn are all frozen by database
+    // trigger and are exactly the fields the tombstone story depends on. Nulling any of
+    // them to signal "purged" would both raise 23514 and destroy the lineage answer.
+    public EvidencePurgeState PurgeState { get; private set; } = EvidencePurgeState.Present;
+    public DateTimeOffset? PurgeRequestedOn { get; private set; }
+    public DateTimeOffset? BytesPurgedOn { get; private set; }
+    public long? PurgedByUserId { get; private set; }
+    public string? PurgePolicyCode { get; private set; }
+    public long PurgedByteCount { get; private set; }
+    public string? PurgeReason { get; private set; }
+
     public DocumentCorpus Corpus { get; private set; } = null!;
     public ICollection<DocumentPage> Pages { get; } = new List<DocumentPage>();
     public ICollection<SourceDocumentOccurrence> Occurrences { get; } = new List<SourceDocumentOccurrence>();
@@ -340,6 +383,47 @@ public sealed class SourceDocument
         ObjectVersion = EvidenceLedgerGuard.Required(objectVersion, 255, nameof(objectVersion));
         MarkSecurityStatus(DocumentSecurityStatus.Cleared, changedOn);
     }
+
+    /// <summary>
+    /// Phase A of the purge: record the INTENT, commit it, and only then touch a byte.
+    /// Called inside its own transaction so that a crash between phases leaves
+    /// <see cref="EvidencePurgeState.PurgeRequested"/> with the bytes possibly still
+    /// present — recoverable and self-healing — instead of the reverse, which would be a
+    /// record that promises bytes nobody can produce.
+    /// </summary>
+    public void RequestPurge(string policyCode, long actorUserId, DateTimeOffset? requestedOn = null)
+    {
+        if (PurgeState == EvidencePurgeState.Purged)
+            throw new InvalidOperationException("The document's bytes have already been purged.");
+        PurgePolicyCode = EvidenceLedgerGuard.Required(policyCode, 64, nameof(policyCode));
+        PurgedByUserId = EvidenceLedgerGuard.Positive(actorUserId, nameof(actorUserId));
+        PurgeState = EvidencePurgeState.PurgeRequested;
+        PurgeRequestedOn = requestedOn ?? DateTimeOffset.UtcNow;
+        UpdatedOn = PurgeRequestedOn.Value;
+    }
+
+    /// <summary>
+    /// Phase C of the purge: confirm what actually happened on disk. A byte count of zero
+    /// with reason <c>BytesAlreadyAbsent</c> is a reconciliation, not a failure — it is the
+    /// correct terminal state for documents whose bytes were lost to ephemeral storage
+    /// before the persistent disk existed, and they need no special case anywhere else.
+    /// </summary>
+    public void ConfirmPurged(long purgedByteCount, string reason, DateTimeOffset? purgedOn = null)
+    {
+        if (PurgeState != EvidencePurgeState.PurgeRequested)
+            throw new InvalidOperationException(
+                "Purge cannot be confirmed before it is requested; intent must precede deletion.");
+        PurgedByteCount = EvidenceLedgerGuard.NonNegative(purgedByteCount, nameof(purgedByteCount));
+        PurgeReason = EvidenceLedgerGuard.Required(reason, 256, nameof(reason));
+        PurgeState = EvidencePurgeState.Purged;
+        BytesPurgedOn = purgedOn ?? DateTimeOffset.UtcNow;
+        UpdatedOn = BytesPurgedOn.Value;
+    }
+
+    /// <summary>True while the stored bytes can still be opened. Readers gate on this and
+    /// answer 410 Gone with the tombstone rather than 404 or a raw FileNotFoundException:
+    /// "we deleted this on purpose, here is the proof" is a different answer from "missing".</summary>
+    public bool BytesAvailable => PurgeState == EvidencePurgeState.Present;
 
     public void StartExtraction(DateTimeOffset? changedOn = null) =>
         TransitionProcessing(DocumentProcessingStatus.Extracting, changedOn ?? DateTimeOffset.UtcNow,

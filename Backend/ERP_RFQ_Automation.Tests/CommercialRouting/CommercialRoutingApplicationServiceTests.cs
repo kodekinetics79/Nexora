@@ -329,7 +329,12 @@ public sealed class CommercialRoutingApplicationServiceTests
             BusinessUnitId = 71,
             CustomerId = customerId,
             IdentifierType = CustomerIdentifierType.CustomerName,
-            NormalizedValue = "ACME TRADING",
+            // Normalised through the platform normaliser rather than hand-typed: organisation
+            // names now share ONE normaliser with client resolution (CustomerNameNormalizer),
+            // which strips legal/generic tokens such as "TRADING". Hard-coding the key here
+            // would make this test assert an obsolete encoding rather than the routing
+            // behaviour it is about.
+            NormalizedValue = RoutingValueNormalizer.Normalize(CustomerIdentifierType.CustomerName, "Acme Trading"),
             DisplayValue = "Acme Trading",
             IsVerified = true,
             Confidence = confidence,
@@ -361,7 +366,13 @@ public sealed class CommercialRoutingApplicationServiceTests
     [InlineData(CustomerIdentifierType.Email, " Buyer@Example.COM ", "buyer@example.com")]
     [InlineData(CustomerIdentifierType.Domain, "https://www.Example.com/path", "example.com")]
     [InlineData(CustomerIdentifierType.Phone, "+1 (212) 555-0199", "12125550199")]
-    [InlineData(CustomerIdentifierType.CustomerName, "  Acme   Trading ", "ACME TRADING")]
+    // Organisation names normalise through CustomerNameNormalizer.LooseKey: case and
+    // whitespace fold, and legal/generic trade tokens ("TRADING", "LLC", "EST", "CO") are
+    // stripped because they carry no identity. One normaliser, so the routing store and the
+    // client resolver can never disagree about what "the same company" means.
+    [InlineData(CustomerIdentifierType.CustomerName, "  Acme   Trading ", "ACME")]
+    [InlineData(CustomerIdentifierType.CustomerName, "Al-Quraishi & Partners Est.", "QURAISHI")]
+    [InlineData(CustomerIdentifierType.Alias, "Saudi Electricity Company", "SAUDI ELECTRICITY")]
     public void Normalizer_produces_stable_matching_values(
         CustomerIdentifierType type, string input, string expected) =>
         Assert.Equal(expected, RoutingValueNormalizer.Normalize(type, input));

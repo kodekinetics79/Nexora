@@ -93,7 +93,20 @@ public sealed class Wave1PlatformGovernancePostgreSqlTests(PostgreSqlTestDatabas
             Assert.Equal(0m, reuse.Value);
             Assert.Null(fieldAccuracy.Value);
             Assert.Equal("InsufficientEvidence", fieldAccuracy.EvidenceStatus);
-            Assert.Contains("independently labeled", view.AccuracyLimitation);
+
+            // The disclosure must make two claims, not one phrase. Asserting the substance
+            // rather than the wording: none of these rates is an accuracy, and a real one
+            // needs labelled ground truth.
+            Assert.Contains("none should be quoted as one", view.AccuracyLimitation);
+            Assert.Contains("labelled ground truth", view.AccuracyLimitation);
+
+            // Sample size toward a publishable figure — a COUNT with no value, so it can
+            // never be read as an accuracy by sitting next to the percentages above.
+            var corpusProgress = Assert.Single(view.Metrics, x => x.Key == "accuracy-corpus");
+            Assert.Null(corpusProgress.Value);
+            Assert.Equal("documents", corpusProgress.Unit);
+            Assert.Equal(0, corpusProgress.Numerator);
+            Assert.Equal("InsufficientEvidence", corpusProgress.EvidenceStatus);
         }
         await using var tenantBContext = database.ContextFor(tenantB);
         var tenantBView = await new QualityAnalyticsService(tenantBContext).GetAsync(tenantB, 30, null, default);

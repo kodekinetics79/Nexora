@@ -1,14 +1,16 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Box, Typography, Paper, Button, Chip, Grid, CircularProgress, Stack,
   IconButton, Breadcrumbs, Link, Dialog, DialogTitle, DialogContent,
-  DialogActions, TextField, Alert, Tooltip, Divider,
+  DialogActions, TextField, Alert, Tooltip, Divider, Popover, FormGroup,
+  FormControlLabel, Checkbox,
 } from '@mui/material';
 import {
-  DataGrid, GridActionsCellItem,
-  type GridColDef, type GridRowModel, type GridRowId,
+  DataGrid, GridActionsCellItem, useGridApiRef,
+  type GridColDef, type GridRowModel, type GridRowId, type GridCellParams,
+  type GridColumnVisibilityModel, type GridRowSelectionModel, type GridPaginationModel,
 } from '@mui/x-data-grid';
 import {
   Description as FileIcon,
@@ -19,20 +21,36 @@ import {
   Add as AddIcon,
   Delete as DeleteIcon,
   ArrowBack as BackIcon,
+  ViewColumn as ColumnsIcon,
+  EditNote as BulkEditIcon,
+  RadioButtonUnchecked as VerifiedDotIcon,
+  ErrorOutlined as NeedsCheckDotIcon,
 } from '@mui/icons-material';
 import dayjs from 'dayjs';
 import { ChevronDown, ChevronUp, Cloud, Cpu, FileSearch } from 'lucide-react';
 import { useSnackbar } from 'notistack';
 import extractionReviewService from '../../api/services/extractionReviewService';
-import type { LeadProcessingEvidence, SubmitReviewPayload, ReviewItemPayload } from '../../api/services/extractionReviewService';
+import type {
+  LeadProcessingEvidence, SubmitReviewPayload, ReviewItemPayload,
+  LeadFieldEvidenceEntry,
+} from '../../api/services/extractionReviewService';
+import { fieldEvidenceKey } from '../../api/services/extractionReviewService';
 import type { LeadItemResponseDTO } from '../../api/services/leadService';
+import ClientIdentityPanel from '../Leads/ClientIdentityPanel';
+import type { ClientSelection } from '../Leads/ResolveClientDialog';
 import { useAuth } from '../../context/AuthContext';
 import { openAuthenticatedFile } from '../../utils/authenticatedFile';
+import FieldEvidencePopover from './FieldEvidencePopover';
+import { checkLine, summariseChecks, checkHeadline, type CheckableLine } from './needsCheck';
 
 // Local editable representation of a line item. `id` doubles as the DataGrid
 // row id; new rows added during review use negative ids and set `isNew` so the
 // payload builder knows to omit the id.
-interface ReviewLineItem {
+//
+// Deliberately carries NO confidence field. The extraction confidence this page
+// used to render was never measured — see ./needsCheck.ts — so the local model
+// simply does not hold it and no future edit can reintroduce the display.
+interface ReviewLineItem extends CheckableLine {
   id: number;
   isNew?: boolean;
   lineItemNo?: string;
@@ -50,7 +68,6 @@ interface ReviewLineItem {
   alternatePartNumber?: string;
   itemText?: string;
   leadTime?: string;
-  aiconfidence?: number | null;
   // Unrecognized customer-document columns captured at extraction time. Read-only
   // in the workbench and deliberately excluded from the submit payload so the
   // backend preserves the stored values untouched.
@@ -65,7 +82,122 @@ interface ReviewHeaderState {
   headerRemarks: string;
 }
 
-const LOW_CONFIDENCE = 0.5;
+// ---------------------------------------------------------------------------
+// Per-user view preferences (column visibility), persisted locally. Key shape
+// copied from LeadsPage so one reviewer's preferences never leak into another
+// account sharing the same browser.
+// ---------------------------------------------------------------------------
+
+const COLUMNS_KEY_BASE = 'nexora.extractionReview.columnVisibility';
+
+const userScopedKey = (base: string): string => {
+  try {
+    const raw = localStorage.getItem('userData');
+    if (raw) {
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && 'id' in parsed) {
+        const id = (parsed as { id?: unknown }).id;
+        if (typeof id === 'number' || typeof id === 'string') return `${base}:user-${id}`;
+      }
+    }
+  } catch {
+    // Corrupted userData — fall back to a global preference key.
+  }
+  return `${base}:global`;
+};
+
+// Curated default column set. Four rarely-populated columns start hidden so the
+// grid fits a laptop viewport without horizontal scrolling; they stay one click
+// away rather than being deleted, because the data behind them is real.
+const DEFAULT_COLUMN_VISIBILITY: GridColumnVisibilityModel = {
+  checkStatus: true,
+  lineItemNo: true,
+  productShortName: true,
+  productShortDescription: true,
+  quantity: true,
+  unitOfMeasure: true,
+  unitPrice: true,
+  currency: true,
+  manufacturerName: true,
+  manufacturerPartNumber: true,
+  itemMaterialCode: true,
+  leadTime: true,
+  commodityProduct: false,
+  alternateProductName: false,
+  alternatePartNumber: false,
+  itemText: false,
+  actions: true,
+};
+
+const HIDEABLE_COLUMNS: ReadonlyArray<{ field: string; label: string }> = [
+  { field: 'lineItemNo', label: 'Line #' },
+  { field: 'productShortName', label: 'Product' },
+  { field: 'productShortDescription', label: 'Description' },
+  { field: 'quantity', label: 'Qty' },
+  { field: 'unitOfMeasure', label: 'UoM' },
+  { field: 'unitPrice', label: 'Unit Price' },
+  { field: 'currency', label: 'Currency' },
+  { field: 'manufacturerName', label: 'Manufacturer' },
+  { field: 'manufacturerPartNumber', label: 'Mfr Part #' },
+  { field: 'itemMaterialCode', label: 'Material Code' },
+  { field: 'leadTime', label: 'Lead Time' },
+  { field: 'commodityProduct', label: 'Commodity' },
+  { field: 'alternateProductName', label: 'Alt Product' },
+  { field: 'alternatePartNumber', label: 'Alt Part #' },
+  { field: 'itemText', label: 'Item Text' },
+];
+
+const loadColumnVisibility = (): GridColumnVisibilityModel => {
+  try {
+    const raw = localStorage.getItem(userScopedKey(COLUMNS_KEY_BASE));
+    if (raw) {
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return { ...DEFAULT_COLUMN_VISIBILITY, ...(parsed as GridColumnVisibilityModel), checkStatus: true, actions: true };
+      }
+    }
+  } catch {
+    // Unreadable preference — use the curated defaults.
+  }
+  return { ...DEFAULT_COLUMN_VISIBILITY };
+};
+
+// ---------------------------------------------------------------------------
+// Draft persistence. A reviewer who loses twenty minutes of corrections once
+// goes back to Excel permanently, so unsent work is written to sessionStorage
+// on every keystroke and restored on return. This is the guard that actually
+// holds: `useBlocker` needs a data router, and this app mounts <BrowserRouter>.
+// ---------------------------------------------------------------------------
+
+const draftKey = (leadId: number): string => `nexora.extractionReview.draft.${leadId}`;
+
+interface ReviewDraft {
+  savedAt: string;
+  header: ReviewHeaderState;
+  items: ReviewLineItem[];
+}
+
+const readDraft = (leadId: number): ReviewDraft | null => {
+  try {
+    const raw = sessionStorage.getItem(draftKey(leadId));
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && 'header' in parsed && 'items' in parsed) {
+      return parsed as ReviewDraft;
+    }
+  } catch {
+    // Unreadable draft — start from the server copy rather than guessing.
+  }
+  return null;
+};
+
+const clearDraft = (leadId: number) => {
+  try {
+    sessionStorage.removeItem(draftKey(leadId));
+  } catch {
+    // Storage unavailable — nothing to clear.
+  }
+};
 
 const readable = (text?: string | null): string =>
   (text || 'Not recorded').replaceAll('_', ' ').toLowerCase().replace(/^./, (letter) => letter.toUpperCase());
@@ -108,18 +240,26 @@ const mapItems = (items: LeadItemResponseDTO[] | undefined): ReviewLineItem[] =>
     alternatePartNumber: it.alternatePartNumber ?? '',
     itemText: it.itemText ?? '',
     leadTime: it.leadTime ?? '',
-    aiconfidence: it.aiconfidence ?? null,
     extraFields: it.extraFields ?? null,
   }));
 
+/** Bulk-settable columns. Both are low-cardinality and wrong on whole documents at a time. */
+type BulkField = 'unitOfMeasure' | 'currency';
+const BULK_FIELD_LABEL: Record<BulkField, string> = {
+  unitOfMeasure: 'Unit of measure',
+  currency: 'Currency',
+};
+
 const ExtractionReviewDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
+  const leadId = Number(id);
   const navigate = useNavigate();
   const location = useLocation();
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
   const { hasPermission } = useAuth();
   const canEditLeads = hasPermission('Leads', 'edit');
+  const apiRef = useGridApiRef();
 
   // Review reason can be passed from the queue via router state; it isn't part
   // of the lead detail payload, so we fall back gracefully when navigated to
@@ -127,14 +267,22 @@ const ExtractionReviewDetailPage: React.FC = () => {
   const reviewReasonFromState = (location.state as { reviewReason?: string } | null)?.reviewReason;
 
   const { data: lead, isLoading, isError, refetch } = useQuery({
-    queryKey: ['needs-review-detail', Number(id)],
-    queryFn: () => extractionReviewService.getLead(Number(id)),
+    queryKey: ['needs-review-detail', leadId],
+    queryFn: () => extractionReviewService.getLead(leadId),
     enabled: !!id,
   });
   const processingEvidence = useQuery({
-    queryKey: ['lead-processing-evidence', Number(id)],
-    queryFn: () => extractionReviewService.getProcessingEvidence(Number(id)),
-    enabled: !!id && Number.isFinite(Number(id)),
+    queryKey: ['lead-processing-evidence', leadId],
+    queryFn: () => extractionReviewService.getProcessingEvidence(leadId),
+    enabled: !!id && Number.isFinite(leadId),
+    retry: false,
+  });
+  // Where each stored value sat in the customer's own document. Absent for
+  // PDF/OCR extractions, which never persisted word boxes — the UI says so.
+  const fieldEvidence = useQuery({
+    queryKey: ['lead-field-evidence', leadId],
+    queryFn: () => extractionReviewService.getFieldEvidence(leadId),
+    enabled: !!id && Number.isFinite(leadId),
     retry: false,
   });
 
@@ -142,26 +290,119 @@ const ExtractionReviewDetailPage: React.FC = () => {
     rfqno: '', buyersName: '', bidClosingDate: '', opportunityNo: '', headerRemarks: '',
   });
   const [items, setItems] = useState<ReviewLineItem[]>([]);
+  // Client organisation staged by the reviewer. Deliberately NOT written on
+  // selection: it travels in this page's single submission alongside the header
+  // and line-item corrections, so one save carries one review version and the
+  // reviewer's other edits cannot be lost to a version conflict.
+  const [clientSelection, setClientSelection] = useState<ClientSelection | null>(null);
   const [newRowSeq, setNewRowSeq] = useState(-1);
   const [approveDialogOpen, setApproveDialogOpen] = useState(false);
   const [approvalReason, setApprovalReason] = useState('Verified against the source document.');
   const [processingEvidenceExpanded, setProcessingEvidenceExpanded] = useState(false);
+  const [columnVisibility, setColumnVisibility] = useState<GridColumnVisibilityModel>(loadColumnVisibility);
+  const [columnsAnchor, setColumnsAnchor] = useState<HTMLElement | null>(null);
+  const [selection, setSelection] = useState<GridRowSelectionModel>({ type: 'include', ids: new Set<GridRowId>() });
+  const [bulkField, setBulkField] = useState<BulkField | null>(null);
+  const [bulkValue, setBulkValue] = useState('');
+  const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 50, page: 0 });
+  const [focusedLineId, setFocusedLineId] = useState<number | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<ReviewLineItem | null>(null);
+  const [leaveConfirmTarget, setLeaveConfirmTarget] = useState<string | null>(null);
+  const [restoredDraftAt, setRestoredDraftAt] = useState<string | null>(null);
+  const [evidenceAnchor, setEvidenceAnchor] = useState<{ el: HTMLElement; field: string; label: string; lineId: number; lineLabel: string } | null>(null);
 
-  // Seed editable state once the lead loads.
+  // Serialized server copy, used to decide whether there is unsent work.
+  const baselineRef = useRef<string>('');
+
+  // Seed editable state once the lead loads, preferring an unsent draft.
   useEffect(() => {
     if (!lead) return;
-    setHeader({
+    const serverHeader: ReviewHeaderState = {
       rfqno: lead.rfqno ?? '',
       buyersName: lead.buyersName ?? '',
       bidClosingDate: toDateInput(lead.bidClosingDate),
       opportunityNo: lead.opportunityNo ?? '',
       headerRemarks: lead.headerRemarks ?? '',
-    });
-    setItems(mapItems(lead.leadItems));
+    };
+    const serverItems = mapItems(lead.leadItems);
+    baselineRef.current = JSON.stringify({ header: serverHeader, items: serverItems });
+
+    const draft = readDraft(lead.id);
+    if (draft && JSON.stringify({ header: draft.header, items: draft.items }) !== baselineRef.current) {
+      setHeader(draft.header);
+      setItems(draft.items);
+      setRestoredDraftAt(draft.savedAt);
+      // Rows the reviewer had added carry negative ids. Resume the sequence
+      // below the lowest of them, or two ids would collide on the next add.
+      const lowest = draft.items.reduce((min, row) => Math.min(min, row.id), 0);
+      setNewRowSeq(lowest < 0 ? lowest - 1 : -1);
+    } else {
+      setHeader(serverHeader);
+      setItems(serverItems);
+      setRestoredDraftAt(null);
+      setNewRowSeq(-1);
+    }
+    setClientSelection(null);
+    setSelection({ type: 'include', ids: new Set<GridRowId>() });
   }, [lead]);
 
-  const aiConfidence = Math.round((lead?.aiconfidence ?? 0) * 100);
-  const confidenceColor = aiConfidence >= 70 ? 'success' : aiConfidence >= 50 ? 'warning' : 'error';
+  const isDirty = useMemo(() => {
+    if (!baselineRef.current) return false;
+    if (clientSelection) return true;
+    return JSON.stringify({ header, items }) !== baselineRef.current;
+  }, [header, items, clientSelection]);
+
+  // Persist unsent work so a mistaken sidebar click costs nothing. Debounced:
+  // the largest pilot document carries ~1,450 lines, and serialising that on
+  // every keystroke would make typing stutter for no benefit.
+  useEffect(() => {
+    if (!lead || !baselineRef.current) return;
+    if (!isDirty) {
+      clearDraft(lead.id);
+      return;
+    }
+    const handle = window.setTimeout(() => {
+      try {
+        sessionStorage.setItem(draftKey(lead.id), JSON.stringify({ savedAt: new Date().toISOString(), header, items } satisfies ReviewDraft));
+      } catch {
+        // Storage full or blocked — the in-page guard still protects the session.
+      }
+    }, 800);
+    return () => window.clearTimeout(handle);
+  }, [lead, header, items, isDirty]);
+
+  // Browser-level guard: refresh, tab close, and any navigation the router
+  // never sees.
+  useEffect(() => {
+    if (!isDirty) return;
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [isDirty]);
+
+  // Field evidence indexed for O(1) cell lookup, plus the per-line validation
+  // statuses that feed the needs-check verdict.
+  const { evidenceByKey, flaggedByLine, documentUnmapped } = useMemo(() => {
+    const byKey = new Map<string, LeadFieldEvidenceEntry>();
+    const flagged = new Map<number, Map<string, string>>();
+    const entries = fieldEvidence.data?.entries ?? [];
+    for (const entry of entries) {
+      byKey.set(fieldEvidenceKey(entry.lineItemId, entry.fieldName), entry);
+      if (entry.lineItemId != null && entry.validationStatus) {
+        const forLine = flagged.get(entry.lineItemId) ?? new Map<string, string>();
+        forLine.set(entry.fieldName, entry.validationStatus);
+        flagged.set(entry.lineItemId, forLine);
+      }
+    }
+    const mapped = fieldEvidence.data?.mapped ?? entries.length > 0;
+    return { evidenceByKey: byKey, flaggedByLine: flagged, documentUnmapped: !mapped };
+  }, [fieldEvidence.data]);
+
+  const summary = useMemo(() => summariseChecks(items, flaggedByLine), [items, flaggedByLine]);
+
   const hasAuthoritativeSource = (lead?.attachments?.length ?? 0) > 0
     || (processingEvidence.data?.occurrences.some((occurrence) => occurrence.sourceDocumentId != null) ?? false);
   const approvalBlockedReason = processingEvidence.isLoading
@@ -192,14 +433,72 @@ const ExtractionReviewDetailPage: React.FC = () => {
         id: tempId, isNew: true, lineItemNo: '', productShortName: '', productShortDescription: '',
         commodityProduct: '', itemMaterialCode: '', currency: '', unitOfMeasure: '',
         unitPrice: null, quantity: null, manufacturerName: '', manufacturerPartNumber: '',
-        alternateProductName: '', alternatePartNumber: '', itemText: '', leadTime: '', aiconfidence: null,
+        alternateProductName: '', alternatePartNumber: '', itemText: '', leadTime: '',
       },
     ]);
   };
 
-  const handleDeleteRow = (rowId: GridRowId) => () => {
-    setItems((prev) => prev.filter((row) => row.id !== rowId));
+  const applyColumnVisibility = (model: GridColumnVisibilityModel) => {
+    const next: GridColumnVisibilityModel = { ...model, checkStatus: true, actions: true };
+    setColumnVisibility(next);
+    try {
+      localStorage.setItem(userScopedKey(COLUMNS_KEY_BASE), JSON.stringify(next));
+    } catch {
+      // Storage unavailable — preference just won't persist.
+    }
   };
+
+  const selectedIds = useMemo<number[]>(() => {
+    if (selection.type === 'exclude') {
+      return items.filter((row) => !selection.ids.has(row.id)).map((row) => row.id);
+    }
+    return items.filter((row) => selection.ids.has(row.id)).map((row) => row.id);
+  }, [selection, items]);
+
+  const applyBulkValue = () => {
+    if (!bulkField) return;
+    const value = bulkValue.trim();
+    const target = new Set(selectedIds);
+    setItems((prev) => prev.map((row) => (target.has(row.id) ? { ...row, [bulkField]: value } : row)));
+    enqueueSnackbar(
+      `${BULK_FIELD_LABEL[bulkField]} set to "${value || '(blank)'}" on ${target.size} line${target.size === 1 ? '' : 's'}`,
+      { variant: 'success' },
+    );
+    setBulkField(null);
+    setBulkValue('');
+  };
+
+  /** Existing values for the bulk field, offered as suggestions. */
+  const bulkSuggestions = useMemo<string[]>(() => {
+    if (!bulkField) return [];
+    const values = new Set<string>();
+    for (const row of items) {
+      const value = (row[bulkField] ?? '').toString().trim();
+      if (value) values.add(value);
+    }
+    return [...values].sort((a, b) => a.localeCompare(b));
+  }, [bulkField, items]);
+
+  /** Moves the grid to the next line still needing a check. */
+  const jumpToNextCheck = useCallback(() => {
+    if (summary.needsCheckIds.length === 0) return;
+    const currentIndex = focusedLineId == null ? -1 : summary.needsCheckIds.indexOf(focusedLineId);
+    const nextId = summary.needsCheckIds[(currentIndex + 1) % summary.needsCheckIds.length];
+    const rowIndex = items.findIndex((row) => row.id === nextId);
+    if (rowIndex < 0) return;
+    const targetPage = Math.floor(rowIndex / paginationModel.pageSize);
+    if (targetPage !== paginationModel.page) {
+      setPaginationModel((prev) => ({ ...prev, page: targetPage }));
+    }
+    setFocusedLineId(nextId);
+    window.setTimeout(() => {
+      try {
+        apiRef.current?.scrollToIndexes({ rowIndex: rowIndex - targetPage * paginationModel.pageSize });
+      } catch {
+        // Grid not mounted yet — the page change alone already surfaces the row.
+      }
+    }, 0);
+  }, [summary.needsCheckIds, focusedLineId, items, paginationModel, apiRef]);
 
   const buildPayload = (action: 'save' | 'approve'): SubmitReviewPayload => ({
     action,
@@ -211,6 +510,10 @@ const ExtractionReviewDetailPage: React.FC = () => {
       bidClosingDate: header.bidClosingDate || undefined,
       opportunityNo: header.opportunityNo || undefined,
       headerRemarks: header.headerRemarks || undefined,
+      // Only sent when the reviewer picked a client in this session. Omitted
+      // otherwise, so a save never re-stamps (or clears) the existing link.
+      ...(clientSelection ? { customerId: clientSelection.customerId } : {}),
+      ...(clientSelection?.contactId != null ? { contactId: clientSelection.contactId } : {}),
     },
     items: items.map<ReviewItemPayload>((it) => ({
       id: it.isNew ? undefined : it.id,
@@ -234,15 +537,20 @@ const ExtractionReviewDetailPage: React.FC = () => {
 
   const mutation = useMutation({
     mutationFn: (action: 'save' | 'approve') =>
-      extractionReviewService.submitReview(Number(id), buildPayload(action)),
+      extractionReviewService.submitReview(leadId, buildPayload(action)),
     onSuccess: (_data, action) => {
+      clearDraft(leadId);
+      setRestoredDraftAt(null);
       enqueueSnackbar(
         action === 'approve' ? 'Extraction approved successfully' : 'Corrections saved and kept in the review queue',
         { variant: 'success' },
       );
       queryClient.invalidateQueries({ queryKey: ['needs-review'] });
-      queryClient.invalidateQueries({ queryKey: ['needs-review-detail', Number(id)] });
-      navigate('/procurement/extraction/review');
+      queryClient.invalidateQueries({ queryKey: ['needs-review-detail', leadId] });
+      // A save keeps the reviewer where they are — only an approval finishes the
+      // document and returns to the queue. Navigating away on save discarded the
+      // reviewer's place in a long document for no reason.
+      if (action === 'approve') navigate('/procurement/extraction/review');
     },
     onError: (err: any) => {
       const data = err?.response?.data;
@@ -255,60 +563,106 @@ const ExtractionReviewDetailPage: React.FC = () => {
 
   const isSubmitting = mutation.isPending;
 
+  /** Guards every exit this page owns. Sidebar links are covered by the draft. */
+  const leaveTo = (path: string) => {
+    if (isDirty) setLeaveConfirmTarget(path);
+    else navigate(path);
+  };
+
   const columns: GridColDef[] = useMemo(() => [
-    { field: 'lineItemNo', headerName: 'Line #', width: 90, editable: canEditLeads },
-    { field: 'productShortName', headerName: 'Product', width: 200, editable: canEditLeads },
-    { field: 'productShortDescription', headerName: 'Description', width: 240, editable: canEditLeads },
-    { field: 'commodityProduct', headerName: 'Commodity', width: 150, editable: canEditLeads },
-    { field: 'itemMaterialCode', headerName: 'Material Code', width: 150, editable: canEditLeads },
-    { field: 'quantity', headerName: 'Qty', width: 90, type: 'number', editable: canEditLeads },
-    { field: 'unitOfMeasure', headerName: 'UoM', width: 90, editable: canEditLeads },
-    { field: 'unitPrice', headerName: 'Unit Price', width: 120, type: 'number', editable: canEditLeads },
-    { field: 'currency', headerName: 'Currency', width: 100, editable: canEditLeads },
-    { field: 'manufacturerName', headerName: 'Manufacturer', width: 170, editable: canEditLeads },
-    { field: 'manufacturerPartNumber', headerName: 'Mfr Part #', width: 150, editable: canEditLeads },
-    { field: 'alternateProductName', headerName: 'Alt Product', width: 170, editable: canEditLeads },
-    { field: 'alternatePartNumber', headerName: 'Alt Part #', width: 150, editable: canEditLeads },
-    { field: 'leadTime', headerName: 'Lead Time', width: 120, editable: canEditLeads },
-    { field: 'itemText', headerName: 'Item Text', width: 200, editable: canEditLeads },
     {
-      field: 'aiconfidence',
-      headerName: 'Confidence',
-      width: 120,
-      editable: false,
+      // Column index 0: the answer to "which lines do I still have to look at",
+      // in place of a percentage nobody could act on.
+      field: 'checkStatus',
+      headerName: 'Status',
+      width: 56,
+      sortable: false,
+      filterable: false,
+      hideable: false,
+      align: 'center',
+      headerAlign: 'center',
       renderCell: (p) => {
-        const v = p.row.aiconfidence;
-        if (v == null) return <Chip label="New" size="small" variant="outlined" sx={{ height: 20, fontSize: '0.65rem' }} />;
-        const pct = Math.round(v * 100);
-        const color = v < 0.5 ? 'error' : v < 0.7 ? 'warning' : 'success';
+        const result = checkLine(p.row as ReviewLineItem, flaggedByLine.get(p.row.id));
+        const needsCheck = result.state === 'needs-check';
+        const title = needsCheck
+          ? result.reasons.join(' · ')
+          : 'Every required field is present and nothing flagged it. Confirm against the source document.';
         return (
-          <Chip
-            label={`${pct}%`}
-            size="small"
-            color={color}
-            variant="outlined"
-            aria-label={`Line confidence ${pct} percent`}
-            sx={{ fontWeight: 900, fontSize: '0.65rem', height: 20, borderWidth: 2 }}
-          />
+          <Tooltip title={title}>
+            <Box
+              role="img"
+              aria-label={needsCheck ? `Needs check: ${result.reasons.join('. ')}` : 'Verified: all required fields present'}
+              sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}
+            >
+              {needsCheck
+                ? <NeedsCheckDotIcon sx={{ fontSize: 18, color: 'error.main' }} />
+                : <VerifiedDotIcon sx={{ fontSize: 16, color: 'success.main' }} />}
+            </Box>
+          </Tooltip>
         );
       },
     },
+    { field: 'lineItemNo', headerName: 'Line #', width: 80, editable: canEditLeads },
+    { field: 'productShortName', headerName: 'Product', width: 180, editable: canEditLeads },
+    { field: 'productShortDescription', headerName: 'Description', width: 260, editable: canEditLeads },
+    { field: 'quantity', headerName: 'Qty', width: 90, type: 'number', editable: canEditLeads },
+    { field: 'unitOfMeasure', headerName: 'UoM', width: 100, editable: canEditLeads },
+    { field: 'unitPrice', headerName: 'Unit Price', width: 110, type: 'number', editable: canEditLeads },
+    { field: 'currency', headerName: 'Currency', width: 100, editable: canEditLeads },
+    { field: 'manufacturerName', headerName: 'Manufacturer', width: 160, editable: canEditLeads },
+    { field: 'manufacturerPartNumber', headerName: 'Mfr Part #', width: 150, editable: canEditLeads },
+    { field: 'itemMaterialCode', headerName: 'Material Code', width: 140, editable: canEditLeads },
+    { field: 'leadTime', headerName: 'Lead Time', width: 110, editable: canEditLeads },
+    { field: 'commodityProduct', headerName: 'Commodity', width: 150, editable: canEditLeads },
+    { field: 'alternateProductName', headerName: 'Alt Product', width: 170, editable: canEditLeads },
+    { field: 'alternatePartNumber', headerName: 'Alt Part #', width: 150, editable: canEditLeads },
+    { field: 'itemText', headerName: 'Item Text', width: 200, editable: canEditLeads },
     ...(canEditLeads ? [{
       field: 'actions',
       type: 'actions',
       headerName: '',
       width: 60,
+      hideable: false,
       getActions: (params) => [
         <GridActionsCellItem
           key="delete"
           icon={<DeleteIcon />}
           label="Delete row"
-          onClick={handleDeleteRow(params.id)}
+          // Reads params.row rather than looking the row up in `items`, so the
+          // column definitions do not depend on the rows and are not rebuilt
+          // (re-rendering the whole grid) on every keystroke of a long review.
+          onClick={() => setPendingDelete(params.row as ReviewLineItem)}
           showInMenu={false}
         />,
       ],
     } as GridColDef] : []),
-  ], [canEditLeads]);
+  ], [canEditLeads, flaggedByLine]);
+
+  const columnLabel = useCallback(
+    (field: string) => columns.find((column) => column.field === field)?.headerName ?? field,
+    [columns],
+  );
+
+  const handleCellClick = (params: GridCellParams, event: React.MouseEvent) => {
+    if (params.field === 'checkStatus' || params.field === 'actions' || params.field === '__check__') return;
+    const row = params.row as ReviewLineItem;
+    if (row.isNew) return; // Nothing was extracted for a row the reviewer typed.
+    // The grid delegates its listeners from the root, so `currentTarget` is the
+    // grid, not the cell. Anchor to the cell element the click actually landed
+    // in, falling back to the delegate target so the popover always has an
+    // anchor rather than silently not opening.
+    const target = event.target as HTMLElement | null;
+    const cell = target?.closest?.('.MuiDataGrid-cell') as HTMLElement | null;
+    const anchor = cell ?? target ?? (event.currentTarget as HTMLElement);
+    if (!anchor) return;
+    setEvidenceAnchor({
+      el: anchor,
+      field: params.field,
+      label: columnLabel(params.field),
+      lineId: row.id,
+      lineLabel: `Line ${row.lineItemNo || row.id}`,
+    });
+  };
 
   if (isLoading) {
     return <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '60vh' }}><CircularProgress /></Box>;
@@ -329,7 +683,7 @@ const ExtractionReviewDetailPage: React.FC = () => {
     <Box sx={{ p: 3, maxWidth: 1800, mx: 'auto' }}>
       {/* Breadcrumb */}
       <Breadcrumbs separator={<NextIcon sx={{ fontSize: 14 }} />} sx={{ mb: 2 }}>
-        <Link component="button" variant="caption" onClick={() => navigate('/procurement/extraction/review')} sx={{ color: 'text.secondary', fontWeight: 700, textDecoration: 'none', textTransform: 'uppercase' }}>
+        <Link component="button" variant="caption" onClick={() => leaveTo('/procurement/extraction/review')} sx={{ color: 'text.secondary', fontWeight: 700, textDecoration: 'none', textTransform: 'uppercase' }}>
           Extraction Review
         </Link>
         <Typography variant="caption" sx={{ color: 'primary.main', fontWeight: 900, textTransform: 'uppercase' }}>
@@ -337,7 +691,7 @@ const ExtractionReviewDetailPage: React.FC = () => {
         </Typography>
       </Breadcrumbs>
 
-      {/* Header row: title + confidence + actions */}
+      {/* Header row: title + what still needs a look + actions */}
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 3, flexWrap: 'wrap', gap: 2 }}>
         <Box>
           <Typography variant="h5" sx={{ fontWeight: 950, mb: 0.5 }}>
@@ -347,23 +701,35 @@ const ExtractionReviewDetailPage: React.FC = () => {
             Verify the extracted data against its source evidence before approving
           </Typography>
         </Box>
-        <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center' }}>
-          {/* Prominent overall confidence */}
+        <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
+          {/* Replaces the extraction-confidence percentage. A count of lines to
+              look at is derived from data we actually persist, and it is the
+              next action rather than a verdict. */}
           <Paper elevation={0} sx={{ px: 2, py: 1, borderRadius: 2, border: '1px solid', borderColor: 'divider', display: 'flex', alignItems: 'center', gap: 1.5 }}>
-            <Box role="img" aria-label={`Overall extraction confidence ${aiConfidence} percent`}>
-              <Typography sx={{ fontSize: '0.6rem', fontWeight: 900, color: 'text.disabled', textTransform: 'uppercase' }}>Extraction confidence</Typography>
-              <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-                <Typography sx={{ fontWeight: 900, fontSize: '1.1rem', color: `${confidenceColor}.main` }}>{aiConfidence}%</Typography>
-                <Box sx={{ width: 90, height: 6, bgcolor: 'action.hover', borderRadius: 3, overflow: 'hidden' }}>
-                  <Box sx={{ height: '100%', width: `${aiConfidence}%`, bgcolor: `${confidenceColor}.main` }} />
-                </Box>
-              </Stack>
+            <Box>
+              <Typography sx={{ fontSize: '0.6rem', fontWeight: 900, color: 'text.disabled', textTransform: 'uppercase' }}>Review progress</Typography>
+              <Typography sx={{ fontWeight: 900, fontSize: '1rem', color: summary.needsCheck > 0 ? 'error.main' : 'success.main' }}>
+                {checkHeadline(summary)}
+              </Typography>
             </Box>
+            {summary.needsCheck > 0 && (
+              <Button
+                size="small"
+                variant="contained"
+                onClick={jumpToNextCheck}
+                sx={{ fontWeight: 800, borderRadius: 2, textTransform: 'none' }}
+              >
+                Next
+              </Button>
+            )}
           </Paper>
+          {isDirty && (
+            <Chip size="small" color="warning" variant="outlined" label="Unsaved corrections" sx={{ fontWeight: 800 }} />
+          )}
           <Button
             variant="outlined"
             startIcon={<BackIcon />}
-            onClick={() => navigate('/procurement/extraction/review')}
+            onClick={() => leaveTo('/procurement/extraction/review')}
             disabled={isSubmitting}
             sx={{ fontWeight: 800, borderRadius: 2 }}
           >
@@ -392,11 +758,35 @@ const ExtractionReviewDetailPage: React.FC = () => {
         </Stack>
       </Box>
 
+      {restoredDraftAt && (
+        <Alert
+          severity="info"
+          sx={{ mb: 2 }}
+          action={
+            <Button
+              size="small"
+              color="inherit"
+              onClick={() => {
+                const restored: { header: ReviewHeaderState; items: ReviewLineItem[] } = JSON.parse(baselineRef.current);
+                setHeader(restored.header);
+                setItems(restored.items);
+                setRestoredDraftAt(null);
+                clearDraft(lead.id);
+              }}
+            >
+              Discard draft
+            </Button>
+          }
+        >
+          Unsaved corrections from {dayjs(restoredDraftAt).isValid() ? dayjs(restoredDraftAt).format('DD MMM, HH:mm') : 'an earlier session'} were restored. Save them to keep them.
+        </Alert>
+      )}
+
       {/* Review reason banner */}
       <Alert severity="warning" sx={{ mb: 3, borderRadius: 2, fontWeight: 600 }}>
         {reviewReasonFromState
           ? reviewReasonFromState
-          : `This document was flagged for manual review${aiConfidence < 70 ? ` (extraction confidence ${aiConfidence}%)` : ''}. Please verify the fields below before approving.`}
+          : 'Every extraction is routed here for a human to verify before it moves downstream. Check the fields below against the source document.'}
       </Alert>
 
       {approvalBlockedReason && (
@@ -420,6 +810,18 @@ const ExtractionReviewDetailPage: React.FC = () => {
         <Grid size={{ xs: 12, lg: 9 }}>
           <Paper sx={{ p: 3, borderRadius: 3, border: '1px solid', borderColor: 'divider', height: '100%' }}>
             <Typography sx={{ fontWeight: 900, fontSize: '1rem', mb: 2, textTransform: 'uppercase', letterSpacing: '0.025em' }}>
+              Client
+            </Typography>
+            {/* Which organisation this enquiry came from — verified first,
+                above the field-level corrections, because every other header
+                field is meaningless if the lead is attributed to nobody. */}
+            <ClientIdentityPanel
+              lead={lead}
+              canEdit={canEditLeads && !isSubmitting}
+              onSelect={setClientSelection}
+              pendingSelection={clientSelection}
+            />
+            <Typography sx={{ fontWeight: 900, fontSize: '1rem', mt: 3, mb: 2, textTransform: 'uppercase', letterSpacing: '0.025em' }}>
               Header
             </Typography>
             <Grid container spacing={2}>
@@ -474,10 +876,10 @@ const ExtractionReviewDetailPage: React.FC = () => {
                       <Typography variant="caption" color="text.disabled" sx={{ fontSize: '0.65rem' }}>{(file.fileSize / 1024).toFixed(1)} KB</Typography>
                     )}
                   </Box>
-                  <Tooltip title="Open document">
+                  <Tooltip title="Download and open in your own viewer">
                     <IconButton
                       size="small"
-                      aria-label={`Open source document ${file.fileName ?? file.id}`}
+                      aria-label={`Download source document ${file.fileName ?? file.id}`}
                       onClick={async () => {
                         try {
                           await openAuthenticatedFile(`/api/File/attachment/${file.id}`);
@@ -504,46 +906,99 @@ const ExtractionReviewDetailPage: React.FC = () => {
         {/* Editable line items */}
         <Grid size={{ xs: 12 }}>
           <Box sx={{ mt: 1 }}>
-            <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+            <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 2, flexWrap: 'wrap', gap: 1 }}>
               <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
                 <Typography sx={{ fontWeight: 900, fontSize: '1rem', textTransform: 'uppercase', letterSpacing: '0.025em' }}>
                   Line Items
                 </Typography>
                 <Chip label={items.length} size="small" sx={{ fontWeight: 900, height: 18, fontSize: '0.7rem' }} />
               </Stack>
-              {canEditLeads && <Button
-                variant="outlined"
-                size="small"
-                startIcon={<AddIcon />}
-                onClick={handleAddRow}
-                disabled={isSubmitting}
-                sx={{ fontWeight: 800, borderRadius: 2 }}
-              >
-                Add row
-              </Button>}
+              <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  startIcon={<ColumnsIcon />}
+                  onClick={(event) => setColumnsAnchor(event.currentTarget)}
+                  sx={{ fontWeight: 800, borderRadius: 2 }}
+                >
+                  Columns
+                </Button>
+                {canEditLeads && <Button
+                  variant="outlined"
+                  size="small"
+                  startIcon={<AddIcon />}
+                  onClick={handleAddRow}
+                  disabled={isSubmitting}
+                  sx={{ fontWeight: 800, borderRadius: 2 }}
+                >
+                  Add row
+                </Button>}
+              </Stack>
             </Stack>
+
+            {/* Bulk actions. Unit of measure and currency are the two fields a
+                document gets wrong for every line at once; setting them one cell
+                at a time is most of the interaction cost of a long review. */}
+            {canEditLeads && selectedIds.length > 0 && (
+              <Paper
+                elevation={0}
+                role="region"
+                aria-label="Bulk actions for selected lines"
+                sx={{ mb: 1.5, p: 1.25, borderRadius: 2, border: '1px solid', borderColor: 'primary.main', display: 'flex', alignItems: 'center', gap: 1.5, flexWrap: 'wrap' }}
+              >
+                <Typography sx={{ fontWeight: 800, fontSize: '0.85rem' }}>
+                  {selectedIds.length} line{selectedIds.length === 1 ? '' : 's'} selected
+                </Typography>
+                <Button size="small" startIcon={<BulkEditIcon />} onClick={() => { setBulkField('unitOfMeasure'); setBulkValue(''); }} sx={{ fontWeight: 800, textTransform: 'none' }}>
+                  Set unit of measure
+                </Button>
+                <Button size="small" startIcon={<BulkEditIcon />} onClick={() => { setBulkField('currency'); setBulkValue(''); }} sx={{ fontWeight: 800, textTransform: 'none' }}>
+                  Set currency
+                </Button>
+                <Box sx={{ flex: 1 }} />
+                <Button size="small" color="inherit" onClick={() => setSelection({ type: 'include', ids: new Set<GridRowId>() })} sx={{ textTransform: 'none' }}>
+                  Clear selection
+                </Button>
+              </Paper>
+            )}
+
             <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-              {canEditLeads ? 'Double-click a cell to edit. Low-confidence rows are highlighted.' : 'This extraction is read-only for your role. Low-confidence rows are highlighted.'}
+              {canEditLeads
+                ? 'Click a cell to see where the value came from in the source document. Double-click (or press Enter) to edit, Tab to move on. Rows still needing a check are marked in the first column.'
+                : 'This extraction is read-only for your role. Click a cell to see where the value came from. Rows still needing a check are marked in the first column.'}
             </Typography>
             <Paper sx={{ borderRadius: 3, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>
               <DataGrid
+                apiRef={apiRef}
                 rows={items}
                 columns={columns}
                 getRowId={(r) => r.id}
-                editMode="row"
+                editMode="cell"
                 processRowUpdate={processRowUpdate}
                 onProcessRowUpdateError={(err) => enqueueSnackbar(String(err?.message ?? 'Row update failed'), { variant: 'error' })}
+                columnVisibilityModel={columnVisibility}
+                onColumnVisibilityModelChange={applyColumnVisibility}
+                checkboxSelection={canEditLeads}
+                rowSelectionModel={selection}
+                onRowSelectionModelChange={setSelection}
                 disableRowSelectionOnClick
+                onCellClick={handleCellClick}
                 hideFooterSelectedRowCount
                 autoHeight
-                pageSizeOptions={[10, 25, 50]}
-                initialState={{ pagination: { paginationModel: { pageSize: 10, page: 0 } } }}
-                getRowClassName={(params) =>
-                  params.row.aiconfidence != null && params.row.aiconfidence < LOW_CONFIDENCE ? 'low-confidence-row' : ''
-                }
+                pageSizeOptions={[25, 50, 100]}
+                paginationModel={paginationModel}
+                onPaginationModelChange={setPaginationModel}
+                getRowClassName={(params) => {
+                  const classes: string[] = [];
+                  if (checkLine(params.row as ReviewLineItem, flaggedByLine.get(params.row.id)).state === 'needs-check') {
+                    classes.push('needs-check-row');
+                  }
+                  if (params.row.id === focusedLineId) classes.push('focused-check-row');
+                  return classes.join(' ');
+                }}
                 sx={{
-                  '& .low-confidence-row': { bgcolor: 'error.lighter' },
-                  '& .low-confidence-row:hover': { bgcolor: 'error.light' },
+                  '& .needs-check-row': { bgcolor: 'action.hover' },
+                  '& .focused-check-row': { outline: '2px solid', outlineColor: 'primary.main', outlineOffset: '-2px' },
                 }}
               />
             </Paper>
@@ -583,6 +1038,148 @@ const ExtractionReviewDetailPage: React.FC = () => {
         Received {dayjs(lead.recDate).isValid() ? dayjs(lead.recDate).format('DD MMM YYYY') : '—'} · Source {lead.leadSource || '—'}
       </Typography>
 
+      {/* Column visibility */}
+      <Popover
+        open={Boolean(columnsAnchor)}
+        anchorEl={columnsAnchor}
+        onClose={() => setColumnsAnchor(null)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+        transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+      >
+        <Box sx={{ p: 2, minWidth: 240 }}>
+          <Typography sx={{ fontWeight: 800, fontSize: '0.8rem', mb: 1 }}>Visible columns</Typography>
+          <FormGroup>
+            {HIDEABLE_COLUMNS.map((column) => (
+              <FormControlLabel
+                key={column.field}
+                control={
+                  <Checkbox
+                    size="small"
+                    checked={columnVisibility[column.field] !== false}
+                    onChange={(event) => applyColumnVisibility({ ...columnVisibility, [column.field]: event.target.checked })}
+                  />
+                }
+                label={<Typography sx={{ fontSize: '0.8rem' }}>{column.label}</Typography>}
+              />
+            ))}
+          </FormGroup>
+        </Box>
+      </Popover>
+
+      {/* Glass box: where this value came from */}
+      <FieldEvidencePopover
+        anchorEl={evidenceAnchor?.el ?? null}
+        onClose={() => setEvidenceAnchor(null)}
+        fieldLabel={evidenceAnchor?.label ?? ''}
+        lineLabel={evidenceAnchor?.lineLabel}
+        entry={evidenceAnchor ? evidenceByKey.get(fieldEvidenceKey(evidenceAnchor.lineId, evidenceAnchor.field)) ?? null : null}
+        documentUnmapped={documentUnmapped}
+        loading={fieldEvidence.isLoading}
+      />
+
+      {/* Bulk set */}
+      <Dialog open={bulkField !== null} onClose={() => setBulkField(null)} fullWidth maxWidth="xs">
+        <DialogTitle sx={{ fontWeight: 800 }}>
+          Set {bulkField ? BULK_FIELD_LABEL[bulkField].toLowerCase() : ''} on {selectedIds.length} line{selectedIds.length === 1 ? '' : 's'}
+        </DialogTitle>
+        <DialogContent dividers>
+          {/* Free text, not a picker. The whole reason to bulk-set a column is
+              usually that every line carries the same WRONG value, so the right
+              one is by definition not among the values already on the document.
+              Existing values are offered as one-click shortcuts beneath it. */}
+          <TextField
+            autoFocus
+            fullWidth
+            label={bulkField ? BULK_FIELD_LABEL[bulkField] : ''}
+            value={bulkValue}
+            onChange={(event) => setBulkValue(event.target.value)}
+            onKeyDown={(event) => { if (event.key === 'Enter' && bulkValue.trim()) applyBulkValue(); }}
+            helperText="Applies to every selected line"
+          />
+          {bulkSuggestions.length > 0 && (
+            <Box sx={{ mt: 1.5 }}>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.75 }}>
+                Already used on this document
+              </Typography>
+              <Stack direction="row" spacing={0.75} useFlexGap sx={{ flexWrap: 'wrap' }}>
+                {bulkSuggestions.map((option) => (
+                  <Chip
+                    key={option}
+                    size="small"
+                    variant={bulkValue === option ? 'filled' : 'outlined'}
+                    color={bulkValue === option ? 'primary' : 'default'}
+                    label={option}
+                    onClick={() => setBulkValue(option)}
+                  />
+                ))}
+              </Stack>
+            </Box>
+          )}
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button onClick={() => setBulkField(null)} color="inherit">Cancel</Button>
+          <Button variant="contained" onClick={applyBulkValue} disabled={!bulkValue.trim()}>Apply</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Delete-row confirmation — a removed line is a commercial fact deleted. */}
+      <Dialog open={pendingDelete !== null} onClose={() => setPendingDelete(null)} fullWidth maxWidth="xs">
+        <DialogTitle sx={{ fontWeight: 800 }}>Remove this line?</DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="body2">
+            Line <strong>{pendingDelete?.lineItemNo || pendingDelete?.id}</strong>
+            {pendingDelete?.productShortDescription ? ` — ${pendingDelete.productShortDescription}` : ''} will be dropped from
+            this document. It is only removed for good once you save or approve.
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button onClick={() => setPendingDelete(null)} color="inherit">Cancel</Button>
+          <Button
+            variant="contained"
+            color="error"
+            onClick={() => {
+              const target = pendingDelete;
+              setPendingDelete(null);
+              if (target) setItems((prev) => prev.filter((row) => row.id !== target.id));
+            }}
+          >
+            Remove line
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Unsaved-work guard for this page's own exits. */}
+      <Dialog open={leaveConfirmTarget !== null} onClose={() => setLeaveConfirmTarget(null)} fullWidth maxWidth="xs">
+        <DialogTitle sx={{ fontWeight: 800 }}>Leave without saving?</DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="body2">
+            You have corrections that have not been sent. They are kept in this browser and will be waiting when you come
+            back, but they are not on the record until you save.
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button onClick={() => setLeaveConfirmTarget(null)} color="inherit">Stay</Button>
+          {canEditLeads && (
+            <Button
+              onClick={() => { setLeaveConfirmTarget(null); mutation.mutate('save'); }}
+              disabled={isSubmitting}
+            >
+              Save and stay
+            </Button>
+          )}
+          <Button
+            variant="contained"
+            onClick={() => {
+              const target = leaveConfirmTarget;
+              setLeaveConfirmTarget(null);
+              if (target) navigate(target);
+            }}
+          >
+            Leave
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       {/* Approve confirmation */}
       <Dialog open={approveDialogOpen && canEditLeads && approvalBlockedReason === null} onClose={() => !isSubmitting && setApproveDialogOpen(false)} fullWidth maxWidth="xs">
         <DialogTitle sx={{ fontWeight: 800 }}>Approve extraction?</DialogTitle>
@@ -591,6 +1188,11 @@ const ExtractionReviewDetailPage: React.FC = () => {
             Approving confirms the extracted data for <strong>{header.rfqno || `document #${lead.id}`}</strong> is correct.
             It will be removed from the review queue and released downstream.
           </Typography>
+          {summary.needsCheck > 0 && (
+            <Alert severity="warning" sx={{ mt: 2 }}>
+              {checkHeadline(summary)}. Approving records your judgement that they are right as they stand.
+            </Alert>
+          )}
           <TextField
             autoFocus
             fullWidth

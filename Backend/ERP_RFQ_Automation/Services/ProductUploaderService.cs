@@ -406,16 +406,31 @@ namespace ERP_RFQ_Automation.Services
             return sub.Id;
         }
 
+        /// <summary>
+        /// Resolves a spreadsheet UoM cell to a SetUom row, creating one only when the tenant
+        /// genuinely has no such unit.
+        ///
+        /// The match is TRIMMED and CASE-INSENSITIVE, and it considers the UoM CODE as well as
+        /// the name. It used to be `u.UomName == name` — ordinal, untrimmed, name-only — so
+        /// "Pcs", "pcs" and "PCS " each minted a separate row, in a table that has no unique
+        /// index on (BusinessUnitId, UomCode) to stop them. That table is the lookup the whole
+        /// conversion path normalises against, so every spurious row made canonicalisation
+        /// weaker exactly where it was supposed to be strongest.
+        /// </summary>
         private async Task<int?> GetOrCreateUom(string name, long buId, string createdBy)
         {
             if (string.IsNullOrWhiteSpace(name)) return null;
-            var uom = await _context.SetUoms.FirstOrDefaultAsync(u => u.UomName == name && u.BusinessUnitId == buId);
+            var trimmed = name.Trim();
+
+            var uom = await _context.SetUoms.FirstOrDefaultAsync(u =>
+                u.BusinessUnitId == buId
+                && (u.UomName.ToLower() == trimmed.ToLower() || u.UomCode.ToLower() == trimmed.ToLower()));
             if (uom != null) return uom.UomId;
 
             uom = new SetUom
             {
-                UomName = name,
-                UomCode = name.Length > 10 ? name.Substring(0, 10) : name,
+                UomName = trimmed,
+                UomCode = trimmed.Length > 10 ? trimmed.Substring(0, 10) : trimmed,
                 BusinessUnitId = buId,
                 CreatedBy = createdBy,
                 CreatedDate = DateTime.UtcNow,

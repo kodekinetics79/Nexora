@@ -27,7 +27,14 @@ public sealed record RoutingPolicy
         CustomerIdentifierType.Phone,
         CustomerIdentifierType.Alias,
         CustomerIdentifierType.CustomerName,
-        CustomerIdentifierType.HistoricalInference
+        CustomerIdentifierType.HistoricalInference,
+        // Client-organisation identity types, ranked LAST because they are learned rather
+        // than authoritative. They MUST appear here: DeterministicRoutingEngine.Route
+        // filters candidates by this list, so an identifier type that is missing is
+        // silently dropped from routing rather than loudly rejected.
+        CustomerIdentifierType.PortalAccount,
+        CustomerIdentifierType.Portal,
+        CustomerIdentifierType.RfqNumberPattern
     ];
 
     public IReadOnlyList<OwnershipScope> OwnershipPrecedence { get; init; } =

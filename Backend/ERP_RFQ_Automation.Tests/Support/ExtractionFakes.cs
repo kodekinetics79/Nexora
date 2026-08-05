@@ -24,6 +24,10 @@ public sealed class StubLlm : ILLMService
     private readonly Queue<LeadExtractionResult?> _responses;
     public List<string> Prompts { get; } = new();
 
+    /// <summary>The governed idempotency key of each successive call, in order — the proof
+    /// of exactly which (job, attempt, chunk) request the extractor issued.</summary>
+    public List<string> IdempotencyKeys { get; } = new();
+
     /// <summary>Items the extractor declared it packed into each successive call.</summary>
     public List<int?> RequestedItemCounts { get; } = new();
     public int CallCount { get; private set; }
@@ -50,6 +54,7 @@ public sealed class StubLlm : ILLMService
     {
         CallCount++;
         Prompts.Add(fullText);
+        IdempotencyKeys.Add(context.IdempotencyKey);
         RequestedItemCounts.Add(context.ItemsInPayload);
         var result = _responses.Count > 0 ? _responses.Dequeue() : null;
         return Task.FromResult(result);

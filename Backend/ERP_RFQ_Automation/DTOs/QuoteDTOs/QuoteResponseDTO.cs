@@ -67,6 +67,11 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public string? ProductName { get; set; }
         public string? ItemDescription { get; set; }
         public decimal Quantity { get; set; }
+        /// <summary>Unit the quantity is quoted in (EA, PACK, M, …). Null on legacy lines.</summary>
+        public string? UnitOfMeasure { get; set; }
+        /// <summary>The buyer's own line reference from their RFQ (SAP "00010", "OPT-29", …).
+        /// Null on legacy lines — display falls back to a synthetic index.</summary>
+        public string? CustomerLineRef { get; set; }
         public decimal UnitPrice { get; set; }
         public decimal TotalAmount { get; set; }
         public decimal? Discount { get; set; }
@@ -123,6 +128,8 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public long? RfqItemId { get; set; }
         public long? ProductId { get; set; }
         public string? ItemDescription { get; set; }
+        public string? UnitOfMeasure { get; set; }
+        public string? CustomerLineRef { get; set; }
         [Required]
         [Range(double.Epsilon, double.MaxValue, ErrorMessage = "Quantity must be greater than zero.")]
         public decimal Quantity { get; set; }
@@ -165,6 +172,10 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public long? RfqItemId { get; set; }
         public long? ProductId { get; set; }
         public string? ItemDescription { get; set; }
+        // Null means "not supplied" — UpdateQuoteAsync preserves the stored value rather
+        // than stripping the unit / buyer reference from an RFQ-born line.
+        public string? UnitOfMeasure { get; set; }
+        public string? CustomerLineRef { get; set; }
         // NOTE: no [Range] here — deleted items (IsDeleted=true) may carry placeholder values.
         // Non-positive quantity/price and negative tax are enforced server-side in
         // UpdateQuoteAsync for items that will remain on the quote (FIN-12).

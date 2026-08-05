@@ -11,6 +11,7 @@ import {
   Dialog,
   DialogContent,
   DialogTitle,
+  Divider,
   IconButton,
   List,
   ListItem,
@@ -252,22 +253,11 @@ export default function DashboardPage() {
         <Box sx={{ minHeight: 320, display: 'grid', placeItems: 'center' }}><CircularProgress /></Box>
       ) : data?.kpis.length ? (
         <>
-          <Typography variant="h6" sx={{ fontWeight: 900, mb: 1.5 }}>Commercial Attention</Typography>
-          <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', lg: 'repeat(3, 1fr)' }, gap: 1.5, mb: 3 }}>
-            {[
-              ['New inquiries', '/procurement/leads/all'],
-              ['Inquiries needing review', '/procurement/extraction/review'],
-              ['Leads ready for RFQ', '/procurement/leads/all?state=ready-for-rfq'],
-              ['RFQs requiring review', '/procurement/rfqs/draft'],
-              ['RFQs ready for Quote', '/procurement/rfqs/all?state=ready-for-quote'],
-              ['Quote Drafts awaiting action', '/sales/quotes?state=draft'],
-              ...(hasPermission('Leads') ? [['Commercial exceptions', '/sales/exceptions']] : []),
-            ].map(([label, route]) => (
-              <Button key={label} variant="outlined" endIcon={<DrillDownIcon />} onClick={() => navigate(route)} sx={{ minHeight: 56, justifyContent: 'space-between', textAlign: 'left' }}>
-                {label}
-              </Button>
-            ))}
-          </Box>
+          {/* The "Commercial Attention" block that used to sit here was seven
+              navigation links laid out as metric tiles — no value, no
+              denominator, no source. A link menu dressed as a dashboard teaches
+              people to read tiles as facts. It is gone; the sidebar already
+              carries every one of those destinations. */}
           <Typography variant="h6" sx={{ fontWeight: 900, mb: 1.5 }}>Verified Performance</Typography>
           <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', lg: 'repeat(4, 1fr)' }, gap: 2 }}>
             {data.kpis.map((kpi) => <KpiCard key={kpi.key} kpi={kpi} />)}
@@ -276,6 +266,26 @@ export default function DashboardPage() {
       ) : !dashboard.isError ? (
         <Alert severity="info">No KPI definitions are available for this period and role scope.</Alert>
       ) : null}
+
+      <Divider sx={{ my: 3 }} />
+      <Stack direction="row" spacing={1.5} sx={{ flexWrap: 'wrap', gap: 1 }}>
+        <Button variant="outlined" endIcon={<DrillDownIcon />} onClick={() => navigate('/analytics/deadlines')} sx={{ fontWeight: 800 }}>
+          Deadline board
+        </Button>
+        <Button variant="outlined" endIcon={<DrillDownIcon />} onClick={() => navigate('/analytics/brand-demand')} sx={{ fontWeight: 800 }}>
+          Brand demand
+        </Button>
+        {hasPermission('Leads') && (
+          <Button variant="outlined" endIcon={<DrillDownIcon />} onClick={() => navigate('/procurement/extraction/review')} sx={{ fontWeight: 800 }}>
+            Extraction review queue
+          </Button>
+        )}
+      </Stack>
+      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1.5 }}>
+        Nexora does not publish an extraction accuracy figure. Accuracy is measured from your reviewers' own corrections and
+        published per field once enough approved documents exist for your tenant. Until then every extraction is reviewed by your
+        team.
+      </Typography>
     </Box>
   );
 }

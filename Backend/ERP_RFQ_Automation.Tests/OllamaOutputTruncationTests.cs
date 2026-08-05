@@ -180,7 +180,135 @@ public sealed class OllamaOutputTruncationTests
             request.RootElement.GetProperty("options").GetProperty("num_predict").GetInt32());
     }
 
+    // ---- quantity tolerance (ship-before-pilot ②) ------------------------
+    // Two whole-document killers lived in the response handling, both candidate causes
+    // of the "unparseable output" / "no result" dead-letters. KILLER 1: Quantity is
+    // int? and the schema called it "number", so one line writing 2.0 (or "2") failed
+    // the ENTIRE document's deserialization. KILLER 2: validation rejected the whole
+    // extraction result when ANY single line carried a non-positive quantity. These
+    // tests pin the replacement behaviour: integral spellings parse, anything else
+    // degrades that LINE to a null quantity (needs review), and only genuinely
+    // document-level defects may still reject the document.
+
+    [Theory]
+    [InlineData("2")]      // the honest integer
+    [InlineData("2.0")]    // the float the "number" schema used to invite
+    [InlineData("2e0")]    // integral value in exponent clothing
+    [InlineData("\"2\"")]  // quantity as a JSON string
+    [InlineData("\"2.0\"")]
+    public async Task IntegralQuantityInAnyDisguise_ParsesToTheInteger_AndTheDocumentSurvives(string token)
+    {
+        var handler = new RecordingHandler(_ => Reply(
+            ItemsJson($"{{\"ProductShortName\":\"Contactor\",\"Quantity\":{token},\"ItemConfidence\":0.9}}"),
+            doneReason: "stop", evalCount: 60));
+        var governance = new PermissiveGovernance();
+        var service = CreateService(handler, governance);
+
+        var outcome = await service.ExtractLeadDataDetailedAsync("PART-1 quantity 2", Context());
+
+        Assert.Null(outcome.ErrorCode);
+        Assert.NotNull(outcome.Result);
+        Assert.Equal((int?)2, Assert.Single(outcome.Result!.Items).Quantity);
+        Assert.Null(governance.CompletedErrorCode);
+    }
+
+    [Fact]
+    public async Task QuantityWithARealFraction_BecomesNullForReview_NeverTruncated()
+    {
+        // 2.5 truncated to 2 is a silent under-quote; rounding to 3 is an invention.
+        // Null routes the LINE to review while the document survives.
+        var handler = new RecordingHandler(_ => Reply(
+            ItemsJson("{\"ProductShortName\":\"Gasket\",\"Quantity\":2.5,\"ItemConfidence\":0.9}"),
+            doneReason: "stop", evalCount: 60));
+        var service = CreateService(handler, new PermissiveGovernance());
+
+        var outcome = await service.ExtractLeadDataDetailedAsync("PART-1 quantity 2.5", Context());
+
+        Assert.Null(outcome.ErrorCode);
+        Assert.NotNull(outcome.Result);
+        Assert.Null(Assert.Single(outcome.Result!.Items).Quantity);
+    }
+
+    [Theory]
+    [InlineData("\"ten\"")]     // words are not quantities
+    [InlineData("\"2.5\"")]     // fraction in string clothing — still never truncated
+    [InlineData("\"12,000\"")]  // group separators are locale-ambiguous ("2,5" is 2.5)
+    [InlineData("4294967296")]  // beyond int range
+    [InlineData("true")]
+    [InlineData("{\"value\":2}")]
+    [InlineData("[2]")]
+    [InlineData("null")]
+    public async Task UnusableQuantityToken_DegradesTheLineToNull_InsteadOfKillingTheDocument(string token)
+    {
+        var handler = new RecordingHandler(_ => Reply(
+            ItemsJson($"{{\"ProductShortName\":\"Contactor\",\"Quantity\":{token},\"ItemConfidence\":0.9}}"),
+            doneReason: "stop", evalCount: 60));
+        var service = CreateService(handler, new PermissiveGovernance());
+
+        var outcome = await service.ExtractLeadDataDetailedAsync("PART-1", Context());
+
+        Assert.Null(outcome.ErrorCode);
+        Assert.NotNull(outcome.Result);
+        Assert.Null(Assert.Single(outcome.Result!.Items).Quantity);
+    }
+
+    [Fact]
+    public async Task OneZeroQuantityLine_IsQuarantinedToNull_WhileEveryOtherLineSurvives()
+    {
+        // KILLER 2. A 174-line production document must not die for one zero cell: the
+        // bad LINE degrades to a null quantity (needs review) and the rest persist.
+        var handler = new RecordingHandler(_ => Reply(ItemsJson(
+                "{\"ProductShortName\":\"Breaker\",\"Quantity\":10,\"ItemConfidence\":0.9}",
+                "{\"ProductShortName\":\"Contactor\",\"Quantity\":0,\"ItemConfidence\":0.8}",
+                "{\"ProductShortName\":\"Relay\",\"Quantity\":-3,\"ItemConfidence\":0.7}",
+                "{\"ProductShortName\":\"Fuse\",\"Quantity\":3,\"ItemConfidence\":0.9}"),
+            doneReason: "stop", evalCount: 200));
+        var governance = new PermissiveGovernance();
+        var logger = new CapturingLogger<OllamaLlmService>();
+        var service = CreateService(handler, governance, logger);
+
+        var outcome = await service.ExtractLeadDataDetailedAsync("four lines", Context());
+
+        Assert.Null(outcome.ErrorCode);
+        Assert.NotNull(outcome.Result);
+        var items = outcome.Result!.Items;
+        Assert.Equal(4, items.Count);
+        Assert.Equal((int?)10, items[0].Quantity);
+        Assert.Null(items[1].Quantity);
+        Assert.Null(items[2].Quantity);
+        Assert.Equal((int?)3, items[3].Quantity);
+        Assert.Null(governance.CompletedErrorCode);
+
+        // The quarantine is diagnosed — count and line positions, no document content.
+        var diagnostic = Assert.Single(logger.Messages.Where(m => m.Contains("Quarantined")));
+        Assert.Contains("2 of 4", diagnostic, StringComparison.Ordinal);
+        Assert.Contains("2,3", diagnostic, StringComparison.Ordinal);
+        Assert.DoesNotContain("Contactor", diagnostic, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DocumentLevelDefects_StillRejectTheWholeResult()
+    {
+        // The preserved other side: an envelope whose OverallConfidence is out of range
+        // is untrustworthy evidence about every line, not a line problem — the whole
+        // result is still refused as invalid_output.
+        var handler = new RecordingHandler(_ => Reply(
+            "{\"Rfqno\":\"RFQ-1\",\"OverallConfidence\":40,\"Items\":"
+            + "[{\"ProductShortName\":\"Breaker\",\"Quantity\":10,\"ItemConfidence\":0.9}]}",
+            doneReason: "stop", evalCount: 60));
+        var service = CreateService(handler, new PermissiveGovernance());
+
+        var outcome = await service.ExtractLeadDataDetailedAsync("PART-1 quantity 10", Context());
+
+        Assert.Null(outcome.Result);
+        Assert.Equal(AiErrorCodes.InvalidOutput, outcome.ErrorCode);
+    }
+
     // ---- harness ---------------------------------------------------------
+
+    /// <summary>A complete, well-formed extraction envelope around the given item objects.</summary>
+    private static string ItemsJson(params string[] items)
+        => $"{{\"Rfqno\":\"RFQ-1\",\"OverallConfidence\":0.9,\"Items\":[{string.Join(",", items)}]}}";
 
     private static OllamaLlmService CreateService(
         HttpMessageHandler handler, IAiGovernanceService governance,

@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using System.Text.Json;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Services;
 using ERP_RFQ_Automation.Services.DocumentIntelligence;
 using ERP_RFQ_Automation.Services.Interfaces;
 using ERP_RFQ_Automation.MultiTenancy;
@@ -212,13 +213,36 @@ public sealed class ExtractionWorker : BackgroundService
                 return true;
             }
             var input = await reader.ReadAsync(job, workToken);
+            var structured = input.IsStructured && input.StructuredRows is { Count: > 0 };
+            // Only the non-structured path can be a conversational body, so the provenance
+            // lookup is paid only where it can change the routing.
+            var jobMetadata = structured ? null : await ReadJobMetadataAsync(job, workToken);
 
             ChunkedExtractionOutcome outcome;
-            if (input.IsStructured && input.StructuredRows is { Count: > 0 })
+            if (structured)
             {
                 // Deterministic path bypasses the LLM entirely — no gate needed.
                 outcome = await extractor.ExtractStructuredAsync(
-                    input.StructuredRows, job.BusinessUnitId, input.SourceDocumentName, workToken);
+                    input.StructuredRows!, job.BusinessUnitId, input.SourceDocumentName, workToken);
+            }
+            else if (IsProseBody(jobMetadata)
+                && scope.ServiceProvider.GetService<Conversational.IConversationalExtractionService>()
+                    is { } conversational)
+            {
+                // ING-07: a conversational email BODY. The structured RFQ prompt cannot
+                // describe free prose (see ConversationalPrompt), so the body takes its own
+                // extractor — under the SAME process-wide LLM concurrency gate. The document
+                // path (ChunkedExtractionService) is untouched.
+                await _llmGate.WaitAsync(workToken);
+                try
+                {
+                    outcome = await conversational.ExtractAsync(
+                        input, jobMetadata?.ThreadContinuation == true, workToken);
+                }
+                finally
+                {
+                    _llmGate.Release();
+                }
             }
             else
             {
@@ -239,9 +263,7 @@ public sealed class ExtractionWorker : BackgroundService
                 // Retryable failure (NOT FailPermanentlyAsync): includes the allow-list
                 // fail-closed refusal for unstructured extraction, which must hold the
                 // document for review/retry, never dead-letter it on the first attempt.
-                var failureReason = outcome.ReviewReason ?? "Extraction produced no usable result.";
-                if (!string.IsNullOrWhiteSpace(input.StructuredFallbackNote))
-                    failureReason = $"{input.StructuredFallbackNote} {failureReason}";
+                var failureReason = ComposeFailureReason(outcome, input.StructuredFallbackNote);
                 if (!await queue.FailAsync(
                         job.Id, workerId, job.Attempts, failureReason, workToken))
                     LogLeaseLost(job.Id, workerId, "recording extraction failure");
@@ -494,6 +516,83 @@ public sealed class ExtractionWorker : BackgroundService
         }
     }
 
+    /// <summary>ING-07: true when the intake door marked this job's payload as conversational
+    /// prose (an email body), which routes it to the conversational extractor.</summary>
+    private static bool IsProseBody(ExtractionJobMetadata? metadata)
+        => string.Equals(metadata?.BodyShape, "prose", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Bound on the per-chunk diagnostics digest appended to a failure reason. The queue
+    /// stores LastError truncated at 4,000 characters and truncation keeps the START of
+    /// the string, so the digest is capped separately to guarantee the summary reason is
+    /// never the part that gets cut off.
+    /// </summary>
+    private const int MaxDiagnosticsDigestChars = 3_400;
+
+    /// <summary>
+    /// Composes the failure reason persisted into <c>ExtractionJobs.LastError</c>. The
+    /// summary reason comes first (prefixed with the reader's structured-fallback note
+    /// when present, unchanged), followed by the extractor's collected per-chunk
+    /// diagnostics. Those diagnostics used to be dropped here, so a dead-lettered job
+    /// said only "All chunks failed; no data extracted" while the ledger showed every
+    /// call succeeding — the stored error must instead say which stage failed and why.
+    /// </summary>
+    internal static string ComposeFailureReason(
+        ChunkedExtractionOutcome outcome, string? structuredFallbackNote)
+    {
+        var reason = outcome.ReviewReason ?? "Extraction produced no usable result.";
+        if (!string.IsNullOrWhiteSpace(structuredFallbackNote))
+            reason = $"{structuredFallbackNote} {reason}";
+
+        var details = outcome.Diagnostics
+            .Where(d => !string.IsNullOrWhiteSpace(d)
+                && !string.Equals(d, outcome.ReviewReason, StringComparison.Ordinal))
+            .ToList();
+        if (details.Count == 0)
+            return reason;
+
+        var digest = string.Join(" | ", details);
+        if (digest.Length > MaxDiagnosticsDigestChars)
+            digest = digest[..MaxDiagnosticsDigestChars] + "…";
+        return $"{reason} [diagnostics: {digest}]";
+    }
+
+    /// <summary>
+    /// Best-effort read of the job's ingest provenance: the database-owned occurrence record
+    /// first, the file sidecar as the pre-database-provenance fallback. Never throws — a job
+    /// with unreadable metadata simply keeps the default (document) routing.
+    /// </summary>
+    private async Task<ExtractionJobMetadata?> ReadJobMetadataAsync(ExtractionJob job, CancellationToken ct)
+    {
+        try
+        {
+            if (job.SourceDocumentOccurrenceId.HasValue)
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+                var json = await db.Set<SourceDocumentOccurrence>().AsNoTracking()
+                    .Where(x => x.BusinessUnitId == job.BusinessUnitId
+                        && x.Id == job.SourceDocumentOccurrenceId.Value)
+                    .Select(x => x.SourceMetadataJson)
+                    .SingleOrDefaultAsync(ct);
+                if (!string.IsNullOrWhiteSpace(json))
+                {
+                    using var document = JsonDocument.Parse(json);
+                    if (document.RootElement.TryGetProperty("metadata", out var element)
+                        && element.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined))
+                        return element.Deserialize<ExtractionJobMetadata>();
+                }
+            }
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException)
+        {
+            _log.LogWarning(ex, "Ingest metadata for job {JobId} is unreadable; using document routing.", job.Id);
+            return null;
+        }
+
+        return ExtractionJobMetadata.TryLoad(job);
+    }
+
     private async Task MarkIntakeFailureAsync(
         ExtractionJob job,
         string errorCode,
@@ -602,6 +701,9 @@ public sealed class DefaultExtractionDocumentReader : IExtractionDocumentReader
                 {
                     BusinessUnitId = job.BusinessUnitId,
                     SourceId = $"job:{job.Id}",
+                    // The lease attempt scopes every AI idempotency key this pass issues,
+                    // so a retried job makes NEW governed requests (see AttemptNumber).
+                    AttemptNumber = Math.Max(1, job.Attempts),
                     ExtractionJobId = job.Id,
                     SourceDocumentOccurrenceId = job.SourceDocumentOccurrenceId,
                     SourceDocumentName = name,
@@ -625,6 +727,9 @@ public sealed class DefaultExtractionDocumentReader : IExtractionDocumentReader
         {
             BusinessUnitId = job.BusinessUnitId,
             SourceId = $"job:{job.Id}",
+            // The lease attempt scopes every AI idempotency key this pass issues, so a
+            // retried job makes NEW governed requests (see AttemptNumber).
+            AttemptNumber = Math.Max(1, job.Attempts),
             ExtractionJobId = job.Id,
             SourceDocumentOccurrenceId = job.SourceDocumentOccurrenceId,
             SourceDocumentName = name,
@@ -717,6 +822,7 @@ public sealed class LeadPersister : ILeadPersister
     private readonly ERP_RFQ_Automation.Deduplication.ILeadDuplicateDetector? _duplicateDetector;
     private readonly ERP_RFQ_Automation.CommercialRouting.ICommercialRoutingApplicationService? _routing;
     private readonly ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService? _leadIdentity;
+    private readonly ERP_RFQ_Automation.CustomerResolution.ILeadCustomerResolutionService? _customerResolution;
 
     // The detector is optional so persistence keeps working before (and without)
     // the Deduplication DI registration (see Deduplication/DEDUP-WIRING.md).
@@ -725,13 +831,15 @@ public sealed class LeadPersister : ILeadPersister
         ILogger<LeadPersister> log,
         ERP_RFQ_Automation.Deduplication.ILeadDuplicateDetector? duplicateDetector = null,
         ERP_RFQ_Automation.CommercialRouting.ICommercialRoutingApplicationService? routing = null,
-        ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService? leadIdentity = null)
+        ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService? leadIdentity = null,
+        ERP_RFQ_Automation.CustomerResolution.ILeadCustomerResolutionService? customerResolution = null)
     {
         _context = context;
         _log = log;
         _duplicateDetector = duplicateDetector;
         _routing = routing;
         _leadIdentity = leadIdentity;
+        _customerResolution = customerResolution;
     }
 
     public Task<long> PersistAsync(
@@ -893,6 +1001,9 @@ public sealed class LeadPersister : ILeadPersister
         {
             var routeIds = _leadIdentity is null ? leads.Select(x => x.Id).ToHashSet()
                 : reconciliation.Where(x => x.ShouldRoute).Select(x => x.LeadId).ToHashSet();
+            // Client identity BEFORE routing, and AFTER reconciliation/persistence — the
+            // ordering is load bearing, see TryResolveCustomersAsync.
+            await TryResolveCustomersAsync(job, leads.Where(x => routeIds.Contains(x.Id)), ct);
             await TryRouteLeadsAsync(job, leads.Where(x => routeIds.Contains(x.Id)), ct);
         }
 
@@ -967,7 +1078,10 @@ public sealed class LeadPersister : ILeadPersister
         if (_leadIdentity is null)
             await TryDetectDuplicatesAsync(job, persisted.Leads, ct);
         if (_leadIdentity is null)
+        {
+            await TryResolveCustomersAsync(job, persisted.Leads, ct);
             await TryRouteLeadsAsync(job, persisted.Leads, ct);
+        }
         else
         {
             var newLeadIds = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadIngestionOccurrence>()
@@ -976,6 +1090,7 @@ public sealed class LeadPersister : ILeadPersister
                     && x.Classification == ERP_RFQ_Automation.LeadIdentity.LeadOccurrenceClassification.New
                     && x.LeadId != null)
                 .Select(x => x.LeadId!.Value).ToListAsync(ct);
+            await TryResolveCustomersAsync(job, persisted.Leads.Where(x => newLeadIds.Contains(x.Id)), ct);
             await TryRouteLeadsAsync(job, persisted.Leads.Where(x => newLeadIds.Contains(x.Id)), ct);
         }
         return persisted.LeadId;
@@ -1038,6 +1153,46 @@ public sealed class LeadPersister : ILeadPersister
             catch (Exception ex)
             {
                 _log.LogError(ex, "Duplicate detection failed for lead {LeadId}; persistence succeeded.", lead.Id);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Deterministic client-organisation resolution at INGESTION — the seam that turns
+    /// "26 leads, 0 with a customer" into a lead a rep can act on without opening the PDF.
+    ///
+    /// ORDERING IS LOAD BEARING. It runs AFTER identity reconciliation and persistence
+    /// because LeadIdentityApplicationService.CustomerScope() keys the dedup corpus on
+    /// <c>customer:{Id}</c> once Lead.CustomerId is set and on <c>email:</c>/<c>buyer:</c>
+    /// before that; resolving earlier would re-key occurrences already stored under the old
+    /// scope and silently break duplicate/revision detection. It runs BEFORE routing so the
+    /// routing engine sees the customer this pass established.
+    ///
+    /// Best-effort by contract: persistence has already committed, and an unresolved lead is
+    /// a correct, recoverable outcome (the backfill entry point re-runs it). A resolution
+    /// failure must never fail ingestion.
+    /// </summary>
+    private async Task TryResolveCustomersAsync(
+        ExtractionJob job, IEnumerable<Lead> leads, CancellationToken ct)
+    {
+        if (_customerResolution is null)
+            return;
+
+        foreach (var lead in leads)
+        {
+            try
+            {
+                var outcome = await _customerResolution.ResolveAsync(job.BusinessUnitId, lead.Id, ct);
+                _log.LogInformation(
+                    "Client resolution for lead {LeadId}: {Status} ({Reason}, confidence {Confidence:F2}).",
+                    lead.Id, outcome.Status, outcome.ReasonCode, outcome.Confidence);
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex,
+                    "Client resolution failed for extracted lead {LeadId}; the lead stays unresolved and can be re-run.",
+                    lead.Id);
+                _context.ChangeTracker.Clear();
             }
         }
     }
@@ -1183,46 +1338,30 @@ public sealed class LeadPersister : ILeadPersister
             // WP-BOQ foundation: document-level "product" | "service" | "mixed"
             // classification (partial property; column added by a lead migration).
             InquiryType = NormalizeInquiryType(ai.InquiryType),
+            // ── Client organisation evidence (raw transcription, never a decision) ──
+            // BuyersName above stays the PERSON ("3C2-AMER AL-DOSSARY"); these carry the
+            // ORGANISATION. SupplierNameOnDocument is persisted precisely so the resolver
+            // can EXCLUDE it: on the SEC corpus the only company name printed is our own.
+            CustomerCompanyNameExtracted = SanitizeCustomerCompanyName(
+                Truncate(ai.CustomerCompanyName, 320), ai.SupplierNameOnDocument),
+            CustomerCompanyEvidence = Truncate(ai.CustomerCompanyEvidence, 200),
+            CustomerCompanyRegistrationId = Truncate(ai.CustomerCompanyRegistrationId, 100),
+            CustomerBuyerEmailExtracted = SanitizeExtractedEmail(Truncate(ai.CustomerBuyerEmail, 255)),
+            CustomerPortalNameExtracted = Truncate(ai.CustomerPortalName, 120),
+            SupplierNameOnDocument = SanitizeBuyerName(Truncate(ai.SupplierNameOnDocument, 320)),
+            SupplierAccountRefOnDocument = Truncate(ai.SupplierAccountRefOnDocument, 100),
             CreatedBy = "System",
             CreatedDate = now,
             BusinessUnitId = job.BusinessUnitId,
             EmailIngests = ingest // navigation -> EF inserts/links ingest, fills EmailIngestsId
         };
 
+        // DRIFT GUARD: the field-by-field mapping is shared with the email, folder and
+        // manual-upload doors — see Services/LeadItemMapper.cs. It carries this door's
+        // sentinel-date and confidence-clamp rules to all four, and it is where the single
+        // unit-of-measure canonicalisation lives.
         foreach (var it in items)
-        {
-            lead.LeadItems.Add(new LeadItem
-            {
-                CompanyRef = Truncate(it.CompanyRef, 100),
-                CustomerAccountPortalId = Truncate(it.CustomerAccountPortalId, 100),
-                CustomerRfqno = Truncate(it.CustomerRfqno, 100),
-                ItemMaterialCode = Truncate(it.ItemMaterialCode, 100),
-                CommodityProduct = Truncate(it.CommodityProduct, 200),
-                BuyerName = Truncate(it.BuyerName, 200),
-                LineItemNo = Truncate(it.LineItemNo, 50),
-                ProductShortName = Truncate(it.ProductShortName, 1000),
-                Alternative = Truncate(it.Alternative, 100),
-                ProductShortDescription = Truncate(it.ProductShortDescription, 1000),
-                Currency = Truncate(it.Currency, 10),
-                UnitOfMeasure = Truncate(it.UnitOfMeasure, 100),
-                UnitPrice = it.UnitPrice,
-                Quantity = it.Quantity ?? 0,
-                StorageLocation = Truncate(it.StorageLocation, 100),
-                ManufacturerName = Truncate(it.ManufacturerName, 200),
-                ManufacturerPartNumber = Truncate(it.ManufacturerPartNumber, 100),
-                AlternateProductName = Truncate(it.AlternateProductName, 200),
-                AlternatePartNumber = Truncate(it.AlternatePartNumber, 100),
-                ItemText = Truncate(it.ItemText, 2000),
-                MaterialPotext = Truncate(it.MaterialPotext, 2000),
-                LeadTime = int.TryParse(it.LeadTime, NumberStyles.Integer, CultureInfo.InvariantCulture, out var lt) ? lt : null,
-                ReceivedDate = SanitizeDate(ParseDate(it.ReceivedDate)),
-                BidClosingDateLine = SanitizeDate(ParseDate(it.BidClosingDateLine)),
-                Aiconfidence = ClampConfidence(it.ItemConfidence ?? 0),
-                // Unrecognized customer-document columns, capped + serialized to jsonb
-                // (null when the model returned none — the common case).
-                ExtraFields = ExtraFieldsJson.Serialize(it.ExtraFields)
-            });
-        }
+            lead.LeadItems.Add(LeadItemMapper.Map(it, ParseDate));
 
         return lead;
     }
@@ -1330,6 +1469,60 @@ public sealed class LeadPersister : ILeadPersister
         if (PlaceholderBuyerNames.Contains(trimmed)) return null;
         if (trimmed.EndsWith("@pipeline.local", StringComparison.OrdinalIgnoreCase)) return null;
         return trimmed;
+    }
+
+    // Generic template words a model reaches for when the document names no buyer. Storing
+    // any of these would turn "we do not know" into a fake fact the resolver then tries to
+    // match.
+    private static readonly HashSet<string> PlaceholderCompanyNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "unknown", "unknown company", "unknown customer", "customer", "client", "buyer",
+        "n/a", "na", "none", "null", "tbd", "not specified", "not stated", "not mentioned",
+        "company", "the company", "organization", "organisation"
+    };
+
+    /// <summary>
+    /// The write-time half of the direction-of-trade guard.
+    ///
+    /// Rejects placeholders, and rejects any "customer" name that is really the VENDOR block
+    /// of the same document — the failure mode the whole feature exists to prevent, because
+    /// on an SEC bid the only company name printed is the trading house receiving it.
+    ///
+    /// The tenant's own BusinessUnit name and mail domains are the OTHER half of that guard;
+    /// they need a tenant-scoped database read, which BuildLead (static, no DbContext) cannot
+    /// do, so they are enforced in <c>CustomerIdentityResolver.Guard</c> and
+    /// <c>CustomerAliasLearner</c> — before anything is ever matched or learned. Persisting
+    /// the raw string here is safe and deliberate: it is evidence a rep can read.
+    /// </summary>
+    private static string? SanitizeCustomerCompanyName(string? name, string? supplierNameOnDocument)
+    {
+        var trimmed = name?.Trim();
+        if (string.IsNullOrEmpty(trimmed)) return null;
+        if (trimmed.Length < 2) return null;
+        if (PlaceholderCompanyNames.Contains(trimmed)) return null;
+        if (PlaceholderBuyerNames.Contains(trimmed)) return null;
+        if (trimmed.EndsWith("@pipeline.local", StringComparison.OrdinalIgnoreCase)) return null;
+
+        var supplierKey = ERP_RFQ_Automation.CustomerResolution.CustomerNameNormalizer.LooseKey(supplierNameOnDocument);
+        if (supplierKey.Length > 0 &&
+            string.Equals(ERP_RFQ_Automation.CustomerResolution.CustomerNameNormalizer.LooseKey(trimmed),
+                supplierKey, StringComparison.Ordinal))
+            return null;
+
+        return trimmed;
+    }
+
+    /// <summary>
+    /// Keeps only a single deliverable address, and never one of Nexora's own ingestion
+    /// placeholders (extraction@pipeline.local, sec@system.com, manual@upload.com …).
+    /// </summary>
+    private static string? SanitizeExtractedEmail(string? email)
+    {
+        var parsed = ERP_RFQ_Automation.CustomerResolution.LeadCustomerResolutionService.ParseAddress(email);
+        if (parsed is null) return null;
+        return ERP_RFQ_Automation.CustomerResolution.SyntheticIdentityGuard.IsSyntheticAddress(parsed)
+            ? null
+            : parsed;
     }
 
     // Conservative junk filter for extracted RFQ numbers: reject only obvious

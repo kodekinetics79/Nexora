@@ -9,7 +9,21 @@ public enum CustomerIdentifierType
     Phone,
     Alias,
     CustomerName,
-    HistoricalInference
+    HistoricalInference,
+
+    // ── Client-organisation identity (additive, string-converted, ≤32 chars) ──
+    // Deliberately OUTSIDE the UX_customer_identifiers_authoritative filter: these are
+    // LEARNED, not authoritative, so several customers may legitimately share one value
+    // and the resolver reports AMBIGUOUS rather than guessing.
+
+    /// <summary>Buying portal / document template ("MATERIALS E-BIDDING SYSTEM", "Ariba", "Etimad").</summary>
+    Portal,
+
+    /// <summary>"PORTAL|OUR-VENDOR-CODE" — the pair is unique per customer; the code alone is not.</summary>
+    PortalAccount,
+
+    /// <summary>Regex shape of the customer's RFQ numbering ("^C\d{9}$"). Suggestion-grade only.</summary>
+    RfqNumberPattern
 }
 
 public enum OwnershipScope
@@ -68,6 +82,21 @@ public sealed class CustomerIdentifier
     public string Source { get; set; } = string.Empty;
     public DateTime EffectiveFrom { get; set; }
     public DateTime? EffectiveTo { get; set; }
+
+    // ── Learning provenance (client-organisation identity) ───────────────────
+    // Which human correction taught this edge. Without it a later reversal cannot
+    // find and expire what a now-known-wrong review asserted (safeguard P5).
+
+    /// <summary>The lead whose review taught this identifier. Null for profile-synced rows.</summary>
+    public long? LearnedFromLeadId { get; set; }
+
+    /// <summary>The LeadReviewAudit row that carries the before/after image of that correction.</summary>
+    public long? LearnedFromReviewAuditId { get; set; }
+
+    /// <summary>How many times a human has re-confirmed this identifier. Never decremented.</summary>
+    public int ObservationCount { get; set; } = 1;
+
+    public DateTime? LastObservedOn { get; set; }
 }
 
 public sealed class CustomerOwnership

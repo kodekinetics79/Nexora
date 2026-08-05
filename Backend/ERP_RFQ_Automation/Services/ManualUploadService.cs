@@ -241,7 +241,7 @@ namespace ERP_RFQ_Automation.Services
                     string limitedText = LimitTextForLLM(combinedExtractedText);
                     ai = await _llmService.ExtractLeadDataAsync(limitedText,
                         new AiCallContext(businessUnitId, AiPurposes.RfqExtraction,
-                            $"manual-ingest:{dummyIngest.Id}", "rfq-extraction-v1"));
+                            $"manual-ingest:{dummyIngest.Id}", AiPromptVersions.StructuredRfqExtraction));
                 }
                 catch (Exception ex)
                 {
@@ -349,42 +349,11 @@ namespace ERP_RFQ_Automation.Services
                     _context.Leads.Add(lead);
                     await _context.SaveChangesAsync();
 
+                    // DRIFT GUARD: shared with the email, folder and async-worker doors — see
+                    // LeadItemMapper. One mapper means the unit-of-measure canonicalisation
+                    // applies to every ingested row, not to whichever door was edited last.
                     foreach (var aiItem in items)
-                    {
-                        int? leadTime = int.TryParse(aiItem.LeadTime ?? "", out int lt) ? lt : null;
-                        DateTime? receivedDate = ParseDate(aiItem.ReceivedDate);
-                        DateTime? bidClosingDateLine = ParseDate(aiItem.BidClosingDateLine);
-
-                        _context.LeadItems.Add(new LeadItem
-                        {
-                            LeadId = lead.Id,
-                            CompanyRef = Truncate(aiItem.CompanyRef, 100),
-                            CustomerAccountPortalId = Truncate(aiItem.CustomerAccountPortalId, 100),
-                            CustomerRfqno = Truncate(aiItem.CustomerRfqno, 100),
-                            ItemMaterialCode = Truncate(aiItem.ItemMaterialCode, 100),
-                            CommodityProduct = Truncate(aiItem.CommodityProduct, 200),
-                            BuyerName = Truncate(aiItem.BuyerName, 200),
-                            LineItemNo = Truncate(aiItem.LineItemNo, 50),
-                            ProductShortName = Truncate(aiItem.ProductShortName, 1000),
-                            Alternative = Truncate(aiItem.Alternative, 100),
-                            ProductShortDescription = Truncate(aiItem.ProductShortDescription, 1000),
-                            Currency = Truncate(aiItem.Currency, 10),
-                            UnitOfMeasure = Truncate(aiItem.UnitOfMeasure, 100),
-                            UnitPrice = aiItem.UnitPrice,
-                            Quantity = aiItem.Quantity ?? 0,
-                            StorageLocation = Truncate(aiItem.StorageLocation, 100),
-                            ManufacturerName = Truncate(aiItem.ManufacturerName, 200),
-                            ManufacturerPartNumber = Truncate(aiItem.ManufacturerPartNumber, 100),
-                            AlternateProductName = Truncate(aiItem.AlternateProductName, 200),
-                            AlternatePartNumber = Truncate(aiItem.AlternatePartNumber, 100),
-                            ItemText = Truncate(aiItem.ItemText, 2000),
-                            MaterialPotext = Truncate(aiItem.MaterialPotext, 2000),
-                            LeadTime = leadTime,
-                            ReceivedDate = receivedDate,
-                            BidClosingDateLine = bidClosingDateLine,
-                            Aiconfidence = (decimal?)(aiItem.ItemConfidence ?? 0.0)
-                        });
-                    }
+                        _context.LeadItems.Add(LeadItemMapper.Map(aiItem, ParseDate, lead.Id));
 
                     if (items.Count > 0)
                         await _context.SaveChangesAsync();

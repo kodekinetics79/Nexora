@@ -5,6 +5,8 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.DTOs.Dashboard;
+using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Services.Measurement;
 
 namespace ERP_RFQ_Automation.Controllers
 {
@@ -58,6 +60,89 @@ namespace ERP_RFQ_Automation.Controllers
                 generatedAt,
                 cancellationToken);
             return Ok(data);
+        }
+
+        /// <summary>
+        /// Forward-looking workload: open enquiries bucketed by days to their bid closing
+        /// date, with line counts. The pilot's landing view — /dashboard does not ship as
+        /// the landing route while its KPI tiles are still link menus in metric clothing.
+        /// </summary>
+        [HttpGet("deadline-board")]
+        [RequireModulePermission("Dashboard", PermissionAction.View)]
+        public async Task<ActionResult<DeadlineBoardDTO>> GetDeadlineBoard(
+            [FromQuery] int maxLeads = 200, CancellationToken cancellationToken = default)
+        {
+            var businessUnitId = ClaimId("businessUnitId");
+            if (businessUnitId <= 0) return Forbid();
+            return Ok(await _repository.GetDeadlineBoardAsync(businessUnitId, maxLeads, cancellationToken));
+        }
+
+        /// <summary>
+        /// Documents in, leads out, and what survived: the funnel plus the coverage tiles
+        /// that say whether what came out is usable.
+        /// </summary>
+        [HttpGet("document-yield")]
+        [RequireModulePermission("Dashboard", PermissionAction.View)]
+        public async Task<ActionResult<DocumentYieldDTO>> GetDocumentYield(
+            [FromQuery] DateTime? from,
+            [FromQuery] DateTime? to,
+            CancellationToken cancellationToken = default)
+        {
+            var businessUnitId = ClaimId("businessUnitId");
+            if (businessUnitId <= 0) return Forbid();
+
+            var generatedAt = DateTime.UtcNow;
+            var effectiveTo = NormalizeUtc(to ?? generatedAt);
+            var effectiveFrom = NormalizeUtc(from ?? effectiveTo.AddDays(-90));
+            if (effectiveFrom >= effectiveTo)
+                return BadRequest("The 'from' value must be earlier than 'to'.");
+            if (effectiveTo - effectiveFrom > TimeSpan.FromDays(732))
+                return BadRequest("The window cannot exceed 732 days.");
+
+            return Ok(await _repository.GetDocumentYieldAsync(
+                businessUnitId, effectiveFrom, effectiveTo, cancellationToken));
+        }
+
+        /// <summary>
+        /// MEASURED extraction accuracy, harvested from reviewers' own corrections.
+        ///
+        /// Returns no percentage for any field until 30 approved documents exist behind it
+        /// — see AccuracyMeasurementService. Below that threshold the payload carries
+        /// counts and an explicit "insufficient-data" status, so there is nothing for a
+        /// caller to render as a figure. This endpoint is the ONLY place in the product
+        /// permitted to state an accuracy number, and it will state none during the early
+        /// pilot, which is the correct answer.
+        /// </summary>
+        [HttpGet("extraction-accuracy")]
+        [RequireModulePermission("Dashboard", PermissionAction.View)]
+        public async Task<ActionResult<ExtractionAccuracyReport>> GetExtractionAccuracy(
+            [FromServices] ErpRfqAutomationContext db,
+            CancellationToken cancellationToken)
+        {
+            var businessUnitId = ClaimId("businessUnitId");
+            if (businessUnitId <= 0) return Forbid();
+            return Ok(await new AccuracyMeasurementService(db)
+                .GetFieldAccuracyAsync(businessUnitId, cancellationToken));
+        }
+
+        /// <summary>
+        /// The correction signal itself: how often reviewers changed what the machine
+        /// produced, per field, with denominators. Read straight from LeadReviewAudit so
+        /// reviews recorded before the corpus table existed still count.
+        ///
+        /// This is NOT accuracy and the payload says so. It is reportable at any sample
+        /// size because it reports what happened rather than estimating what will happen.
+        /// </summary>
+        [HttpGet("correction-signal")]
+        [RequireModulePermission("Dashboard", PermissionAction.View)]
+        public async Task<ActionResult<CorrectionSignalReport>> GetCorrectionSignal(
+            [FromServices] ErpRfqAutomationContext db,
+            [FromQuery] int maxReviews = 2000, CancellationToken cancellationToken = default)
+        {
+            var businessUnitId = ClaimId("businessUnitId");
+            if (businessUnitId <= 0) return Forbid();
+            return Ok(await new AccuracyMeasurementService(db)
+                .GetCorrectionSignalAsync(businessUnitId, maxReviews, cancellationToken));
         }
 
         // The {businessUnitId} route segment is kept for backward compatibility with

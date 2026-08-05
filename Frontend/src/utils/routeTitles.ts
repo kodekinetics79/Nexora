@@ -19,6 +19,8 @@ const STATIC_ROUTE_TITLES: Readonly<Record<string, string>> = {
   // Dashboards & intelligence
   '/dashboard': 'Dashboard',
   '/dashboard/team': 'Team Workload',
+  '/analytics/deadlines': 'Deadline Board',
+  '/analytics/brand-demand': 'Brand Demand',
   '/intelligence/commercial-memory': 'Commercial Memory',
 
   // Sourcing Copilot
@@ -44,6 +46,7 @@ const STATIC_ROUTE_TITLES: Readonly<Record<string, string>> = {
   '/admin/platform/releases': 'Test & Release Center',
   '/admin/platform/archive': 'Commercial Document Archive',
   '/admin/platform/quality': 'Quality Analytics',
+  '/admin/platform/retention': 'Storage & Retention',
 
   // Sales management
   '/sales/actions': 'Human Action Center',
@@ -116,6 +119,7 @@ const STATIC_ROUTE_TITLES: Readonly<Record<string, string>> = {
   '/procurement/leads/manual-upload': 'Bulk Lead Upload',
   '/procurement/leads/possible-matches': 'Possible Matches',
   '/procurement/leads/duplicates': 'Duplicate Uploads',
+  '/procurement/leads/inbound-mail': 'Inbound Mail',
   '/commercial-cases': 'Commercial Case Workspace',
 
   // Platform Owner console (see platform/PlatformRoutes.tsx)

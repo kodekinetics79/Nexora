@@ -14,6 +14,18 @@ public sealed record EvidenceObject(
     string? ETag,
     long ByteSize);
 
+/// <summary>
+/// Outcome of purging ONE stored evidence object. <paramref name="Deleted"/> is false when
+/// the object was already absent — the normal, non-error case for a re-run and for the
+/// production documents whose bytes were lost to ephemeral storage before the persistent
+/// disk existed. <paramref name="BytesFreed"/> is measured, never assumed, so the tenant's
+/// "space reclaimed" figure is a fact rather than an estimate.
+/// </summary>
+public readonly record struct EvidenceObjectPurgeResult(bool Deleted, long BytesFreed)
+{
+    public static readonly EvidenceObjectPurgeResult Absent = new(false, 0);
+}
+
 public interface IEvidenceObjectStorage
 {
     bool IsDurable { get; }
@@ -32,6 +44,45 @@ public interface IEvidenceObjectStorage
         string storageUri,
         string expectedSha256,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Permanently removes the BYTES of one evidence object. The evidence RECORD is never
+    /// touched here — <c>source_documents</c> physically refuses DELETE
+    /// (<c>trg_source_documents_no_delete</c>) and freezes its hash, filename and size
+    /// against modification, which is what makes "we deleted the file" auditable rather
+    /// than indistinguishable from "we lost the file".
+    ///
+    /// <para>
+    /// Addressed by the stored (bucket, key, version) triple rather than by a URI so each
+    /// provider deletes the exact object it wrote: on a versioned S3 bucket a delete
+    /// WITHOUT the version id only writes a delete marker and reclaims nothing at all,
+    /// which would make the reclaimed-bytes figure a lie.
+    /// </para>
+    ///
+    /// <para>Default implementation refuses rather than silently reporting success: a
+    /// provider that cannot delete must surface as an error the purge records, never as a
+    /// purge that quietly freed nothing.</para>
+    /// </summary>
+    Task<EvidenceObjectPurgeResult> TryDeletePurgedObjectAsync(
+        string bucket,
+        string key,
+        string version,
+        CancellationToken ct = default)
+        => throw new NotSupportedException(
+            $"{GetType().Name} does not support purging stored evidence bytes.");
+
+    /// <summary>
+    /// Size of a stored object, or null when it is not there. Exists so a dry run can quote
+    /// the bytes it WOULD free by measuring the same objects the real run would delete,
+    /// rather than by multiplying a recorded size and hoping. The ~15 production documents
+    /// whose bytes vanished with ephemeral storage must not inflate the promised figure.
+    /// </summary>
+    Task<long?> TryMeasureObjectAsync(
+        string bucket,
+        string key,
+        string version,
+        CancellationToken ct = default)
+        => Task.FromResult<long?>(null);
 }
 
 public sealed class LocalEvidenceObjectStorage : IEvidenceObjectStorage
@@ -74,6 +125,52 @@ public sealed class LocalEvidenceObjectStorage : IEvidenceObjectStorage
         {
             await source.DisposeAsync();
         }
+    }
+
+    public Task<EvidenceObjectPurgeResult> TryDeletePurgedObjectAsync(
+        string bucket,
+        string key,
+        string version,
+        CancellationToken ct = default)
+    {
+        _ = version;
+        if (string.IsNullOrWhiteSpace(key))
+            throw new ArgumentException("An evidence object key is required.", nameof(key));
+        if (!string.IsNullOrWhiteSpace(bucket)
+            && !string.Equals(bucket, "local", StringComparison.Ordinal))
+            throw new InvalidDataException(
+                "The evidence object was not written by local storage and cannot be purged by it.");
+
+        // Size is read before the delete because afterwards there is nothing to measure.
+        // Missing file => Absent, which the purge treats as success, not as an error.
+        var path = _files.ResolvePath(key);
+        var bytes = File.Exists(path) ? new FileInfo(path).Length : 0L;
+        return DeleteAsync(key, bytes, ct);
+    }
+
+    private async Task<EvidenceObjectPurgeResult> DeleteAsync(string key, long bytes, CancellationToken ct)
+    {
+        var deleted = await _files.TryDeleteAsync(key, ct);
+        return deleted ? new EvidenceObjectPurgeResult(true, bytes) : EvidenceObjectPurgeResult.Absent;
+    }
+
+    public Task<long?> TryMeasureObjectAsync(
+        string bucket,
+        string key,
+        string version,
+        CancellationToken ct = default)
+    {
+        _ = version;
+        ct.ThrowIfCancellationRequested();
+        if (string.IsNullOrWhiteSpace(key))
+            return Task.FromResult<long?>(null);
+        if (!string.IsNullOrWhiteSpace(bucket)
+            && !string.Equals(bucket, "local", StringComparison.Ordinal))
+            return Task.FromResult<long?>(null);
+
+        // ResolvePath still applies: a dry run must not be a way to stat arbitrary files.
+        var path = _files.ResolvePath(key);
+        return Task.FromResult<long?>(File.Exists(path) ? new FileInfo(path).Length : null);
     }
 
     internal static string BuildKey(long businessUnitId, string zone, string sha256, string extension)
@@ -259,6 +356,64 @@ public sealed class S3EvidenceObjectStorage : IEvidenceObjectStorage, IDisposabl
         return await LocalEvidenceObjectStorage.CopyAndVerifyAsync(response.ResponseStream, expectedSha256, ct);
     }
 
+    public async Task<EvidenceObjectPurgeResult> TryDeletePurgedObjectAsync(
+        string bucket,
+        string key,
+        string version,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(key))
+            throw new ArgumentException("An evidence object key is required.", nameof(key));
+        EnsureConfiguredBucket(bucket, _options.Bucket!);
+
+        // The version id is load-bearing, not decoration. Evidence buckets are versioned
+        // (ProbeAsync refuses to be ready otherwise), and a DeleteObject WITHOUT a version
+        // id on a versioned bucket only adds a delete marker: the bytes stay, storage cost
+        // stays, and the tenant is told space was reclaimed when none was. Deleting the
+        // specific version is the only form that actually frees anything.
+        var versionId = NormalizeVersionId(version);
+        var existing = await TryHeadAsync(key, versionId, ct);
+        if (existing is null)
+            return EvidenceObjectPurgeResult.Absent;
+
+        await _client.DeleteObjectAsync(new DeleteObjectRequest
+        {
+            BucketName = _options.Bucket,
+            Key = key,
+            VersionId = versionId
+        }, ct);
+        return new EvidenceObjectPurgeResult(true, existing.ContentLength);
+    }
+
+    public async Task<long?> TryMeasureObjectAsync(
+        string bucket,
+        string key,
+        string version,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(key))
+            return null;
+        EnsureConfiguredBucket(bucket, _options.Bucket!);
+        var metadata = await TryHeadAsync(key, NormalizeVersionId(version), ct);
+        return metadata?.ContentLength;
+    }
+
+    /// <summary>
+    /// Local-written objects record the content hash where S3 records a version id (see
+    /// <see cref="LocalEvidenceObjectStorage.WriteImmutableAsync"/>), and a bucket with
+    /// versioning suspended returns none at all. A 64-hex value is therefore a hash, not a
+    /// version, and must not be sent as one — S3 would 400 on it.
+    /// </summary>
+    internal static string? NormalizeVersionId(string? version)
+    {
+        if (string.IsNullOrWhiteSpace(version))
+            return null;
+        var trimmed = version.Trim();
+        if (trimmed.Length == 64 && trimmed.All(Uri.IsHexDigit))
+            return null;
+        return trimmed;
+    }
+
     private async Task<GetObjectMetadataResponse?> TryHeadAsync(string key, CancellationToken ct)
     {
         try
@@ -266,6 +421,27 @@ public sealed class S3EvidenceObjectStorage : IEvidenceObjectStorage, IDisposabl
             return await _client.GetObjectMetadataAsync(_options.Bucket, key, ct);
         }
         catch (AmazonS3Exception ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+    }
+
+    private async Task<GetObjectMetadataResponse?> TryHeadAsync(
+        string key, string? versionId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(versionId))
+            return await TryHeadAsync(key, ct);
+        try
+        {
+            return await _client.GetObjectMetadataAsync(new GetObjectMetadataRequest
+            {
+                BucketName = _options.Bucket,
+                Key = key,
+                VersionId = versionId
+            }, ct);
+        }
+        catch (AmazonS3Exception ex) when (ex.StatusCode is HttpStatusCode.NotFound
+                                           or HttpStatusCode.MethodNotAllowed)
         {
             return null;
         }

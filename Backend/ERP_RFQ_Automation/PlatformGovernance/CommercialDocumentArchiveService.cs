@@ -21,6 +21,11 @@ public sealed record ArchiveDocumentItem(long OccurrenceId, long SourceDocumentI
 public sealed record ArchiveSearchResult(IReadOnlyList<ArchiveDocumentItem> Items, int Page,
     int PageSize, int Total, string SearchScope, string DefinitionVersion);
 
+/// <summary>Projected governance state for one archived occurrence. Read-only view of the
+/// audit log; there is no stored copy of it anywhere.</summary>
+public sealed record ArchiveGovernanceState(long OccurrenceId, bool LegalHold,
+    bool DeletionRequested, int Version);
+
 public sealed record ArchiveGovernanceCommand(int ExpectedVersion, string Action, string Reason);
 public sealed record ArchiveGovernanceResult(long OccurrenceId, bool LegalHold, bool DeletionRequested,
     int GovernanceVersion, bool IdempotentReplay);
@@ -231,6 +236,58 @@ public sealed class CommercialDocumentArchiveService(ErpRfqAutomationContext db)
             return new ArchiveGovernanceResult(occurrenceId, next.LegalHold,
                 next.DeletionRequested, next.Version, false);
         });
+    }
+
+    /// <summary>
+    /// Current hold / deletion-request state for every governed occurrence in the tenant,
+    /// folded from the same audit log and by the same <see cref="State"/> projection the
+    /// single-occurrence path uses.
+    ///
+    /// <para>
+    /// Exposed so the retention purge can honour legal hold without inventing a second
+    /// source of truth for it. A duplicate hold flag on a table somewhere would itself be
+    /// an audit finding: two places that can disagree about whether evidence is frozen is
+    /// strictly worse than one place that is slower to read.
+    /// </para>
+    /// </summary>
+    public async Task<IReadOnlyDictionary<long, ArchiveGovernanceState>> GovernanceStateAsync(
+        long tenantId, CancellationToken ct)
+    {
+        PlatformGovernanceService.EnsureTenant(tenantId);
+        var events = await db.TenantGovernanceAuditEvents.AsNoTracking()
+            .Where(x => x.BusinessUnitId == tenantId && x.Area == Area
+                && x.AggregateType == "SourceDocumentOccurrence")
+            .OrderBy(x => x.OccurredOn).ThenBy(x => x.Id)
+            .Select(x => new { x.AggregateReference, x.Action, x.OccurredOn, x.Id })
+            .ToListAsync(ct);
+
+        var byOccurrence = new Dictionary<long, ArchiveGovernanceState>();
+        foreach (var group in events.GroupBy(x => x.AggregateReference))
+        {
+            if (!TryParseOccurrenceReference(group.Key, out var occurrenceId))
+                continue;
+            var state = new ArchiveState(false, false, 0);
+            foreach (var audit in group)
+                state = state with
+                {
+                    LegalHold = audit.Action == "HOLD_APPLIED"
+                        || audit.Action != "HOLD_RELEASED" && state.LegalHold,
+                    DeletionRequested = audit.Action == "DELETION_REQUESTED"
+                        || audit.Action != "DELETION_CANCELLED" && state.DeletionRequested,
+                    Version = state.Version + 1
+                };
+            byOccurrence[occurrenceId] = new ArchiveGovernanceState(
+                occurrenceId, state.LegalHold, state.DeletionRequested, state.Version);
+        }
+        return byOccurrence;
+    }
+
+    private static bool TryParseOccurrenceReference(string reference, out long occurrenceId)
+    {
+        occurrenceId = 0;
+        const string prefix = "occurrence:";
+        return reference.StartsWith(prefix, StringComparison.Ordinal)
+            && long.TryParse(reference[prefix.Length..], out occurrenceId);
     }
 
     private Task<List<TenantGovernanceAuditEvent>> EventsAsync(long tenantId, long occurrenceId,

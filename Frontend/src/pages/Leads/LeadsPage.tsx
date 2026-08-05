@@ -24,10 +24,11 @@ import {
 import leadService, { type LeadResponseDTO } from '../../api/services/leadService';
 import decisionService, { type LeadDecisionSummary } from '../../api/services/decisionService';
 import LateIngestedBadge from './LateIngestedBadge';
+import ClientCell from './ClientCell';
+import ResolveClientDialog from './ResolveClientDialog';
 import SearchField from '../../components/common/SearchField';
 import { useSnackbar } from 'notistack';
 import { formatDateSafe, parseDateSafe } from '../../utils/dates';
-import { confidenceLevel } from '../Intelligence/common';
 import { useAuth } from '../../context/AuthContext';
 import { presentableErrorMessage } from '../../utils/apiErrors';
 
@@ -60,13 +61,15 @@ const userScopedKey = (base: string): string => {
 const DEFAULT_COLUMN_VISIBILITY: GridColumnVisibilityModel = {
   nexoraSerial: true,
   rfqno: true,
+  // Which CLIENT the enquiry came from. Sits before `buyer` and is on by
+  // default: the buying organisation is the primary identity on a lead.
+  client: true,
   buyer: true,
   recDate: true,
   ingestedAtUtc: true,
   bidClosingDate: true,
   itemCount: true,
   leadSource: true,
-  aiconfidence: true,
   status: true,
   decision: true,
   estimatedValue: false,
@@ -76,13 +79,13 @@ const DEFAULT_COLUMN_VISIBILITY: GridColumnVisibilityModel = {
 const HIDEABLE_COLUMNS: ReadonlyArray<{ field: string; label: string }> = [
   { field: 'nexoraSerial', label: 'Nexora Serial' },
   { field: 'rfqno', label: 'RFQ #' },
-  { field: 'buyer', label: 'Buyer' },
+  { field: 'client', label: 'Client' },
+  { field: 'buyer', label: 'Buyer contact' },
   { field: 'recDate', label: 'Received' },
   { field: 'ingestedAtUtc', label: 'Nexora Ingestion Date' },
   { field: 'bidClosingDate', label: 'Deadline' },
   { field: 'itemCount', label: 'Items' },
   { field: 'leadSource', label: 'Source' },
-  { field: 'aiconfidence', label: 'Confidence' },
   { field: 'status', label: 'Status' },
   { field: 'decision', label: 'Decision' },
   { field: 'estimatedValue', label: 'Estimated value' },
@@ -94,7 +97,10 @@ const loadColumnVisibility = (): GridColumnVisibilityModel => {
     if (raw) {
       const parsed: unknown = JSON.parse(raw);
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return { ...DEFAULT_COLUMN_VISIBILITY, ...(parsed as GridColumnVisibilityModel), actions: true };
+        // `aiconfidence` is stripped rather than merged: the column no longer
+        // exists, and a stale preference must not resurrect a fabricated score.
+        const { aiconfidence: _removed, ...stored } = parsed as GridColumnVisibilityModel & { aiconfidence?: boolean };
+        return { ...DEFAULT_COLUMN_VISIBILITY, ...stored, actions: true };
       }
     }
   } catch {
@@ -154,12 +160,12 @@ const leadStatus = (row: LeadResponseDTO): StatusMeta => {
   return { label: 'New', color: 'primary', variant: 'outlined' };
 };
 
-// High/Medium/Low levels reuse the app-wide thresholds from Intelligence/common.
-const CONFIDENCE_META: Record<'high' | 'medium' | 'low', { label: string; color: 'success' | 'warning' | 'error' }> = {
-  high: { label: 'High', color: 'success' },
-  medium: { label: 'Medium', color: 'warning' },
-  low: { label: 'Low', color: 'error' },
-};
+// NOTE: this grid used to carry a "Confidence" column driven by
+// Lead.Aiconfidence, rendered High/Medium/Low in green/amber/red. That score is
+// not a measured accuracy — on the structured path it is a literal written per
+// cell, on the model path it is the model's own self-report against a rubric in
+// its own prompt — so the column is gone. The "Status" column already carries
+// the fact a user can act on: whether a person has reviewed the document.
 
 // Plain-language rendering of the Decision Brief recommendation — raw enum
 // values ("bid"/"review"/"skip") are never shown to users.
@@ -196,24 +202,6 @@ const decisionFacts = (s: LeadDecisionSummary): string[] => {
   return facts;
 };
 
-const ConfidenceCell: React.FC<{ score: number | null | undefined }> = ({ score }) => {
-  const level = confidenceLevel(score);
-  if (level === 'unknown') {
-    return <Typography variant="body2" sx={{ color: 'text.disabled' }}>—</Typography>;
-  }
-  const meta = CONFIDENCE_META[level];
-  return (
-    <Chip
-      label={meta.label}
-      color={meta.color}
-      size="small"
-      variant="outlined"
-      sx={{ fontWeight: 700, fontSize: '0.7rem' }}
-      aria-label={`AI confidence ${meta.label.toLowerCase()}`}
-    />
-  );
-};
-
 const LeadsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -229,6 +217,10 @@ const LeadsPage: React.FC = () => {
   // Row overflow menu
   const [rowMenuAnchor, setRowMenuAnchor] = useState<HTMLElement | null>(null);
   const [rowMenuLeadId, setRowMenuLeadId] = useState<number | null>(null);
+
+  // One resolve dialog for the whole grid (never one per row).
+  const [resolveLead, setResolveLead] = useState<LeadResponseDTO | null>(null);
+  const canEditLeads = hasPermission('Leads', 'edit');
 
   // View preferences (persisted per user)
   const [columnVisibility, setColumnVisibility] = useState<GridColumnVisibilityModel>(loadColumnVisibility);
@@ -342,8 +334,27 @@ const LeadsPage: React.FC = () => {
       },
     },
     {
+      field: 'client',
+      headerName: 'Client',
+      flex: 1,
+      minWidth: 190,
+      sortable: false,
+      filterable: false,
+      valueGetter: (_value, row) => row.customerName || '',
+      renderCell: (p) => (
+        <ClientCell
+          lead={p.row}
+          canEdit={canEditLeads}
+          onResolve={() => setResolveLead(p.row)}
+        />
+      ),
+    },
+    {
       field: 'buyer',
-      headerName: 'Buyer',
+      // Renamed from "Buyer": this column holds a PERSON and their email, and the
+      // old heading read like a company — which is half the reason nobody could
+      // tell which client a lead came from.
+      headerName: 'Buyer contact',
       flex: 1,
       minWidth: 200,
       sortable: false,
@@ -458,12 +469,6 @@ const LeadsPage: React.FC = () => {
           sx={{ fontWeight: 600, fontSize: '0.7rem' }}
         />
       ),
-    },
-    {
-      field: 'aiconfidence',
-      headerName: 'Confidence',
-      width: 120,
-      renderCell: (p) => <ConfidenceCell score={p.row.aiconfidence} />,
     },
     {
       field: 'status',
@@ -688,6 +693,15 @@ const LeadsPage: React.FC = () => {
           />
         )}
       </Paper>
+
+      {/* Client resolution — one dialog for the grid, driven by the client cell */}
+      <ResolveClientDialog
+        open={resolveLead !== null}
+        leadId={resolveLead?.id ?? null}
+        lead={resolveLead}
+        onClose={() => setResolveLead(null)}
+        onResolved={() => queryClient.invalidateQueries({ queryKey: ['leads'] })}
+      />
 
       {/* Row overflow menu */}
       <Menu anchorEl={rowMenuAnchor} open={Boolean(rowMenuAnchor)} onClose={closeRowMenu}>

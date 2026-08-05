@@ -2,6 +2,7 @@ using ERP_RFQ_Automation.DTOs.QuoteDTOs;
 using ERP_RFQ_Automation.Fx;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Services;
 using Microsoft.EntityFrameworkCore;
 using System;
 using System.Collections.Generic;
@@ -186,7 +187,7 @@ namespace ERP_RFQ_Automation.Repositories
                 DiscountTypeName = q.DiscountType?.Description, // or SetupName/SetupValue
                 DiscountValue = q.DiscountValue,
                 ItemCount = itemCount >= 0 ? itemCount : q.QuoteItems?.Count ?? 0,
-                QuoteItems = itemCount >= 0 ? new List<QuoteItemResponseDTO>() : q.QuoteItems.Select(i => new QuoteItemResponseDTO
+                QuoteItems = itemCount >= 0 ? new List<QuoteItemResponseDTO>() : QuoteService.OrderQuoteLines(q.QuoteItems).Select(i => new QuoteItemResponseDTO
                 {
                     Id = i.Id,
                     QuoteId = i.QuoteId,
@@ -195,6 +196,8 @@ namespace ERP_RFQ_Automation.Repositories
                     ProductName = i.Product?.ProductName,
                     ItemDescription = i.ItemDescription,
                     Quantity = i.Quantity,
+                    UnitOfMeasure = i.UnitOfMeasure,
+                    CustomerLineRef = i.CustomerLineRef,
                     UnitPrice = i.UnitPrice,
                     TotalAmount = i.TotalAmount,
                     Discount = i.Discount,

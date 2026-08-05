@@ -37,9 +37,10 @@ import {
 import dayjs from 'dayjs';
 import leadService from '../../api/services/leadService';
 import type { BatchReconciliationItemDTO, LeadMatchCandidateDTO, MatchReviewDecisionAction } from '../../api/services/leadService';
+import { clientStatusLabel } from './ClientCell';
 import { useAuth } from '../../context/AuthContext';
 import ApiErrorNotice from '../../components/common/ApiErrorNotice';
-import { looksLikeTechnicalNoise } from '../../utils/apiErrors';
+import { presentableServerText } from '../../utils/apiErrors';
 import { explainIntakeItem, isInfrastructureHold } from '../../utils/intakeErrors';
 
 type ChipColor = 'default' | 'primary' | 'success' | 'warning' | 'error' | 'info';
@@ -64,15 +65,23 @@ const readable = (value: string): string => value
  * text stays available through the support disclosure.
  */
 const presentableReasons = (reasons: string[]): string[] => reasons
-  .map((reason) => reason.trim())
-  .filter((reason) => reason.length > 0)
   // "Intake stopped: document quarantined." is the code echoed back; the error map says it better.
-  .filter((reason) => !/^Intake (?:stopped|status):/i.test(reason))
-  .filter((reason) => !looksLikeTechnicalNoise(reason));
+  .filter((reason) => !/^\s*Intake (?:stopped|status):/i.test(reason))
+  // One gate, shared with every other server string in the product (src/utils/apiErrors.ts):
+  // bounded length, printable, no markup, no hostnames, no stack frames, no bare reason phrases.
+  .map((reason) => presentableServerText(reason))
+  .filter((reason): reason is string => reason !== null);
 
+/**
+ * The exact complement of {@link presentableReasons}: everything the gate refused, so the "detail
+ * was recorded for support" note appears whenever something real was held back — not only for the
+ * technical-marker case it used to check.
+ */
 const withheldReasons = (reasons: string[]): string[] => reasons
   .map((reason) => reason.trim())
-  .filter((reason) => reason.length > 0 && looksLikeTechnicalNoise(reason));
+  .filter((reason) => reason.length > 0)
+  .filter((reason) => !/^Intake (?:stopped|status):/i.test(reason))
+  .filter((reason) => presentableServerText(reason) === null);
 
 /**
  * Poll backoff. The old loop stopped the moment nothing was Pending or Awaiting, so a scanner that
@@ -246,7 +255,10 @@ const ReconciliationRow = ({ item, onRetryHold, retrying, retryOutcome }: Reconc
     ? { label: 'Held — scanning offline', color: 'warning' as ChipColor }
     : classificationMeta(item.classification);
   const canOpenLead = typeof item.leadId === 'number' && item.leadId > 0;
-  const shownReasons = presentableReasons(item.reasons);
+  // `explainIntakeItem` promotes the recorded reason to `whatHappened` whenever the code is a
+  // bucket, so listing it again below the explanation would print the same sentence twice.
+  const shownReasons = presentableReasons(item.reasons)
+    .filter((reason) => reason !== explanation?.whatHappened);
   const hiddenReasons = withheldReasons(item.reasons);
 
   return (
@@ -314,7 +326,9 @@ const ReconciliationRow = ({ item, onRetryHold, retrying, retryOutcome }: Reconc
             </Typography>
           )}
           <Typography variant="body2" sx={{ mt: 1 }}>
-            Customer: {readable(item.customerResolutionStatus || 'Awaiting customer resolution')}
+            {/* Plain language, not the raw match enum: "AUTO_MATCHED_CONTACT_UNRESOLVED"
+                told an operator nothing. Same vocabulary as the leads grid. */}
+            Client: {clientStatusLabel(item.customerResolutionStatus)}
             {' | '}Owner: {item.assignedOpportunityOwner || 'Not assigned'}
           </Typography>
           {!explanation && shownReasons.length > 0 && (

@@ -14,6 +14,50 @@ public static class AiPurposes
     public const string Agent = "Agent";
 }
 
+/// <summary>
+/// Governed prompt version labels. The value written to the ledger IS the switch the LLM
+/// client uses to select an instruction set, so the prompt that is recorded is provably
+/// the prompt that was sent — the same idiom as
+/// <c>Extraction.Conversational.ConversationalPrompt.PromptVersion</c>, which owns the
+/// conversational label next to the instructions it names.
+/// Bump the version here whenever the shape of the request changes, so ledger rows can be
+/// attributed to the prompt that produced them.
+/// </summary>
+public static class AiPromptVersions
+{
+    /// <summary>
+    /// The structured document prompt (<c>OllamaLlmService.BuildExtractionInstructions</c>).
+    ///
+    /// v1 -> v2 (2026-08-05): the per-item schema no longer asks for a
+    /// "&lt;Field&gt;Confidence" number beside each of the 24 line-item value fields. Those
+    /// numbers were parsed and then discarded — a LeadItem row carries ONE confidence
+    /// column (<c>Aiconfidence</c>), fed from <c>ItemConfidence</c> — while costing about
+    /// half of every item's output budget and forcing chunk sizes down into the
+    /// truncation-and-dead-letter regime that <c>Extraction.ExtractionOutputBudget</c>
+    /// exists to prevent. Header-level confidences and OverallConfidence are unchanged;
+    /// several ingestion gates read OverallConfidence.
+    ///
+    /// v2 -> v3 (2026-08-05): added the unit-of-measure transcription rule. The prompt had
+    /// no unit vocabulary at all, and production shows the cost — one concept spelled five
+    /// ways across 2,966 stored line items (each / EA / pcs / Pcs / piece / NOS). The rule
+    /// tells the model to TRANSCRIBE the document's own wording and forbids it from
+    /// standardising, defaulting a missing unit, or turning a package ("Pallet") into a
+    /// piece count; canonicalisation is deterministic and happens in
+    /// <c>Services/Uom/UomCanonicalizer.cs</c>, where it can be corrected and replayed.
+    ///
+    /// v3 -> v4 (2026-08-05): quantity format rules. The item schema typed Quantity as
+    /// "number", which licensed <c>"Quantity": 2.0</c> — and because
+    /// <c>LeadItemData.Quantity</c> is an <c>int?</c>, one decimal point on one line
+    /// failed the WHOLE document's deserialization, a candidate cause of the
+    /// "unparseable output" dead-letters. The schema now reads <c>integer | null</c> and
+    /// rule 5 demands bare digits — no decimal point, no thousands separators — with null
+    /// when a line states no quantity. The parse path was hardened in the same change
+    /// (<c>OllamaLlmService.LenientQuantityConverter</c> plus per-line quarantine of
+    /// non-positive quantities), so v4 is belt on top of braces, not the only defence.
+    /// </summary>
+    public const string StructuredRfqExtraction = "rfq-extraction-v4";
+}
+
 public sealed record AiCallContext(
     long BusinessUnitId,
     string Purpose,
@@ -66,12 +110,37 @@ public sealed class AiPolicyDeniedException : InvalidOperationException
 {
     public string Code { get; }
 
-    public AiPolicyDeniedException(string code) : base("AI processing is not permitted for this request.")
+    // The code is part of the message on purpose: catch-all surfaces persist ex.Message
+    // (e.g. ExtractionWorker -> ExtractionJobs.LastError), and a refusal whose stored
+    // trace does not say WHY it was refused is indistinguishable from a model failure.
+    public AiPolicyDeniedException(string code)
+        : base($"AI processing is not permitted for this request ({code}).")
         => Code = code;
 }
 
 public sealed class AiGovernanceService : IAiGovernanceService
 {
+    /// <summary>
+    /// Retry headroom on the per-document token ceiling: the tenant-configured
+    /// <see cref="AiProcessingPolicy.MaxTokensPerDocument"/> is the budget for ONE full
+    /// extraction pass, and the ceiling enforced in <see cref="ReserveAsync"/> is that
+    /// per-pass budget × this factor.
+    ///
+    /// SIZING. The per-document usage query keys on the document/job — NOT the lease
+    /// attempt — so settled tokens from every earlier pipeline attempt keep counting for
+    /// the document's whole life. Extraction idempotency keys are attempt-scoped
+    /// (a retried job makes genuinely new governed calls), and the queue retries a
+    /// document up to ExtractionJob.MaxAttempts times — default 5, the value this factor
+    /// mirrors — on lease reclaim, worker restart, or manual re-drive. A ceiling sized
+    /// for a single pass would therefore refuse exactly the FINAL attempts of the
+    /// documents that most need retries, re-creating the dead-letter class the
+    /// attempt-scoped keys just eliminated. Five full honest passes is the worst
+    /// legitimate lifetime spend; the ceiling stays finite and per-document, so runaway
+    /// callers and pathological re-splitting loops are still stopped. Do NOT remove the
+    /// ceiling — it is the runaway-cost guard.
+    /// </summary>
+    internal const int DocumentBudgetRetryCycles = 5;
+
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ITenantScopeAccessor _tenantScope;
     private readonly ITenantContext _tenantContext;
@@ -236,7 +305,7 @@ public sealed class AiGovernanceService : IAiGovernanceService
                     .SumAsync(x => x.CompletedOn == null
                         ? x.ReservedTokens
                         : x.InputTokens + x.OutputTokens, ct);
-                if (checked(documentUsage + reserve) > documentLimit)
+                if (checked(documentUsage + reserve) > checked(documentLimit * DocumentBudgetRetryCycles))
                 {
                     db.AiRequests.Add(NewRequest(context, provider, model, input, inputHash, estimatedInput, 0, now,
                         AiCallStatuses.Denied, "document_budget_exceeded"));

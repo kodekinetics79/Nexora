@@ -3,6 +3,7 @@ using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using Microsoft.EntityFrameworkCore;
 using ERP_RFQ_Automation.Inventory.Commercial;
+using ERP_RFQ_Automation.Services.Uom;
 
 namespace ERP_RFQ_Automation.Intelligence.Conversion;
 
@@ -251,7 +252,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
                 string? uomText;
                 int? uomId;
                 if (!string.IsNullOrWhiteSpace(choice?.UnitOfMeasure))
-                    (uomText, uomId) = NormalizeUom(choice!.UnitOfMeasure, r.UomLookup);
+                    (uomText, uomId) = NormalizeUom(choice!.UnitOfMeasure, r.UomVocabulary);
                 else
                     (uomText, uomId) = (r.NormalizedUom ?? li.UnitOfMeasure, r.UomId);
 
@@ -354,8 +355,8 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         public int? UomId { get; init; }
         public bool NeedsAttention { get; init; }
         public string? AttentionReason { get; init; }
-        /// <summary>Tenant UoM lookup, exposed so ConvertAsync can normalize corrected UoM strings.</summary>
-        public IReadOnlyDictionary<string, SetUom> UomLookup { get; init; } = new Dictionary<string, SetUom>();
+        /// <summary>Tenant UoM master data, exposed so ConvertAsync can canonicalize corrected UoM strings.</summary>
+        public IUomVocabulary? UomVocabulary { get; init; }
     }
 
     private sealed record Candidate(long Id, string? ProductName, string PartNo, string? ModelNo, string? Description);
@@ -368,16 +369,13 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         if (items.Count == 0) return result;
 
         // ---- Tenant UoM table (small, per-BU; SetUom has no global tenant filter,
-        // so the BU predicate here is mandatory). Keyed by lower code AND name.
+        // so the BU predicate here is mandatory). Folded on both code and name by
+        // SetUomVocabulary, which also indexes each row under the canonical code it maps
+        // to — so a tenant who spells the unit "Nos" is still found when we ask for "EA".
         var uoms = await _db.SetUoms.AsNoTracking()
             .Where(u => u.BusinessUnitId == businessUnitId && u.IsActive)
             .ToListAsync(ct);
-        var uomLookup = new Dictionary<string, SetUom>(StringComparer.OrdinalIgnoreCase);
-        foreach (var u in uoms)
-        {
-            uomLookup.TryAdd(u.UomCode.Trim(), u);
-            uomLookup.TryAdd(u.UomName.Trim(), u);
-        }
+        var uomVocabulary = SetUomVocabulary.From(uoms);
 
         // ---- Candidate fetch 1: exact part/model numbers in one IN query.
         var codes = items.Select(i => i.ItemMaterialCode?.Trim().ToLowerInvariant())
@@ -434,24 +432,28 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
 
             var confidence = matches.Count > 0 ? matches[0].Score : 0m;
             var normalizedQty = NormalizeQuantity(item);
-            var (normalizedUom, uomId) = NormalizeUom(item.UnitOfMeasure, uomLookup);
+            var uom = UomCanonicalizer.Canonicalize(item.UnitOfMeasure, uomVocabulary);
 
             var reasons = new List<string>();
             if (matches.Count == 0) reasons.Add("No catalog match found");
             else if (confidence < ConfidenceFloor) reasons.Add($"Low-confidence match ({Math.Round(confidence * 100)}%)");
             if (normalizedQty is null or <= 0) reasons.Add("Quantity missing");
-            if (string.IsNullOrWhiteSpace(normalizedUom)) reasons.Add("Unit of measure missing");
+            if (uom.Resolution == UomResolution.Absent) reasons.Add("Unit of measure missing");
+            // A unit we refuse to map is NOT a missing unit and must not be quoted as if it
+            // were a piece count: "25 Pack" needs a human to say how many are in a pack.
+            else if (uom.NeedsReview)
+                reasons.Add($"Unit of measure \"{uom.SourceText}\" needs review — {UomCanonicalizer.Explain(uom.ReviewReason)}");
 
             result[item.Id] = new ResolvedLine
             {
                 Matches = matches,
                 Confidence = confidence,
                 NormalizedQuantity = normalizedQty,
-                NormalizedUom = normalizedUom,
-                UomId = uomId,
+                NormalizedUom = uom.Value,
+                UomId = uom.TenantUomId,
                 NeedsAttention = reasons.Count > 0,
                 AttentionReason = reasons.Count > 0 ? string.Join("; ", reasons) : null,
-                UomLookup = uomLookup
+                UomVocabulary = uomVocabulary
             };
         }
 
@@ -578,18 +580,20 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
     }
 
     /// <summary>
-    /// Trim/standardize a raw UoM string against the tenant's SetUom table: a code
-    /// or name hit returns the canonical UomCode + UomId; otherwise the cleaned
-    /// raw text is kept (no id). Leading digits ("10 EA") are stripped first.
+    /// Standardize a raw UoM string. Delegates wholesale to the ONE canonicaliser
+    /// (<c>Services/Uom/UomCanonicalizer.cs</c>), so the RFQ carries the same unit string the
+    /// lead does.
+    ///
+    /// The previous miss-fallback here — <c>cleaned.ToUpperInvariant()</c> — is DELETED. It
+    /// was the source of a whole spelling: 2,868 lead items say "each", and every one of them
+    /// missed the tenant lookup and landed on the RFQ as "EACH", a sixth spelling that exists
+    /// nowhere in the customer's document and matches nothing in the tenant's UoM table.
+    /// Upper-casing a string is not canonicalisation.
     /// </summary>
-    private static (string? uom, int? uomId) NormalizeUom(string? raw, IReadOnlyDictionary<string, SetUom> lookup)
+    private static (string? uom, int? uomId) NormalizeUom(string? raw, IUomVocabulary? vocabulary)
     {
-        if (string.IsNullOrWhiteSpace(raw)) return (null, null);
-        var cleaned = Regex.Replace(raw, @"^[\d\s.,]+", "").Trim().TrimEnd('.', ',', ';');
-        if (cleaned.Length == 0) return (null, null);
-        if (lookup.TryGetValue(cleaned, out var uom))
-            return (uom.UomCode, uom.UomId);
-        return (cleaned.ToUpperInvariant(), null);
+        var result = UomCanonicalizer.Canonicalize(raw, vocabulary);
+        return (result.Value, result.TenantUomId);
     }
 
     private static string? BuildSourceText(LeadItem li)

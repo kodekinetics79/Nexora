@@ -60,6 +60,65 @@ public class LeadPersisterSplitTests : IDisposable
     }
 
     [Fact]
+    public async Task Client_organisation_evidence_reaches_every_split_lead_and_the_vendor_block_is_rejected()
+    {
+        // MultiInquirySplitter builds each group with a `with` expression, so header fields
+        // propagate by construction — this pins that, and pins the write-time direction-of-
+        // trade guard: a "customer" name that is really the document's own vendor block must
+        // persist as NULL, because on an SEC bid the only company printed is the trading
+        // house receiving it.
+        await using (var seedCtx = _db.ContextFor(null))
+        {
+            Seed.BusinessUnit(seedCtx, 1);
+            await seedCtx.SaveChangesAsync();
+            await SeedAuthoritativeSourceAsync(seedCtx, Job());
+        }
+
+        LeadExtractionResult WithClient(LeadExtractionResult group, string? customerName) => group with
+        {
+            CustomerCompanyName = customerName,
+            CustomerCompanyEvidence = "PURCHASE OPTIONAL AGREEMENT FOR SAUDI ELECTRICITY COMPANY",
+            CustomerBuyerEmail = "57322@se.com.sa",
+            CustomerPortalName = "MATERIALS E-BIDDING SYSTEM",
+            SupplierNameOnDocument = "ALI ZAID AL-QURAISHI&PARTNERS EL",
+            SupplierAccountRefOnDocument = "2004414"
+        };
+
+        await using (var ctx = _db.ContextFor(null))
+        {
+            var persister = new LeadPersister(ctx, new NoopLogger<LeadPersister>());
+            await persister.PersistAsync(Job(), SplitOutcome(
+                WithClient(Group("RFQ-A", 2), "Saudi Electricity Company"),
+                // Group B's model output confused the vendor block for the customer.
+                WithClient(Group("RFQ-B", 3), "ALI ZAID AL-QURAISHI & PARTNERS EL")));
+        }
+
+        await using (var assertCtx = _db.ContextFor(null))
+        {
+            var leads = await assertCtx.Leads.OrderBy(l => l.Id).ToListAsync();
+            Assert.Equal(2, leads.Count);
+
+            Assert.Equal("Saudi Electricity Company", leads[0].CustomerCompanyNameExtracted);
+            // Rejected: it normalises to the document's own Vendname block.
+            Assert.Null(leads[1].CustomerCompanyNameExtracted);
+
+            Assert.All(leads, lead =>
+            {
+                Assert.Equal("57322@se.com.sa", lead.CustomerBuyerEmailExtracted);
+                Assert.Equal("MATERIALS E-BIDDING SYSTEM", lead.CustomerPortalNameExtracted);
+                Assert.Equal("2004414", lead.SupplierAccountRefOnDocument);
+                Assert.Equal("ALI ZAID AL-QURAISHI&PARTNERS EL", lead.SupplierNameOnDocument);
+                Assert.Contains("SAUDI ELECTRICITY", lead.CustomerCompanyEvidence);
+                // BuyersName still means the PERSON; nothing about this work changed that.
+                Assert.Equal("Buyer", lead.BuyersName);
+                // Nothing is linked at write time: linking is the resolver's decision.
+                Assert.Null(lead.CustomerId);
+                Assert.Equal(LeadCustomerMatchStatuses.Unresolved, lead.CustomerMatchStatus);
+            });
+        }
+    }
+
+    [Fact]
     public async Task ManualSplitOutcome_PersistsWithoutEmailConfiguration()
     {
         await using (var seedCtx = _db.ContextFor(null))

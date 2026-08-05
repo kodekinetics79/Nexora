@@ -245,6 +245,89 @@ public class LeadReviewUpsertTests
     }
 
     [Fact]
+    public async Task Approving_a_reviewer_chosen_client_teaches_the_identity_store()
+    {
+        // The learning loop's ONLY trigger: action == approve AND an explicitly supplied
+        // customer. It runs inside the review's own transaction, so what the reviewer taught
+        // commits with the review that taught it.
+        using var db = new TestDb();
+        using (var seed = db.ContextFor(null))
+        {
+            Seed.Customer(seed, 700, Bu, "Saudi Electricity Company");
+            var lead = Seed.Lead(seed, 100, Bu, parseStatus: "NeedsReview",
+                buyersName: "3C2-AMER AL-DOSSARY", items: new[] { Seed.LeadItem(1, "L1", 1) });
+            lead.CustomerCompanyNameExtracted = "SAUDI ELECTRICITY CO.";
+            lead.CustomerPortalNameExtracted = "MATERIALS E-BIDDING SYSTEM";
+            lead.SupplierAccountRefOnDocument = "2004414";
+            lead.CustomerBuyerEmailExtracted = "57322@se.com.sa";
+            SeedAuthoritativeEvidence(seed, 100);
+            seed.SaveChanges();
+        }
+
+        using var ctx = db.ContextFor(Bu);
+        var repo = new LeadRepository(ctx, aliasLearner: new ERP_RFQ_Automation.CustomerResolution.CustomerAliasLearner(ctx));
+        await repo.SubmitLeadReviewAsync(100, Bu, new LeadReviewSubmitDTO
+        {
+            ExpectedVersion = 1,
+            Action = "approve",
+            Reason = "Confirmed the client against the bid document.",
+            Header = new LeadReviewHeaderDTO { CustomerId = 700 },
+            Items = new() { ItemDto(1, "L1", 1) }
+        });
+
+        using var verify = db.ContextFor(Bu);
+        var reviewed = verify.Leads.Single(l => l.Id == 100);
+        Assert.Equal(700, reviewed.CustomerId);
+        Assert.Equal(LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved, reviewed.CustomerMatchStatus);
+
+        var learned = verify.Set<ERP_RFQ_Automation.CommercialRouting.CustomerIdentifier>()
+            .Where(i => i.Source == ERP_RFQ_Automation.CustomerResolution.CustomerIdentifierSources.LeadReviewLearned)
+            .ToList();
+        Assert.NotEmpty(learned);
+        Assert.All(learned, i =>
+        {
+            Assert.Equal(700, i.CustomerId);
+            Assert.Equal(100, i.LearnedFromLeadId);
+            // The audit row that carries the before/after image of this correction.
+            Assert.NotNull(i.LearnedFromReviewAuditId);
+        });
+        Assert.Contains(learned, i => i.IdentifierType
+            == ERP_RFQ_Automation.CommercialRouting.CustomerIdentifierType.Alias);
+        Assert.Contains(learned, i => i.IdentifierType
+            == ERP_RFQ_Automation.CommercialRouting.CustomerIdentifierType.PortalAccount);
+    }
+
+    [Fact]
+    public async Task Saving_a_client_without_approving_teaches_nothing()
+    {
+        // "save" is a draft. Only an approval is a commitment worth generalising from.
+        using var db = new TestDb();
+        using (var seed = db.ContextFor(null))
+        {
+            Seed.Customer(seed, 700, Bu, "Saudi Electricity Company");
+            var lead = Seed.Lead(seed, 100, Bu, parseStatus: "NeedsReview",
+                items: new[] { Seed.LeadItem(1, "L1", 1) });
+            lead.CustomerCompanyNameExtracted = "SAUDI ELECTRICITY CO.";
+            seed.SaveChanges();
+        }
+
+        using var ctx = db.ContextFor(Bu);
+        var repo = new LeadRepository(ctx, aliasLearner: new ERP_RFQ_Automation.CustomerResolution.CustomerAliasLearner(ctx));
+        await repo.SubmitLeadReviewAsync(100, Bu, new LeadReviewSubmitDTO
+        {
+            ExpectedVersion = 1,
+            Action = "save",
+            Header = new LeadReviewHeaderDTO { CustomerId = 700 },
+            Items = new() { ItemDto(1, "L1", 1) }
+        });
+
+        using var verify = db.ContextFor(Bu);
+        Assert.Equal(700, verify.Leads.Single(l => l.Id == 100).CustomerId);
+        Assert.Empty(verify.Set<ERP_RFQ_Automation.CommercialRouting.CustomerIdentifier>()
+            .Where(i => i.Source == ERP_RFQ_Automation.CustomerResolution.CustomerIdentifierSources.LeadReviewLearned));
+    }
+
+    [Fact]
     public async Task Approve_WithoutAuthoritativeEvidence_IsRejectedWithoutMutation()
     {
         using var db = new TestDb();

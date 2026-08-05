@@ -43,6 +43,7 @@ const ManualUploadLeadsPage = lazy(() => import('./pages/Leads/ManualUploadLeads
 const LeadIngestionBatchPage = lazy(() => import('./pages/Leads/LeadIngestionBatchPage'));
 const PossibleMatchesPage = lazy(() => import('./pages/Leads/PossibleMatchesPage'));
 const DuplicateUploadsPage = lazy(() => import('./pages/Leads/DuplicateUploadsPage'));
+const InboundMailTriagePage = lazy(() => import('./pages/Leads/InboundMailTriagePage'));
 const LeadDetailPage = lazy(() => import('./pages/Leads/LeadDetailPage'));
 const CommercialCaseWorkspacePage = lazy(() => import('./pages/CommercialCases/CommercialCaseWorkspacePage'));
 const ExtractionReviewPage = lazy(() => import('./pages/ExtractionReview/ExtractionReviewPage'));
@@ -60,6 +61,8 @@ const CommercialInboxPage = lazy(() => import('./pages/Procurement/SupplierQuote
 const ProcurementHandoffsPage = lazy(() => import('./pages/Procurement/Handoffs/ProcurementHandoffsPage'));
 const DashboardPage = lazy(() => import('./pages/Dashboard/DashboardPage'));
 const TeamWorkloadPage = lazy(() => import('./pages/Dashboard/TeamWorkloadPage'));
+const DeadlineBoardPage = lazy(() => import('./pages/Analytics/DeadlineBoardPage'));
+const BrandDemandPage = lazy(() => import('./pages/Analytics/BrandDemandPage'));
 const QuotesPage = lazy(() => import('./pages/Sales/Quotes/QuotesPage'));
 const CreateQuotePage = lazy(() => import('./pages/Sales/Quotes/CreateQuotePage'));
 const QuoteViewPage = lazy(() => import('./pages/Sales/Quotes/QuoteViewPage'));
@@ -101,6 +104,7 @@ const IntegrationHubPage = lazy(() => import('./pages/PlatformGovernance/Integra
 const ReleaseCenterPage = lazy(() => import('./pages/PlatformGovernance/ReleaseCenterPage'));
 const CommercialDocumentArchivePage = lazy(() => import('./pages/PlatformGovernance/CommercialDocumentArchivePage'));
 const QualityAnalyticsPage = lazy(() => import('./pages/PlatformGovernance/QualityAnalyticsPage'));
+const StorageRetentionPage = lazy(() => import('./pages/PlatformGovernance/StorageRetentionPage'));
 
 // Service RFQ → BOQ engine — drafted bills of quantities for service work.
 const BoqListPage = lazy(() => import('./pages/Boq/BoqListPage'));
@@ -155,6 +159,11 @@ function App() {
       <Route path="/" element={<Navigate to="/login" replace />} />
       <Route path="/dashboard" element={<MainLayout><PermissionGuard moduleName="Dashboard"><DashboardPage /></PermissionGuard></MainLayout>} />
       <Route path="/dashboard/team" element={<MainLayout><PermissionGuard moduleName="Dashboard"><TeamWorkloadPage /></PermissionGuard></MainLayout>} />
+      {/* Analytics built only on data the tenant actually holds. The deadline
+          board is the landing surface for the pilot: /dashboard's KPIs are
+          insufficient-data for a new tenant and must not be the first screen. */}
+      <Route path="/analytics/deadlines" element={<MainLayout><PermissionGuard moduleName="Leads"><DeadlineBoardPage /></PermissionGuard></MainLayout>} />
+      <Route path="/analytics/brand-demand" element={<MainLayout><PermissionGuard moduleName="Leads"><BrandDemandPage /></PermissionGuard></MainLayout>} />
       <Route path="/intelligence/commercial-memory" element={<MainLayout><PermissionGuard moduleName="Dashboard"><PermissionGuard moduleName="Quotations"><CommercialMemoryPage /></PermissionGuard></PermissionGuard></MainLayout>} />
 
       {/* Sourcing Copilot Routes */}
@@ -179,6 +188,7 @@ function App() {
       <Route path="/admin/platform/releases" element={<MainLayout><PermissionGuard moduleName="Users"><ReleaseCenterPage /></PermissionGuard></MainLayout>} />
       <Route path="/admin/platform/archive" element={<MainLayout><PermissionGuard moduleName="Users"><CommercialDocumentArchivePage /></PermissionGuard></MainLayout>} />
       <Route path="/admin/platform/quality" element={<MainLayout><PermissionGuard moduleName="Users"><QualityAnalyticsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/admin/platform/retention" element={<MainLayout><PermissionGuard moduleName="Users"><StorageRetentionPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/actions" element={<MainLayout><PermissionGuard moduleName="Leads"><HumanActionCenterPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/team" element={<MainLayout><PermissionGuard moduleName="Leads"><TeamOverviewPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/reps" element={<MainLayout><PermissionGuard moduleName="Users"><RepDirectoryPage /></PermissionGuard></MainLayout>} />
@@ -287,6 +297,7 @@ function App() {
       <Route path="/procurement/leads/ingestion/:batchId" element={<MainLayout><PermissionGuard moduleName="Leads"><LeadIngestionBatchPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/leads/possible-matches" element={<MainLayout><PermissionGuard moduleName="Leads"><PossibleMatchesPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/leads/duplicates" element={<MainLayout><PermissionGuard moduleName="Leads"><DuplicateUploadsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/procurement/leads/inbound-mail" element={<MainLayout><PermissionGuard moduleName="Leads"><InboundMailTriagePage /></PermissionGuard></MainLayout>} />
       {/* Customer 1 / Customer 2 folder-upload prototype removed from intake. Redirect legacy links to manual upload. */}
       <Route path="/procurement/leads/folder-upload" element={<Navigate to="/procurement/leads/manual-upload" replace />} />
       <Route path="/procurement/leads/view/:id" element={<MainLayout><PermissionGuard moduleName="Leads"><LeadDetailPage /></PermissionGuard></MainLayout>} />

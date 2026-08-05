@@ -7,7 +7,7 @@ namespace ERP_RFQ_Automation.Extraction;
 ///
 /// PROD ROOT CAUSE (2026-08-05). Chunking used to be sized purely by INPUT size
 /// (≤200 items / ≤24,000 characters). But the extraction prompt does not ask for a
-/// compact echo of the input — it asks for a fully expanded, per-field-confidence JSON
+/// compact echo of the input — it asks for a fully expanded, 28-key JSON
 /// object per line item. The OUTPUT is therefore many times larger than the input, and
 /// it is the output that has the hard ceiling (Ollama <c>num_predict</c>). Measured live
 /// against ollama.com/deepseek-v4-pro with a 40-line-item RFQ: num_predict=4096 and
@@ -21,38 +21,69 @@ namespace ERP_RFQ_Automation.Extraction;
 /// Counted from the item schema that <c>OllamaLlmService.BuildExtractionInstructions()</c>
 /// actually requires (keep these in step if the schema ever changes):
 ///   * 24 value fields (CompanyRef … BidClosingDateLine)
-///   * 24 matching "&lt;Field&gt;Confidence" numbers — one per value field
 ///   * 4 more keys: ItemConfidence, ExtraFields, InquiryGroup, InquiryGroupConfidence
-///   => 52 JSON keys per item.
+///   => 28 JSON keys per item.
 /// Character cost of one item, at the ~10-character average value length the schema
 /// produces (rule 3 forbids omitting fields — missing values are emitted as explicit
-/// null, so the KEYS dominate and the estimate barely moves with document density):
-///   keys, with quotes + colon .... 1,129 chars
-///   values ......................... 352 chars
-///   separators + braces ............  54 chars
-///   => ~1,535 characters per item.
+/// null, so the KEYS still dominate and the estimate moves only modestly with density):
+///   keys, with quotes + colon ...... 480 chars (396 of key name + 28 × 3)
+///   values ......................... 256 chars (24 values ≈ 10 chars, 4 short tails)
+///   separators + braces .............. 30 chars
+///   => ~766 characters per item.
 /// Dense JSON with PascalCase identifiers tokenizes at roughly 3.5 characters/token
-/// (~3.0 pessimistic, ~4.0 optimistic), so 1,535 / 3.5 ≈ 439 tokens. Rounded UP to 450
-/// so the constant errs toward smaller, safer chunks.
+/// (~3.0 pessimistic, ~4.0 optimistic), so 766 / 3.5 ≈ 219 tokens. Rounded UP to 225
+/// so the constant errs toward smaller, safer chunks. Tokenizer variance is absorbed by
+/// <see cref="SafetyUtilization"/>, exactly as it was before.
 ///
-/// <see cref="EstimatedHeaderOutputTokens"/> is the same arithmetic over the 26
-/// document-level keys (Rfqno … InquiryTypeConfidence, plus the "Items" wrapper), whose
-/// HeaderRemarks string is the only long value: ~832 characters ≈ 240 tokens, rounded up
-/// to 300.
+/// WHY 225 AND NOT 450 (2026-08-05). The item schema used to demand 24 additional
+/// "&lt;Field&gt;Confidence" numbers — one per value field, 52 keys per item, ~1,535
+/// characters ≈ 439 tokens, rounded to 450. Those numbers were never persisted: the
+/// LeadItem row has ONE confidence column (<c>Aiconfidence</c>) and
+/// <c>ExtractionWorker.BuildLead</c> reads exactly one value, <c>ItemConfidence</c>.
+/// Roughly half of every item's output budget was therefore spent generating numbers that
+/// were parsed and dropped — and that spend is what forced chunks down to 11 items and
+/// produced the OutputTruncated / "All chunks failed" failures this file exists to fight.
+/// Removing them (prompt version rfq-extraction-v2) roughly DOUBLES the items per chunk:
+/// 5 -> 10 at a 4,096-token ceiling, 11 -> 23 at 8,192. Header-level confidences are
+/// untouched — they are paid once per document, and OverallConfidence gates ingestion.
+/// The one honest caveat: with the key overhead gone, values are now 33% of the character
+/// budget instead of 23%, so a chunk of unusually verbose ItemText /
+/// ProductShortDescription lines drifts from the average a little faster than before. The
+/// 30% head room below is what absorbs that, and truncation is still corrected by
+/// re-splitting rather than by a replay.
+///
+/// <see cref="EstimatedHeaderOutputTokens"/> is the same arithmetic over the document-level
+/// keys. It was 300 for the original 26 keys (Rfqno … InquiryTypeConfidence, plus the
+/// "Items" wrapper), whose HeaderRemarks string is the only long value: ~832 characters
+/// ≈ 240 tokens, rounded up to 300.
+///
+/// CLIENT ORGANISATION IDENTITY added 13 more header keys (CustomerCompanyName …
+/// SupplierAccountRefOnDocumentConfidence — see OllamaLlmService.BuildExtractionInstructions).
+/// Same arithmetic, same 3.5 characters/token:
+///   keys, with quotes + colon .... ~505 chars (13 keys averaging ~36 characters)
+///   values ....................... ~275 chars (7 string values, 6 confidence numbers;
+///                                  CustomerCompanyEvidence alone is capped at 120)
+///   separators ...................  ~26 chars
+///   => ~806 characters ≈ 230 tokens.
+/// 300 + 230 = 530, rounded UP to 550 so the constant errs toward smaller, safer chunks.
+///
+/// COST OF THAT CHOICE, stated plainly: the header is now worth two line items rather
+/// than one (550 / 225), which is exactly why the client fields are HEADER fields. Making
+/// any of them per-item would cost ~225 tokens PER LINE and give the budget straight back.
 ///
 /// <see cref="SafetyUtilization"/> keeps the projection at 70% of the ceiling. That head
 /// room absorbs the cases the average cannot: unusually verbose ItemText /
 /// ProductShortDescription values, a populated ExtraFields map, and tokenizer variance.
 ///
-/// Resulting chunk sizes: 5 items at a 4,096-token ceiling, 12 items at 8,192.
+/// Resulting chunk sizes: 10 items at a 4,096-token ceiling, 23 items at 8,192.
 /// </summary>
 public static class ExtractionOutputBudget
 {
     /// <summary>Estimated OUTPUT tokens the schema costs for one extracted line item.</summary>
-    public const int EstimatedOutputTokensPerItem = 450;
+    public const int EstimatedOutputTokensPerItem = 225;
 
     /// <summary>Estimated OUTPUT tokens for the document-level header fields emitted once per call.</summary>
-    public const int EstimatedHeaderOutputTokens = 300;
+    public const int EstimatedHeaderOutputTokens = 550;
 
     /// <summary>
     /// Fraction of the provider's output ceiling this budget is willing to project into.

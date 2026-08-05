@@ -20,16 +20,21 @@ import {
   Person as UserIcon,
   MoreHoriz as MenuIcon,
 } from '@mui/icons-material';
-import leadService from '../../api/services/leadService';
+import leadService, { type AcceptedLeadResponseDTO } from '../../api/services/leadService';
 import SearchField from '../../components/common/SearchField';
 import { useSnackbar } from 'notistack';
 import { useAuth } from '../../context/AuthContext';
 import { presentableErrorMessage } from '../../utils/apiErrors';
+import ClientCell from './ClientCell';
+import ResolveClientDialog from './ResolveClientDialog';
 
 const OutstandingLeadsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { userData } = useAuth();
+  const { userData, hasPermission } = useAuth();
+  const canEditLeads = hasPermission('Leads', 'edit');
+  // One resolve dialog for the whole grid (never one per row).
+  const [resolveLead, setResolveLead] = useState<AcceptedLeadResponseDTO | null>(null);
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
@@ -136,8 +141,22 @@ const OutstandingLeadsPage: React.FC = () => {
       )
     },
     {
+      // Which CLIENT the enquiry came from — placed before the buyer person so
+      // the organisation reads first.
+      field: 'client',
+      headerName: 'Client',
+      width: 200,
+      sortable: false,
+      filterable: false,
+      renderCell: (p) => (
+        <Box sx={{ display: 'flex', alignItems: 'center', height: '100%' }}>
+          <ClientCell lead={p.row} canEdit={canEditLeads} onResolve={() => setResolveLead(p.row)} />
+        </Box>
+      ),
+    },
+    {
       field: 'buyer',
-      headerName: 'Buyer And Contact',
+      headerName: 'Buyer contact',
       flex: 1,
       minWidth: 280,
       renderCell: (p) => (
@@ -239,12 +258,14 @@ const OutstandingLeadsPage: React.FC = () => {
       )
     },
     {
+      // The "% Match" meter that used to sit beside this chip rendered
+      // Lead.Aiconfidence, which is not a measured accuracy — on the structured
+      // path it is a literal written per cell, on the model path it is the
+      // model's own self-report. It is gone; the source alone is a fact.
       field: 'source_confidence',
-      headerName: 'Source & AI Match',
-      width: 160,
+      headerName: 'Source',
+      width: 120,
       renderCell: (p) => {
-        const val = (p.row.aiconfidence || 0) * 100;
-        const color = val > 80 ? 'success' : val > 50 ? 'warning' : 'error';
         return (
           <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%', width: '100%' }}>
             <Chip
@@ -261,14 +282,6 @@ const OutstandingLeadsPage: React.FC = () => {
                 width: 'fit-content'
               }}
             />
-            <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 0.3 }}>
-              <Typography sx={{ fontSize: '0.7rem', fontWeight: 900, color: `${color}.main` }}>
-                {Math.round(val)}% Match
-              </Typography>
-            </Stack>
-            <Box sx={{ height: 4, width: '100%', bgcolor: 'action.hover', borderRadius: 2, overflow: 'hidden' }}>
-              <Box sx={{ height: '100%', width: `${val}%`, bgcolor: `${color}.main` }} />
-            </Box>
           </Box>
         );
       }
@@ -337,6 +350,15 @@ const OutstandingLeadsPage: React.FC = () => {
           }}
         />
       </Paper>
+
+      {/* Client resolution — one dialog for the grid, driven by the client cell */}
+      <ResolveClientDialog
+        open={resolveLead !== null}
+        leadId={resolveLead?.id ?? null}
+        lead={resolveLead}
+        onClose={() => setResolveLead(null)}
+        onResolved={() => queryClient.invalidateQueries({ queryKey: ['leads-outstanding'] })}
+      />
 
       {/* Assignment Dialog */}
       <Dialog open={assignDialogOpen} onClose={() => setAssignDialogOpen(false)} fullWidth>

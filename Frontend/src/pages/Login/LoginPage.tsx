@@ -456,7 +456,10 @@ const LoginPage: React.FC = () => {
         businessUnitId: me.businessUnitId ?? data.businessUnitId ?? undefined,
         permissions: me.permissions ?? [],
       });
-      navigate('/dashboard');
+      // Land on the deadline board, not /dashboard. A new tenant's KPIs are all
+      // "insufficient data" on day one; a wall of empty tiles is a worse first
+      // screen than the work that is actually waiting.
+      navigate('/analytics/deadlines');
     } catch (err: any) {
       setError(err.response?.data?.error || err.response?.data?.message || "Invalid credentials");
     } finally {

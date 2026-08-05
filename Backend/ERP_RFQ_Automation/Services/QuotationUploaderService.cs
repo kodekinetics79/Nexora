@@ -60,10 +60,13 @@ namespace ERP_RFQ_Automation.Services
             // 3. Main Template Sheet
             var ws = package.Workbook.Worksheets.Add("QuotationTemplate");
 
+            // The two line-reference columns are appended (12, 13) so templates downloaded
+            // before they existed still import: their cells simply read as empty.
             string[] headers = {
                 "Quote No", "Customer Name*", "Quote Date (YYYY-MM-DD)*", "Valid Until (YYYY-MM-DD)",
                 "Currency Code*", "Product Name*", "Quantity*", "Unit Price*",
-                "Tax Amount", "Discount Amount", "Header Remarks"
+                "Tax Amount", "Discount Amount", "Header Remarks",
+                "Unit of Measure", "Customer Line Ref"
             };
 
             for (int i = 0; i < headers.Length; i++)
@@ -122,6 +125,8 @@ namespace ERP_RFQ_Automation.Services
             ws.Cells[2, 9].Value = 15.00;
             ws.Cells[2, 10].Value = 5.00;
             ws.Cells[2, 11].Value = "Initial quotation for Q2 project.";
+            ws.Cells[2, 12].Value = "EA";
+            ws.Cells[2, 13].Value = "00010";
 
             ws.Cells.AutoFitColumns();
             return await package.GetAsByteArrayAsync();
@@ -225,11 +230,18 @@ namespace ERP_RFQ_Automation.Services
                         }
                     }
 
+                    // Optional line-reference columns (12, 13): blank on templates downloaded
+                    // before the columns existed. Stored as null, never as an empty string.
+                    var unitOfMeasure = ws.Cells[row, 12].Text?.Trim();
+                    var customerLineRef = ws.Cells[row, 13].Text?.Trim();
+
                     var item = new QuoteItem
                     {
                         ProductId = product?.Id,
                         ItemDescription = productName,
                         Quantity = qty,
+                        UnitOfMeasure = string.IsNullOrEmpty(unitOfMeasure) ? null : unitOfMeasure,
+                        CustomerLineRef = string.IsNullOrEmpty(customerLineRef) ? null : customerLineRef,
                         UnitPrice = price,
                         TaxAmount = tax,
                         Discount = disc,

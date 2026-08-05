@@ -28,6 +28,10 @@ interface QuoteItem {
   productName: string;
   itemDescription: string;
   quantity: number;
+  // Read-only carriers from the source RFQ line: shown, never edited here, and
+  // echoed back on save so an edit round-trip cannot strip them.
+  unitOfMeasure?: string | null;
+  customerLineRef?: string | null;
   unitPrice: number;
   totalAmount: number;
   discount: number;
@@ -98,6 +102,8 @@ const EditQuotePage: React.FC = () => {
         productName: i.productName || '',
         itemDescription: i.itemDescription || '',
         quantity: i.quantity,
+        unitOfMeasure: i.unitOfMeasure || null,
+        customerLineRef: i.customerLineRef || null,
         unitPrice: i.unitPrice,
         totalAmount: i.totalAmount,
         discount: i.discount || 0,
@@ -207,6 +213,7 @@ const EditQuotePage: React.FC = () => {
       quoteItems: items.map(item => ({
         id: item.id, productId: item.productId, itemDescription: item.itemDescription || item.productName,
         quantity: item.quantity, unitPrice: item.unitPrice, totalAmount: item.totalAmount,
+        unitOfMeasure: item.unitOfMeasure || null, customerLineRef: item.customerLineRef || null,
         discountTypeId: item.discountTypeId, discountValue: item.discountValue,
         taxAmount: item.taxAmount, deliveryLeadTime: item.deliveryLeadTime,
         isDeleted: item.isDeleted || false
@@ -299,9 +306,11 @@ const EditQuotePage: React.FC = () => {
             <Table size="small">
               <TableHead>
                 <TableRow sx={{ bgcolor: 'grey.100' }}>
+                  <TableCell sx={{ fontWeight: 800, width: 70 }}>Ref</TableCell>
                   <TableCell sx={{ fontWeight: 800, width: '25%' }}>Product</TableCell>
                   <TableCell sx={{ fontWeight: 800 }}>Description</TableCell>
                   <TableCell sx={{ fontWeight: 800, width: 80 }} align="center">Qty</TableCell>
+                  <TableCell sx={{ fontWeight: 800, width: 60 }} align="center">UOM</TableCell>
                   <TableCell sx={{ fontWeight: 800, width: 110 }} align="center">Price</TableCell>
                   <TableCell sx={{ fontWeight: 800, width: 100 }} align="center">Disc</TableCell>
                   <TableCell sx={{ fontWeight: 800, width: 100 }} align="center">Total</TableCell>
@@ -311,6 +320,10 @@ const EditQuotePage: React.FC = () => {
               <TableBody>
                 {items.filter(i => !i.isDeleted).map((item, index) => (
                   <TableRow key={index} sx={{ '&:hover': { bgcolor: 'grey.50' } }}>
+                    {/* Read-only: the buyer's own line reference from their RFQ */}
+                    <TableCell>
+                      <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>{item.customerLineRef || '—'}</Typography>
+                    </TableCell>
                     <TableCell>
                       <Autocomplete
                         size="small"
@@ -326,6 +339,10 @@ const EditQuotePage: React.FC = () => {
                     </TableCell>
                     <TableCell align="center">
                       <TextField type="number" size="small" variant="standard" sx={{ width: 60 }} value={item.quantity} onChange={(e) => updateItem(index, { quantity: Number(e.target.value) })} />
+                    </TableCell>
+                    {/* Read-only: the unit the quantity is quoted in, carried from the RFQ line */}
+                    <TableCell align="center">
+                      <Typography variant="body2">{item.unitOfMeasure || '—'}</Typography>
                     </TableCell>
                     <TableCell align="center">
                       <TextField 

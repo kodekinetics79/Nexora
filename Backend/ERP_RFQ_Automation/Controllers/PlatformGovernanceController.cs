@@ -2,6 +2,7 @@ using System.Security.Claims;
 using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.PlatformGovernance;
+using ERP_RFQ_Automation.Retention;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -16,6 +17,7 @@ public sealed class PlatformGovernanceController(
     AiTrustCenterService aiTrust,
     IAiExternalProviderTrust externalProviderTrust,
     CommercialDocumentArchiveService archive,
+    EvidenceRetentionService retention,
     QualityAnalyticsService quality) : ControllerBase
 {
     [HttpGet("artifacts")]
@@ -144,6 +146,49 @@ public sealed class PlatformGovernanceController(
         [FromBody] ArchiveGovernanceCommand command, CancellationToken ct) =>
         Execute(() => archive.GovernAsync(TenantId(), ActorUserId(), occurrenceId,
             IdempotencyKey(), command, ct));
+
+    /// <summary>
+    /// Current retention policy plus the tenant's own storage figures. Read-only and safe:
+    /// nothing here can delete anything.
+    /// </summary>
+    [HttpGet("evidence-retention")]
+    [RequireModulePermission("Users", PermissionAction.View)]
+    public Task<EvidenceRetentionView> GetEvidenceRetention(CancellationToken ct) =>
+        retention.GetAsync(TenantId(), ct);
+
+    /// <summary>
+    /// Sets the retention window and the opt-in switch. Saving a policy is the tenant's
+    /// explicit consent to irreversible deletion — <c>POST /purge-run</c> refuses to delete
+    /// anything until this has been done by a named user with a written reason.
+    /// </summary>
+    [HttpPut("evidence-retention/policy")]
+    [RequireModulePermission("Users", PermissionAction.Edit)]
+    public Task<ActionResult<EvidenceRetentionView>> UpdateEvidenceRetentionPolicy(
+        [FromBody] UpdateEvidenceRetentionPolicyCommand command, CancellationToken ct) =>
+        Execute(() => retention.UpdatePolicyAsync(TenantId(), ActorUserId(), IdempotencyKey(), command, ct));
+
+    /// <summary>
+    /// Runs — or simulates — a byte purge.
+    ///
+    /// <para>
+    /// <c>dryRun</c> is defaulted to true by the binder below, so a malformed or truncated
+    /// body can never be interpreted as "delete everything eligible". The destructive path
+    /// has to be asked for explicitly, twice: once by enabling the policy, once by sending
+    /// <c>dryRun:false</c> with a reason and an Idempotency-Key.
+    /// </para>
+    ///
+    /// <para>
+    /// This deletes stored bytes only. The document record, its SHA-256 fingerprint and
+    /// every extracted field survive — and so does the personal data extracted from those
+    /// files, which is why every response carries the not-erasure disclosure.
+    /// </para>
+    /// </summary>
+    [HttpPost("evidence-retention/purge-run")]
+    [RequireModulePermission("Users", PermissionAction.Edit)]
+    public Task<ActionResult<EvidenceRetentionPurgeResult>> RunEvidenceRetentionPurge(
+        [FromBody] EvidenceRetentionPurgeCommand? command, CancellationToken ct) =>
+        Execute(() => retention.RunPurgeAsync(TenantId(), ActorUserId(), IdempotencyKey(),
+            command ?? new EvidenceRetentionPurgeCommand(true, "Dry run."), ct));
 
     [HttpGet("quality")]
     [RequireModulePermission("Users", PermissionAction.View)]

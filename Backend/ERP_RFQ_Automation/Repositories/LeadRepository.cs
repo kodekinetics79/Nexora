@@ -27,15 +27,22 @@ namespace ERP_RFQ_Automation.Repositories
 
     public class LeadRepository : ILeadRepository
     {
+        /// <summary>How many machine client proposals the LIST projection carries per row.</summary>
+        private const int ListCandidateCount = 3;
+
+        /// <summary>How many the DETAIL projection and the resolve dialog carry.</summary>
+        private const int DetailCandidateCount = 5;
+
         private readonly ErpRfqAutomationContext _context;
         private readonly ISlaPolicyReader _slaPolicy;
         private readonly ILeadDuplicateDetector? _duplicateDetector;
         private readonly ILogger<LeadRepository>? _logger;
         private readonly ERP_RFQ_Automation.Metrics.IMetricRecorder? _metrics;
         private readonly ICommercialLineResolutionApplicationService? _lineResolution;
+        private readonly ERP_RFQ_Automation.CustomerResolution.ICustomerAliasLearner? _aliasLearner;
 
         // Optional dependencies keep existing constructions (tests, pre-wiring DI)
-        // compiling and running: duplicate detection / metrics
+        // compiling and running: duplicate detection / metrics / alias learning
         // degrade to no-ops, the SLA reader falls back to the flat default threshold.
         public LeadRepository(
             ErpRfqAutomationContext context,
@@ -43,7 +50,8 @@ namespace ERP_RFQ_Automation.Repositories
             ILeadDuplicateDetector? duplicateDetector = null,
             ILogger<LeadRepository>? logger = null,
             ERP_RFQ_Automation.Metrics.IMetricRecorder? metrics = null,
-            ICommercialLineResolutionApplicationService? lineResolution = null)
+            ICommercialLineResolutionApplicationService? lineResolution = null,
+            ERP_RFQ_Automation.CustomerResolution.ICustomerAliasLearner? aliasLearner = null)
         {
             _context = context;
             _slaPolicy = slaPolicy ?? new DefaultSlaPolicyReader();
@@ -51,6 +59,33 @@ namespace ERP_RFQ_Automation.Repositories
             _logger = logger;
             _metrics = metrics;
             _lineResolution = lineResolution;
+            _aliasLearner = aliasLearner;
+        }
+
+        /// <summary>
+        /// The ranked client proposals the machine persisted for this lead, newest pass only.
+        /// Read-only: the resolve dialog shows them with their reasons, and confirming one
+        /// goes through the review endpoint like any other human decision.
+        /// </summary>
+        public async Task<List<ClientCandidateDTO>> GetClientCandidatesAsync(long id, long businessUnitId)
+        {
+            return await (
+                from candidate in _context.Set<ERP_RFQ_Automation.CustomerResolution.LeadCustomerMatchCandidate>().AsNoTracking()
+                join customer in _context.Customers.AsNoTracking()
+                    on new { Buid = (long?)candidate.BusinessUnitId, Id = candidate.CustomerId }
+                    equals new { Buid = customer.Buid, Id = customer.Id }
+                where candidate.BusinessUnitId == businessUnitId && candidate.LeadId == id
+                      && candidate.Rank <= DetailCandidateCount
+                orderby candidate.Rank
+                select new ClientCandidateDTO
+                {
+                    Rank = candidate.Rank,
+                    CustomerId = candidate.CustomerId,
+                    CustomerName = customer.Name,
+                    Confidence = candidate.Confidence,
+                    ReasonCode = candidate.ReasonCode,
+                    Explanation = candidate.Explanation
+                }).ToListAsync();
         }
 
         public async Task<(IEnumerable<LeadResponseDTO>, int TotalCount)> GetLeadListAsync(int pageNumber, int pageSize, long? id, string? rfqno, string? buyersName, string? leadSource, long businessUnitId, DateTime? startDate = null, DateTime? endDate = null, string? emailSource = null, string? clientemail = null, string? view = null)
@@ -133,6 +168,45 @@ namespace ERP_RFQ_Automation.Repositories
             var earliestReceivedOn = await ERP_RFQ_Automation.LeadIdentity.LeadIngestionAudit
                 .EarliestSourceReceivedOnAsync(_context, businessUnitId, leadIds);
 
+            // CLIENT COLUMN: the list projection has always carried CustomerMatchStatus and
+            // never CustomerName, which is exactly why a rep looking at the leads list could
+            // not tell which client company a lead came from. Both the resolved name and the
+            // top machine proposals are batch-loaded here — two queries for the whole page,
+            // never one per row — so the list can render a client for EVERY lead: the name,
+            // the suggestion, or an explicit "unknown", but never an empty cell.
+            var linkedCustomerIds = leads.Where(l => l.CustomerId.HasValue)
+                .Select(l => l.CustomerId!.Value).Distinct().ToList();
+            var customerNames = linkedCustomerIds.Count == 0
+                ? new Dictionary<long, string>()
+                : await _context.Customers.AsNoTracking()
+                    .Where(c => c.Buid == businessUnitId && linkedCustomerIds.Contains(c.Id))
+                    .Select(c => new { c.Id, c.Name })
+                    .ToDictionaryAsync(c => c.Id, c => c.Name);
+
+            var candidateRows = await (
+                from candidate in _context.Set<ERP_RFQ_Automation.CustomerResolution.LeadCustomerMatchCandidate>().AsNoTracking()
+                join customer in _context.Customers.AsNoTracking()
+                    on new { Buid = (long?)candidate.BusinessUnitId, Id = candidate.CustomerId }
+                    equals new { Buid = customer.Buid, Id = customer.Id }
+                where candidate.BusinessUnitId == businessUnitId && leadIds.Contains(candidate.LeadId)
+                      && candidate.Rank <= ListCandidateCount
+                orderby candidate.LeadId, candidate.Rank
+                select new { candidate.LeadId, candidate.Rank, candidate.CustomerId, customer.Name, candidate.Confidence, candidate.ReasonCode, candidate.Explanation })
+                .ToListAsync();
+            var candidatesByLead = candidateRows
+                .GroupBy(row => row.LeadId)
+                .ToDictionary(group => group.Key, group => group
+                    .OrderBy(row => row.Rank)
+                    .Select(row => new ClientCandidateDTO
+                    {
+                        Rank = row.Rank,
+                        CustomerId = row.CustomerId,
+                        CustomerName = row.Name,
+                        Confidence = row.Confidence,
+                        ReasonCode = row.ReasonCode,
+                        Explanation = row.Explanation
+                    }).ToList());
+
             // Project to LeadResponseDTO (merging Lead, LeadItems, and Attachments)
             var leadDtos = leads.Select(l =>
             {
@@ -149,7 +223,23 @@ namespace ERP_RFQ_Automation.Repositories
                     CommercialCaseReference = l.CommercialCaseReference,
                     CustomerId = l.CustomerId,
                     ContactId = l.ContactId,
+                    CustomerName = l.CustomerId.HasValue && customerNames.TryGetValue(l.CustomerId.Value, out var name)
+                        ? name
+                        : null,
                     CustomerMatchStatus = l.CustomerMatchStatus,
+                    CustomerMatchReasonCode = l.CustomerMatchReasonCode,
+                    CustomerMatchConfidence = l.CustomerMatchConfidence,
+                    CustomerMatchExplanation = l.CustomerMatchExplanation,
+                    CustomerCompanyNameExtracted = l.CustomerCompanyNameExtracted,
+                    CustomerCompanyEvidence = l.CustomerCompanyEvidence,
+                    CustomerCompanyRegistrationId = l.CustomerCompanyRegistrationId,
+                    CustomerBuyerEmailExtracted = l.CustomerBuyerEmailExtracted,
+                    CustomerPortalNameExtracted = l.CustomerPortalNameExtracted,
+                    SupplierNameOnDocument = l.SupplierNameOnDocument,
+                    SupplierAccountRefOnDocument = l.SupplierAccountRefOnDocument,
+                    ClientCandidates = candidatesByLead.TryGetValue(l.Id, out var proposals)
+                        ? proposals
+                        : new List<ClientCandidateDTO>(),
                     Rfqno = l.Rfqno,
                     BuyersName = l.BuyersName,
                     RecDate = l.RecDate,
@@ -701,6 +791,7 @@ namespace ERP_RFQ_Automation.Repositories
             var ingestedOn = LeadIdentity.LeadIngestionAudit.ResolveIngestionTimestamp(
                 earliestReceivedOn.TryGetValue(lead.Id, out var receivedOn) ? receivedOn : null,
                 lead.CreatedDate);
+            var detailCandidates = await GetClientCandidatesAsync(id, businessUnitId);
 
             return new LeadResponseDTO
             {
@@ -712,6 +803,17 @@ namespace ERP_RFQ_Automation.Repositories
                 CustomerName = customerName,
                 AccountOwnerName = accountOwnerName,
                 CustomerMatchStatus = lead.CustomerMatchStatus,
+                CustomerMatchReasonCode = lead.CustomerMatchReasonCode,
+                CustomerMatchConfidence = lead.CustomerMatchConfidence,
+                CustomerMatchExplanation = lead.CustomerMatchExplanation,
+                CustomerCompanyNameExtracted = lead.CustomerCompanyNameExtracted,
+                CustomerCompanyEvidence = lead.CustomerCompanyEvidence,
+                CustomerCompanyRegistrationId = lead.CustomerCompanyRegistrationId,
+                CustomerBuyerEmailExtracted = lead.CustomerBuyerEmailExtracted,
+                CustomerPortalNameExtracted = lead.CustomerPortalNameExtracted,
+                SupplierNameOnDocument = lead.SupplierNameOnDocument,
+                SupplierAccountRefOnDocument = lead.SupplierAccountRefOnDocument,
+                ClientCandidates = detailCandidates,
                 Rfqno = lead.Rfqno,
                 BuyersName = lead.BuyersName,
                 RecDate = lead.RecDate,
@@ -908,7 +1010,20 @@ namespace ERP_RFQ_Automation.Repositories
             if (review.ExpectedVersion.Value != lead.ReviewVersion)
                 throw new LeadReviewConflictException(
                     $"Review version {review.ExpectedVersion} is stale; current version is {lead.ReviewVersion}.");
-            if (!string.Equals(lead.EmailIngests?.ParseStatus, "NeedsReview", StringComparison.OrdinalIgnoreCase))
+            // The needs-review queue (GetNeedsReviewLeadsAsync, above) lists BOTH email-door
+            // leads flagged NeedsReview AND upload-door leads, which have no EmailIngest at
+            // all. This gate used to require an EmailIngest, so every upload-door lead was
+            // offered for review and then refused at submit: the approval path was closed
+            // for them, and with it the ONLY source of measured correction evidence the
+            // product has. An upload-door lead has no ParseStatus to read, so its review
+            // state is the lead's own — untriaged, unverified — plus the same authoritative
+            // source-document evidence approval already demands.
+            var awaitingReview = lead.EmailIngests != null
+                ? string.Equals(lead.EmailIngests.ParseStatus, "NeedsReview", StringComparison.OrdinalIgnoreCase)
+                : lead.LeadStatusId == null
+                  && !lead.CommercialFactsVerified
+                  && (await SourceOccurrenceIdsAsync(lead.Id, businessUnitId)).Count > 0;
+            if (!awaitingReview)
                 throw new LeadReviewConflictException("This lead is no longer awaiting extraction review.");
 
             var items = review.Items ?? new List<LeadItemReviewDTO>();
@@ -930,6 +1045,8 @@ namespace ERP_RFQ_Automation.Repositories
             var fromVersion = lead.ReviewVersion;
 
             var header = review.Header ?? new LeadReviewHeaderDTO();
+            long? previousCustomerId = null;
+            var shouldLearnIdentity = false;
 
             if (header.ContactId.HasValue && !header.CustomerId.HasValue && !lead.CustomerId.HasValue)
                 throw new LeadReviewValidationException("A customer is required when selecting a contact.");
@@ -949,10 +1066,20 @@ namespace ERP_RFQ_Automation.Repositories
                         throw new LeadReviewValidationException("The selected contact does not belong to the selected customer.");
                 }
 
+                // LEARNING INTENT is recorded here, alongside the human decision that
+                // creates it; the write happens after the audit row exists (below), so the
+                // learned identity edge can point at the exact before/after image that
+                // justifies it.
+                previousCustomerId = lead.CustomerId;
                 lead.ResolveCommercialIdentity(
                     header.CustomerId.Value,
                     header.ContactId,
                     header.ContactId.HasValue ? "CONFIRMED" : "CUSTOMER_CONFIRMED_CONTACT_UNRESOLVED");
+                // P6 approval gate: only an explicit "approve" carrying an explicitly chosen
+                // customer teaches. A machine AUTO_MATCHED result must NEVER become an
+                // alias — that is the path by which one machine mistake would bootstrap
+                // itself into authoritative knowledge.
+                shouldLearnIdentity = action == "approve";
             }
 
             // WP-B4 passive metric (hook b): capture which fields the reviewer
@@ -1040,33 +1167,56 @@ namespace ERP_RFQ_Automation.Repositories
             var reviewedOn = DateTime.UtcNow;
             lead.ModifiedDate = reviewedOn;
             lead.ReviewVersion++;
-            var audit = new LeadReviewAudit
-            {
-                BusinessUnitId = businessUnitId,
-                LeadId = lead.Id,
-                FromVersion = fromVersion,
-                ToVersion = lead.ReviewVersion,
-                Action = action,
-                ReviewedBy = reviewedBy.Trim(),
-                Reason = string.IsNullOrWhiteSpace(review.Reason) ? null : review.Reason.Trim(),
-                BeforeJson = beforeJson,
-                AfterJson = "{}",
-                ReviewedOn = reviewedOn
-            };
 
             var ownsTransaction = _context.Database.CurrentTransaction == null;
             await using var transaction = ownsTransaction
                 ? await _context.Database.BeginTransactionAsync()
                 : null;
+            string? learningSkipped = null;
             try
             {
                 // The first flush assigns database IDs to inserted lines. The audit is
-                // written by the second flush inside the same transaction, so its after
-                // image is exact without sacrificing atomicity.
+                // built and written by the second flush inside the same transaction, so its
+                // after image is exact without sacrificing atomicity. The audit is
+                // CONSTRUCTED here rather than above so there is no window in which an
+                // AfterJson placeholder could reach the database: the row has never
+                // existed without its real after image.
                 await _context.SaveChangesAsync();
-                audit.AfterJson = SerializeReviewSnapshot(lead);
+                var afterJson = SerializeReviewSnapshot(lead);
+                var audit = new LeadReviewAudit
+                {
+                    BusinessUnitId = businessUnitId,
+                    LeadId = lead.Id,
+                    FromVersion = fromVersion,
+                    ToVersion = lead.ReviewVersion,
+                    Action = action,
+                    ReviewedBy = reviewedBy.Trim(),
+                    Reason = string.IsNullOrWhiteSpace(review.Reason) ? null : review.Reason.Trim(),
+                    BeforeJson = beforeJson,
+                    AfterJson = afterJson,
+                    ReviewedOn = reviewedOn
+                };
                 _context.Set<LeadReviewAudit>().Add(audit);
                 await _context.SaveChangesAsync();
+
+                // GOLDEN CORPUS: an approved review is a human assertion that the after
+                // image is correct, which makes it the only ground truth this product has.
+                // It is captured HERE — inside the review's own transaction, flushed with
+                // it, committing with it or not at all — and deliberately NOT through
+                // IMetricRecorder, which swallows its own exceptions. A corpus row that can
+                // silently fail to appear yields a biased sample, and a biased sample
+                // produces a confident wrong number instead of an honest missing one.
+                if (action == "approve")
+                    await CaptureExtractionCorpusAsync(lead, audit, businessUnitId, beforeJson, afterJson, reviewedOn);
+
+                // LEARNING LOOP: a further flush inside the SAME transaction, so what the
+                // reviewer taught commits with the review that taught it or not at all.
+                // A learning failure must never fail the review — it is wrapped in a
+                // savepoint and reported as a reason on the correction metric instead.
+                if (shouldLearnIdentity && _aliasLearner != null && header.CustomerId.HasValue)
+                    learningSkipped = await LearnClientIdentityAsync(
+                        businessUnitId, lead, header.CustomerId.Value, previousCustomerId, audit.Id);
+
                 if (transaction != null)
                     await transaction.CommitAsync();
             }
@@ -1085,7 +1235,8 @@ namespace ERP_RFQ_Automation.Repositories
 
             // WP-B4 passive metric (hook b): what the reviewer corrected. Additive,
             // null-safe, and the recorder never throws — review flow is unaffected.
-            if (_metrics != null && (headerChanged.Count > 0 || itemsChanged > 0 || itemsAdded > 0 || toRemove.Count > 0))
+            if (_metrics != null && (headerChanged.Count > 0 || itemsChanged > 0 || itemsAdded > 0
+                                     || toRemove.Count > 0 || learningSkipped != null))
             {
                 await _metrics.RecordAsync(businessUnitId,
                     ERP_RFQ_Automation.Metrics.MetricEventTypes.ExtractionCorrected, lead.Id, new
@@ -1096,7 +1247,8 @@ namespace ERP_RFQ_Automation.Repositories
                         itemsAdded,
                         itemsRemoved = toRemove.Count,
                         itemsChanged,
-                        itemFieldChanges
+                        itemFieldChanges,
+                        learningSkipped
                     });
             }
 
@@ -1104,7 +1256,132 @@ namespace ERP_RFQ_Automation.Repositories
             return await GetLeadByIdAsync(id, businessUnitId);
         }
 
-        private async Task EnsureApprovalEvidenceAsync(long leadId, long businessUnitId)
+        /// <summary>
+        /// Turns the reviewer's client correction into durable identity knowledge, inside the
+        /// review's own transaction.
+        ///
+        /// Guarded by a SAVEPOINT: a failed write inside a PostgreSQL transaction aborts the
+        /// whole transaction, so without one a learning error would silently roll back a
+        /// perfectly good review. On failure the savepoint is rolled back, anything the
+        /// learner staged is detached, and the review commits unchanged.
+        /// Returns a reason string when learning was skipped, otherwise null.
+        /// </summary>
+        private async Task<string?> LearnClientIdentityAsync(
+            long businessUnitId, Lead lead, long customerId, long? previousCustomerId, long reviewAuditId)
+        {
+            const string savepoint = "client_identity_learning";
+            var currentTransaction = _context.Database.CurrentTransaction;
+            var savepointCreated = false;
+            try
+            {
+                if (currentTransaction is not null && _context.Database.IsNpgsql())
+                {
+                    await currentTransaction.CreateSavepointAsync(savepoint);
+                    savepointCreated = true;
+                }
+
+                var learned = await _aliasLearner!.LearnFromReviewAsync(
+                    businessUnitId, lead, customerId, previousCustomerId, reviewAuditId);
+                await _context.SaveChangesAsync();
+
+                if (savepointCreated)
+                    await currentTransaction!.ReleaseSavepointAsync(savepoint);
+
+                _logger?.LogInformation(
+                    "Client identity learning for lead {LeadId}: {Learned} learned, {Reinforced} reinforced, {Expired} expired.",
+                    lead.Id, learned.Learned, learned.Reinforced, learned.Expired);
+                return learned.SkippedReason;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex,
+                    "Client identity learning failed for lead {LeadId}; the review is unaffected.", lead.Id);
+                if (savepointCreated)
+                {
+                    try { await currentTransaction!.RollbackToSavepointAsync(savepoint); }
+                    catch (Exception rollbackFailure)
+                    {
+                        _logger?.LogError(rollbackFailure,
+                            "Rolling back the client-identity learning savepoint failed for lead {LeadId}.", lead.Id);
+                        throw;
+                    }
+                }
+                foreach (var entry in _context.ChangeTracker
+                             .Entries<ERP_RFQ_Automation.CommercialRouting.CustomerIdentifier>()
+                             .Where(entry => entry.State != EntityState.Unchanged)
+                             .ToList())
+                    entry.State = EntityState.Detached;
+                return "learningFailed";
+            }
+        }
+
+        /// <summary>
+        /// Reduces an approved review to labelled corpus cells and stages them for the
+        /// caller's flush. Runs inside <c>SubmitLeadReviewAsync</c>'s transaction, so the
+        /// label and the approval that created it are the same commit.
+        ///
+        /// Accuracy is never pooled across pipelines, so the row records which path
+        /// produced the values being scored (<see cref="ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath"/>,
+        /// or "unknown" when the lead has no ingestion occurrence). A deterministic
+        /// spreadsheet parse and a language-model read are different systems and an
+        /// average over both describes neither.
+        ///
+        /// A re-approval of the same lead writes a new audit and therefore a new set of
+        /// cells; the unique index on (BU, audit, scope, field) keeps one row per cell per
+        /// review, and the accuracy service counts documents by distinct review, so a
+        /// re-reviewed lead cannot inflate its own sample.
+        /// </summary>
+        private async Task CaptureExtractionCorpusAsync(
+            Lead lead, LeadReviewAudit audit, long businessUnitId,
+            string beforeJson, string afterJson, DateTime capturedOn)
+        {
+            var observations = ERP_RFQ_Automation.Services.Measurement.ExtractionCorpusProjection
+                .Diff(beforeJson, afterJson);
+            if (observations.Count == 0) return;
+
+            var occurrenceId = (await SourceOccurrenceIdsAsync(lead.Id, businessUnitId))
+                .Select(id => (long?)id).FirstOrDefault();
+
+            // Ordered in memory, not in SQL: IngestedAtUtc is a DateTimeOffset and SQLite —
+            // which the repository test suite runs on — cannot ORDER BY that type. A lead
+            // has a handful of ingestion occurrences at most, so the sort is free.
+            var occurrences = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadIngestionOccurrence>()
+                .AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.LeadId == lead.Id)
+                .Select(x => new { x.IngestedAtUtc, x.ProcessingPath })
+                .ToListAsync();
+            var path = occurrences
+                .OrderByDescending(x => x.IngestedAtUtc)
+                .Select(x => (ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath?)x.ProcessingPath)
+                .FirstOrDefault();
+
+            var entries = observations.Select(observation => new ExtractionCorpusEntry
+            {
+                BusinessUnitId = businessUnitId,
+                LeadId = lead.Id,
+                LeadReviewAuditId = audit.Id,
+                SourceDocumentOccurrenceId = occurrenceId,
+                ExtractionPath = path?.ToString() ?? "unknown",
+                Scope = observation.Scope,
+                FieldName = observation.FieldName,
+                ObservedCount = observation.Observed,
+                CorrectedCount = observation.Corrected,
+                FieldCorrect = observation.Correct,
+                CapturedOn = capturedOn,
+                ApprovedBy = audit.ReviewedBy
+            });
+
+            await _context.Set<ExtractionCorpusEntry>().AddRangeAsync(entries);
+            await _context.SaveChangesAsync();
+        }
+
+        /// <summary>
+        /// Source-document occurrences bound to this lead, from either the ingestion
+        /// occurrence chain or the extraction job. Shared by the review gate and the
+        /// approval evidence check so both answer "is there a document behind this lead?"
+        /// the same way.
+        /// </summary>
+        private async Task<List<long>> SourceOccurrenceIdsAsync(long leadId, long businessUnitId)
         {
             var occurrenceIds = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadIngestionOccurrence>()
                 .AsNoTracking()
@@ -1118,7 +1395,12 @@ namespace ERP_RFQ_Automation.Repositories
                     && x.SourceDocumentOccurrenceId.HasValue)
                 .Select(x => x.SourceDocumentOccurrenceId!.Value)
                 .ToListAsync());
-            occurrenceIds = occurrenceIds.Distinct().ToList();
+            return occurrenceIds.Distinct().ToList();
+        }
+
+        private async Task EnsureApprovalEvidenceAsync(long leadId, long businessUnitId)
+        {
+            var occurrenceIds = await SourceOccurrenceIdsAsync(leadId, businessUnitId);
             if (occurrenceIds.Count == 0)
                 throw new LeadReviewValidationException(
                     "Approval requires authoritative source-document evidence.");
@@ -1232,7 +1514,13 @@ namespace ERP_RFQ_Automation.Repositories
             Check("commodityProduct", item.CommodityProduct, dto.CommodityProduct);
             Check("itemMaterialCode", item.ItemMaterialCode, dto.ItemMaterialCode);
             Check("currency", item.Currency, dto.Currency);
-            Check("unitOfMeasure", item.UnitOfMeasure, dto.UnitOfMeasure);
+            // Diff against the CANONICAL form of what the reviewer typed, because that is
+            // what ApplyItemFields will store. Diffing the raw text made every unchanged
+            // form submit record a spurious "unitOfMeasure" correction (stored "EA" vs
+            // typed "each") into the review audit — polluting the one signal that says
+            // what extraction actually got wrong.
+            Check("unitOfMeasure", item.UnitOfMeasure,
+                Services.Uom.UomCanonicalizer.CanonicalizeForStorage(dto.UnitOfMeasure));
             Check("unitPrice", item.UnitPrice, dto.UnitPrice);
             if (dto.Quantity.HasValue) Check("quantity", item.Quantity, dto.Quantity.Value);
             Check("manufacturerName", item.ManufacturerName, dto.ManufacturerName);
@@ -1256,7 +1544,12 @@ namespace ERP_RFQ_Automation.Repositories
             item.CommodityProduct = dto.CommodityProduct;
             item.ItemMaterialCode = dto.ItemMaterialCode;
             item.Currency = dto.Currency;
-            item.UnitOfMeasure = dto.UnitOfMeasure;
+            // The reviewer-correction door is the FIFTH UnitOfMeasure write path, and the
+            // only one a human drives. Without this, a reviewer typing "each" stored it raw
+            // and defeated the ingestion canonicalisation for exactly the rows a human
+            // touched. Same policy as LeadItemMapper: spelling is settled, packaging and
+            // form-factor words are kept verbatim, null stays null.
+            item.UnitOfMeasure = Services.Uom.UomCanonicalizer.CanonicalizeForStorage(dto.UnitOfMeasure);
             item.UnitPrice = dto.UnitPrice;
             if (dto.Quantity.HasValue) item.Quantity = dto.Quantity.Value;
             item.ManufacturerName = dto.ManufacturerName;

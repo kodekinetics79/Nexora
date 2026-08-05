@@ -334,11 +334,8 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
           </Box>
 
           <Box sx={{ display: 'flex', gap: 1, my: 0.5 }}>
-            <Chip
-              label={`AI: ${Math.round((item.aiconfidence ?? 0) * 100)}%`}
-              size="small"
-              sx={{ height: 16, fontSize: '0.55rem', fontWeight: 900, bgcolor: '#e8f5e9', color: '#2e7d32', borderRadius: 1 }}
-            />
+            {/* An "AI: N%" chip used to lead this row. It rendered a score the
+                platform has never measured, so it is not shown. */}
             {item.matchStatus === 'matched' && (
               <Stack direction="row" spacing={0.75} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
                 <Chip label="System Match" size="small" sx={{ height: 16, fontSize: '0.55rem', fontWeight: 900, bgcolor: '#e3f2fd', color: '#1976d2', borderRadius: 1 }} />
@@ -1383,9 +1380,10 @@ const ProcessRFQPage: React.FC = () => {
             { label: 'Client Email', value: lead.clientemail, border: true, bottom: true },
             { label: 'Matched Customer', value: null, chip: true, bottom: true },
             { label: 'Source', value: lead.leadSource, border: true, bottom: true },
-            { label: 'RFQ Type', value: lead.rfqtype || '—', bottom: true },
-            { label: 'AI Confidence', value: null, confidence: true, border: true },
-          ].map(({ label, value, chip, confidence, border, bottom }) => (
+            // An "AI Confidence" row used to close this block. The score behind
+            // it was never measured against a labelled corpus, so it is gone.
+            { label: 'RFQ Type', value: lead.rfqtype || '—', bottom: true, border: true },
+          ].map(({ label, value, chip, border, bottom }) => (
             <Grid
               key={label}
               size={{ xs: 12, md: 6 }}
@@ -1419,12 +1417,6 @@ const ProcessRFQPage: React.FC = () => {
                       minWidth: 0,
                       '& .MuiAutocomplete-input': { p: '0 !important' }
                     }}
-                  />
-                ) : confidence ? (
-                  <Chip
-                    label={`${Math.round((lead.aiconfidence ?? 0) * 100)}%`}
-                    size="small"
-                    sx={{ height: 18, fontSize: '0.6rem', fontWeight: 900, bgcolor: '#e3f2fd', color: '#1976d2', borderRadius: 1 }}
                   />
                 ) : (
                   <Typography sx={{ fontSize: '0.75rem', fontWeight: 700, color: '#333' }}>{value}</Typography>

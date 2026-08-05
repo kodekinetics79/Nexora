@@ -60,7 +60,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
   const instanceId = useId();
 
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
-    'dashboard': location.pathname.startsWith('/dashboard'),
+    'dashboard': location.pathname.startsWith('/dashboard') || location.pathname.startsWith('/analytics/'),
     'rfq_mgmt': location.pathname.includes('/rfqs'),
     'quote_mgmt': location.pathname.includes('/quotes'),
     'setup': location.pathname.includes('/setup'),
@@ -100,18 +100,22 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
       },
       // Managers get a Dashboard group with the WP-B1 Team Workload view;
       // everyone else keeps the familiar one-click Dashboard item.
-      isManager
-        ? {
-            key: 'dashboard',
-            label: t('dashboard'),
-            icon: <DashboardIcon />,
-            moduleName: 'Dashboard',
-            children: [
-              { key: 'dashboard-overview', label: t('dashboard'), path: '/dashboard', moduleName: 'Dashboard' },
-              { key: 'dashboard-team', label: t('team_workload', 'Team Workload'), path: '/dashboard/team', moduleName: 'Dashboard' },
-            ],
-          }
-        : { key: 'dashboard', label: t('dashboard'), icon: <DashboardIcon />, path: '/dashboard', moduleName: 'Dashboard' },
+      // The deadline board leads: it is the only analytics surface that computes
+      // from data every tenant has on day one. /dashboard sits below it until
+      // its KPIs stop reporting insufficient data.
+      {
+        key: 'dashboard',
+        label: t('dashboard'),
+        icon: <DashboardIcon />,
+        moduleName: 'Dashboard',
+        activePrefixes: ['/analytics/'],
+        children: [
+          { key: 'analytics-deadlines', label: 'Deadline Board', path: '/analytics/deadlines', moduleName: 'Leads' },
+          { key: 'analytics-brand-demand', label: 'Brand Demand', path: '/analytics/brand-demand', moduleName: 'Leads' },
+          { key: 'dashboard-overview', label: t('dashboard'), path: '/dashboard', moduleName: 'Dashboard' },
+          ...(isManager ? [{ key: 'dashboard-team', label: t('team_workload', 'Team Workload'), path: '/dashboard/team', moduleName: 'Dashboard' }] : []),
+        ],
+      },
       {
         key: 'copilot',
         // NOTE: these keys are missing from i18n resources, so t('copilot')
@@ -157,6 +161,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
           { key: 'leads-all', label: 'All Inquiries', path: '/procurement/leads/all', moduleName: 'Leads', activePrefixes: ['/procurement/leads/view', '/leads/view'] },
           { key: 'leads-review', label: 'Needs Review', path: '/procurement/extraction/review', moduleName: 'Leads', activePrefixes: ['/procurement/extraction/review'] },
           { key: 'leads-bulk', label: 'Bulk Uploads', path: '/procurement/leads/manual-upload', moduleName: 'Leads', activePrefixes: ['/procurement/leads/ingestion'] },
+          { key: 'leads-inbound-mail', label: 'Inbound Mail', path: '/procurement/leads/inbound-mail', moduleName: 'Leads' },
           { key: 'leads-duplicates', label: 'Duplicates', path: '/procurement/leads/duplicates', moduleName: 'Leads' },
           { key: 'leads-revisions', label: 'Revisions', path: '/procurement/leads/all?view=revisions', moduleName: 'Leads' },
           { key: 'leads-matches', label: 'Possible Matches', path: '/procurement/leads/possible-matches', moduleName: 'Leads' },
@@ -242,6 +247,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
           { key: 'platform-releases', label: 'Test & Release', path: '/admin/platform/releases', moduleName: 'Users' },
           { key: 'platform-archive', label: 'Document Archive', path: '/admin/platform/archive', moduleName: 'Users' },
           { key: 'platform-quality', label: 'Quality Analytics', path: '/admin/platform/quality', moduleName: 'Users' },
+          { key: 'platform-retention', label: 'Storage & Retention', path: '/admin/platform/retention', moduleName: 'Users' },
         ],
       },
       {

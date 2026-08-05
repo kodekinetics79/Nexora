@@ -39,6 +39,15 @@ public partial class QuoteItem
 
     public decimal? DiscountValue { get; set; }
 
+    /// <summary>Unit the quantity is quoted in (EA, PACK, M, …), carried from the RFQ line
+    /// so the customer-facing document never prints a bare quantity. Null on legacy rows.</summary>
+    public string? UnitOfMeasure { get; set; }
+
+    /// <summary>The buyer's own line reference from their RFQ (e.g. SAP "00010", "OPT-29",
+    /// traced from LeadItem/Rfqitem.LineItemNo). Printed instead of a synthetic 1,2,3 so the
+    /// buyer can match our quote lines against their request. Null on legacy rows.</summary>
+    public string? CustomerLineRef { get; set; }
+
     public virtual SetupMaster? DiscountType { get; set; }
 
     public virtual Product? Product { get; set; }

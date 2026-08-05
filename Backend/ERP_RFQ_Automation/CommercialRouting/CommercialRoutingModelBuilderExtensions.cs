@@ -20,6 +20,10 @@ public static class CommercialRoutingModelBuilderExtensions
             entity.Property(x => x.DisplayValue).HasMaxLength(320).IsRequired();
             entity.Property(x => x.Confidence).HasPrecision(5, 4);
             entity.Property(x => x.Source).HasMaxLength(80).IsRequired();
+            entity.Property(x => x.ObservationCount).HasDefaultValue(1);
+            entity.HasIndex(x => new { x.BusinessUnitId, x.LearnedFromLeadId })
+                .HasFilter("\"LearnedFromLeadId\" IS NOT NULL")
+                .HasDatabaseName("IX_customer_identifiers_learned_from_lead");
             entity.HasIndex(x => new { x.BusinessUnitId, x.IdentifierType, x.NormalizedValue, x.CustomerId })
                 .IsUnique()
                 .HasFilter("\"EffectiveTo\" IS NULL");

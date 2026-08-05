@@ -43,7 +43,8 @@ public sealed class OpportunityPriorityPostgreSqlSecurityTests(PostgreSqlTestDat
             const string current = "20260729054001_V2Gate02ValidateOpportunityCommercialComponents";
             await migrator.MigrateAsync(previous);
 
-            var lead = Seed.Lead(context, 839_011, 839_001);
+            // Pinned to the rehearsal era (see Seed.HistoricalLead).
+            var lead = Seed.HistoricalLead(context, 839_011, 839_001);
             await context.SaveChangesAsync();
             var identity = await context.Leads.IgnoreQueryFilters().AsNoTracking()
                 .Where(x => x.Id == lead.Id)

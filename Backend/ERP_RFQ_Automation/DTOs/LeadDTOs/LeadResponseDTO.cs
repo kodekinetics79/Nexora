@@ -11,7 +11,33 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         public long? ContactId { get; set; }
         public string? CustomerName { get; set; }
         public string? AccountOwnerName { get; set; }
+
+        // ── Client organisation identity ────────────────────────────────────
+        // UNRESOLVED | SUGGESTED | AMBIGUOUS | AUTO_MATCHED |
+        // AUTO_MATCHED_CONTACT_UNRESOLVED | CONFIRMED |
+        // CUSTOMER_CONFIRMED_CONTACT_UNRESOLVED | VERIFIED_EMAIL
         public string CustomerMatchStatus { get; set; } = "UNRESOLVED";
+
+        /// <summary>Why the machine decided what it decided; one of CustomerMatchReasonCodes.</summary>
+        public string? CustomerMatchReasonCode { get; set; }
+
+        /// <summary>Strength of that signal, 0..1.</summary>
+        public decimal? CustomerMatchConfidence { get; set; }
+
+        /// <summary>One-line human-readable basis ("Shares the corporate sender domain se.com.sa").</summary>
+        public string? CustomerMatchExplanation { get; set; }
+
+        // Raw evidence, so an unresolved lead is a five-second decision instead of a dead end.
+        public string? CustomerCompanyNameExtracted { get; set; }
+        public string? CustomerCompanyEvidence { get; set; }
+        public string? CustomerCompanyRegistrationId { get; set; }
+        public string? CustomerBuyerEmailExtracted { get; set; }
+        public string? CustomerPortalNameExtracted { get; set; }
+        public string? SupplierNameOnDocument { get; set; }
+        public string? SupplierAccountRefOnDocument { get; set; }
+
+        /// <summary>Ranked machine proposals: up to 3 in the list projection, up to 5 on detail.</summary>
+        public List<ClientCandidateDTO> ClientCandidates { get; set; } = new();
         public string? Rfqno { get; set; }
         public string? BuyersName { get; set; }
         public DateTime RecDate { get; set; }
@@ -79,5 +105,24 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         public int ItemCount { get; set; } // Optimized: Item count instead of loading all items
         public List<LeadItemResponseDTO> LeadItems { get; set; } = new List<LeadItemResponseDTO>();
         public List<AttachmentResponseDTO> Attachments { get; set; } = new List<AttachmentResponseDTO>();
+    }
+
+    /// <summary>
+    /// One ranked machine proposal for a lead's client organisation, with the reason a rep
+    /// can read. Never a link — a candidate is what the machine THINKS, and the customer on
+    /// the lead stays null until a signal is strong enough or a person confirms.
+    /// </summary>
+    public class ClientCandidateDTO
+    {
+        /// <summary>1 = strongest.</summary>
+        public int Rank { get; set; }
+        public long CustomerId { get; set; }
+        public string CustomerName { get; set; } = string.Empty;
+        /// <summary>0..1.</summary>
+        public decimal Confidence { get; set; }
+        /// <summary>One of CustomerMatchReasonCodes.</summary>
+        public string ReasonCode { get; set; } = string.Empty;
+        /// <summary>"shares sender domain se.com.sa", "same portal vendor code 2004414".</summary>
+        public string Explanation { get; set; } = string.Empty;
     }
 }

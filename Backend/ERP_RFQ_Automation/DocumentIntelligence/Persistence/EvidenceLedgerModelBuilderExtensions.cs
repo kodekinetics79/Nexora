@@ -196,6 +196,16 @@ public static class EvidenceLedgerModelBuilderExtensions
                 table.HasCheckConstraint("ck_source_documents_content_hash", "content_hash ~ '^[0-9a-f]{64}$'");
                 table.HasCheckConstraint("ck_source_documents_malware_verdict",
                     "(malware_verdict_status IS NULL AND malware_scanned_on IS NULL) OR (malware_verdict_status IN ('Clean','Infected','Unavailable','Error') AND malware_scanned_on IS NOT NULL AND malware_scanner_engine IS NOT NULL)");
+                table.HasCheckConstraint("ck_source_documents_purge_state",
+                    "purge_state IN ('Present','PurgeRequested','Purged')");
+                table.HasCheckConstraint("ck_source_documents_purged_byte_count", "purged_byte_count >= 0");
+                // "Purged" and "has a completion timestamp" are the same fact; the database
+                // refuses to hold one without the other so a half-written tombstone cannot
+                // exist even if application code is wrong.
+                table.HasCheckConstraint("ck_source_documents_purge_completion",
+                    "(purge_state = 'Purged') = (bytes_purged_on IS NOT NULL)");
+                table.HasCheckConstraint("ck_source_documents_purge_intent",
+                    "(purge_state = 'Present') = (purge_requested_on IS NULL)");
             });
             entity.HasKey(x => x.Id);
             entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id })
@@ -220,8 +230,23 @@ public static class EvidenceLedgerModelBuilderExtensions
             entity.Property(x => x.MalwareScannedOn).HasColumnName("malware_scanned_on").HasColumnType("timestamp with time zone");
             entity.Property(x => x.CreatedOn).HasColumnName("created_on").HasColumnType("timestamp with time zone");
             entity.Property(x => x.UpdatedOn).HasColumnName("updated_on").HasColumnType("timestamp with time zone");
+            entity.Property(x => x.PurgeState).HasColumnName("purge_state")
+                .HasConversion<string>().HasMaxLength(24).HasDefaultValue(EvidencePurgeState.Present);
+            entity.Property(x => x.PurgeRequestedOn).HasColumnName("purge_requested_on")
+                .HasColumnType("timestamp with time zone");
+            entity.Property(x => x.BytesPurgedOn).HasColumnName("bytes_purged_on")
+                .HasColumnType("timestamp with time zone");
+            entity.Property(x => x.PurgedByUserId).HasColumnName("purged_by_user_id");
+            entity.Property(x => x.PurgePolicyCode).HasColumnName("purge_policy_code").HasMaxLength(64);
+            entity.Property(x => x.PurgedByteCount).HasColumnName("purged_byte_count").HasDefaultValue(0L);
+            entity.Property(x => x.PurgeReason).HasColumnName("purge_reason").HasMaxLength(256);
             entity.HasIndex(x => new { x.BusinessUnitId, x.ContentHash }).IsUnique()
                 .HasDatabaseName("ux_source_documents_tenant_hash");
+            // Partial: the interesting rows are the exceptions. Present is the overwhelming
+            // majority and is already served by the tenant/created indexes.
+            entity.HasIndex(x => new { x.BusinessUnitId, x.PurgeState })
+                .HasFilter("purge_state <> 'Present'")
+                .HasDatabaseName("ix_source_documents_tenant_purge_state");
             entity.HasIndex(x => new { x.BusinessUnitId, x.ObjectBucket, x.ObjectKey, x.ObjectVersion }).IsUnique()
                 .HasDatabaseName("ux_source_documents_object_version");
             entity.HasIndex(x => new { x.BusinessUnitId, x.CorpusId })

@@ -2,6 +2,7 @@
 using ERP_RFQ_Automation.DTOs.LeadDTOs;
 using ERP_RFQ_Automation.DTOs.AcceptedLeadDTOs;
 using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.CustomerResolution;
 using ERP_RFQ_Automation.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -306,6 +307,54 @@ public class LeadController : ControllerBase
         catch (Exception ex)
         {
             return Unexpected(ex, "resolve-duplicate");
+        }
+    }
+
+    // CLIENT ORGANISATION: what the machine proposed for this lead, ranked, each with the
+    // reason behind it. Read-only — confirming a candidate goes through PUT {id}/review so
+    // there is exactly one governed path by which a lead acquires a customer.
+    [HttpGet("{id}/client-candidates")]
+    [RequireModulePermission("Leads", PermissionAction.View)]
+    public async Task<ActionResult<IEnumerable<ClientCandidateDTO>>> GetClientCandidates(long id)
+    {
+        try
+        {
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
+
+            var lead = await _repository.GetLeadByIdAsync(id, businessUnitId);
+            if (lead == null) return NotFound($"Lead with ID {id} not found.");
+
+            return Ok(await _repository.GetClientCandidatesAsync(id, businessUnitId));
+        }
+        catch (Exception ex)
+        {
+            return Unexpected(ex, "client-candidates");
+        }
+    }
+
+    // Tenant-scoped re-run of client resolution over leads that are not human-decided.
+    // Deliberately an endpoint rather than a data step inside a migration: resolution is a
+    // runtime service, so a rule that turns out to be wrong can be fixed and re-run instead
+    // of being frozen into schema history. It never touches a lead a person has decided.
+    [HttpPost("resolve-clients")]
+    [RequireManagerRole]
+    [RequireModulePermission("Leads", PermissionAction.Edit)]
+    public async Task<ActionResult<CustomerResolutionBackfillResult>> ResolveClients(
+        [FromServices] ILeadCustomerResolutionService resolution,
+        [FromQuery] int maxLeads = 500,
+        [FromQuery] bool includeSuggested = true)
+    {
+        try
+        {
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
+
+            return Ok(await resolution.BackfillAsync(businessUnitId, maxLeads, includeSuggested));
+        }
+        catch (Exception ex)
+        {
+            return Unexpected(ex, "resolve-clients");
         }
     }
 

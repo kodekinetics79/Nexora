@@ -1,10 +1,12 @@
 using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Intelligence.Conversion;
+using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Services;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 using System.Reflection;
+using UglyToad.PdfPig;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -97,9 +99,183 @@ public sealed class QuoteDraftHandoffTests
         Assert.Empty(await intruder.Quotes.ToListAsync());
     }
 
+    [Fact]
+    public async Task PrepareDraftFromRfq_CarriesUnitAndBuyersLineReference_AndOrdersLinesByThatReference()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(9404);
+        // Insertion order deliberately REVERSED against the buyer's numbering ("00020"
+        // before "00010") to prove ordering follows the buyer's reference, not row order.
+        var lead = Seed.Lead(context, 94041, 9404, items: new[]
+        {
+            Line(94042, "00020", "EA", "Gasket spiral wound"),
+            Line(94043, "00010", "PACK", "Hex bolts M12")
+        });
+        Seed.Customer(context, 94044, 9404, "Ref Customer");
+        context.SetupMasters.Add(Status(94045, 9404, "QuoteStatus", "DRAFT"));
+        await context.SaveChangesAsync();
+        lead.ResolveCommercialIdentity(94044, null, "CONFIRMED");
+        var rfq = RfqFrom(lead, 94046);
+        context.Rfqs.Add(rfq);
+        await context.SaveChangesAsync();
+
+        var service = new QuoteService(context, null!, null!);
+        var draft = await service.PrepareDraftFromRfqAsync(rfq.Id, 9404, "owner@example.com");
+
+        // Persisted lines carry the unit and the buyer's own reference from the RFQ line.
+        context.ChangeTracker.Clear();
+        var quote = await context.Quotes.Include(item => item.QuoteItems).SingleAsync();
+        var byRef = quote.QuoteItems.ToDictionary(item => item.CustomerLineRef!);
+        Assert.Equal("EA", byRef["00020"].UnitOfMeasure);
+        Assert.Equal("PACK", byRef["00010"].UnitOfMeasure);
+
+        // The DTO orders lines by the buyer's reference, numeric-aware ("00010" < "00020").
+        Assert.Equal(new[] { "00010", "00020" }, draft.QuoteItems.Select(item => item.CustomerLineRef).ToArray());
+        Assert.Equal(new[] { "PACK", "EA" }, draft.QuoteItems.Select(item => item.UnitOfMeasure).ToArray());
+    }
+
+    [Fact]
+    public async Task GenerateQuotePdf_PrintsUnit_BuyersLineReference_AndTheCustomersRfqNumber()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(9405);
+        var quoteId = SeedPrintableQuote(context, 9405, 94051,
+            customerRfqNo: "SA-RFQ-2026-889",
+            lines: new[]
+            {
+                (Ref: (string?)"00020", Uom: (string?)"EA", Description: "Gasket spiral wound"),
+                (Ref: (string?)"00010", Uom: (string?)"PACK", Description: "Hex bolts M12")
+            });
+
+        var service = new QuoteService(context, null!, new NullQuoteConfigurationRepository());
+        var pdf = await service.GenerateQuotePdfAsync(quoteId, 9405);
+
+        var text = PdfText(pdf);
+        // Header: the buyer files our quote under THEIR number.
+        Assert.Contains("Your RFQ Reference", text);
+        Assert.Contains("SA-RFQ-2026-889", text);
+        // Line grid: unit column + the buyer's own line references.
+        Assert.Contains("UOM", text);
+        Assert.Contains("PACK", text);
+        Assert.Contains("EA", text);
+        Assert.Contains("00010", text);
+        Assert.Contains("00020", text);
+        // Deterministic, numeric-aware order: the buyer's "00010" prints before "00020".
+        Assert.True(text.IndexOf("00010", StringComparison.Ordinal) < text.IndexOf("00020", StringComparison.Ordinal),
+            "Quote lines must print in the buyer's line-reference order.");
+    }
+
+    [Fact]
+    public async Task GenerateQuotePdf_LegacyLinesWithoutUnitOrReference_StillRenderWithSyntheticNumbering()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(9406);
+        // Pre-existing production rows: both new columns are NULL and no RFQ is linked.
+        var quoteId = SeedPrintableQuote(context, 9406, 94061,
+            customerRfqNo: null,
+            lines: new[]
+            {
+                (Ref: (string?)null, Uom: (string?)null, Description: "Legacy line one"),
+                (Ref: (string?)null, Uom: (string?)null, Description: "Legacy line two")
+            });
+
+        var service = new QuoteService(context, null!, new NullQuoteConfigurationRepository());
+        var pdf = await service.GenerateQuotePdfAsync(quoteId, 9406);
+
+        Assert.NotEmpty(pdf);
+        var text = PdfText(pdf);
+        Assert.Contains("Legacy line one", text);
+        Assert.Contains("Legacy line two", text);
+        // No buyer reference exists, so no customer RFQ header line is invented.
+        Assert.DoesNotContain("Your RFQ Reference", text);
+    }
+
+    /// <summary>A complete, priced, non-draft quote (optionally RFQ-linked) that passes
+    /// every PDF export gate; returns the quote id.</summary>
+    private static long SeedPrintableQuote(
+        ErpRfqAutomationContext context, long tenant, long baseId, string? customerRfqNo,
+        (string? Ref, string? Uom, string Description)[] lines)
+    {
+        Seed.EnsureBusinessUnit(context, tenant);
+
+        long? rfqId = null;
+        if (customerRfqNo != null)
+        {
+            var lead = Seed.Lead(context, baseId + 1, tenant);
+            lead.Rfqno = customerRfqNo;
+            context.Rfqs.Add(new Rfq
+            {
+                Id = baseId + 2,
+                Rfqno = customerRfqNo,
+                LeadId = lead.Id,
+                BusinessUnitId = tenant,
+                CreatedBy = "seed",
+                CreatedDate = DateTime.UtcNow
+            });
+            rfqId = baseId + 2;
+        }
+
+        var quote = new Quote
+        {
+            Id = baseId + 3,
+            QuoteNo = $"QT-PRINT-{baseId}",
+            Rfqid = rfqId,
+            BusinessUnitId = tenant,
+            QuoteDate = DateTime.UtcNow,
+            ValidUntil = DateTime.UtcNow.AddDays(30),
+            TotalAmount = 100m,
+            CreatedBy = "seed",
+            CreatedDate = DateTime.UtcNow
+        };
+        var lineId = baseId + 10;
+        foreach (var line in lines)
+        {
+            quote.QuoteItems.Add(new QuoteItem
+            {
+                Id = lineId++,
+                ItemDescription = line.Description,
+                Quantity = 5m,
+                UnitOfMeasure = line.Uom,
+                CustomerLineRef = line.Ref,
+                UnitPrice = 10m,
+                TotalAmount = 50m,
+                CreatedBy = "seed",
+                CreatedDate = DateTime.UtcNow
+            });
+        }
+        context.Quotes.Add(quote);
+        context.SaveChanges();
+        return quote.Id;
+    }
+
+    private static string PdfText(byte[] pdf)
+    {
+        using var document = PdfDocument.Open(pdf);
+        return string.Join("\n", document.GetPages().Select(page => page.Text));
+    }
+
+    private static LeadItem Line(long id, string lineItemNo, string unitOfMeasure, string description) => new()
+    {
+        Id = id,
+        LineItemNo = lineItemNo,
+        ItemMaterialCode = $"PART-{id}",
+        ProductShortDescription = description,
+        Quantity = 2,
+        UnitOfMeasure = unitOfMeasure,
+        Currency = "USD"
+    };
+
+    /// <summary>PDF export path only needs the lookup; "no configuration row" exercises
+    /// every built-in default (colors, terms, company block).</summary>
+    private sealed class NullQuoteConfigurationRepository : IQuoteConfigurationRepository
+    {
+        public Task<QuoteConfiguration?> GetByBusinessUnitIdAsync(long businessUnitId) => Task.FromResult<QuoteConfiguration?>(null);
+        public Task AddAsync(QuoteConfiguration config) => Task.CompletedTask;
+        public Task UpdateAsync(QuoteConfiguration config) => Task.CompletedTask;
+    }
+
     private static Rfq RfqFrom(Lead lead, long id)
     {
-        var line = lead.LeadItems.Single();
         var rfq = new Rfq
         {
             Id = id,
@@ -111,20 +287,17 @@ public sealed class QuoteDraftHandoffTests
             CustomerId = lead.CustomerId,
             CreatedBy = "seed",
             CreatedDate = DateTime.UtcNow,
-            Rfqitems = new List<Rfqitem>
+            Rfqitems = lead.LeadItems.Select((line, index) => new Rfqitem
             {
-                new()
-                {
-                    Id = id + 1,
-                    LineItemNo = line.LineItemNo,
-                    ItemMaterialCode = line.ItemMaterialCode,
-                    ProductShortDescription = line.ProductShortDescription,
-                    Quantity = line.Quantity,
-                    UnitOfMeasure = line.UnitOfMeasure,
-                    CreatedBy = "seed",
-                    CreatedDate = DateTime.UtcNow
-                }
-            }
+                Id = id + 1 + index,
+                LineItemNo = line.LineItemNo,
+                ItemMaterialCode = line.ItemMaterialCode,
+                ProductShortDescription = line.ProductShortDescription,
+                Quantity = line.Quantity,
+                UnitOfMeasure = line.UnitOfMeasure,
+                CreatedBy = "seed",
+                CreatedDate = DateTime.UtcNow
+            }).ToList()
         };
         rfq.InheritCommercialIdentity(lead);
         return rfq;

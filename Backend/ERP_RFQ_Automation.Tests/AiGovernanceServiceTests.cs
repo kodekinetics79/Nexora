@@ -144,6 +144,33 @@ public sealed class AiGovernanceServiceTests
     }
 
     [Fact]
+    public async Task Retry_attempt_key_is_a_new_governed_request_and_a_same_attempt_replay_still_dedups()
+    {
+        // THE dead-letter root cause: extraction keys used to omit the lease attempt, so
+        // every retry (lease reclaim, worker restart, manual re-drive) replayed attempt
+        // one's keys and was refused as a duplicate before a single model call. The key
+        // must distinguish ATTEMPTS while an identical (job, chunk, attempt) replay is
+        // still deduplicated.
+        using var fixture = new Fixture(hardLimit: 100_000);
+        var attemptOne = fixture.Context("extraction:job:33:a1:chunk:1:12", extractionJobId: 33);
+        await fixture.Service.ReserveAsync(attemptOne, "Ollama", "test", "chunk text", 16, 10, 1, default);
+
+        var replay = await Assert.ThrowsAsync<AiPolicyDeniedException>(() => fixture.Service.ReserveAsync(
+            attemptOne, "Ollama", "test", "chunk text", 16, 10, 1, default));
+        Assert.Equal("duplicate_request", replay.Code);
+        Assert.Contains("duplicate_request", replay.Message); // legible on catch-all surfaces
+
+        var attemptTwo = fixture.Context("extraction:job:33:a2:chunk:1:12", extractionJobId: 33);
+        var reservation = await fixture.Service.ReserveAsync(
+            attemptTwo, "Ollama", "test", "chunk text", 16, 10, 1, default);
+
+        Assert.NotEqual(Guid.Empty, reservation.RequestId);
+        await using var db = fixture.Database.ContextFor(null);
+        Assert.Equal(2, await db.AiRequests.IgnoreQueryFilters()
+            .CountAsync(x => x.Status == AiCallStatuses.Reserved));
+    }
+
+    [Fact]
     public async Task External_dependency_is_reserved_only_at_or_below_ten_percent()
     {
         using var fixture = new Fixture(hardLimit: 100_000);
@@ -269,7 +296,10 @@ public sealed class AiGovernanceServiceTests
     [Fact]
     public async Task Authorized_endpoint_is_still_denied_when_the_document_budget_is_exhausted()
     {
-        using var fixture = new Fixture(hardLimit: 100_000, maxTokensPerDocument: 25);
+        // 5 per pass × AiGovernanceService.DocumentBudgetRetryCycles (5) = 25 lifetime —
+        // the identical enforcement threshold this test asserted before the ceiling
+        // gained retry headroom.
+        using var fixture = new Fixture(hardLimit: 100_000, maxTokensPerDocument: 5);
         fixture.AuthorizeResolvedEndpoint();
         await fixture.Service.ReserveAsync(
             fixture.Context("authorized-document-first", AiProviderClass.External, extractionJobId: 771),
@@ -285,7 +315,9 @@ public sealed class AiGovernanceServiceTests
     [Fact]
     public async Task Per_document_budget_denies_additional_reservation_atomically()
     {
-        using var fixture = new Fixture(hardLimit: 100_000, maxTokensPerDocument: 25);
+        // 5 per pass × AiGovernanceService.DocumentBudgetRetryCycles (5) = 25 lifetime —
+        // same threshold as before the retry headroom (see that constant's sizing note).
+        using var fixture = new Fixture(hardLimit: 100_000, maxTokensPerDocument: 5);
         await fixture.Service.ReserveAsync(fixture.Context("document-first", extractionJobId: 551),
             "Ollama", "test", "local", 10, 10, 1, default);
 

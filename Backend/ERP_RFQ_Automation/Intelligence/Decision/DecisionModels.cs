@@ -206,6 +206,15 @@ public static class LeadDecisionRecommendations
     public const string Bid = "bid";
     public const string Review = "review";
     public const string Skip = "skip";
+
+    /// <summary>
+    /// The inputs the rules need do not exist for this lead, so no recommendation is
+    /// made. Emitted instead of <see cref="Skip"/> when catalog coverage cannot be
+    /// assessed — see LeadDecisionService.Recommend. "Likely skip" on every inbound
+    /// enquiry is not advice, it is a stuck needle, and a rep who learns to ignore the
+    /// column has lost the column for the cases where it would have been right.
+    /// </summary>
+    public const string CannotAssess = "cannot-assess";
 }
 
 /// <summary>Stable urgency band values (wire contract).</summary>

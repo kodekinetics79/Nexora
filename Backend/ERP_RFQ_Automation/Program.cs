@@ -176,6 +176,10 @@ builder.Services.AddSingleton<ERP_RFQ_Automation.HealthChecks.IBackgroundWorkerH
 builder.Services.AddHealthChecks()
     .AddCheck<ERP_RFQ_Automation.HealthChecks.DatabaseHealthCheck>("database", tags: new[] { "live", "ready" })
     .AddCheck<ERP_RFQ_Automation.HealthChecks.EvidenceStorageHealthCheck>("evidence-storage", tags: new[] { "ready" })
+    // "ready" ONLY. A full disk must drain traffic, never trigger a restart: the replacement
+    // process lands on the same full volume, fails LocalFileStorage's constructor write
+    // probe, and the platform loops — consuming the window an operator needs to free space.
+    .AddCheck<ERP_RFQ_Automation.HealthChecks.StorageCapacityHealthCheck>("storage-capacity", tags: new[] { "ready" })
     .AddCheck<ERP_RFQ_Automation.HealthChecks.MalwareScannerHealthCheck>("malware-scanner", tags: new[] { "ready" })
     .AddCheck<ERP_RFQ_Automation.HealthChecks.ExtractionWorkerHealthCheck>("extraction-worker", tags: new[] { "ready" })
     .AddCheck<ERP_RFQ_Automation.HealthChecks.QuoteDeliveryWorkerHealthCheck>("quote-delivery-worker", tags: new[] { "ready" })
@@ -276,6 +280,15 @@ builder.Services.AddScoped<ICommercialRoutingApplicationService, CommercialRouti
 builder.Services.AddScoped<ICustomFieldApplicationService, CustomFieldApplicationService>();
 builder.Services.AddSingleton<DeterministicRoutingEngine>();
 builder.Services.AddSingleton(new RoutingPolicy());
+// CLIENT ORGANISATION IDENTITY. The policy is a singleton so the thresholds behind every
+// auto-link are one edit away from being retuned; the resolver and the learner are scoped
+// because they write through the SAME request-scoped DbContext (and, for learning, the same
+// transaction) as the review that triggers them.
+builder.Services.AddSingleton(new ERP_RFQ_Automation.CustomerResolution.CustomerResolutionPolicy());
+builder.Services.AddScoped<ERP_RFQ_Automation.CustomerResolution.ILeadCustomerResolutionService,
+    ERP_RFQ_Automation.CustomerResolution.LeadCustomerResolutionService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.CustomerResolution.ICustomerAliasLearner,
+    ERP_RFQ_Automation.CustomerResolution.CustomerAliasLearner>();
 builder.Services.AddHostedService<RoutingReconciliationWorker>();
 // RBAC Authorization
 builder.Services.AddScoped<IAuthorizationHandler, PermissionHandler>();
@@ -462,6 +475,12 @@ builder.Services.AddSingleton(new ExtractionWorkerOptions
 });
 builder.Services.AddScoped<IExtractionQueue, ExtractionQueue>();
 builder.Services.AddScoped<IChunkedExtractionService, ChunkedExtractionService>();
+// ING-07: the conversational (email-body) extractor. Separate registration, separate prompt,
+// same governed ILLMService — the document path is untouched.
+builder.Services.AddScoped<ERP_RFQ_Automation.Extraction.Conversational.IConversationalExtractionService,
+    ERP_RFQ_Automation.Extraction.Conversational.ConversationalExtractionService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Ingestion.Triage.IEmailTriageService,
+    ERP_RFQ_Automation.Ingestion.Triage.EmailTriageService>();
 builder.Services.AddScoped<ILeadPersister, LeadPersister>();
 builder.Services.AddScoped<IExtractionDocumentReader, ProductionDocumentReader>();
 builder.Services.AddHostedService<ExtractionWorker>();
@@ -534,6 +553,10 @@ builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.HumanActionServ
 builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.AiTrustCenterService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.CommercialDocumentArchiveService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.QualityAnalyticsService>();
+// Evidence retention: purge stored BYTES, keep the evidence RECORD. The immutability
+// triggers make the tombstone stronger proof than the file it replaces.
+builder.Services.AddScoped<ERP_RFQ_Automation.Retention.LegacyAttachmentPurgeResolver>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Retention.EvidenceRetentionService>();
 
 // SEC-H6: the app sits behind a TLS-terminating reverse proxy, so the socket peer is the
 // proxy, not the client. Without this, the rate limiter's per-IP partition

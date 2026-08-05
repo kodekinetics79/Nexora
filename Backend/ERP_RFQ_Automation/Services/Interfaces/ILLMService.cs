@@ -97,7 +97,63 @@ namespace ERP_RFQ_Automation.Services.Interfaces
         // the BOQ engine). Optional + defaulted so every existing positional construction
         // site and model outputs that omit it keep working unchanged.
         string? InquiryType = null,
-        double? InquiryTypeConfidence = null);
+        double? InquiryTypeConfidence = null,
+
+        // ── CLIENT ORGANISATION IDENTITY ────────────────────────────────────────────
+        // Header-level ONLY (a per-item field costs ~225 output tokens PER LINE; a header
+        // field is paid once). Every field is a trailing optional parameter so that all
+        // existing positional construction sites keep compiling unchanged.
+        //
+        // DIRECTION OF TRADE is the whole point of this block. On the production corpus —
+        // 14 Saudi Electricity Company "MATERIALS E-BIDDING SYSTEM" bids — the ONLY company
+        // name printed anywhere is OUR OWN ("Vendname: ALI ZAID AL-QURAISHI&PARTNERS",
+        // "Vendor Code 2004414"). A naive "CustomerName" field would make the model return
+        // the trading house itself and auto-link every SEC lead to a customer record of us.
+        // So the vendor block is captured too — as the thing to EXCLUDE.
+
+        // The BUYING organisation, verbatim. Null unless the document states it.
+        string? CustomerCompanyName = null,
+        double? CustomerCompanyNameConfidence = null,
+        // <=120-character verbatim snippet that names the buyer. No snippet, no name.
+        string? CustomerCompanyEvidence = null,
+        // Buyer's CR / VAT / commercial registration. Usually null on SEC bids — correct.
+        string? CustomerCompanyRegistrationId = null,
+        double? CustomerCompanyRegistrationIdConfidence = null,
+        // Buyer contact address (57322@se.com.sa) — often the only trace of the real domain.
+        string? CustomerBuyerEmail = null,
+        double? CustomerBuyerEmailConfidence = null,
+        // Buying portal / template name; pairs with the vendor code into a unique key.
+        string? CustomerPortalName = null,
+        double? CustomerPortalNameConfidence = null,
+        // OUR name in the Vendor/Vendname block. Captured to be EXCLUDED, never matched.
+        string? SupplierNameOnDocument = null,
+        double? SupplierNameOnDocumentConfidence = null,
+        // OUR vendor code AT the customer (e.g. 2004414). Identifies us, never them.
+        string? SupplierAccountRefOnDocument = null,
+        double? SupplierAccountRefOnDocumentConfidence = null);
+    /// <summary>
+    /// One extracted line item.
+    ///
+    /// THE PER-FIELD <c>&lt;Field&gt;Confidence</c> SLOTS BELOW ARE NO LONGER ASKED FOR BY
+    /// THE LLM (prompt rfq-extraction-v2, 2026-08-05). They cost roughly half of every
+    /// item's output budget and were then discarded: a LeadItem row has ONE confidence
+    /// column, <c>Aiconfidence</c>, and <c>ExtractionWorker.BuildLead</c> reads exactly one
+    /// value — <c>ItemConfidence</c>. From the model path they now arrive null, which the
+    /// persister already handles because it never read them.
+    ///
+    /// They are KEPT as parameters on purpose. Three construction sites pass all 48
+    /// value/confidence arguments POSITIONALLY (<c>FolderService</c> ×2,
+    /// <c>ManualUploadService.BuildFallbackItems</c>) with interleaved
+    /// <c>value, confidence</c> pairs, and most of those values are <c>string?</c>. Deleting
+    /// the confidence parameters would require re-threading those lists by hand, where a
+    /// single miscount silently shifts every following value into the WRONG FIELD and still
+    /// compiles. That is a data-corruption class of bug, traded for zero runtime benefit:
+    /// a null field on a record costs nothing, and the saving being banked here is in the
+    /// PROMPT, not in this type. The deterministic parser paths
+    /// (<c>ChunkedExtractionService.MapCanonicalItem</c>, <c>FolderService</c>) also still
+    /// populate them with genuine per-field parser confidence, so the slots are not dead —
+    /// only unread at persistence.
+    /// </summary>
     public record LeadItemData(
         string? CompanyRef, double? CompanyRefConfidence,
         string? CustomerAccountPortalId, double? CustomerAccountPortalIdConfidence,
@@ -112,6 +168,12 @@ namespace ERP_RFQ_Automation.Services.Interfaces
         string? Currency, double? CurrencyConfidence,
         string? UnitOfMeasure, double? UnitOfMeasureConfidence,
         decimal? UnitPrice, double? UnitPriceConfidence,
+        // Null means "the document did not state a usable quantity" — the LINE routes to
+        // review (the canonical-line store enforces quantity IS NULL OR quantity > 0).
+        // The model path reads this int? through OllamaLlmService.LenientQuantityConverter
+        // (2 / 2.0 / "2" / "2.0" -> 2; a real fraction like 2.5 -> null, NEVER truncated),
+        // and a zero/negative model value is quarantined to null per line — one bad cell
+        // must not fail the other 173 lines of the document.
         int? Quantity, double? QuantityConfidence,
         string? StorageLocation, double? StorageLocationConfidence,
         string? ManufacturerName, double? ManufacturerNameConfidence,
@@ -135,7 +197,20 @@ namespace ERP_RFQ_Automation.Services.Interfaces
         // document is a single inquiry. Optional + defaulted for the same reason as
         // ExtraFields.
         string? InquiryGroup = null,
-        double? InquiryGroupConfidence = null);
+        double? InquiryGroupConfidence = null,
+
+        // ── CONVERSATIONAL ANCHORS ──────────────────────────────────────────────────
+        // Emitted ONLY by the conversational (email-body) prompt, where there is no parsed
+        // row count to conserve and therefore no way to tell an extracted item from an
+        // invented one. SourceSpan is a <=120-character VERBATIM quote of the sentence that
+        // requested this item; ProseAnchorVerifier re-finds it in the submitted text and
+        // drops any item whose span is absent, out of order, or overlapping.
+        // QuantityToken is the sender's literal quantity wording ("40 nos") — null when the
+        // message stated none, which is precisely when Quantity must stay null instead of
+        // being invented as 1. Trailing optional parameters: every existing positional
+        // construction site and every model output that omits them keeps working unchanged.
+        string? SourceSpan = null,
+        string? QuantityToken = null);
 
     /// <summary>
     /// Tolerant reader for the LLM's ExtraFields object: accepts string/number/bool

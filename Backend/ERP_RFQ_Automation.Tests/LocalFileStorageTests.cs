@@ -73,6 +73,73 @@ public sealed class LocalFileStorageTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task TryDeleteAsync_RemovesOneFileAndTreatsAnAbsentFileAsSuccess()
+    {
+        var storage = new LocalFileStorage(_root, Path.GetTempPath());
+        var path = await storage.WriteImmutableAsync("Evidence/aa/purge-me.txt",
+            Encoding.UTF8.GetBytes("bytes"));
+
+        Assert.True(await storage.TryDeleteAsync("Evidence/aa/purge-me.txt"));
+        Assert.False(File.Exists(path));
+
+        // Absent is success, not an error: a retention purge must be idempotent, and the
+        // production documents whose bytes were lost before the persistent disk existed have
+        // to reconcile rather than fail.
+        Assert.False(await storage.TryDeleteAsync("Evidence/aa/purge-me.txt"));
+        Assert.False(await storage.TryDeleteAsync("Evidence/never/existed.txt"));
+    }
+
+    [Fact]
+    public async Task TryDeleteAsync_CannotEscapeTheStorageRoot()
+    {
+        var storage = new LocalFileStorage(_root, Path.GetTempPath());
+        var outsideDirectory = Path.Combine(Path.GetTempPath(), "nexora-storage-outside-delete",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(outsideDirectory);
+        var outside = Path.Combine(outsideDirectory, "must-survive.txt");
+        await File.WriteAllTextAsync(outside, "not evidence");
+        try
+        {
+            await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+                storage.TryDeleteAsync("../must-survive.txt"));
+            await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+                storage.TryDeleteAsync(outside));
+            await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+                storage.TryDeleteAsync("Evidence/../../must-survive.txt"));
+            Assert.True(File.Exists(outside));
+
+            // A symlinked segment is refused for deletion exactly as it is for reads —
+            // otherwise a link planted inside the root would be a deletion primitive
+            // pointed anywhere on the volume.
+            Directory.CreateSymbolicLink(storage.GetPath("linked"), outsideDirectory);
+            await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+                storage.TryDeleteAsync("linked/must-survive.txt"));
+            Assert.True(File.Exists(outside));
+        }
+        finally
+        {
+            var link = Path.Combine(storage.RootPath, "linked");
+            if (Directory.Exists(link))
+                Directory.Delete(link);
+            Directory.Delete(outsideDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task TryDeleteAsync_RefusesDirectoriesAndTheRootItself()
+    {
+        var storage = new LocalFileStorage(_root, Path.GetTempPath());
+        await storage.WriteImmutableAsync("Evidence/bb/keep.txt", Encoding.UTF8.GetBytes("keep"));
+
+        // Files only. There is no recursive form, so no stored path can become a
+        // "delete this whole tree" instruction.
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => storage.TryDeleteAsync("Evidence"));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => storage.TryDeleteAsync("Evidence/bb"));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => storage.TryDeleteAsync(storage.RootPath));
+        Assert.True(File.Exists(storage.ResolvePath("Evidence/bb/keep.txt")));
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_root))

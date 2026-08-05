@@ -17,7 +17,9 @@ public enum ExtractionOutcomeStatus
 {
     /// <summary>All items accounted for and confidence acceptable.</summary>
     Ok,
-    /// <summary>Persist, but flag for a human: count mismatch, low confidence, or a partial chunk failure.</summary>
+    /// <summary>Persist, but flag for a human: a partial chunk failure, an empty extraction
+    /// from a populated body, incomplete OCR, low confidence, or a structured import with
+    /// validation issues.</summary>
     NeedsReview,
     /// <summary>Nothing usable was produced (every chunk failed / empty document).</summary>
     Failed
@@ -43,16 +45,32 @@ public enum ExtractionOcrStatus
 
 /// <summary>
 /// Parsed, ready-to-extract view of ONE document. Produced by the document reader and
-/// consumed by the extraction service. <see cref="LineItemRegions"/> is the authoritative
-/// per-row text (one entry per detected line item) used both to chunk the LLM calls and to
-/// assert count conservation. Structured sources also carry <see cref="StructuredRows"/> so
-/// they can bypass the LLM entirely via the deterministic normalizer.
+/// consumed by the extraction service. <see cref="LineItemRegions"/> carries the parsed
+/// body text, one region per entry, and is what the LLM calls are chunked over. For
+/// structured sources a region IS a row; for unstructured sources it is merely a text
+/// line, so its count is a chunk-planning input, NOT an item count. Structured sources
+/// also carry <see cref="StructuredRows"/> so they can bypass the LLM entirely via the
+/// deterministic normalizer.
 /// </summary>
 public sealed class DocumentExtractionInput
 {
     public long BusinessUnitId { get; init; }
     public string SourceDocumentName { get; init; } = "RFQ document";
     public string SourceId { get; init; } = Guid.NewGuid().ToString("N");
+
+    /// <summary>
+    /// The queue lease attempt (<see cref="ExtractionJob.Attempts"/>) this pass runs
+    /// under. Monotonic for the life of the job — every claim increments it and
+    /// dead-letter recovery extends MaxAttempts without ever resetting it — and it is
+    /// baked into every AI idempotency key this pass issues. Without it a retry (lease
+    /// reclaim, worker restart, manual re-drive) replayed the FIRST attempt's keys and
+    /// the governance ledger refused every call as a duplicate before a single model
+    /// call was made, so re-driving a document was guaranteed to fail. Within one
+    /// attempt the keys are still deterministic, so a replay of the same
+    /// (job, chunk, attempt) is still deduplicated.
+    /// </summary>
+    public int AttemptNumber { get; init; } = 1;
+
     public long? ExtractionJobId { get; init; }
     public long? SourceDocumentOccurrenceId { get; init; }
     public ExtractionProcessingPath ProcessingPath { get; init; } = ExtractionProcessingPath.NativeParser;
@@ -63,7 +81,16 @@ public sealed class DocumentExtractionInput
     /// <summary>Header/context text extracted once (buyer, RFQ no, dates, terms).</summary>
     public string HeaderText { get; init; } = "";
 
-    /// <summary>One entry per detected line item. Length is the ground-truth item count.</summary>
+    /// <summary>
+    /// One entry per parsed body region. For STRUCTURED sources (spreadsheet/CSV) a region
+    /// is a real row, so the count is a real item count. For UNSTRUCTURED sources the
+    /// reader produces one region per non-empty TEXT LINE — several lines routinely form
+    /// one real item (wrapped descriptions, section banners, footers), so the count is a
+    /// chunking bound only and must never be treated as a ground-truth item count. It was
+    /// once, and the resulting "Item count mismatch: expected 174, extracted 4"-style alarm
+    /// fired on effectively every unstructured document while gating multi-inquiry
+    /// auto-split off for all of them.
+    /// </summary>
     public IReadOnlyList<string> LineItemRegions { get; init; } = Array.Empty<string>();
 
     /// <summary>True when the document is a structured spreadsheet/CSV and can skip the LLM.</summary>
@@ -86,6 +113,13 @@ public sealed class ChunkedExtractionOutcome
 {
     public ExtractionOutcomeStatus Status { get; init; }
     public LeadExtractionResult? Result { get; init; }
+
+    /// <summary>
+    /// Diagnostic only. For structured sources this is the real row/item count; for
+    /// unstructured sources it is the parsed text-REGION count (the chunk-planning bound),
+    /// which legitimately exceeds the item count. It is never used to gate review on the
+    /// unstructured path.
+    /// </summary>
     public int ExpectedItemCount { get; init; }
     public int ExtractedItemCount { get; init; }
     public string? ReviewReason { get; init; }
@@ -134,16 +168,23 @@ public interface IChunkedExtractionService
 }
 
 /// <summary>
-/// Chunked map/reduce extraction. Line items are split into bounded chunks — sized first
-/// by the model's OUTPUT-token budget (<see cref="ExtractionOutputBudget"/>) and then by
-/// the ~24k-character input budget, whichever binds first — each extracted independently
-/// via <see cref="ILLMService"/>, then unioned in order. Item-count conservation is
-/// asserted (Σ chunk items == parsed row count) so nothing is ever silently truncated; a
-/// mismatch, a partial chunk failure, or low confidence routes the document to NeedsReview
-/// instead of being saved as "complete". Per-field confidence is preserved end-to-end.
-/// When a chunk still overflows the completion ceiling the provider says so explicitly
-/// (<see cref="AiErrorCodes.OutputTruncated"/>) and the chunk is halved and re-issued,
-/// never replayed unchanged.
+/// Chunked map/reduce extraction. Parsed text regions are split into bounded chunks —
+/// sized first by the model's OUTPUT-token budget (<see cref="ExtractionOutputBudget"/>)
+/// and then by the ~24k-character input budget, whichever binds first — each extracted
+/// independently via <see cref="ILLMService"/>, then unioned in order.
+///
+/// Conservation is enforced where it is REAL, and only there:
+///   * CHUNK level — a failed chunk's regions were never extracted; the document routes to
+///     NeedsReview, never saved as "complete". A truncated chunk is halved and re-issued
+///     (<see cref="AiErrorCodes.OutputTruncated"/>), never replayed unchanged, and a single
+///     item that cannot fit fails honestly.
+///   * STRUCTURED sources — rows are rows, so row-count conservation holds by construction
+///     on the deterministic path.
+/// What is deliberately NOT asserted: "extracted items == parsed text lines" on the
+/// unstructured path. Text lines are not items (several lines form one item), so that
+/// comparison flagged effectively every unstructured document with a false "Item count
+/// mismatch" and thereby disabled multi-inquiry auto-split entirely.
+/// Per-field confidence is preserved end-to-end.
 /// </summary>
 public sealed class ChunkedExtractionService : IChunkedExtractionService
 {
@@ -165,7 +206,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
     // Chunk bounds. A chunk must satisfy ALL THREE constraints:
     //   1. OUTPUT-token budget (ExtractionOutputBudget) — the binding one in practice, and
     //      the one whose absence caused the 2026-08-05 outage. The extraction schema costs
-    //      ~450 output tokens per line item, so 200 items would demand ~90,000 output
+    //      ~225 output tokens per line item, so 200 items would demand ~45,000 output
     //      tokens against a 4,096–8,192 ceiling: every real multi-line RFQ came back cut
     //      mid-JSON, unparseable, and the whole document dead-lettered.
     //   2. Character budget — keeps the chunk inside the model context and the request
@@ -263,18 +304,34 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             // No detected line-item rows: a single whole-document pass (header + any body).
             // There is nothing to chunk here — the parser found no rows to split on — so the
             // only correction available on truncation is an honest failure reason.
-            var wholeDocument = await _llm.ExtractLeadDataDetailedAsync(
-                Clip(input.HeaderText, MaxChunkChars),
-                new AiCallContext(input.BusinessUnitId, AiPurposes.RfqExtraction,
-                    $"extraction:{input.SourceId}:whole", "rfq-extraction-v1",
-                    ExtractionJobId: input.ExtractionJobId,
-                    SourceDocumentOccurrenceId: input.SourceDocumentOccurrenceId), ct);
+            // The key is scoped to the LEASE ATTEMPT so a retried job is a NEW governed
+            // request rather than a replay of a refused one (see AttemptNumber).
+            LlmExtractionOutcome wholeDocument;
+            try
+            {
+                wholeDocument = await _llm.ExtractLeadDataDetailedAsync(
+                    Clip(input.HeaderText, MaxChunkChars),
+                    new AiCallContext(input.BusinessUnitId, AiPurposes.RfqExtraction,
+                        $"extraction:{input.SourceId}:a{input.AttemptNumber}:whole",
+                        AiPromptVersions.StructuredRfqExtraction,
+                        ExtractionJobId: input.ExtractionJobId,
+                        SourceDocumentOccurrenceId: input.SourceDocumentOccurrenceId), ct);
+            }
+            catch (AiPolicyDeniedException ex)
+            {
+                _log.LogWarning(ex,
+                    "Whole-document extraction for {Document} was refused by AI governance ({Code}) "
+                    + "before any model call.", input.SourceDocumentName, ex.Code);
+                return Failed(0,
+                    $"AI governance refused this request before any model call was made ({ex.Code}).",
+                    input, diagnostics);
+            }
             var single = wholeDocument.Result;
             if (single is null)
                 return Failed(0, wholeDocument.OutputTruncated
                     ? $"The model ran out of output budget ({_llm.MaxOutputTokens} tokens) before it finished "
                       + "this document, and no line-item rows were detected to split it on."
-                    : "LLM returned no result for the document.", input);
+                    : "LLM returned no result for the document.", input, diagnostics);
             var items0 = single.Items ?? new List<LeadItemData>();
             var incompleteOcr = input.OcrTruncated
                                 || input.OcrStatus is ExtractionOcrStatus.Partial or ExtractionOcrStatus.Failed;
@@ -339,6 +396,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         var pending = new List<List<string>>(chunks);
         var attemptedCalls = 0;
         var callBudget = TruncationCallBudget(expected, chunks.Count);
+        var governanceRefusalCodes = new List<string>();
 
         for (var i = 0; i < pending.Count; i++)
         {
@@ -349,12 +407,40 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             try
             {
                 attemptedCalls++;
+                // The key is scoped to the LEASE ATTEMPT (a{n}) so that a retried job is a
+                // NEW governed request instead of a replay the ledger refuses as a
+                // duplicate; within one attempt the (position, size) pair never repeats
+                // (every re-split shrinks the chunk at its position), so a replay of the
+                // same attempt still deduplicates exactly as it should.
                 outcome = await _llm.ExtractLeadDataDetailedAsync(prompt,
                     new AiCallContext(input.BusinessUnitId, AiPurposes.RfqExtraction,
-                        $"extraction:{input.SourceId}:chunk:{i + 1}:{chunk.Count}", "rfq-extraction-v1",
+                        $"extraction:{input.SourceId}:a{input.AttemptNumber}:chunk:{i + 1}:{chunk.Count}",
+                        AiPromptVersions.StructuredRfqExtraction,
                         ExtractionJobId: input.ExtractionJobId,
                         SourceDocumentOccurrenceId: input.SourceDocumentOccurrenceId,
                         ItemsInPayload: chunk.Count), ct);
+            }
+            catch (OperationCanceledException)
+            {
+                throw; // lease loss / shutdown is not a chunk failure — never record it as one
+            }
+            catch (AiPolicyDeniedException ex)
+            {
+                // The governance ledger refused this request BEFORE any model call
+                // (duplicate key, policy denial, budget ceiling). That is a different fact
+                // from a model failure and it must stay legible all the way to the
+                // dead-letter row — this exact refusal used to be flattened into
+                // attempts_exhausted and then into "All chunks failed", which is how a job
+                // whose 12 calls all succeeded dead-lettered as a model problem.
+                failedChunks++;
+                governanceRefusalCodes.Add(ex.Code);
+                diagnostics.Add(
+                    $"Chunk {i + 1}/{pending.Count} refused by AI governance before any model call "
+                    + $"({ex.Code}); {chunk.Count} item(s) not extracted.");
+                _log.LogWarning(ex,
+                    "Chunk {Index}/{Total} for {Document} was refused by AI governance ({Code}).",
+                    i + 1, pending.Count, input.SourceDocumentName, ex.Code);
+                continue;
             }
             catch (Exception ex)
             {
@@ -418,20 +504,43 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         }
 
         if (headerSource is null)
-            return Failed(expected, "All chunks failed; no data extracted.", input);
+        {
+            // Tell the truth about WHICH layer stopped the document. "All chunks failed"
+            // is only honest when the model was actually asked and could not answer.
+            var refusalCodes = string.Join(", ", governanceRefusalCodes.Distinct());
+            var reason = governanceRefusalCodes.Count == failedChunks && failedChunks > 0
+                ? $"AI governance refused every request before any model call was made ({refusalCodes}). "
+                  + "No chunk was extracted."
+                : governanceRefusalCodes.Count > 0
+                    ? $"All chunks failed; no data extracted ({governanceRefusalCodes.Count} of {failedChunks} "
+                      + $"chunk(s) were refused by AI governance: {refusalCodes})."
+                    : "All chunks failed; no data extracted.";
+            return Failed(expected, reason, input, diagnostics);
+        }
 
-        // Count conservation: never claim "complete" unless every parsed row was extracted.
+        // Merge accounting. `expected` counts parsed text REGIONS (lines), not items: on
+        // an unstructured document several lines routinely form ONE real item (wrapped
+        // descriptions, section banners, footers), so `extracted != expected` is not
+        // evidence of loss and must not flag review. It used to — stamping a false
+        // "Item count mismatch: expected N, extracted M" on effectively every unstructured
+        // document (production example: a 6-item SEC bid flagged as "expected 174") and,
+        // because only an Ok outcome may auto-split, silently disabling multi-inquiry
+        // splitting for all of them. The conservation that IS real stays below: a FAILED
+        // chunk's regions were genuinely never extracted, incomplete OCR genuinely omitted
+        // content, and a populated body that produced ZERO items is a real signal on any
+        // document. Row-level conservation lives on the structured path, where rows are rows.
         var extracted = mergedItems.Count;
         var overall = ComputeOverallConfidence(headerSource, mergedItems);
         var merged = WithItems(headerSource, mergedItems, overall);
+        diagnostics.Add($"Extracted {extracted} item(s) from {expected} parsed text region(s).");
 
         string? reviewReason = null;
         if (input.OcrTruncated || input.OcrStatus is ExtractionOcrStatus.Partial or ExtractionOcrStatus.Failed)
             reviewReason = "OCR was incomplete; omitted content requires review.";
         else if (failedChunks > 0)
             reviewReason = $"{failedChunks} chunk(s) failed to extract.";
-        else if (extracted != expected)
-            reviewReason = $"Item count mismatch: expected {expected}, extracted {extracted}.";
+        else if (extracted == 0)
+            reviewReason = $"No line items were extracted from {expected} parsed text region(s).";
         else if (overall < MinAcceptableConfidence)
             reviewReason = $"Overall confidence {overall:F2} below threshold {MinAcceptableConfidence:F2}.";
 
@@ -439,8 +548,10 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         if (reviewReason is not null) diagnostics.Add(reviewReason);
 
         // Multi-inquiry auto-split — only when the extraction is fully clean (all chunks
-        // succeeded, counts conserved, confidence acceptable). A NeedsReview document is
-        // never guess-split; it keeps today's single flagged lead.
+        // succeeded, OCR complete, items present, confidence acceptable). A NeedsReview
+        // document is never guess-split; it keeps today's single flagged lead. The split
+        // decides on its OWN signals (InquiryGroup labels + grouping confidence, see
+        // MultiInquirySplitter) — never on the text-line count.
         List<LeadExtractionResult>? splitResults = null;
         if (status == ExtractionOutcomeStatus.Ok)
         {
@@ -608,22 +719,26 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         return items.Count > 0 ? (headerConf * 0.4) + (itemConf * 0.6) : headerConf;
     }
 
+    /// <summary>
+    /// Re-attaches the merged item list to the document header.
+    ///
+    /// PRE-EXISTING DEFECT FIXED HERE: this reconstruction was positional and stopped at
+    /// <c>items</c>, so every header field declared AFTER it on
+    /// <see cref="LeadExtractionResult"/> was silently dropped on every chunked document —
+    /// InquiryType/InquiryTypeConfidence have been lost this way since the BOQ work landed.
+    /// Chunking starts at 11 items and SEC bids are 12+ lines, so this hit exactly the
+    /// documents that matter most. Using a <c>with</c> expression instead of a positional
+    /// call makes the same mistake impossible for every field added from now on.
+    /// </summary>
     private static LeadExtractionResult WithItems(LeadExtractionResult header, List<LeadItemData> items, double overall)
-        => new(
-            header.Rfqno, header.RfqnoConfidence,
-            header.BuyersName, header.BuyersNameConfidence,
-            header.RecDate, header.RecDateConfidence,
-            header.BidClosingDate, header.BidClosingDateConfidence,
-            header.BiddingDecision, header.BiddingDecisionConfidence,
-            header.AcknowledgmentDate, header.AcknowledgmentDateConfidence,
-            header.SubDate, header.SubDateConfidence,
-            header.HeaderRemarks, header.HeaderRemarksConfidence,
-            header.OpportunityNo, header.OpportunityNoConfidence,
-            header.Rfqtype, header.RfqtypeConfidence,
-            header.DurationAgreement, header.DurationAgreementConfidence,
-            overall,
-            items);
+        => header with { OverallConfidence = overall, Items = items };
 
+    /// <summary>
+    /// The deterministic spreadsheet/CSV path. It produces no document-level classification
+    /// and no client-organisation evidence: a structured price sheet carries neither a
+    /// narrative nor a vendor block. Those fields stay null on purpose — an invented client
+    /// is worse than an unresolved one.
+    /// </summary>
     private static LeadExtractionResult BuildStructuredResult(CanonicalRfqDocument doc, List<LeadItemData> items, double overall)
         => new(
             doc.RfqNo.Value, (double)doc.RfqNo.Confidence,
@@ -690,18 +805,31 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             _ => input.ProcessingPath
         };
 
-    private static ChunkedExtractionOutcome Failed(int expected, string reason, DocumentExtractionInput? input = null)
-        => new()
+    /// <param name="diagnostics">
+    /// The per-chunk diagnostics collected before the failure. They used to be DISCARDED
+    /// here — the outcome carried only the flattened reason, so the dead-letter LastError
+    /// could not say which chunk failed at which stage or why. The reason is appended so
+    /// consumers that read only <see cref="ChunkedExtractionOutcome.Diagnostics"/> still
+    /// see it.
+    /// </param>
+    private static ChunkedExtractionOutcome Failed(
+        int expected, string reason, DocumentExtractionInput? input = null, List<string>? diagnostics = null)
+    {
+        diagnostics ??= new List<string>();
+        if (!diagnostics.Contains(reason))
+            diagnostics.Add(reason);
+        return new ChunkedExtractionOutcome
         {
             Status = ExtractionOutcomeStatus.Failed,
             Result = null,
             ExpectedItemCount = expected,
             ExtractedItemCount = 0,
             ReviewReason = reason,
-            Diagnostics = new List<string> { reason },
+            Diagnostics = diagnostics,
             ProcessingPath = input?.ProcessingPath ?? ExtractionProcessingPath.NativeParser,
             OcrStatus = input?.OcrStatus ?? ExtractionOcrStatus.NotRequired,
             OcrPageCount = input?.OcrPageCount ?? 0,
             OcrTruncated = input?.OcrTruncated ?? false
         };
+    }
 }

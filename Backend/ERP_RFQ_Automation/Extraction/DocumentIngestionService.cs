@@ -304,15 +304,7 @@ public sealed class DocumentIngestionService : IDocumentIngestion
                 corpus.RequireReview();
             var rejectedInspection = sourceIsCleared || !inspection.IsCleared
                 ? inspection
-                : new FileInspectionResult(
-                    source.SecurityStatus == DocumentSecurityStatus.Rejected
-                        ? FileInspectionStatus.Rejected
-                        : FileInspectionStatus.Quarantined,
-                    source.DetectedMimeType,
-                    source.ByteSize,
-                    "The authoritative source document has not passed security inspection.",
-                    "evidence-ledger",
-                    null);
+                : await CarryForwardSourceRejectionAsync(businessUnitId, source, occurrence.Id, ct);
             var detailsJson = JsonSerializer.Serialize(new
             {
                 status = rejectedInspection.Status.ToString(),
@@ -441,6 +433,82 @@ public sealed class DocumentIngestionService : IDocumentIngestion
         FileInspectionStatus.Quarantined => DocumentSecurityStatus.Quarantined,
         _ => DocumentSecurityStatus.Rejected
     };
+
+    /// <summary>
+    /// This upload's own inspection passed, but the authoritative source document is already
+    /// Quarantined/Rejected from an EARLIER occurrence — so there is no current-inspection reason
+    /// to report. The earlier occurrence recorded the real one, and substituting a generic sentence
+    /// here is how a truthful explanation ("this workbook contains macros") degraded into a vacuous
+    /// one ("has not passed security inspection") the moment the user retried. Carry the recorded
+    /// reason and code forward instead; fall back to the generic sentence only when nothing was
+    /// ever recorded.
+    /// </summary>
+    private async Task<FileInspectionResult> CarryForwardSourceRejectionAsync(
+        long businessUnitId,
+        SourceDocument source,
+        long currentOccurrenceId,
+        CancellationToken ct)
+    {
+        var status = source.SecurityStatus == DocumentSecurityStatus.Rejected
+            ? FileInspectionStatus.Rejected
+            : FileInspectionStatus.Quarantined;
+
+        var recorded = await _context.Set<SourceDocumentOccurrence>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId
+                        && x.SourceDocumentId == source.Id
+                        && x.Id != currentOccurrenceId
+                        && x.LastErrorCode != null)
+            .OrderBy(x => x.ReceivedOn).ThenBy(x => x.Id)
+            .Select(x => new { x.LastErrorCode, x.LastErrorDetailsJson })
+            .ToListAsync(ct);
+
+        // The carried code must be CONSISTENT WITH THE STATUS BEING CARRIED. A source whose
+        // history is [scanner outage -> Infected verdict] has an earliest occurrence coded
+        // security_scanner_unavailable; carrying that code onto a Rejected status makes
+        // SecurityHoldRecovery.IsRecoverableSecurityHold answer true, so the UI offers
+        // "Retry blocked files" and the sweep replays a source that no path can ever
+        // release — a permanent phantom retry. When carrying Rejected, only terminal codes
+        // are eligible; the recoverable ones (and their outage-flavoured reasons, which
+        // describe the scanner, not the document) are skipped.
+        var eligible = status == FileInspectionStatus.Rejected
+            ? recorded.Where(x => !SecurityHoldRecovery.RecoverableErrorCodes
+                .Contains(x.LastErrorCode!, StringComparer.OrdinalIgnoreCase)).ToList()
+            : recorded;
+
+        string? carriedReason = null;
+        string? carriedCode = eligible.Count > 0 ? eligible[0].LastErrorCode : null;
+        foreach (var entry in eligible)
+        {
+            if (string.IsNullOrWhiteSpace(entry.LastErrorDetailsJson))
+                continue;
+            try
+            {
+                using var details = JsonDocument.Parse(entry.LastErrorDetailsJson);
+                if (details.RootElement.ValueKind == JsonValueKind.Object
+                    && details.RootElement.TryGetProperty("reason", out var reason)
+                    && reason.ValueKind == JsonValueKind.String
+                    && !string.IsNullOrWhiteSpace(reason.GetString()))
+                {
+                    carriedReason = reason.GetString();
+                    carriedCode = entry.LastErrorCode;
+                    break;
+                }
+            }
+            catch (JsonException)
+            {
+                // Malformed legacy details: the machine code stays authoritative.
+            }
+        }
+
+        var carried = new FileInspectionResult(
+            status,
+            source.DetectedMimeType,
+            source.ByteSize,
+            carriedReason ?? "The authoritative source document has not passed security inspection.",
+            "evidence-ledger",
+            null);
+        return string.IsNullOrWhiteSpace(carriedCode) ? carried : carried with { ErrorCode = carriedCode };
+    }
 
     private async Task<bool> CanReleaseAfterScannerRecoveryAsync(long sourceDocumentId, CancellationToken ct)
     {
