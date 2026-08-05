@@ -12,9 +12,22 @@ public sealed class DocumentInspectionOptions
 
     public long MaximumFileBytes { get; init; } = DefaultMaximumFileBytes;
     public int MaximumArchiveEntries { get; init; } = 1_000;
-    public long MaximumArchiveEntryBytes { get; init; } = 50L * 1024 * 1024;
+
+    // Per-entry cap equals the package cap DELIBERATELY. Entries are streamed through a
+    // rented 80KB buffer and never materialised, so the resource a hostile archive can
+    // consume is bounded by MaximumArchiveExpandedBytes (enforced mid-stream), not by any
+    // single entry's size. A tighter per-entry cap added no safety — but it rejected real
+    // documents: a large Aramco RFP's document.xml (thousands of table rows) legitimately
+    // expands past 50MB, and production rejected exactly that file on 2026-08-05.
+    public long MaximumArchiveEntryBytes { get; init; } = 100L * 1024 * 1024;
     public long MaximumArchiveExpandedBytes { get; init; } = 100L * 1024 * 1024;
-    public double MaximumArchiveExpansionRatio { get; init; } = 100;
+
+    // 300, not 100: repetitive OOXML table markup legitimately compresses at 100-300x —
+    // the same Aramco document.xml pattern — while classic zip bombs sit at 1000x and up.
+    // The ratio is a tripwire, not the bound: even at exactly 300x an archive can only
+    // reach MaximumArchiveExpandedBytes of actual work before the mid-stream total cap
+    // stops it, and nested archives are never expanded here at all.
+    public double MaximumArchiveExpansionRatio { get; init; } = 300;
 }
 public sealed class DocumentFileInspectionService : IFileInspectionService
 {
@@ -278,14 +291,19 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
 
                     if (entry.Length > _options.MaximumArchiveEntryBytes)
                     {
-                        throw new UnsafeArchiveException("An OOXML entry exceeds the expanded-size limit.");
+                        // Sizes only — never the entry NAME, which is attacker-controlled
+                        // text inside the archive, and rejection reasons render verbatim
+                        // as product copy in the intake UI.
+                        throw new UnsafeArchiveException(
+                            $"A part of this document expands to {entry.Length / (1024 * 1024)} MB, above the {_options.MaximumArchiveEntryBytes / (1024 * 1024)} MB limit.");
                     }
 
                     totalCompressed = checked(totalCompressed + entry.CompressedLength);
                     totalExpanded = checked(totalExpanded + entry.Length);
                     if (totalExpanded > _options.MaximumArchiveExpandedBytes)
                     {
-                        throw new UnsafeArchiveException("The OOXML package exceeds the expanded-size limit.");
+                        throw new UnsafeArchiveException(
+                            $"This document expands to more than {_options.MaximumArchiveExpandedBytes / (1024 * 1024)} MB in total, which is above the limit.");
                     }
 
                     EnsureSafeRatio(entry.Length, entry.CompressedLength);
