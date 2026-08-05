@@ -4,6 +4,7 @@ import Sidebar from './Sidebar';
 import Navbar from './Navbar';
 import Branding from '../common/Branding';
 import SkipLink, { MAIN_CONTENT_ID } from './SkipLink';
+import ImpersonationBanner from './ImpersonationBanner';
 
 const drawerWidth = 280;
 const collapsedWidth = 88;
@@ -127,6 +128,10 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
         <Toolbar />
         {children}
       </Box>
+
+      {/* Fixed on every tenant page while a platform impersonation session is
+          active; renders nothing otherwise. */}
+      <ImpersonationBanner />
     </Box>
   );
 };

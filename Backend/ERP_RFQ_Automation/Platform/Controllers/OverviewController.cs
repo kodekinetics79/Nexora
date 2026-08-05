@@ -103,7 +103,10 @@ public class OverviewController(
             llmCostTrendPct = priorCost > 0
                 ? (double?)((currentCost - priorCost) / priorCost * 100m)
                 : null,
-            seatsInUse = await context.Set<User>().IgnoreQueryFilters().CountAsync(u => u.IsActive == true, ct),
+            // Clearly-labeled FLEET-WIDE total of active tenant users (all business
+            // units). This is not a per-tenant seat count and no longer pretends to
+            // be one; the old misleading "seatsInUse" key is gone.
+            activeUsersFleetWide = await context.Set<User>().IgnoreQueryFilters().CountAsync(u => u.IsActive == true, ct),
             services,
             throughput = Enumerable.Range(0, 14).Select(i =>
             {
@@ -116,18 +119,15 @@ public class OverviewController(
                 var date = seriesStart.AddDays(i);
                 return new { date = date.ToString("yyyy-MM-dd"), costUsd = costMap.GetValueOrDefault(date) };
             }),
-            tenantsByPlan = new[] { "free", "pro", "enterprise" }.Select(tier => new
-            {
-                tier,
-                count = tenants.Count(t => NormalizePlanTier(t.Plan?.Code) == tier)
-            })
+            // Buckets are the REAL plan codes present in the fleet; tenants without
+            // a plan are reported under "none" — never silently defaulted to "pro".
+            tenantsByPlan = tenants
+                .GroupBy(t => string.IsNullOrWhiteSpace(t.Plan?.Code)
+                    ? "none"
+                    : t.Plan!.Code.Trim().ToLowerInvariant())
+                .OrderBy(g => g.Key)
+                .Select(g => new { tier = g.Key, count = g.Count() })
         });
-    }
-
-    private static string NormalizePlanTier(string? code)
-    {
-        var normalized = (code ?? "pro").Trim().ToLowerInvariant();
-        return normalized is "free" or "pro" or "enterprise" ? normalized : "pro";
     }
 
     private static string Humanize(string value)

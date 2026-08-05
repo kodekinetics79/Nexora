@@ -9,7 +9,7 @@ namespace ERP_RFQ_Automation.Platform.Services;
 
 public interface IPlatformAuditService
 {
-    /// <summary>Append one immutable audit record. Persistence failures propagate to the caller.</summary>
+    /// <summary>Append one immutable audit record (result = "success"). Persistence failures propagate to the caller.</summary>
     Task WriteAsync(
         ClaimsPrincipal actor,
         string action,
@@ -19,15 +19,42 @@ public interface IPlatformAuditService
         long? actAsTenantId = null,
         HttpContext? httpContext = null,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Append one immutable audit record with an explicit outcome
+    /// (<see cref="PlatformAuditResults.Success"/> / <see cref="PlatformAuditResults.Failure"/>).
+    /// The default interface implementation delegates to the legacy overload so existing
+    /// implementations (including test doubles) remain source-compatible.
+    /// </summary>
+    Task WriteAsync(
+        ClaimsPrincipal actor,
+        string action,
+        string? targetType,
+        string? targetId,
+        object? metadata,
+        long? actAsTenantId,
+        HttpContext? httpContext,
+        string result,
+        CancellationToken ct = default)
+        => WriteAsync(actor, action, targetType, targetId, metadata, actAsTenantId, httpContext, ct);
 }
 
 /// <summary>
 /// Writes append-only <see cref="PlatformAuditLog"/> rows for privileged actions.
 /// Resolves the acting platform user from the "Platform" token's <c>sub</c> claim.
+///
+/// ACTOR INVARIANT: a SUCCESS record always requires a positive platform actor id —
+/// there is no anonymous privileged mutation. The single deliberate relaxation is
+/// FAILURE records for pre-authentication events (e.g. <c>platform.login.failed</c>),
+/// which have no authenticated actor and are attributed to the reserved system actor
+/// <see cref="SystemActorId"/> (0). No <c>PlatformUsers</c> row ever has id 0.
 /// (ADR-0005 §3, §4)
 /// </summary>
 public class PlatformAuditService : IPlatformAuditService
 {
+    /// <summary>Reserved pseudo-actor for unauthenticated FAILURE records only.</summary>
+    public const long SystemActorId = 0;
+
     private readonly ErpRfqAutomationContext _context;
     private readonly ILogger<PlatformAuditService> _logger;
 
@@ -37,7 +64,7 @@ public class PlatformAuditService : IPlatformAuditService
         _logger = logger;
     }
 
-    public async Task WriteAsync(
+    public Task WriteAsync(
         ClaimsPrincipal actor,
         string action,
         string? targetType = null,
@@ -46,14 +73,45 @@ public class PlatformAuditService : IPlatformAuditService
         long? actAsTenantId = null,
         HttpContext? httpContext = null,
         CancellationToken ct = default)
+        => WriteAsync(actor, action, targetType, targetId, metadata, actAsTenantId, httpContext,
+            PlatformAuditResults.Success, ct);
+
+    public async Task WriteAsync(
+        ClaimsPrincipal actor,
+        string action,
+        string? targetType,
+        string? targetId,
+        object? metadata,
+        long? actAsTenantId,
+        HttpContext? httpContext,
+        string result,
+        CancellationToken ct = default)
     {
         try
         {
+            var normalizedResult = NormalizeResult(result);
+
             var sub = actor.FindFirst(JwtRegisteredClaimNames.Sub)?.Value
                       ?? actor.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-            if (!long.TryParse(sub, out var actorId) || actorId <= 0)
+            long actorId;
+            if (long.TryParse(sub, out var parsed) && parsed > 0)
+            {
+                actorId = parsed;
+            }
+            else if (normalizedResult == PlatformAuditResults.Failure)
+            {
+                // Deliberate, documented relaxation of the positive-actor invariant:
+                // only FAILURE records may lack an authenticated platform actor
+                // (pre-auth events such as failed platform logins). They are pinned
+                // to the reserved system actor 0 so they remain queryable and can
+                // never masquerade as a real operator.
+                actorId = SystemActorId;
+            }
+            else
+            {
                 throw new InvalidOperationException(
                     "A valid platform actor identifier is required to write a privileged audit record.");
+            }
 
             var entry = new PlatformAuditLog
             {
@@ -64,6 +122,7 @@ public class PlatformAuditService : IPlatformAuditService
                 TargetId = targetId,
                 Metadata = metadata is null ? null : JsonSerializer.Serialize(metadata),
                 Ip = httpContext?.Connection?.RemoteIpAddress?.ToString(),
+                Result = normalizedResult,
                 CreatedOn = DateTime.UtcNow
             };
 
@@ -75,5 +134,16 @@ public class PlatformAuditService : IPlatformAuditService
             _logger.LogError("Failed to write platform audit log for action {Action}", action);
             throw;
         }
+    }
+
+    private static string NormalizeResult(string? result)
+    {
+        var normalized = string.IsNullOrWhiteSpace(result)
+            ? PlatformAuditResults.Success
+            : result.Trim().ToLowerInvariant();
+        if (normalized is not (PlatformAuditResults.Success or PlatformAuditResults.Failure))
+            throw new InvalidOperationException(
+                $"Audit result must be '{PlatformAuditResults.Success}' or '{PlatformAuditResults.Failure}'.");
+        return normalized;
     }
 }

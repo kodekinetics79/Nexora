@@ -134,6 +134,26 @@ namespace ERP_RFQ_Automation.Controllers
                         reason = ex.Inspection.Reason
                     });
                 }
+                catch (Platform.Entitlements.EntitlementDeniedException ex)
+                {
+                    // Plan entitlement denial (e.g. monthly document quota): every
+                    // remaining file in the batch would be denied too — stop with the
+                    // typed problem response instead of a per-file "Error".
+                    _logger.LogWarning("Upload batch stopped for tenant {BusinessUnitId}: {Reason}",
+                        businessUnitId, ex.Message);
+                    return new ObjectResult(new
+                    {
+                        type = ex.ProblemType,
+                        title = ex.Message,
+                        status = ex.SuggestedStatusCode,
+                        batchId,
+                        jobs = results
+                    })
+                    {
+                        StatusCode = ex.SuggestedStatusCode,
+                        ContentTypes = { "application/problem+json" }
+                    };
+                }
                 catch (Exception ex)
                 {
                     // Poison-file isolation at the ingest boundary: one bad file never fails the batch.

@@ -43,6 +43,9 @@ using ERP_RFQ_Automation.SupplierGovernance;
 using ERP_RFQ_Automation.SupplierQuotes;
 using System.Text.Json.Serialization;
 using Npgsql;
+using ERP_RFQ_Automation.Platform.Entitlements;
+using ERP_RFQ_Automation.Platform.Services;
+using ERP_RFQ_Automation.Billing;
 
 // PostgreSQL migration: restore pre-6.0 Npgsql timestamp semantics so the
 // existing DateTime usage (DateTime.Now / Unspecified-kind values inherited from
@@ -190,6 +193,8 @@ builder.Services.AddScoped<IUserGroupRepository, UserGroupRepository>();
 builder.Services.AddScoped<IBusinessUnitRepository, BusinessUnitRepository>();
 builder.Services.AddScoped<IUserRepository, UserRepository>();
 builder.Services.AddScoped<IAuthRepository, AuthRepository>();
+builder.Services.AddPlatformEntitlements();
+builder.Services.AddPlatformBilling();
 builder.Services.AddScoped<IGeneralDropdownRepository, GeneralDropdownRepository>();
 builder.Services.AddScoped<ICustomerRepository, CustomerRepository>();
 builder.Services.AddScoped<ISupplierRepository, SupplierRepository>();
@@ -283,6 +288,10 @@ builder.Services.AddScoped<IAuthorizationHandler, PermissionHandler>();
 // body that leaks no module names.
 builder.Services.AddMemoryCache();
 builder.Services.AddScoped<IRoleGate, RoleGate>();
+// RC-7: IAM audit trail. Scoped because it writes through the SAME request-scoped DbContext the
+// repositories use — that shared instance is what makes an audit event commit or roll back with
+// the mutation it describes, rather than being a best-effort log line beside it.
+builder.Services.AddScoped<IIamAuditWriter, IamAuditWriter>();
 builder.Services.AddSingleton<TenantSmtpConcurrencyGate>();
 builder.Services.AddSingleton<IOutboundSmtpTransport, MailKitOutboundSmtpTransport>();
 builder.Services.AddScoped<IAuthorizationHandler, ManagerRoleHandler>();
@@ -397,7 +406,16 @@ builder.Services.AddAuthentication(options =>
         ValidateIssuerSigningKey = true,
         ValidIssuer = builder.Configuration["Jwt:Issuer"] ?? "",
         ValidAudience = builder.Configuration["Jwt:Audience"] ?? "",
-        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
+        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey)),
+        // RC-7: without this, User.Identity.Name is ALWAYS null on a tenant token, which is why
+        // every `User.Identity?.Name ?? request.CreatedBy` in the IAM controllers silently
+        // resolved to the client-supplied value. AuthRepository now emits the matching claim.
+        NameClaimType = System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Name,
+        // Default ClockSkew is FIVE MINUTES, which is added on top of the 60-minute token
+        // lifetime — the honest revocation window was therefore up to 65 minutes. Real
+        // revocation needs a SecurityStamp/TokenVersion re-check (backlog item 2); this
+        // shrinks the part of the window that is pure configuration.
+        ClockSkew = TimeSpan.FromSeconds(30)
     };
 })
 // Second JWT scheme for the Platform-Owner plane (audience nexora-platform, scope=platform).
@@ -656,6 +674,7 @@ static async Task ValidateRuntimeDatabaseRoleAsync(string runtimeConnection)
 }
 
 await DemoUserSeeder.EnsureAsync(app.Services, app.Configuration, app.Environment);
+await app.SeedPlatformOwnerAsync();
 
 // Global exception handler — return a generic message to clients and log the
 // detail server-side, instead of leaking exception internals. (DATA-12, SEC-16)
@@ -694,6 +713,7 @@ app.UseReadOnlyImpersonationGuard();
 app.UsePlatformObservability();
 // Authenticated tenant routes fail closed when a token has no valid tenant claim.
 app.UseTenantClaimGuard();
+app.UseTenantStatusGuard();
 app.UseAuthorization();
 // Built-in rate limiter — AFTER auth so the per-tenant partition uses the claim.
 app.UseRateLimiter();

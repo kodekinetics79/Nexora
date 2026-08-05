@@ -34,8 +34,24 @@ import { DataGrid, type GridColDef, type GridPaginationModel } from '@mui/x-data
 import userService, { type UserDTO } from '../../../api/services/userService';
 import { useAuth } from '../../../context/AuthContext';
 import SearchField from '../../../components/common/SearchField';
+import PermissionGuard from '../../../components/common/PermissionGuard';
 import { handleApiError } from '../../../utils/errorHandler';
+import { toPresentableError } from '../../../utils/apiErrors';
 import { useSnackbar } from 'notistack';
+
+/**
+ * "What failed" + "why", as one sentence. `toPresentableError`'s `fallbackMessage` REPLACES the
+ * status copy for statuses whose server text is not trusted for display (403 among them), so
+ * passing a domain fallback there would discard the only line explaining a permission denial.
+ */
+const describeFailure = (error: unknown, context: string): string =>
+  `${context} ${toPresentableError(error).message}`;
+
+/**
+ * Minimum password length accepted client-side. The server is still the authority; this only stops
+ * an obviously-doomed round trip and gives the administrator immediate feedback.
+ */
+const MIN_PASSWORD_LENGTH = 8;
 
 const UsersPage: React.FC = () => {
   const { t } = useTranslation();
@@ -76,7 +92,7 @@ const UsersPage: React.FC = () => {
   const [createPassword, setCreatePassword] = useState('');
 
   // Queries
-  const { data: users, isLoading: loadingUsers, isError: usersError, refetch: refetchUsers } = useQuery({
+  const { data: users, isLoading: loadingUsers, isError: usersError, error: usersErrorValue, refetch: refetchUsers } = useQuery({
     queryKey: ['users', paginationModel, search, filterRole, filterActive],
     queryFn: () => userService.getAll({
       businessUnitId: userData.businessUnitId || 1,
@@ -88,10 +104,25 @@ const UsersPage: React.FC = () => {
     }),
   });
 
-  const { data: roles } = useQuery({
+  const {
+    data: roles,
+    isLoading: loadingRoles,
+    isError: rolesError,
+    error: rolesErrorValue,
+    refetch: refetchRoles,
+  } = useQuery({
     queryKey: ['roles', userData.businessUnitId],
     queryFn: () => userService.getRoles(),
   });
+
+  // Role is a required field on this form and the only source of a user's access. When the list is
+  // empty the dropdown renders as a silently-unusable control, so name the condition instead.
+  const hasNoRoles = !loadingRoles && !rolesError && (roles ?? []).length === 0;
+  const roleNotice = rolesError
+    ? describeFailure(rolesErrorValue, 'The list of roles could not be loaded.')
+    : hasNoRoles
+      ? 'No roles are configured for this business unit. Create one under Setup → Setup Master (type "Role") before adding users.'
+      : null;
 
   const { data: teams } = useQuery({
     queryKey: ['teams', userData.businessUnitId],
@@ -166,9 +197,32 @@ const UsersPage: React.FC = () => {
     }
   };
 
+  /**
+   * Create needs an explicit password: there is no shared default any more. A well-known default
+   * credential on every new account is indefensible, and it was additionally advertised in the
+   * field's own helper text.
+   */
+  const createPasswordError = (): string | null => {
+    if (selectedRecord) return null;
+    if (!createPassword) return 'A password is required to create a user.';
+    if (createPassword.length < MIN_PASSWORD_LENGTH) {
+      return `Use at least ${MIN_PASSWORD_LENGTH} characters.`;
+    }
+    return null;
+  };
+
+  const isFormIncomplete =
+    !formData.firstName?.trim() ||
+    !formData.lastName?.trim() ||
+    !formData.email?.trim() ||
+    !formData.roleId ||
+    createPasswordError() !== null;
+
   const handleSave = () => {
+    if (isFormIncomplete) return;
+
     const data = new FormData();
-    
+
     // Explicitly map to PascalCase as expected by the backend [FromForm] DTO
     data.append('FirstName', formData.firstName || '');
     data.append('MiddleName', formData.middleName || '');
@@ -184,8 +238,9 @@ const UsersPage: React.FC = () => {
     data.append('IsActive', (formData.isActive ?? true).toString());
 
     if (selectedImage) data.append('ImageFile', selectedImage);
-    if (!selectedRecord) data.append('Password', createPassword || 'Welcome@123');
-    
+    // No `|| 'Welcome@123'` fallback: `isFormIncomplete` guarantees a real password is present.
+    if (!selectedRecord) data.append('Password', createPassword);
+
     saveMutation.mutate(data);
   };
 
@@ -227,20 +282,41 @@ const UsersPage: React.FC = () => {
       headerName: t('actions') || 'Actions',
       width: 120,
       sortable: false,
-      renderCell: (params) => (
-        <Box>
-          <Tooltip title={t('edit_user') || 'Edit User'}>
-            <IconButton size="small" color="primary" onClick={() => handleEdit(params.row)}>
-              <EditIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
-          <Tooltip title={t('change_password') || 'Change Password'}>
-            <IconButton size="small" color="secondary" onClick={() => { setSelectedRecord(params.row); setIsPasswordModalOpen(true); }}>
-              <KeyIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
-        </Box>
-      ),
+      renderCell: (params) => {
+        // `POST /api/User/{id}/ChangePassword` rejects any caller that is not the subject, so this
+        // button 403'd on every other row — including for the Super Admin. Rendering an affordance
+        // that cannot succeed teaches users the product is broken. Admin-initiated reset is a
+        // separate, backlogged endpoint; until it exists the button belongs only on your own row.
+        const isSelf = params.row.id === userData.id;
+        return (
+          <Box>
+            <PermissionGuard moduleName="Users" action="edit">
+              <Tooltip title={t('edit_user') || 'Edit User'}>
+                <IconButton
+                  size="small"
+                  color="primary"
+                  aria-label={`${t('edit_user') || 'Edit User'}: ${params.row.firstName} ${params.row.lastName}`}
+                  onClick={() => handleEdit(params.row)}
+                >
+                  <EditIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            </PermissionGuard>
+            {isSelf && (
+              <Tooltip title={t('change_my_password') || 'Change my password'}>
+                <IconButton
+                  size="small"
+                  color="secondary"
+                  aria-label={t('change_my_password') || 'Change my password'}
+                  onClick={() => { setSelectedRecord(params.row); setIsPasswordModalOpen(true); }}
+                >
+                  <KeyIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            )}
+          </Box>
+        );
+      },
     },
   ];
 
@@ -248,13 +324,38 @@ const UsersPage: React.FC = () => {
     <Box sx={{ width: '100%', px: 1, py: 1 }}>
       <Box sx={{ mb: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <Box>
-          <Typography variant="h5" sx={{ fontWeight: 800 }}>{t('user_management') || 'User Management'}</Typography>
+          <Typography variant="h5" component="h1" sx={{ fontWeight: 800 }}>{t('user_management') || 'User Management'}</Typography>
           <Typography variant="body2" color="text.secondary">{t('manage_user_accounts') || 'Create and manage user accounts and system access'}</Typography>
         </Box>
-        <Button variant="contained" startIcon={<AddIcon />} onClick={() => { setSelectedRecord(null); resetForm(); setIsModalOpen(true); }} sx={{ px: 3 }}>
-          {t('add_user') || 'Add User'}
-        </Button>
+        {/* Hidden rather than failed: without Users:Create the POST 403s, so offering the dialog
+            only wastes the administrator's time filling it in. */}
+        <PermissionGuard moduleName="Users" action="create">
+          <Button
+            variant="contained"
+            startIcon={<AddIcon />}
+            onClick={() => { setSelectedRecord(null); resetForm(); setIsModalOpen(true); }}
+            sx={{ px: 3 }}
+            disabled={Boolean(roleNotice)}
+            title={roleNotice ?? undefined}
+          >
+            {t('add_user') || 'Add User'}
+          </Button>
+        </PermissionGuard>
       </Box>
+
+      {roleNotice && (
+        <Alert
+          severity={rolesError ? 'error' : 'warning'}
+          sx={{ mb: 1.5, borderRadius: 2 }}
+          action={
+            <Button color="inherit" size="small" onClick={() => { void refetchRoles(); }}>
+              {t('retry') || 'Retry'}
+            </Button>
+          }
+        >
+          {roleNotice}
+        </Alert>
+      )}
 
       <Paper sx={{ p: 1, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', backgroundColor: 'background.paper', borderRadius: 2 }}>
         <Grid container spacing={2} sx={{ width: '100%' }}>
@@ -280,8 +381,13 @@ const UsersPage: React.FC = () => {
       <Paper sx={{ height: 'calc(100vh - 220px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
         {usersError ? (
           <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, p: 3, textAlign: 'center' }}>
+            {/* Render the server's own reason (403s name the missing module permission) rather
+                than a fixed "temporarily unavailable" line that misdiagnoses every failure. */}
             <Alert severity="error" sx={{ borderRadius: 2, maxWidth: 480 }}>
-              {t('users_load_failed') || "We couldn't load users. The service may be temporarily unavailable."}
+              {describeFailure(
+                usersErrorValue,
+                t('users_load_failed') || "We couldn't load users.",
+              )}
             </Alert>
             <Button variant="contained" startIcon={<RefreshIcon />} onClick={() => refetchUsers()} sx={{ fontWeight: 700 }}>
               {t('retry') || 'Retry'}
@@ -339,12 +445,17 @@ const UsersPage: React.FC = () => {
                   <Grid size={{ xs: 12 }}>
                     <TextField
                       fullWidth
+                      required
                       label={(t('password') || 'Password')}
                       type="password"
+                      autoComplete="new-password"
                       value={createPassword}
                       onChange={(e) => setCreatePassword(e.target.value)}
-                      placeholder={t('password_placeholder') || 'Leave blank to use default (Welcome@123)'}
-                      helperText={t('password_helper') || 'Default password is Welcome@123 if left empty.'}
+                      error={createPassword.length > 0 && createPasswordError() !== null}
+                      helperText={
+                        createPasswordError() ??
+                        (t('password_helper') || `At least ${MIN_PASSWORD_LENGTH} characters. Share it with the user through a secure channel.`)
+                      }
                     />
                   </Grid>
                 )}
@@ -358,8 +469,18 @@ const UsersPage: React.FC = () => {
             </Grid>
 
             <Grid size={{ xs: 12, sm: 6, md: 4 }}>
-              <TextField select fullWidth label={t('role') || 'Role'} value={formData.roleId || ''} onChange={(e) => setFormData({ ...formData, roleId: Number(e.target.value) })} required>
-                {roles?.map(r => <MenuItem key={r.setupId} value={r.setupId}>{r.setupName}</MenuItem>)}
+              <TextField
+                select
+                fullWidth
+                label={t('role') || 'Role'}
+                value={formData.roleId || ''}
+                onChange={(e) => setFormData({ ...formData, roleId: Number(e.target.value) })}
+                required
+                error={Boolean(roleNotice)}
+                // Without this the control is an empty, unexplained dropdown blocking a required field.
+                helperText={roleNotice ?? undefined}
+              >
+                {(roles ?? []).map(r => <MenuItem key={r.setupId} value={r.setupId}>{r.setupName}</MenuItem>)}
               </TextField>
             </Grid>
             <Grid size={{ xs: 12, sm: 6, md: 4 }}>
@@ -406,8 +527,13 @@ const UsersPage: React.FC = () => {
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
           <Button onClick={() => setIsModalOpen(false)} color="inherit">{t('cancel') || 'Cancel'}</Button>
-          <Button variant="contained" onClick={handleSave} disabled={saveMutation.isPending} sx={{ px: 4 }}>
-            {saveMutation.isPending ? <CircularProgress size={24} /> : (selectedRecord ? (t('update_user') || 'Update User') : (t('create_user') || 'Create User'))}
+          <Button
+            variant="contained"
+            onClick={handleSave}
+            disabled={saveMutation.isPending || isFormIncomplete}
+            sx={{ px: 4 }}
+          >
+            {saveMutation.isPending ? <CircularProgress size={24} aria-label={t('saving') || 'Saving'} /> : (selectedRecord ? (t('update_user') || 'Update User') : (t('create_user') || 'Create User'))}
           </Button>
         </DialogActions>
       </Dialog>

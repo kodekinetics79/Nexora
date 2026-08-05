@@ -252,6 +252,15 @@ namespace ERP_RFQ_Automation.Services
                 Messages: BuildGovernedMessages(trustedInstructions, untrustedDocument),
                 Stream: false,
                 Format: "json", // Added to enforce strict JSON output for better parsing reliability
+                // PROD ROOT CAUSE (2026-08-05): reasoning models (deepseek-v4-pro) count their
+                // hidden "thinking" against num_predict. On real document chunks the model
+                // exhausted the entire 4096-token budget thinking and returned an EMPTY
+                // message.content — every attempt logged HTTP 200 + empty_response with
+                // OutputTokens exactly 4096, and the document dead-lettered as "All chunks
+                // failed". Extraction is a structured task: disable thinking. Verified live
+                // against ollama.com: think:false => thinking=0, full JSON content, ~50x
+                // fewer output tokens. Non-reasoning models ignore the field.
+                Think: false,
                 Options: new OllamaOptions(Temperature: TEMPERATURE, NumPredict: _maximumOutputTokens)
             );
 
@@ -312,7 +321,7 @@ namespace ERP_RFQ_Automation.Services
         {
             var payload = new OllamaRequest(
                 _model, BuildGovernedMessages(trustedInstructions, untrustedDocument), false, "json",
-                new OllamaOptions(TEMPERATURE, _maximumOutputTokens));
+                false, new OllamaOptions(TEMPERATURE, _maximumOutputTokens));
             return Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(payload, _jsonOptions));
         }
 
@@ -603,6 +612,7 @@ namespace ERP_RFQ_Automation.Services
             [property: JsonPropertyName("messages")] OllamaMessage[] Messages,
             [property: JsonPropertyName("stream")] bool Stream,
             [property: JsonPropertyName("format")] string Format,
+            [property: JsonPropertyName("think")] bool Think,
             [property: JsonPropertyName("options")] OllamaOptions Options
         );
 

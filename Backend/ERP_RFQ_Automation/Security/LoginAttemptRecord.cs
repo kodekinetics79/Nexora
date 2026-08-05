@@ -35,9 +35,17 @@ public class LoginAttemptRecord
     public DateTime? LockedUntilUtc { get; set; }
 }
 
-/// <summary>The two authentication planes tracked independently by the throttle.</summary>
+/// <summary>The authentication planes tracked independently by the throttle.</summary>
 public static class LoginPlane
 {
     public const string Tenant = "tenant";
     public const string Platform = "platform";
+
+    /// <summary>
+    /// Sec5: IP-keyed counter for FAILED platform logins (AttemptKey = remote IP,
+    /// not email). Gates the append-only <c>platform.login.failed</c> audit rows so
+    /// an unauthenticated flooder cannot grow the audit table without bound — once
+    /// the IP is locked out, further attempts 429 and write NO audit row.
+    /// </summary>
+    public const string PlatformIp = "platform-ip";
 }

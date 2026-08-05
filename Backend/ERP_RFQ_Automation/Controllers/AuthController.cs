@@ -1,5 +1,6 @@
 using ERP_RFQ_Automation.DTOs.AuthDTOs;
 using ERP_RFQ_Automation.Interfaces;
+using ERP_RFQ_Automation.Platform.Entitlements;
 using ERP_RFQ_Automation.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -67,6 +68,14 @@ namespace ERP_RFQ_Automation.Controllers
                 await _loginThrottle.RegisterSuccessAsync(
                     LoginPlane.Tenant, request?.Email, HttpContext.RequestAborted);
                 return Ok(response);
+            }
+            catch (TenantAccessDeniedException ex)
+            {
+                // Credentials were valid — the ORGANIZATION is suspended/archived, so
+                // this is a 403 problem+json denial, not a credential failure (and it
+                // must not feed the failed-attempt lockout counter). P2-A10: rendered
+                // by the single canonical EntitlementProblemFilter shape.
+                return EntitlementProblemFilter.ToResult(ex);
             }
             catch (UnauthorizedAccessException ex)
             {

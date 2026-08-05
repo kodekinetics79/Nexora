@@ -23,6 +23,7 @@ import {
 } from '@mui/icons-material';
 import leadService, { type LeadResponseDTO } from '../../api/services/leadService';
 import decisionService, { type LeadDecisionSummary } from '../../api/services/decisionService';
+import LateIngestedBadge from './LateIngestedBadge';
 import SearchField from '../../components/common/SearchField';
 import { useSnackbar } from 'notistack';
 import { formatDateSafe, parseDateSafe } from '../../utils/dates';
@@ -394,17 +395,28 @@ const LeadsPage: React.FC = () => {
     {
       field: 'ingestedAtUtc',
       headerName: 'Ingested',
-      width: 150,
-      valueGetter: (_value, row) => row.ingestedAtUtc || row.createdDate || '',
+      width: 170,
+      // Audit-grade ingestion timestamp: earliest source received_on from the
+      // backend (`ingestedOn`), with the legacy pipeline timestamp and
+      // createdDate as display fallbacks for older payloads.
+      valueGetter: (_value, row) => row.ingestedOn || row.ingestedAtUtc || row.createdDate || '',
       renderCell: (p) => {
-        const value = p.row.ingestedAtUtc || p.row.createdDate;
+        const value = p.row.ingestedOn || p.row.ingestedAtUtc || p.row.createdDate;
         const label = formatDateSafe(value);
         return (
-          <Tooltip title={value ? new Date(value).toLocaleString() : 'Not recorded'}>
-            <Typography variant="body2" sx={{ fontSize: '0.8rem', color: label === '—' ? 'text.disabled' : 'text.primary' }}>
-              {label}
-            </Typography>
-          </Tooltip>
+          <Box sx={{ lineHeight: 1.3, py: 0.25 }}>
+            <Tooltip title={value ? `Entered Nexora ${new Date(value).toLocaleString()}` : 'Not recorded'}>
+              <Typography variant="body2" sx={{ fontSize: '0.8rem', color: label === '—' ? 'text.disabled' : 'text.primary' }}>
+                {label === '—' ? label : `Ingested ${label}`}
+              </Typography>
+            </Tooltip>
+            {/* Audit fairness: flag leads that entered Nexora after their deadline. */}
+            <LateIngestedBadge
+              lateIngested={p.row.lateIngested}
+              ingestedOn={value}
+              dueDate={p.row.bidClosingDate || p.row.subDate}
+            />
+          </Box>
         );
       },
     },

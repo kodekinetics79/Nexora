@@ -4,6 +4,7 @@ using ERP_RFQ_Automation.DTOs.UserDTO;
 using ERP_RFQ_Automation.DTOs.UserGroup;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Platform.Entitlements;
 using ERP_RFQ_Automation.Security;
 using ERP_RFQ_Automation.Authorization;
 using Microsoft.AspNetCore.Authorization;
@@ -21,13 +22,29 @@ namespace ERP_RFQ_Automation.Controllers
         private readonly IUserRepository _repository;
         private readonly IWebHostEnvironment _environment;
         private readonly IRoleGate _roleGate;
+        private readonly IEntitlementService? _entitlements;
+        private readonly IRolePermissionRepository? _rolePermissions;
+        private readonly IIamAuditWriter? _audit;
         private static readonly int[] AllowedPageSizes = { 5, 10, 25, 50 };
 
-        public UserController(IUserRepository repository, IWebHostEnvironment environment, IRoleGate roleGate)
+        /// <summary>
+        /// The trailing dependencies are optional so the existing unit-test constructions keep
+        /// compiling; in the composed application every one of them is registered.
+        /// </summary>
+        public UserController(
+            IUserRepository repository,
+            IWebHostEnvironment environment,
+            IRoleGate roleGate,
+            IEntitlementService? entitlements = null,
+            IRolePermissionRepository? rolePermissions = null,
+            IIamAuditWriter? audit = null)
         {
             _repository = repository;
             _environment = environment;
             _roleGate = roleGate;
+            _entitlements = entitlements;
+            _rolePermissions = rolePermissions;
+            _audit = audit;
         }
 
         // GET: api/User?pageNumber=1&pageSize=10&id=1&userName=john&email=john@example.com&roleId=1&region=US&isActive=true&businessUnitId=1
@@ -103,9 +120,88 @@ namespace ERP_RFQ_Automation.Controllers
             }
         }
 
+        // GET: api/User/me/permissions
+        /// <summary>
+        /// RC-5: the caller's own effective permissions. <c>[Authorize]</c> ONLY — deliberately no
+        /// <c>[RequireModulePermission]</c>.
+        ///
+        /// The login bootstrap previously read <c>GET /api/RolePermission</c>, which is gated on
+        /// "Roles &amp; Permissions":View. That gate is correct for the RBAC administration grid and
+        /// stays exactly as it is; it is catastrophic as the source of a session's own permission
+        /// set, because every role that cannot administer RBAC — i.e. every role a customer creates
+        /// at pilot — bootstrapped with an empty permission array and an empty product.
+        ///
+        /// Reading your own grants is not privileged. roleId and businessUnitId come from the
+        /// claims exclusively; there is no parameter a client could use to ask about another role.
+        /// </summary>
+        [HttpGet("me/permissions")]
+        public async Task<ActionResult<MyPermissionsResponseDTO>> GetMyPermissions()
+        {
+            try
+            {
+                var actor = ActorContext.From(User);
+                if (!actor.HasTenant)
+                    return StatusCode(StatusCodes.Status403Forbidden, "A valid businessUnitId claim is required.");
+
+                var response = new MyPermissionsResponseDTO
+                {
+                    UserId = actor.UserId,
+                    RoleId = actor.RoleId,
+                    BusinessUnitId = actor.BusinessUnitId
+                };
+
+                if (actor.RoleId is not { } roleId)
+                    return Ok(response);
+
+                // RC-8: super-admin/manager status is asked of IRoleGate, the SAME authority
+                // PermissionHandler consults. AuthRepository used to answer the identical question
+                // from a plain FK Include with no BU / SetupType / IsActive predicate, so the login
+                // response and the API could disagree — the UI renders everything and every call
+                // 403s. There is now one decision, made in one place.
+                response.IsSuperAdmin = await _roleGate.IsSuperAdminAsync(roleId, actor.BusinessUnitId);
+                response.IsManager = await _roleGate.IsManagerOrAdminAsync(roleId, actor.BusinessUnitId);
+
+                var roles = await _repository.GetRolesAsync(actor.BusinessUnitId);
+                response.RoleName = roles.FirstOrDefault(x => x.SetupId == roleId)?.SetupName;
+
+                if (_rolePermissions is not null)
+                {
+                    // pageSize covers the full module catalogue (51+ rows today) in one call; the
+                    // repository already scopes by business unit, so no foreign-tenant row can
+                    // reach this projection.
+                    var (rows, _) = await _rolePermissions.GetAllAsync(
+                        pageNumber: 1, pageSize: 1000, id: null, roleId: roleId, moduleId: null,
+                        businessUnitId: actor.BusinessUnitId);
+
+                    response.Permissions = rows
+                        .Select(rp => new MyModulePermissionDTO
+                        {
+                            ModuleId = rp.ModuleId,
+                            ModuleName = rp.Module?.ModuleName,
+                            CanView = rp.CanView == true,
+                            CanCreate = rp.CanCreate == true,
+                            CanEdit = rp.CanEdit == true,
+                            CanDelete = rp.CanDelete == true
+                        })
+                        .ToList();
+                }
+
+                return Ok(response);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving permissions: {ex.Message}");
+            }
+        }
+
         // POST: api/User
         [HttpPost]
         [RequireModulePermission("Users", PermissionAction.Create)]
+        // SEGREGATION OF DUTIES: creating a user ASSIGNS A ROLE, which is a privilege
+        // grant — the same act RolePermissionController gates far more strictly. Without
+        // this second requirement, a holder of Users:Create could mint an account carrying
+        // any role, including one more privileged than their own, entirely bypassing the
+        // self-grant and grant-what-you-hold guards added to the permissions controller.
         [RequireModulePermission("Roles & Permissions", PermissionAction.Edit)]
         public async Task<ActionResult<UserResponseDTO>> Create([FromForm] UserCreateRequestDTO request)
         {
@@ -143,6 +239,10 @@ namespace ERP_RFQ_Automation.Controllers
                 request.Buid = claimBUId;
                 if (!await CanManageRoleAsync(request.RoleId, claimBUId)) return Forbid();
 
+                // Plan seat entitlement (P0): creating an ACTIVE user consumes a seat.
+                if (request.IsActive != false && await SeatLimitDenialAsync(claimBUId) is { } seatDenial)
+                    return seatDenial;
+
                 var user = new User
                 {
                     FirstName = request.FirstName,
@@ -159,11 +259,26 @@ namespace ERP_RFQ_Automation.Controllers
                     Buid = request.Buid,
                     UserGroupId = request.UserGroupId,
                     IsActive = request.IsActive ?? true,
-                    CreatedBy = User.Identity?.Name ?? request.CreatedBy ?? "System",
+                    // RC-7: server-derived. `User.Identity?.Name` was always null (the tenant JWT
+                    // never set NameClaimType), so the client-supplied request.CreatedBy always won.
+                    CreatedBy = ActorContext.From(User).Stamp,
                     CreatedOn = DateTime.UtcNow
                 };
 
+                // The audit row and the user row commit together or not at all. The user's Id is
+                // only assigned by the INSERT, so the audit write has to follow it — the explicit
+                // transaction is what keeps "created but unaudited" from being a reachable state.
+                await using var transaction = await BeginAtomicAsync();
                 await _repository.AddAsync(user);
+                await AuditAsync(IamAuditActions.UserCreated, user.Id, user.Email, after: new
+                {
+                    user.Email,
+                    user.RoleId,
+                    user.TeamId,
+                    user.UserGroupId,
+                    user.IsActive
+                });
+                if (transaction is not null) await transaction.CommitAsync();
 
                 var response = MapToResponse(user);
                 return CreatedAtAction(nameof(GetById), new { id = user.Id, businessUnitId = user.Buid }, response);
@@ -181,6 +296,9 @@ namespace ERP_RFQ_Automation.Controllers
         // PUT: api/User/5
         [HttpPut("{id}")]
         [RequireModulePermission("Users", PermissionAction.Edit)]
+        // SEGREGATION OF DUTIES: see Create. Updating a user can REASSIGN ITS ROLE, so the
+        // same privilege-granting authority is required; Users:Edit alone would be a
+        // privilege-escalation path around the permissions controller's guards.
         [RequireModulePermission("Roles & Permissions", PermissionAction.Edit)]
         public async Task<ActionResult> Update(long id, [FromForm] UserUpdateRequestDTO request)
         {
@@ -201,6 +319,24 @@ namespace ERP_RFQ_Automation.Controllers
                 if (request.RoleId != existing.RoleId &&
                     (callerId == id || !await CanManageRoleAsync(request.RoleId, claimBUId)))
                     return Forbid();
+
+                // Plan seat entitlement (P0): reactivating an inactive user consumes a
+                // seat exactly like a create (the effective new value is IsActive ?? true).
+                if (existing.IsActive != true && (request.IsActive ?? true)
+                    && await SeatLimitDenialAsync(claimBUId) is { } seatDenial)
+                    return seatDenial;
+
+                // B7 lockout invariant: an administrator can lock the whole tenant out of its own
+                // RBAC screens by deactivating (or demoting) the last account that holds a
+                // super-admin-capable role. There is no break-glass path in the tenant plane, so
+                // this has to be refused at the point of change, not recovered from afterwards.
+                var losesAdministrator =
+                    (request.IsActive == false && existing.IsActive == true) ||
+                    (request.RoleId != existing.RoleId &&
+                     await IsSuperAdminCapableRoleAsync(existing.RoleId, claimBUId) &&
+                     !await IsSuperAdminCapableRoleAsync(request.RoleId, claimBUId));
+                if (losesAdministrator && await IsLastActiveAdministratorAsync(id, existing.RoleId, claimBUId))
+                    return Conflict("This is the last active administrator for this business unit.");
 
                 string? imagePath = existing.ImageUrl;
                 if (request.ImageFile != null)
@@ -225,12 +361,21 @@ namespace ERP_RFQ_Automation.Controllers
                     imagePath = $"/UserImages/{uniqueFileName}";
                 }
 
+                var before = new
+                {
+                    existing.Email,
+                    existing.RoleId,
+                    existing.TeamId,
+                    existing.UserGroupId,
+                    existing.IsActive
+                };
+
                 existing.FirstName = request.FirstName;
                 existing.MiddleName = request.MiddleName;
                 existing.LastName = request.LastName;
                 existing.Email = request.Email;
                 existing.ImageUrl = imagePath ?? request.ImageUrl;
-                
+
                 // Update Foreign Keys
                 existing.RoleId = request.RoleId;
                 existing.TeamId = request.TeamId;
@@ -248,8 +393,28 @@ namespace ERP_RFQ_Automation.Controllers
                 existing.Manager = null;
                 existing.Bu = null;
 
-                existing.ModifiedBy = User.Identity?.Name ?? request.ModifiedBy ?? "System";
+                // RC-7: server-derived; request.ModifiedBy is never read.
+                existing.ModifiedBy = ActorContext.From(User).Stamp;
                 existing.ModifiedOn = DateTime.UtcNow;
+
+                var after = new
+                {
+                    existing.Email,
+                    existing.RoleId,
+                    existing.TeamId,
+                    existing.UserGroupId,
+                    existing.IsActive
+                };
+
+                // The audit event is enlisted BEFORE the repository's SaveChangesAsync, so both
+                // rows land in that one implicit transaction — a failed update leaves no trace.
+                var action = before.RoleId != after.RoleId
+                    ? IamAuditActions.UserRoleChanged
+                    : before.IsActive == true && after.IsActive != true
+                        ? IamAuditActions.UserDeactivated
+                        : IamAuditActions.UserUpdated;
+                _audit?.Enlist(User, new IamAuditEntry(
+                    action, IamAuditTargets.User, existing.Id, existing.Email, before, after));
 
                 await _repository.UpdateAsync(existing);
 
@@ -292,7 +457,10 @@ namespace ERP_RFQ_Automation.Controllers
                 if (callerId != id) return Forbid();
 
                 // Ensure the target user exists within the caller's business unit.
-                await _repository.GetByIdAsync(id, claimBUId);
+                var target = await _repository.GetByIdAsync(id, claimBUId);
+
+                _audit?.Enlist(User, new IamAuditEntry(
+                    IamAuditActions.PasswordChanged, IamAuditTargets.User, id, target.Email));
 
                 await _repository.ChangePasswordAsync(id, request.NewPassword);
                 return NoContent();
@@ -326,6 +494,17 @@ namespace ERP_RFQ_Automation.Controllers
 
                 var existing = await _repository.GetByIdAsync(id, targetBUId);
                 if (!await CanManageRoleAsync(existing.RoleId, targetBUId)) return Forbid();
+
+                // B7 lockout invariant — see the matching guard in Update. An already-inactive
+                // account cannot be the last ACTIVE administrator, so it is exempt.
+                if (existing.IsActive == true
+                    && await IsLastActiveAdministratorAsync(id, existing.RoleId, targetBUId))
+                    return Conflict("This is the last active administrator for this business unit.");
+
+                _audit?.Enlist(User, new IamAuditEntry(
+                    IamAuditActions.UserDeleted, IamAuditTargets.User, id, existing.Email,
+                    Before: new { existing.Email, existing.RoleId, existing.IsActive }));
+
                 await _repository.DeleteAsync(id, targetBUId);
                 return NoContent();
             }
@@ -454,6 +633,26 @@ namespace ERP_RFQ_Automation.Controllers
             };
         }
 
+        /// <summary>
+        /// Null when a seat is available (or the tenant has no plan / no platform
+        /// Tenant row — fail open); otherwise the 403 problem+json denial whose title
+        /// states the plan's seat limit. P2-A10: the denial is the TYPED
+        /// <see cref="SeatLimitExceededException"/> rendered by the single canonical
+        /// <see cref="EntitlementProblemFilter"/> shape (no hand-rolled payload here).
+        /// </summary>
+        private async Task<ActionResult?> SeatLimitDenialAsync(long businessUnitId)
+        {
+            if (_entitlements is null)
+                return null;
+
+            var seats = await _entitlements.CheckSeatAvailabilityAsync(businessUnitId, HttpContext.RequestAborted);
+            if (seats.Allowed)
+                return null;
+
+            return EntitlementProblemFilter.ToResult(
+                new SeatLimitExceededException(businessUnitId, seats));
+        }
+
         private async Task<bool> CanManageRoleAsync(long? targetRoleId, long businessUnitId)
         {
             if (!targetRoleId.HasValue) return true;
@@ -462,6 +661,49 @@ namespace ERP_RFQ_Automation.Controllers
                 : 0;
             if (callerRoleId <= 0) return false;
             return await _roleGate.CanManageRoleAsync(callerRoleId, targetRoleId, businessUnitId);
+        }
+
+        private Task<Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction?> BeginAtomicAsync()
+            => _audit is null
+                ? Task.FromResult<Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction?>(null)
+                : _audit.BeginAtomicAsync(HttpContext?.RequestAborted ?? default);
+
+        private async Task AuditAsync(
+            string action, long? targetId, string? targetLabel, object? before = null, object? after = null)
+        {
+            if (_audit is null) return;
+            await _audit.WriteAsync(User, new IamAuditEntry(
+                action, IamAuditTargets.User, targetId, targetLabel, before, after));
+        }
+
+        private Task<bool> IsSuperAdminCapableRoleAsync(long? roleId, long businessUnitId)
+            => roleId is { } id ? _roleGate.IsSuperAdminAsync(id, businessUnitId) : Task.FromResult(false);
+
+        /// <summary>
+        /// B7: true when <paramref name="userId"/> is the ONLY active account in the business unit
+        /// holding a super-admin-capable role.
+        ///
+        /// Deactivating or deleting that account leaves the tenant with nobody who can reach the
+        /// Roles &amp; Permissions screen, and the tenant plane has no break-glass recovery
+        /// (platform-plane recovery is backlog item 15). Cheap to check — user counts per business
+        /// unit are small — and it fails OPEN if the roster cannot be read, because refusing every
+        /// deactivation would be a worse failure than allowing one.
+        /// </summary>
+        private async Task<bool> IsLastActiveAdministratorAsync(long userId, long? roleId, long businessUnitId)
+        {
+            if (!await IsSuperAdminCapableRoleAsync(roleId, businessUnitId)) return false;
+
+            var (users, _) = await _repository.GetAllAsync(
+                pageNumber: 1, pageSize: 1000, id: null, userName: null, email: null, roleId: null,
+                region: null, isActive: true, businessUnitId: businessUnitId);
+
+            foreach (var candidate in users)
+            {
+                if (candidate.Id == userId) continue;
+                if (await IsSuperAdminCapableRoleAsync(candidate.RoleId, businessUnitId)) return false;
+            }
+
+            return true;
         }
     }
 }

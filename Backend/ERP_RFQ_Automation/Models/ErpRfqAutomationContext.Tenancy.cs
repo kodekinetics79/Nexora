@@ -42,6 +42,8 @@ public partial class ErpRfqAutomationContext
 
         ConfigureAiGovernance(modelBuilder);
         ConfigureExtractionOperations(modelBuilder);
+        // Platform-plane SaaS billing (rate cards, statements) — platform schema, not tenant-scoped.
+        ConfigureBillingModel(modelBuilder);
         // SEC-H6: pre-authentication login counter — deliberately unfiltered, see the partial.
         ConfigureLoginThrottlingModel(modelBuilder);
         modelBuilder.ConfigureCommercialFinance();
@@ -61,6 +63,7 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<LeadStatusHistory>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<SetupMaster>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<RolePermission>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        ConfigureIamAuditTrail(modelBuilder);
         modelBuilder.Entity<User>().HasQueryFilter(e => CurrentTenantId == null || e.Buid == null || e.Buid == CurrentTenantId);
         modelBuilder.Entity<CommercialLifecycleEvent>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<LifecycleOutboxMessage>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
@@ -513,6 +516,7 @@ public partial class ErpRfqAutomationContext
             e.Property(x => x.Code).IsRequired().HasMaxLength(64);
             e.Property(x => x.Name).IsRequired().HasMaxLength(128);
             e.Property(x => x.Features).HasColumnType("jsonb").HasDefaultValue("{}");
+            e.Property(x => x.MonthlyPriceUsd).HasPrecision(10, 2);
         });
         modelBuilder.Entity<ERP_RFQ_Automation.Platform.Models.Tenant>(e =>
         {
@@ -534,8 +538,21 @@ public partial class ErpRfqAutomationContext
             e.Property(x => x.TargetId).HasMaxLength(128);
             e.Property(x => x.Metadata).HasColumnType("jsonb");
             e.Property(x => x.Ip).HasMaxLength(64);
+            e.Property(x => x.Result).IsRequired().HasMaxLength(16)
+                .HasDefaultValue(ERP_RFQ_Automation.Platform.Models.PlatformAuditResults.Success);
             e.HasIndex(x => new { x.ActorPlatformUserId, x.CreatedOn });
             e.HasIndex(x => new { x.ActAsTenantId, x.CreatedOn });
+        });
+        modelBuilder.Entity<ERP_RFQ_Automation.Platform.Models.ImpersonationSession>(e =>
+        {
+            e.ToTable("ImpersonationSessions", "platform");
+            e.HasKey(x => x.Id);
+            e.HasIndex(x => x.Jti).IsUnique();
+            e.Property(x => x.Jti).IsRequired().HasMaxLength(64);
+            e.Property(x => x.Reason).IsRequired().HasMaxLength(1000);
+            e.Property(x => x.RevokedBy).HasMaxLength(256);
+            e.HasIndex(x => new { x.TenantId, x.IssuedAtUtc });
+            e.HasIndex(x => x.ExpiresAtUtc);
         });
 
         // ==== Sourcing-copilot ("Agent") engine (Agent/) ====
@@ -555,5 +572,46 @@ public partial class ErpRfqAutomationContext
         // ==== Service RFQ → BOQ engine (Boq/) ====
         // Same partial-splice pattern; implementation in ErpRfqAutomationContext.Boq.cs.
         ConfigureBoqModel(modelBuilder);
+    }
+
+    /// <summary>
+    /// Append-only IAM audit trail (RC-7).
+    ///
+    /// The query filter below is not just a read guard: it auto-enrols this table in
+    /// PostgreSqlProductionDialectTests.AllMigrationsApplyToAnEmptyPostgreSqlDatabase, which
+    /// enumerates every entity carrying a filter and FAILS unless a matching
+    /// <c>nexora_tenant_isolation</c> RLS policy exists with both polqual and polwithcheck
+    /// referencing <c>nexora.business_unit_id</c>. That is the intended safety net — see
+    /// 20260805120000_IamCanViewAndAccessAuditTrail for the database half.
+    /// </summary>
+    private void ConfigureIamAuditTrail(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<IamAuditEvent>(entity =>
+        {
+            entity.ToTable("IamAuditEvents");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Action).HasMaxLength(64).IsRequired();
+            entity.Property(e => e.TargetType).HasMaxLength(32).IsRequired();
+            entity.Property(e => e.TargetLabel).HasMaxLength(256);
+            entity.Property(e => e.Reason).HasMaxLength(512);
+            entity.Property(e => e.CorrelationId).HasMaxLength(64);
+            entity.Property(e => e.BeforeJson).HasColumnType("jsonb");
+            entity.Property(e => e.AfterJson).HasColumnType("jsonb");
+            entity.Property(e => e.OccurredOn).HasDefaultValueSql("now()");
+            entity.HasIndex(e => new { e.BusinessUnitId, e.OccurredOn })
+                .HasDatabaseName("IX_IamAuditEvents_BU_OccurredOn");
+            entity.HasIndex(e => new { e.BusinessUnitId, e.TargetType, e.TargetId })
+                .HasDatabaseName("IX_IamAuditEvents_BU_Target");
+
+            // ActorUserId and TargetId deliberately carry NO foreign key: the record of who
+            // deleted a user must survive that user's deletion. BusinessUnitId does, because a
+            // tenant-less audit row is unattributable and falls outside the RLS policy.
+            entity.HasOne<BusinessUnit>()
+                .WithMany()
+                .HasForeignKey(e => e.BusinessUnitId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        });
     }
 }

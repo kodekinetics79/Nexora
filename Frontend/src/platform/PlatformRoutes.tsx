@@ -11,6 +11,9 @@ const TenantDetailPage = lazy(() => import('./pages/TenantDetailPage'));
 const PipelinePage = lazy(() => import('./pages/PipelinePage'));
 const PlansFlagsPage = lazy(() => import('./pages/PlansFlagsPage'));
 const AuditLogPage = lazy(() => import('./pages/AuditLogPage'));
+const PlatformUsersPage = lazy(() => import('./pages/PlatformUsersPage'));
+const BillingPage = lazy(() => import('./pages/BillingPage'));
+const SecurityPage = lazy(() => import('./pages/SecurityPage'));
 
 const PlatformLoader = () => (
   <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '60vh', width: '100%' }}>
@@ -37,6 +40,9 @@ export default function PlatformRoutes() {
             <Route path="tenants/:id" element={<TenantDetailPage />} />
             <Route path="pipeline" element={<PipelinePage />} />
             <Route path="plans" element={<PlansFlagsPage />} />
+            <Route path="users" element={<PlatformUsersPage />} />
+            <Route path="billing" element={<BillingPage />} />
+            <Route path="security" element={<SecurityPage />} />
             <Route path="audit" element={<AuditLogPage />} />
             <Route path="*" element={<Navigate to="overview" replace />} />
           </Route>

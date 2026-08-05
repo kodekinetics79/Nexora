@@ -37,6 +37,14 @@ public partial class User
 
     public bool? IsActive { get; set; }
 
+    /// <summary>
+    /// UTC instant the user was last deactivated (IsActive flipped true→false); cleared on
+    /// reactivation. Enables a reproducible seats meter: a user occupied a seat in a billing
+    /// period when CreatedOn &lt; PeriodEnd AND (IsActive OR DeactivatedAtUtc &gt;= PeriodEnd).
+    /// Legacy inactive rows with a null DeactivatedAtUtc count as deactivated.
+    /// </summary>
+    public DateTime? DeactivatedAtUtc { get; set; }
+
     public string CreatedBy { get; set; } = null!;
 
     public DateTime CreatedOn { get; set; }

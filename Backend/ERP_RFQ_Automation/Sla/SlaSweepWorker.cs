@@ -592,7 +592,9 @@ public sealed class SlaSweepWorker : BackgroundService
     {
         var rows = await db.Users.AsNoTracking()
             .Where(u => u.Buid == bu && u.IsActive != false && u.RoleId != null)
-            .Join(db.SetupMasters.AsNoTracking().Where(s => s.SetupType == "role"),
+            // RC-1: was the case-SENSITIVE literal "role"; production stores 'Role', so this
+            // join matched nothing and SLA escalations silently had no recipients.
+            .Join(db.SetupMasters.AsNoTracking().Where(ERP_RFQ_Automation.Authorization.SetupTypes.IsRoleRow),
                 u => u.RoleId, s => s.SetupId,
                 (u, s) => new { u.Id, u.Email, u.FirstName, RoleName = s.SetupValue })
             .ToListAsync(ct);

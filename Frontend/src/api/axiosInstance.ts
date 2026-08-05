@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { clearImpersonation, getImpersonation } from './impersonation';
 
 const axiosInstance = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL,
@@ -7,10 +8,14 @@ const axiosInstance = axios.create({
   },
 });
 
-// Add interceptor for auth token
+// Add interceptor for auth token. When a platform operator is impersonating a
+// tenant, the short-lived read-only impersonation token (sessionStorage,
+// `nexora_impersonation`) takes precedence over any real tenant session token —
+// the real `localStorage['token']` is never touched.
 axiosInstance.interceptors.request.use(
   (config) => {
-    const token = localStorage.getItem('token');
+    const impersonation = getImpersonation();
+    const token = impersonation?.token ?? localStorage.getItem('token');
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
@@ -35,6 +40,15 @@ axiosInstance.interceptors.response.use(
     const status = error.response?.status;
     const url: string = error.config?.url ?? '';
     const isAuthExempt = AUTH_EXEMPT_PATHS.some((path) => url.includes(path));
+
+    // An expired/revoked impersonation token must end the impersonation and
+    // return the operator to the platform console — never bounce to /login or
+    // clear a real tenant session that may coexist in localStorage.
+    if (status === 401 && getImpersonation()) {
+      clearImpersonation();
+      window.location.assign('/platform/tenants');
+      return Promise.reject(error);
+    }
 
     // Only treat a 401 as a genuine auth-required failure when the user
     // actually holds a session token. A 401 with no token (e.g. a background

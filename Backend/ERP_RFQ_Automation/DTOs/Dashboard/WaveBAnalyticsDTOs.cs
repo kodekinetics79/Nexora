@@ -42,6 +42,15 @@ namespace ERP_RFQ_Automation.DTOs.Dashboard
         public int StaleQuoteDays { get; set; }
 
         public DateTime GeneratedAt { get; set; }
+
+        /// <summary>
+        /// Ingestion-audit fairness: open leads EXCLUDED from the OverdueLeads
+        /// aging metric because they were ingested into Nexora after their
+        /// business due date (they were already past deadline on arrival, so
+        /// counting them would book pre-Nexora losses against Nexora).
+        /// Surfaced so the exclusion is visible, never silent.
+        /// </summary>
+        public int LateIngestedExcludedLeads { get; set; }
     }
 
     // ─── WP-B2: pipeline / margin analytics ─────────────────────────────────

@@ -1,13 +1,17 @@
 // ---------------------------------------------------------------------------
 // Nexora Platform Owner Console — domain types
 //
-// These types mirror the ADR-0005 platform API contract (`/api/platform/*`).
-// They are the single source of truth shared by the typed API client, the
-// mock adapter, and every page in `src/platform`. When the real backend lands,
-// only `src/platform/api/*` changes — these types stay put.
+// These types mirror the platform API contract (`/api/platform/*`). They are
+// the single source of truth shared by the typed API client and every page in
+// `src/platform`. Casing matches the backend JSON (camelCased DTOs).
 // ---------------------------------------------------------------------------
 
-export type PlanTier = 'free' | 'pro' | 'enterprise' | 'unassigned';
+/**
+ * A plan's tier is its own lowercased plan code straight from the backend
+ * ("free", "pro", "enterprise", custom codes, …). Tenants without a plan are
+ * reported as "none" — nothing is ever silently bucketed.
+ */
+export type PlanTier = string;
 
 export type TenantStatus =
   | 'active'
@@ -25,10 +29,6 @@ export type JobStatus =
   | 'failed'
   | 'dead_letter';
 
-export type PlatformUserRole = 'owner' | 'admin' | 'member' | 'viewer';
-
-export type UserStatus = 'active' | 'invited' | 'disabled';
-
 export type AuditResult = 'success' | 'failure';
 
 // --- Plans & entitlements ---------------------------------------------------
@@ -36,6 +36,8 @@ export type AuditResult = 'success' | 'failure';
 export interface Plan {
   id: string;
   name: string;
+  /** Canonical lowercased plan code (unique). */
+  code: string;
   tier: PlanTier;
   /** Scheduling weight used by the extraction dispatcher (higher = more share). */
   weight: number;
@@ -46,71 +48,69 @@ export interface Plan {
   /** Seat quota. `null` = unlimited. */
   seatQuota: number | null;
   priceMonthlyUsd: number | null;
-  /** Feature-flag keys granted by default on this plan. */
+  isActive: boolean;
+  /** Feature-flag keys enabled (true) in the plan's features JSON. */
   entitlements: string[];
 }
 
-export interface FeatureFlag {
-  key: string;
-  label: string;
-  description: string;
-  /** Whether this flag is a paid entitlement or an operational toggle. */
-  category: 'entitlement' | 'operational';
+/** Body for POST /api/platform/plans and PUT /api/platform/plans/{id}. */
+export interface UpsertPlanInput {
+  code: string;
+  name: string;
+  weight: number;
+  maxConcurrentExtractionJobs: number;
+  maxDocsPerMonth: number;
+  maxSeats: number;
+  monthlyPriceUsd: number | null;
+  /** JSON object of feature entitlements, e.g. `{"copilot": true}`. */
+  features: string;
+  isActive: boolean;
 }
 
 // --- Tenants ----------------------------------------------------------------
-
-export interface TenantUsage {
-  docsProcessedMtd: number;
-  docQuota: number | null;
-  seatsUsed: number;
-  seatQuota: number | null;
-  llmCostMtdUsd: number;
-  storageUsedGb: number;
-}
 
 export interface Tenant {
   id: string;
   name: string;
   slug: string;
-  planTier: PlanTier;
+  planId: string | null;
+  /** Lowercased plan code, or null when the tenant has no plan. */
+  planCode: string | null;
   status: TenantStatus;
-  region: string;
-  primaryContactEmail: string;
-  createdAt: string; // ISO
-  usage: TenantUsage;
-  /** Rolling extraction success rate over the trailing 30 days (0–1). */
-  extractionSuccessRate: number;
-  pipelineHealth: HealthStatus;
+  statusReason: string | null;
+  createdAt: string | null; // ISO
 }
 
-export interface PlatformUser {
+// --- Platform operators (control-plane accounts) ----------------------------
+
+export type PlatformOperatorRole =
+  | 'Owner'
+  | 'SupportAdmin'
+  | 'BillingAdmin'
+  | 'ReadOnlyOps';
+
+export const PLATFORM_OPERATOR_ROLES: PlatformOperatorRole[] = [
+  'Owner',
+  'SupportAdmin',
+  'BillingAdmin',
+  'ReadOnlyOps',
+];
+
+export interface PlatformOperator {
   id: string;
-  tenantId: string;
-  name: string;
   email: string;
-  role: PlatformUserRole;
-  status: UserStatus;
-  lastActiveAt: string | null; // ISO
+  platformRole: string;
+  isActive: boolean;
+  displayName: string | null;
+  lastLogin: string | null; // ISO
+  createdOn: string; // ISO
 }
 
-export interface UsageMeter {
-  metric: string;
-  label: string;
-  used: number;
-  limit: number | null; // null = unlimited
-  unit: string;
-  period: string; // e.g. "2026-07"
-}
-
-export interface TenantDetail extends Tenant {
-  users: PlatformUser[];
-  /** Effective flags for this tenant (plan entitlements ± per-tenant overrides). */
-  flags: Record<string, boolean>;
-  usageMeters: UsageMeter[];
-  recentAudit: AuditEntry[];
-  /** Per-tenant slice of the extraction pipeline. */
-  queue: QueueStats;
+export interface CreatePlatformOperatorInput {
+  email: string;
+  password: string;
+  role: PlatformOperatorRole;
+  displayName?: string;
 }
 
 // --- Extraction pipeline ----------------------------------------------------
@@ -176,26 +176,156 @@ export interface OverviewMetrics {
   deadLetter: number;
   llmCostMtdUsd: number;
   llmCostTrendPct: number | null; // vs prior comparable period
-  seatsInUse: number;
+  /** Fleet-wide total of active tenant users across ALL business units. */
+  activeUsersFleetWide: number;
   services: ServiceHealth[];
   /** Documents processed per day for the trailing 14 days. */
   throughput: { date: string; docs: number; failures: number }[];
   /** LLM spend per day (USD) for the trailing 14 days. */
   costTrend: { date: string; costUsd: number }[];
+  /** Real plan codes present in the fleet; plan-less tenants appear as "none". */
   tenantsByPlan: { tier: PlanTier; count: number }[];
 }
 
-// --- Command results --------------------------------------------------------
+// --- Impersonation ----------------------------------------------------------
+
+export interface ImpersonationTicket {
+  tenantId: string;
+  /** Short-lived read-only tenant token. */
+  token: string;
+  expiresAt: string; // ISO
+  /** Revocation key decoded from the token's `jti` claim (null if unreadable). */
+  jti: string | null;
+}
+
+export type ImpersonationSessionStatus = 'active' | 'expired' | 'revoked';
+
+export interface ImpersonationSession {
+  jti: string;
+  tenantId: string;
+  tenantName: string | null;
+  actorPlatformUserId: string;
+  actorEmail: string | null;
+  reason: string;
+  issuedAtUtc: string; // ISO
+  expiresAtUtc: string; // ISO
+  revokedAtUtc: string | null;
+  revokedBy: string | null;
+  status: ImpersonationSessionStatus;
+}
+
+// --- Billing ----------------------------------------------------------------
+
+export interface MeterReading {
+  meterKey: string;
+  quantity: number;
+  unit: string;
+  sourceNote: string;
+}
+
+export interface TenantUsageReadout {
+  tenantId: string;
+  businessUnitId: string | null;
+  period: string; // YYYY-MM
+  periodStartUtc: string;
+  periodEndUtc: string;
+  meters: MeterReading[];
+}
+
+export interface RateCardLine {
+  id: string;
+  meterKey: string;
+  includedQuantity: number;
+  unitPrice: number;
+  unit: string;
+  tierNote: string | null;
+}
+
+export interface RateCard {
+  id: string;
+  code: string;
+  currency: string;
+  effectiveFromUtc: string;
+  effectiveToUtc: string | null;
+  isActive: boolean;
+  createdOn: string;
+  createdBy: string | null;
+  version: number;
+  lines: RateCardLine[];
+}
+
+export interface RateCardLineInput {
+  meterKey: string;
+  includedQuantity: number;
+  unitPrice: number;
+  unit: string;
+  tierNote: string | null;
+}
+
+export interface CreateRateCardInput {
+  code: string;
+  currency: string;
+  effectiveFromUtc: string;
+  effectiveToUtc: string | null;
+  isActive: boolean;
+  lines: RateCardLineInput[];
+}
+
+export type UpdateRateCardInput = Omit<CreateRateCardInput, 'code'>;
+
+export type BillingStatementStatus = 'Draft' | 'Final';
+
+export interface BillingStatementLine {
+  meterKey: string;
+  description: string;
+  meteredQuantity: number;
+  includedQuantity: number;
+  billableQuantity: number;
+  unitPrice: number;
+  amount: number;
+  sourceNote: string | null;
+}
+
+export interface BillingStatement {
+  id: string;
+  tenantId: string;
+  periodStartUtc: string;
+  periodEndUtc: string;
+  rateCardId: string;
+  currency: string;
+  status: string;
+  totalAmount: number;
+  computedAtUtc: string;
+  finalizedAtUtc: string | null;
+  finalizedBy: string | null;
+  lines: BillingStatementLine[];
+}
+
+/**
+ * Cost vs revenue for a tenant-period. `aiCostTotal` and `grossMargin` are
+ * null (never fabricated) whenever any settled AI request in the period is
+ * unpriceable — the UI must render an honest "not priced" state.
+ */
+export interface TenantCostReport {
+  tenantId: string;
+  businessUnitId: string | null;
+  period: string;
+  statementTotal: number | null;
+  statementStatus: string | null;
+  statementCurrency: string | null;
+  settledAiRequestCount: number;
+  unpricedAiRequestCount: number;
+  pricedAiCostSubtotal: number;
+  aiCostTotal: number | null;
+  grossMargin: number | null;
+  note: string;
+}
+
+// --- Command inputs ---------------------------------------------------------
 
 export interface ProvisionTenantInput {
   name: string;
   slug: string;
-  planTier: PlanTier;
-}
-
-export interface ImpersonationTicket {
-  tenantId: string;
-  /** Short-lived token the app would exchange to enter the tenant workspace. */
-  token: string;
-  expiresAt: string; // ISO
+  /** Persisted plan id to assign at provisioning time (optional). */
+  planId: string | null;
 }

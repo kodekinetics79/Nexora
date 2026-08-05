@@ -55,8 +55,9 @@ namespace ERP_RFQ_Automation.Authorization
                 !await IsManagerOrAdminAsync(callerRoleId, businessUnitId)) return false;
 
             var roles = await _context.SetupMasters.AsNoTracking()
+                .Where(SetupTypes.IsRoleRow)
                 .Where(x => (x.SetupId == callerRoleId || x.SetupId == targetRoleId.Value) &&
-                            x.BusinessUnitId == businessUnitId && x.SetupType.ToLower() == "role" &&
+                            x.BusinessUnitId == businessUnitId &&
                             x.IsActive != false)
                 .Select(x => x.SetupId)
                 .Distinct()
@@ -66,17 +67,22 @@ namespace ERP_RFQ_Automation.Authorization
             var permissions = await _context.RolePermissions.AsNoTracking()
                 .Where(x => x.BusinessUnitId == businessUnitId && x.RoleId.HasValue &&
                             (x.RoleId == callerRoleId || x.RoleId == targetRoleId.Value))
-                .Select(x => new { RoleId = x.RoleId!.Value, x.ModuleId, x.CanCreate, x.CanEdit, x.CanDelete })
+                .Select(x => new { RoleId = x.RoleId!.Value, x.ModuleId, x.CanView, x.CanCreate, x.CanEdit, x.CanDelete })
                 .ToListAsync();
             var caller = permissions.Where(x => x.RoleId == callerRoleId)
                 .GroupBy(x => x.ModuleId)
                 .ToDictionary(x => x.Key, x => (
+                    CanView: x.Any(y => y.CanView == true),
                     CanCreate: x.Any(y => y.CanCreate == true),
                     CanEdit: x.Any(y => y.CanEdit == true),
                     CanDelete: x.Any(y => y.CanDelete == true)));
             foreach (var target in permissions.Where(x => x.RoleId == targetRoleId.Value).GroupBy(x => x.ModuleId))
             {
                 if (!caller.TryGetValue(target.Key, out var grant)) return false;
+                // CanView joins the rank comparison (B3). Before it existed, read access was
+                // implied by row existence, so "the target role can see a module I cannot" was not
+                // expressible — and therefore not checkable.
+                if (target.Any(x => x.CanView == true) && !grant.CanView) return false;
                 if (target.Any(x => x.CanCreate == true) && !grant.CanCreate) return false;
                 if (target.Any(x => x.CanEdit == true) && !grant.CanEdit) return false;
                 if (target.Any(x => x.CanDelete == true) && !grant.CanDelete) return false;
@@ -84,28 +90,48 @@ namespace ERP_RFQ_Automation.Authorization
             return true;
         }
 
-        private static bool IsSuperAdminName(string? s) =>
+        /// <summary>
+        /// Exposed to the assembly (B4) so <see cref="Controllers.SetupMasterController"/> can test a
+        /// CANDIDATE name — the name a caller is proposing — before it is ever written. Without that
+        /// the only way to discover a rename had created a super administrator was to read the row
+        /// back, by which time the privilege already existed.
+        ///
+        /// Known weakness, deliberately retained for now: this is substring matching on a free-text
+        /// name, so "Office Manager" and "Contract Administrator" are administrators today. B4
+        /// closes the EXPLOIT (self-escalation by rename); the class is closed by the immutable
+        /// Setup_Master.RoleRank column in backlog item 1.
+        /// </summary>
+        internal static bool IsSuperAdminName(string? s) =>
             s != null
             && s.Contains("super", StringComparison.OrdinalIgnoreCase)
             && s.Contains("admin", StringComparison.OrdinalIgnoreCase);
 
-        private static bool IsManagerName(string? s) =>
+        /// <inheritdoc cref="IsSuperAdminName"/>
+        internal static bool IsManagerName(string? s) =>
             s != null && (s.Contains("admin", StringComparison.OrdinalIgnoreCase)
                           || s.Contains("manager", StringComparison.OrdinalIgnoreCase));
+
+        /// <summary>
+        /// The IMemoryCache key holding a role's resolved (code, value). A rename MUST evict it: the
+        /// 60s TTL would otherwise keep serving the previous name, and after B4 that window is the
+        /// only remaining way a stale privileged name could be honoured.
+        /// </summary>
+        internal static string RoleCacheKey(long businessUnitId, long roleId)
+            => $"rbac:role:{businessUnitId}:{roleId}";
 
         /// <summary>Role names change rarely; cache the resolved (code, value) 60s per roleId.</summary>
         private async Task<(string? Code, string? Value)?> ResolveRoleAsync(long roleId, long businessUnitId)
         {
             return await _cache.GetOrCreateAsync<(string? Code, string? Value)?>(
-                $"rbac:role:{businessUnitId}:{roleId}",
+                RoleCacheKey(businessUnitId, roleId),
                 async entry =>
                 {
                     entry.AbsoluteExpirationRelativeToNow = CacheTtl;
 
                     var role = await _context.SetupMasters
                         .AsNoTracking()
+                        .Where(SetupTypes.IsRoleRow)
                         .Where(s => s.SetupId == roleId && s.BusinessUnitId == businessUnitId
-                                    && s.SetupType.ToLower() == "role"
                                     && (s.IsActive == true || s.IsActive == null))
                         .Select(s => new { s.SetupCode, s.SetupValue })
                         .FirstOrDefaultAsync();

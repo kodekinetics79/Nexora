@@ -51,7 +51,7 @@ public sealed class AdministrativeSecurityTests
         {
             nextCalled = true;
             return Task.CompletedTask;
-        });
+        }, new MemoryCache(new MemoryCacheOptions()));
         var context = Context(method, readOnly: true);
 
         await middleware.InvokeAsync(context);
@@ -68,7 +68,7 @@ public sealed class AdministrativeSecurityTests
         {
             nextCalled = true;
             return Task.CompletedTask;
-        });
+        }, new MemoryCache(new MemoryCacheOptions()));
         var context = Context("GET", readOnly: true);
 
         await middleware.InvokeAsync(context);
@@ -84,7 +84,7 @@ public sealed class AdministrativeSecurityTests
         {
             nextCalled = true;
             return Task.CompletedTask;
-        });
+        }, new MemoryCache(new MemoryCacheOptions()));
         var context = new DefaultHttpContext();
         context.Request.Method = "POST";
         context.Response.Body = new MemoryStream();
@@ -100,14 +100,71 @@ public sealed class AdministrativeSecurityTests
         Assert.Equal(StatusCodes.Status403Forbidden, context.Response.StatusCode);
     }
 
+    /// <summary>
+    /// The permission each user-mutation endpoint declares: Create requires "Users":Create,
+    /// Update requires "Users":Edit. Plus the counterpart on the RBAC administration surface, so
+    /// the two halves of the separation cannot drift apart unnoticed.
+    ///
+    /// This test used to also assert <c>[RequireModulePermission("Roles &amp; Permissions", Edit)]</c>
+    /// on Create/Update. That assertion is gone on purpose, and its absence is NOT an oversight —
+    /// but note that this test also does NOT assert the attribute is absent. Whether that second
+    /// attribute belongs there is an open POLICY question, and this test deliberately does not
+    /// take a side, because it is not where the security answer lives:
+    ///
+    ///  - The argument for removing it (B7): it makes every user administrator an RBAC
+    ///    administrator by construction, so the "can create users, cannot grant permissions" role
+    ///    a customer actually wants becomes unrepresentable. See
+    ///    <c>UserAdministrationEscalationTests.PilotUserAdministratorRole_*</c>, which shows such a
+    ///    role passing the Users gates and failing the "Roles &amp; Permissions" gate — i.e. with
+    ///    the attribute present it cannot call these endpoints at all.
+    ///
+    ///  - The argument for keeping it: least privilege / defence in depth on a privilege-granting
+    ///    action.
+    ///
+    ///  - What is NOT in dispute: the attribute is not the escalation control, in either
+    ///    direction. Assigning — or changing to — a role the caller does not outrank is refused
+    ///    imperatively by <c>CanManageRoleAsync</c> (Controllers/UserController.cs:246 for Create,
+    ///    :326 and :328 for Update, :504 for Delete) via <see cref="IRoleGate"/>, and self-role
+    ///    mutation is refused by the <c>callerId == id</c> check at :328. Those refusals are proven
+    ///    behaviourally — real controller, real gate, real database, with a permissive-gate
+    ///    mutation control confirming the refusals actually come from the gate — in
+    ///    <c>UserAdministrationEscalationTests</c>. THAT is the escalation coverage. A reflection
+    ///    test can only ever prove which attribute was typed, which is why the old assertion was
+    ///    misleading: it read like escalation coverage and was not.
+    ///
+    /// So: if you are here because you added or removed that attribute and expected this test to
+    /// have an opinion — it does not. Change the policy on its merits; the escalation invariant is
+    /// enforced and tested elsewhere and does not move when you do.
+    /// </summary>
     [Fact]
-    public void UserRoleMutations_RequireRoleAdministrationAuthority()
+    public void UserMutations_DeclareUserAdministrationPermission()
     {
-        foreach (var methodName in new[] { nameof(UserController.Create), nameof(UserController.Update) })
+        var userAdministration = new[]
+        {
+            (Method: nameof(UserController.Create), Action: PermissionAction.Create),
+            (Method: nameof(UserController.Update), Action: PermissionAction.Edit)
+        };
+
+        foreach (var (methodName, action) in userAdministration)
         {
             var permissions = typeof(UserController).GetMethods().Single(x => x.Name == methodName)
                 .GetCustomAttributes<RequireModulePermissionAttribute>().ToArray();
-            Assert.Contains(permissions, x => x.ModuleName == "Roles & Permissions" && x.Action == PermissionAction.Edit);
+
+            Assert.Contains(permissions, x => x.ModuleName == "Users" && x.Action == action);
+        }
+
+        foreach (var methodName in new[]
+                 {
+                     nameof(RolePermissionController.Create),
+                     nameof(RolePermissionController.Update),
+                     nameof(RolePermissionController.Delete),
+                     nameof(RolePermissionController.BulkApply)
+                 })
+        {
+            var permissions = typeof(RolePermissionController).GetMethods().Single(x => x.Name == methodName)
+                .GetCustomAttributes<RequireModulePermissionAttribute>().ToArray();
+
+            Assert.Contains(permissions, x => x.ModuleName == "Roles & Permissions");
         }
     }
 

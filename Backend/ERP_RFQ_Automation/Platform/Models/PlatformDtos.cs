@@ -100,4 +100,109 @@ public class ImpersonationResponse
     public string Token { get; set; } = null!;
     public bool ReadOnly { get; set; } = true;
     public DateTime ExpiresAtUtc { get; set; }
+
+    /// <summary>
+    /// The revocable session id — pass to POST /api/platform/impersonation/{jti}/revoke.
+    /// Surfaced directly so the console never has to decode the JWT to end a session.
+    /// </summary>
+    public string Jti { get; set; } = null!;
+}
+
+public class ImpersonationSessionDto
+{
+    public string Jti { get; set; } = null!;
+    public long TenantId { get; set; }
+    public string? TenantName { get; set; }
+    public long ActorPlatformUserId { get; set; }
+    public string? ActorEmail { get; set; }
+    public string Reason { get; set; } = null!;
+    public DateTime IssuedAtUtc { get; set; }
+    public DateTime ExpiresAtUtc { get; set; }
+    public DateTime? RevokedAtUtc { get; set; }
+    public string? RevokedBy { get; set; }
+
+    /// <summary>"active" | "expired" | "revoked".</summary>
+    public string Status { get; set; } = null!;
+}
+
+// ---- Tenant plan assignment ----------------------------------------------
+
+public class ChangeTenantPlanRequest
+{
+    [Required]
+    public long PlanId { get; set; }
+
+    public string? Reason { get; set; }
+}
+
+// ---- Platform users ------------------------------------------------------
+
+public class PlatformUserDto
+{
+    public long Id { get; set; }
+    public string Email { get; set; } = null!;
+    public string PlatformRole { get; set; } = null!;
+    public bool IsActive { get; set; }
+    public string? DisplayName { get; set; }
+    public DateTime? LastLogin { get; set; }
+    public DateTime CreatedOn { get; set; }
+}
+
+public class CreatePlatformUserRequest
+{
+    [Required, EmailAddress]
+    public string Email { get; set; } = null!;
+
+    [Required, MinLength(12)]
+    public string Password { get; set; } = null!;
+
+    /// <summary>One of the <see cref="Models.PlatformRole"/> names.</summary>
+    [Required]
+    public string Role { get; set; } = null!;
+
+    public string? DisplayName { get; set; }
+}
+
+public class ChangePlatformUserRoleRequest
+{
+    /// <summary>One of the <see cref="Models.PlatformRole"/> names.</summary>
+    [Required]
+    public string Role { get; set; } = null!;
+}
+
+public class ResetPlatformUserPasswordRequest
+{
+    [Required, MinLength(12)]
+    public string NewPassword { get; set; } = null!;
+}
+
+// ---- Plans ---------------------------------------------------------------
+
+public class UpsertPlanRequest
+{
+    [Required]
+    public string Code { get; set; } = null!;
+
+    [Required]
+    public string Name { get; set; } = null!;
+
+    [Range(1, 1000)]
+    public int Weight { get; set; } = 1;
+
+    [Range(1, 1000)]
+    public int MaxConcurrentExtractionJobs { get; set; } = 2;
+
+    [Range(0, int.MaxValue)]
+    public int MaxDocsPerMonth { get; set; } = 1000;
+
+    [Range(0, int.MaxValue)]
+    public int MaxSeats { get; set; } = 5;
+
+    [Range(0, 99999999.99)]
+    public decimal? MonthlyPriceUsd { get; set; }
+
+    /// <summary>JSON object of feature entitlements; defaults to "{}".</summary>
+    public string? Features { get; set; }
+
+    public bool IsActive { get; set; } = true;
 }

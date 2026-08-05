@@ -8,8 +8,6 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.AI;
-using System.Security.Claims;
-using System.Text.Json;
 using ERP_RFQ_Automation.MultiTenancy;
 
 namespace ERP_RFQ_Automation.Platform.Controllers;
@@ -30,16 +28,19 @@ public class TenantsController : ControllerBase
     private readonly ILogger<TenantsController> _logger;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ITenantScopeAccessor _tenantScope;
+    private readonly Entitlements.ITenantAccessService? _tenantAccess;
 
     public TenantsController(
         ErpRfqAutomationContext context, IPlatformAuditService audit, ILogger<TenantsController> logger,
-        IServiceScopeFactory scopeFactory, ITenantScopeAccessor tenantScope)
+        IServiceScopeFactory scopeFactory, ITenantScopeAccessor tenantScope,
+        Entitlements.ITenantAccessService? tenantAccess = null)
     {
         _context = context;
         _audit = audit;
         _logger = logger;
         _scopeFactory = scopeFactory;
         _tenantScope = tenantScope;
+        _tenantAccess = tenantAccess;
     }
 
     // GET /api/platform/tenants
@@ -222,20 +223,16 @@ public class TenantsController : ControllerBase
         policy.UpdatedOn = DateTime.UtcNow;
         policy.UpdatedBy = User.FindFirst("email")?.Value ?? "platform";
         var after = ToAiPolicyDto(policy);
-        var subject = User.FindFirst("sub")?.Value ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-        long.TryParse(subject, out var actorId);
-        tenantDb.Set<PlatformAuditLog>().Add(new PlatformAuditLog
-        {
-            ActorPlatformUserId = actorId,
-            ActAsTenantId = id,
-            Action = "tenant.ai-policy.update",
-            TargetType = nameof(AiProcessingPolicy),
-            TargetId = businessUnitId.ToString(),
-            Metadata = JsonSerializer.Serialize(new { before, after, reason = request.Reason.Trim() }),
-            Ip = HttpContext.Connection.RemoteIpAddress?.ToString(),
-            CreatedOn = DateTime.UtcNow
-        });
-        await tenantDb.SaveChangesAsync(ct);
+
+        // Audit through PlatformAuditService so the positive-actor invariant is
+        // enforced (a row can no longer be silently written with actor id 0). The
+        // service is instantiated over the SAME tenant-scoped context, so its
+        // SaveChanges persists the policy mutation and the audit row atomically.
+        var scopedAudit = new PlatformAuditService(
+            tenantDb, scope.ServiceProvider.GetRequiredService<ILogger<PlatformAuditService>>());
+        await scopedAudit.WriteAsync(User, "tenant.ai-policy.update", nameof(AiProcessingPolicy),
+            businessUnitId.ToString(), new { before, after, reason = request.Reason.Trim() },
+            actAsTenantId: id, httpContext: HttpContext, ct: ct);
         return Ok(after);
     }
 
@@ -244,17 +241,96 @@ public class TenantsController : ControllerBase
     [Authorize(Policy = PlatformPolicies.TenantAdmin)]
     public Task<ActionResult<TenantSummaryDto>> Suspend(
         long id, [FromBody] TenantStatusChangeRequest request, CancellationToken ct) =>
-        ChangeStatus(id, TenantStatus.Suspended, request?.Reason, "tenant.suspend", ct);
+        ChangeStatus(id, TenantStatus.Active, TenantStatus.Suspended, request?.Reason, "tenant.suspend", "suspended", ct);
 
     // POST /api/platform/tenants/{id}/resume
     [HttpPost("{id:long}/resume")]
     [Authorize(Policy = PlatformPolicies.TenantAdmin)]
     public Task<ActionResult<TenantSummaryDto>> Resume(
         long id, [FromBody] TenantStatusChangeRequest request, CancellationToken ct) =>
-        ChangeStatus(id, TenantStatus.Active, request?.Reason, "tenant.resume", ct);
+        ChangeStatus(id, TenantStatus.Suspended, TenantStatus.Active, request?.Reason, "tenant.resume", "resumed", ct);
+
+    // POST /api/platform/tenants/{id}/archive  (Suspended -> Archived)
+    [HttpPost("{id:long}/archive")]
+    [Authorize(Policy = PlatformPolicies.TenantAdmin)]
+    public Task<ActionResult<TenantSummaryDto>> Archive(
+        long id, [FromBody] TenantStatusChangeRequest request, CancellationToken ct) =>
+        ChangeStatus(id, TenantStatus.Suspended, TenantStatus.Archived, request?.Reason, "tenant.archive", "archived", ct);
+
+    // POST /api/platform/tenants/{id}/restore  (Archived -> Suspended)
+    [HttpPost("{id:long}/restore")]
+    [Authorize(Policy = PlatformPolicies.TenantAdmin)]
+    public Task<ActionResult<TenantSummaryDto>> Restore(
+        long id, [FromBody] TenantStatusChangeRequest request, CancellationToken ct) =>
+        ChangeStatus(id, TenantStatus.Archived, TenantStatus.Suspended, request?.Reason, "tenant.restore", "restored", ct);
+
+    // PUT /api/platform/tenants/{id}/plan
+    // Sec9: plan assignment is a BILLING operation (Owner | BillingAdmin), not a
+    // support-tenant-admin one — SupportAdmin must not be able to change what a
+    // customer is charged/entitled to.
+    [HttpPut("{id:long}/plan")]
+    [Authorize(Policy = PlatformPolicies.Billing)]
+    public async Task<ActionResult<TenantSummaryDto>> ChangePlan(
+        long id, [FromBody] ChangeTenantPlanRequest request, CancellationToken ct)
+    {
+        if (!ModelState.IsValid)
+            return BadRequest(ModelState);
+
+        var plan = await _context.Set<Plan>().AsNoTracking()
+            .FirstOrDefaultAsync(p => p.Id == request.PlanId, ct);
+        if (plan is null)
+            return BadRequest(new { error = $"Plan {request.PlanId} does not exist." });
+        if (!plan.IsActive)
+            return BadRequest(new { error = $"Plan '{plan.Code}' is not active and cannot be assigned." });
+
+        var strategy = _context.Database.CreateExecutionStrategy();
+        try
+        {
+            await strategy.ExecuteAsync(async () =>
+            {
+                _context.ChangeTracker.Clear();
+                await using var tx = await _context.Database.BeginTransactionAsync(ct);
+
+                var tenant = await _context.Set<Tenant>().IgnoreQueryFilters()
+                    .FirstOrDefaultAsync(t => t.Id == id, ct);
+                if (tenant is null)
+                    throw new TenantNotFoundException();
+
+                var previousPlanId = tenant.PlanId;
+                tenant.PlanId = plan.Id;
+                tenant.ModifiedBy = User.FindFirst("email")?.Value ?? "platform";
+                tenant.ModifiedOn = DateTime.UtcNow;
+                await _context.SaveChangesAsync(ct);
+
+                await _audit.WriteAsync(User, "tenant.plan.change", nameof(Tenant), tenant.Id.ToString(),
+                    new { fromPlanId = previousPlanId, toPlanId = plan.Id, planCode = plan.Code, reason = request.Reason },
+                    actAsTenantId: tenant.Id, httpContext: HttpContext, ct: ct);
+
+                await tx.CommitAsync(ct);
+            });
+        }
+        catch (TenantNotFoundException)
+        {
+            return NotFound();
+        }
+        catch (Exception)
+        {
+            _logger.LogError("Failed to change tenant {TenantId} plan to {PlanId}", id, request.PlanId);
+            return StatusCode(500, new { error = "Tenant plan change failed." });
+        }
+
+        var withPlan = await _context.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
+            .Include(t => t.Plan).FirstAsync(t => t.Id == id, ct);
+        // P2-A7 (same rationale as status changes): drop the cached tenant+plan snapshot
+        // so the new plan's limits apply immediately on this node.
+        if (withPlan.PrimaryBusinessUnitId is long planChangedBu)
+            _tenantAccess?.Evict(planChangedBu);
+        return Ok(ToDto(withPlan));
+    }
 
     private async Task<ActionResult<TenantSummaryDto>> ChangeStatus(
-        long id, TenantStatus target, string? reason, string action, CancellationToken ct)
+        long id, TenantStatus requiredCurrent, TenantStatus target, string? reason,
+        string action, string operationVerb, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(reason))
             return BadRequest(new { error = "A reason is required." });
@@ -275,10 +351,10 @@ public class TenantsController : ControllerBase
                 if (tenant is null)
                     throw new TenantNotFoundException();
 
-                if (target == TenantStatus.Suspended && tenant.Status != TenantStatus.Active)
-                    throw new InvalidTenantStatusTransitionException(tenant.Status, "Active", "suspended");
-                if (target == TenantStatus.Active && tenant.Status != TenantStatus.Suspended)
-                    throw new InvalidTenantStatusTransitionException(tenant.Status, "Suspended", "resumed");
+                // Validated lifecycle graph: Active <-> Suspended <-> Archived.
+                if (tenant.Status != requiredCurrent)
+                    throw new InvalidTenantStatusTransitionException(
+                        tenant.Status, requiredCurrent.ToString(), operationVerb);
 
                 var previous = tenant.Status;
                 tenant.Status = target;
@@ -310,6 +386,12 @@ public class TenantsController : ControllerBase
 
         var withPlan = await _context.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
             .Include(t => t.Plan).FirstAsync(t => t.Id == id, ct);
+        // P2-A7: evict the ~60s tenant-access cache entry for this tenant's primary
+        // BusinessUnit so suspension (and every other lifecycle transition) is
+        // enforced IMMEDIATELY on this node. Other instances converge within the
+        // cache TTL — a documented cross-instance bound.
+        if (withPlan.PrimaryBusinessUnitId is long statusChangedBu)
+            _tenantAccess?.Evict(statusChangedBu);
         return Ok(ToDto(withPlan));
     }
 

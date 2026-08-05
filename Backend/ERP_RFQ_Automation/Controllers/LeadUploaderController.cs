@@ -77,6 +77,12 @@ namespace ERP_RFQ_Automation.Controllers
                     HttpContext.RequestAborted);
                 return StatusCode(StatusCodes.Status202Accepted, new { success = true, batchId, jobId = result.JobId, outcome = result.Outcome.ToString() });
             }
+            catch (Platform.Entitlements.EntitlementDeniedException ex)
+            {
+                _logger.LogWarning("Template upload denied for tenant {BusinessUnitId}: {Reason}", targetBUId, ex.Message);
+                // P2-A10: one canonical problem+json shape/base URI for typed denials.
+                return Platform.Entitlements.EntitlementProblemFilter.ToResult(ex);
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error uploading lead template.");

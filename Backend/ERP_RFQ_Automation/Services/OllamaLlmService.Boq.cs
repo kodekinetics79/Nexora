@@ -146,6 +146,10 @@ namespace ERP_RFQ_Automation.Services
                 Messages: BuildGovernedMessages(trustedInstructions, untrustedDocument),
                 Stream: false,
                 Format: "json",
+                // BoQ drafting is structured extraction — same rationale as the extraction
+                // path above: disable hidden thinking so reasoning models spend the output
+                // budget on JSON content. Non-reasoning models ignore the field.
+                Think: false,
                 Options: new OllamaOptions(Temperature: TEMPERATURE, NumPredict: _maximumOutputTokens)
             );
 

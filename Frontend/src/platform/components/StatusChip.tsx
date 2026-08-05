@@ -81,13 +81,15 @@ export const JobStatusChip = ({ status }: { status: JobStatus }) => (
   <SoftChip label={JOB_LABEL[status]} tone={JOB_TONE[status]} />
 );
 
-const PLAN_TONE: Record<PlanTier, Tone> = {
+// Well-known plan codes get a stable tone; any other real plan code falls back
+// to "info", and plan-less tenants ("none") read as a warning.
+const PLAN_TONE: Record<string, Tone> = {
   free: 'neutral',
   pro: 'info',
   enterprise: 'success',
-  unassigned: 'warning',
+  none: 'warning',
 };
 
 export const PlanChip = ({ tier }: { tier: PlanTier }) => (
-  <SoftChip label={tier} tone={PLAN_TONE[tier]} dot={false} />
+  <SoftChip label={tier} tone={PLAN_TONE[tier] ?? 'info'} dot={false} />
 );

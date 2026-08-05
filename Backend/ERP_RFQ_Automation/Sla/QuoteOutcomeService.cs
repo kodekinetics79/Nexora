@@ -580,7 +580,9 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
         // this only ever mattered on the null-tenant sweep path — which is precisely where this
         // service runs.
         var roleName = await _context.SetupMasters.AsNoTracking()
-            .Where(s => s.SetupId == roleId && s.SetupType == "role" && s.BusinessUnitId == businessUnitId)
+            // RC-1: was the case-SENSITIVE literal "role"; production stores 'Role'.
+            .Where(ERP_RFQ_Automation.Authorization.SetupTypes.IsRoleRow)
+            .Where(s => s.SetupId == roleId && s.BusinessUnitId == businessUnitId)
             .Select(s => s.SetupValue)
             .FirstOrDefaultAsync(ct);
         if (string.IsNullOrWhiteSpace(roleName)) return false;

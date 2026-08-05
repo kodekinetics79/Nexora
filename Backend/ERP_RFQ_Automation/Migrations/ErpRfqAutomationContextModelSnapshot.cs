@@ -1991,6 +1991,218 @@ namespace ERP_RFQ_Automation.Migrations
                         });
                 });
 
+            modelBuilder.Entity("ERP_RFQ_Automation.Billing.BillingStatement", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime>("ComputedAtUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<DateTime?>("FinalizedAtUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("FinalizedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<DateTime>("PeriodEndUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<DateTime>("PeriodStartUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<long>("RateCardId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<long>("TenantId")
+                        .HasColumnType("bigint");
+
+                    b.Property<decimal>("TotalAmount")
+                        .HasPrecision(14, 2)
+                        .HasColumnType("numeric(14,2)");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L);
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RateCardId")
+                        .HasDatabaseName("IX_BillingStatements_RateCard");
+
+                    b.HasIndex("TenantId", "PeriodStartUtc")
+                        .IsUnique()
+                        .HasDatabaseName("UX_BillingStatements_Tenant_PeriodStart");
+
+                    b.HasIndex("TenantId", "Status")
+                        .HasDatabaseName("IX_BillingStatements_Tenant_Status");
+
+                    b.ToTable("BillingStatements", "platform");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Billing.BillingStatementLine", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<decimal>("Amount")
+                        .HasPrecision(14, 2)
+                        .HasColumnType("numeric(14,2)");
+
+                    b.Property<decimal>("BillableQuantity")
+                        .HasPrecision(18, 3)
+                        .HasColumnType("numeric(18,3)");
+
+                    b.Property<long>("BillingStatementId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Description")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<decimal>("IncludedQuantity")
+                        .HasPrecision(18, 3)
+                        .HasColumnType("numeric(18,3)");
+
+                    b.Property<string>("MeterKey")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<decimal>("MeteredQuantity")
+                        .HasPrecision(18, 3)
+                        .HasColumnType("numeric(18,3)");
+
+                    b.Property<string>("SourceNote")
+                        .HasMaxLength(400)
+                        .HasColumnType("character varying(400)");
+
+                    b.Property<decimal>("UnitPrice")
+                        .HasPrecision(12, 6)
+                        .HasColumnType("numeric(12,6)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BillingStatementId")
+                        .HasDatabaseName("IX_BillingStatementLines_Statement");
+
+                    b.ToTable("BillingStatementLines", "platform");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Billing.RateCard", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("Code")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("CreatedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<DateTime>("CreatedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<DateTime>("EffectiveFromUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<DateTime?>("EffectiveToUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L);
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Code")
+                        .IsUnique()
+                        .HasDatabaseName("UX_RateCards_Code");
+
+                    b.HasIndex("IsActive", "EffectiveFromUtc")
+                        .HasDatabaseName("IX_RateCards_Active_EffectiveFrom");
+
+                    b.ToTable("RateCards", "platform");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Billing.RateCardLine", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<decimal>("IncludedQuantity")
+                        .HasPrecision(18, 3)
+                        .HasColumnType("numeric(18,3)");
+
+                    b.Property<string>("MeterKey")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<long>("RateCardId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("TierNote")
+                        .HasMaxLength(400)
+                        .HasColumnType("character varying(400)");
+
+                    b.Property<string>("Unit")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<decimal>("UnitPrice")
+                        .HasPrecision(12, 6)
+                        .HasColumnType("numeric(12,6)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RateCardId", "MeterKey")
+                        .IsUnique()
+                        .HasDatabaseName("UX_RateCardLines_RateCard_MeterKey");
+
+                    b.ToTable("RateCardLines", "platform");
+                });
+
             modelBuilder.Entity("ERP_RFQ_Automation.Boq.BoqAssembly", b =>
                 {
                     b.Property<long>("Id")
@@ -10743,6 +10955,70 @@ namespace ERP_RFQ_Automation.Migrations
                     b.ToTable("EmailIngests");
                 });
 
+            modelBuilder.Entity("ERP_RFQ_Automation.Models.IamAuditEvent", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("Action")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<long?>("ActorRoleId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("ActorUserId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("AfterJson")
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("BeforeJson")
+                        .HasColumnType("jsonb");
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("CorrelationId")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTime>("OccurredOn")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp without time zone")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<string>("Reason")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<long?>("TargetId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("TargetLabel")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("TargetType")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BusinessUnitId", "OccurredOn")
+                        .HasDatabaseName("IX_IamAuditEvents_BU_OccurredOn");
+
+                    b.HasIndex("BusinessUnitId", "TargetType", "TargetId")
+                        .HasDatabaseName("IX_IamAuditEvents_BU_Target");
+
+                    b.ToTable("IamAuditEvents", (string)null);
+                });
+
             modelBuilder.Entity("ERP_RFQ_Automation.Models.Image", b =>
                 {
                     b.Property<long>("Id")
@@ -12785,6 +13061,11 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("boolean")
                         .HasDefaultValue(false);
 
+                    b.Property<bool?>("CanView")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true);
+
                     b.Property<string>("CreatedBy")
                         .IsRequired()
                         .HasMaxLength(255)
@@ -13913,6 +14194,10 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<DateTime>("CreatedOn")
                         .HasColumnType("timestamp without time zone");
 
+                    b.Property<DateTime?>("DeactivatedAtUtc")
+                        .HasColumnType("timestamp without time zone")
+                        .HasColumnName("DeactivatedAtUtc");
+
                     b.Property<string>("Email")
                         .IsRequired()
                         .HasColumnType("citext");
@@ -14641,6 +14926,55 @@ namespace ERP_RFQ_Automation.Migrations
                         });
                 });
 
+            modelBuilder.Entity("ERP_RFQ_Automation.Platform.Models.ImpersonationSession", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("ActorPlatformUserId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime>("ExpiresAtUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<DateTime>("IssuedAtUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("Jti")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<DateTime?>("RevokedAtUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("RevokedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<long>("TenantId")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ExpiresAtUtc");
+
+                    b.HasIndex("Jti")
+                        .IsUnique();
+
+                    b.HasIndex("TenantId", "IssuedAtUtc");
+
+                    b.ToTable("ImpersonationSessions", "platform");
+                });
+
             modelBuilder.Entity("ERP_RFQ_Automation.Platform.Models.Plan", b =>
                 {
                     b.Property<long>("Id")
@@ -14674,6 +15008,10 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<int>("MaxSeats")
                         .HasColumnType("integer");
+
+                    b.Property<decimal?>("MonthlyPriceUsd")
+                        .HasPrecision(10, 2)
+                        .HasColumnType("numeric(10,2)");
 
                     b.Property<string>("Name")
                         .IsRequired()
@@ -14719,6 +15057,13 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<string>("Metadata")
                         .HasColumnType("jsonb");
+
+                    b.Property<string>("Result")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasDefaultValue("success");
 
                     b.Property<string>("TargetId")
                         .HasMaxLength(128)
@@ -17482,6 +17827,43 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Navigation("Run");
                 });
 
+            modelBuilder.Entity("ERP_RFQ_Automation.Billing.BillingStatement", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Billing.RateCard", null)
+                        .WithMany()
+                        .HasForeignKey("RateCardId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Platform.Models.Tenant", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Billing.BillingStatementLine", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Billing.BillingStatement", "Statement")
+                        .WithMany("Lines")
+                        .HasForeignKey("BillingStatementId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Statement");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Billing.RateCardLine", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Billing.RateCard", "RateCard")
+                        .WithMany("Lines")
+                        .HasForeignKey("RateCardId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("RateCard");
+                });
+
             modelBuilder.Entity("ERP_RFQ_Automation.Boq.BoqAssemblyComponent", b =>
                 {
                     b.HasOne("ERP_RFQ_Automation.Boq.BoqAssembly", "Assembly")
@@ -19128,6 +19510,15 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasConstraintName("FK__EmailInge__Email__503BEA1C");
 
                     b.Navigation("EmailConfiguration");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Models.IamAuditEvent", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Models.BusinessUnit", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Models.Inventory", b =>
@@ -20872,6 +21263,16 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Navigation("Matches");
 
                     b.Navigation("Rules");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Billing.BillingStatement", b =>
+                {
+                    b.Navigation("Lines");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Billing.RateCard", b =>
+                {
+                    b.Navigation("Lines");
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Boq.BoqAssembly", b =>

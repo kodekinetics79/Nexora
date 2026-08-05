@@ -25,8 +25,24 @@ const ACTIONS = [
   'tenant.provision',
   'tenant.suspend',
   'tenant.resume',
+  'tenant.archive',
+  'tenant.restore',
+  'tenant.plan.change',
   'tenant.ai-policy.update',
+  'plan.create',
+  'plan.update',
+  'platform-user.create',
+  'platform-user.role.change',
+  'platform-user.deactivate',
+  'platform-user.reactivate',
+  'platform-user.password.reset',
+  'billing.ratecard.create',
+  'billing.ratecard.update',
+  'billing.statement.compute',
+  'billing.statement.finalize',
   'impersonate.issue',
+  'impersonate.revoke',
+  'platform.login.failed',
 ];
 
 export default function AuditLogPage() {
@@ -35,14 +51,16 @@ export default function AuditLogPage() {
 
   const [search, setSearch] = useState('');
   const [action, setAction] = useState('all');
+  const [result, setResult] = useState<'all' | 'success' | 'failure'>('all');
 
   const query: AuditQuery = useMemo(
     () => ({
       action: action === 'all' ? undefined : action,
       tenantId: tenantFromUrl || undefined,
+      result: result === 'all' ? undefined : result,
       search: search.trim() || undefined,
     }),
-    [action, tenantFromUrl, search],
+    [action, tenantFromUrl, result, search],
   );
 
   const { data: tenants } = useQuery({
@@ -57,10 +75,11 @@ export default function AuditLogPage() {
 
   const tenantName = tenants?.find((t) => t.id === tenantFromUrl)?.name;
 
-  const hasFilters = search.trim() !== '' || action !== 'all';
+  const hasFilters = search.trim() !== '' || action !== 'all' || result !== 'all';
   const clearFilters = () => {
     setSearch('');
     setAction('all');
+    setResult('all');
   };
 
   const columns: GridColDef<AuditEntry>[] = [
@@ -119,6 +138,11 @@ export default function AuditLogPage() {
                 {a}
               </MenuItem>
             ))}
+          </TextField>
+          <TextField size="small" select label="Result" value={result} onChange={(e) => setResult(e.target.value as 'all' | 'success' | 'failure')} sx={{ minWidth: 140 }}>
+            <MenuItem value="all">All results</MenuItem>
+            <MenuItem value="success">Success</MenuItem>
+            <MenuItem value="failure">Failure</MenuItem>
           </TextField>
           {hasFilters && (
             <Button color="inherit" startIcon={<ClearIcon />} onClick={clearFilters} sx={{ fontWeight: 700 }}>

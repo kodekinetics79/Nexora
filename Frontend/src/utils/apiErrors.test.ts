@@ -219,3 +219,128 @@ describe('toPresentableError — misc', () => {
     expect(text).toContain('HTTP 500');
   });
 });
+
+describe('toPresentableError — plain-string 400/409 bodies (the swallowed-reason class)', () => {
+  // The exact body the RFQ create endpoint returned while the honest reason was being swallowed.
+  const LEAD_REQUIRED = 'A tenant-owned lead is required so the RFQ belongs to a commercial case.';
+  const GENERIC_400 = 'Some of the submitted details were not valid. Review the highlighted fields and try again.';
+
+  it('renders a bare-string 400 body as the user-facing message', () => {
+    const result = toPresentableError(
+      axiosError({
+        status: 400,
+        data: LEAD_REQUIRED,
+        method: 'post',
+        url: 'https://api.internal.nexora.test/api/Rfq',
+      }),
+      { fallbackMessage: 'The RFQ could not be created.' },
+    );
+    expect(result.message).toBe(LEAD_REQUIRED);
+    expect(result.severity).toBe('warning');
+    expect(result.status).toBe(400);
+  });
+
+  it('renders a bare-string 409 body as the user-facing message', () => {
+    const result = toPresentableError(axiosError({ status: 409, data: 'This RFQ number is already in use.' }));
+    expect(result.message).toBe('This RFQ number is already in use.');
+  });
+
+  it('unwraps a JSON-encoded string body a transport left quoted', () => {
+    const result = toPresentableError(axiosError({ status: 400, data: `"${LEAD_REQUIRED}"` }));
+    expect(result.message).toBe(LEAD_REQUIRED);
+  });
+
+  it('collapses multi-line server text into one snackbar-safe sentence', () => {
+    const result = toPresentableError(
+      axiosError({ status: 400, data: 'A tenant-owned lead is required\n   so the RFQ belongs to a commercial case.' }),
+    );
+    expect(result.message).toBe(LEAD_REQUIRED);
+  });
+
+  it('does not render a string body carrying control characters', () => {
+    const withNul = `Bad${String.fromCharCode(0)}payload`;
+    const result = toPresentableError(axiosError({ status: 400, data: withNul }));
+    expect(result.message).toBe(GENERIC_400);
+  });
+
+  it('does not render an unbounded string body, but keeps it for support', () => {
+    const result = toPresentableError(axiosError({ status: 400, data: 'x'.repeat(400) }));
+    expect(result.message).toBe(GENERIC_400);
+    expect(result.technicalDetail).toContain('body=xxxx');
+  });
+
+  it('does not render a bare HTTP reason phrase as product copy', () => {
+    const result = toPresentableError(axiosError({ status: 400, data: 'Bad Request' }));
+    expect(result.message).toBe(GENERIC_400);
+  });
+
+  it('still never renders a bare-string 500 body', () => {
+    const result = toPresentableError(axiosError({ status: 500, data: 'Unhandled failure in RfqController' }));
+    expect(result.message).not.toContain('RfqController');
+    expect(result.technicalDetail).toContain('Unhandled failure in RfqController');
+  });
+});
+
+describe('toPresentableError — RFC 7807 ProblemDetails', () => {
+  const TRACE = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01';
+  const LEAD_REQUIRED = 'A tenant-owned lead is required so the RFQ belongs to a commercial case.';
+  const problem = (overrides: Record<string, unknown> = {}) => ({
+    type: 'https://tools.ietf.org/html/rfc9110#section-15.5.1',
+    title: 'Bad Request',
+    status: 400,
+    traceId: TRACE,
+    ...overrides,
+  });
+
+  it('renders `detail` as the message, never the stock title', () => {
+    const result = toPresentableError(axiosError({ status: 400, data: problem({ detail: LEAD_REQUIRED }) }));
+    expect(result.message).toBe(LEAD_REQUIRED);
+    expect(result.message).not.toBe('Bad Request');
+  });
+
+  it('discloses the traceId even when the detail was rendered as the message', () => {
+    const result = toPresentableError(axiosError({ status: 400, data: problem({ detail: LEAD_REQUIRED }) }));
+    expect(result.technicalDetail).toContain(`traceId=${TRACE}`);
+  });
+
+  it('falls back to status copy when the body offers only a stock title, keeping the traceId', () => {
+    const result = toPresentableError(axiosError({ status: 400, data: problem() }));
+    expect(result.message).toBe(
+      'Some of the submitted details were not valid. Review the highlighted fields and try again.',
+    );
+    expect(result.technicalDetail).toContain(`traceId=${TRACE}`);
+  });
+
+  it('demotes a technical `detail` but still discloses the body and the traceId', () => {
+    const result = toPresentableError(
+      axiosError({ status: 400, data: problem({ detail: 'Npgsql.PostgresException: insert violates foreign key' }) }),
+    );
+    expect(result.message).not.toContain('Npgsql');
+    expect(result.technicalDetail).toContain('Npgsql.PostgresException');
+    expect(result.technicalDetail).toContain(`traceId=${TRACE}`);
+  });
+
+  it('flattens ValidationProblemDetails and keeps the traceId', () => {
+    const result = toPresentableError(
+      axiosError({
+        status: 400,
+        data: problem({
+          title: 'One or more validation errors occurred.',
+          errors: { 'Rfqitems[0].Quantity': ['The Quantity field is required.'] },
+        }),
+      }),
+    );
+    expect(result.message).toContain('Rfqitems[0].Quantity: The Quantity field is required.');
+    expect(result.technicalDetail).toContain(`traceId=${TRACE}`);
+  });
+
+  it('renders a 409 ProblemDetails detail', () => {
+    const result = toPresentableError(
+      axiosError({
+        status: 409,
+        data: problem({ status: 409, title: 'Conflict', detail: 'This RFQ was modified by another user. Reload before saving.' }),
+      }),
+    );
+    expect(result.message).toBe('This RFQ was modified by another user. Reload before saving.');
+  });
+});

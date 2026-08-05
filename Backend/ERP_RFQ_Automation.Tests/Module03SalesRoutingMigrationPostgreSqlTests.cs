@@ -88,8 +88,8 @@ public sealed class Module03SalesRoutingMigrationPostgreSqlTests(PostgreSqlTestD
             Seed.EnsureBusinessUnit(context, 99_501);
             Seed.EnsureBusinessUnit(context, 99_502);
             var lead = Seed.Lead(context, 99_511, 99_501, buyersName: "Routing tenant A");
-            context.Users.AddRange(User(99_521, 99_501, "owner-a"), User(99_522, 99_502, "owner-b"));
             await context.SaveChangesAsync();
+            await SeedOwnersAsync(context);
             var decision = new LeadRoutingDecision
             {
                 BusinessUnitId = 99_501, LeadId = lead.Id, SuggestedUserId = 99_521,
@@ -167,12 +167,39 @@ public sealed class Module03SalesRoutingMigrationPostgreSqlTests(PostgreSqlTestD
         }
     }
 
+    /// <summary>
+    /// Owner row for tests that run against the fully migrated fixture, where the current EF
+    /// model matches the schema. The historical rehearsal must use <see cref="SeedOwnersAsync"/>
+    /// instead.
+    /// </summary>
     private static User User(long id, long tenant, string name) => new()
     {
         Id = id, Buid = tenant, FirstName = name, LastName = "Test", Email = $"{name}@nexora.invalid",
         PasswordHash = "not-used", ImageUrl = "n/a", IsActive = true,
         CreatedBy = "tests", CreatedOn = DateTime.UtcNow
     };
+
+    /// <summary>
+    /// Seeds the owner rows the migration rehearsal needs as FK targets.
+    ///
+    /// Deliberately raw SQL rather than <c>context.Users.Add</c>: the rehearsal runs against the
+    /// schema as it stood at <see cref="PreviousMigration"/>, while the EF model is always the
+    /// current one. Inserting through the model makes every later additive column on Users
+    /// (for example DeactivatedAtUtc) fail this test with "column does not exist" even though the
+    /// migration under test is unaffected. Naming the columns that existed at that point keeps
+    /// the rehearsal pinned to the history it is meant to exercise.
+    /// </summary>
+    private static Task SeedOwnersAsync(ErpRfqAutomationContext context) =>
+        context.Database.ExecuteSqlRawAsync("""
+            INSERT INTO "Users"
+                ("ID", "BUID", "FirstName", "LastName", "Email", "Password_Hash",
+                 "ImageURL", "IsActive", "CreatedBy", "CreatedOn")
+            VALUES
+                (99521, 99501, 'owner-a', 'Test', 'owner-a@nexora.invalid', 'not-used',
+                 'n/a', true, 'tests', now()),
+                (99522, 99502, 'owner-b', 'Test', 'owner-b@nexora.invalid', 'not-used',
+                 'n/a', true, 'tests', now());
+            """);
 
     private static CommercialRoutingApplicationService Service(ErpRfqAutomationContext context) =>
         new(context, new DeterministicRoutingEngine(), new RoutingPolicy());

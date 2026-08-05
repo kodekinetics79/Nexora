@@ -31,5 +31,19 @@ public class PlatformAuditLog
 
     public string? Ip { get; set; }
 
+    /// <summary>
+    /// Outcome of the audited action: <see cref="PlatformAuditResults.Success"/> or
+    /// <see cref="PlatformAuditResults.Failure"/>. Defaults to success so legacy writers
+    /// and pre-existing rows stay semantically unchanged.
+    /// </summary>
+    public string Result { get; set; } = PlatformAuditResults.Success;
+
     public DateTime CreatedOn { get; set; } = DateTime.UtcNow;
+}
+
+/// <summary>Canonical values for <see cref="PlatformAuditLog.Result"/> (max length 16).</summary>
+public static class PlatformAuditResults
+{
+    public const string Success = "success";
+    public const string Failure = "failure";
 }

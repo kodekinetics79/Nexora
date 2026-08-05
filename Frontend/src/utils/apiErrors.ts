@@ -13,6 +13,15 @@
  *     copy. This is the "ClamAV is unavailable (SocketException)" class of leak.
  *  4. Anything unrecognised falls back to a safe generic message, with the original detail kept in
  *     `technicalDetail` for the copyable "Technical detail (for support)" disclosure.
+ *  5. A 4xx whose body is a PLAIN STRING (`text/plain`, or a JSON-encoded string the transport left
+ *     quoted) IS rendered verbatim when it is safe printable text: bounded length, no markup, no
+ *     stack/host markers, no control characters, and not a bare HTTP reason phrase ("Bad Request").
+ *     Backends in this product return honest one-line reasons that way ("A tenant-owned lead is
+ *     required so the RFQ belongs to a commercial case."); swallowing them hid the real fix from
+ *     users. Only genuinely unrenderable bodies fall back to the generic wording.
+ *  6. RFC 7807 ProblemDetails: `detail` is preferred as the user-facing message (subject to the
+ *     same safety gate), and a `traceId` is always carried into the support disclosure — even when
+ *     the detail was rendered — so support can correlate the report with server logs.
  *
  * 401 handling deliberately mirrors `src/api/axiosInstance.ts`: the response interceptor there owns
  * the redirect to /login. This module only produces the wording, and never triggers navigation.
@@ -55,6 +64,54 @@ const trimmedString = (value: unknown): string | null => {
 };
 
 /**
+ * A `text/plain` (or mis-labelled) body can arrive still JSON-encoded: `'"A lead is required."'`.
+ * Axios usually unwraps it, but not for every content-type/adapter combination. One level of
+ * unwrap keeps the quotes out of product copy; anything that parses to a non-string stays as-is.
+ */
+const unwrapJsonStringLiteral = (value: string): string => {
+  if (value.length < 2 || !value.startsWith('"') || !value.endsWith('"')) return value;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return typeof parsed === 'string' ? parsed : value;
+  } catch {
+    return value;
+  }
+};
+
+/** Snackbars are one line; collapse newlines/runs of whitespace before rendering server text. */
+const collapseWhitespace = (value: string): string => value.replace(/\s+/g, ' ').trim();
+
+/** C0/C1 control characters (tab/newline/CR excluded — `collapseWhitespace` removes those). */
+const NON_PRINTABLE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/;
+
+/**
+ * Status-line reason phrases and framework defaults ("Bad Request", ProblemDetails' stock titles)
+ * carry no information the status-derived copy doesn't already say better. They are not rendered,
+ * so a ProblemDetails `title` never displaces real product copy when `detail` is absent.
+ */
+const GENERIC_REASON_PHRASES = new Set([
+  'bad request',
+  'unauthorized',
+  'forbidden',
+  'not found',
+  'conflict',
+  'unprocessable entity',
+  'internal server error',
+  'service unavailable',
+  'error',
+  'an error occurred',
+  'an error occurred while processing your request',
+  'one or more validation errors occurred',
+]);
+
+const isGenericReasonPhrase = (value: string): boolean =>
+  GENERIC_REASON_PHRASES.has(value.trim().replace(/[.!]+$/, '').toLowerCase());
+
+/** ASP.NET stamps ProblemDetails with a `traceId` extension; keep it for support correlation. */
+const problemTraceId = (data: unknown): string | null =>
+  isRecord(data) ? trimmedString(data.traceId) : null;
+
+/**
  * Heuristic gate for server-supplied strings. A backend `message`/`detail` is only product copy if
  * it reads like a sentence written for a user. Anything carrying operator signal — exception type
  * names, stack frames, host:port, file paths, markup, SQL — is diagnostics wearing a message field.
@@ -76,9 +133,16 @@ const TECHNICAL_MARKERS: RegExp[] = [
 export const looksLikeTechnicalNoise = (value: string): boolean =>
   TECHNICAL_MARKERS.some((marker) => marker.test(value));
 
-/** A server string is shown only when it is a plausible sentence and free of operator signal. */
+/**
+ * A server string is shown only when it is a plausible sentence and free of operator signal:
+ * non-empty, bounded, printable, not a bare reason phrase, and free of technical markers.
+ */
 const isPresentableServerText = (value: string): boolean =>
-  value.length > 0 && value.length <= MAX_MESSAGE_LENGTH && !looksLikeTechnicalNoise(value);
+  value.length > 0 &&
+  value.length <= MAX_MESSAGE_LENGTH &&
+  !NON_PRINTABLE.test(value) &&
+  !isGenericReasonPhrase(value) &&
+  !looksLikeTechnicalNoise(value);
 
 const truncate = (value: string, limit: number): string =>
   value.length <= limit ? value : `${value.slice(0, limit - 1)}…`;
@@ -119,16 +183,38 @@ const validationMessage = (data: unknown): string | null => {
   return truncate(lines.join(' '), MAX_MESSAGE_LENGTH);
 };
 
-/** Pulls the first string-typed candidate out of a response body. Non-strings are ignored. */
+/**
+ * Pulls the first PRESENTABLE string candidate out of a response body. Non-strings are ignored.
+ * `detail` (RFC 7807) outranks `title`, so a ProblemDetails body renders its specific sentence and
+ * a bland stock title never shadows it; keys that fail the safety gate are skipped rather than
+ * poisoning the whole body, so `{ title: "Bad Request", detail: "A lead is required." }` still
+ * renders the detail.
+ */
 const SERVER_TEXT_KEYS = ['message', 'detail', 'error', 'title', 'errorMessage'] as const;
+
+/**
+ * Gates on the RAW string first (the stack-frame marker is line-anchored), then collapses
+ * whitespace so multi-line server text renders as one snackbar-safe sentence.
+ */
+const presentableCandidate = (raw: string): string | null => {
+  if (!isPresentableServerText(raw)) return null;
+  const collapsed = collapseWhitespace(raw);
+  return collapsed.length > 0 ? collapsed : null;
+};
 
 const serverText = (data: unknown): string | null => {
   const direct = trimmedString(data);
-  if (direct !== null) return direct;
+  if (direct !== null) {
+    // A bare-string body ("A tenant-owned lead is required …") is the message, modulo one level
+    // of JSON quoting some transports leave in place.
+    return presentableCandidate(unwrapJsonStringLiteral(direct));
+  }
   if (!isRecord(data)) return null;
   for (const key of SERVER_TEXT_KEYS) {
     const candidate = trimmedString(data[key]);
-    if (candidate !== null) return candidate;
+    if (candidate === null) continue;
+    const presentable = presentableCandidate(candidate);
+    if (presentable !== null) return presentable;
   }
   return null;
 };
@@ -302,6 +388,7 @@ const redactOrigins = (value: string): string =>
 const buildTechnicalDetail = (
   shape: AxiosLikeShape,
   demotedServerText: string | null,
+  traceId?: string | null,
 ): string | undefined => {
   const parts: string[] = [];
   if (shape.status !== undefined) parts.push(`HTTP ${shape.status}`);
@@ -310,6 +397,9 @@ const buildTechnicalDetail = (
   if (path) parts.push(`${shape.method ?? 'REQUEST'} ${path}`);
   if (shape.errorMessage) parts.push(`error=${redactOrigins(shape.errorMessage)}`);
   if (demotedServerText) parts.push(`body=${redactOrigins(demotedServerText)}`);
+  // The ProblemDetails traceId is always disclosed — even when the body's `detail` became the
+  // user-facing message — so a support report can be matched to the server-side log line.
+  if (traceId) parts.push(`traceId=${traceId}`);
   if (parts.length === 0) return undefined;
   return truncate(parts.join(' | '), MAX_TECHNICAL_LENGTH);
 };
@@ -377,13 +467,14 @@ export const toPresentableError = (
   }
 
   const copy = statusCopy(shape.status);
+  // `validationMessage` and `serverText` only ever return already-gated, presentation-ready text.
   const validation = validationMessage(shape.data);
   const candidate = validation ?? serverText(shape.data);
-  const useServerText =
-    copy.allowServerText && candidate !== null && isPresentableServerText(candidate);
+  const useServerText = copy.allowServerText && candidate !== null;
 
   // Everything the server said that we chose not to render still reaches support.
   const demoted = useServerText ? null : describeForSupport(shape.data);
+  const traceId = problemTraceId(shape.data);
 
   return {
     title: copy.title,
@@ -395,7 +486,7 @@ export const toPresentableError = (
     status: shape.status,
     isNetworkFailure: false,
     isCanceled: false,
-    technicalDetail: buildTechnicalDetail(shape, demoted),
+    technicalDetail: buildTechnicalDetail(shape, demoted, traceId),
   };
 };
 

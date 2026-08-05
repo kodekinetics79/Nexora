@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DTOs.BusinessUnit;
 using ERP_RFQ_Automation.DTOs.TeamDTOs;
 using ERP_RFQ_Automation.DTOs.UserDTO;
@@ -24,7 +25,13 @@ namespace ERP_RFQ_Automation.Repositories
             var query = _context.Users
                 .AsNoTracking()
                 .Where(u => u.Buid == businessUnitId)
-                .GroupJoin(_context.SetupMasters.Where(sm => sm.SetupType == "role"),
+                // RC-1: this used the case-SENSITIVE literal "role" while production stores 'Role',
+                // so the join never matched and every row's RoleName came back null. The BU
+                // predicate is new too: without it the join could attach another tenant's role name
+                // (SetupID is only unique per business unit here — see the composite principal key
+                // on RolePermission.Role).
+                .GroupJoin(_context.SetupMasters.Where(SetupTypes.IsRoleRow)
+                        .Where(sm => sm.BusinessUnitId == businessUnitId),
                     user => user.RoleId,
                     role => role.SetupId,
                     (user, roles) => new { user, roles })
@@ -135,9 +142,9 @@ namespace ERP_RFQ_Automation.Repositories
             // Validate foreign keys
             if (user.RoleId.HasValue)
             {
-                var roleExists = await _context.SetupMasters.AnyAsync(sm => sm.SetupId == user.RoleId.Value
-                    && sm.BusinessUnitId == user.Buid && sm.SetupType.ToLower() == "role"
-                    && sm.IsActive != false);
+                var roleExists = await _context.SetupMasters.Where(SetupTypes.IsRoleRow)
+                    .AnyAsync(sm => sm.SetupId == user.RoleId.Value
+                        && sm.BusinessUnitId == user.Buid && sm.IsActive != false);
                 if (!roleExists)
                     throw new ArgumentException($"Role with ID {user.RoleId.Value} does not exist.");
             }
@@ -169,6 +176,11 @@ namespace ERP_RFQ_Automation.Repositories
                     throw new ArgumentException($"Manager with ID {user.ManagerId.Value} does not exist in Business Unit {user.Buid}.");
             }
 
+            // Seats-meter reproducibility: a user created already-inactive is stamped as
+            // deactivated at creation so the billing meter never counts it as seat usage.
+            if (user.IsActive == false && user.DeactivatedAtUtc is null)
+                user.DeactivatedAtUtc = DateTime.UtcNow;
+
             _context.Users.Add(user);
             await _context.SaveChangesAsync();
         }
@@ -193,9 +205,9 @@ namespace ERP_RFQ_Automation.Repositories
             // Validate foreign keys
             if (user.RoleId.HasValue)
             {
-                var roleExists = await _context.SetupMasters.AnyAsync(sm => sm.SetupId == user.RoleId.Value
-                    && sm.BusinessUnitId == user.Buid && sm.SetupType.ToLower() == "role"
-                    && sm.IsActive != false);
+                var roleExists = await _context.SetupMasters.Where(SetupTypes.IsRoleRow)
+                    .AnyAsync(sm => sm.SetupId == user.RoleId.Value
+                        && sm.BusinessUnitId == user.Buid && sm.IsActive != false);
                 if (!roleExists)
                     throw new ArgumentException($"Role with ID {user.RoleId.Value} does not exist.");
             }
@@ -226,6 +238,16 @@ namespace ERP_RFQ_Automation.Repositories
                 if (!managerExists)
                     throw new ArgumentException($"Manager with ID {user.ManagerId.Value} does not exist in Business Unit {user.Buid}.");
             }
+
+            // Seats-meter reproducibility: maintain DeactivatedAtUtc on every IsActive flip.
+            // true→false stamps UtcNow (only when previously active); reactivation clears it;
+            // inactive→inactive preserves the original deactivation instant.
+            if (user.IsActive == true)
+                user.DeactivatedAtUtc = null;
+            else if (existing.IsActive == true)
+                user.DeactivatedAtUtc = DateTime.UtcNow;
+            else
+                user.DeactivatedAtUtc = existing.DeactivatedAtUtc ?? DateTime.UtcNow;
 
             _context.Users.Update(user);
             await _context.SaveChangesAsync();
@@ -279,7 +301,11 @@ namespace ERP_RFQ_Automation.Repositories
         {
             return await _context.SetupMasters
                 .AsNoTracking()
-                .Where(sm => sm.SetupType == "role" && sm.BusinessUnitId == businessUnitId && sm.IsActive != false)
+                // RC-1: the literal was "role" and PostgreSQL stores 'Role'. This endpoint feeds the
+                // role dropdown on BOTH the User Management and Roles & Permissions screens, so the
+                // empty array it returned is the direct cause of the two blank screens.
+                .Where(SetupTypes.IsRoleRow)
+                .Where(sm => sm.BusinessUnitId == businessUnitId && sm.IsActive != false)
                 .Select(sm => new RoleResponseDTO
                 {
                     SetupId = sm.SetupId,

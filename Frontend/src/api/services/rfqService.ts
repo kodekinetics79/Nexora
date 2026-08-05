@@ -106,6 +106,68 @@ export interface RfqFilterParams {
     readiness?: string;
 }
 
+/** Mirrors backend RfqitemCreateRequestDTO. `quantity` is [Required] server-side and must be >= 1. */
+export interface RfqitemCreatePayload {
+    companyRef?: string | null;
+    customerAccountPortalId?: string | null;
+    customerRfqno?: string | null;
+    itemMaterialCode?: string | null;
+    lineItemNo?: string | null;
+    productId?: number | null;
+    /** Carried for governed sourcing lines; ignored by the create endpoint today. */
+    supplierQuotedItemId?: number | null;
+    commodityProduct?: string | null;
+    productShortName?: string | null;
+    productShortDescription?: string | null;
+    alternative?: string | null;
+    buyerName?: string | null;
+    currency?: string | null;
+    currencyId?: number | null;
+    unitOfMeasure?: string | null;
+    uomId?: number | null;
+    unitPrice?: number | null;
+    quantity: number;
+    storageLocation?: string | null;
+    warehouseId?: number | null;
+    manufacturerName?: string | null;
+    manufacturerPartNumber?: string | null;
+    supplierId?: number | null;
+    alternateProductName?: string | null;
+    alternatePartNumber?: string | null;
+    itemText?: string | null;
+    materialPotext?: string | null;
+    leadTime?: number | null;
+    requiredDesiredDate?: string | null;
+    receivedDate?: string | null;
+    bidClosingDateLine?: string | null;
+    aiconfidence?: number | null;
+}
+
+/**
+ * Mirrors backend RfqCreateRequestDTO. `recDate` is a non-nullable DateTime server-side — always
+ * send a real date. `leadId` is optional: when omitted the backend links the RFQ to a governed
+ * shell lead so it still belongs to a commercial case (the response carries the linkage).
+ */
+export interface RfqCreatePayload {
+    rfqno?: string | null;
+    buyersName?: string | null;
+    recDate: string;
+    bidClosingDate?: string | null;
+    biddingDecision?: string | null;
+    acknowledgmentDate?: string | null;
+    subDate?: string | null;
+    headerRemarks?: string | null;
+    opportunityNo?: string | null;
+    rfqtype?: string | null;
+    rfqtypeId?: number | null;
+    durationAgreement?: string | null;
+    leadId?: number | null;
+    rfqstatusId?: number | null;
+    customerId?: number | null;
+    contactId?: number | null;
+    rfqitems: RfqitemCreatePayload[];
+}
+
 const rfqService = {
     getAll: async (params: RfqFilterParams): Promise<PaginatedRfqResponseDTO> => {
         const response = await axiosInstance.get<PaginatedRfqResponseDTO>("/api/Rfq", { params });
@@ -125,8 +187,8 @@ const rfqService = {
     delete: async (id: number, businessUnitId: number) => {
         await axiosInstance.delete(`/api/Rfq/${id}`, { params: { businessUnitId } });
     },
-    create: async (data: any) => {
-        const response = await axiosInstance.post("/api/Rfq", data);
+    create: async (data: RfqCreatePayload): Promise<RfqResponseDTO> => {
+        const response = await axiosInstance.post<RfqResponseDTO>("/api/Rfq", data);
         return response.data;
     },
     prepareQuoteDraft: async (id: number) => {

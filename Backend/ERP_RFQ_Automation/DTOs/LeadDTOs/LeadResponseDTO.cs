@@ -44,6 +44,20 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         public int CurrentRevisionNumber { get; set; }
         public DateTimeOffset? IngestedAtUtc { get; set; }
 
+        // ── Ingestion audit (owner requirement: audit fairness) ──────────────
+        // When the lead actually ENTERED Nexora: the earliest received_on across
+        // its source-document occurrences, falling back to CreatedDate for
+        // manual/legacy leads without occurrence lineage. Distinct from the
+        // business dates (RecDate / BidClosingDate / SubDate) and from
+        // IngestedAtUtc (the identity-pipeline processing timestamp).
+        public DateTimeOffset? IngestedOn { get; set; }
+        // Server-computed: IngestedOn is strictly after the business due date
+        // (BidClosingDate, falling back to SubDate; sentinel dates < year 2000
+        // are "no deadline"). Late-ingested leads are excluded from Nexora's
+        // response-time / aging performance metrics — the flag makes that
+        // exclusion auditable instead of silent.
+        public bool LateIngested { get; set; }
+
         // WP-BOQ foundation: "product" | "service" | "mixed" | null (unclassified).
         public string? InquiryType { get; set; }
         // Distinct list badge for service-scope leads (service or mixed inquiries).

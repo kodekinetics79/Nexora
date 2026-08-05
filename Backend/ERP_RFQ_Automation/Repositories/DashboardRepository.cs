@@ -268,8 +268,26 @@ namespace ERP_RFQ_Automation.Repositories
                 .Where(l => l.BusinessUnitId == businessUnitId
                             && l.LeadStatusId != null && acceptedLeadStatusIds.Contains(l.LeadStatusId.Value)
                             && l.LeadRejectedReasonId == null)
-                .Select(l => new { l.AssignTo, l.BidClosingDate })
+                .Select(l => new { l.Id, l.AssignTo, l.BidClosingDate, l.SubDate, l.CreatedDate })
                 .ToListAsync();
+
+            // ── Ingestion audit (owner requirement: audit fairness) ──────────
+            // A lead INGESTED into Nexora after its business due date was already
+            // past deadline on arrival: counting it as "overdue" would book a
+            // loss that predates Nexora against Nexora's aging performance.
+            // Such leads are EXCLUDED from the overdue metric below, and the
+            // number excluded is surfaced on the payload so the exclusion is
+            // visible, never silent. Ingestion timestamp = earliest source
+            // received_on (occurrence chain), CreatedDate fallback — the same
+            // shared rule the lead read models use (LeadIngestionAudit).
+            var earliestReceivedOn = await ERP_RFQ_Automation.LeadIdentity.LeadIngestionAudit
+                .EarliestSourceReceivedOnAsync(_context, businessUnitId, leadRows.Select(l => l.Id).ToList());
+            var lateIngestedLeadIds = leadRows
+                .Where(l => ERP_RFQ_Automation.LeadIdentity.LeadIngestionAudit.IsLateIngested(
+                    earliestReceivedOn.TryGetValue(l.Id, out var receivedOn) ? receivedOn : null,
+                    l.CreatedDate, l.BidClosingDate, l.SubDate))
+                .Select(l => l.Id)
+                .ToHashSet();
 
             // SENT quotes; ownership is resolved from Quote.CreatedBy (free-text
             // identity) by email or "First Last" — the same rule as the SLA
@@ -306,7 +324,10 @@ namespace ERP_RFQ_Automation.Repositories
                     Name = fullName.Length > 0 ? fullName : u.Email,
                     Email = u.Email,
                     OpenLeads = myLeads.Count,
-                    OverdueLeads = myLeads.Count(l => IsOverdue(l.BidClosingDate, now)),
+                    // Audit fairness: late-ingested leads (entered Nexora after
+                    // their due date) are excluded — arriving late is not aging.
+                    OverdueLeads = myLeads.Count(l =>
+                        IsOverdue(l.BidClosingDate, now) && !lateIngestedLeadIds.Contains(l.Id)),
                     SentQuotes = myQuotes.Count,
                     StaleQuotes = myQuotes.Count(q => IsStaleSentQuote(q.SentOn, q.RespondedOn, staleDays, now))
                 });
@@ -329,13 +350,25 @@ namespace ERP_RFQ_Automation.Repositories
                 Name = "Unassigned",
                 Email = null,
                 OpenLeads = unassignedLeads.Count,
-                OverdueLeads = unassignedLeads.Count(l => IsOverdue(l.BidClosingDate, now)),
+                // Audit fairness: same late-ingested exclusion as the rep rows.
+                OverdueLeads = unassignedLeads.Count(l =>
+                    IsOverdue(l.BidClosingDate, now) && !lateIngestedLeadIds.Contains(l.Id)),
                 SentQuotes = orphanQuotes.Count,
                 StaleQuotes = orphanQuotes.Count(q => IsStaleSentQuote(q.SentOn, q.RespondedOn, staleDays, now)),
                 IsUnassignedBucket = true
             });
 
-            return new TeamWorkloadDTO { Rows = rows, StaleQuoteDays = staleDays, GeneratedAt = now };
+            return new TeamWorkloadDTO
+            {
+                Rows = rows,
+                StaleQuoteDays = staleDays,
+                GeneratedAt = now,
+                // Audit visibility: open leads the overdue metric excluded because
+                // they were ingested after their due date. Reported so the
+                // exclusion is never silent.
+                LateIngestedExcludedLeads = leadRows.Count(l =>
+                    IsOverdue(l.BidClosingDate, now) && lateIngestedLeadIds.Contains(l.Id))
+            };
         }
 
         private static bool IsOverdue(DateTime? bidClosingDate, DateTime now) =>

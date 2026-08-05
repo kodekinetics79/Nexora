@@ -128,49 +128,66 @@ namespace ERP_RFQ_Automation.Repositories
                 .Select(g => new { LeadId = g.Key, Count = g.Count() })
                 .ToDictionaryAsync(x => x.LeadId, x => x.Count);
 
+            // Ingestion audit (owner requirement): earliest source received_on per
+            // paged lead — the authoritative "when did this lead enter Nexora".
+            var earliestReceivedOn = await ERP_RFQ_Automation.LeadIdentity.LeadIngestionAudit
+                .EarliestSourceReceivedOnAsync(_context, businessUnitId, leadIds);
+
             // Project to LeadResponseDTO (merging Lead, LeadItems, and Attachments)
-            var leadDtos = leads.Select(l => new LeadResponseDTO
+            var leadDtos = leads.Select(l =>
             {
-                Id = l.Id,
-                CommercialCaseId = l.CommercialCaseId,
-                CommercialCaseReference = l.CommercialCaseReference,
-                CustomerId = l.CustomerId,
-                ContactId = l.ContactId,
-                CustomerMatchStatus = l.CustomerMatchStatus,
-                Rfqno = l.Rfqno,
-                BuyersName = l.BuyersName,
-                RecDate = l.RecDate,
-                BidClosingDate = l.BidClosingDate,
-                BiddingDecision = l.BiddingDecision,
-                AcknowledgmentDate = l.AcknowledgmentDate,
-                SubDate = l.SubDate,
-                HeaderRemarks = l.HeaderRemarks,
-                OpportunityNo = l.OpportunityNo,
-                NoOfLineItems = l.NoOfLineItems,
-                Rfqtype = l.Rfqtype,
-                DurationAgreement = l.DurationAgreement,
-                LeadSource = l.LeadSource,
-                Aiconfidence = l.Aiconfidence,
-                CreatedBy = l.CreatedBy,
-                CreatedDate = l.CreatedDate,
-                IngestedAtUtc = l.IngestedAtUtc,
-                BusinessUnitId = l.BusinessUnitId,
-                BusinessUnitName = l.BusinessUnit?.BusinessUnitName,
-                EmailIngestsId = l.EmailIngestsId,
-                ModifiedDate = l.ModifiedDate,
-                EmailSource = l.EmailSource,
-                Clientemail = l.Clientemail,
-                LeadStatusId = l.LeadStatusId,
-                LifecycleVersion = l.LifecycleVersion,
-                ReviewVersion = l.ReviewVersion,
-                RequiresCommercialReview = l.RequiresCommercialReview,
-                CommercialFactsVerified = l.CommercialFactsVerified,
-                InquiryType = l.InquiryType, // WP-BOQ: service/mixed list badge
-                DuplicateStatus = l.DuplicateStatus,
-                DuplicateOfLeadId = l.DuplicateOfLeadId,
-                ItemCount = itemCounts.TryGetValue(l.Id, out var count) ? count : 0,
-                LeadItems = new List<LeadItemResponseDTO>(), // Empty list for list view
-                Attachments = attachmentsGrouped.TryGetValue(l.Id, out var atts) ? atts : new List<AttachmentResponseDTO>()
+                // Audit fairness: occurrence-derived ingestion timestamp with the
+                // documented CreatedDate fallback for manual/legacy leads; a lead
+                // ingested after its due date is flagged, never silently normal.
+                var ingestedOn = LeadIdentity.LeadIngestionAudit.ResolveIngestionTimestamp(
+                    earliestReceivedOn.TryGetValue(l.Id, out var receivedOn) ? receivedOn : null,
+                    l.CreatedDate);
+                return new LeadResponseDTO
+                {
+                    Id = l.Id,
+                    CommercialCaseId = l.CommercialCaseId,
+                    CommercialCaseReference = l.CommercialCaseReference,
+                    CustomerId = l.CustomerId,
+                    ContactId = l.ContactId,
+                    CustomerMatchStatus = l.CustomerMatchStatus,
+                    Rfqno = l.Rfqno,
+                    BuyersName = l.BuyersName,
+                    RecDate = l.RecDate,
+                    BidClosingDate = l.BidClosingDate,
+                    BiddingDecision = l.BiddingDecision,
+                    AcknowledgmentDate = l.AcknowledgmentDate,
+                    SubDate = l.SubDate,
+                    HeaderRemarks = l.HeaderRemarks,
+                    OpportunityNo = l.OpportunityNo,
+                    NoOfLineItems = l.NoOfLineItems,
+                    Rfqtype = l.Rfqtype,
+                    DurationAgreement = l.DurationAgreement,
+                    LeadSource = l.LeadSource,
+                    Aiconfidence = l.Aiconfidence,
+                    CreatedBy = l.CreatedBy,
+                    CreatedDate = l.CreatedDate,
+                    IngestedAtUtc = l.IngestedAtUtc,
+                    IngestedOn = ingestedOn,
+                    LateIngested = LeadIdentity.LeadIngestionAudit.IsLateIngested(
+                        ingestedOn, l.BidClosingDate, l.SubDate),
+                    BusinessUnitId = l.BusinessUnitId,
+                    BusinessUnitName = l.BusinessUnit?.BusinessUnitName,
+                    EmailIngestsId = l.EmailIngestsId,
+                    ModifiedDate = l.ModifiedDate,
+                    EmailSource = l.EmailSource,
+                    Clientemail = l.Clientemail,
+                    LeadStatusId = l.LeadStatusId,
+                    LifecycleVersion = l.LifecycleVersion,
+                    ReviewVersion = l.ReviewVersion,
+                    RequiresCommercialReview = l.RequiresCommercialReview,
+                    CommercialFactsVerified = l.CommercialFactsVerified,
+                    InquiryType = l.InquiryType, // WP-BOQ: service/mixed list badge
+                    DuplicateStatus = l.DuplicateStatus,
+                    DuplicateOfLeadId = l.DuplicateOfLeadId,
+                    ItemCount = itemCounts.TryGetValue(l.Id, out var count) ? count : 0,
+                    LeadItems = new List<LeadItemResponseDTO>(), // Empty list for list view
+                    Attachments = attachmentsGrouped.TryGetValue(l.Id, out var atts) ? atts : new List<AttachmentResponseDTO>()
+                };
             }).ToList();
 
             return (leadDtos, totalCount);
@@ -677,6 +694,14 @@ namespace ERP_RFQ_Automation.Repositories
                 })
                 .ToListAsync();
 
+            // Ingestion audit (owner requirement): earliest source received_on for
+            // this lead, CreatedDate fallback — same rule as the list view.
+            var earliestReceivedOn = await LeadIdentity.LeadIngestionAudit
+                .EarliestSourceReceivedOnAsync(_context, businessUnitId, new[] { lead.Id });
+            var ingestedOn = LeadIdentity.LeadIngestionAudit.ResolveIngestionTimestamp(
+                earliestReceivedOn.TryGetValue(lead.Id, out var receivedOn) ? receivedOn : null,
+                lead.CreatedDate);
+
             return new LeadResponseDTO
             {
                 Id = lead.Id,
@@ -715,6 +740,11 @@ namespace ERP_RFQ_Automation.Repositories
                 CommercialFactsVerified = lead.CommercialFactsVerified,
                 CurrentRevisionNumber = lead.CurrentRevisionNumber,
                 IngestedAtUtc = lead.IngestedAtUtc,
+
+                // Ingestion audit (owner requirement: audit fairness)
+                IngestedOn = ingestedOn,
+                LateIngested = LeadIdentity.LeadIngestionAudit.IsLateIngested(
+                    ingestedOn, lead.BidClosingDate, lead.SubDate),
 
                 // WP-BOQ: service/mixed badge
                 InquiryType = lead.InquiryType,
