@@ -75,6 +75,38 @@ public sealed class ProductionDocumentReaderTests
     }
 
     [Fact]
+    public async Task Docx_MultiParagraphCells_JoinWithSpaces_UnderTheStreamingReader()
+    {
+        // Regression for the DOM->streaming rewrite (a real 121MB document.xml forced
+        // ExtractTextFromDocx onto OpenXmlReader): a cell holding several paragraphs
+        // must still join them with spaces into ONE cell text, and the row must still
+        // tab-join its cells — the exact shape the old DOM reader produced.
+        byte[] bytes;
+        using (var stream = new MemoryStream())
+        {
+            using (var document = WordprocessingDocument.Create(stream, WordprocessingDocumentType.Document, true))
+            {
+                var main = document.AddMainDocumentPart();
+                main.Document = new Document(
+                    new Body(
+                        new Table(
+                            new TableRow(
+                                new TableCell(
+                                    ParagraphWithText("GASKET SPIRAL"),
+                                    ParagraphWithText("WOUND 300MM")),
+                                TableCellWithText("40")))));
+                main.Document.Save();
+            }
+            bytes = stream.ToArray();
+        }
+
+        var reader = CreateReader(bytes);
+        var result = await reader.ReadAsync(CreateJob("rfq.docx", "docx"));
+
+        Assert.Equal("GASKET SPIRAL WOUND 300MM\t40", result.HeaderText);
+    }
+
+    [Fact]
     public async Task MalformedDocx_StopsWithTypedPermanentParseFailure()
     {
         var reader = CreateReader(System.Text.Encoding.UTF8.GetBytes("not-an-openxml-document"));

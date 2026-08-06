@@ -17,10 +17,15 @@ public sealed class DocumentInspectionOptions
     // rented 80KB buffer and never materialised, so the resource a hostile archive can
     // consume is bounded by MaximumArchiveExpandedBytes (enforced mid-stream), not by any
     // single entry's size. A tighter per-entry cap added no safety — but it rejected real
-    // documents: a large Aramco RFP's document.xml (thousands of table rows) legitimately
-    // expands past 50MB, and production rejected exactly that file on 2026-08-05.
-    public long MaximumArchiveEntryBytes { get; init; } = 100L * 1024 * 1024;
-    public long MaximumArchiveExpandedBytes { get; init; } = 100L * 1024 * 1024;
+    // documents: a genuine Aramco RFP (4.4 MB on disk) carries a document.xml that
+    // expands to 121 MB — thousands of materials-table rows at an honest ~28x ratio —
+    // and production rejected exactly that file twice, first at 50 MB, then at 100 MB.
+    // 256 MB covers it with headroom. Safe to hold at this size ONLY because the
+    // downstream .docx reader streams (ProductionDocumentReader.ExtractTextFromDocx uses
+    // OpenXmlReader, not the DOM) — if a DOM reader ever returns, this cap is what
+    // stands between a large tender and a 512 MB instance OOM.
+    public long MaximumArchiveEntryBytes { get; init; } = 256L * 1024 * 1024;
+    public long MaximumArchiveExpandedBytes { get; init; } = 256L * 1024 * 1024;
 
     // 300, not 100: repetitive OOXML table markup legitimately compresses at 100-300x —
     // the same Aramco document.xml pattern — while classic zip bombs sit at 1000x and up.
