@@ -143,10 +143,6 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             throw new InvalidOperationException(
                 "AI-extracted commercial facts must be approved in extraction review before RFQ conversion.");
 
-        var blockers = FindConversionBlockers(lead);
-        if (blockers.Count > 0)
-            throw new InvalidOperationException($"Review these required inquiry fields before creating the RFQ: {string.Join("; ", blockers)}.");
-
         // Per-line choices. Reject ids that don't belong to this lead (never trust
         // caller-supplied identifiers across the tenant boundary).
         var choices = (request.Items ?? new List<ConvertRequestItem>())
@@ -181,6 +177,13 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             .ToList();
         if (included.Count == 0)
             throw new ArgumentException("At least one line item must be included to convert a lead.");
+
+        // Header + per-line requirements, evaluated over the lines actually being converted with
+        // the caller's corrections applied. Runs AFTER `included`/`choices` exist, because
+        // checking the lead's raw stored lines ignored both exclusions and corrections (A-9).
+        var blockers = FindConversionBlockers(lead, included, choices);
+        if (blockers.Count > 0)
+            throw new InvalidOperationException($"Review these required inquiry fields before creating the RFQ: {string.Join("; ", blockers)}.");
 
         // Resolve once: supplies best-match products, match scores and UoM ids.
         var resolved = await ResolveLinesAsync(included, businessUnitId, ct);
@@ -336,22 +339,46 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             false, ct);
     }
 
-    private static List<string> FindConversionBlockers(Lead lead)
+    /// <summary>
+    /// Header requirements plus per-line requirements evaluated over the lines ACTUALLY being
+    /// converted, with the caller's corrections applied.
+    ///
+    /// <para><b>The defect this closes (A-9).</b> This used to read <c>lead.LeadItems</c>
+    /// wholesale: every line on the lead, at its persisted values. Two consequences, both wrong.
+    /// A line the operator deliberately EXCLUDED still blocked the conversion — so one unreadable
+    /// line on an 84-line bid list made the whole RFQ unconvertible. And a quantity CORRECTED on
+    /// the Review &amp; Create RFQ screen was ignored, because the check read the stored 0 rather
+    /// than the corrected value in the request: the quantity box the UI offers could never
+    /// satisfy the gate it was there to satisfy.</para>
+    ///
+    /// <para>Nothing is relaxed. An included line must still carry a description, a positive
+    /// quantity, a unit and a currency — the values are simply the ones being converted.</para>
+    /// </summary>
+    private static List<string> FindConversionBlockers(
+        Lead lead,
+        IReadOnlyList<LeadItem> includedLines,
+        IReadOnlyDictionary<long, ConvertRequestItem> choices)
     {
         var blockers = new List<string>();
         if (!lead.CustomerId.HasValue) blockers.Add("customer");
         if (!lead.BidClosingDate.HasValue) blockers.Add("customer deadline");
-        if (lead.LeadItems.Count == 0) blockers.Add("at least one requested item");
+        if (includedLines.Count == 0) blockers.Add("at least one requested item");
 
-        foreach (var line in lead.LeadItems.OrderBy(item => item.Id))
+        foreach (var line in includedLines.OrderBy(item => item.Id))
         {
+            choices.TryGetValue(line.Id, out var choice);
+            // Effective values: what this conversion will actually write.
+            var quantity = choice?.Quantity ?? line.Quantity;
+            var unitOfMeasure = string.IsNullOrWhiteSpace(choice?.UnitOfMeasure)
+                ? line.UnitOfMeasure
+                : choice!.UnitOfMeasure;
             var label = string.IsNullOrWhiteSpace(line.LineItemNo) ? $"line {line.Id}" : $"line {line.LineItemNo}";
             if (string.IsNullOrWhiteSpace(line.ItemMaterialCode)
                 && string.IsNullOrWhiteSpace(line.ManufacturerPartNumber)
                 && string.IsNullOrWhiteSpace(line.ProductShortDescription))
                 blockers.Add($"{label} part number or description");
-            if (line.Quantity <= 0) blockers.Add($"{label} quantity");
-            if (string.IsNullOrWhiteSpace(line.UnitOfMeasure)) blockers.Add($"{label} unit");
+            if (quantity <= 0) blockers.Add($"{label} quantity");
+            if (string.IsNullOrWhiteSpace(unitOfMeasure)) blockers.Add($"{label} unit");
             if (string.IsNullOrWhiteSpace(line.Currency)) blockers.Add($"{label} currency");
         }
 
@@ -421,13 +448,27 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             if (!resolved.TryGetValue(li.Id, out var r) || !r.NeedsAttention) continue;
             choices.TryGetValue(li.Id, out var choice);
 
-            // A missing quantity or unit is never waivable, even if the caller ticks the box.
-            // Checked first so a request that acknowledges everything cannot slip one through.
-            if (r.IsBlocked)
+            // A missing quantity or unit is never waivable by ACKNOWLEDGEMENT — but it is
+            // resolvable by CORRECTION, which is the whole point of the quantity and unit boxes
+            // on the Review & Create RFQ screen. The resolver classifies from the persisted line,
+            // so a line corrected in this request would otherwise stay blocked forever and the
+            // operator would have no way to proceed: the gate would demand a fix it then ignored.
+            // Re-evaluate the hard reasons against the values actually being converted.
+            var effectiveQuantity = choice?.Quantity ?? li.Quantity;
+            var effectiveUom = string.IsNullOrWhiteSpace(choice?.UnitOfMeasure)
+                ? li.UnitOfMeasure
+                : choice!.UnitOfMeasure;
+            var stillBlocked = r.IsBlocked
+                && (effectiveQuantity <= 0 || string.IsNullOrWhiteSpace(effectiveUom));
+            if (stillBlocked)
             {
                 blocked.Add($"{Label(li)}: {r.BlockingReason}");
                 continue;
             }
+
+            // A line whose ONLY problem was the hard value, now corrected, needs no
+            // acknowledgement — there is no longer anything to acknowledge.
+            if (r.IsBlocked) continue;
 
             if (choice?.AcknowledgeWarning != true && !request.AcknowledgeAllWarnings)
             {

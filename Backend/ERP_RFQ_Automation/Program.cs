@@ -710,6 +710,11 @@ static async Task ValidateRuntimeDatabaseRoleAsync(string runtimeConnection)
             "The runtime database role must be NOINHERIT, non-superuser, non-BYPASSRLS, a member of the tenant, identity, and pipeline execution roles, and have no AI maintenance bypass role.");
 }
 
+// Prove the REQUEST PATH can reach the database before anything reports ready. Migrations and
+// the seeders below open their own connections and can succeed while the context controllers
+// resolve cannot authenticate at all. Off unless explicitly enabled.
+await RequestPathDatabaseValidator.ValidateAsync(app.Services, app.Configuration);
+
 await DemoUserSeeder.EnsureAsync(app.Services, app.Configuration, app.Environment);
 // Local E2E only: fail-closed on GoldenJourneySeed:Enabled and refuses under Production.
 await GoldenCommercialJourneySeeder.EnsureAsync(app.Services, app.Configuration, app.Environment);

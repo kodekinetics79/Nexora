@@ -84,7 +84,15 @@ test('Phase 1 — Lead converts to exactly one RFQ and one Customer Quote Draft'
     items: preview.items.map((i: any) => ({ leadItemId: i.leadItemId, include: true, acknowledgeWarning: true })),
   });
   expect(waiveAttempt.status(), 'a missing quantity must never be acknowledgeable').toBe(409);
-  expect(await waiveAttempt.text()).toContain('correct them on the lead first');
+
+  // TWO gates refuse this, and which one speaks first is not the point of the assertion.
+  // FindConversionBlockers evaluates every lead line and rejects the zero quantity before the
+  // warning-governance gate is reached (documented as A-9); if that lead-level check were ever
+  // relaxed, the governance gate refuses the same request with "correct them on the lead first".
+  // What must hold either way: the operator is told WHICH line and WHY, and no RFQ is created.
+  const refusal = await waiveAttempt.text();
+  expect(refusal).toContain('00010');
+  expect(refusal.toLowerCase()).toContain('quantity');
   expect(await rfqCountForLead(page, bearer, leadId)).toBe(0);
 
   // ---------------------------------------------------------------- correct the hard warning

@@ -249,23 +249,20 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task Excluding_a_zero_quantity_line_does_NOT_bypass_the_lead_level_blocker()
+    public async Task Excluding_an_unreadable_line_lets_the_valid_lines_convert()
     {
-        // Documents real, PRE-EXISTING behaviour discovered while building this gate, so that a
-        // future change to FindConversionBlockers is a deliberate decision rather than an
-        // accident: that method inspects EVERY line on the lead, not just the included ones.
-        // Deselecting the unreadable line in the UI therefore does not unblock conversion —
-        // the operator must go and correct the lead itself.
+        // A-9, now FIXED. FindConversionBlockers used to evaluate every line on the lead at its
+        // persisted values, so one unreadable line made the whole RFQ unconvertible even when the
+        // operator had deliberately left it out — a cliff on an 84-line bid list. It now evaluates
+        // the lines actually being converted, with the caller's corrections applied.
         //
-        // Defensible (fix the source, don't hide it) but it is a cliff on an 84-line bid list
-        // where one line is unreadable. Recorded as a P1 in the blocker register rather than
-        // silently relaxed here, because loosening a gate is not a side effect this slice
-        // should have.
+        // This test previously pinned the DEFECT ("does NOT bypass"). It pins the repair instead:
+        // excluding is a legitimate resolution, and nothing about the remaining lines is relaxed.
         var leadId = await QualifiedLeadAsync(
             Line("00010", 5, "EA", "UNMATCHED-G"), Line("00020", 0, "EA", "UNMATCHED-H"));
         var lineIds = await LineIdsAsync(leadId);
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => ConvertAsync(leadId, new ConvertRequest
+        var rfqId = await ConvertAsync(leadId, new ConvertRequest
         {
             ActingUser = "sara@nexora.sa",
             AcknowledgeAllWarnings = true,
@@ -275,11 +272,33 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
                 new ConvertRequestItem { LeadItemId = lineIds[0], AcknowledgeWarning = true },
                 new ConvertRequestItem { LeadItemId = lineIds[1], Include = false } // the zero-qty line
             }
-        }));
+        });
 
-        Assert.Contains("00020", ex.Message);
-        Assert.Contains("quantity", ex.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(0, await RfqCountForAsync(leadId));
+        await using var owner = _database.ContextFor(null);
+        // Only the included line travelled; the excluded one is still on the lead, untouched.
+        Assert.Equal(1, await owner.Rfqitems.AsNoTracking().CountAsync(i => i.Rfqid == rfqId));
+        Assert.Equal(2, await owner.LeadItems.AsNoTracking().CountAsync(i => i.LeadId == leadId));
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Correcting_a_zero_quantity_in_the_request_satisfies_the_hard_gate()
+    {
+        // The other half of A-9. The Review & Create RFQ screen offers a quantity box; the gate
+        // used to read the PERSISTED value, so the correction it demanded was the one thing it
+        // ignored and the operator could never proceed. A supplied correction now satisfies it.
+        var leadId = await QualifiedLeadAsync(Line("00010", 0, "EA", "UNMATCHED-Q"));
+        var lineId = await FirstLineIdAsync(leadId);
+
+        var rfqId = await ConvertAsync(leadId, new ConvertRequest
+        {
+            ActingUser = "sara@nexora.sa",
+            Items = { new ConvertRequestItem { LeadItemId = lineId, Include = true, Quantity = 25 } }
+        });
+
+        await using var owner = _database.ContextFor(null);
+        var line = await owner.Rfqitems.AsNoTracking().SingleAsync(i => i.Rfqid == rfqId);
+        Assert.Equal(25, line.Quantity);   // the corrected value is what was written
     }
 
     [Fact]

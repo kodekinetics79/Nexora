@@ -37,8 +37,23 @@ cleanup() {
     return $code
   fi
   log "Tearing down services this script started."
-  [[ -n "$FRONTEND_PID" ]] && kill "$FRONTEND_PID" 2>/dev/null || true
-  [[ -n "$BACKEND_PID" ]] && kill "$BACKEND_PID" 2>/dev/null || true
+  # `( ... ) &` yields the SUBSHELL pid. `dotnet run` then forks the actual application, so
+  # killing $! terminated the wrapper and left the real backend holding the port. The next run
+  # found that stale process still answering /health while it held the PREVIOUS run's database
+  # credentials — which surfaced as 28P01 on the first login and nothing before it. Kill the
+  # process actually listening on the port.
+  for pair in "$FRONTEND_PORT:$FRONTEND_PID" "$BACKEND_PORT:$BACKEND_PID"; do
+    local port="${pair%%:*}" wrapper="${pair##*:}"
+    [[ -n "$wrapper" ]] && kill "$wrapper" 2>/dev/null || true
+    local listener
+    listener="$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true)"
+    if [[ -n "$listener" ]]; then
+      kill $listener 2>/dev/null || true
+      sleep 1
+      listener="$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true)"
+      [[ -n "$listener" ]] && kill -9 $listener 2>/dev/null || true
+    fi
+  done
   # Only remove the database if THIS run created it — never someone else's container.
   [[ "$STARTED_PG" == "1" ]] && docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
   return $code
@@ -69,6 +84,15 @@ for tool in docker dotnet node npx curl python3; do
 done
 docker info >/dev/null 2>&1 || die "Docker is installed but not running."
 mkdir -p "$RUN_DIR"
+
+# A port already in use means someone else's process — very likely a leaked backend from an
+# earlier run — would answer our health check and serve the browser test against the wrong
+# database. Refuse rather than silently test the wrong process.
+for pair in "backend:$BACKEND_PORT" "frontend:$FRONTEND_PORT"; do
+  svc="${pair%%:*}"; port="${pair##*:}"
+  holder="$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true)"
+  [[ -z "$holder" ]] || die "Port $port ($svc) is already in use by PID(s) $holder. Stop it first: kill $holder"
+done
 
 # Local-only throwaway credentials. Generated per run, written to an ignored file with
 # restrictive permissions, never printed and never committed.
@@ -132,6 +156,7 @@ log "Starting backend (migrations + golden seed) on $BACKEND_URL."
   cd "$BACKEND_DIR"
   ConnectionStrings__DefaultConnection="$CONNECTION" \
   Database__ApplyMigrationsOnStartup=true \
+  Database__ValidateRequestPathOnStartup=true \
   Jwt__Key="$APP_SECRET" \
   CommercialFinance__ContactVerificationSecret="$APP_SECRET" \
   CommercialFinance__DunningProviderWebhookSecret="$APP_SECRET" \
@@ -160,6 +185,9 @@ print(m['tenantA'], m['tenantB'], m['adminEmail'], m['salespersonEmail'],
       m['outsiderEmail'], m['leadId'], m['foreignLeadId'])"
 )"
 
+export SALES_EMAIL="$SALES_EMAIL"
+export E2E_PASSWORD="$E2E_PASSWORD"
+
 umask 077
 cat >"$ENV_FILE" <<ENV
 E2E_BASE_URL=$FRONTEND_URL
@@ -175,6 +203,16 @@ E2E_GOLDEN_FOREIGN_LEAD_ID=$FOREIGN_LEAD_ID
 ENV
 chmod 600 "$ENV_FILE"
 log "Resolved ids: tenantA=$TENANT_A lead=$LEAD_ID foreignLead=$FOREIGN_LEAD_ID (credentials in $ENV_FILE, mode 600)."
+# ---------------------------------------------------------------- 4b. login preflight
+#
+# A real POST /api/Auth/login that must return 200 AND a JWT. This is the check that catches a
+# backend which starts, answers /health, and still cannot authenticate a single request — the
+# exact failure that previously reached Playwright and was misreported as a browser-test failure.
+# Implemented in its own helper so the credential never passes through a shell command line.
+log "Login preflight."
+python3 "$REPO_ROOT/scripts/e2e/login-preflight.py" \
+  "$BACKEND_URL" "$SALES_EMAIL" "$E2E_PASSWORD" "$PG_PORT" \
+  || die "Login preflight failed. Playwright not started."
 
 # ---------------------------------------------------------------- 5. frontend
 log "Starting frontend on $FRONTEND_URL."
