@@ -121,7 +121,8 @@ public class PlatformSecurityRegressionTests
         var result = await controller.Provision(new ProvisionTenantRequest
         {
             Name = "Audit Failure Tenant",
-            Slug = "audit-failure-tenant"
+            Slug = "audit-failure-tenant",
+            AdminEmail = "admin@audit-failure.test", AdminFirstName = "A", AdminLastName = "F"
         }, CancellationToken.None);
 
         Assert.Equal(StatusCodes.Status500InternalServerError, Assert.IsType<ObjectResult>(result.Result).StatusCode);
@@ -130,6 +131,10 @@ public class PlatformSecurityRegressionTests
         await using var verification = db.ContextFor(null);
         Assert.False(await verification.Set<Tenant>().IgnoreQueryFilters()
             .AnyAsync(t => t.Slug == "audit-failure-tenant"));
+        // The founding admin is created in the same transaction, so it must vanish with it — a
+        // surviving orphan account with a live credential would be worse than the failed provision.
+        Assert.False(await verification.Users.IgnoreQueryFilters()
+            .AnyAsync(u => u.Email == "admin@audit-failure.test"));
         Assert.Empty(await verification.Set<PlatformAuditLog>().ToListAsync());
     }
 
@@ -152,7 +157,8 @@ public class PlatformSecurityRegressionTests
         var result = await controller.Provision(new ProvisionTenantRequest
         {
             Name = "Fresh Provisioning Tenant",
-            Slug = "fresh-provisioning-tenant"
+            Slug = "fresh-provisioning-tenant",
+            AdminEmail = "admin@fresh-provisioning.test", AdminFirstName = "F", AdminLastName = "P"
         }, CancellationToken.None);
 
         Assert.IsType<CreatedAtActionResult>(result.Result);
@@ -183,7 +189,8 @@ public class PlatformSecurityRegressionTests
         var result = await controller.Provision(new ProvisionTenantRequest
         {
             Name = "Retried Provisioning Tenant",
-            Slug = "retried-provisioning-tenant"
+            Slug = "retried-provisioning-tenant",
+            AdminEmail = "admin@retried-provisioning.test", AdminFirstName = "R", AdminLastName = "P"
         }, CancellationToken.None);
 
         Assert.IsType<CreatedAtActionResult>(result.Result);

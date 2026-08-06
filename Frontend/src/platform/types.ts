@@ -328,4 +328,30 @@ export interface ProvisionTenantInput {
   slug: string;
   /** Persisted plan id to assign at provisioning time (optional). */
   planId: string | null;
+  /**
+   * The tenant's founding Super Administrator. Required: a tenant without one is a shell
+   * nobody can log into, which is the state every portal-provisioned tenant used to land in.
+   */
+  adminEmail: string;
+  adminFirstName: string;
+  adminLastName: string;
+  /** Omit to have the server generate one and return it exactly once. */
+  adminPassword?: string | null;
+}
+
+export interface FoundingAdmin {
+  userId: number;
+  email: string;
+  roleName: string;
+  /**
+   * Present ONLY when the server generated the password, and only in the provisioning
+   * response. It is stored as a BCrypt hash and can never be retrieved again — if it is lost
+   * before handover, the credential must be reset rather than looked up.
+   */
+  generatedPassword: string | null;
+}
+
+export interface ProvisionTenantResult {
+  tenant: Tenant;
+  foundingAdmin: FoundingAdmin;
 }

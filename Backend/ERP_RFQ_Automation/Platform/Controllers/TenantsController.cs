@@ -91,8 +91,30 @@ public class TenantsController : ControllerBase
             !await _context.Set<Plan>().AnyAsync(p => p.Id == planId, ct))
             return BadRequest(new { error = $"Plan {planId} does not exist." });
 
+        // Users.Email is GLOBALLY unique — one address, one account, one tenant. Checked here so
+        // the operator gets a clear 409 naming the problem instead of a transaction rollback
+        // surfacing as "Provisioning failed." (Re-raced inserts still fail safely inside the
+        // transaction; this check is for the error message, not the guarantee.)
+        var adminEmail = request.AdminEmail.Trim();
+        if (await _context.Users.IgnoreQueryFilters().AnyAsync(u => u.Email == adminEmail, ct))
+            return Conflict(new
+            {
+                error = $"A user with email '{adminEmail}' already exists. One email address maps to " +
+                        "one account on one tenant; use a different address for this tenant's administrator."
+            });
+
+        // Generated when the operator did not supply one: returned exactly once in the response,
+        // stored only as a BCrypt hash. Hashing happens OUTSIDE the retriable transaction — BCrypt
+        // mints a fresh salt per call, and the stored hash must not change between retry attempts.
+        var generatedPassword = string.IsNullOrEmpty(request.AdminPassword)
+            ? GenerateInitialPassword()
+            : null;
+        var adminPasswordHash = BCrypt.Net.BCrypt.HashPassword(generatedPassword ?? request.AdminPassword);
+
         var actor = User.FindFirst("email")?.Value ?? "platform";
         Tenant created;
+        User foundingAdmin = null!;
+        SetupMaster foundingRole = null!;
 
         // The context enables EnableRetryOnFailure, so an explicit transaction must
         // run inside the execution strategy or EF throws. Provision Tenant + primary
@@ -133,8 +155,56 @@ public class TenantsController : ControllerBase
                 _context.SetupMasters.AddRange(LifecycleStatusCatalog.CreateFor(bu, actor));
                 await _context.SaveChangesAsync(ct);
 
-                _context.AiProcessingPolicies.Add(
-                    AiProcessingPolicy.CreateSecureDefault(bu.Id, actor, DateTime.UtcNow));
+                // PostgreSQL creates this row ITSELF: the business_units_create_ai_policy trigger
+                // fires AFTER INSERT ON "BusinessUnits" and calls nexora_create_default_ai_policy().
+                // Adding a second one unconditionally violated PK_AiProcessingPolicies, so every
+                // provision through the portal failed with a bare "Provisioning failed." — and the
+                // SQLite tests never caught it, because SQLite has no such trigger.
+                //
+                // Checked rather than assumed, so this works on both providers: the trigger owns
+                // the row where it exists, and the explicit add covers providers where it does not.
+                var policyExists = await _context.AiProcessingPolicies.IgnoreQueryFilters()
+                    .AnyAsync(p => p.BusinessUnitId == bu.Id, ct);
+                if (!policyExists)
+                    _context.AiProcessingPolicies.Add(
+                        AiProcessingPolicy.CreateSecureDefault(bu.Id, actor, DateTime.UtcNow));
+
+                // ---- founding Super Administrator ---------------------------------------
+                // The role and its holder are created IN THE SAME TRANSACTION as the tenant,
+                // because a tenant without them is a shell nobody can log into — the exact
+                // state every portal-provisioned tenant used to land in. RoleRank.Owner is
+                // what PermissionHandler's rank rule reads, so the founding admin has full
+                // tenant authority immediately, before any RolePermissions row exists.
+                foundingRole = new SetupMaster
+                {
+                    SetupType = "Role",
+                    SetupCode = "SUPER_ADMIN",
+                    SetupValue = "Super Administrator",
+                    Description = "Founding administrator role created at tenant provisioning.",
+                    BusinessUnitId = bu.Id,
+                    RoleRank = Authorization.RoleRanks.Owner,
+                    IsActive = true,
+                    CreatedBy = actor,
+                    CreatedOn = DateTime.UtcNow
+                };
+                _context.SetupMasters.Add(foundingRole);
+                await _context.SaveChangesAsync(ct);
+
+                foundingAdmin = new User
+                {
+                    FirstName = request.AdminFirstName.Trim(),
+                    LastName = request.AdminLastName.Trim(),
+                    Email = adminEmail,
+                    PasswordHash = adminPasswordHash,
+                    ImageUrl = string.Empty,
+                    RoleId = foundingRole.SetupId,
+                    Buid = bu.Id,
+                    IsActive = true,
+                    CreatedBy = actor,
+                    CreatedOn = DateTime.UtcNow
+                };
+                _context.Users.Add(foundingAdmin);
+                await _context.SaveChangesAsync(ct);
 
                 tenant.PrimaryBusinessUnitId = bu.Id;
                 tenant.Status = TenantStatus.Active;
@@ -142,23 +212,78 @@ public class TenantsController : ControllerBase
                 tenant.ModifiedOn = DateTime.UtcNow;
                 await _context.SaveChangesAsync(ct);
 
+                // The admin's EMAIL is audited; the password never is, generated or not.
                 await _audit.WriteAsync(User, "tenant.provision", nameof(Tenant), tenant.Id.ToString(),
-                    new { tenant.Name, tenant.Slug, tenant.PlanId, tenant.PrimaryBusinessUnitId },
+                    new
+                    {
+                        tenant.Name, tenant.Slug, tenant.PlanId, tenant.PrimaryBusinessUnitId,
+                        AdminEmail = adminEmail, AdminUserId = foundingAdmin.Id,
+                        PasswordGenerated = generatedPassword is not null
+                    },
                     actAsTenantId: tenant.Id, httpContext: HttpContext, ct: ct);
 
                 await tx.CommitAsync(ct);
                 return tenant;
             });
         }
-        catch (Exception)
+        catch (Exception exception)
         {
-            _logger.LogError("Failed to provision tenant {Slug}", slug);
+            // The exception was previously DISCARDED, so a failed provision left the operator with
+            // "Provisioning failed." and the server with no record of why — which is how a
+            // duplicate-key violation on the AI policy went unnoticed through every portal attempt.
+            _logger.LogError(exception, "Failed to provision tenant {Slug} for admin {AdminEmail}.",
+                slug, adminEmail);
             return StatusCode(500, new { error = "Provisioning failed." });
         }
 
         var withPlan = await _context.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
             .Include(t => t.Plan).FirstAsync(t => t.Id == created.Id, ct);
-        return CreatedAtAction(nameof(Get), new { id = created.Id }, ToDto(withPlan));
+
+        // ProvisionTenantResponse, not TenantSummaryDto: the generated password appears in THIS
+        // response and nowhere else, ever — not on list, not on get, not in the audit log. Only a
+        // BCrypt hash is stored, so there is nothing to retrieve later by design.
+        return CreatedAtAction(nameof(Get), new { id = created.Id }, new ProvisionTenantResponse
+        {
+            Tenant = ToDto(withPlan),
+            FoundingAdmin = new FoundingAdminDto
+            {
+                UserId = foundingAdmin.Id,
+                Email = foundingAdmin.Email,
+                RoleName = foundingRole.SetupValue,
+                GeneratedPassword = generatedPassword
+            }
+        });
+    }
+
+    /// <summary>
+    /// A generated initial credential: 20 characters from a cryptographic RNG with guaranteed
+    /// class coverage, over an alphabet with lookalikes (0/O, 1/l/I) removed because this value
+    /// gets read aloud or retyped during customer handover.
+    /// </summary>
+    private static string GenerateInitialPassword()
+    {
+        const string upper = "ABCDEFGHJKMNPQRSTUVWXYZ";
+        const string lower = "abcdefghjkmnpqrstuvwxyz";
+        const string digits = "23456789";
+        const string symbols = "!@#$%^*-_+=";
+        const string all = upper + lower + digits + symbols;
+
+        var chars = new char[20];
+        chars[0] = upper[System.Security.Cryptography.RandomNumberGenerator.GetInt32(upper.Length)];
+        chars[1] = lower[System.Security.Cryptography.RandomNumberGenerator.GetInt32(lower.Length)];
+        chars[2] = digits[System.Security.Cryptography.RandomNumberGenerator.GetInt32(digits.Length)];
+        chars[3] = symbols[System.Security.Cryptography.RandomNumberGenerator.GetInt32(symbols.Length)];
+        for (var i = 4; i < chars.Length; i++)
+            chars[i] = all[System.Security.Cryptography.RandomNumberGenerator.GetInt32(all.Length)];
+
+        // Fisher–Yates with the same RNG, so the guaranteed classes are not always positions 0–3.
+        for (var i = chars.Length - 1; i > 0; i--)
+        {
+            var j = System.Security.Cryptography.RandomNumberGenerator.GetInt32(i + 1);
+            (chars[i], chars[j]) = (chars[j], chars[i]);
+        }
+
+        return new string(chars);
     }
 
     [HttpGet("{id:long}/ai-policy")]

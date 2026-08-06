@@ -3,6 +3,8 @@ import Stack from '../components/Flex';
 import { useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  Alert,
+  AlertTitle,
   Box,
   Button,
   Dialog,
@@ -10,6 +12,7 @@ import {
   DialogContent,
   DialogContentText,
   DialogTitle,
+  Divider,
   IconButton,
   InputAdornment,
   MenuItem,
@@ -37,7 +40,7 @@ import { platformApi } from '../api/client';
 import { platformErrorMessage } from '../api/apiError';
 import { platformKeys } from '../api/queryKeys';
 import { setImpersonation } from '../../api/impersonation';
-import type { Tenant, TenantStatus } from '../types';
+import type { ProvisionTenantResult, Tenant, TenantStatus } from '../types';
 import PageHeader from '../components/PageHeader';
 import { PlanChip, TenantStatusChip } from '../components/StatusChip';
 import { ErrorState } from '../components/States';
@@ -57,6 +60,10 @@ const emptyForm = {
   name: '',
   slug: '',
   planId: '',
+  adminEmail: '',
+  adminFirstName: '',
+  adminLastName: '',
+  adminPassword: '',
 };
 
 export default function TenantsPage() {
@@ -71,6 +78,10 @@ export default function TenantsPage() {
   const [provisionOpen, setProvisionOpen] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [confirm, setConfirm] = useState<{ kind: ActionKind; tenant: Tenant } | null>(null);
+  // Shown after a successful provision. The generated credential lives ONLY in this response,
+  // so the operator gets one deliberate handover step rather than a toast that scrolls away.
+  const [handover, setHandover] = useState<ProvisionTenantResult | null>(null);
+  const [credentialCopied, setCredentialCopied] = useState(false);
   const [actionReason, setActionReason] = useState('');
 
   const { data: tenants, isLoading, isError, refetch } = useQuery({
@@ -90,10 +101,12 @@ export default function TenantsPage() {
 
   const provisionMutation = useMutation({
     mutationFn: () => platformApi.provisionTenant({ ...form, planId: form.planId || null }),
-    onSuccess: (t) => {
-      enqueueSnackbar(`${t.name} provisioned`, { variant: 'success' });
+    onSuccess: (result) => {
+      enqueueSnackbar(`${result.tenant.name} provisioned`, { variant: 'success' });
       setProvisionOpen(false);
       setForm(emptyForm);
+      setCredentialCopied(false);
+      setHandover(result);
       invalidate();
     },
     onError: (error) =>
@@ -152,7 +165,17 @@ export default function TenantsPage() {
   }, [tenants, planFilter, statusFilter, search]);
 
   const slugValid = /^[a-z0-9-]{2,}$/.test(form.slug);
-  const formValid = form.name.trim().length > 1 && slugValid;
+  const adminEmailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.adminEmail.trim());
+  // A supplied password is optional, but a too-short one must not reach the server only to
+  // come back as a validation error after the tenant name is already typed.
+  const adminPasswordValid = form.adminPassword.length === 0 || form.adminPassword.length >= 8;
+  const formValid =
+    form.name.trim().length > 1 &&
+    slugValid &&
+    adminEmailValid &&
+    form.adminFirstName.trim().length > 0 &&
+    form.adminLastName.trim().length > 0 &&
+    adminPasswordValid;
   const openConfirm = (kind: ActionKind, tenant: Tenant) => {
     setActionReason('');
     setConfirm({ kind, tenant });
@@ -358,6 +381,60 @@ export default function TenantsPage() {
                 </MenuItem>
               ))}
             </TextField>
+
+            <Divider textAlign="left" sx={{ pt: 1 }}>
+              <Typography variant="overline" sx={{ fontWeight: 800, letterSpacing: '0.06em' }}>
+                Founding administrator
+              </Typography>
+            </Divider>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: -1 }}>
+              This person receives full authority over the new workspace and creates the customer&apos;s
+              own users from there. A tenant provisioned without one cannot be logged into at all.
+            </Typography>
+
+            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
+              <TextField
+                label="First name"
+                value={form.adminFirstName}
+                onChange={(e) => setForm({ ...form, adminFirstName: e.target.value })}
+                fullWidth
+                required
+              />
+              <TextField
+                label="Last name"
+                value={form.adminLastName}
+                onChange={(e) => setForm({ ...form, adminLastName: e.target.value })}
+                fullWidth
+                required
+              />
+            </Stack>
+            <TextField
+              label="Work email"
+              type="email"
+              value={form.adminEmail}
+              onChange={(e) => setForm({ ...form, adminEmail: e.target.value })}
+              error={form.adminEmail.length > 0 && !adminEmailValid}
+              helperText={
+                form.adminEmail.length > 0 && !adminEmailValid
+                  ? 'Enter a valid email address.'
+                  : 'Also their sign-in username. One address belongs to one workspace.'
+              }
+              fullWidth
+              required
+            />
+            <TextField
+              label="Initial password"
+              type="text"
+              value={form.adminPassword}
+              onChange={(e) => setForm({ ...form, adminPassword: e.target.value })}
+              error={!adminPasswordValid}
+              helperText={
+                !adminPasswordValid
+                  ? 'At least 8 characters.'
+                  : 'Leave blank and one will be generated for you — shown once, on the next screen.'
+              }
+              fullWidth
+            />
           </Stack>
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
@@ -366,6 +443,92 @@ export default function TenantsPage() {
           </Button>
           <Button variant="contained" onClick={() => provisionMutation.mutate()} disabled={!formValid || provisionMutation.isPending} sx={{ fontWeight: 700, px: 3 }}>
             {provisionMutation.isPending ? 'Provisioning…' : 'Provision'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Credential handover. A separate, deliberate step: the generated password exists in the
+          provisioning response and NOWHERE else — not in the audit log, not retrievable later —
+          so it must not be delivered as a toast the operator can miss or dismiss. */}
+      <Dialog
+        open={handover !== null}
+        onClose={() => { /* deliberately not dismissible by backdrop — see the close button */ }}
+        fullWidth
+        maxWidth="sm"
+      >
+        <DialogTitle sx={{ fontWeight: 800 }}>
+          {handover?.tenant.name} is ready
+        </DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={2}>
+            <Alert severity="success" sx={{ borderRadius: 2 }}>
+              The workspace is active and its founding administrator can sign in now.
+            </Alert>
+
+            <Stack spacing={0.5}>
+              <Typography variant="overline" sx={{ fontWeight: 800, color: 'text.secondary' }}>
+                Sign-in email
+              </Typography>
+              <Typography sx={{ fontFamily: 'monospace', fontSize: '0.95rem' }}>
+                {handover?.foundingAdmin.email}
+              </Typography>
+            </Stack>
+
+            {handover?.foundingAdmin.generatedPassword ? (
+              <>
+                <Stack spacing={0.5}>
+                  <Typography variant="overline" sx={{ fontWeight: 800, color: 'text.secondary' }}>
+                    Temporary password
+                  </Typography>
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <Typography
+                      sx={{
+                        fontFamily: 'monospace', fontSize: '1.05rem', fontWeight: 700,
+                        px: 1.5, py: 1, borderRadius: 1.5, flex: 1,
+                        bgcolor: 'action.hover', wordBreak: 'break-all',
+                      }}
+                    >
+                      {handover.foundingAdmin.generatedPassword}
+                    </Typography>
+                    <Button
+                      variant="outlined"
+                      onClick={() => {
+                        navigator.clipboard
+                          ?.writeText(handover.foundingAdmin.generatedPassword ?? '')
+                          .then(() => setCredentialCopied(true))
+                          .catch(() => enqueueSnackbar('Copy failed — select the password manually.', { variant: 'warning' }));
+                      }}
+                      sx={{ fontWeight: 700, whiteSpace: 'nowrap' }}
+                    >
+                      {credentialCopied ? 'Copied' : 'Copy'}
+                    </Button>
+                  </Stack>
+                </Stack>
+                <Alert severity="warning" sx={{ borderRadius: 2 }}>
+                  <AlertTitle sx={{ fontWeight: 800 }}>Shown once — it cannot be retrieved</AlertTitle>
+                  Only a one-way hash is stored, so nobody can look this up later, including us.
+                  Send it to {handover.foundingAdmin.email} through a secure channel and have them
+                  change it on first sign-in. If it is lost, the password must be reset instead.
+                </Alert>
+              </>
+            ) : (
+              <Alert severity="info" sx={{ borderRadius: 2 }}>
+                You set the password yourself, so it is not repeated here. Share it with{' '}
+                {handover?.foundingAdmin.email} through a secure channel.
+              </Alert>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button
+            variant="contained"
+            onClick={() => setHandover(null)}
+            disabled={Boolean(handover?.foundingAdmin.generatedPassword) && !credentialCopied}
+            sx={{ fontWeight: 700, px: 3 }}
+          >
+            {handover?.foundingAdmin.generatedPassword && !credentialCopied
+              ? 'Copy the password first'
+              : 'Done'}
           </Button>
         </DialogActions>
       </Dialog>

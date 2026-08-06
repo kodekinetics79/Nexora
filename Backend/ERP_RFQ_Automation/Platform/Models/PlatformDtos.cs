@@ -47,6 +47,56 @@ public class ProvisionTenantRequest
 
     /// <summary>Optional plan to assign at provisioning time.</summary>
     public long? PlanId { get; set; }
+
+    // ---- founding administrator -------------------------------------------------------
+    // Required, deliberately. A tenant without its founding Super Admin is a shell nobody
+    // can log into: the customer journey is Platform Admin -> customer account -> that
+    // customer's Super Admin -> sub accounts, and provisioning that stops at the shell
+    // breaks the journey at its first step. If an operator truly needs an admin-less
+    // tenant they are doing something this API should not encourage.
+
+    [Required, EmailAddress, StringLength(320)]
+    public string AdminEmail { get; set; } = null!;
+
+    [Required, StringLength(100, MinimumLength = 1)]
+    public string AdminFirstName { get; set; } = null!;
+
+    [Required, StringLength(100, MinimumLength = 1)]
+    public string AdminLastName { get; set; } = null!;
+
+    /// <summary>
+    /// Optional. When omitted, a strong password is GENERATED and returned exactly once in
+    /// the provisioning response — it is stored only as a BCrypt hash and can never be
+    /// retrieved again. Supplying one is for operators who agree a password with the
+    /// customer beforehand.
+    /// </summary>
+    [StringLength(128, MinimumLength = 8)]
+    public string? AdminPassword { get; set; }
+}
+
+/// <summary>
+/// What provisioning returns. Distinct from <see cref="TenantSummaryDto"/> because it can carry a
+/// ONE-TIME generated credential that must never appear on any list/get endpoint.
+/// </summary>
+public class ProvisionTenantResponse
+{
+    public TenantSummaryDto Tenant { get; set; } = null!;
+
+    public FoundingAdminDto FoundingAdmin { get; set; } = null!;
+}
+
+public class FoundingAdminDto
+{
+    public long UserId { get; set; }
+    public string Email { get; set; } = null!;
+    public string RoleName { get; set; } = null!;
+
+    /// <summary>
+    /// Present ONLY when the password was generated server-side, and only in this response.
+    /// The operator hands it to the customer through a secure channel; the customer changes
+    /// it on first login. Null when the operator supplied the password themselves.
+    /// </summary>
+    public string? GeneratedPassword { get; set; }
 }
 
 public class TenantStatusChangeRequest

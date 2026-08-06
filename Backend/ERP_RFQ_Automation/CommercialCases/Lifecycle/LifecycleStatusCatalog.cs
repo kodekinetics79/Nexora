@@ -56,12 +56,46 @@ public static class LifecycleStatusCatalog
         ("ORDERED", "Ordered")
     };
 
+    /// <summary>
+    /// Order lifecycle. Seeded because <c>OrderService</c> RESOLVES these rows rather than
+    /// treating them as configuration: converting a quote to an order looks up
+    /// <c>OrderStatus/DRAFT</c> and throws <c>"No OrderStatus setup found in the system"</c> when
+    /// it is absent (Services/OrderService.cs:132, :198, :281). A tenant provisioned without them
+    /// works perfectly through lead → RFQ → quote and then fails at the first conversion — the
+    /// exact moment the product proves its value — with an error the customer cannot self-repair.
+    ///
+    /// <para>Both CANCELED and CANCELLED are present deliberately: the codebase resolves both
+    /// spellings, and seeding only one leaves whichever call site uses the other unresolvable.</para>
+    /// </summary>
+    private static readonly (string Code, string Label)[] OrderStatuses =
+    {
+        ("DRAFT", "Draft"),
+        ("ORDERED", "Ordered"),
+        ("CANCELLED", "Cancelled"),
+        ("CANCELED", "Canceled")
+    };
+
+    /// <summary>
+    /// Payment lifecycle. <c>UNPAID</c> is resolved on every order creation
+    /// (OrderService.cs:135, :201, :284) and by customer-award application
+    /// (OrderToCash/CustomerAwardApplicationService.cs:666), so it is a hard dependency of the
+    /// order path, not a reporting nicety.
+    /// </summary>
+    private static readonly (string Code, string Label)[] PaymentStatuses =
+    {
+        ("UNPAID", "Unpaid"),
+        ("PARTIAL", "Partially paid"),
+        ("PAID", "Paid")
+    };
+
     public static IReadOnlyList<SetupMaster> CreateFor(BusinessUnit businessUnit, string actor, DateTime? now = null)
     {
         var createdOn = now ?? DateTime.UtcNow;
         return LeadStatuses.Select(item => Create("LeadStatus", item, businessUnit, actor, createdOn))
             .Concat(RfqStatuses.Select(item => Create("RFQStatus", item, businessUnit, actor, createdOn)))
             .Concat(QuoteStatuses.Select(item => Create("QuoteStatus", item, businessUnit, actor, createdOn)))
+            .Concat(OrderStatuses.Select(item => Create("OrderStatus", item, businessUnit, actor, createdOn)))
+            .Concat(PaymentStatuses.Select(item => Create("PaymentStatus", item, businessUnit, actor, createdOn)))
             .ToArray();
     }
 

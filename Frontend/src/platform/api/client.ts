@@ -14,6 +14,7 @@ import type {
   PlatformOperator,
   PlatformOperatorRole,
   ProvisionTenantInput,
+  ProvisionTenantResult,
   QueueStats,
   RateCard,
   Tenant,
@@ -44,7 +45,7 @@ export interface PlatformApi {
   getOverview(): Promise<OverviewMetrics>;
   listTenants(): Promise<Tenant[]>;
   getTenant(id: string): Promise<Tenant>;
-  provisionTenant(input: ProvisionTenantInput): Promise<Tenant>;
+  provisionTenant(input: ProvisionTenantInput): Promise<ProvisionTenantResult>;
   suspendTenant(id: string, reason: string): Promise<Tenant>;
   resumeTenant(id: string, reason: string): Promise<Tenant>;
   archiveTenant(id: string, reason: string): Promise<Tenant>;
@@ -189,12 +190,24 @@ const httpPlatformApi: PlatformApi = {
     (await platformHttp.get<BackendTenant[]>('/api/platform/tenants')).data.map(normalizeTenant),
   getTenant: async (id) =>
     normalizeTenant((await platformHttp.get<BackendTenant>(`/api/platform/tenants/${id}`)).data),
-  provisionTenant: async (input) =>
-    normalizeTenant((await platformHttp.post<BackendTenant>('/api/platform/tenants', {
+  provisionTenant: async (input) => {
+    // The response is ProvisionTenantResponse, not a bare tenant: it carries the founding
+    // admin and, when the server generated it, a one-time credential that exists in this
+    // payload and nowhere else.
+    const { data } = await platformHttp.post<{
+      tenant: BackendTenant;
+      foundingAdmin: { userId: number; email: string; roleName: string; generatedPassword: string | null };
+    }>('/api/platform/tenants', {
       name: input.name,
       slug: input.slug,
       planId: input.planId == null ? null : Number(input.planId),
-    })).data),
+      adminEmail: input.adminEmail,
+      adminFirstName: input.adminFirstName,
+      adminLastName: input.adminLastName,
+      adminPassword: input.adminPassword || null,
+    });
+    return { tenant: normalizeTenant(data.tenant), foundingAdmin: data.foundingAdmin };
+  },
   suspendTenant: async (id, reason) =>
     normalizeTenant((await platformHttp.post<BackendTenant>(`/api/platform/tenants/${id}/suspend`, { reason })).data),
   resumeTenant: async (id, reason) =>
