@@ -1,3 +1,4 @@
+using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 using System.Text.Json;
 using ERP_RFQ_Automation.Models;
@@ -77,6 +78,39 @@ namespace ERP_RFQ_Automation.Authorization
                 // Provider without transaction support (EF InMemory). The audit write still
                 // happens; it simply is not atomic with the mutation on that provider.
                 return null;
+            }
+        }
+
+        public async Task ExecuteAtomicAsync(Func<Task> work, CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(work);
+
+            // Already inside someone else's transaction: just run. Opening a nested one, or
+            // re-entering the execution strategy, would both be wrong.
+            if (_context.Database.CurrentTransaction is not null)
+            {
+                await work();
+                return;
+            }
+
+            var strategy = _context.Database.CreateExecutionStrategy();
+            try
+            {
+                await strategy.ExecuteAsync(async () =>
+                {
+                    await using var transaction = await _context.Database.BeginTransactionAsync(cancellationToken);
+                    await work();
+                    await transaction.CommitAsync(cancellationToken);
+                });
+            }
+            catch (InvalidOperationException) when (_context.Database.CurrentTransaction is null
+                                                    && !_context.Database.ProviderName!.Contains("Npgsql", StringComparison.OrdinalIgnoreCase)
+                                                    && !_context.Database.ProviderName!.Contains("Sqlite", StringComparison.OrdinalIgnoreCase))
+            {
+                // Providers without transaction support (EF InMemory). The work still happens; it
+                // simply is not atomic there. Deliberately narrow — a relational provider must
+                // never reach this path, because that is precisely the bug this method fixes.
+                await work();
             }
         }
 

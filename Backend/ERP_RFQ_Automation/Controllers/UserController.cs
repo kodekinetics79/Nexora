@@ -268,17 +268,23 @@ namespace ERP_RFQ_Automation.Controllers
                 // The audit row and the user row commit together or not at all. The user's Id is
                 // only assigned by the INSERT, so the audit write has to follow it — the explicit
                 // transaction is what keeps "created but unaudited" from being a reachable state.
-                await using var transaction = await BeginAtomicAsync();
-                await _repository.AddAsync(user);
-                await AuditAsync(IamAuditActions.UserCreated, user.Id, user.Email, after: new
+                // Runs inside the retrying execution strategy. Opening the transaction here and
+                // calling SaveChanges under it threw "the configured execution strategy
+                // 'NpgsqlRetryingExecutionStrategy' does not support user-initiated transactions"
+                // at SAVE time — after BeginAtomicAsync's try/catch had already returned — so
+                // every single user creation returned a 500.
+                await ExecuteAtomicAsync(async () =>
                 {
-                    user.Email,
-                    user.RoleId,
-                    user.TeamId,
-                    user.UserGroupId,
-                    user.IsActive
+                    await _repository.AddAsync(user);
+                    await AuditAsync(IamAuditActions.UserCreated, user.Id, user.Email, after: new
+                    {
+                        user.Email,
+                        user.RoleId,
+                        user.TeamId,
+                        user.UserGroupId,
+                        user.IsActive
+                    });
                 });
-                if (transaction is not null) await transaction.CommitAsync();
 
                 var response = MapToResponse(user);
                 return CreatedAtAction(nameof(GetById), new { id = user.Id, businessUnitId = user.Buid }, response);
@@ -663,10 +669,11 @@ namespace ERP_RFQ_Automation.Controllers
             return await _roleGate.CanManageRoleAsync(callerRoleId, targetRoleId, businessUnitId);
         }
 
-        private Task<Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction?> BeginAtomicAsync()
+        /// <summary>Mutation + audit as one retriable unit. See IIamAuditWriter.ExecuteAtomicAsync.</summary>
+        private Task ExecuteAtomicAsync(Func<Task> work)
             => _audit is null
-                ? Task.FromResult<Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction?>(null)
-                : _audit.BeginAtomicAsync(HttpContext?.RequestAborted ?? default);
+                ? work()
+                : _audit.ExecuteAtomicAsync(work, HttpContext?.RequestAborted ?? default);
 
         private async Task AuditAsync(
             string action, long? targetId, string? targetLabel, object? before = null, object? after = null)

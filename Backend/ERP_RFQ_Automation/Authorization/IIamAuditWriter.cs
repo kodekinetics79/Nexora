@@ -19,6 +19,9 @@ namespace ERP_RFQ_Automation.Authorization
         public const string PermissionGrantDenied = "PERMISSION_GRANT_DENIED";
         public const string RoleCreated = "ROLE_CREATED";
         public const string RoleRenamed = "ROLE_RENAMED";
+        /// <summary>A role's authority tier (Setup_Master.RoleRank) moved — the privilege-bearing
+        /// role edit, kept distinct from a cosmetic rename.</summary>
+        public const string RoleRankChanged = "ROLE_RANK_CHANGED";
         public const string RoleDeleted = "ROLE_DELETED";
 
         /// <summary>Every action this system emits, in the order they appear above.</summary>
@@ -26,7 +29,7 @@ namespace ERP_RFQ_Automation.Authorization
         {
             UserCreated, UserUpdated, UserRoleChanged, UserDeactivated, UserDeleted,
             PasswordChanged, PermissionGranted, PermissionModified, PermissionRevoked,
-            PermissionGrantDenied, RoleCreated, RoleRenamed, RoleDeleted
+            PermissionGrantDenied, RoleCreated, RoleRenamed, RoleRankChanged, RoleDeleted
         };
     }
 
@@ -76,5 +79,24 @@ namespace ERP_RFQ_Automation.Authorization
         /// </summary>
         Task<Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction?> BeginAtomicAsync(
             CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Runs <paramref name="work"/> inside a transaction that is safe under the retrying
+        /// execution strategy, so the mutation and its audit event commit or roll back as one.
+        ///
+        /// <para><b>Why this exists.</b> Callers used to open the transaction themselves via
+        /// <see cref="BeginAtomicAsync"/> and then call <c>SaveChangesAsync</c>. The DbContext is
+        /// registered with <c>EnableRetryOnFailure</c>, and EF refuses to execute inside a
+        /// user-initiated transaction under a retrying strategy — it throws
+        /// <c>"The configured execution strategy 'NpgsqlRetryingExecutionStrategy' does not
+        /// support user-initiated transactions"</c>. Crucially it throws at SAVE time, not at
+        /// BeginTransaction, so the try/catch guarding BeginAtomicAsync never saw it and every
+        /// affected action returned a 500. User creation and both role-permission mutations
+        /// failed 100% of the time.</para>
+        ///
+        /// <para>The whole unit must be retriable, which means the strategy has to own the
+        /// transaction — hence this method rather than a fix at each call site.</para>
+        /// </summary>
+        Task ExecuteAtomicAsync(Func<Task> work, CancellationToken cancellationToken = default);
     }
 }

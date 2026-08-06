@@ -147,14 +147,17 @@ namespace ERP_RFQ_Automation.Controllers
                     CreatedOn = DateTime.UtcNow
                 };
 
-                await using var transaction = await BeginAtomicAsync();
-                await _repository.AddAsync(rolePermission);
-                if (_audit is not null)
-                    await _audit.WriteAsync(User, new IamAuditEntry(
-                        IamAuditActions.PermissionGranted, IamAuditTargets.RolePermission,
-                        rolePermission.Id, $"role:{rolePermission.RoleId} module:{rolePermission.ModuleId}",
-                        After: Snapshot(rolePermission)));
-                if (transaction is not null) await transaction.CommitAsync();
+                // Retry-safe: see IIamAuditWriter.ExecuteAtomicAsync. Opening the transaction
+                // directly made every permission grant fail with a 500 at save time.
+                await ExecuteAtomicAsync(async () =>
+                {
+                    await _repository.AddAsync(rolePermission);
+                    if (_audit is not null)
+                        await _audit.WriteAsync(User, new IamAuditEntry(
+                            IamAuditActions.PermissionGranted, IamAuditTargets.RolePermission,
+                            rolePermission.Id, $"role:{rolePermission.RoleId} module:{rolePermission.ModuleId}",
+                            After: Snapshot(rolePermission)));
+                });
 
                 var response = MapToResponse(rolePermission);
                 return CreatedAtAction(nameof(GetById), new { id = rolePermission.Id, businessUnitId = rolePermission.BusinessUnitId }, response);
@@ -340,7 +343,13 @@ namespace ERP_RFQ_Automation.Controllers
                 var created = 0;
                 var updated = 0;
 
-                await using var transaction = await BeginAtomicAsync();
+                // Retry-safe: see IIamAuditWriter.ExecuteAtomicAsync. The whole read-modify-write
+                // must be inside the strategy so a transient failure replays it as one unit —
+                // `created`/`updated` are reset on entry for exactly that reason.
+                await ExecuteAtomicAsync(async () =>
+                {
+                created = 0;
+                updated = 0;
 
                 var existingRows = await _context.RolePermissions
                     .Where(rp => rp.BusinessUnitId == claimBUId && rp.RoleId == roleId
@@ -398,7 +407,7 @@ namespace ERP_RFQ_Automation.Controllers
                 }
 
                 await _context.SaveChangesAsync(HttpContext?.RequestAborted ?? default);
-                if (transaction is not null) await transaction.CommitAsync();
+                });
 
                 return Ok(new RolePermissionBulkApplyResponseDTO
                 {
@@ -423,10 +432,11 @@ namespace ERP_RFQ_Automation.Controllers
         private long CallerRoleId() =>
             long.TryParse(User.FindFirst("roleId")?.Value, out var roleId) ? roleId : 0;
 
-        private Task<Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction?> BeginAtomicAsync()
+        /// <summary>Mutation + audit as one retriable unit. See IIamAuditWriter.ExecuteAtomicAsync.</summary>
+        private Task ExecuteAtomicAsync(Func<Task> work)
             => _audit is null
-                ? Task.FromResult<Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction?>(null)
-                : _audit.BeginAtomicAsync(HttpContext?.RequestAborted ?? default);
+                ? work()
+                : _audit.ExecuteAtomicAsync(work, HttpContext?.RequestAborted ?? default);
 
         /// <summary>
         /// RC-7: a REFUSED escalation is the signal worth keeping — a successful grant is routine
