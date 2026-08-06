@@ -293,8 +293,12 @@ public sealed class AdministrativeSecurityTests
         {
             Id = 101, ModuleName = "Users", IsActive = true, CreatedBy = "test", CreatedOn = DateTime.UtcNow
         });
+        // Ranks are explicit now; the names are only labels. "super-admin" is Owner and "manager"
+        // is Manager because that is what the legacy name rule made them — the hierarchy under
+        // test is unchanged, only its source of truth is.
         context.SetupMasters.AddRange(
-            Role(1, "limited"), Role(2, "elevated"), Role(3, "super-admin"), Role(4, "manager"));
+            Role(1, "limited"), Role(2, "elevated"),
+            Role(3, "super-admin", RoleRanks.Owner), Role(4, "manager", RoleRanks.Manager));
         context.RolePermissions.AddRange(
             Permission(1, canEdit: false), Permission(2, canEdit: true), Permission(3, canEdit: true),
             Permission(4, canEdit: false));
@@ -370,9 +374,9 @@ public sealed class AdministrativeSecurityTests
         return context;
     }
 
-    private static SetupMaster Role(long id, string code) => new()
+    private static SetupMaster Role(long id, string code, short rank = RoleRanks.Member) => new()
     {
-        SetupId = id, SetupType = "role", SetupCode = code, SetupValue = code,
+        SetupId = id, SetupType = "role", SetupCode = code, SetupValue = code, RoleRank = rank,
         BusinessUnitId = 42, IsActive = true, CreatedBy = "test", CreatedOn = DateTime.UtcNow
     };
 

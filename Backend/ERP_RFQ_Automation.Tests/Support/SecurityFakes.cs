@@ -50,6 +50,11 @@ public sealed class StubRoleGate : IRoleGate
     public Task<bool> IsSuperAdminAsync(long roleId, long businessUnitId) =>
         Task.FromResult(SuperAdminRoleIds.Contains(roleId));
 
+    public Task<short> GetRoleRankAsync(long roleId, long businessUnitId) =>
+        Task.FromResult(
+            SuperAdminRoleIds.Contains(roleId) ? RoleRanks.Owner :
+            ManagerRoleIds.Contains(roleId) ? RoleRanks.Manager : RoleRanks.Member);
+
     public Task<bool> IsManagerOrAdminAsync(long roleId, long businessUnitId) =>
         Task.FromResult(SuperAdminRoleIds.Contains(roleId) || ManagerRoleIds.Contains(roleId));
 

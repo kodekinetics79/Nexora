@@ -44,12 +44,26 @@ namespace ERP_RFQ_Automation.Authorization
                 return;
             }
 
-            // Super-admin bypass: defense against missing/partial RolePermissions rows.
-            // Even if the seed grants a super admin everything, an absent row must never
-            // lock the platform owner-role out of its own tenant.
-            if (await _roleGate.IsSuperAdminAsync(roleId, businessUnitId))
+            // Rank rule (replaces the former super-admin BYPASS): a role at RoleRanks.Admin or
+            // above satisfies a module permission requirement on its own.
+            //
+            // This is deliberately a rule, not a bypass. The bypass short-circuited EVERY module
+            // check for anything RoleGate called a super admin, and RoleGate decided that by
+            // substring-matching the role NAME — so a tenant role called "Supervisor Admin" owned
+            // the tenant. Authority now comes from the explicit Setup_Master.RoleRank column, and
+            // this check states exactly which tier it grants.
+            //
+            // The reason the bypass existed is fully satisfied by the rank check: an administrator
+            // with missing or partial RolePermissions rows must never be locked out of their own
+            // tenant, and rank >= Admin grants that directly, without reference to any row.
+            // Everything below Admin is decided by RolePermissions rows and stays fail-closed:
+            // no row, no grant.
+            var rank = await _roleGate.GetRoleRankAsync(roleId, businessUnitId);
+            if (rank >= RoleRanks.Admin)
             {
-                _logger.LogDebug("Module permission check bypassed for super-admin role {RoleId}.", roleId);
+                _logger.LogDebug(
+                    "Module permission {Module}:{Action} satisfied by rank {Rank} for role {RoleId}.",
+                    requirement.ModuleName, requirement.Action, rank, roleId);
                 context.Succeed(requirement);
                 return;
             }

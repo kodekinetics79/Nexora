@@ -80,6 +80,16 @@ if (string.IsNullOrWhiteSpace(contactVerificationSecret) || Encoding.UTF8.GetByt
     throw new InvalidOperationException(
         "Commercial finance provider secrets are required and must each contain at least 32 bytes.");
 
+// Security:SecretProtectionKey encrypts stored CUSTOMER MAILBOX credentials at rest
+// (Email_Configurations.Password, AES-256-GCM). Same fail-closed contract as Jwt:Key above:
+// outside Development a missing/short/placeholder key stops the deploy rather than booting
+// an API that writes corporate Exchange/O365 passwords in cleartext. Development falls back
+// to an ephemeral process-lifetime key — logged loudly below — so the demo needs no setup.
+var secretProtector = SecretProtection.CreateFromConfiguration(
+    builder.Configuration, builder.Environment.IsDevelopment(), out var secretProtectionIsEphemeral);
+SecretProtection.Use(secretProtector, secretProtectionIsEphemeral);
+builder.Services.AddSingleton(secretProtector);
+
 // Add services to the container.
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
@@ -325,16 +335,6 @@ builder.Services.AddSingleton<TenantSmtpConcurrencyGate>();
 builder.Services.AddSingleton<IOutboundSmtpTransport, MailKitOutboundSmtpTransport>();
 // Stateless — every call carries its own settings — so a singleton is correct.
 builder.Services.AddSingleton<IMailboxConnectionProbe, MailboxConnectionProbe>();
-builder.Services.AddScoped<IAuthorizationHandler, ManagerRoleHandler>();
-builder.Services.AddSingleton<IAuthorizationPolicyProvider, ModulePermissionPolicyProvider>();
-builder.Services.AddSingleton<IAuthorizationMiddlewareResultHandler, ForbiddenJsonResultHandler>();
-
-ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
-builder.Services.AddAuthorization(options =>
-{
-    // RFQ Policies
-    options.AddPolicy("CanCreateRFQ", policy => policy.Requirements.Add(new PermissionRequirement("RFQ", "CanCreate")));
-    options.AddPolicy("CanEditRFQ", policy => policy.Requirements.Add(new PermissionRequirement("RFQ", "CanEdit")));
 // Testing-only tenant data reset. Scoped because it reads the EF model through the request
 // context; refuses Production internally regardless of how it is registered.
 builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Testing.TenantDataReset>();
@@ -345,6 +345,16 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Testing.TenantDataReset>(
 // service so it runs after any startup migration has applied, and so a slow or failing database
 // delays reconciliation rather than the whole boot.
 builder.Services.AddHostedService<ModuleCatalogStartupService>();
+builder.Services.AddScoped<IAuthorizationHandler, ManagerRoleHandler>();
+builder.Services.AddSingleton<IAuthorizationPolicyProvider, ModulePermissionPolicyProvider>();
+builder.Services.AddSingleton<IAuthorizationMiddlewareResultHandler, ForbiddenJsonResultHandler>();
+
+ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
+builder.Services.AddAuthorization(options =>
+{
+    // RFQ Policies
+    options.AddPolicy("CanCreateRFQ", policy => policy.Requirements.Add(new PermissionRequirement("RFQ", "CanCreate")));
+    options.AddPolicy("CanEditRFQ", policy => policy.Requirements.Add(new PermissionRequirement("RFQ", "CanEdit")));
     options.AddPolicy("CanDeleteRFQ", policy => policy.Requirements.Add(new PermissionRequirement("RFQ", "CanDelete")));
 
     // Quotation Policies
@@ -628,6 +638,16 @@ var app = builder.Build();
 // loopback. Production ran external for weeks with nothing in the log saying so.
 app.Services.GetRequiredService<IAiProviderEndpointResolver>();
 
+// An ephemeral key is only reachable in Development (CreateFromConfiguration throws
+// otherwise), but say so out loud: anything protected under it becomes unreadable at the
+// next restart, which is confusing unless you know why.
+if (SecretProtection.UsingEphemeralDevelopmentKey)
+    app.Logger.LogWarning(
+        "INSECURE: no {ConfigurationPath} configured, so a random process-lifetime key is protecting " +
+        "stored mailbox credentials. Values encrypted now CANNOT be read after a restart. This fallback " +
+        "exists for local development only and is refused outside Development.",
+        SecretProtection.KeyConfigurationPath);
+
 // Production defaults to applying migrations before serving traffic. This guarantees
 // tenant-role/RLS policy installation is atomic with the application rollout. Set
 // Database:ApplyMigrationsOnStartup=false only when an external release job owns it.
@@ -655,6 +675,14 @@ if (applyMigrations)
     await using var migrationDb = new ErpRfqAutomationContext(migrationOptionsBuilder.Options);
     await migrationDb.Database.MigrateAsync();
 }
+// Backfill legacy cleartext mailbox credentials into the protected envelope. Deliberately a
+// startup step rather than a `migrationBuilder.Sql` data migration: the key lives in
+// application configuration, NOT in the database, so no SQL script can perform AES-256-GCM
+// with it. Running it here is also where the key is guaranteed present and validated.
+// Idempotent (skips anything already carrying the v1: prefix), so it is safe on every boot.
+await MailboxCredentialProtectionBackfill.RunAsync(migrationConnection, secretProtector, app.Logger);
+
+
 await SyncFinanceProviderSecretsAsync(
     migrationConnection, contactVerificationSecret, dunningProviderSecret, auditActorSecret);
 
@@ -788,6 +816,12 @@ app.MapHealthChecks("/ready", new Microsoft.AspNetCore.Diagnostics.HealthChecks.
 {
     Predicate = registration => registration.Tags.Contains("ready")
 }).AllowAnonymous();
+// Zero-dependency Prometheus scrape endpoint (Platform/Hardening). Self-disabling: the
+// call is a no-op unless ObservabilityExtensions.SelectExporter enabled it, which by
+// default happens exactly when no OTLP collector is configured — so the process can
+// never again register a meter and export nothing. Carries its own X-Scrape-Key check.
+app.MapNexoraMetricsScrape();
+
 app.Run();
 
 public partial class Program;

@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.CommercialIntelligence.Opportunity;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Tests.HttpIntegration;
@@ -208,25 +209,16 @@ public sealed class OpportunityPrioritiesAuthenticatedHttpTests(Release01BHttpAp
             return;
 
         db.SetupMasters.AddRange(
-            Role(TenantAManagerRole, Release01BHttpApplication.TenantA, "Opportunity Manager A"),
-            Role(TenantBManagerRole, Release01BHttpApplication.TenantB, "Opportunity Manager B"));
+            Role(TenantAManagerRole, Release01BHttpApplication.TenantA, "Opportunity Manager A", RoleRanks.Manager),
+            Role(TenantBManagerRole, Release01BHttpApplication.TenantB, "Opportunity Manager B", RoleRanks.Manager));
         db.RolePermissions.AddRange(
             Permission(848_301, TenantAManagerRole, Release01BHttpApplication.TenantA),
             Permission(848_302, TenantBManagerRole, Release01BHttpApplication.TenantB));
         await db.SaveChangesAsync();
     }
 
-    private static SetupMaster Role(long id, long tenantId, string name) => new()
-    {
-        SetupId = id,
-        SetupType = "Role",
-        SetupCode = name.Replace(' ', '_').ToUpperInvariant(),
-        SetupValue = name,
-        BusinessUnitId = tenantId,
-        IsActive = true,
-        CreatedBy = "opportunity-priority-http-tests",
-        CreatedOn = DateTime.UtcNow
-    };
+    private static SetupMaster Role(long id, long tenantId, string name, short rank) =>
+        Release01BHttpApplication.Role(id, tenantId, name, rank, "opportunity-priority-http-tests");
 
     private static RolePermission Permission(long id, long roleId, long tenantId) => new()
     {

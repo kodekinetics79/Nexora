@@ -87,19 +87,22 @@ public sealed class ExtractionWorker : BackgroundService
     private readonly ITenantScopeAccessor _tenantScope;
     private readonly SemaphoreSlim _llmGate; // process-wide LLM concurrency cap
     private readonly IExtractionWorkerHeartbeat? _workerHeartbeat;
+    private readonly ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? _metrics;
 
     public ExtractionWorker(
         IServiceScopeFactory scopeFactory,
         ExtractionWorkerOptions options,
         ILogger<ExtractionWorker> log,
         ITenantScopeAccessor tenantScope,
-        IExtractionWorkerHeartbeat? workerHeartbeat = null)
+        IExtractionWorkerHeartbeat? workerHeartbeat = null,
+        ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? metrics = null)
     {
         _scopeFactory = scopeFactory;
         _options = options;
         _log = log;
         _tenantScope = tenantScope;
         _workerHeartbeat = workerHeartbeat;
+        _metrics = metrics;
         _llmGate = new SemaphoreSlim(Math.Max(1, options.MaxConcurrentLlmCalls));
     }
 
@@ -158,6 +161,12 @@ public sealed class ExtractionWorker : BackgroundService
         if (job is null)
             return false;
 
+        // Duration is measured from the moment the lease is held to the moment the job
+        // leaves this method, so it is the number an operator cares about (how long a
+        // document occupies a worker), not just model time.
+        var processingStartedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+        double ElapsedMs() => System.Diagnostics.Stopwatch.GetElapsedTime(processingStartedAt).TotalMilliseconds;
+
         using var tenantScope = _tenantScope.Push(job.BusinessUnitId);
         using var scope = _scopeFactory.CreateScope();
         var queue = scope.ServiceProvider.GetRequiredService<IExtractionQueue>();
@@ -207,6 +216,7 @@ public sealed class ExtractionWorker : BackgroundService
                     return true;
                 }
                 await MarkIntakeFinalizedAsync(job, ct);
+                _metrics?.JobSucceeded(ElapsedMs(), job.BusinessUnitId);
                 _log.LogInformation(
                     "Job {JobId} completed as a non-Lead commercial document for tenant {BusinessUnitId}.",
                     job.Id, job.BusinessUnitId);
@@ -268,7 +278,10 @@ public sealed class ExtractionWorker : BackgroundService
                         job.Id, workerId, job.Attempts, failureReason, workToken))
                     LogLeaseLost(job.Id, workerId, "recording extraction failure");
                 else
+                {
                     await MarkIntakeFailureAsync(job, "extraction_failed", workToken);
+                    RecordFailureMetrics(job, "extraction_failed", failureReason, ElapsedMs());
+                }
                 return true;
             }
 
@@ -296,6 +309,7 @@ public sealed class ExtractionWorker : BackgroundService
                 return true;
             }
             await MarkIntakeFinalizedAsync(job, ct);
+            _metrics?.JobSucceeded(ElapsedMs(), job.BusinessUnitId);
 
             _log.LogInformation(
                 "Job {JobId} succeeded: lead {LeadId}, {Extracted}/{Expected} items, status {Status}.",
@@ -318,13 +332,17 @@ public sealed class ExtractionWorker : BackgroundService
                 job.BusinessUnitId, job.Id);
             try
             {
+                var parseReason = ex is UnsupportedDocumentFormatException
+                    ? "unsupported_format" : "document_parse_failed";
                 if (!await queue.FailPermanentlyAsync(job.Id, workerId, job.Attempts,
                         ex.Message, CancellationToken.None))
                     LogLeaseLost(job.Id, workerId, "recording document parse failure");
                 else
-                    await MarkIntakeFailureAsync(job,
-                        ex is UnsupportedDocumentFormatException ? "unsupported_format" : "document_parse_failed",
-                        CancellationToken.None, permanent: true);
+                {
+                    await MarkIntakeFailureAsync(job, parseReason, CancellationToken.None, permanent: true);
+                    // FailPermanentlyAsync dead-letters immediately, regardless of attempts.
+                    RecordFailureMetrics(job, parseReason, ex.Message, ElapsedMs(), permanent: true);
+                }
             }
             catch (Exception failEx)
             {
@@ -355,7 +373,11 @@ public sealed class ExtractionWorker : BackgroundService
                         "Evidence integrity failure: " + ex.Message, CancellationToken.None))
                     LogLeaseLost(job.Id, workerId, "recording evidence integrity failure");
                 else
+                {
                     await MarkIntakeFailureAsync(job, "evidence_integrity_failure", CancellationToken.None);
+                    RecordFailureMetrics(job, "evidence_integrity_failure",
+                        "Evidence integrity failure: " + ex.Message, ElapsedMs());
+                }
             }
             catch (Exception failEx)
             {
@@ -371,7 +393,10 @@ public sealed class ExtractionWorker : BackgroundService
                 if (!await queue.FailAsync(job.Id, workerId, job.Attempts, ex.Message, CancellationToken.None))
                     LogLeaseLost(job.Id, workerId, "recording unexpected failure");
                 else
+                {
                     await MarkIntakeFailureAsync(job, "unexpected_extraction_failure", CancellationToken.None);
+                    RecordFailureMetrics(job, "unexpected_extraction_failure", ex.Message, ElapsedMs());
+                }
             }
             catch (Exception failEx) { _log.LogError(failEx, "Also failed to record failure for job {JobId}.", job.Id); }
             return true;
@@ -656,9 +681,30 @@ public sealed class ExtractionWorker : BackgroundService
     }
 
     private void LogLeaseLost(long jobId, string workerId, string operation)
-        => _log.LogWarning(
+    {
+        _log.LogWarning(
             "Worker {Worker} lost or expired its lease for job {JobId} while {Operation}; stale transition was fenced.",
             workerId, jobId, operation);
+        // The tenant comes from the ambient scope pushed at the top of ProcessOnceAsync,
+        // which every call site here runs inside. The stage string is a fixed literal at
+        // each call site, so the tag domain is closed. Neither the job id nor the worker
+        // id is tagged — both are unbounded.
+        _metrics?.LeaseLost(operation, _tenantScope.BusinessUnitId);
+    }
+
+    /// <summary>
+    /// Records a terminal-for-this-attempt failure. A job that has spent its attempts is
+    /// ALSO a dead-letter arrival, categorised through the same closed vocabulary the
+    /// dead-letter API reports, so the counter and the operator queue agree.
+    /// </summary>
+    private void RecordFailureMetrics(
+        ExtractionJob job, string reason, string? errorText, double durationMs, bool permanent = false)
+    {
+        _metrics?.JobFailed(reason, job.BusinessUnitId, durationMs);
+        if (permanent || job.Attempts >= job.MaxAttempts)
+            _metrics?.JobDeadLettered(
+                ExtractionDeadLetterService.ClassifyFailure(errorText), job.BusinessUnitId);
+    }
 }
 
 /// <summary>

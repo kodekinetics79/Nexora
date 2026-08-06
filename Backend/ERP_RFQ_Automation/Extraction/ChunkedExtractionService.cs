@@ -202,6 +202,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
     private readonly ICanonicalRfqNormalizer _normalizer;
     private readonly ILogger<ChunkedExtractionService> _log;
     private readonly IAiExternalProviderTrust? _externalProviderTrust;
+    private readonly ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? _metrics;
 
     // Chunk bounds. A chunk must satisfy ALL THREE constraints:
     //   1. OUTPUT-token budget (ExtractionOutputBudget) — the binding one in practice, and
@@ -238,12 +239,33 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         ILLMService llm,
         ICanonicalRfqNormalizer normalizer,
         ILogger<ChunkedExtractionService> log,
-        IAiExternalProviderTrust? externalProviderTrust = null)
+        IAiExternalProviderTrust? externalProviderTrust = null,
+        ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? metrics = null)
     {
         _llm = llm;
         _normalizer = normalizer;
         _log = log;
         _externalProviderTrust = externalProviderTrust;
+        _metrics = metrics;
+    }
+
+    /// <summary>
+    /// Emits nexora.llm.calls + nexora.llm.latency for exactly one provider call.
+    /// Latency is measured around the call itself and is recorded on EVERY outcome —
+    /// a refusal or a timeout is the outcome an operator most needs the latency for, and
+    /// recording only successes is how a provider that has started failing slowly looks
+    /// like a provider that has simply gone quiet.
+    /// </summary>
+    private void RecordLlmCall(long businessUnitId, long startTimestamp, string outcome)
+    {
+        if (_metrics is null) return;
+        var descriptor = _llm.ProviderDescriptor;
+        _metrics.LlmCall(
+            System.Diagnostics.Stopwatch.GetElapsedTime(startTimestamp).TotalMilliseconds,
+            model: string.IsNullOrEmpty(descriptor.Model) ? null : descriptor.Model,
+            businessUnitId: businessUnitId,
+            provider: descriptor.Provider,
+            outcome: outcome);
     }
 
     public Task<ChunkedExtractionOutcome> ExtractAsync(DocumentExtractionInput input, CancellationToken ct = default)
@@ -307,6 +329,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             // The key is scoped to the LEASE ATTEMPT so a retried job is a NEW governed
             // request rather than a replay of a refused one (see AttemptNumber).
             LlmExtractionOutcome wholeDocument;
+            var wholeDocumentStartedAt = System.Diagnostics.Stopwatch.GetTimestamp();
             try
             {
                 wholeDocument = await _llm.ExtractLeadDataDetailedAsync(
@@ -316,9 +339,13 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                         AiPromptVersions.StructuredRfqExtraction,
                         ExtractionJobId: input.ExtractionJobId,
                         SourceDocumentOccurrenceId: input.SourceDocumentOccurrenceId), ct);
+                RecordLlmCall(input.BusinessUnitId, wholeDocumentStartedAt,
+                    wholeDocument.Result is not null ? "ok"
+                        : wholeDocument.OutputTruncated ? "output_truncated" : "no_result");
             }
             catch (AiPolicyDeniedException ex)
             {
+                RecordLlmCall(input.BusinessUnitId, wholeDocumentStartedAt, "policy_denied");
                 _log.LogWarning(ex,
                     "Whole-document extraction for {Document} was refused by AI governance ({Code}) "
                     + "before any model call.", input.SourceDocumentName, ex.Code);
@@ -404,6 +431,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             var chunk = pending[i];
             var prompt = BuildChunkText(headerContext, chunk);
             LlmExtractionOutcome outcome;
+            var chunkStartedAt = System.Diagnostics.Stopwatch.GetTimestamp();
             try
             {
                 attemptedCalls++;
@@ -419,6 +447,9 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                         ExtractionJobId: input.ExtractionJobId,
                         SourceDocumentOccurrenceId: input.SourceDocumentOccurrenceId,
                         ItemsInPayload: chunk.Count), ct);
+                RecordLlmCall(input.BusinessUnitId, chunkStartedAt,
+                    outcome.Result is not null ? "ok"
+                        : outcome.OutputTruncated ? "output_truncated" : "no_result");
             }
             catch (OperationCanceledException)
             {
@@ -426,6 +457,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             }
             catch (AiPolicyDeniedException ex)
             {
+                RecordLlmCall(input.BusinessUnitId, chunkStartedAt, "policy_denied");
                 // The governance ledger refused this request BEFORE any model call
                 // (duplicate key, policy denial, budget ceiling). That is a different fact
                 // from a model failure and it must stay legible all the way to the
@@ -444,6 +476,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             }
             catch (Exception ex)
             {
+                RecordLlmCall(input.BusinessUnitId, chunkStartedAt, "error");
                 _log.LogWarning(ex, "Chunk {Index}/{Total} extraction threw.", i + 1, pending.Count);
                 outcome = new LlmExtractionOutcome(null, AiErrorCodes.AttemptsExhausted);
             }

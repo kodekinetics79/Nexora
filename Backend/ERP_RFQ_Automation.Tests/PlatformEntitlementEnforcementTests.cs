@@ -377,6 +377,7 @@ public sealed class PlatformEntitlementEnforcementTests
     private sealed class StubRoleGate : ERP_RFQ_Automation.Authorization.IRoleGate
     {
         public Task<bool> IsSuperAdminAsync(long roleId, long businessUnitId) => Task.FromResult(true);
+        public Task<short> GetRoleRankAsync(long roleId, long businessUnitId) => Task.FromResult(RoleRanks.Owner);
         public Task<bool> IsManagerOrAdminAsync(long roleId, long businessUnitId) => Task.FromResult(true);
         public Task<bool> CanManageRoleAsync(long callerRoleId, long? targetRoleId, long businessUnitId) => Task.FromResult(true);
     }

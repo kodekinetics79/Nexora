@@ -98,6 +98,10 @@ public static class DemoUserSeeder
                 SetupCode = "SUPER_ADMIN",
                 SetupValue = roleName,
                 Description = "Full access demo role.",
+                // Authority is the RoleRank column now, not the "SUPER_ADMIN" string. Without this
+                // the demo tenant's owner role would seed at Member and the demo account would have
+                // no access at all.
+                RoleRank = ERP_RFQ_Automation.Authorization.RoleRanks.Owner,
                 BusinessUnitId = businessUnit.Id,
                 IsActive = true,
                 CreatedBy = "system:demo-seed",
@@ -106,10 +110,14 @@ public static class DemoUserSeeder
             db.SetupMasters.Add(role);
             await db.SaveChangesAsync();
         }
-        else if (role.IsActive != true || role.SetupCode != "SUPER_ADMIN")
+        else if (role.IsActive != true
+                 || role.SetupCode != "SUPER_ADMIN"
+                 || role.RoleRank < ERP_RFQ_Automation.Authorization.RoleRanks.Owner)
         {
             role.IsActive = true;
             role.SetupCode = "SUPER_ADMIN";
+            // Repair path for a demo tenant seeded before RoleRank existed.
+            role.RoleRank = ERP_RFQ_Automation.Authorization.RoleRanks.Owner;
             role.ModifiedBy = "system:demo-seed";
             role.ModifiedOn = now;
             await db.SaveChangesAsync();

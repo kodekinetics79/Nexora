@@ -49,12 +49,12 @@ public sealed class UserAdministrationEscalationTests
     private const long ModuleUsersId = 101;
     private const long ModuleRbacId = 102;
 
-    // Roles. Names matter: RoleGate's super-admin / manager tests are substring matches on the
-    // Setup_Master role name, so the names below are chosen to isolate which rule does the work.
-    private const long RoleCoordinator = 1;  // the B7 pilot role: users yes, RBAC no. No "admin"/"manager" in the name.
-    private const long RoleCompliance = 2;   // outranks Coordinator ONLY by permission set (name is deliberately neutral).
-    private const long RoleSuperAdmin = 3;   // super admin by name.
-    private const long RoleFieldManager = 4; // outranks nobody by permissions; blocked purely by the "manager" name rule.
+    // Roles. Authority is the explicit Setup_Master.RoleRank column (RoleGate no longer looks at
+    // the name at all), so each role below declares the tier that isolates which rule does the work.
+    private const long RoleCoordinator = 1;  // the B7 pilot role: users yes, RBAC no. RoleRanks.Member.
+    private const long RoleCompliance = 2;   // outranks Coordinator ONLY by permission set (same rank).
+    private const long RoleSuperAdmin = 3;   // RoleRanks.Owner.
+    private const long RoleFieldManager = 4; // outranks nobody by permissions; blocked purely by RoleRanks.Manager.
     private const long RoleExecutive = 5;    // strictly below Coordinator — the legitimate assignment target.
 
     private const long CallerUserId = 77;
@@ -70,11 +70,14 @@ public sealed class UserAdministrationEscalationTests
             NewModule(ModuleUsersId, "Users"),
             NewModule(ModuleRbacId, "Roles & Permissions"));
 
+        // Rank is now an explicit column, so these roles say what they are instead of being
+        // reverse-engineered from their names. The tiers are the ones the old name rule produced,
+        // so the escalation invariants under test are unchanged.
         ctx.SetupMasters.AddRange(
             NewRole(RoleCoordinator, "User Coordinator"),
             NewRole(RoleCompliance, "Compliance Officer"),
-            NewRole(RoleSuperAdmin, "Super Admin"),
-            NewRole(RoleFieldManager, "Field Manager"),
+            NewRole(RoleSuperAdmin, "Super Admin", RoleRanks.Owner),
+            NewRole(RoleFieldManager, "Field Manager", RoleRanks.Manager),
             NewRole(RoleExecutive, "Sales Executive"));
 
         // Coordinator: full user administration, zero RBAC administration.
@@ -87,12 +90,12 @@ public sealed class UserAdministrationEscalationTests
         ctx.RolePermissions.Add(NewPermission(9003, RoleCompliance, ModuleRbacId,
             canView: true, canCreate: true, canEdit: true, canDelete: true));
 
-        // Super Admin: bypasses everything by name; the row is incidental.
+        // Super Admin: satisfies module checks by RANK (RoleRanks.Owner); the row is incidental.
         ctx.RolePermissions.Add(NewPermission(9004, RoleSuperAdmin, ModuleUsersId,
             canView: true, canCreate: true, canEdit: true, canDelete: true));
 
         // Field Manager: strictly FEWER permissions than the Coordinator. If the caller is refused
-        // this role, only the name-based manager rule can be responsible.
+        // this role, only the rank comparison can be responsible.
         ctx.RolePermissions.Add(NewPermission(9005, RoleFieldManager, ModuleUsersId, canView: true));
 
         // Sales Executive: strictly below the Coordinator on every flag.
@@ -106,9 +109,9 @@ public sealed class UserAdministrationEscalationTests
         Id = id, ModuleName = name, IsActive = true, CreatedBy = "seed", CreatedOn = DateTime.UtcNow
     };
 
-    private static SetupMaster NewRole(long id, string name) => new()
+    private static SetupMaster NewRole(long id, string name, short rank = RoleRanks.Member) => new()
     {
-        SetupId = id, SetupType = "role", SetupCode = name, SetupValue = name,
+        SetupId = id, SetupType = "role", SetupCode = name, SetupValue = name, RoleRank = rank,
         BusinessUnitId = Bu, IsActive = true, CreatedBy = "seed", CreatedOn = DateTime.UtcNow
     };
 
@@ -262,8 +265,8 @@ public sealed class UserAdministrationEscalationTests
 
     [Theory]
     [InlineData(RoleCompliance)]   // outranked on permissions
-    [InlineData(RoleSuperAdmin)]   // super admin by name
-    [InlineData(RoleFieldManager)] // manager by name, despite holding fewer permissions
+    [InlineData(RoleSuperAdmin)]   // RoleRanks.Owner
+    [InlineData(RoleFieldManager)] // RoleRanks.Manager, despite holding fewer permissions
     public async Task Create_ByNonPrivilegedUserAdministrator_ForbidsRoleTheCallerDoesNotOutrank(long targetRoleId)
     {
         using var db = new TestDb();

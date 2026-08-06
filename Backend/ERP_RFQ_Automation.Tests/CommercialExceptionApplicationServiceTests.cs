@@ -379,6 +379,8 @@ public sealed class CommercialExceptionApplicationServiceTests
             SetupType = "Role",
             SetupCode = "SUPER_ADMINISTRATOR",
             SetupValue = "Super Administrator",
+            // The NAME no longer confers anything — the rank column does.
+            RoleRank = ERP_RFQ_Automation.Authorization.RoleRanks.Owner,
             BusinessUnitId = TenantId,
             IsActive = true,
             CreatedBy = "tests",

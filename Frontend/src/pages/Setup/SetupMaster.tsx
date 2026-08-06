@@ -30,6 +30,7 @@ import {
   Layers as LayersIcon,
   CheckCircle as ActiveIcon,
   Cancel as InactiveIcon,
+  Security as ShieldIcon,
 } from '@mui/icons-material';
 import { useTranslation } from 'react-i18next';
 import { useLocation } from 'react-router-dom';
@@ -37,7 +38,28 @@ import setupService from '../../api/services/setupService';
 import type { SetupMasterDTO, SetupMasterCreateDTO, SetupMasterUpdateDTO } from '../../api/services/setupService';
 import { useAuth } from '../../context/AuthContext';
 import SearchField from '../../components/common/SearchField';
+import ApiErrorNotice from '../../components/common/ApiErrorNotice';
+import {
+  DEFAULT_ROLE_RANK,
+  ROLE_RANK_DENIED_MESSAGE,
+  ROLE_RANK_MEMBER,
+  ROLE_RANK_MANAGER,
+  ROLE_RANK_ADMIN,
+  ROLE_RANK_OWNER,
+  asRoleRank,
+  isRoleSetupType,
+  roleRankChoices,
+  roleRankTier,
+} from './roleRankTiers';
 import lodash from 'lodash';
+
+/** Authority reads at a glance: the higher the tier, the louder the chip. */
+const ROLE_RANK_CHIP_COLOR: Record<number, 'default' | 'info' | 'warning' | 'error'> = {
+  [ROLE_RANK_MEMBER]: 'default',
+  [ROLE_RANK_MANAGER]: 'info',
+  [ROLE_RANK_ADMIN]: 'warning',
+  [ROLE_RANK_OWNER]: 'error',
+};
 
 const SetupMaster: React.FC = () => {
   const { t } = useTranslation();
@@ -72,6 +94,8 @@ const SetupMaster: React.FC = () => {
     description: '',
     isActive: true,
     parentSetupId: null,
+    // New roles start with no administrative authority: the server's default and the safe choice.
+    roleRank: DEFAULT_ROLE_RANK,
   });
 
   // Sync form data when selection changes
@@ -84,6 +108,7 @@ const SetupMaster: React.FC = () => {
         description: selectedRecord.description || '',
         isActive: selectedRecord.isActive,
         parentSetupId: selectedRecord.parentSetupId,
+        roleRank: asRoleRank(selectedRecord.roleRank),
       });
     } else {
       setFormData({
@@ -93,6 +118,7 @@ const SetupMaster: React.FC = () => {
         description: '',
         isActive: true,
         parentSetupId: null,
+        roleRank: DEFAULT_ROLE_RANK,
       });
     }
   }, [selectedRecord, setupType]);
@@ -146,6 +172,48 @@ const SetupMaster: React.FC = () => {
     },
   });
 
+  // Only role rows carry authority. The server rejects a non-Member rank on a lookup row with a
+  // 400, so the field is neither shown nor sent for anything else.
+  const isRoleForm = isRoleSetupType(formData.setupType);
+  const selectedRoleRank = asRoleRank(formData.roleRank);
+
+  /**
+   * The tiers this caller may grant. `isSuperAdmin`/`isManager` are the only authority signals the
+   * session carries — see the DTO-gap note in `roleRankTiers.ts`.
+   */
+  const rankChoices = useMemo(
+    () => roleRankChoices(
+      { isSuperAdmin: userData.isSuperAdmin, isManager: userData.isManager },
+      {
+        currentRank: selectedRecord && isRoleSetupType(selectedRecord.setupType)
+          ? asRoleRank(selectedRecord.roleRank)
+          : null,
+      },
+    ),
+    [userData.isSuperAdmin, userData.isManager, selectedRecord],
+  );
+
+  const blockedChoices = useMemo(() => rankChoices.filter((choice) => choice.disabled), [rankChoices]);
+
+  /** True when the tier currently in the form is one the server will certainly refuse. */
+  const selectedRankRefused =
+    isRoleSetupType(formData.setupType) &&
+    rankChoices.find((choice) => choice.rank === asRoleRank(formData.roleRank))?.disabled === true;
+
+  const openDialog = (record: SetupMasterDTO | null) => {
+    // A rejection from a previous attempt must not haunt the next one.
+    createMutation.reset();
+    updateMutation.reset();
+    setSelectedRecord(record);
+    setIsModalOpen(true);
+  };
+
+  const closeDialog = () => {
+    setIsModalOpen(false);
+    createMutation.reset();
+    updateMutation.reset();
+  };
+
   const handleSave = () => {
     if (selectedRecord) {
       updateMutation.mutate({
@@ -156,6 +224,7 @@ const SetupMaster: React.FC = () => {
           setupName: formData.setupName || '',
           description: formData.description || '',
           parentSetupId: formData.parentSetupId,
+          ...(isRoleForm ? { roleRank: selectedRoleRank } : {}),
           isActive: !!formData.isActive,
           modifiedBy: userData.userName || 'System'
         }
@@ -167,11 +236,14 @@ const SetupMaster: React.FC = () => {
         setupName: formData.setupName || '',
         description: formData.description || '',
         parentSetupId: formData.parentSetupId,
+        ...(isRoleForm ? { roleRank: selectedRoleRank } : {}),
         isActive: !!formData.isActive,
         createdBy: userData.userName || 'System'
       });
     }
   };
+
+  const saveError = createMutation.error ?? updateMutation.error;
 
   const [isNewType, setIsNewType] = useState(false);
 
@@ -191,7 +263,7 @@ const SetupMaster: React.FC = () => {
         <Button
           variant="contained"
           startIcon={<AddIcon />}
-          onClick={() => { setSelectedRecord(null); setIsModalOpen(true); }}
+          onClick={() => openDialog(null)}
           sx={{
             borderRadius: 2.5,
             px: 3,
@@ -277,7 +349,7 @@ const SetupMaster: React.FC = () => {
                           <Tooltip title="Edit">
                             <IconButton
                               size="small"
-                              onClick={() => { setSelectedRecord(item); setIsModalOpen(true); }}
+                              onClick={() => openDialog(item)}
                               sx={{ mt: -0.5, mr: -0.5, color: 'text.secondary' }}
                             >
                               <EditIcon fontSize="small" />
@@ -293,14 +365,30 @@ const SetupMaster: React.FC = () => {
                           {item.description || 'No description available for this item.'}
                         </Typography>
 
-                        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <Chip
-                            icon={item.isActive ? <ActiveIcon sx={{ fontSize: '12px !important' }} /> : <InactiveIcon sx={{ fontSize: '12px !important' }} />}
-                            label={item.isActive ? 'Active' : 'Disabled'}
-                            size="small"
-                            color={item.isActive ? 'success' : 'default'}
-                            sx={{ height: 20, fontSize: '0.65rem', fontWeight: 800, borderRadius: 1.5 }}
-                          />
+                        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 0.75 }}>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0 }}>
+                            <Chip
+                              icon={item.isActive ? <ActiveIcon sx={{ fontSize: '12px !important' }} /> : <InactiveIcon sx={{ fontSize: '12px !important' }} />}
+                              label={item.isActive ? 'Active' : 'Disabled'}
+                              size="small"
+                              color={item.isActive ? 'success' : 'default'}
+                              sx={{ height: 20, fontSize: '0.65rem', fontWeight: 800, borderRadius: 1.5 }}
+                            />
+                            {/* Authority is a property of ROLE rows only — a UOM or City row has none,
+                                so no empty chip is rendered for them. */}
+                            {isRoleSetupType(item.setupType) && (
+                              <Tooltip title={roleRankTier(item.roleRank).description}>
+                                <Chip
+                                  icon={<ShieldIcon sx={{ fontSize: '12px !important' }} />}
+                                  label={roleRankTier(item.roleRank).label}
+                                  size="small"
+                                  color={ROLE_RANK_CHIP_COLOR[asRoleRank(item.roleRank)]}
+                                  variant={asRoleRank(item.roleRank) === ROLE_RANK_MEMBER ? 'outlined' : 'filled'}
+                                  sx={{ height: 20, fontSize: '0.65rem', fontWeight: 800, borderRadius: 1.5 }}
+                                />
+                              </Tooltip>
+                            )}
+                          </Box>
                           <Typography variant="caption" sx={{ fontSize: '0.6rem', color: 'text.disabled', fontWeight: 600 }}>
                             ID: #{item.setupId}
                           </Typography>
@@ -326,7 +414,7 @@ const SetupMaster: React.FC = () => {
       {/* Standard Setup Dialog */}
       <Dialog
         open={isModalOpen}
-        onClose={() => setIsModalOpen(false)}
+        onClose={closeDialog}
         fullWidth
         maxWidth="sm"
       >
@@ -334,6 +422,18 @@ const SetupMaster: React.FC = () => {
           {selectedRecord ? 'Update Setup Record' : 'Create New Setup Record'}
         </DialogTitle>
         <DialogContent dividers>
+          {saveError != null && (
+            <ApiErrorNotice
+              error={saveError}
+              // A 403 on a role row is the rank guard; `toPresentableError` never renders server
+              // text on a 403, so the reason is named here and the server's own sentence stays in
+              // the technical-detail disclosure.
+              fallbackMessage={isRoleForm
+                ? ROLE_RANK_DENIED_MESSAGE
+                : 'This setup record could not be saved. Nothing was changed — try again.'}
+              sx={{ mb: 2 }}
+            />
+          )}
           <Grid container spacing={2} sx={{ mt: 0.5 }}>
             <Grid size={{ xs: 12, md: 6 }}>
               {isNewType || !selectedRecord ? (
@@ -413,6 +513,47 @@ const SetupMaster: React.FC = () => {
                 onChange={(e) => setFormData({ ...formData, description: e.target.value })}
               />
             </Grid>
+            {/* Role rows only: a lookup value has no authority, and the server 400s if one is sent. */}
+            {isRoleForm && (
+              <Grid size={{ xs: 12 }}>
+                <TextField
+                  select
+                  fullWidth
+                  label="Role authority"
+                  variant="outlined"
+                  value={selectedRoleRank}
+                  onChange={(e) => setFormData({ ...formData, roleRank: asRoleRank(Number(e.target.value)) })}
+                  slotProps={{
+                    select: {
+                      // The menu rows are two lines each; the closed field stays a single line.
+                      renderValue: (value) => `${roleRankTier(Number(value)).label} — ${roleRankTier(Number(value)).summary}`,
+                    },
+                  }}
+                  helperText={roleRankTier(selectedRoleRank).description}
+                >
+                  {rankChoices.map((choice) => (
+                    <MenuItem key={choice.rank} value={choice.rank} disabled={choice.disabled}>
+                      <Box sx={{ py: 0.25 }}>
+                        <Typography variant="body2" sx={{ fontWeight: 800 }}>
+                          {choice.label} — {choice.summary}
+                        </Typography>
+                        <Typography
+                          variant="caption"
+                          sx={{ display: 'block', color: choice.availability === 'grantable' ? 'text.secondary' : 'warning.main', whiteSpace: 'normal' }}
+                        >
+                          {choice.note ?? choice.description}
+                        </Typography>
+                      </Box>
+                    </MenuItem>
+                  ))}
+                </TextField>
+                {blockedChoices.length > 0 && (
+                  <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: 'text.secondary' }}>
+                    {blockedChoices.map((choice) => choice.note).filter(Boolean)[0]}
+                  </Typography>
+                )}
+              </Grid>
+            )}
             <Grid size={{ xs: 12 }}>
               <FormControlLabel
                 control={
@@ -428,14 +569,14 @@ const SetupMaster: React.FC = () => {
           </Grid>
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
-          <Button onClick={() => setIsModalOpen(false)} color="inherit">
+          <Button onClick={closeDialog} color="inherit">
             {t('cancel') || 'Cancel'}
           </Button>
           <Button
             onClick={handleSave}
             variant="contained"
             color="primary"
-            disabled={createMutation.isPending || updateMutation.isPending}
+            disabled={createMutation.isPending || updateMutation.isPending || selectedRankRefused}
           >
             {selectedRecord ? 'Update' : 'Create'}
           </Button>

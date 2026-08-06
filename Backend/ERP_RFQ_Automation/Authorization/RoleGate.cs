@@ -5,18 +5,36 @@ using Microsoft.Extensions.Caching.Memory;
 namespace ERP_RFQ_Automation.Authorization
 {
     /// <summary>
-    /// Shared role-name gate so the "role name contains admin/manager" rule (previously
-    /// inlined in LeadRepository.CanManageLeadAssignmentsAsync) lives in ONE place.
-    /// Resolves RoleId → the active SetupMaster "role" row and matches on SetupCode /
-    /// SetupValue, case-insensitive. Missing/inactive role → false (fail-closed).
+    /// The single place that answers "how much authority does this role hold?".
+    ///
+    /// It reads the explicit <c>Setup_Master.RoleRank</c> column (see <see cref="RoleRanks"/>) for
+    /// the active role row in the CALLER'S OWN tenant. Missing row, inactive row, or a row owned by
+    /// a different business unit → <see cref="RoleRanks.Member"/> (fail-closed).
+    ///
+    /// It used to resolve privilege by substring-matching the free-text role NAME:
+    /// <c>contains "super" &amp;&amp; contains "admin"</c> made a super administrator and
+    /// <c>contains "admin" || contains "manager"</c> made a manager. That is a privilege-escalation
+    /// class, not a rough edge — "Supervisor Admin", "Superintendent Administrator" and
+    /// "Site Supervisor - Admin" are ordinary job titles in industrial and energy procurement, and
+    /// every one of them contains "super" + "admin", so every one of them silently held the whole
+    /// tenant (PermissionHandler bypassed every module check for a super admin). Those two
+    /// name-matching helpers have been DELETED, not deprecated: there is no longer any code path in
+    /// which a role name influences authority.
     /// </summary>
     public interface IRoleGate
     {
-        /// <summary>Role name contains both "super" and "admin" (e.g. "Super Admin", "Super_Administrator").</summary>
+        /// <summary>Role's <c>RoleRank</c> is at or above <see cref="RoleRanks.Owner"/>.</summary>
         Task<bool> IsSuperAdminAsync(long roleId, long businessUnitId);
 
-        /// <summary>Role name contains "admin" or "manager" (same rule as lead-assignment management).</summary>
+        /// <summary>Role's <c>RoleRank</c> is at or above <see cref="RoleRanks.Manager"/>.</summary>
         Task<bool> IsManagerOrAdminAsync(long roleId, long businessUnitId);
+
+        /// <summary>
+        /// The role's stored rank, or <see cref="RoleRanks.Member"/> when the role does not exist,
+        /// is inactive, or belongs to another tenant. Callers that must COMPARE two ranks (role
+        /// administration) need the number, not the two booleans.
+        /// </summary>
+        Task<short> GetRoleRankAsync(long roleId, long businessUnitId);
 
         Task<bool> CanManageRoleAsync(long callerRoleId, long? targetRoleId, long businessUnitId);
     }
@@ -34,25 +52,31 @@ namespace ERP_RFQ_Automation.Authorization
             _cache = cache;
         }
 
+        public async Task<short> GetRoleRankAsync(long roleId, long businessUnitId)
+            => await ResolveRankAsync(roleId, businessUnitId) ?? RoleRanks.Member;
+
         public async Task<bool> IsSuperAdminAsync(long roleId, long businessUnitId)
-        {
-            var role = await ResolveRoleAsync(roleId, businessUnitId);
-            return role is not null && (IsSuperAdminName(role.Value.Code) || IsSuperAdminName(role.Value.Value));
-        }
+            => await GetRoleRankAsync(roleId, businessUnitId) >= RoleRanks.Owner;
 
         public async Task<bool> IsManagerOrAdminAsync(long roleId, long businessUnitId)
-        {
-            var role = await ResolveRoleAsync(roleId, businessUnitId);
-            return role is not null && (IsManagerName(role.Value.Code) || IsManagerName(role.Value.Value));
-        }
+            => await GetRoleRankAsync(roleId, businessUnitId) >= RoleRanks.Manager;
 
         public async Task<bool> CanManageRoleAsync(long callerRoleId, long? targetRoleId, long businessUnitId)
         {
             if (!targetRoleId.HasValue) return true;
-            if (await IsSuperAdminAsync(callerRoleId, businessUnitId)) return true;
-            if (await IsSuperAdminAsync(targetRoleId.Value, businessUnitId)) return false;
-            if (await IsManagerOrAdminAsync(targetRoleId.Value, businessUnitId) &&
-                !await IsManagerOrAdminAsync(callerRoleId, businessUnitId)) return false;
+
+            var callerRank = await GetRoleRankAsync(callerRoleId, businessUnitId);
+            var targetRank = await GetRoleRankAsync(targetRoleId.Value, businessUnitId);
+
+            // The owner tier administers the whole tenant plane.
+            if (callerRank >= RoleRanks.Owner) return true;
+
+            // You may never administer a role that outranks you. This single comparison replaces
+            // the two name-derived special cases it grew out of ("target is a super admin" and
+            // "target is a manager while I am not") and additionally closes the tier they could not
+            // express — Admin(20) is now genuinely above Manager(10) instead of being the same
+            // "contains admin-or-manager" bucket.
+            if (targetRank > callerRank) return false;
 
             var roles = await _context.SetupMasters.AsNoTracking()
                 .Where(SetupTypes.IsRoleRow)
@@ -91,52 +115,39 @@ namespace ERP_RFQ_Automation.Authorization
         }
 
         /// <summary>
-        /// Exposed to the assembly (B4) so <see cref="Controllers.SetupMasterController"/> can test a
-        /// CANDIDATE name — the name a caller is proposing — before it is ever written. Without that
-        /// the only way to discover a rename had created a super administrator was to read the row
-        /// back, by which time the privilege already existed.
-        ///
-        /// Known weakness, deliberately retained for now: this is substring matching on a free-text
-        /// name, so "Office Manager" and "Contract Administrator" are administrators today. B4
-        /// closes the EXPLOIT (self-escalation by rename); the class is closed by the immutable
-        /// Setup_Master.RoleRank column in backlog item 1.
-        /// </summary>
-        internal static bool IsSuperAdminName(string? s) =>
-            s != null
-            && s.Contains("super", StringComparison.OrdinalIgnoreCase)
-            && s.Contains("admin", StringComparison.OrdinalIgnoreCase);
-
-        /// <inheritdoc cref="IsSuperAdminName"/>
-        internal static bool IsManagerName(string? s) =>
-            s != null && (s.Contains("admin", StringComparison.OrdinalIgnoreCase)
-                          || s.Contains("manager", StringComparison.OrdinalIgnoreCase));
-
-        /// <summary>
-        /// The IMemoryCache key holding a role's resolved (code, value). A rename MUST evict it: the
-        /// 60s TTL would otherwise keep serving the previous name, and after B4 that window is the
-        /// only remaining way a stale privileged name could be honoured.
+        /// The IMemoryCache key holding a role's resolved rank. Any write that can change the rank —
+        /// or remove the role — MUST evict it: the 60s TTL would otherwise keep serving the previous
+        /// rank, and a rank REVOKED by an administrator would keep granting for up to a minute.
+        /// <c>SetupMasterController</c> evicts on update and delete.
         /// </summary>
         internal static string RoleCacheKey(long businessUnitId, long roleId)
             => $"rbac:role:{businessUnitId}:{roleId}";
 
-        /// <summary>Role names change rarely; cache the resolved (code, value) 60s per roleId.</summary>
-        private async Task<(string? Code, string? Value)?> ResolveRoleAsync(long roleId, long businessUnitId)
+        /// <summary>
+        /// Ranks change rarely; cache the resolved rank 60s per (tenant, roleId). A null cached
+        /// value means "no such active role in this tenant" and is cached too, so a bogus roleId
+        /// cannot be used to hammer the database.
+        /// </summary>
+        private async Task<short?> ResolveRankAsync(long roleId, long businessUnitId)
         {
-            return await _cache.GetOrCreateAsync<(string? Code, string? Value)?>(
+            return await _cache.GetOrCreateAsync<short?>(
                 RoleCacheKey(businessUnitId, roleId),
                 async entry =>
                 {
                     entry.AbsoluteExpirationRelativeToNow = CacheTtl;
 
+                    // BusinessUnitId is part of the predicate, not just the cache key: a role row is
+                    // tenant-owned, so a rank of 30 in business unit 2 grants nothing at all to a
+                    // caller whose token says business unit 1.
                     var role = await _context.SetupMasters
                         .AsNoTracking()
                         .Where(SetupTypes.IsRoleRow)
                         .Where(s => s.SetupId == roleId && s.BusinessUnitId == businessUnitId
                                     && (s.IsActive == true || s.IsActive == null))
-                        .Select(s => new { s.SetupCode, s.SetupValue })
+                        .Select(s => (short?)s.RoleRank)
                         .FirstOrDefaultAsync();
 
-                    return role == null ? null : (role.SetupCode, role.SetupValue);
+                    return role;
                 });
         }
     }

@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using ERP_RFQ_Automation.Services;
 using ERP_RFQ_Automation.CustomFields;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
+using ERP_RFQ_Automation.Security;
 
 namespace ERP_RFQ_Automation.Models;
 
@@ -317,7 +318,15 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.EmailAddress).HasMaxLength(255);
             entity.Property(e => e.Host).HasMaxLength(255);
             entity.Property(e => e.IsActive).HasDefaultValue(true);
-            entity.Property(e => e.Password).HasMaxLength(255);
+            // SEC: this is a CUSTOMER MAILBOX credential (corporate Exchange/O365), and it
+            // must stay reversible because it is replayed to the customer's IMAP/SMTP server
+            // on every poll and send. It used to sit here in cleartext, readable by every
+            // role that bypasses RLS (nexora_identity_app, nexora_pipeline_app) and by anyone
+            // holding a backup. Converting at the persistence boundary encrypts it at rest
+            // (AES-256-GCM) without touching a single call site.
+            entity.Property(e => e.Password)
+                .HasMaxLength(ProtectedSecretConverter.ProtectedColumnMaxLength)
+                .HasConversion(new ProtectedSecretConverter());
             entity.Property(e => e.PollingInterval).HasDefaultValue(300);
             entity.Property(e => e.Protocol).HasMaxLength(50);
             entity.Property(e => e.UseSsl)
@@ -1352,6 +1361,12 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.ParentSetupId).HasColumnName("ParentSetupID");
             entity.Property(e => e.SetupCode).HasMaxLength(100);
             entity.Property(e => e.SetupType).HasMaxLength(100);
+            // Authority tier for role rows (RoleRanks.Member/Manager/Admin/Owner). NOT NULL with a
+            // store default of 0 so any row written by legacy code, a raw INSERT or a migration that
+            // predates this column lands as Member — fail-closed, never as an accidental owner.
+            entity.Property(e => e.RoleRank)
+                .HasColumnType("smallint")
+                .HasDefaultValue((short)0);
 
             entity.HasOne(d => d.BusinessUnit).WithMany(p => p.SetupMasters)
                 .HasForeignKey(d => d.BusinessUnitId)

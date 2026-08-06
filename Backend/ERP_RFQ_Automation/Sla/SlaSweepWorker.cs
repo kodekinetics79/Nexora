@@ -596,12 +596,14 @@ public sealed class SlaSweepWorker : BackgroundService
             // join matched nothing and SLA escalations silently had no recipients.
             .Join(db.SetupMasters.AsNoTracking().Where(ERP_RFQ_Automation.Authorization.SetupTypes.IsRoleRow),
                 u => u.RoleId, s => s.SetupId,
-                (u, s) => new { u.Id, u.Email, u.FirstName, RoleName = s.SetupValue })
+                (u, s) => new { u.Id, u.Email, u.FirstName, s.RoleRank })
             .ToListAsync(ct);
 
+        // Escalation recipients are selected by RoleRank, not by a substring of the role name.
+        // Post-backfill this is the same set of people, and it can no longer be changed by a rename.
         return rows
-            .Where(r => !string.IsNullOrWhiteSpace(r.Email) && r.RoleName != null &&
-                        (r.RoleName.ToLowerInvariant().Contains("manager") || r.RoleName.ToLowerInvariant().Contains("admin")))
+            .Where(r => !string.IsNullOrWhiteSpace(r.Email) &&
+                        r.RoleRank >= ERP_RFQ_Automation.Authorization.RoleRanks.Manager)
             .Select(r => new Recipient(r.Id, r.Email, r.FirstName))
             .ToList();
     }

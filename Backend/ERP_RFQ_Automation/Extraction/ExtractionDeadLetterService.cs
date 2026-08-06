@@ -488,7 +488,16 @@ public sealed class ExtractionDeadLetterService(
             CreatedOn = DateTimeOffset.UtcNow
         };
 
-    private static string FailureCategory(string? error)
+    private static string FailureCategory(string? error) => ClassifyFailure(error);
+
+    /// <summary>
+    /// The dead-letter failure vocabulary, shared with the metrics emission in
+    /// <c>ExtractionWorker</c> so the <c>nexora.extraction.jobs.deadlettered</c> counter's
+    /// <c>failure.category</c> tag and this API's <c>FailureCategory</c> field can never
+    /// drift apart. The returned set is small and CLOSED, which is what makes it safe to
+    /// use as a metric dimension — the raw error text never is.
+    /// </summary>
+    internal static string ClassifyFailure(string? error)
     {
         if (string.IsNullOrWhiteSpace(error)) return "UNCLASSIFIED";
         if (error.Contains("integrity", StringComparison.OrdinalIgnoreCase)) return "EVIDENCE_INTEGRITY";

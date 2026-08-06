@@ -19,6 +19,7 @@ Set configuration as **Render environment variables** (nothing sensitive is bake
 ```text
 ConnectionStrings__DefaultConnection=Host=<neon-DIRECT-endpoint>;Database=neondb;Username=neondb_owner;Password=<neon-pw>;SSL Mode=Require;Trust Server Certificate=True
 Jwt__Key=<a NEW 32+ byte random key>
+Security__SecretProtectionKey=<base64 of 32 random bytes: openssl rand -base64 32>
 Ollama__BaseUrl=https://ollama.com/
 Ollama__ApiKey=<ollama key>
 Cors__AllowedOrigins__0=https://nexora1-ai.vercel.app
@@ -108,6 +109,7 @@ secrets, and rotate the credentials through the application before customer use.
 |---|---|
 | `ConnectionStrings__DefaultConnection` | Neon Postgres connection |
 | `Jwt__Key` | JWT signing key (**use a new strong key**; ≥32 bytes) |
+| `Security__SecretProtectionKey` | **AES-256 key encrypting stored customer mailbox credentials at rest** (`Email_Configurations.Password`). Base64 of exactly 32 random bytes — `openssl rand -base64 32`. The API **refuses to start** without it outside Development. Losing or rotating it makes every already-encrypted mailbox password undecryptable and email polling stops until credentials are re-entered. |
 | `CommercialFinance__DunningProviderWebhookSecret` | HMAC secret for authenticated dunning delivery events (**use a distinct secret**; ≥32 bytes) |
 | `CommercialFinance__ContactVerificationSecret` | HMAC secret for trusted finance-contact verification assertions (**use a distinct secret**; ≥32 bytes) |
 | `CommercialFinance__AuditActorSecret` | HMAC secret binding authenticated actors to governed database mutations (**use a distinct secret**; ≥32 bytes) |

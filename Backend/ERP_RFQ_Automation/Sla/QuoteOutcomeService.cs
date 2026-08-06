@@ -560,7 +560,14 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
 
     /// <summary>
     /// Role check for terminal-state corrections: caller's Users row → RoleId →
-    /// SetupMaster (SetupType "role") whose name contains "admin" or "manager".
+    /// SetupMaster (SetupType "role") whose <c>RoleRank</c> is at or above
+    /// <see cref="ERP_RFQ_Automation.Authorization.RoleRanks.Manager"/>.
+    ///
+    /// This used to substring-match the role NAME ("admin" or "manager"), the same rule
+    /// <c>RoleGate</c> carried. It is a duplicate of that logic rather than a call into it (this
+    /// service runs on the null-tenant sweep path and has no request-scoped gate), so it had to be
+    /// converted here too — otherwise a role named "Site Supervisor - Admin" could still unfreeze a
+    /// terminal quote outcome after the gate itself stopped honouring names.
     /// </summary>
     private async Task<bool> IsManagerOrAdminAsync(string actorEmail, long businessUnitId, CancellationToken ct)
     {
@@ -579,16 +586,14 @@ public sealed class QuoteOutcomeService : IQuoteOutcomeService
         // authorise correcting a frozen outcome here. SetupMaster carries a global query filter, so
         // this only ever mattered on the null-tenant sweep path — which is precisely where this
         // service runs.
-        var roleName = await _context.SetupMasters.AsNoTracking()
+        var rank = await _context.SetupMasters.AsNoTracking()
             // RC-1: was the case-SENSITIVE literal "role"; production stores 'Role'.
             .Where(ERP_RFQ_Automation.Authorization.SetupTypes.IsRoleRow)
             .Where(s => s.SetupId == roleId && s.BusinessUnitId == businessUnitId)
-            .Select(s => s.SetupValue)
+            .Select(s => (short?)s.RoleRank)
             .FirstOrDefaultAsync(ct);
-        if (string.IsNullOrWhiteSpace(roleName)) return false;
 
-        var lower = roleName.ToLowerInvariant();
-        return lower.Contains("admin") || lower.Contains("manager");
+        return rank >= ERP_RFQ_Automation.Authorization.RoleRanks.Manager;
     }
 
     private static string? Truncate(string? value, int max)

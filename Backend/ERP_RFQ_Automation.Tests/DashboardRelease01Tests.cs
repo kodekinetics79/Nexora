@@ -319,6 +319,8 @@ public sealed class DashboardRelease01Tests
     private sealed class StubRoleGate(bool manager) : IRoleGate
     {
         public Task<bool> IsSuperAdminAsync(long roleId, long businessUnitId) => Task.FromResult(false);
+        public Task<short> GetRoleRankAsync(long roleId, long businessUnitId) =>
+            Task.FromResult(manager ? RoleRanks.Manager : RoleRanks.Member);
         public Task<bool> IsManagerOrAdminAsync(long roleId, long businessUnitId) => Task.FromResult(manager);
         public Task<bool> CanManageRoleAsync(long callerRoleId, long? targetRoleId, long businessUnitId) =>
             Task.FromResult(false);

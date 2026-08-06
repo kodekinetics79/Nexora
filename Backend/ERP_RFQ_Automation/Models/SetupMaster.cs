@@ -19,6 +19,14 @@ public partial class SetupMaster
 
     public long BusinessUnitId { get; set; }
 
+    /// <summary>
+    /// Authority tier for rows whose <see cref="SetupType"/> is a role — see
+    /// <c>ERP_RFQ_Automation.Authorization.RoleRanks</c>. Non-role rows keep 0 and ignore it.
+    /// This column, and NOT <see cref="SetupCode"/>/<see cref="SetupValue"/>, is what
+    /// <c>IRoleGate</c> reads to decide super-admin/manager status.
+    /// </summary>
+    public short RoleRank { get; set; }
+
     public bool? IsActive { get; set; }
 
     public string CreatedBy { get; set; } = null!;

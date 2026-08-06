@@ -145,6 +145,7 @@ public sealed class AiGovernanceService : IAiGovernanceService
     private readonly ITenantScopeAccessor _tenantScope;
     private readonly ITenantContext _tenantContext;
     private readonly IAiExternalProviderTrust _externalProviderTrust;
+    private readonly ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? _metrics;
 
     /// <param name="externalProviderTrust">
     /// The per-tenant external-provider allow-list. REQUIRED, deliberately: here the gate
@@ -155,17 +156,23 @@ public sealed class AiGovernanceService : IAiGovernanceService
     /// changing ceiling semantics. Absence of a matching live authorization always reads
     /// as "not authorized", never as "exempt".
     /// </param>
+    /// <param name="metrics">
+    /// Optional, unlike the trust gate: metrics are an observation of the ledger, never a
+    /// control over it. A missing registration must not be able to change what is allowed.
+    /// </param>
     public AiGovernanceService(
         IServiceScopeFactory scopeFactory,
         ITenantScopeAccessor tenantScope,
         ITenantContext tenantContext,
-        IAiExternalProviderTrust externalProviderTrust)
+        IAiExternalProviderTrust externalProviderTrust,
+        ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? metrics = null)
     {
         _scopeFactory = scopeFactory;
         _tenantScope = tenantScope;
         _tenantContext = tenantContext;
         _externalProviderTrust = externalProviderTrust
             ?? throw new ArgumentNullException(nameof(externalProviderTrust));
+        _metrics = metrics;
     }
 
     public async Task<AiReservation> ReserveAsync(
@@ -391,6 +398,10 @@ public sealed class AiGovernanceService : IAiGovernanceService
         var strategyDb = strategyScope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
         var strategy = strategyDb.Database.CreateExecutionStrategy();
         var expectedOutputHash = string.IsNullOrEmpty(output) ? null : Hash(output);
+        // Captured, then emitted AFTER the strategy returns. Emitting inside the lambda
+        // would double-count every transient retry, and would count a settlement whose
+        // transaction later rolled back — the ledger and the meter must agree exactly.
+        SettledCall? settled = null;
         await strategy.ExecuteAsync(async () =>
         {
             using var operationScope = _scopeFactory.CreateScope();
@@ -450,8 +461,27 @@ public sealed class AiGovernanceService : IAiGovernanceService
             budget.UpdatedOn = DateTime.UtcNow;
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
+            settled = new SettledCall(
+                request.InputTokens, request.OutputTokens, request.Provider, request.Model,
+                request.ProviderClass.ToString(), request.EstimatedCost, request.CostCurrency);
         });
+
+        if (settled is { } call)
+        {
+            // Provider/model/class are configuration-scoped values with a handful of
+            // possible values, so they are safe dimensions. Prompt hashes, idempotency
+            // keys and request ids are NOT tagged — each is unique per call.
+            _metrics?.LlmSettled(
+                call.InputTokens, call.OutputTokens, reservation.BusinessUnitId,
+                call.Provider, call.Model, call.ProviderClass, call.Cost, call.Currency);
+        }
     }
+
+    /// <summary>What a committed settlement reported, carried out of the retryable
+    /// execution strategy so it can be metered exactly once.</summary>
+    private readonly record struct SettledCall(
+        long InputTokens, long OutputTokens, string? Provider, string? Model,
+        string ProviderClass, decimal? Cost, string? Currency);
 
     private static AiRequest NewRequest(
         AiCallContext context, string provider, string model, string input, string inputHash,

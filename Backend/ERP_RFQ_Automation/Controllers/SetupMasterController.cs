@@ -143,15 +143,25 @@ namespace ERP_RFQ_Automation.Controllers
                 if (tenantId <= 0)
                     return StatusCode(StatusCodes.Status403Forbidden, "A valid tenant claim is required.");
 
+                var requestedRank = request.RoleRank ?? RoleRanks.Member;
+                if (!RoleRanks.IsDefined(requestedRank))
+                    return BadRequest($"RoleRank must be one of {string.Join(", ", RoleRanks.All)}.");
+
                 // B4 / RC-6: role rows are RBAC, not lookup data. [RequireManagerRole] admits any
-                // role whose NAME contains "admin" or "manager" — production role 4 "Sales Manager"
-                // qualifies — so on its own it let a mid-level manager mint roles at will.
+                // role at RoleRanks.Manager or above, so on its own it let a mid-level manager mint
+                // roles at will.
                 if (SetupTypes.IsRole(request.SetupType))
                 {
                     if (await RoleAdministrationDenialAsync(tenantId, "CanCreate") is { } denial)
                         return denial;
-                    if (await PrivilegedNameDenialAsync(tenantId, request.SetupCode, request.SetupName) is { } nameDenial)
-                        return nameDenial;
+                    if (await RoleRankDenialAsync(tenantId, requestedRank, existingRank: null) is { } rankDenial)
+                        return rankDenial;
+                }
+                else if (requestedRank != RoleRanks.Member)
+                {
+                    // RoleRank is meaningless on a UOM/City/status row; refuse rather than store a
+                    // value that would become live the moment somebody flipped SetupType.
+                    return BadRequest("RoleRank may only be set on a role.");
                 }
 
                 // Normalize: treat 0 as null
@@ -167,6 +177,8 @@ namespace ERP_RFQ_Automation.Controllers
                     Description = request.Description,
                     ParentSetupId = parentId,
                     BusinessUnitId = tenantId,
+                    // Server-derived: validated above and clamped to Member for non-role rows.
+                    RoleRank = SetupTypes.IsRole(request.SetupType) ? requestedRank : RoleRanks.Member,
                     IsActive = request.IsActive,
                     CreatedBy = request.CreatedBy,
                     CreatedOn = DateTime.UtcNow
@@ -181,7 +193,7 @@ namespace ERP_RFQ_Automation.Controllers
                     await _audit.WriteAsync(User, new IamAuditEntry(
                         IamAuditActions.RoleCreated, IamAuditTargets.Role, setupMaster.SetupId,
                         setupMaster.SetupValue,
-                        After: new { setupMaster.SetupCode, setupMaster.SetupValue, setupMaster.IsActive }));
+                        After: new { setupMaster.SetupCode, setupMaster.SetupValue, setupMaster.IsActive, setupMaster.RoleRank }));
 
                 var response = MapToResponse(setupMaster);
                 return CreatedAtAction(nameof(GetById), new { id = setupMaster.SetupId, businessUnitId = setupMaster.BusinessUnitId }, response);
@@ -210,15 +222,22 @@ namespace ERP_RFQ_Automation.Controllers
                 // ==== B4 / RC-6: one-request self-escalation to tenant super admin ====
                 //
                 // This action was gated ONLY by [RequireManagerRole] and assigned
-                // SetupType/SetupCode/SetupValue verbatim, with no check that the row was a role,
-                // was not the caller's OWN role, or that the new name conveyed authority. A holder
-                // of production role 4 "Sales Manager" could rename their own role to
-                // "Sales Super Admin"; RoleGate.IsSuperAdminName then matched, PermissionHandler
-                // short-circuited every module check, and they held the whole tenant — inside the
-                // 60s cache TTL, with NO re-login. The SEC-C1 guards on RolePermissionController
-                // did not help, because both of them return true for super admins.
+                // SetupType/SetupCode/SetupValue verbatim, with no check that the row was a role or
+                // was not the caller's OWN role. A holder of production role 4 "Sales Manager" could
+                // rename their own role to "Sales Super Admin"; the name-matching gate then called
+                // it a super admin, PermissionHandler short-circuited every module check, and they
+                // held the whole tenant — inside the 60s cache TTL, with NO re-login.
+                //
+                // A RENAME can no longer escalate anything: authority is the RoleRank column and a
+                // name is just a label. What replaces the old name guard is the rank guard below —
+                // the escalation vector moved from "what you call the role" to "what number you put
+                // in the column", and that number is bounded by the caller's own rank.
                 var wasRole = SetupTypes.IsRole(existing.SetupType);
                 var willBeRole = SetupTypes.IsRole(request.SetupType);
+                var requestedRank = request.RoleRank ?? existing.RoleRank;
+
+                if (!RoleRanks.IsDefined(requestedRank))
+                    return BadRequest($"RoleRank must be one of {string.Join(", ", RoleRanks.All)}.");
 
                 if (wasRole || willBeRole)
                 {
@@ -242,9 +261,14 @@ namespace ERP_RFQ_Automation.Controllers
                             StatusCodes.Status403Forbidden,
                             "You may not modify the role you currently hold.");
 
-                    // (3) Only a super administrator may create a name that CONVEYS authority.
-                    if (await PrivilegedNameDenialAsync(tenantId, request.SetupCode, request.SetupName, existing) is { } nameDenial)
-                        return nameDenial;
+                    // (3) Rank may only move DOWN the caller's own ladder — including for a super
+                    // administrator, who therefore cannot mint a second owner role from the API.
+                    if (await RoleRankDenialAsync(tenantId, requestedRank, existing.RoleRank) is { } rankDenial)
+                        return rankDenial;
+                }
+                else if (requestedRank != RoleRanks.Member)
+                {
+                    return BadRequest("RoleRank may only be set on a role.");
                 }
 
                 // Normalize parent id (treat 0 as null)
@@ -256,7 +280,8 @@ namespace ERP_RFQ_Automation.Controllers
                 if (parentId.HasValue && parentId.Value == existing.SetupId)
                     return BadRequest("ParentSetupId cannot be same as the entity SetupId.");
 
-                var beforeRole = new { existing.SetupCode, existing.SetupValue, existing.IsActive };
+                var beforeRole = new { existing.SetupCode, existing.SetupValue, existing.IsActive, existing.RoleRank };
+                var rankChanged = wasRole && existing.RoleRank != requestedRank;
 
                 // Update relevant fields
                 existing.SetupType = request.SetupType;
@@ -264,6 +289,7 @@ namespace ERP_RFQ_Automation.Controllers
                 existing.SetupValue = request.SetupName;
                 existing.Description = request.Description;
                 existing.ParentSetupId = parentId;
+                existing.RoleRank = wasRole ? requestedRank : RoleRanks.Member;
                 // BusinessUnitId is deliberately NOT assigned. It used to be rewritten to 1 on every
                 // update, which reassigned the row away from its owning tenant; on PostgreSQL the RLS
                 // WITH CHECK clause turned that into a 500, and on any path that is not covered by RLS
@@ -275,10 +301,21 @@ namespace ERP_RFQ_Automation.Controllers
                 existing.ModifiedOn = DateTime.UtcNow;
 
                 if (wasRole)
+                {
+                    var afterRole = new { existing.SetupCode, existing.SetupValue, existing.IsActive, existing.RoleRank };
                     _audit?.Enlist(User, new IamAuditEntry(
                         IamAuditActions.RoleRenamed, IamAuditTargets.Role, existing.SetupId,
-                        existing.SetupValue, beforeRole,
-                        new { existing.SetupCode, existing.SetupValue, existing.IsActive }));
+                        existing.SetupValue, beforeRole, afterRole));
+
+                    // A rank move is the privilege-bearing edit on this endpoint, so it gets its own
+                    // audit action rather than hiding inside a ROLE_RENAMED diff.
+                    if (rankChanged)
+                        _audit?.Enlist(User, new IamAuditEntry(
+                            IamAuditActions.RoleRankChanged, IamAuditTargets.Role, existing.SetupId,
+                            existing.SetupValue,
+                            Before: new { RoleRank = beforeRole.RoleRank, Tier = RoleRanks.Describe(beforeRole.RoleRank) },
+                            After: new { existing.RoleRank, Tier = RoleRanks.Describe(existing.RoleRank) }));
+                }
 
                 await _repository.UpdateAsync(existing);
 
@@ -397,38 +434,56 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         /// <summary>
-        /// (3) A non-super-admin may not produce a SetupCode/SetupValue that NEWLY satisfies
-        /// <see cref="RoleGate.IsSuperAdminName"/> or <see cref="RoleGate.IsManagerName"/>.
+        /// (3) Rank mutation guard — the replacement for the deleted "privileged NAME" guard.
         ///
-        /// "Newly" matters: an existing role legitimately called "Sales Manager" must remain
-        /// editable (description, active flag) by whoever may administer roles. What is refused is
-        /// the transition from a non-privileged name to a privileged one — the RC-6 exploit.
+        /// Invariant: <b>a caller may never set a role's rank at or above their own</b>, and may
+        /// never move the rank of a role that already sits at or above their own. Both halves are
+        /// required. Without the first, a Manager(10) mints an Owner(30) role and assigns it to
+        /// themselves. Without the second, a Manager(10) DEMOTES the Owner role to Member and takes
+        /// the tenant by removing everyone above them.
+        ///
+        /// This applies to the owner tier as well — deliberately. There is no "super admins are
+        /// exempt" branch, because such a branch is exactly what the old name guard had, and it is
+        /// what let a role that merely LOOKED like an owner mint real owners. The consequence is
+        /// that a second Owner role cannot be created through this API at all; owner provisioning
+        /// is a platform-plane act (seeder/migration), not a tenant-plane one.
+        ///
+        /// Non-rank edits (name, description, active flag) are untouched: this returns null when
+        /// the requested rank equals the stored one.
+        ///
+        /// Fail-closed: with no role gate wired, <see cref="CallerRankAsync"/> reports Member, so
+        /// every rank above Member is refused rather than silently permitted.
         /// </summary>
-        private async Task<ActionResult?> PrivilegedNameDenialAsync(
-            long tenantId, string? setupCode, string? setupName, SetupMaster? existing = null)
+        /// <param name="existingRank">The role's CURRENT rank, or null when the role is being
+        /// created. On create there is no "unchanged" case: every rank, including Member, is a rank
+        /// the caller is choosing, so it must be strictly below their own.</param>
+        private async Task<ActionResult?> RoleRankDenialAsync(long tenantId, short requestedRank, short? existingRank)
         {
-            if (await IsSuperAdminAsync(tenantId)) return null;
+            if (existingRank == requestedRank) return null;
 
-            // The two tiers are tested SEPARATELY and deliberately. Collapsing them into one
-            // "was privileged" flag would re-open RC-6 verbatim: production role 4 "Sales Manager"
-            // is already manager-privileged, so a single flag would happily let it rename itself to
-            // "Sales Super Admin" — the exact escalation this guard exists to stop.
-            var wasSuperAdmin = existing is not null &&
-                (RoleGate.IsSuperAdminName(existing.SetupCode) || RoleGate.IsSuperAdminName(existing.SetupValue));
-            var wasManager = existing is not null &&
-                (RoleGate.IsManagerName(existing.SetupCode) || RoleGate.IsManagerName(existing.SetupValue));
+            var callerRank = await CallerRankAsync(tenantId);
 
-            var willBeSuperAdmin =
-                RoleGate.IsSuperAdminName(setupCode) || RoleGate.IsSuperAdminName(setupName);
-            var willBeManager =
-                RoleGate.IsManagerName(setupCode) || RoleGate.IsManagerName(setupName);
+            if (requestedRank >= callerRank)
+                return StatusCode(
+                    StatusCodes.Status403Forbidden,
+                    $"You may not set a role to rank {RoleRanks.Describe(requestedRank)} " +
+                    $"at or above your own rank {RoleRanks.Describe(callerRank)}.");
 
-            var escalates = (willBeSuperAdmin && !wasSuperAdmin) || (willBeManager && !wasManager);
-            if (!escalates) return null;
+            if (existingRank.HasValue && existingRank.Value >= callerRank)
+                return StatusCode(
+                    StatusCodes.Status403Forbidden,
+                    $"You may not change the rank of a role at or above your own rank " +
+                    $"{RoleRanks.Describe(callerRank)}.");
 
-            return StatusCode(
-                StatusCodes.Status403Forbidden,
-                "Role names conveying administrative authority may only be set by a super administrator.");
+            return null;
+        }
+
+        private async Task<short> CallerRankAsync(long tenantId)
+        {
+            var callerRoleId = CallerRoleId();
+            return _roleGate is not null && callerRoleId > 0
+                ? await _roleGate.GetRoleRankAsync(callerRoleId, tenantId)
+                : RoleRanks.Member;
         }
 
         // Helper: Map entity to response DTO
@@ -442,6 +497,7 @@ namespace ERP_RFQ_Automation.Controllers
                 SetupName = setupMaster.SetupValue,
                 Description = setupMaster.Description,
                 ParentSetupId = setupMaster.ParentSetupId,
+                RoleRank = setupMaster.RoleRank,
 
                 IsActive = setupMaster.IsActive,
                 CreatedBy = setupMaster.CreatedBy,

@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.CommercialIntelligence.Exceptions;
 using ERP_RFQ_Automation.CommercialIntelligence.Sales;
 using ERP_RFQ_Automation.CommercialRouting;
@@ -189,9 +190,9 @@ public sealed class CommercialExceptionsAuthenticatedHttpTests(Release01BHttpApp
         if (!await db.SetupMasters.IgnoreQueryFilters().AnyAsync(x => x.SetupId == ManagerRole))
         {
             db.SetupMasters.AddRange(
-                Role(ManagerRole, Release01BHttpApplication.TenantA, "Commercial Manager"),
-                Role(IndividualRole, Release01BHttpApplication.TenantA, "Sales Representative"),
-                Role(TenantBManagerRole, Release01BHttpApplication.TenantB, "Commercial Manager"));
+                Role(ManagerRole, Release01BHttpApplication.TenantA, "Commercial Manager", RoleRanks.Manager),
+                Role(IndividualRole, Release01BHttpApplication.TenantA, "Sales Representative", RoleRanks.Member),
+                Role(TenantBManagerRole, Release01BHttpApplication.TenantB, "Commercial Manager", RoleRanks.Manager));
             db.RolePermissions.AddRange(
                 Permission(859_101, ManagerRole, Release01BHttpApplication.TenantA, canEdit: true),
                 Permission(859_102, IndividualRole, Release01BHttpApplication.TenantA),
@@ -275,17 +276,8 @@ public sealed class CommercialExceptionsAuthenticatedHttpTests(Release01BHttpApp
         }
     }
 
-    private static SetupMaster Role(long id, long tenantId, string name) => new()
-    {
-        SetupId = id,
-        SetupType = "Role",
-        SetupCode = name.Replace(' ', '_').ToUpperInvariant(),
-        SetupValue = name,
-        BusinessUnitId = tenantId,
-        IsActive = true,
-        CreatedBy = "commercial-exception-http-tests",
-        CreatedOn = DateTime.UtcNow
-    };
+    private static SetupMaster Role(long id, long tenantId, string name, short rank) =>
+        Release01BHttpApplication.Role(id, tenantId, name, rank, "commercial-exception-http-tests");
 
     private static RolePermission Permission(long id, long roleId, long tenantId, bool canEdit = false) => new()
     {

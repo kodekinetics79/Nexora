@@ -17,7 +17,11 @@ namespace ERP_RFQ_Automation.DTOs
 
         public long? ParentSetupId { get; set; }
 
-
+        /// <summary>
+        /// Authority tier for a role row (see <c>RoleRanks</c>). Omitted → the stored rank is kept,
+        /// so a client that does not know about ranks cannot silently demote a role to Member.
+        /// </summary>
+        public short? RoleRank { get; set; }
 
         public bool? IsActive { get; set; } = true;
 

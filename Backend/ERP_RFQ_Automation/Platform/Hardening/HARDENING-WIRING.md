@@ -82,11 +82,28 @@ env vars on Fly.io).
   "Observability": {
     // OTLP collector endpoint (gRPC, e.g. http://otel-collector:4317).
     // Unset  + Development -> Console exporter.
-    // Unset  + Production  -> no exporter (collect-only; does NOT crash if no collector).
-    // Invalid URI          -> treated as unset (never throws).
+    // Unset  + Production  -> no PUSH exporter (the Prometheus endpoint below
+    //                         then turns on, so the process is never blind).
+    // Invalid URI          -> treated as unset, logged as a config ERROR, never throws.
     "OtlpEndpoint": "",
     "ServiceVersion": "1.0.0",        // default: entry assembly version, else "1.0.0"
-    "Environment": "Production"        // default: ASPNETCORE_ENVIRONMENT, else "Production"
+    "Environment": "Production",       // default: ASPNETCORE_ENVIRONMENT, else "Production"
+    "Prometheus": {
+      // null (default) -> ON exactly when OtlpEndpoint is unset/invalid. This is
+      // the zero-dependency fallback that closes the "meter registered, nothing
+      // exported" hole. Set true/false to force it.
+      "Enabled": null,
+      "Path": "/metrics",
+      // Required as the X-Scrape-Key header when set. UNSET = open endpoint, and
+      // the boot log warns for as long as it is: the exposition carries tenant ids.
+      "ScrapeKey": ""
+    },
+    "QueueMetrics": {
+      "Enabled": true,
+      "PollInterval": "00:00:15",     // ONE grouped query per interval, never per request
+      "QueryTimeout": "00:00:10",
+      "MaxTenantSeries": 200          // cardinality cap, worst oldest-age first
+    }
   },
   "RateLimiting": {
     "PermitLimit": 600,                // default 600 requests ...
@@ -144,31 +161,57 @@ constant.
 
 ---
 
-## 6. Custom extraction metrics — `NexoraMetrics` (for existing code to emit later)
+## 6. Custom extraction metrics — `NexoraMetrics` (WIRED, emitting)
 
 `AddPlatformObservability` registers `NexoraMetrics` as a **singleton** and wires
 its Meter (`NexoraMetrics.MeterName = "Nexora.Extraction"`) into the OTel
-`MeterProvider`. The hardening module cannot edit the pipeline files, so it only
-**exposes** the instruments. Any existing service can later inject it and emit —
-no observability re-wiring needed; the metrics already flow to the configured
-exporter.
+`MeterProvider`.
 
-Example (to add later, e.g. in `ExtractionWorker` / `ChunkedExtractionService`):
+> **Historical note.** This section used to say the instruments were merely
+> *exposed* for the pipeline to emit "later". Later never came: for the whole life
+> of the module there was exactly ONE emission site in the codebase
+> (`Platform/Entitlements/TenantAccessService.cs`, TenantAccessFailOpen). Every
+> other documented instrument was permanently zero — and a flat-zero dashboard
+> reads as *healthy*, not as *unmeasured*. They are now emitted from the real
+> paths, listed below, and covered by
+> `ERP_RFQ_Automation.Tests/PlatformObservabilityMetricsTests.cs`.
 
-```csharp
-public ExtractionWorker(/* existing deps */, NexoraMetrics metrics) { _metrics = metrics; }
+### Emission sites
 
-_metrics.JobEnqueued(businessUnitId);
-_metrics.JobSucceeded(durationMs: elapsed.TotalMilliseconds, businessUnitId: buId);
-_metrics.JobFailed(reason: "timeout", businessUnitId: buId);
-_metrics.LlmCall(latencyMs: elapsed.TotalMilliseconds, model: "deepseek-v3.1", businessUnitId: buId);
-```
+| Instrument | Emitted from |
+|---|---|
+| `nexora.extraction.jobs.enqueued` | `Extraction/ExtractionQueue.EnqueueAsync` (real insert only, never a duplicate short-circuit) |
+| `nexora.extraction.jobs.claimed` | `Extraction/ExtractionQueue.ClaimAsync` |
+| `nexora.extraction.claims.refused` | `Extraction/ExtractionQueue.ClaimAsync` (23514 intake-guard refusal) |
+| `nexora.extraction.jobs.succeeded` + `nexora.extraction.job.duration` | `Extraction/ExtractionWorker.ProcessOnceAsync` |
+| `nexora.extraction.jobs.failed` (+ duration) | `ExtractionWorker.RecordFailureMetrics`, all four failure paths |
+| `nexora.extraction.jobs.deadlettered` | same, when the attempt was the last one; category from `ExtractionDeadLetterService.ClassifyFailure` |
+| `nexora.extraction.leases.lost` | `ExtractionWorker.LogLeaseLost` |
+| `nexora.llm.calls` + `nexora.llm.latency` | `Extraction/ChunkedExtractionService.RecordLlmCall` (both provider call sites, every outcome) |
+| `nexora.llm.tokens` + `nexora.llm.cost` | `AI/AiGovernanceService.CompleteAsync`, after the settlement commits |
+| `nexora.platform.tenant_access.fail_open` | `Platform/Entitlements/TenantAccessService` |
 
-Exported instruments:
-`nexora.extraction.jobs.enqueued|succeeded|failed` (counters),
-`nexora.extraction.job.duration` (histogram, ms),
-`nexora.llm.calls` (counter), `nexora.llm.latency` (histogram, ms) — tagged with
-`tenant.id` (and `failure.reason` / `llm.model` where relevant).
+### Golden-signal gauges (ObservableGauge)
+
+Backed by `ExtractionQueueMetricsPoller` → `IExtractionQueueSnapshotProvider`.
+**A collection cycle or a Prometheus scrape costs ZERO database round-trips**;
+one bounded `GROUP BY` runs per `Observability:QueueMetrics:PollInterval`.
+
+| Gauge | Meaning |
+|---|---|
+| `nexora.extraction.queue.oldest_pending_age` (s, per tenant) | Age of the oldest waiting job. **The stuck-tenant signal** — depth stays flat while one tenant starves. Measured from `CreatedOn`, so exponential backoff cannot hide in it. |
+| `nexora.extraction.queue.depth` (per tenant × state) | `pending` / `pending_ready` / `pending_backed_off` (poison pressure) / `in_flight` / `dead_letter` |
+| `nexora.extraction.queue.expired_leases` (per tenant) | Lapsed leases awaiting reclaim |
+| `nexora.extraction.queue.snapshot_age` (s) | Age of the cached snapshot — read this before trusting the others |
+
+### Cardinality contract
+
+Tags are limited to bounded domains: `tenant.id`, `queue.state`,
+`failure.category` (closed vocabulary), `failure.reason`, `llm.provider`,
+`llm.model`, `llm.direction`. Job ids, document ids, file names, storage paths,
+worker ids and raw error text are **never** tags. Per-tenant series are
+additionally capped at `MaxTenantSeries`, ranked worst-oldest-age first, with the
+remainder reported as a single overflow series.
 
 ---
 

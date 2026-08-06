@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Security.Claims;
 using System.Text;
 using ERP_RFQ_Automation.Agent.Models;
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.CommercialIntelligence.Sales;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Extraction;
@@ -120,6 +121,11 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         builder.UseSetting("CommercialFinance:ContactVerificationSecret", TestSecret);
         builder.UseSetting("CommercialFinance:DunningProviderWebhookSecret", TestSecret);
         builder.UseSetting("CommercialFinance:AuditActorSecret", TestSecret);
+        // The environment here is "Testing", not "Development", so the API fails closed
+        // without a mailbox-credential protection key — exactly as a real deploy would.
+        builder.UseSetting(
+            ERP_RFQ_Automation.Security.SecretProtection.KeyConfigurationPath,
+            Convert.ToBase64String(TestAssemblyInitialization.TestSecretProtectionKey));
         builder.ConfigureServices(services =>
         {
             services.RemoveAll<IHostedService>();
@@ -298,7 +304,7 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
             Role(AllowedRole, TenantA, "Release 01B Reader"),
             Role(DeniedRole, TenantA, "Release 01B Denied"),
             Role(SupplierHistoryViewerRole, TenantA, "Supplier History Viewer"),
-            Role(GrowthManagerRole, TenantA, "Commercial Manager"));
+            Role(GrowthManagerRole, TenantA, "Commercial Manager", RoleRanks.Manager));
 
         db.RolePermissions.AddRange(
             Permission(85_001, AllowedRole, leadsModuleId, TenantA, canCreate: true, canEdit: true),
@@ -619,17 +625,30 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         CreatedOn = DateTime.UtcNow
     };
 
-    private static SetupMaster Role(long id, long tenantId, string name) => new()
-    {
-        SetupId = id,
-        SetupType = "Role",
-        SetupCode = name.Replace(' ', '_').ToUpperInvariant(),
-        SetupValue = name,
-        BusinessUnitId = tenantId,
-        IsActive = true,
-        CreatedBy = "release-01b-tests",
-        CreatedOn = DateTime.UtcNow
-    };
+    /// <summary>
+    /// The ONE place every test in this collection seeds a role row.
+    ///
+    /// <paramref name="rank"/> is mandatory-by-intent: authority comes from the explicit
+    /// <c>Setup_Master.RoleRank</c> column and NEVER from the role's name, so a role called
+    /// "Commercial Manager" that is seeded without <see cref="RoleRanks.Manager"/> is — correctly —
+    /// an ordinary member and is refused by <c>[RequireManagerRole]</c>. Seeding through this helper
+    /// keeps the rank next to the name it is meant to describe instead of scattering it across
+    /// call sites.
+    /// </summary>
+    public static SetupMaster Role(
+        long id, long tenantId, string name, short rank = RoleRanks.Member, string createdBy = "release-01b-tests")
+        => new()
+        {
+            SetupId = id,
+            SetupType = "Role",
+            SetupCode = name.Replace(' ', '_').ToUpperInvariant(),
+            SetupValue = name,
+            RoleRank = rank,
+            BusinessUnitId = tenantId,
+            IsActive = true,
+            CreatedBy = createdBy,
+            CreatedOn = DateTime.UtcNow
+        };
 
     private static User User(long id, long tenantId, long roleId, string lastName, string email) => new()
     {

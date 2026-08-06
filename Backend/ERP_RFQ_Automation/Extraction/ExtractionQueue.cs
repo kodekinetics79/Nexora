@@ -46,19 +46,25 @@ public sealed class ExtractionQueue : IExtractionQueue
     private readonly ILogger<ExtractionQueue> _log;
     private readonly ITenantContext? _tenantContext;
     private readonly IEntitlementService? _entitlements;
+    private readonly ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? _metrics;
 
-    public ExtractionQueue(ErpRfqAutomationContext context, ILogger<ExtractionQueue> log)
+    public ExtractionQueue(
+        ErpRfqAutomationContext context,
+        ILogger<ExtractionQueue> log,
+        ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? metrics = null)
     {
         _context = context;
         _log = log;
+        _metrics = metrics;
     }
 
     public ExtractionQueue(
         ErpRfqAutomationContext context,
         ILogger<ExtractionQueue> log,
         ITenantContext tenantContext,
-        IEntitlementService? entitlements = null)
-        : this(context, log)
+        IEntitlementService? entitlements = null,
+        ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? metrics = null)
+        : this(context, log, metrics)
     {
         _tenantContext = tenantContext;
         _entitlements = entitlements;
@@ -409,6 +415,10 @@ RETURNING j.""Id"", j.""BusinessUnitId"", j.""Status"", j.""Attempts"", j.""MaxA
             try
             {
                 await _context.SaveChangesAsync(ct);
+                // Counted ONLY on a real insert. A duplicate short-circuit accepted no new
+                // work, and counting it would make the enqueue rate lie about intake volume
+                // exactly when a sender is retrying.
+                _metrics?.JobEnqueued(request.BusinessUnitId);
                 return new EnqueueResult { JobId = job.Id, BatchId = batchId, ContentHash = hash, Outcome = EnqueueOutcome.Enqueued };
             }
             catch (DbUpdateException ex) when (IsUniqueViolation(ex))
@@ -474,6 +484,9 @@ RETURNING j.""Id"", j.""BusinessUnitId"", j.""Status"", j.""Attempts"", j.""MaxA
             // ExtractionJobs carries no CHECK constraint, so 23514 here is a trigger refusing
             // the transition to Leased. The invariant is right; looping on it was not.
             await transaction.RollbackAsync(ClaimSavepoint, ct);
+            // Poison-message pressure. The SQLSTATE is the tag, never the message text —
+            // the message names the offending job/occurrence and would be unbounded.
+            _metrics?.ClaimRefused($"sqlstate_{refused.SqlState}", _tenantContext?.BusinessUnitId);
             var reason =
                 $"Extraction claim refused by a database invariant (SQLSTATE {refused.SqlState}): " +
                 $"{refused.MessageText} The refusal is recorded against this attempt so the job " +
@@ -493,6 +506,7 @@ RETURNING j.""Id"", j.""BusinessUnitId"", j.""Status"", j.""Attempts"", j.""MaxA
             return null;
         }
         await transaction.CommitAsync(ct);
+        if (job is not null) _metrics?.JobClaimed(job.BusinessUnitId);
         return job;
     }
 

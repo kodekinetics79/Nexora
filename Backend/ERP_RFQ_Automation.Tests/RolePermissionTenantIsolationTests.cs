@@ -57,6 +57,8 @@ public sealed class RolePermissionTenantIsolationTests
     {
         public Task<bool> IsSuperAdminAsync(long roleId, long businessUnitId) => Task.FromResult(false);
 
+        public Task<short> GetRoleRankAsync(long roleId, long businessUnitId) => Task.FromResult(RoleRanks.Member);
+
         public Task<bool> IsManagerOrAdminAsync(long roleId, long businessUnitId) => Task.FromResult(false);
 
         public Task<bool> CanManageRoleAsync(long callerRoleId, long? targetRoleId, long businessUnitId)

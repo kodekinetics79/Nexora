@@ -235,10 +235,10 @@ public sealed class LeadDuplicateDetector : ILeadDuplicateDetector
             .Where(u => u.Buid == businessUnitId && u.IsActive == true && u.RoleId != null)
             .Join(_context.SetupMasters.AsNoTracking().Where(ERP_RFQ_Automation.Authorization.SetupTypes.IsRoleRow),
                   u => u.RoleId, s => (long?)s.SetupId, (u, s) => new { User = u, Role = s })
-            .Where(x => x.Role.SetupValue.ToLower().Contains("admin")
-                        || x.Role.SetupValue.ToLower().Contains("manager")
-                        || (x.Role.SetupCode != null && (x.Role.SetupCode.ToLower().Contains("admin")
-                                                         || x.Role.SetupCode.ToLower().Contains("manager"))))
+            // "Manager/admin of the BU" is the RoleRank column now, not a substring of the role
+            // name. Post-backfill this selects exactly the same people; it just cannot be steered
+            // by renaming a role.
+            .Where(x => x.Role.RoleRank >= ERP_RFQ_Automation.Authorization.RoleRanks.Manager)
             .OrderBy(x => x.User.Id)
             .Select(x => x.User)
             .FirstOrDefaultAsync(ct);

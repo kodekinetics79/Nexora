@@ -103,6 +103,13 @@ services:
         value: "true"
       - key: Jwt__Key
         sync: false
+      # REQUIRED. Base64 of 32 random bytes (`openssl rand -base64 32`). Encrypts stored
+      # CUSTOMER MAILBOX credentials (Email_Configurations.Password) at rest with AES-256-GCM.
+      # The API REFUSES TO START outside Development without it. Rotating or losing this value
+      # makes every already-encrypted mailbox password undecryptable, and polling stops until
+      # the credentials are re-entered — treat it like Jwt__Key.
+      - key: Security__SecretProtectionKey
+        sync: false
       - key: Jwt__PlatformKey
         sync: false
       - key: CommercialFinance__DunningProviderWebhookSecret
@@ -117,3 +124,61 @@ services:
         sync: false
       - key: Cors__AllowedOrigins__0
         value: https://nexora1-ai.vercel.app
+      # -----------------------------------------------------------------------
+      # OBSERVABILITY. Read before changing anything here.
+      #
+      # WHAT WAS BROKEN: NexoraMetrics defined a full instrument set, Program.cs
+      # registered the meter, and this file set no Observability__* variable at
+      # all. ObservabilityExtensions registers an exporter only when
+      # Observability__OtlpEndpoint is a valid absolute URI, or (Development
+      # only) a console exporter — so in Production NO exporter was registered.
+      # Every counter, histogram and gauge was collected in-process and thrown
+      # away. A dashboard would have read flat zero, and flat zero reads as
+      # "healthy". The platform was running blind.
+      #
+      # WHAT FIXES IT WITHOUT A COLLECTOR: nothing below is required. With no
+      # OTLP endpoint set, ObservabilityExtensions.SelectExporter now enables
+      # the built-in, zero-dependency Prometheus scrape endpoint at /metrics
+      # (Platform/Hardening/PrometheusScrapeEndpoint.cs) and the boot log states
+      # which exporter is live. Point any scraper at
+      # https://<service>.onrender.com/metrics.
+      #
+      # SECURITY: /metrics carries tenant ids, per-tenant queue depth and
+      # per-tenant oldest-pending-job age. It is operational data, not public
+      # data, and the app logs a startup WARNING for as long as it is
+      # unauthenticated. Set the scrape key below and configure the scraper to
+      # send it as the X-Scrape-Key header.
+      #
+      # - key: Observability__Prometheus__ScrapeKey
+      #   sync: false
+      #
+      # TO SEND TO A COLLECTOR INSTEAD (Grafana Cloud / Honeycomb / an OTel
+      # collector sidecar), uncomment exactly this — an absolute URI including
+      # the scheme and port, OTLP/gRPC on 4317 or OTLP/HTTP on 4318. Setting it
+      # switches the exporter to OTLP and turns the /metrics endpoint OFF
+      # (SelectExporter treats the scrape endpoint as the fallback), which is
+      # visible in the boot log. An unparseable value degrades to "no OTLP" and
+      # is logged as a configuration ERROR; it never crashes the host.
+      #
+      # - key: Observability__OtlpEndpoint
+      #   value: http://otel-collector:4317
+      #
+      # Vendor collectors that authenticate with a header (e.g. Grafana Cloud's
+      # basic-auth token) additionally need the standard OTLP variable, which
+      # the exporter reads directly from the environment:
+      #
+      # - key: OTEL_EXPORTER_OTLP_HEADERS
+      #   sync: false        # e.g. Authorization=Basic <base64 instanceID:token>
+      #
+      # To run BOTH (push to a collector and keep the scrape endpoint for local
+      # debugging), set Observability__Prometheus__Enabled to "true" explicitly.
+      #
+      # Queue-gauge poll cadence. One bounded GROUP BY over ExtractionJobs per
+      # interval feeds every per-tenant gauge — including oldest pending job
+      # age, the only signal that reveals a starving tenant. There is no
+      # per-request and no per-scrape query. Default 00:00:15; raise it only if
+      # the database is under pressure.
+      #
+      # - key: Observability__QueueMetrics__PollInterval
+      #   value: "00:00:15"
+      # -----------------------------------------------------------------------

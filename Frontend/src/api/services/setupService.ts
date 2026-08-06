@@ -7,6 +7,11 @@ export interface SetupMasterDTO {
     setupName: string;
     description: string | null;
     parentSetupId: number | null;
+    /**
+     * Authority tier of a ROLE row (`RoleRanks`: 0 Member, 10 Manager, 20 Admin, 30 Owner).
+     * Always 0 on lookup rows. Optional here only so payloads cached by an older build still type.
+     */
+    roleRank?: number;
     businessUnitId?: number;
     isActive: boolean;
     createdBy?: string;
@@ -21,6 +26,8 @@ export interface SetupMasterCreateDTO {
     setupName: string;
     description?: string;
     parentSetupId?: number | null;
+    /** Role rows only. Omitted → the server stores Member (0); any value on a non-role row is a 400. */
+    roleRank?: number;
     isActive?: boolean;
     createdBy: string;
 }
@@ -31,6 +38,8 @@ export interface SetupMasterUpdateDTO {
     setupName: string;
     description?: string;
     parentSetupId?: number | null;
+    /** Role rows only. Omitted → the stored tier is kept, so a save cannot silently demote a role. */
+    roleRank?: number;
     isActive: boolean;
     modifiedBy: string;
 }

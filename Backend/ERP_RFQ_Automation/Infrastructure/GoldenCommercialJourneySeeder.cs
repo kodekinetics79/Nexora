@@ -356,6 +356,10 @@ public static class GoldenCommercialJourneySeeder
         {
             SetupType = "Role", SetupCode = code, SetupValue = name,
             Description = "Local E2E golden journey role.", BusinessUnitId = businessUnitId,
+            // These roles all carried SetupCode "SUPER_ADMIN", which the old name rule read as
+            // super admin. Rank is explicit now; Owner keeps the golden journey behaving exactly
+            // as it did before the column existed.
+            RoleRank = ERP_RFQ_Automation.Authorization.RoleRanks.Owner,
             IsActive = true, CreatedBy = Actor, CreatedOn = now
         };
         db.SetupMasters.Add(role);

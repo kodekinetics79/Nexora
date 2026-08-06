@@ -25,6 +25,41 @@ must be **rotated** — removal from source does not undo prior exposure.
    one. (Note: an ADR is in progress to move the AI layer to Claude — see
    `docs/adr/`.)
 
+## Stored customer mailbox credentials (encrypted at rest)
+
+`Email_Configurations.Password` holds a **customer mailbox credential** — the corporate
+Exchange/O365 password Nexora replays to the tenant's IMAP/SMTP server on every poll and
+send. It cannot be hashed, because it must be presented verbatim; it used to be stored in
+**cleartext**, readable by every database role that bypasses RLS (`nexora_identity_app`,
+`nexora_pipeline_app`) and by anyone holding a backup.
+
+It is now protected with **AES-256-GCM** at the EF Core persistence boundary
+(`Security/ProtectedSecretConverter.cs`), so every read and write is transparently
+encrypted/decrypted and no service can forget to do it. The stored form is versioned and
+self-describing — `v1:<base64 nonce>:<base64 ciphertext||tag>` — with a fresh random nonce
+per value, so two tenants sharing a password do not share a ciphertext. Tampering fails the
+GCM tag check and **throws** rather than returning a corrupted credential.
+
+**`Security:SecretProtectionKey` (env: `Security__SecretProtectionKey`) is required.**
+Base64 of exactly 32 random bytes:
+
+```
+openssl rand -base64 32
+```
+
+- Outside Development a missing, placeholder, short, non-base64 or all-zero key makes the
+  API **fail at startup**, exactly like `Jwt:Key` — a misconfigured deploy cannot silently
+  fall back to writing cleartext.
+- In Development only, an ephemeral random key is generated and logged as **INSECURE**.
+  It dies with the process, so anything encrypted under it is unreadable after a restart.
+- Existing cleartext rows are converted by an idempotent startup backfill
+  (`Security/MailboxCredentialProtectionBackfill.cs`). It skips values already carrying the
+  `v1:` prefix and logs-and-continues per row, so one bad row cannot leave the rest in
+  cleartext. The data conversion is deliberately NOT a SQL migration: the key lives in
+  application configuration and must never be reachable from inside the database.
+- **Treat this key like `Jwt:Key`.** Losing or rotating it makes every already-encrypted
+  mailbox password undecryptable and email polling stops until credentials are re-entered.
+
 ## Configuration pattern (how secrets are supplied now)
 
 `appsettings.json` is a **committed template containing only placeholders**

@@ -13,9 +13,9 @@ namespace ERP_RFQ_Automation.Tests;
 /// <summary>
 /// Server-side module RBAC (mirrors the frontend PermissionGuard):
 /// - PermissionHandler: allow with a RolePermissions row, deny without (fail-closed),
-///   View = row-exists, Create/Edit/Delete = the row's flags, super-admin bypass,
-///   60s IMemoryCache on the lookup.
-/// - ManagerRoleHandler ([RequireManagerRole]): role name contains admin/manager.
+///   View = row-exists, Create/Edit/Delete = the row's flags, the RANK rule
+///   (RoleRank >= Admin satisfies any module requirement), 60s IMemoryCache on the lookup.
+/// - ManagerRoleHandler ([RequireManagerRole]): RoleRank >= Manager.
 /// - ModulePermissionPolicyProvider: dynamic "ModulePermission:{module}:{action}"
 ///   policy names with fall-through to conventionally registered policies.
 /// </summary>
@@ -37,7 +37,9 @@ public class RbacAuthorizationTests
             CreatedOn = DateTime.UtcNow
         });
 
-    private static void SeedRole(ErpRfqAutomationContext ctx, long roleId, string roleName, long businessUnitId = Bu)
+    private static void SeedRole(
+        ErpRfqAutomationContext ctx, long roleId, string roleName,
+        long businessUnitId = Bu, short rank = RoleRanks.Member)
     {
         Seed.EnsureBusinessUnit(ctx, businessUnitId);
         ctx.SetupMasters.Add(new SetupMaster
@@ -46,6 +48,7 @@ public class RbacAuthorizationTests
             SetupType = "role",
             SetupCode = roleName,
             SetupValue = roleName,
+            RoleRank = rank,
             BusinessUnitId = businessUnitId,
             IsActive = true,
             CreatedBy = "seed",
@@ -181,31 +184,123 @@ public class RbacAuthorizationTests
         Assert.False(await RunPermissionCheck(ctx, cache, UserWith(10, null), ModuleLeads, "CanEdit"));
     }
 
-    [Fact]
-    public async Task SuperAdmin_BypassesModuleChecks_EvenWithoutPermissionRows()
+    /// <summary>
+    /// The reason the deleted super-admin BYPASS existed: an administrator must never be locked out
+    /// of their own tenant by a missing or partial RolePermissions row. The rank rule satisfies that
+    /// directly — and, unlike the bypass, it says which tier it grants and gets that tier from a
+    /// column instead of from the role's name.
+    /// </summary>
+    [Theory]
+    [InlineData(RoleRanks.Admin)]
+    [InlineData(RoleRanks.Owner)]
+    public async Task RankAtOrAboveAdmin_SatisfiesModuleChecks_WithNoPermissionRows(short rank)
     {
         using var db = new TestDb();
         using var ctx = db.ContextFor(Bu);
-        SeedRole(ctx, 99, "Super_Administrator");
+        // A deliberately unremarkable name: the grant comes from the rank, nothing else.
+        SeedRole(ctx, 99, "Procurement Lead", rank: rank);
         SeedModule(ctx, ModuleLeadsId, ModuleLeads);
-        // Deliberately NO RolePermissions rows: the bypass must still grant access.
+        // Deliberately NO RolePermissions rows.
         ctx.SaveChanges();
 
         using var cache = new MemoryCache(new MemoryCacheOptions());
         Assert.True(await RunPermissionCheck(ctx, cache, UserWith(99, Bu), ModuleLeads, "CanDelete"));
+        Assert.True(await RunPermissionCheck(ctx, cache, UserWith(99, Bu), ModuleLeads, "CanView"));
     }
 
+    /// <summary>Manager is BELOW Admin, so it does not satisfy a module check by rank — it still
+    /// needs a RolePermissions row. The old rule could not express this: "admin" and "manager"
+    /// were the same bucket.</summary>
     [Fact]
-    public async Task ForeignTenantSuperAdminRole_DoesNotBypassModuleChecks()
+    public async Task ManagerRank_DoesNotSatisfyModuleChecks_WithoutPermissionRows()
     {
         using var db = new TestDb();
         using var ctx = db.ContextFor(Bu);
-        SeedRole(ctx, 99, "Super Admin", businessUnitId: 2);
+        SeedRole(ctx, 20, "Sales Manager", rank: RoleRanks.Manager);
         SeedModule(ctx, ModuleLeadsId, ModuleLeads);
         ctx.SaveChanges();
 
         using var cache = new MemoryCache(new MemoryCacheOptions());
+        Assert.False(await RunPermissionCheck(ctx, cache, UserWith(20, Bu), ModuleLeads, "CanDelete"));
+    }
+
+    /// <summary>
+    /// THE REGRESSION THIS CHANGE EXISTS FOR. Every name below satisfied the deleted rule
+    /// <c>contains "super" AND contains "admin"</c> and therefore owned the tenant outright. They
+    /// are ordinary industrial/energy procurement job titles, not attacks. With rank stored
+    /// explicitly and left at Member, they grant exactly nothing.
+    /// </summary>
+    [Theory]
+    [InlineData("Supervisor Admin")]
+    [InlineData("Superintendent Administrator")]
+    [InlineData("Site Supervisor - Admin")]
+    [InlineData("Super Admin")]              // even the canonical name is inert without the rank
+    [InlineData("Super_Administrator")]
+    public async Task PrivilegedLookingName_WithMemberRank_GrantsNothing(string roleName)
+    {
+        using var db = new TestDb();
+        using var ctx = db.ContextFor(Bu);
+        SeedRole(ctx, 77, roleName, rank: RoleRanks.Member);
+        SeedModule(ctx, ModuleLeadsId, ModuleLeads);
+        ctx.SaveChanges();
+
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var gate = new RoleGate(ctx, cache);
+
+        Assert.False(await gate.IsSuperAdminAsync(77, Bu));
+        Assert.False(await gate.IsManagerOrAdminAsync(77, Bu));
+        Assert.Equal(RoleRanks.Member, await gate.GetRoleRankAsync(77, Bu));
+
+        // …and the two gates that used to be handed the whole tenant on the strength of the name.
+        Assert.False(await RunPermissionCheck(ctx, cache, UserWith(77, Bu), ModuleLeads, "CanView"));
+        Assert.False(await RunManagerCheck(ctx, UserWith(77, Bu)));
+    }
+
+    /// <summary>The same names at Owner rank DO grant — proving the assertions above fail because
+    /// of the rank and not because the test harness is inert.</summary>
+    [Theory]
+    [InlineData("Supervisor Admin")]
+    [InlineData("Site Supervisor - Admin")]
+    public async Task SameName_AtOwnerRank_IsSuperAdmin(string roleName)
+    {
+        using var db = new TestDb();
+        using var ctx = db.ContextFor(Bu);
+        SeedRole(ctx, 77, roleName, rank: RoleRanks.Owner);
+        SeedModule(ctx, ModuleLeadsId, ModuleLeads);
+        ctx.SaveChanges();
+
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var gate = new RoleGate(ctx, cache);
+
+        Assert.True(await gate.IsSuperAdminAsync(77, Bu));
+        Assert.True(await RunPermissionCheck(ctx, cache, UserWith(77, Bu), ModuleLeads, "CanDelete"));
+    }
+
+    /// <summary>Rank is TENANT-OWNED. An Owner-ranked role in business unit 2 grants nothing to a
+    /// token that says business unit 1, even though the roleId resolves to a real row.</summary>
+    [Fact]
+    public async Task ForeignTenantOwnerRank_GrantsNothing()
+    {
+        using var db = new TestDb();
+        using var ctx = db.ContextFor(Bu);
+        SeedRole(ctx, 99, "Super Admin", businessUnitId: 2, rank: RoleRanks.Owner);
+        SeedModule(ctx, ModuleLeadsId, ModuleLeads);
+        ctx.SaveChanges();
+
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var gate = new RoleGate(ctx, cache);
+
+        Assert.Equal(RoleRanks.Member, await gate.GetRoleRankAsync(99, Bu));
+        Assert.False(await gate.IsSuperAdminAsync(99, Bu));
+        Assert.False(await gate.IsManagerOrAdminAsync(99, Bu));
         Assert.False(await RunPermissionCheck(ctx, cache, UserWith(99, Bu), ModuleLeads, "CanDelete"));
+        Assert.False(await RunManagerCheck(ctx, UserWith(99, Bu)));
+
+        // The very same role, read through a context scoped to ITS OWN tenant, is an owner — so the
+        // denials above are the tenant boundary, not a missing rank.
+        using var foreignCtx = db.ContextFor(2);
+        using var foreignCache = new MemoryCache(new MemoryCacheOptions());
+        Assert.True(await new RoleGate(foreignCtx, foreignCache).IsSuperAdminAsync(99, 2));
     }
 
     [Fact]
@@ -249,29 +344,29 @@ public class RbacAuthorizationTests
     // ---------------- manager/admin gate ----------------
 
     [Fact]
-    public async Task ManagerGate_Allows_ManagerRole()
+    public async Task ManagerGate_Allows_ManagerRank()
     {
         using var db = new TestDb();
         using var ctx = db.ContextFor(Bu);
-        SeedRole(ctx, 20, "Sales Manager");
+        SeedRole(ctx, 20, "Sales Manager", rank: RoleRanks.Manager);
         ctx.SaveChanges();
 
         Assert.True(await RunManagerCheck(ctx, UserWith(20, Bu)));
     }
 
     [Fact]
-    public async Task ManagerGate_Allows_SuperAdminRole()
+    public async Task ManagerGate_Allows_OwnerRank()
     {
         using var db = new TestDb();
         using var ctx = db.ContextFor(Bu);
-        SeedRole(ctx, 99, "Super Admin");
+        SeedRole(ctx, 99, "Super Admin", rank: RoleRanks.Owner);
         ctx.SaveChanges();
 
         Assert.True(await RunManagerCheck(ctx, UserWith(99, Bu)));
     }
 
     [Fact]
-    public async Task ManagerGate_Denies_NonManagerRole_AndUnknownRole()
+    public async Task ManagerGate_Denies_MemberRank_AndUnknownRole()
     {
         using var db = new TestDb();
         using var ctx = db.ContextFor(Bu);
