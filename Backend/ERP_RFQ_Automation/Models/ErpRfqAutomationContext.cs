@@ -324,6 +324,14 @@ public partial class ErpRfqAutomationContext : DbContext
                 .HasDefaultValue(true)
                 .HasColumnName("UseSSL");
             entity.Property(e => e.Username).HasMaxLength(255);
+            // ING-08: the durable poll ledger for this mailbox. The poller used to beat its
+            // heartbeat and log "completed successfully" on a cycle that had just thrown
+            // AuthenticationException, so nothing in the system knew the door had been shut
+            // since 2026-07-30. LastSuccessfulPollOn is also what the lookback window is
+            // derived from, replacing the fixed 7-day window that turned any longer outage
+            // into permanent, invisible loss.
+            entity.Property(e => e.LastPollError).HasMaxLength(500);
+            entity.Property(e => e.ConsecutivePollFailures).HasDefaultValue(0);
 
             entity.HasOne(d => d.BusinessUnit).WithMany(p => p.EmailConfigurations)
                 .HasForeignKey(d => d.BusinessUnitId)
@@ -355,6 +363,10 @@ public partial class ErpRfqAutomationContext : DbContext
             // a misjudged RFQ and replay it.
             entity.Property(e => e.TriageOutcome).HasMaxLength(32);
             entity.Property(e => e.TriageReasonJson).HasMaxLength(1000);
+            // ING-06: attachments the intake door could not hand to extraction, with the reason
+            // for each. Recorded unconditionally so a dropped .msg on a quoted-only reply is
+            // visible on the message it arrived with instead of nowhere.
+            entity.Property(e => e.SkippedAttachmentsJson).HasMaxLength(2000);
 
             entity.HasOne(d => d.EmailConfiguration).WithMany(p => p.EmailIngests)
                 .HasForeignKey(d => d.EmailConfigurationId)
@@ -893,6 +905,16 @@ public partial class ErpRfqAutomationContext : DbContext
 
             entity.HasIndex(e => e.QuoteNo, "IX_Quotes_QuoteNo");
 
+            // A customer-facing document number that can repeat is an audit defect, not a
+            // cosmetic one. Three independent generators write this column — QuoteService's
+            // read-max, QuotationUploaderService's copy of it, and RfqRepository's QT-{Rfqno}
+            // scheme — and none of them were backstopped. Consolidating the generators is
+            // separate work; this index makes a collision impossible in the meantime, from any
+            // path, including ones not yet written. Scoped per tenant because the number is
+            // only ever presented within one tenant's correspondence.
+            entity.HasIndex(e => new { e.BusinessUnitId, e.QuoteNo }, "UX_Quotes_BusinessUnitID_QuoteNo")
+                .IsUnique();
+
             entity.HasIndex(e => new { e.BusinessUnitId, e.CommercialCaseId }, "IX_Quotes_BusinessUnitID_CommercialCaseID");
 
             entity.HasIndex(e => new { e.BusinessUnitId, e.NexoraSerial }, "IX_Quotes_BusinessUnitID_NexoraSerial");
@@ -1083,6 +1105,23 @@ public partial class ErpRfqAutomationContext : DbContext
             // LeadItems, the extraction landing zone, deliberately carries NO such
             // constraint — there 0 = "never established" plus a review flag.
             entity.HasCheckConstraint("CK_RFQItems_Quantity_Positive", "\"Quantity\" > 0");
+
+            // Line participation (see Rfqitem.Participation.cs). The reason rule is enforced in
+            // the domain AND here, because a decline without a reason is an audit hole that a
+            // future caller writing the column directly would otherwise reopen.
+            entity.HasCheckConstraint(
+                "CK_RFQItems_Participation_Decision",
+                "\"ParticipationDecision\" IN ('Pending','Quote','NoQuote')");
+            entity.HasCheckConstraint(
+                "CK_RFQItems_NoQuote_Requires_Reason",
+                // trim(), not btrim(): this constraint is created by EnsureCreated on the SQLite
+                // unit lane as well as by the migration on PostgreSQL, and btrim is Postgres-only.
+                "\"ParticipationDecision\" <> 'NoQuote' OR (\"NoQuoteReason\" IS NOT NULL AND trim(\"NoQuoteReason\") <> '')");
+            entity.Property(e => e.ParticipationDecision).HasMaxLength(20).HasDefaultValue("Pending");
+            entity.Property(e => e.NoQuoteReason).HasMaxLength(500);
+            entity.Property(e => e.ParticipationDecidedBy).HasMaxLength(120);
+            // Partial index: the quote-draft gate only ever asks "which lines are Quote?".
+            entity.HasIndex(e => new { e.Rfqid, e.ParticipationDecision }, "IX_RFQItems_Rfqid_Participation");
 
             entity.Property(e => e.Id).HasColumnName("ID");
             entity.Property(e => e.Aiconfidence)

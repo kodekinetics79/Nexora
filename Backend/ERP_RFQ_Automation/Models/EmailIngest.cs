@@ -39,6 +39,15 @@ public partial class EmailIngest
 
     public DateTime? TriageDecidedOn { get; set; }
 
+    /// <summary>
+    /// ING-06: JSON array of <c>"filename (reason)"</c> for every attachment on this message
+    /// that was NOT handed to extraction — unsupported type, oversize, empty, unnamed, embedded
+    /// message. Written on EVERY fan-out path, not only the one where the body produced a job:
+    /// a quoted-only reply carrying one supported and one unsupported attachment used to record
+    /// the dropped file nowhere at all. Null means nothing was skipped.
+    /// </summary>
+    public string? SkippedAttachmentsJson { get; set; }
+
     public virtual EmailConfiguration EmailConfiguration { get; set; } = null!;
 
     public virtual ICollection<Lead> Leads { get; set; } = new List<Lead>();

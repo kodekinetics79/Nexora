@@ -14,6 +14,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using MimeKit;
 using MimeKit.Text;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -24,10 +25,56 @@ using Tesseract;
 using UglyToad.PdfPig;
 using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.AI;
+using ERP_RFQ_Automation.HealthChecks;
 using ERP_RFQ_Automation.Ingestion.Triage;
 
 namespace ERP_RFQ_Automation.Services
 {
+    /// <summary>
+    /// What polling ONE mailbox actually achieved. Returned instead of <c>void</c> because the
+    /// poll loop used to log "Email fetch completed successfully." on a cycle that had thrown
+    /// <c>MailKit.Security.AuthenticationException</c> 1.5 ms earlier — the caller had no way to
+    /// know, so it beat its heartbeat and the channel stayed green for a week.
+    /// </summary>
+    public sealed record MailboxPollOutcome(
+        long EmailConfigurationId,
+        string EmailAddress,
+        bool Succeeded,
+        string? FailureReason,
+        bool FailureIsPermanent,
+        DateTime? LastSuccessfulPollOn,
+        DateTime WindowSinceUtc,
+        int LookbackCappedDays,
+        int MessagesDownloaded,
+        int MessagesAlreadyIngested);
+
+    /// <summary>The truthful result of one poll cycle across every configured mailbox.</summary>
+    public sealed record MailboxPollReport(IReadOnlyList<MailboxPollOutcome> Mailboxes)
+    {
+        public static readonly MailboxPollReport Empty = new(Array.Empty<MailboxPollOutcome>());
+
+        public int Polled => Mailboxes.Count;
+        public IReadOnlyList<MailboxPollOutcome> Failures =>
+            Mailboxes.Where(m => !m.Succeeded).ToList();
+        public int Failed => Mailboxes.Count(m => !m.Succeeded);
+        public bool AnyFailed => Failed > 0;
+
+        /// <summary>True ONLY when at least one mailbox was polled and none failed. Zero
+        /// configured mailboxes is deliberately not success: nothing proved the door works.</summary>
+        public bool AllSucceeded => Mailboxes.Count > 0 && Failed == 0;
+
+        public bool AnyPermanentFailure => Mailboxes.Any(m => !m.Succeeded && m.FailureIsPermanent);
+
+        public DateTime? OldestLastSuccessfulPoll => Mailboxes
+            .Where(m => !m.Succeeded)
+            .Select(m => m.LastSuccessfulPollOn)
+            .DefaultIfEmpty(null)
+            .Min();
+
+        public string FailureSummary => string.Join("; ",
+            Mailboxes.Where(m => !m.Succeeded).Select(m => $"{m.EmailAddress}: {m.FailureReason}"));
+    }
+
     public class EmailService : IEmailService
     {
         private readonly ErpRfqAutomationContext _context;
@@ -41,7 +88,14 @@ namespace ERP_RFQ_Automation.Services
         // Configuration constants
         private const double MIN_CONFIDENCE_THRESHOLD = 0.3; // Minimum AI confidence to accept
         private const double MIN_CONFIDENCE_WITH_VALIDATION = 0.25; // Minimum if email passes validation
-        private const int SEARCH_DAYS_BACK = 7; // Days to look back for emails
+        // ING-08: lookback defaults. The window used to be a FIXED 7 days
+        // (`SentSince(Today-7) AND NotSeen`), which meant an outage longer than a week made
+        // every older message permanently invisible: no row, no log, nothing. The window is now
+        // derived from EmailConfiguration.LastSuccessfulPollOn and only these bounds are fixed.
+        // Overridable via Ingestion:Email:* for a tenant with an unusual mailbox volume.
+        private const double DEFAULT_INITIAL_LOOKBACK_DAYS = 7;   // first ever poll for a mailbox
+        private const double DEFAULT_MIN_LOOKBACK_DAYS = 1;       // always re-scan at least this
+        private const double DEFAULT_MAX_LOOKBACK_DAYS = 30;      // never scan further back than this
         private const long MAX_ATTACHMENT_SIZE = Ingestion.Triage.EmailIngestEnqueuer.MaxAttachmentBytes; // 25 MB
         // Token/Text limiting for LLM to prevent context length errors and excessive costs
         private const int MAX_CHARS_FOR_LLM = 32000; // ~8k tokens (safe for most models)
@@ -70,23 +124,44 @@ namespace ERP_RFQ_Automation.Services
         // jobs instead. Config: Ingestion:UseUnifiedQueue (set false to restore the
         // legacy direct-extraction path unchanged).
         private readonly bool _useUnifiedQueue;
+        // ING-08: channel (not loop) health for the inbound mailbox. Optional so the intake
+        // unit tests can construct the service without the readiness surface.
+        private readonly IEmailPollerHealth? _pollerHealth;
+        private readonly TimeSpan _initialLookback;
+        private readonly TimeSpan _minLookback;
+        private readonly TimeSpan _maxLookback;
         public EmailService(ErpRfqAutomationContext context, IWebHostEnvironment env,
             ILogger<EmailService> logger, ILLMService llmService, IServiceScopeFactory scopeFactory,
-            IConfiguration configuration, IFileStorage storage)
+            IConfiguration configuration, IFileStorage storage,
+            IEmailPollerHealth? pollerHealth = null)
         {
             _context = context;
             _env = env;
             _logger = logger;
             _llmService = llmService;
             _scopeFactory = scopeFactory;
+            _pollerHealth = pollerHealth;
             _useUnifiedQueue = configuration.GetValue("Ingestion:UseUnifiedQueue", true);
+            _initialLookback = PositiveDays(
+                configuration.GetValue("Ingestion:Email:InitialLookbackDays", DEFAULT_INITIAL_LOOKBACK_DAYS),
+                DEFAULT_INITIAL_LOOKBACK_DAYS);
+            _minLookback = PositiveDays(
+                configuration.GetValue("Ingestion:Email:MinLookbackDays", DEFAULT_MIN_LOOKBACK_DAYS),
+                DEFAULT_MIN_LOOKBACK_DAYS);
+            _maxLookback = PositiveDays(
+                configuration.GetValue("Ingestion:Email:MaxLookbackDays", DEFAULT_MAX_LOOKBACK_DAYS),
+                DEFAULT_MAX_LOOKBACK_DAYS);
+            if (_maxLookback < _minLookback) _maxLookback = _minLookback;
             _attachmentPath = storage.GetPath("RFQ_Attachments");
             _rawEmailPath = storage.GetPath("Raw_Emails");
             _tessDataPath = Path.Combine(_env.ContentRootPath, "tessdata");
             Directory.CreateDirectory(_attachmentPath);
             Directory.CreateDirectory(_rawEmailPath);
         }
-        public async Task FetchAndSaveLeadsAsync(long? businessUnitId = null)
+
+        private static TimeSpan PositiveDays(double configured, double fallback)
+            => TimeSpan.FromDays(configured > 0 ? configured : fallback);
+        public async Task<MailboxPollReport> FetchAndSaveLeadsAsync(long? businessUnitId = null)
         {
             var query = _context.EmailConfigurations
                 .Where(e => e.IsActive && e.Protocol.ToUpper() == "IMAP");
@@ -99,23 +174,104 @@ namespace ERP_RFQ_Automation.Services
             var configs = await query.ToListAsync();
             _logger.LogInformation("Found {Count} active IMAP email configurations to process.", configs.Count);
 
+            var outcomes = new List<MailboxPollOutcome>(configs.Count);
             foreach (var config in configs)
             {
+                MailboxPollOutcome outcome;
                 try
                 {
                     _logger.LogInformation("Starting process for configuration: {Email}", config.EmailAddress);
-                    await ProcessConfigAsync(config);
-                    _logger.LogInformation("Finished process for configuration: {Email}", config.EmailAddress);
+                    outcome = await ProcessConfigAsync(config);
                 }
                 catch (Exception ex)
                 {
-                    // This catch ensures that even if ProcessConfigAsync has an unhandled catastrophic failure,
-                    // it will not stop the loop from processing the next email configuration.
+                    // A catastrophic failure inside ProcessConfigAsync must not stop the loop
+                    // from reaching the next mailbox — but it must never be mistaken for
+                    // success either, which is precisely what this method used to do.
                     _logger.LogError(ex, "Unexpected failure processing email configuration {Email}. Moving to next.", config.EmailAddress);
+                    outcome = FailedOutcome(config, ex, ResolveLookbackWindow(config, DateTime.UtcNow));
+                }
+
+                // ING-08: the durable ledger is written for BOTH outcomes, on every cycle.
+                await RecordPollOutcomeAsync(config, outcome);
+                outcomes.Add(outcome);
+
+                if (outcome.Succeeded)
+                {
+                    _logger.LogInformation(
+                        "Finished process for configuration: {Email} ({Downloaded} new message(s), "
+                        + "{AlreadyIngested} already in the ingestion ledger).",
+                        config.EmailAddress, outcome.MessagesDownloaded, outcome.MessagesAlreadyIngested);
+                }
+                else
+                {
+                    _logger.LogError(
+                        "Mailbox {Email} could NOT be polled: {Reason} Last successful poll: {LastSuccess}. "
+                        + "No message from this mailbox has been ingested since then.",
+                        config.EmailAddress, outcome.FailureReason,
+                        outcome.LastSuccessfulPollOn?.ToString("O") ?? "never");
                 }
             }
+
+            var report = new MailboxPollReport(outcomes);
+            PublishChannelHealth(report);
+            return report;
         }
-        private async Task ProcessConfigAsync(EmailConfiguration config)
+
+        /// <summary>
+        /// ING-08: mirrors the cycle's real outcome into the readiness surface. A mailbox that
+        /// refused authentication is a PERMANENT failure — it will not heal by being retried —
+        /// so <c>/ready</c> is allowed to go red on the first occurrence instead of after three.
+        /// </summary>
+        private void PublishChannelHealth(MailboxPollReport report)
+        {
+            if (_pollerHealth is null) return;
+            var now = DateTimeOffset.UtcNow;
+            if (report.AnyFailed)
+                _pollerHealth.RecordFailure(report.FailureSummary, report.AnyPermanentFailure, now);
+            else if (report.AllSucceeded)
+                _pollerHealth.RecordSuccess(now);
+            // Zero configured mailboxes: neither success nor failure was demonstrated, so
+            // nothing is recorded. Claiming success here would advance "last successful poll"
+            // for a door that was never opened.
+        }
+
+        /// <summary>
+        /// ING-08: persists the mailbox's poll ledger. This is the durable, operator-visible
+        /// half of the fix: <c>LastSuccessfulPollOn</c> is what the next lookback window is
+        /// derived from, and <c>LastPollError</c> is the reason an operator reads.
+        /// </summary>
+        private async Task RecordPollOutcomeAsync(EmailConfiguration config, MailboxPollOutcome outcome)
+        {
+            var now = DateTime.UtcNow;
+            config.LastPollAttemptOn = now;
+            if (outcome.Succeeded)
+            {
+                config.LastSuccessfulPollOn = now;
+                config.LastPollError = null;
+                config.ConsecutivePollFailures = 0;
+            }
+            else
+            {
+                // LastSuccessfulPollOn is deliberately NOT touched: a failed cycle must never
+                // move the recovery point forward, or the outage window is lost with it.
+                config.LastPollError = Truncate(outcome.FailureReason, 500);
+                config.ConsecutivePollFailures += 1;
+            }
+
+            try
+            {
+                await _context.SaveChangesAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Failed to persist the poll ledger for {Email}; the in-process health state still reports the outcome.",
+                    config.EmailAddress);
+            }
+        }
+
+        private async Task<MailboxPollOutcome> ProcessConfigAsync(EmailConfiguration config)
         {
             using var scope = _scopeFactory.CreateScope();
             var localContext = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
@@ -123,6 +279,12 @@ namespace ERP_RFQ_Automation.Services
             // ING-05: unified-queue gateway from the SAME scope as localContext (null when
             // not registered -> the legacy direct path below still works).
             var ingestion = scope.ServiceProvider.GetService<ERP_RFQ_Automation.Extraction.IDocumentIngestion>();
+
+            var window = ResolveLookbackWindow(config, DateTime.UtcNow);
+            LogLookbackWindow(config, window);
+
+            var downloaded = 0;
+            var alreadyIngested = 0;
             using var client = new ImapClient();
             try
             {
@@ -131,16 +293,36 @@ namespace ERP_RFQ_Automation.Services
                 await client.AuthenticateAsync(config.EmailAddress, config.Password);
                 var inbox = client.Inbox;
                 await inbox.OpenAsync(FolderAccess.ReadWrite);
-                var sinceDate = DateTime.Today.AddDays(-SEARCH_DAYS_BACK);
-                // More specific RFQ keyword search
-                var query = BuildRFQSearchQuery(sinceDate).And(SearchQuery.NotSeen); // Added NotSeen to avoid reprocessing seen emails
+                var query = BuildRFQSearchQuery(window.SinceUtc);
                 var uids = await inbox.SearchAsync(query);
-                _logger.LogInformation("Found {Count} potential RFQ emails for {Email}", uids.Count, config.EmailAddress);
-                foreach (var uid in uids)
+                _logger.LogInformation("Found {Count} message(s) in the poll window for {Email}", uids.Count, config.EmailAddress);
+
+                // ING-08: envelopes first, full messages only for what the ledger has not seen.
+                // Dropping `NotSeen` means the window is re-searched every cycle; downloading
+                // every message in it every cycle would be unacceptable, and is unnecessary —
+                // the Message-Id in the envelope is enough to ask the ledger.
+                var summaries = uids.Count == 0
+                    ? new List<IMessageSummary>()
+                    : (await inbox.FetchAsync(uids,
+                        MessageSummaryItems.UniqueId | MessageSummaryItems.Envelope)).ToList();
+                var ledger = await LoadIngestedMessageIdsAsync(localContext, config, summaries);
+
+                foreach (var summary in summaries)
                 {
+                    var envelopeId = NormalizeMessageId(summary.Envelope?.MessageId);
+                    if (envelopeId is not null && ledger.Contains(envelopeId))
+                    {
+                        // Handled on an earlier cycle. The DURABLE record says so — not the
+                        // IMAP \Seen flag, which a human reading the mailbox also sets.
+                        alreadyIngested++;
+                        continue;
+                    }
+
+                    var uid = summary.UniqueId;
                     try
                     {
                         var message = await inbox.GetMessageAsync(uid);
+                        downloaded++;
                         // ING-01: only mark \Seen once a durable record (EmailIngest + raw .eml)
                         // exists, so a message we fail to persist is retried on the next cycle
                         // instead of vanishing.
@@ -157,11 +339,13 @@ namespace ERP_RFQ_Automation.Services
 
                         if (durablyPersisted)
                         {
-                            await inbox.AddFlagsAsync(uid, MessageFlags.Seen, true); // Mark as seen only after a durable record exists
+                            // Courtesy flag for the humans who also read this mailbox. It is NOT
+                            // consulted on the way in any more; the EmailIngests row is.
+                            await inbox.AddFlagsAsync(uid, MessageFlags.Seen, true);
                         }
                         else
                         {
-                            _logger.LogWarning("Email UID {UID} not persisted durably; leaving unseen for retry next cycle.", uid);
+                            _logger.LogWarning("Email UID {UID} not persisted durably; it will be retried next cycle.", uid);
                         }
                     }
                     catch (Exception ex)
@@ -170,10 +354,147 @@ namespace ERP_RFQ_Automation.Services
                     }
                 }
                 await client.DisconnectAsync(true);
+
+                return new MailboxPollOutcome(
+                    config.Id, config.EmailAddress, Succeeded: true, FailureReason: null,
+                    FailureIsPermanent: false, config.LastSuccessfulPollOn, window.SinceUtc,
+                    window.CappedDays, downloaded, alreadyIngested);
             }
             catch (Exception ex)
             {
+                // NOT swallowed into silence and NOT rethrown into a dead loop: the reason is
+                // recorded, the caller reports the failure, and the poller keeps retrying while
+                // remaining visibly failed.
                 _logger.LogError(ex, "IMAP error for config: {Email}", config.EmailAddress);
+                return FailedOutcome(config, ex, window, downloaded, alreadyIngested);
+            }
+        }
+
+        /// <summary>The ingest keys already recorded for the messages in this window. One query
+        /// per cycle, keyed on the RFC 5322 Message-Id.</summary>
+        private static async Task<HashSet<string>> LoadIngestedMessageIdsAsync(
+            ErpRfqAutomationContext context, EmailConfiguration config,
+            IReadOnlyList<IMessageSummary> summaries)
+        {
+            var candidates = summaries
+                .Select(s => NormalizeMessageId(s.Envelope?.MessageId))
+                .Where(id => id is not null)
+                .Select(id => id!)
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+            if (candidates.Count == 0)
+                return new HashSet<string>(StringComparer.Ordinal);
+
+            var known = await context.EmailIngests
+                .Where(e => e.EmailConfigurationId == config.Id && candidates.Contains(e.MessageId))
+                .Select(e => e.MessageId)
+                .ToListAsync();
+            return new HashSet<string>(known, StringComparer.Ordinal);
+        }
+
+        private MailboxPollOutcome FailedOutcome(
+            EmailConfiguration config, Exception ex, LookbackWindow window,
+            int downloaded = 0, int alreadyIngested = 0)
+            => new(config.Id, config.EmailAddress, Succeeded: false,
+                DescribeFailure(ex), IsPermanentFailure(ex), config.LastSuccessfulPollOn,
+                window.SinceUtc, window.CappedDays, downloaded, alreadyIngested);
+
+        /// <summary>
+        /// A one-line, operator-readable reason. Deliberately names the exception type: the
+        /// production symptom was <c>AuthenticationException: Authentication failed</c>, and
+        /// "the mailbox rejected our credentials" is the sentence that gets it fixed.
+        /// </summary>
+        internal static string DescribeFailure(Exception ex) => ex switch
+        {
+            AuthenticationException =>
+                $"The mailbox rejected the configured credentials (authentication failed): {ex.Message}",
+            ServiceNotAuthenticatedException =>
+                $"The mail server refused the session before authentication completed: {ex.Message}",
+            SslHandshakeException =>
+                $"The TLS handshake with the mail server failed: {ex.Message}",
+            System.Net.Sockets.SocketException =>
+                $"The mail server could not be reached: {ex.Message}",
+            TimeoutException =>
+                $"The mail server did not respond in time: {ex.Message}",
+            _ => $"{ex.GetType().Name}: {ex.Message}"
+        };
+
+        /// <summary>
+        /// True when retrying cannot help. An expired or revoked credential is the canonical
+        /// case: three more failed cycles only delay the moment an operator is told.
+        /// </summary>
+        internal static bool IsPermanentFailure(Exception ex)
+            => ex is AuthenticationException or ServiceNotAuthenticatedException;
+
+        /// <param name="SinceUtc">Inclusive floor of the search window.</param>
+        /// <param name="CappedDays">Days of the outage the cap excluded — 0 when nothing was cut.
+        /// Non-zero means messages exist that this poll cannot see, which is announced loudly.</param>
+        /// <param name="FirstEverPoll">True when this mailbox has never been polled successfully.</param>
+        internal readonly record struct LookbackWindow(DateTime SinceUtc, int CappedDays, bool FirstEverPoll);
+
+        /// <summary>
+        /// ING-08: derives the search window from the LAST SUCCESSFUL POLL rather than a fixed
+        /// 7 days.
+        ///
+        /// The old `SentSince(Today - 7)` was a permanent loss window: the poller had not
+        /// contacted the mailbox since 2026-07-30, so by 2026-08-06 every message older than a
+        /// week was invisible forever — no row, no log, nothing to replay. Deriving the window
+        /// from <see cref="EmailConfiguration.LastSuccessfulPollOn"/> makes an outage
+        /// RECOVERABLE: the first successful poll after it re-reads the whole gap.
+        ///
+        /// Bounds, and why each exists:
+        /// <list type="bullet">
+        ///   <item><description>FLOOR (1 day) — always re-scan the recent past, covering
+        ///   server/client clock skew and the day-granularity of the IMAP SENTSINCE key.</description></item>
+        ///   <item><description>CAP (30 days) — the FIRST deploy of this change must not turn
+        ///   into an unbounded mailbox re-read, and an abandoned mailbox must not scan years of
+        ///   history every 5 minutes. When the cap actually cuts an outage short, that is
+        ///   potential loss, so it is logged as a warning naming the exact days.</description></item>
+        ///   <item><description>INITIAL (7 days) — a mailbox with no recorded success keeps
+        ///   exactly today's behaviour, so shipping this change re-reads at most the same week
+        ///   it already re-read. Everything already in the ledger is skipped without a
+        ///   download, so the "re-ingestion storm" is bounded to envelope fetches.</description></item>
+        /// </list>
+        /// </summary>
+        internal LookbackWindow ResolveLookbackWindow(EmailConfiguration config, DateTime nowUtc)
+        {
+            var lastSuccess = config.LastSuccessfulPollOn;
+            var firstEver = lastSuccess is null;
+            var since = firstEver ? nowUtc - _initialLookback : lastSuccess!.Value;
+
+            var cappedDays = 0;
+            var oldestAllowed = nowUtc - _maxLookback;
+            if (since < oldestAllowed)
+            {
+                cappedDays = (int)Math.Ceiling((oldestAllowed - since).TotalDays);
+                since = oldestAllowed;
+            }
+
+            var newestAllowed = nowUtc - _minLookback;
+            if (since > newestAllowed) since = newestAllowed;
+
+            return new LookbackWindow(since, cappedDays, firstEver);
+        }
+
+        private void LogLookbackWindow(EmailConfiguration config, LookbackWindow window)
+        {
+            if (window.CappedDays > 0)
+            {
+                // The cap is the ONE place this design can still lose a message, so it is never
+                // silent: the operator is told exactly how much history is out of reach.
+                _logger.LogWarning(
+                    "Mailbox {Email} was last polled successfully on {LastSuccess}. The lookback is capped at "
+                    + "{MaxDays} days, so mail sent before {Since:O} — {CappedDays} day(s) of the outage — is NOT "
+                    + "visible to this poll and must be recovered manually from the mailbox.",
+                    config.EmailAddress, config.LastSuccessfulPollOn?.ToString("O") ?? "never",
+                    _maxLookback.TotalDays, window.SinceUtc, window.CappedDays);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Polling {Email} for mail sent since {Since:O} (last successful poll: {LastSuccess}).",
+                    config.EmailAddress, window.SinceUtc,
+                    config.LastSuccessfulPollOn?.ToString("O") ?? "never — first poll for this mailbox");
             }
         }
         /// <summary>
@@ -189,9 +510,17 @@ namespace ERP_RFQ_Automation.Services
         /// day per tenant, autoreplies/bulk mail/no-reply senders are stopped by the gate
         /// WITHOUT an AI call, and everything else is one governed prose call under the
         /// existing token ledger and per-tenant caps.
+        ///
+        /// ING-08: `AND NotSeen` is GONE as well, and for the same reason. The IMAP \Seen flag
+        /// is set by any human who opens the mailbox in Outlook, so a message someone glanced at
+        /// before the poller reached it was never ingested — no row, no log, no trace. The flag
+        /// is a READING state, not an ingestion ledger; the EmailIngests row (unique on
+        /// EmailConfigurationID + MessageID) is the authority, and it is consulted from the
+        /// envelope before any message is downloaded.
         /// </summary>
-        private SearchQuery BuildRFQSearchQuery(DateTime sinceDate)
-            => SearchQuery.SentSince(sinceDate);
+        internal static SearchQuery BuildRFQSearchQuery(DateTime sinceUtc)
+            // SENTSINCE compares dates, not instants, and is inclusive of the given day.
+            => SearchQuery.SentSince(sinceUtc.Date);
         /// <summary>
         /// Processes a single fetched message. Returns true when a durable record
         /// (EmailIngest row + raw .eml) exists for the message, meaning the caller may safely
@@ -201,17 +530,24 @@ namespace ERP_RFQ_Automation.Services
             ErpRfqAutomationContext context, ILLMService llmService,
             ERP_RFQ_Automation.Extraction.IDocumentIngestion? ingestion = null)
         {
-            var messageId = message.MessageId ?? Guid.NewGuid().ToString();
+            var messageId = ResolveIngestKey(message);
             var from = message.From.ToString();
             var to = message.To.ToString();
             var subject = message.Subject ?? "";
-            // Check if already processed by messageId or same from/to/subject (likely duplicate send).
-            // A durable record already exists from a previous run, so it is safe to mark \Seen.
-            if (await context.EmailIngests.AnyAsync(e => e.EmailConfigurationId == config.Id &&
-                (e.MessageId == messageId ||
-                    (e.FromEmail == from && e.ToEmail == to && e.EmailSubject == subject))))
+
+            // ING-08: the skip is keyed on the MESSAGE, not on (From, To, Subject).
+            //
+            // The old check also skipped anything matching an existing From+To+Subject triple.
+            // "RFQ", "Quotation Request" and every reply in a thread reuse a subject line, so a
+            // customer's SECOND, genuinely different enquiry was dropped on arrival — a Debug
+            // log line and no row anywhere. The RFC 5322 Message-Id is the identifier that is
+            // stable for this message and different for the next one, and it is already the
+            // durable ingestion key (unique index on EmailConfigurationID + MessageID).
+            if (await context.EmailIngests.AnyAsync(e =>
+                    e.EmailConfigurationId == config.Id && e.MessageId == messageId))
             {
-                _logger.LogDebug("Skipping duplicate email: {MessageId} (From: {From}, Subject: {Subject})", messageId, from, subject);
+                _logger.LogDebug("Skipping already-ingested email: {MessageId} (From: {From}, Subject: {Subject})",
+                    messageId, from, subject);
                 return true;
             }
 
@@ -351,9 +687,10 @@ namespace ERP_RFQ_Automation.Services
                 message, ingest, config.BusinessUnitId, config.EmailAddress,
                 ingestion, triage, bodyParts, _logger);
 
-            // ING-06: nothing enqueued but attachments were dropped — surface the loss on
-            // the tenant-visible ingest record (ParseStatus is limited to 50 chars; the
-            // per-file reasons are in the Warning logs).
+            // ING-06: the per-file reasons are recorded on ingest.SkippedAttachmentsJson by the
+            // enqueuer itself, unconditionally and on every path. This only raises the loss into
+            // the 50-char lifecycle status for the one case where the message produced NOTHING
+            // — a "Queued" ingest with no jobs would read as normal progress.
             if (result.Queued == 0 && result.SkippedAttachments.Count > 0)
             {
                 ingest.ParseStatus = Truncate(
@@ -406,6 +743,72 @@ namespace ERP_RFQ_Automation.Services
             var json = JsonSerializer.Serialize(reasonCodes);
             return json.Length <= 1000 ? json : json.Substring(0, 1000);
         }
+
+        /// <summary>
+        /// ING-08: the durable ingestion key for a message.
+        ///
+        /// Prefers the RFC 5322 Message-Id. Falls back to a deterministic content hash when the
+        /// header is absent or unusable — never to <c>Guid.NewGuid()</c>, which the old code
+        /// used and which quietly guaranteed the OPPOSITE failure: a header-less message looked
+        /// brand new on every single cycle and was ingested again and again.
+        /// </summary>
+        internal static string ResolveIngestKey(MimeMessage message)
+        {
+            var messageId = NormalizeMessageId(message.MessageId);
+            // MessageID is varchar(255). Truncating a pathological header would manufacture a
+            // collision between two different messages, so hash it instead.
+            if (messageId is not null && messageId.Length <= 255)
+                return messageId;
+            return ComputeContentKey(message);
+        }
+
+        /// <summary>
+        /// Message-Ids reach us from two places — the parsed message and the IMAP ENVELOPE —
+        /// and the angle brackets are not guaranteed to be stripped identically by both. One
+        /// normalizer keeps the ledger lookup and the ledger write on the same key.
+        /// </summary>
+        internal static string? NormalizeMessageId(string? messageId)
+        {
+            if (string.IsNullOrWhiteSpace(messageId)) return null;
+            var trimmed = messageId.Trim();
+            if (trimmed.Length >= 2 && trimmed[0] == '<' && trimmed[^1] == '>')
+                trimmed = trimmed[1..^1].Trim();
+            return trimmed.Length == 0 ? null : trimmed;
+        }
+
+        /// <summary>
+        /// Deterministic stand-in for a missing Message-Id: SHA-256 over the full header block
+        /// (which carries the per-delivery Received trail) plus the body text. The SAME message
+        /// re-read next cycle hashes identically and is skipped; a DIFFERENT message under the
+        /// same subject hashes differently and is ingested.
+        /// </summary>
+        internal static string ComputeContentKey(MimeMessage message)
+        {
+            var sb = new StringBuilder();
+            try
+            {
+                foreach (var header in message.Headers)
+                    sb.Append(header.Field).Append(':').Append(header.Value ?? string.Empty).Append('\n');
+            }
+            catch
+            {
+                // A malformed header must not stop ingestion; the envelope facts below still
+                // produce a stable key.
+            }
+            sb.Append('\n')
+              .Append(message.From?.ToString() ?? string.Empty).Append('\n')
+              .Append(message.To?.ToString() ?? string.Empty).Append('\n')
+              .Append(message.Subject ?? string.Empty).Append('\n')
+              .Append(message.Date.ToString("O")).Append('\n')
+              .Append(message.GetTextBody(TextFormat.Plain)
+                      ?? message.GetTextBody(TextFormat.Html)
+                      ?? string.Empty);
+            foreach (var attachment in message.Attachments.OfType<MimePart>())
+                sb.Append('\n').Append(attachment.FileName ?? "(unnamed)");
+
+            var hash = SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()));
+            return "sha256:" + Convert.ToHexString(hash).ToLowerInvariant();
+        }
         private bool IsDuplicateKeyException(DbUpdateException ex)
         {
             // SQL Server unique/PK violation error numbers.
@@ -430,23 +833,39 @@ namespace ERP_RFQ_Automation.Services
             string attachmentsText = "";
             var fileTypes = new HashSet<string>();
             // Process attachments
+            // ING-06: every skip below is collected, not just logged. The legacy path is behind
+            // Ingestion:UseUnifiedQueue=false but it is still a door, and a door that drops an
+            // attachment without a record is the same defect wherever it lives.
+            var skippedAttachments = new List<string>();
+            void RecordSkipped(string fileName, string reason)
+            {
+                skippedAttachments.Add($"{fileName} ({reason})");
+                _logger.LogWarning(
+                    "Skipping email attachment {FileName} for ingest {IngestId}: {Reason}.",
+                    fileName, ingest.Id, reason);
+            }
+
             var attachmentStreams = new List<(string FileName, MemoryStream Stream, string Extension)>();
+            var attachmentOrdinal = 0;
             foreach (var att in message.Attachments)
             {
-                if (att is not MimePart part || part.FileName == null)
+                attachmentOrdinal++;
+                if (att is not MimePart part)
                 {
-                    _logger.LogWarning(
-                        "Skipping email attachment for ingest {IngestId}: unnamed or embedded-message attachment.",
-                        ingest.Id);
+                    RecordSkipped(
+                        att.ContentDisposition?.FileName ?? $"attachment #{attachmentOrdinal}",
+                        "embedded email message is not ingested");
+                    continue;
+                }
+                if (part.FileName == null)
+                {
+                    RecordSkipped($"attachment #{attachmentOrdinal}", "attachment has no filename");
                     continue;
                 }
                 var ext = Path.GetExtension(part.FileName).ToLowerInvariant();
                 if (!IsSupportedExtension(ext))
                 {
-                    // ING-06: a dropped attachment is never silent.
-                    _logger.LogWarning(
-                        "Skipping email attachment {FileName} for ingest {IngestId}: unsupported file type '{Extension}'.",
-                        part.FileName, ingest.Id, ext);
+                    RecordSkipped(part.FileName, $"unsupported file type '{ext}'");
                     continue;
                 }
                 fileTypes.Add(GetFileTypeLabel(ext));
@@ -460,8 +879,12 @@ namespace ERP_RFQ_Automation.Services
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex, "Failed to read attachment: {FileName}", part.FileName);
+                    RecordSkipped(part.FileName, $"could not be read from the message: {ex.GetType().Name}");
                 }
             }
+            // Recorded BEFORE any extraction/AI outcome can short-circuit this method — every
+            // early `return (0, extracted)` below would otherwise lose the list.
+            EmailIngestEnqueuer.RecordSkippedAttachments(ingest, skippedAttachments);
             // Extract text from attachments in parallel for efficiency
             var attachmentTasks = attachmentStreams.Select(async (item) =>
             {
@@ -632,9 +1055,15 @@ namespace ERP_RFQ_Automation.Services
                     if (items.Count > 0)
                         await context.SaveChangesAsync();
                     
-                    // Save attachments
-                    await SaveAttachmentsAsync(message, lead.Id, context);
-                    
+                    // Save attachments. Anything storage refuses is appended to the SAME durable
+                    // skip record, so the ingest carries one complete list.
+                    var storageSkips = await SaveAttachmentsAsync(message, lead.Id, context);
+                    if (storageSkips.Count > 0)
+                    {
+                        skippedAttachments.AddRange(storageSkips);
+                        EmailIngestEnqueuer.RecordSkippedAttachments(ingest, skippedAttachments);
+                    }
+
                     // Commit transaction - all or nothing
                     await transaction.CommitAsync();
                     
@@ -1161,16 +1590,53 @@ namespace ERP_RFQ_Automation.Services
         // accepts), losing leads. See DocumentIntakeAllowList and its tests.
         internal static bool IsSupportedExtension(string ext) =>
             ERP_RFQ_Automation.Security.DocumentInspection.DocumentIntakeAllowList.IsAllowed(ext);
-        private async Task SaveAttachmentsAsync(MimeMessage message, long leadId,
+        /// <summary>
+        /// Persists the message's attachments against the created lead.
+        /// ING-06: returns "filename (reason)" for every attachment it did NOT store. Three of
+        /// these were bare `continue` statements — most notably `.eml`, which was dropped with
+        /// no log, no row and no reason at all — so an attached forwarded message simply ceased
+        /// to exist between the mailbox and the lead.
+        /// </summary>
+        private async Task<IReadOnlyList<string>> SaveAttachmentsAsync(MimeMessage message, long leadId,
             ErpRfqAutomationContext context)
         {
+            var skipped = new List<string>();
+            void RecordSkipped(string fileName, string reason)
+            {
+                skipped.Add($"{fileName} ({reason})");
+                _logger.LogWarning(
+                    "Not storing email attachment {FileName} against lead {LeadId}: {Reason}.",
+                    fileName, leadId, reason);
+            }
+
             // FIXED: Removed parallel Task.Run to fix DbContext thread-safety issue
             // DbContext is NOT thread-safe - process sequentially instead
+            var ordinal = 0;
             foreach (var entity in message.Attachments)
             {
-                if (entity is not MimePart part || part.FileName == null) continue;
-                if (part.FileName.EndsWith(".eml", StringComparison.OrdinalIgnoreCase)) continue;
-                
+                ordinal++;
+                if (entity is not MimePart part)
+                {
+                    RecordSkipped(
+                        entity.ContentDisposition?.FileName ?? $"attachment #{ordinal}",
+                        "embedded email message is not stored");
+                    continue;
+                }
+                if (part.FileName == null)
+                {
+                    RecordSkipped($"attachment #{ordinal}", "attachment has no filename");
+                    continue;
+                }
+                if (part.FileName.EndsWith(".eml", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Unchanged behaviour, now with a reason: .eml is off the intake allow-list
+                    // (DocumentIntakeAllowList), so it is recorded-but-not-processed. The raw
+                    // parent message is retained on disk, so the bytes are still recoverable.
+                    RecordSkipped(part.FileName,
+                        "'.eml' is not an accepted intake format; recorded but not processed");
+                    continue;
+                }
+
                 var safeName = SanitizeFileName(part.FileName);
                 var fileName = $"{leadId}_{Guid.NewGuid()}_{safeName}";
                 var relativePath = Path.Combine("Uploads", "RFQ_Attachments", fileName);
@@ -1187,8 +1653,8 @@ namespace ERP_RFQ_Automation.Services
                         
                         if (size > MAX_ATTACHMENT_SIZE)
                         {
-                            _logger.LogWarning("Skipping large attachment: {File} ({Size} bytes)",
-                                safeName, size);
+                            RecordSkipped(safeName,
+                                $"exceeds the {MAX_ATTACHMENT_SIZE / (1024 * 1024)} MB size limit ({size} bytes)");
                             continue; // Skip this attachment
                         }
                         
@@ -1216,6 +1682,7 @@ namespace ERP_RFQ_Automation.Services
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex, "Failed to save attachment: {File}", safeName);
+                    RecordSkipped(safeName, $"could not be stored: {ex.GetType().Name}");
                     // Clean up file if it was created
                     if (File.Exists(physicalPath))
                     {
@@ -1223,10 +1690,12 @@ namespace ERP_RFQ_Automation.Services
                     }
                 }
             }
-            
+
             // Save all attachments at once
             if (message.Attachments.Any())
                 await context.SaveChangesAsync();
+
+            return skipped;
         }
         public async Task SendEmailAsync(string to, string subject, string body, List<(string FileName, byte[] FileContent, string ContentType)> attachments = null, string fromEmail = null, long? businessUnitId = null)
         {

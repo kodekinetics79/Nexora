@@ -18,6 +18,19 @@ namespace ERP_RFQ_Automation.Services
     /// the lock stand by and retry next tick, and the lock is released automatically if
     /// the holder dies. This makes the poller safe to scale horizontally: extra
     /// instances serve HTTP and take over polling the moment the leader disappears.
+    ///
+    /// ING-08 — THE HEARTBEAT TELLS THE TRUTH NOW. This loop used to beat
+    /// <see cref="BackgroundWorkerNames.EmailPoller"/> unconditionally at the bottom of every
+    /// iteration, whatever had just happened inside it. In production that meant
+    /// <c>MailKit.Security.AuthenticationException: Authentication failed</c> followed 1.5 ms
+    /// later by "Email fetch completed successfully.", a green heartbeat, a green
+    /// <c>/ready</c>, and a mailbox that had not been read since 2026-07-30. The loop was
+    /// alive; the door was shut; nothing in the system said so.
+    ///
+    /// The rule is now: a cycle beats the success heartbeat ONLY if it succeeded, or if it
+    /// stood by (this instance did not hold the lock, so it neither succeeded nor failed at
+    /// anything). A failed cycle records WHY — durably, per mailbox — and lets the surfaces go
+    /// red, while the loop itself keeps retrying forever.
     /// </summary>
     public class EmailBackgroundService : BackgroundService
     {
@@ -26,27 +39,35 @@ namespace ERP_RFQ_Automation.Services
 
         private readonly IServiceProvider _services;
         private readonly IBackgroundWorkerHeartbeats? _heartbeats;
+        private readonly IEmailPollerHealth? _pollerHealth;
         private readonly ILogger<EmailBackgroundService> _logger;
 
         public EmailBackgroundService(
             IServiceProvider services,
             ILogger<EmailBackgroundService> logger,
-            IBackgroundWorkerHeartbeats? heartbeats = null)
+            IBackgroundWorkerHeartbeats? heartbeats = null,
+            IEmailPollerHealth? pollerHealth = null)
         {
             _services = services;
             _logger = logger;
             _heartbeats = heartbeats;
+            _pollerHealth = pollerHealth;
             _heartbeats?.Register(BackgroundWorkerNames.EmailPoller, DefaultPollInterval);
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             _logger.LogInformation("Email Background Service started.");
-            _heartbeats?.Beat(BackgroundWorkerNames.EmailPoller, DefaultPollInterval);
+            // NOT a success beat: the loop has started, it has not polled anything. The
+            // registry's startup grace covers a worker that never reaches its first cycle.
+            await SeedChannelHealthAsync(stoppingToken);
 
             while (!stoppingToken.IsCancellationRequested)
             {
                 var interval = DefaultPollInterval;
+                // Null = this iteration proved nothing about the mailbox (stood by, or the lock
+                // could not be evaluated). Only `true` may beat the success heartbeat.
+                bool? cycleSucceeded = null;
                 using (var scope = _services.CreateScope())
                 {
                     var dbContext = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
@@ -72,6 +93,11 @@ namespace ERP_RFQ_Automation.Services
                         _logger.LogDebug(
                             "Another instance holds the email-poller lock; standing by for {Interval}s.",
                             interval.TotalSeconds);
+                        // Standing by is a legitimate, healthy state — the loop is turning and
+                        // another instance is doing the work — so it beats liveness but must
+                        // never clear or fabricate a mailbox result.
+                        _pollerHealth?.StandBy();
+                        cycleSucceeded = null;
                     }
                     else
                     {
@@ -79,7 +105,7 @@ namespace ERP_RFQ_Automation.Services
                         {
                             try
                             {
-                                await RunPollCycleAsync(scope.ServiceProvider, stoppingToken);
+                                cycleSucceeded = await RunPollCycleAsync(scope.ServiceProvider, stoppingToken);
                             }
                             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                             {
@@ -88,8 +114,14 @@ namespace ERP_RFQ_Automation.Services
                             catch (Exception ex)
                             {
                                 // BackgroundServiceExceptionBehavior is Ignore, so an escaping
-                                // exception would kill the poller for the lifetime of the process.
+                                // exception would kill the poller for the lifetime of the
+                                // process. It is caught — but recorded as a FAILURE, never
+                                // logged-and-forgotten while the heartbeat carries on.
                                 _logger.LogError(ex, "Email poll cycle failed; retrying next interval.");
+                                cycleSucceeded = false;
+                                _pollerHealth?.RecordFailure(
+                                    $"The email poll cycle threw {ex.GetType().Name}: {ex.Message}",
+                                    isPermanent: false, DateTimeOffset.UtcNow);
                             }
 
                             interval = await ResolvePollIntervalAsync(dbContext, stoppingToken);
@@ -97,7 +129,11 @@ namespace ERP_RFQ_Automation.Services
                     }
                 }
 
-                _heartbeats?.Beat(BackgroundWorkerNames.EmailPoller, interval);
+                // THE FIX. A failed cycle does not beat. `background-workers` therefore names
+                // `email-poller` on /ready once the tolerance (3 x interval + 1 min) expires,
+                // and `email-poll-channel` says why immediately.
+                if (cycleSucceeded is not false)
+                    _heartbeats?.Beat(BackgroundWorkerNames.EmailPoller, interval);
 
                 try { await Task.Delay(interval, stoppingToken); }
                 catch (OperationCanceledException) { break; }
@@ -105,53 +141,180 @@ namespace ERP_RFQ_Automation.Services
             _logger.LogInformation("Email Background Service stopped.");
         }
 
-        private async Task RunPollCycleAsync(IServiceProvider scopedServices, CancellationToken stoppingToken)
+        /// <summary>
+        /// ING-08: hydrates the in-process channel ledger from the durable per-mailbox state so
+        /// a restart cannot launder a broken mailbox back to green, and so a STANDBY instance —
+        /// which never polls and would otherwise learn nothing — still reports the truth.
+        /// Best-effort by design: a failure to read it must not stop the poller.
+        /// </summary>
+        private async Task SeedChannelHealthAsync(CancellationToken stoppingToken)
         {
-            var emailService = scopedServices.GetRequiredService<IEmailService>();
+            if (_pollerHealth is null) return;
             try
             {
-                _logger.LogInformation("Starting email fetch...");
-                await emailService.FetchAndSaveLeadsAsync();
-                _logger.LogInformation("Email fetch completed successfully.");
+                using var scope = _services.CreateScope();
+                var dbContext = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+                var mailboxes = await dbContext.EmailConfigurations
+                    .AsNoTracking()
+                    .Where(e => e.IsActive && e.Protocol.ToUpper() == "IMAP")
+                    .Select(e => new
+                    {
+                        e.EmailAddress,
+                        e.LastSuccessfulPollOn,
+                        e.LastPollAttemptOn,
+                        e.LastPollError,
+                        e.ConsecutivePollFailures
+                    })
+                    .ToListAsync(stoppingToken);
+                if (mailboxes.Count == 0) return;
+
+                var failing = mailboxes.Where(m => !string.IsNullOrWhiteSpace(m.LastPollError)).ToList();
+                // "Last successful poll" for the CHANNEL is the oldest across mailboxes: the
+                // one that has been dark longest is the one an operator has to hear about.
+                var lastSuccess = mailboxes.Min(m => m.LastSuccessfulPollOn);
+                _pollerHealth.Seed(new EmailPollerChannelStatus(
+                    LastSeenUtc: null,
+                    LastSuccessUtc: lastSuccess is { } success
+                        ? new DateTimeOffset(DateTime.SpecifyKind(success, DateTimeKind.Utc))
+                        : null,
+                    LastFailureUtc: failing.Count == 0
+                        ? null
+                        : failing.Max(m => m.LastPollAttemptOn) is { } attempt
+                            ? new DateTimeOffset(DateTime.SpecifyKind(attempt, DateTimeKind.Utc))
+                            : null,
+                    ConsecutiveFailures: failing.Count == 0 ? 0 : failing.Max(m => m.ConsecutivePollFailures),
+                    LastFailureReason: failing.Count == 0
+                        ? null
+                        : string.Join("; ", failing.Select(m => $"{m.EmailAddress}: {m.LastPollError}")),
+                    // Conservative: the durable row does not record whether the failure was
+                    // permanent, so it is seeded as transient and the first real cycle
+                    // reclassifies it. This delays red at most one poll interval; claiming
+                    // permanence we did not observe would be a different kind of lie.
+                    LastFailureIsPermanent: false));
+
+                if (failing.Count > 0)
+                {
+                    _logger.LogWarning(
+                        "Email poller starting with {Count} mailbox(es) in a failed state from the durable poll ledger. "
+                        + "Oldest successful poll across mailboxes: {LastSuccess}.",
+                        failing.Count, lastSuccess?.ToString("O") ?? "never");
+                }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
-                return;
+                // shutting down
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Could not seed the email channel health from the durable poll ledger; "
+                    + "the first poll cycle will establish it.");
+            }
+        }
+
+        /// <summary>
+        /// Returns true only when the mailboxes were genuinely polled. Null means this cycle
+        /// established nothing either way (cancelled mid-flight); false means it failed.
+        /// The folder sweep below is a separate channel and deliberately does not change the
+        /// MAILBOX verdict — a broken watched folder must not mask a working mailbox, or the
+        /// reverse.
+        /// </summary>
+        private async Task<bool?> RunPollCycleAsync(IServiceProvider scopedServices, CancellationToken stoppingToken)
+        {
+            var emailService = scopedServices.GetRequiredService<IEmailService>();
+            bool? mailboxesPolled = null;
+            try
+            {
+                _logger.LogInformation("Starting email fetch...");
+                var report = await emailService.FetchAndSaveLeadsAsync();
+
+                if (report.AnyFailed)
+                {
+                    // NOT "completed successfully". This is the sentence the operator needed
+                    // for the seven days the mailbox was unreachable and nobody was told.
+                    mailboxesPolled = false;
+                    _logger.LogError(
+                        "Email fetch FAILED for {Failed} of {Total} mailbox(es): {Reasons} "
+                        + "Oldest last-successful poll among them: {LastSuccess}. "
+                        + "No mail is being ingested from those mailboxes.",
+                        report.Failed, report.Polled, report.FailureSummary,
+                        report.OldestLastSuccessfulPoll?.ToString("O") ?? "never");
+                }
+                else if (report.AllSucceeded)
+                {
+                    mailboxesPolled = true;
+                    _logger.LogInformation(
+                        "Email fetch completed successfully for {Total} mailbox(es).", report.Polled);
+                }
+                else
+                {
+                    // Zero active IMAP configurations. Nothing failed, but nothing was proved
+                    // either, so this must not read as a healthy poll.
+                    _logger.LogWarning(
+                        "Email fetch ran with NO active IMAP mailbox configured; no inbound mail can be ingested.");
+                }
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                return null;
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Critical error in email background service");
+                mailboxesPolled = false;
+                _pollerHealth?.RecordFailure(
+                    $"The email fetch threw {ex.GetType().Name}: {ex.Message}",
+                    isPermanent: false, DateTimeOffset.UtcNow);
             }
 
             // Folder discovery is filesystem-only; the sweep itself writes tenant data and
             // therefore runs inside a pushed tenant scope so it executes as
             // nexora_tenant_app under RLS instead of the BYPASSRLS pipeline role.
-            var tenantScope = scopedServices.GetRequiredService<ITenantScopeAccessor>();
-            var discovery = scopedServices.GetRequiredService<FolderService>();
-            foreach (var businessUnitId in discovery.DiscoverTenantFolderIds())
+            //
+            // Fully fenced off from the mailbox verdict: the watched folders are a DIFFERENT
+            // channel, and letting a folder failure mark the mailbox as failed (or an escaping
+            // exception here erase a genuine mailbox success) would put the wrong channel's
+            // name on the red light.
+            try
             {
-                try
+                var tenantScope = scopedServices.GetRequiredService<ITenantScopeAccessor>();
+                var discovery = scopedServices.GetRequiredService<FolderService>();
+                foreach (var businessUnitId in discovery.DiscoverTenantFolderIds())
                 {
-                    using var tenant = tenantScope.Push(businessUnitId);
-                    using var tenantServices = _services.CreateScope();
-                    var folderService = tenantServices.ServiceProvider.GetRequiredService<FolderService>();
-                    var report = await folderService.ProcessAllFoldersAsync(businessUnitId, stoppingToken);
-                    if (report.Enqueued + report.Duplicates + report.Rejected + report.Failed > 0)
+                    try
                     {
-                        _logger.LogInformation(
-                            "Folder sweep {BatchId} for BU {BusinessUnitId}: {Enqueued} enqueued, {Duplicates} duplicates, {Rejected} rejected, {Failed} retrying.",
-                            report.BatchId, businessUnitId, report.Enqueued, report.Duplicates, report.Rejected, report.Failed);
+                        using var tenant = tenantScope.Push(businessUnitId);
+                        using var tenantServices = _services.CreateScope();
+                        var folderService = tenantServices.ServiceProvider.GetRequiredService<FolderService>();
+                        var report = await folderService.ProcessAllFoldersAsync(businessUnitId, stoppingToken);
+                        if (report.Enqueued + report.Duplicates + report.Rejected + report.Failed > 0)
+                        {
+                            _logger.LogInformation(
+                                "Folder sweep {BatchId} for BU {BusinessUnitId}: {Enqueued} enqueued, {Duplicates} duplicates, {Rejected} rejected, {Failed} retrying.",
+                                report.BatchId, businessUnitId, report.Enqueued, report.Duplicates, report.Rejected, report.Failed);
+                        }
+                    }
+                    catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                    {
+                        return mailboxesPolled;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Folder sweep failed for BU {BusinessUnitId}; continuing with other tenants.", businessUnitId);
                     }
                 }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-                {
-                    return;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Folder sweep failed for BU {BusinessUnitId}; continuing with other tenants.", businessUnitId);
-                }
             }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                return mailboxesPolled;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "The watched-folder sweep could not run this cycle; the mailbox verdict is unaffected.");
+            }
+
+            return mailboxesPolled;
         }
 
         // DATA-01: this DB read must NOT be able to fault ExecuteAsync — a single

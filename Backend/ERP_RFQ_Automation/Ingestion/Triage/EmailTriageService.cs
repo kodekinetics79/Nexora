@@ -21,6 +21,9 @@ namespace ERP_RFQ_Automation.Ingestion.Triage;
 /// "this message provably had no attachments" for a message nobody looked inside.</param>
 /// <param name="BodySubmitted">True when the body text itself was sent for extraction.</param>
 /// <param name="LeadId">The lead this message produced, when it produced one.</param>
+/// <param name="SkippedAttachments">ING-06: "filename (reason)" for every attachment that was
+/// NOT handed to extraction. Empty when nothing was skipped. A durable record nobody can see is
+/// only half a fix, and this screen is the one place a human goes to find lost mail.</param>
 public sealed record EmailTriageRow(
     long Id,
     DateTime ReceivedOn,
@@ -35,7 +38,8 @@ public sealed record EmailTriageRow(
     int? AttachmentCount,
     IReadOnlyList<string>? AttachmentNames,
     bool BodySubmitted,
-    long? LeadId);
+    long? LeadId,
+    IReadOnlyList<string> SkippedAttachments);
 
 public sealed record EmailTriagePage(
     int PageNumber, int PageSize, int TotalCount, IReadOnlyList<EmailTriageRow> Items);
@@ -110,7 +114,8 @@ public sealed class EmailTriageService : IEmailTriageService
                 e.TriageDecidedOn,
                 e.ParseStatus,
                 e.RawEmailPath,
-                e.MessageId
+                e.MessageId,
+                e.SkippedAttachmentsJson
             })
             .ToListAsync(ct);
 
@@ -191,7 +196,8 @@ public sealed class EmailTriageService : IEmailTriageService
                 AttachmentCount: attachmentCount,
                 AttachmentNames: attachmentNames,
                 BodySubmitted: messageJobs.Any(j => IsBodyDocument(j.FileName)),
-                LeadId: leadIdByIngest.TryGetValue(row.Id, out var leadId) ? leadId : null));
+                LeadId: leadIdByIngest.TryGetValue(row.Id, out var leadId) ? leadId : null,
+                SkippedAttachments: ParseSkippedAttachments(row.SkippedAttachmentsJson)));
         }
 
         return new EmailTriagePage(page, pageSize, total, items);
@@ -254,6 +260,11 @@ public sealed class EmailTriageService : IEmailTriageService
 
     private static bool IsBodyDocument(string? fileName)
         => fileName is not null && fileName.EndsWith("_body.txt", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>ING-06: the same tolerant JSON-array reader as the reason codes. A corrupt column
+    /// must read as "nothing recorded" rather than 500 the one page an operator opens to find
+    /// mail the system dropped.</summary>
+    internal static IReadOnlyList<string> ParseSkippedAttachments(string? json) => ParseReasonCodes(json);
 
     internal static IReadOnlyList<string> ParseReasonCodes(string? json)
     {

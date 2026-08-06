@@ -274,7 +274,14 @@ public sealed class QuoteDraftHandoffTests
         public Task UpdateAsync(QuoteConfiguration config) => Task.CompletedTask;
     }
 
-    private static Rfq RfqFrom(Lead lead, long id)
+    /// <param name="markLinesForQuote">
+    /// Preparing a Quote Draft now requires an explicit per-line decision, so these fixtures
+    /// state one. The tests that use the default are asserting carry-forward and idempotency,
+    /// not the gate; the gate itself is asserted by
+    /// <see cref="PrepareDraftFromRfq_RefusesWhenNoLineIsMarkedForQuote"/> and its siblings,
+    /// which pass <c>false</c>.
+    /// </param>
+    private static Rfq RfqFrom(Lead lead, long id, bool markLinesForQuote = true)
     {
         var rfq = new Rfq
         {
@@ -299,6 +306,9 @@ public sealed class QuoteDraftHandoffTests
                 CreatedDate = DateTime.UtcNow
             }).ToList()
         };
+        if (markLinesForQuote)
+            foreach (var line in rfq.Rfqitems)
+                line.DecideParticipation(Rfqitem.ParticipationQuote, null, "seed@example.com", DateTime.UtcNow);
         rfq.InheritCommercialIdentity(lead);
         return rfq;
     }

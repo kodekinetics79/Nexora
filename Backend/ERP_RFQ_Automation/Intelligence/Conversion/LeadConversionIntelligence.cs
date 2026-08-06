@@ -124,7 +124,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
                 await _lineResolution.ResolveLeadAsync(businessUnitId, lead.Id, 10, ct);
                 await _lineResolution.LinkRfqAsync(businessUnitId, lead.Id, already.Id, ct);
             }
-            await CompleteConversionLifecycleInCurrentTransactionAsync(lead, already.Id, request.ActingUser, ct);
+            await CompleteConversionLifecycleInCurrentTransactionAsync(lead, already.Id, request.ActingUser, null, ct);
             await tx.CommitAsync(ct);
             return already.Id;
         }
@@ -184,6 +184,13 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
 
         // Resolve once: supplies best-match products, match scores and UoM ids.
         var resolved = await ResolveLinesAsync(included, businessUnitId, ct);
+
+        // WP-B1 governance gate. The resolver has always computed NeedsAttention/AttentionReason
+        // and the screen has always coloured those lines red — but nothing read the flag, so
+        // "Create RFQ" stayed enabled and an operator could convert an inquiry the system knew
+        // it had failed to read. Everything below runs BEFORE the first write, so a refusal
+        // leaves no partial RFQ.
+        var acknowledgedLines = EnforceLineWarningGovernance(included, resolved, choices, request);
 
         var createdBy = string.IsNullOrWhiteSpace(request.ActingUser) ? "System" : request.ActingUser!;
         var now = DateTime.UtcNow;
@@ -305,18 +312,26 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             await _lineResolution.ResolveLeadAsync(businessUnitId, lead.Id, 10, ct);
             await _lineResolution.LinkRfqAsync(businessUnitId, lead.Id, rfq.Id, ct);
         }
-        await CompleteConversionLifecycleInCurrentTransactionAsync(lead, rfq.Id, createdBy, ct);
+        await CompleteConversionLifecycleInCurrentTransactionAsync(lead, rfq.Id, createdBy, acknowledgedLines, ct);
         await tx.CommitAsync(ct);
         return rfq.Id;
     }
 
-    private async Task CompleteConversionLifecycleInCurrentTransactionAsync(Lead lead, long rfqId, string? createdBy, CancellationToken ct)
+    /// <param name="acknowledgedWarnings">
+    /// Null when every converted line was clean. Otherwise a summary of which lines were
+    /// converted over a warning and why, recorded on the existing lifecycle event rather than in
+    /// a new audit table — the event already carries ReasonCode/ReasonNotes and both were being
+    /// passed as null.
+    /// </param>
+    private async Task CompleteConversionLifecycleInCurrentTransactionAsync(
+        Lead lead, long rfqId, string? createdBy, string? acknowledgedWarnings, CancellationToken ct)
     {
         if (LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue) != "QUALIFIED") return;
         var actor = string.IsNullOrWhiteSpace(createdBy) ? "System" : createdBy.Trim();
+        var reasonCode = acknowledgedWarnings is null ? null : "CONVERTED_WITH_ACKNOWLEDGED_WARNINGS";
         await new LifecycleApplicationService(_db).TransitionLeadInCurrentTransactionAsync(
             lead.BusinessUnitId, lead.Id, new LifecycleActor(actor, "LeadConversion"),
-            new LifecycleTransitionCommand("CONVERTED_TO_RFQ", lead.LifecycleVersion, null, null,
+            new LifecycleTransitionCommand("CONVERTED_TO_RFQ", lead.LifecycleVersion, reasonCode, acknowledgedWarnings,
                 "Api", $"conversion-{lead.Id}", $"rfq-{rfqId}", $"lead-conversion:{lead.BusinessUnitId}:{lead.Id}"),
             false, ct);
     }
@@ -355,8 +370,93 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         public int? UomId { get; init; }
         public bool NeedsAttention { get; init; }
         public string? AttentionReason { get; init; }
+
+        /// <summary>
+        /// The subset of <see cref="AttentionReason"/> an operator may never wave through:
+        /// a missing quantity or a missing unit. Acknowledging "I don't know how many" produces
+        /// an RFQ that cannot be quoted, so these are refused whatever the caller sends.
+        ///
+        /// <para>Typed rather than re-derived by matching the reason strings, so that changing
+        /// the wording of a message can never silently make a hard failure waivable.</para>
+        /// </summary>
+        public string? BlockingReason { get; init; }
+
+        public bool IsBlocked => BlockingReason is not null;
+
+        /// <summary>Flagged, but every reason is soft — an explicit acknowledgement may proceed.</summary>
+        public bool NeedsAcknowledgement => NeedsAttention && BlockingReason is null;
         /// <summary>Tenant UoM master data, exposed so ConvertAsync can canonicalize corrected UoM strings.</summary>
         public IUomVocabulary? UomVocabulary { get; init; }
+    }
+
+    /// <summary>Minimum characters for an acknowledgement reason. Matches the threshold the
+    /// routing-override and No-Quote paths already enforce, so operators meet one rule.</summary>
+    private const int MinimumAcknowledgementReasonLength = 5;
+
+    /// <summary>
+    /// Refuses conversion when a line the resolver flagged has not been dealt with, and returns
+    /// a one-line summary of what WAS acknowledged so the lifecycle audit can record it.
+    ///
+    /// <para>Three outcomes per flagged line: a hard integrity failure is refused outright; a
+    /// soft warning that was acknowledged with a reason proceeds and is audited; a soft warning
+    /// that was neither corrected nor acknowledged is refused with the reason quoted back, so
+    /// the operator is told what to fix rather than being handed a generic validation error.</para>
+    /// </summary>
+    private static string? EnforceLineWarningGovernance(
+        IReadOnlyList<LeadItem> included,
+        IReadOnlyDictionary<long, ResolvedLine> resolved,
+        IReadOnlyDictionary<long, ConvertRequestItem> choices,
+        ConvertRequest request)
+    {
+        static string Label(LeadItem li) =>
+            string.IsNullOrWhiteSpace(li.LineItemNo) ? $"line {li.Id}" : $"line {li.LineItemNo}";
+
+        var blocked = new List<string>();
+        var unacknowledged = new List<string>();
+        var acknowledged = new List<string>();
+        var batchReason = request.WarningAcknowledgementReason?.Trim();
+
+        foreach (var li in included)
+        {
+            if (!resolved.TryGetValue(li.Id, out var r) || !r.NeedsAttention) continue;
+            choices.TryGetValue(li.Id, out var choice);
+
+            // A missing quantity or unit is never waivable, even if the caller ticks the box.
+            // Checked first so a request that acknowledges everything cannot slip one through.
+            if (r.IsBlocked)
+            {
+                blocked.Add($"{Label(li)}: {r.BlockingReason}");
+                continue;
+            }
+
+            if (choice?.AcknowledgeWarning != true && !request.AcknowledgeAllWarnings)
+            {
+                unacknowledged.Add($"{Label(li)}: {r.AttentionReason}");
+                continue;
+            }
+
+            var reason = string.IsNullOrWhiteSpace(choice?.AcknowledgementReason)
+                ? batchReason
+                : choice!.AcknowledgementReason!.Trim();
+            if (string.IsNullOrWhiteSpace(reason) || reason.Length < MinimumAcknowledgementReasonLength)
+                throw new InvalidOperationException(
+                    $"Acknowledging the warning on {Label(li)} requires a reason of at least " +
+                    $"{MinimumAcknowledgementReasonLength} characters. An acknowledgement without an explanation is not an audit trail.");
+
+            acknowledged.Add($"{Label(li)} ({r.AttentionReason}) — {reason}");
+        }
+
+        if (blocked.Count > 0)
+            throw new InvalidOperationException(
+                "These lines cannot be converted because the request could not be read reliably, and no acknowledgement can " +
+                $"substitute for the missing values — correct them on the lead first: {string.Join("; ", blocked)}.");
+
+        if (unacknowledged.Count > 0)
+            throw new InvalidOperationException(
+                "These lines carry extraction warnings that must be corrected or explicitly acknowledged with a reason before " +
+                $"the RFQ is created: {string.Join("; ", unacknowledged)}.");
+
+        return acknowledged.Count > 0 ? string.Join(" | ", acknowledged) : null;
     }
 
     private sealed record Candidate(long Id, string? ProductName, string PartNo, string? ModelNo, string? Description);
@@ -435,14 +535,23 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             var uom = UomCanonicalizer.Canonicalize(item.UnitOfMeasure, uomVocabulary);
 
             var reasons = new List<string>();
-            if (matches.Count == 0) reasons.Add("No catalog match found");
-            else if (confidence < ConfidenceFloor) reasons.Add($"Low-confidence match ({Math.Round(confidence * 100)}%)");
-            if (normalizedQty is null or <= 0) reasons.Add("Quantity missing");
-            if (uom.Resolution == UomResolution.Absent) reasons.Add("Unit of measure missing");
+            // Soft: a human can look at these and reasonably say "convert anyway".
+            var soft = new List<string>();
+            // Hard: no acknowledgement can make these safe to quote.
+            var hard = new List<string>();
+
+            if (matches.Count == 0) soft.Add("No catalog match found");
+            else if (confidence < ConfidenceFloor) soft.Add($"Low-confidence match ({Math.Round(confidence * 100)}%)");
+            if (normalizedQty is null or <= 0) hard.Add("Quantity missing");
+            if (uom.Resolution == UomResolution.Absent) hard.Add("Unit of measure missing");
             // A unit we refuse to map is NOT a missing unit and must not be quoted as if it
             // were a piece count: "25 Pack" needs a human to say how many are in a pack.
+            // Soft because the human CAN say — by correcting the line, or by acknowledging.
             else if (uom.NeedsReview)
-                reasons.Add($"Unit of measure \"{uom.SourceText}\" needs review — {UomCanonicalizer.Explain(uom.ReviewReason)}");
+                soft.Add($"Unit of measure \"{uom.SourceText}\" needs review — {UomCanonicalizer.Explain(uom.ReviewReason)}");
+
+            reasons.AddRange(hard);
+            reasons.AddRange(soft);
 
             result[item.Id] = new ResolvedLine
             {
@@ -453,6 +562,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
                 UomId = uom.TenantUomId,
                 NeedsAttention = reasons.Count > 0,
                 AttentionReason = reasons.Count > 0 ? string.Join("; ", reasons) : null,
+                BlockingReason = hard.Count > 0 ? string.Join("; ", hard) : null,
                 UomVocabulary = uomVocabulary
             };
         }

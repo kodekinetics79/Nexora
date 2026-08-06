@@ -83,6 +83,12 @@ export interface RfqitemResponseDTO {
     modifiedDate?: string;
     aiconfidence?: number;
     supplierQuotedItemId?: number;
+  /** 'Pending' | 'Quote' | 'NoQuote'. A line nobody has decided is Pending, never Quote. */
+  participationDecision: string;
+  /** Mandatory whenever participationDecision is 'NoQuote'. */
+  noQuoteReason?: string | null;
+  participationDecidedBy?: string | null;
+  participationDecidedOn?: string | null;
 }
 
 export interface PaginatedRfqResponseDTO {
@@ -191,7 +197,24 @@ const rfqService = {
         const response = await axiosInstance.post<RfqResponseDTO>("/api/Rfq", data);
         return response.data;
     },
-    prepareQuoteDraft: async (id: number) => {
+    /**
+   * Records whether Nexora will quote one RFQ line. A No-Quote requires a reason — the rule is
+   * enforced in the backend domain, so this call will be refused without one.
+   */
+  setLineParticipation: async (
+    rfqId: number,
+    lineId: number,
+    decision: 'Pending' | 'Quote' | 'NoQuote',
+    reason?: string,
+  ) => {
+    const response = await axiosInstance.post(
+      `/api/Rfq/${rfqId}/lines/${lineId}/participation`,
+      { decision, reason },
+    );
+    return response.data;
+  },
+
+  prepareQuoteDraft: async (id: number) => {
         const response = await axiosInstance.post(`/api/Rfq/${id}/prepare-quote-draft`);
         return response.data;
     },

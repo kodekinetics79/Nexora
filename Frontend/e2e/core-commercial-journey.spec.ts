@@ -41,7 +41,14 @@ test('29 Review & Create RFQ preserves customer, owners and inventory results', 
   );
   const existingRfq = existing.items.find((row) => row.leadId === leadId);
   if (existingRfq) await page.goto(`/procurement/rfqs/view/${existingRfq.id}`);
-  else await page.getByRole('button', { name: 'Create RFQ' }).click();
+  else {
+    // WP-B1: a line the extractor could not read with confidence must be corrected, left out,
+    // or explicitly acknowledged with a reason — the server refuses the conversion otherwise.
+    // This fixture's UnknownProduct line raises exactly that, so the journey now records the
+    // acknowledgement the way an operator would.
+    await acknowledgeExtractionWarningsIfPresent(page);
+    await page.getByRole('button', { name: 'Create RFQ' }).click();
+  }
   await expect(page).toHaveURL(/\/procurement\/rfqs\/view\/\d+$/);
   await expect(page.getByText(required('E2E_CORE_RFQ_CREATION_NEXORA_SERIAL'), { exact: false }).first()).toBeVisible();
   await fs.mkdir(evidenceDir, { recursive: true });
@@ -180,3 +187,80 @@ test('39 Mobile Sales Rep and Inventory journeys work', async ({ page }) => {
 test.afterEach(async ({ page }, testInfo) => {
   expect(testInfo.annotations.filter((annotation) => annotation.type === 'skip')).toHaveLength(0);
 });
+
+test('40 RFQ lines are marked Quote or No-Quote, and one Quote Draft is prepared', async ({ page }) => {
+  // Closes the Phase 1 journey: Convert to RFQ -> Mark Selected Lines Quote -> Quote Draft.
+  // Everything here is real: real auth, real API, real database. No fixture substitutes for a
+  // step of the journey.
+  const rfqId = requiredNumber('E2E_CORE_RFQ_ID');
+  const token = await loginAs(page, 'manager');
+
+  await page.goto(`/procurement/rfqs/view/${rfqId}`);
+  await expect(page).toHaveURL(new RegExp(`/procurement/rfqs/view/${rfqId}$`));
+
+  // Every line starts undecided. A line nobody has looked at must never read as an implicit
+  // commitment to quote it, so this is asserted rather than assumed.
+  const firstQuoteToggle = page.getByRole('button', { name: 'Quote this line' }).first();
+  await expect(firstQuoteToggle).toBeVisible();
+
+  // Decline one line WITH a reason — the dialog must refuse to submit without one.
+  const firstDecline = page.getByRole('button', { name: 'Decline this line' }).first();
+  await firstDecline.click();
+  const confirmDecline = page.getByRole('button', { name: 'Decline line' });
+  await expect(confirmDecline).toBeDisabled(); // no reason yet
+  await page.getByLabel('Why are we not quoting this line?')
+    .fill('Browser acceptance: obsolete part, no supplier source');
+  await expect(confirmDecline).toBeEnabled();
+  await confirmDecline.click();
+  await expect(page.getByText('Line declined, with your reason recorded.')).toBeVisible();
+
+  // Mark a different line for quotation.
+  const quoteToggle = page.getByRole('button', { name: 'Quote this line' }).last();
+  await quoteToggle.click();
+  await expect(page.getByText('Line marked for quotation.')).toBeVisible();
+
+  // Prepare the Customer Quote Draft. Only the Quote-marked lines may reach it.
+  await page.getByRole('button', { name: /Prepare Quote Draft/i }).click();
+  await expect(page).toHaveURL(/\/sales\/quotes\/view\/\d+$/);
+  const firstQuoteUrl = page.url();
+
+  await fs.mkdir(evidenceDir, { recursive: true });
+  await page.screenshot({ path: path.join(evidenceDir, '30-quote-draft-from-marked-lines.png'), fullPage: true });
+
+  // Idempotency through the browser, not just the database: going back and pressing the button
+  // again must land on the SAME quote, never mint a second one.
+  const quotesBefore = await jsonOk<{ items: Array<{ id: number; rfqId?: number }> }>(
+    await api(page, token, 'get', '/api/Quote?pageNumber=1&pageSize=250'),
+  );
+  const countBefore = quotesBefore.items.filter((row) => row.rfqId === rfqId).length;
+  expect(countBefore).toBe(1);
+
+  await page.goto(`/procurement/rfqs/view/${rfqId}`);
+  await page.getByRole('button', { name: /Prepare Quote Draft/i }).click();
+  await expect(page).toHaveURL(new RegExp(firstQuoteUrl.replace(/^.*(\/sales\/quotes\/view\/\d+)$/, '$1') + '$'));
+
+  const quotesAfter = await jsonOk<{ items: Array<{ id: number; rfqId?: number }> }>(
+    await api(page, token, 'get', '/api/Quote?pageNumber=1&pageSize=250'),
+  );
+  expect(quotesAfter.items.filter((row) => row.rfqId === rfqId).length).toBe(countBefore);
+});
+
+/**
+ * Ticks the extraction-warning acknowledgement on the Review & Create RFQ page when the server
+ * has flagged at least one included line, and records a reason.
+ *
+ * No-op when nothing is flagged, so the same journey works against a clean fixture. Deliberately
+ * NOT a blind click: if the control is absent the conversion is expected to succeed unaided, and
+ * silently tolerating its absence is what would let the gate regress unnoticed.
+ */
+async function acknowledgeExtractionWarningsIfPresent(page: import('@playwright/test').Page) {
+  const acknowledgement = page.getByRole('checkbox', {
+    name: 'Acknowledge the flagged lines and convert anyway',
+  });
+  if (await acknowledgement.count() === 0) return false;
+  await acknowledgement.check();
+  await page
+    .getByLabel('Why are you going ahead?')
+    .fill('Browser acceptance: catalog not seeded for this fixture, parts verified by the test');
+  return true;
+}

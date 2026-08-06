@@ -3,6 +3,7 @@ using System.IO.Compression;
 using System.Text;
 using System.Xml;
 using System.Xml.Linq;
+using ERP_RFQ_Automation.Services.DocumentIntelligence;
 
 namespace ERP_RFQ_Automation.Security.DocumentInspection;
 
@@ -118,7 +119,7 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
             return Rejected(
                 detection.ContentType,
                 bytes.LongLength,
-                $"The content signature does not match the '{extension}' extension.");
+                MismatchReason(detection.ContentType, extension));
         }
 
         if (!DeclaredTypeMatches(request.DeclaredContentType, detection.ContentType))
@@ -197,6 +198,36 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
         };
     }
 
+    /// <summary>
+    /// The signature/extension mismatch sentence. The extension is safe to quote back — it has
+    /// already been constrained to the intake allow-list — and naming the format the bytes really
+    /// ARE is the difference between a dead end and a one-step remedy.
+    ///
+    /// <para>
+    /// The HTML case is the one that mattered in production: portal exports from SEC and Aramco,
+    /// and every "export to Excel" button that emits an HTML table, arrive named <c>.xls</c>.
+    /// Those files kept being rejected with "its contents are not in that format", which is true
+    /// and useless. The MAGIC-BYTE CONTROL IS NOT WEAKENED to admit them — a file is still only
+    /// ever treated as what its bytes say it is — but now that <c>.html</c> is itself an accepted
+    /// format, the remedy is a rename, and the sentence says so.
+    /// </para>
+    /// </summary>
+    private static string MismatchReason(string detectedContentType, string extension) =>
+        detectedContentType switch
+        {
+            "text/html" =>
+                $"This file is named '{extension}' but its contents are a web page (HTML). Nexora "
+                + "accepts HTML directly: rename the file so it ends in .html and upload it again, "
+                + "or open it and use Save As to store a real spreadsheet, then upload that.",
+            "message/rfc822" =>
+                $"This file is named '{extension}' but its contents are an email message. Rename it "
+                + "so it ends in .eml and upload it again.",
+            "application/vnd.ms-outlook" =>
+                $"This file is named '{extension}' but its contents are an Outlook message. Rename "
+                + "it so it ends in .msg and upload it again.",
+            _ => $"The content signature does not match the '{extension}' extension."
+        };
+
     private TypeDetection DetectType(byte[] bytes, string extension)
     {
         if (StartsWith(bytes, PdfSignature))
@@ -245,6 +276,28 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
             bytes.AsSpan(8, 4).SequenceEqual("WEBP"u8))
         {
             return new("image/webp", [".webp"]);
+        }
+
+        // HTML is typed from markup at the START of the document, never from a tag found
+        // somewhere inside it: a substring match anywhere would let a base64 blob or a CSV that
+        // merely mentions "<table>" be typed as HTML, and typing by "contains" is how signature
+        // checks get bypassed. Validated as text first so a binary payload cannot be renamed
+        // .html and carried past this gate on the strength of six leading ASCII characters.
+        if (HtmlDocumentTextExtractor.HasHtmlSignature(bytes))
+        {
+            ValidateText(bytes, allowNonUtf8: true);
+            return new("text/html", [".html", ".htm"]);
+        }
+
+        // An .eml has no magic number — RFC 5322 defines a header block, so that IS the
+        // signature. Only the HEADER region is validated as strict text: a MIME body legitimately
+        // carries 8-bit and binary transfer encodings, and rejecting those would refuse ordinary
+        // mail. Every attachment inside is separately decoded and put through this same
+        // inspection before anything reads it (EmailContainerReader), so the looser body check
+        // here is not a hole — the bytes that matter are inspected as themselves.
+        if (extension is ".eml" && HasRfc5322Headers(bytes))
+        {
+            return new("message/rfc822", [".eml"]);
         }
 
         if (extension is ".csv" or ".txt")
@@ -413,11 +466,26 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
         }
         var isWord = streamNames.Contains("WordDocument");
         var isExcel = streamNames.Contains("Workbook") || streamNames.Contains("Book");
+        // An Outlook .msg is the SAME OLE compound container as a legacy .doc/.xls, which is why
+        // it reaches this method at all — and why it inherits, unchanged, the flat macro scan
+        // above. A message carrying a VBA storage is refused exactly as a document would be,
+        // BEFORE any property stream is read.
+        var isOutlookMessage = OutlookMsgReader.LooksLikeOutlookMessage(streamNames);
 
-        if (extension == ".doc" && isWord && !isExcel)
+        if (extension == ".doc" && isWord && !isExcel && !isOutlookMessage)
             return new("application/msword", [".doc"]);
-        if (extension == ".xls" && isExcel && !isWord)
+        if (extension == ".xls" && isExcel && !isWord && !isOutlookMessage)
             return new("application/vnd.ms-excel", [".xls"]);
+        if (isOutlookMessage && !isWord && !isExcel)
+            return new("application/vnd.ms-outlook", [".msg"]);
+
+        if (extension == ".msg")
+        {
+            throw new UnsafeArchiveException(
+                "Nexora could not confirm this is an Outlook message: the file's internal structure "
+                + "does not match its '.msg' name. Open it in Outlook and use Save As to store it "
+                + "again, then upload that.");
+        }
 
         // "could not confirm" is the honest claim, and it stays honest in the known false-positive
         // case too: this directory scan is flat, so a genuine workbook that EMBEDS a Word object
@@ -603,7 +671,14 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
         }
     }
 
-    private static void ValidateText(byte[] bytes)
+    /// <param name="allowNonUtf8">
+    /// HTML only. A portal export is routinely windows-1252 with no charset declaration;
+    /// rejecting it for its code page would refuse real RFQs. The property this check exists to
+    /// enforce — no NUL, no unsafe control bytes, i.e. "this is text, not a renamed binary" — is
+    /// still enforced, byte-wise, on that path. <c>.csv</c>/<c>.txt</c> keep strict UTF-8 exactly
+    /// as before.
+    /// </param>
+    private static void ValidateText(byte[] bytes, bool allowNonUtf8 = false)
     {
         string text;
         try
@@ -612,7 +687,11 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
         }
         catch (DecoderFallbackException)
         {
-            throw new UnsafeArchiveException("The text file is not valid UTF-8.");
+            if (!allowNonUtf8)
+                throw new UnsafeArchiveException("The text file is not valid UTF-8.");
+            if (ContainsBinaryBytes(bytes))
+                throw new UnsafeArchiveException("The text file contains binary or unsafe control characters.");
+            return;
         }
 
         if (text.IndexOf('\0') >= 0 || text.Any(character => char.IsControl(character) && character is not '\r' and not '\n' and not '\t' and not '\f'))
@@ -620,6 +699,61 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
             throw new UnsafeArchiveException("The text file contains binary or unsafe control characters.");
         }
     }
+
+    private static bool ContainsBinaryBytes(byte[] bytes)
+    {
+        foreach (var value in bytes)
+        {
+            if (value == 0) return true;
+            if (value < 0x20 && value is not 0x09 and not 0x0A and not 0x0C and not 0x0D) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// True when the file opens with an RFC 5322 header block. An <c>.eml</c> has no magic
+    /// number, so this IS its signature: at least two well-formed <c>Name: value</c> header lines
+    /// before the first blank line, one of which must be a header a real message always carries.
+    /// A renamed executable, image or archive fails on the very first line.
+    /// </summary>
+    private static bool HasRfc5322Headers(byte[] bytes)
+    {
+        const int ProbeBytes = 8192;
+        var probe = bytes.AsSpan(0, Math.Min(bytes.Length, ProbeBytes));
+        if (probe.Length >= 3 && probe[0] == 0xEF && probe[1] == 0xBB && probe[2] == 0xBF) probe = probe[3..];
+
+        var header = Encoding.ASCII.GetString(probe).Replace("\r\n", "\n");
+        var headerCount = 0;
+        var hasRequiredHeader = false;
+
+        foreach (var line in header.Split('\n'))
+        {
+            if (line.Length == 0) break;              // end of the header block
+            if (line[0] is ' ' or '\t') continue;     // folded continuation of the previous header
+
+            var colon = line.IndexOf(':');
+            if (colon <= 0) return false;             // not a header line: this is not a message
+
+            var name = line[..colon];
+            foreach (var character in name)
+            {
+                // RFC 5322 field names are printable US-ASCII excluding ':' and space.
+                if (character is < '!' or > '~') return false;
+            }
+
+            headerCount++;
+            if (RequiredEmailHeaders.Contains(name)) hasRequiredHeader = true;
+            if (headerCount >= 2 && hasRequiredHeader) return true;
+        }
+
+        return headerCount >= 2 && hasRequiredHeader;
+    }
+
+    private static readonly IReadOnlySet<string> RequiredEmailHeaders =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "Received", "From", "Message-ID", "MIME-Version", "Date", "Subject", "Return-Path", "To"
+        };
 
     private static bool DeclaredTypeMatches(string? declared, string detected)
     {
@@ -717,7 +851,11 @@ public sealed class DocumentFileInspectionService : IFileInspectionService
             ["image/gif"] = new(StringComparer.OrdinalIgnoreCase) { "image/gif" },
             ["image/bmp"] = new(StringComparer.OrdinalIgnoreCase) { "image/bmp", "image/x-ms-bmp" },
             ["image/tiff"] = new(StringComparer.OrdinalIgnoreCase) { "image/tiff" },
-            ["image/webp"] = new(StringComparer.OrdinalIgnoreCase) { "image/webp" }
+            ["image/webp"] = new(StringComparer.OrdinalIgnoreCase) { "image/webp" },
+            ["text/html"] = new(StringComparer.OrdinalIgnoreCase) { "text/html", "application/xhtml+xml", "text/plain" },
+            ["message/rfc822"] = new(StringComparer.OrdinalIgnoreCase) { "message/rfc822", "text/plain" },
+            ["application/vnd.ms-outlook"] = new(StringComparer.OrdinalIgnoreCase)
+                { "application/vnd.ms-outlook", "application/vnd.ms-office", "application/x-msg", "application/msoutlook" }
         };
 
     private sealed record TypeDetection(string ContentType, IReadOnlyCollection<string> AllowedExtensions);

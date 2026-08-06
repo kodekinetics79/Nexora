@@ -50,11 +50,28 @@ export interface ConvertLeadItemRequest {
   productId?: number;
   quantity?: number;
   unitOfMeasure?: string;
+  /**
+   * The operator has seen this line's extraction warning and is converting anyway.
+   * Required for any included line the server flagged `needsAttention` whose reasons are all
+   * soft. It can never waive a hard integrity failure (missing quantity, missing unit) — the
+   * server refuses those whatever this says.
+   */
+  acknowledgeWarning?: boolean;
+  /** Per-line explanation; falls back to `warningAcknowledgementReason`. */
+  acknowledgementReason?: string;
 }
 
 export interface ConvertLeadRequest {
   items: ConvertLeadItemRequest[];
   notes?: string;
+  /** One explanation covering every acknowledged line that has no reason of its own. */
+  warningAcknowledgementReason?: string;
+  /**
+   * Acknowledges every soft-flagged line in one action. An 84-line bid list where most lines
+   * lack a catalog entry would otherwise need dozens of individual ticks, which trains people
+   * to click through without reading. Every waived line is still audited by name.
+   */
+  acknowledgeAllWarnings?: boolean;
 }
 
 export interface ConvertLeadResponse {

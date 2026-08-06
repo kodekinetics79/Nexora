@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DTOs.QuoteConfigurationDTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
@@ -29,7 +30,16 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         // POST: api/QuoteConfiguration/migrate
+        //
+        // SECURITY REPAIR. This action iterates EVERY BusinessUnitId present in SetupMaster and
+        // writes a configuration row for each, and it carried only [Authorize] — so any
+        // authenticated user of any tenant could create configuration for every other tenant.
+        // It is a one-off platform data migration, so it is restricted to the platform-admin
+        // permission the other cross-tenant maintenance routes already use, rather than to the
+        // per-tenant "Quote Configuration" module permission, which would still be the wrong
+        // scope for an all-tenant write.
         [HttpPost("migrate")]
+        [RequireModulePermission("Business Units", PermissionAction.Edit)]
         public async Task<ActionResult> MigrateFromSetupMaster()
         {
             try
@@ -103,6 +113,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         // POST: api/QuoteConfiguration
         [HttpPost]
+        [RequireModulePermission("Quote Configuration", PermissionAction.Edit)]
         public async Task<ActionResult<QuoteConfigurationResponseDTO>> CreateOrUpdate([FromBody] QuoteConfigurationCreateRequestDTO request)
         {
             try
@@ -110,10 +121,15 @@ namespace ERP_RFQ_Automation.Controllers
                 if (!ModelState.IsValid)
                     return BadRequest(ModelState);
 
+                // SECURITY REPAIR. This previously read the tenant claim and, when the claim was
+                // absent or 0, silently FELL BACK to the BusinessUnitId supplied in the request
+                // body — letting a caller without a tenant claim write another tenant's quote
+                // branding. The claim is now the only accepted source; a request that carries no
+                // usable claim is rejected rather than trusted.
                 var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                if (claimBUId > 0) request.BusinessUnitId = claimBUId;
-
-                if (request.BusinessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+                if (claimBUId <= 0)
+                    return Forbid();
+                request.BusinessUnitId = claimBUId;
 
                 var existing = await _repository.GetByBusinessUnitIdAsync(request.BusinessUnitId);
                 if (existing != null)

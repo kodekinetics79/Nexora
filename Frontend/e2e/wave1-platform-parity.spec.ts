@@ -1,15 +1,16 @@
 import { expect, test, type Page } from '@playwright/test';
 import { loginThroughUi } from './support/login';
+import { requireEnv } from './support/environment';
 
 const apiUrl = process.env.E2E_API_URL || 'http://127.0.0.1:5192';
 const email = process.env.E2E_MANAGER_EMAIL || 'robert@example.com';
-const password = process.env.E2E_MANAGER_PASSWORD;
 const evidenceDir = '../docs/nexora/evidence/wave-01-platform-parity';
 const runId = Date.now().toString(36);
 
-if (!password) throw new Error('E2E_MANAGER_PASSWORD is required for Wave 1 browser acceptance.');
-
 async function login(page: Page): Promise<string> {
+  // Resolved here, not at module scope — see requireEnv. Same failure, without destroying
+  // discovery for every other spec in the suite.
+  const { E2E_MANAGER_PASSWORD: password } = requireEnv('Wave 1 browser acceptance', 'E2E_MANAGER_PASSWORD');
   await loginThroughUi(page, { email, password });
   const token = await page.evaluate(() => localStorage.getItem('token'));
   if (!token) throw new Error('The authenticated browser session has no access token.');

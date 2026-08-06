@@ -1,16 +1,19 @@
 import { expect, test } from "@playwright/test";
 import { loginThroughUi } from "./support/login";
+import { requireEnv } from "./support/environment";
 
-const supplierQuoteId = process.env.E2E_V24_SUPPLIER_QUOTE_ID;
-const email = process.env.E2E_MANAGER_EMAIL;
-const password = process.env.E2E_MANAGER_PASSWORD;
-const businessUnitId = process.env.E2E_MANAGER_BUSINESS_UNIT_ID;
-
-if (!supplierQuoteId || !/^\d+$/.test(supplierQuoteId) || !email || !password || !businessUnitId) {
-  throw new Error("V2.4 live browser acceptance requires quote ID and manager login environment values.");
-}
+// Resolved inside the test, not at module scope — see requireEnv.
+const env = () => {
+  const values = requireEnv("V2.4 live browser acceptance", "E2E_V24_SUPPLIER_QUOTE_ID",
+    "E2E_MANAGER_EMAIL", "E2E_MANAGER_PASSWORD", "E2E_MANAGER_BUSINESS_UNIT_ID");
+  if (!/^\d+$/.test(values.E2E_V24_SUPPLIER_QUOTE_ID))
+    throw new Error("E2E_V24_SUPPLIER_QUOTE_ID must be a numeric supplier quote id.");
+  return values;
+};
 
 test("authenticated user reviews real bid guidance and records a governed decision", async ({ page }) => {
+  const { E2E_V24_SUPPLIER_QUOTE_ID: supplierQuoteId, E2E_MANAGER_EMAIL: email,
+    E2E_MANAGER_PASSWORD: password, E2E_MANAGER_BUSINESS_UNIT_ID: businessUnitId } = env();
   await loginThroughUi(page, { email, password, businessUnitId });
 
   const guidanceResponse = page.waitForResponse((response) =>

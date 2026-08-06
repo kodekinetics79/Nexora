@@ -46,14 +46,47 @@ public sealed class DocumentIntakeAllowListTests
     // ------------------------------------------------------------------ drift guards
 
     // A probe universe: everything on the allow-list plus formats that must stay out.
+    //
+    // The probe list is deliberately allowed to NAME an extension that later becomes
+    // admissible — .msg/.eml/.html did exactly that when the email-container readers landed.
+    // When that happens the two loops collide, xUnit drops the duplicate theory rows AT
+    // DISCOVERY, and the run still reports "Skipped: 0" while the drift guard silently
+    // shrinks. De-duplicating here keeps every probe executed exactly once no matter which
+    // side of the allow-list an extension is on.
+    private static readonly string[] MustStayOut =
+        { ".pptx", ".ppt", ".exe", ".zip", ".msg", ".eml", ".html", ".js", ".svg", ".dll", ".rar", ".bat", "" };
+
+    private static List<string> ProbeUniverse()
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var probes = new List<string>();
+        foreach (var ext in DocumentIntakeAllowList.Extensions)
+            if (seen.Add(ext)) probes.Add(ext);
+        foreach (var ext in MustStayOut)
+            if (seen.Add(ext)) probes.Add(ext);
+        return probes;
+    }
+
     public static TheoryData<string> ProbeExtensions()
     {
         var data = new TheoryData<string>();
-        foreach (var ext in DocumentIntakeAllowList.Extensions) data.Add(ext);
-        foreach (var ext in new[]
-                 { ".pptx", ".ppt", ".exe", ".zip", ".msg", ".eml", ".html", ".js", ".svg", ".dll", ".rar", ".bat", "" })
-            data.Add(ext);
+        foreach (var ext in ProbeUniverse()) data.Add(ext);
         return data;
+    }
+
+    [Fact]
+    public void ProbeUniverse_ContainsNoDuplicates_SoNoCaseIsDroppedAtDiscovery()
+    {
+        // Guards the guard: a duplicate row is invisible in the pass/fail summary, so it is
+        // asserted directly rather than left to be noticed in the runner's discovery log.
+        var probes = ProbeUniverse();
+        Assert.Equal(probes.Count, probes.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        // and the three that caused the collision are present, exactly once each, as POSITIVES
+        foreach (var admitted in new[] { ".msg", ".eml", ".html" })
+        {
+            Assert.Single(probes, p => string.Equals(p, admitted, StringComparison.OrdinalIgnoreCase));
+            Assert.Contains(admitted, DocumentIntakeAllowList.Extensions);
+        }
     }
 
     [Theory]

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using ERP_RFQ_Automation.Extraction;
@@ -51,7 +52,12 @@ public static class EmailIngestEnqueuer
         var batchId = Guid.NewGuid();
         var queued = 0;
         var skippedAttachments = new List<string>();
-        var messageKey = message.MessageId ?? ingest.Id.ToString();
+        // ING-08: prefer the durable ingest key over the raw header. They are the same string
+        // whenever the message carries a Message-Id; when it does not, the ingest key is a
+        // stable content hash, so the group key survives a replay instead of changing every
+        // time (it used to fall straight through to the row id, which the triage screen — which
+        // looks messages up by `email:{EmailIngest.MessageId}` — could never match).
+        var messageKey = Coalesce(message.MessageId, ingest.MessageId) ?? ingest.Id.ToString();
 
         var metadata = new ExtractionJobMetadata
         {
@@ -154,6 +160,18 @@ public static class EmailIngestEnqueuer
             }
         }
 
+        // ING-06: the skip list is attached to the body job's provenance BEFORE the body branch
+        // is evaluated, and recorded on the EmailIngest UNCONDITIONALLY below.
+        //
+        // It used to be assigned inside the `else` of "did the body carry fresh text?". A
+        // quoted-only reply carrying one supported attachment and one unsupported one (a
+        // forwarded .msg, say) therefore recorded the dropped file NOWHERE: no metadata, no
+        // ingest column, and — because a job WAS enqueued — not even the "nothing queued"
+        // ParseStatus summary. The loss existed only as a Warning in a log nobody reads.
+        if (skippedAttachments.Count > 0)
+            metadata.SkippedAttachments = skippedAttachments.ToArray();
+        RecordSkippedAttachments(ingest, skippedAttachments);
+
         // 2) The body — the sender's OWN words only. A body that is nothing but a quoted
         //    thread produces no job; its attachments (above) still do.
         try
@@ -167,8 +185,6 @@ public static class EmailIngestEnqueuer
             }
             else
             {
-                if (skippedAttachments.Count > 0)
-                    metadata.SkippedAttachments = skippedAttachments.ToArray();
                 var bodyDocument =
                     $"Subject: {message.Subject}\nFrom: {message.From}\nDate: {message.Date:yyyy-MM-dd}\n\n{body}";
                 var bodyName = $"{SanitizeFileName(message.Subject ?? "email")}_body.txt";
@@ -186,6 +202,48 @@ public static class EmailIngestEnqueuer
         }
 
         return new EmailEnqueueResult(batchId, queued, skippedAttachments);
+    }
+
+    /// <summary>
+    /// ING-06: THE single owner of the durable skipped-attachment record.
+    ///
+    /// Every fan-out path (mailbox poller, manual reprocess, and the legacy direct-extraction
+    /// path via <c>EmailService</c>) writes through here, so "an attachment was dropped" can
+    /// never again depend on which branch the message happened to take. The caller owns the
+    /// SaveChanges — both existing callers already save the ingest immediately afterwards.
+    ///
+    /// The value is written unconditionally, including the clear-to-null case: a replay that
+    /// skips nothing must not leave a stale list claiming a loss that no longer applies.
+    /// </summary>
+    public static void RecordSkippedAttachments(EmailIngest ingest, IReadOnlyList<string> skipped)
+    {
+        ArgumentNullException.ThrowIfNull(ingest);
+        if (skipped is null || skipped.Count == 0)
+        {
+            ingest.SkippedAttachmentsJson = null;
+            return;
+        }
+
+        // Column is varchar(2000). A message with a pathological number of skipped attachments
+        // must still record SOMETHING truthful rather than fail the ingest, so entries are
+        // dropped from the tail and the remainder is counted explicitly.
+        const int MaxJson = 2000;
+        var entries = new List<string>(skipped);
+        var json = JsonSerializer.Serialize(entries);
+        while (json.Length > MaxJson && entries.Count > 1)
+        {
+            var omitted = skipped.Count - (entries.Count - 1);
+            entries.RemoveAt(entries.Count - 1);
+            entries[^1] = $"... and {omitted} more skipped attachment(s)";
+            json = JsonSerializer.Serialize(entries);
+        }
+        ingest.SkippedAttachmentsJson = json.Length <= MaxJson ? json : json[..MaxJson];
+    }
+
+    private static string? Coalesce(string? first, string? second)
+    {
+        if (!string.IsNullOrWhiteSpace(first)) return first.Trim();
+        return string.IsNullOrWhiteSpace(second) ? null : second.Trim();
     }
 
     /// <summary>File-type label used for Lead.EmailSource. Single owner — the email door and

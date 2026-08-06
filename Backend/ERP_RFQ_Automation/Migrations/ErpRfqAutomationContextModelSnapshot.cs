@@ -10222,6 +10222,9 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long>("OccurrenceId")
                         .HasColumnType("bigint");
 
+                    b.Property<string>("ProposedLeadSnapshotJson")
+                        .HasColumnType("jsonb");
+
                     b.Property<string>("ReviewReason")
                         .HasMaxLength(2000)
                         .HasColumnType("character varying(2000)");
@@ -10965,6 +10968,11 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
 
+                    b.Property<int>("ConsecutivePollFailures")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
+
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("timestamp without time zone")
@@ -10984,6 +10992,16 @@ namespace ERP_RFQ_Automation.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("boolean")
                         .HasDefaultValue(true);
+
+                    b.Property<DateTime?>("LastPollAttemptOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("LastPollError")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<DateTime?>("LastSuccessfulPollOn")
+                        .HasColumnType("timestamp without time zone");
 
                     b.Property<string>("Password")
                         .IsRequired()
@@ -11065,6 +11083,10 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<string>("RawEmailPath")
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
+
+                    b.Property<string>("SkippedAttachmentsJson")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
 
                     b.Property<string>("ToEmail")
                         .HasMaxLength(255)
@@ -12848,6 +12870,9 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasIndex(new[] { "QuoteNo" }, "IX_Quotes_QuoteNo");
 
+                    b.HasIndex(new[] { "BusinessUnitId", "QuoteNo" }, "UX_Quotes_BusinessUnitID_QuoteNo")
+                        .IsUnique();
+
                     b.ToTable("Quotes");
                 });
 
@@ -13229,6 +13254,24 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<DateTime?>("ModifiedDate")
                         .HasColumnType("timestamp without time zone");
 
+                    b.Property<string>("NoQuoteReason")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<string>("ParticipationDecidedBy")
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)");
+
+                    b.Property<DateTime?>("ParticipationDecidedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("ParticipationDecision")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasDefaultValue("Pending");
+
                     b.Property<long?>("ProductId")
                         .HasColumnType("bigint")
                         .HasColumnName("ProductID");
@@ -13284,8 +13327,6 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasIndex("ProductId");
 
-                    b.HasIndex("Rfqid");
-
                     b.HasIndex("SupplierId");
 
                     b.HasIndex("SupplierQuotedItemId");
@@ -13294,8 +13335,14 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasIndex("WarehouseId");
 
+                    b.HasIndex(new[] { "Rfqid", "ParticipationDecision" }, "IX_RFQItems_Rfqid_Participation");
+
                     b.ToTable("RFQItems", null, t =>
                         {
+                            t.HasCheckConstraint("CK_RFQItems_NoQuote_Requires_Reason", "\"ParticipationDecision\" <> 'NoQuote' OR (\"NoQuoteReason\" IS NOT NULL AND trim(\"NoQuoteReason\") <> '')");
+
+                            t.HasCheckConstraint("CK_RFQItems_Participation_Decision", "\"ParticipationDecision\" IN ('Pending','Quote','NoQuote')");
+
                             t.HasCheckConstraint("CK_RFQItems_Quantity_Positive", "\"Quantity\" > 0");
                         });
                 });

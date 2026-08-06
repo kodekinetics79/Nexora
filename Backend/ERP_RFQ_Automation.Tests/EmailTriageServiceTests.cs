@@ -108,6 +108,41 @@ public class EmailTriageServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ADroppedAttachmentIsVisibleOnTheMessageItArrivedWith()
+    {
+        // ING-06: a durable record nobody can see is only half a fix. This screen is where a
+        // human goes to find mail the system did not process, so the skipped attachment and its
+        // reason have to be ON the row — not only in a log line and a column.
+        using (var context = _db.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(context, 5001);
+            Seed.EmailConfig(context, 6001, 5001);
+            var ingest = Ingest(context, 7020, 6001, "Inquiry",
+                new[] { EmailTriageReasonCodes.QtyUomPattern }, "RE: RFQ 4711", "Queued");
+            EmailIngestEnqueuer.RecordSkippedAttachments(ingest,
+                new[] { "forwarded.msg (unsupported file type '.msg')" });
+            context.SaveChanges();
+        }
+
+        using var reader = _db.ContextFor(5001);
+        var page = await NewService(reader).ListAsync(5001, outcome: null, page: 1, pageSize: 25);
+
+        var row = Assert.Single(page.Items);
+        Assert.Equal("forwarded.msg (unsupported file type '.msg')", Assert.Single(row.SkippedAttachments));
+    }
+
+    [Fact]
+    public async Task AMessageWithNothingSkippedClaimsNoLoss()
+    {
+        SeedThreeDecisions();
+        using var context = _db.ContextFor(5001);
+
+        var page = await NewService(context).ListAsync(5001, "Inquiry", 1, 25);
+
+        Assert.Empty(Assert.Single(page.Items).SkippedAttachments);
+    }
+
+    [Fact]
     public async Task MailIngestedBeforeTheGateExistedReadsAsLegacyRatherThanAsADecision()
     {
         using (var context = _db.ContextFor(null))

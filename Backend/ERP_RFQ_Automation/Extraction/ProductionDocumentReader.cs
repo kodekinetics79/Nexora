@@ -13,11 +13,13 @@ using Docnet.Core.Converters;
 using Docnet.Core.Models;
 using ERP_RFQ_Automation.Services.DocumentIntelligence;
 using ERP_RFQ_Automation.Infrastructure.Storage;
+using ERP_RFQ_Automation.Security.DocumentInspection;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Logging;
 using OfficeOpenXml;
 using Tesseract;
 using UglyToad.PdfPig;
+using UglyToad.PdfPig.Exceptions;
 
 namespace ERP_RFQ_Automation.Extraction;
 
@@ -33,6 +35,11 @@ namespace ERP_RFQ_Automation.Extraction;
 ///             DETERMINISTIC structured-bypass hook (IsStructured=true) so the LLM is skipped.
 ///   * CSV   — parsed into <see cref="RfqSpreadsheetRow"/> (structured bypass, same as XLSX).
 ///   * Images (jpg/jpeg/png/bmp/tiff) — Tesseract OCR, including every TIFF frame.
+///   * HTML  — HtmlAgilityPack, TABLE-AWARE (see <see cref="HtmlDocumentTextExtractor"/>): an
+///             HTML RFQ's line items live in a &lt;table&gt; and a tag-strip destroys them.
+///   * EML / MSG — the message is an envelope, not a text file: the sender's own words plus
+///             every attachment, each attachment re-inspected and read by the same reader
+///             (see <see cref="EmailContainerReader"/>).
 ///   * Plain text / everything else — read as UTF-8.
 ///
 /// Self-contained: it calls PdfPig / Docnet / Tesseract / OpenXML / EPPlus directly and does
@@ -45,10 +52,49 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
     private readonly string _tessDataPath;
     private readonly IEvidenceObjectStorage _evidenceStorage;
     private readonly Func<byte[], IReadOnlyList<string>>? _tiffFrameOcr;
+    private readonly IFileInspectionService? _inspection;
     private readonly NativeSpreadsheetParser _spreadsheetParser = new();
 
-    // A PDF/image that yields fewer than this many non-whitespace characters is treated as scanned.
+    // An image (one page by definition) that yields fewer than this many non-whitespace
+    // characters is treated as having produced nothing.
     private const int NearEmptyThreshold = 20;
+
+    /// <summary>
+    /// Characters per page below which a PDF's embedded text layer is NOT accepted as the
+    /// document's content and OCR is attempted.
+    ///
+    /// <para>
+    /// This replaces a flat 20-character test applied to the WHOLE document. That test was
+    /// wrong in a way that lost content silently: a 40-page scanned tender that carries a
+    /// digital-signature stamp, a Bates number or a portal footer in its text layer clears 20
+    /// characters easily, so the reader returned those 25 characters as "native text" with
+    /// <c>OcrStatus = NotRequired</c> — an assertion that nothing was needed, on a document
+    /// whose entire content is images. The document then looked like a poor-quality RFQ rather
+    /// than a missed OCR, and no surface anywhere said otherwise.
+    /// </para>
+    ///
+    /// <para>
+    /// 100 characters per page is chosen against the two populations it has to separate. Real
+    /// tender prose runs 1,500–3,000 characters per page — a factor of 15 to 30 above this
+    /// line. Text-layer ARTEFACTS run 20–80 characters per page: a signature block
+    /// ("Digitally signed by ... Date: 2026-08-04"), a page number, a footer URL, a scanner
+    /// watermark. 100 sits an order of magnitude below the smallest real page and above the
+    /// largest artefact, so neither population lands near the boundary. It is also a DENSITY,
+    /// not a total, which is the actual defect: the old test got easier to pass the longer the
+    /// scanned document was, which is exactly backwards.
+    /// </para>
+    ///
+    /// <para>
+    /// Being below the line is not a verdict. It only means "OCR is worth trying" — and the
+    /// native text is still kept if OCR recovers less, so a genuinely sparse one-page covering
+    /// note cannot be lost to this threshold either.
+    /// </para>
+    /// </summary>
+    internal const int MinimumNativeCharactersPerPage = 100;
+
+    /// <summary>Absolute floor for a PDF whose page count could not be established.</summary>
+    internal const int MinimumNativeCharacters = 20;
+
     // Header/context slice size for the unstructured path (mirrors DefaultExtractionDocumentReader).
     private const int HeaderLineCount = 20;
 
@@ -59,7 +105,22 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         ILogger<ProductionDocumentReader> log,
         IWebHostEnvironment env,
         IEvidenceObjectStorage evidenceStorage)
-        : this(log, env, evidenceStorage, null)
+        : this(log, env, evidenceStorage, null, null)
+    {
+    }
+
+    /// <summary>
+    /// The constructor DI selects. <paramref name="inspection"/> is what lets an email container
+    /// put its own attachments through the SAME security inspection the top-level file went
+    /// through. It is nullable only so the existing direct-construction call sites keep working;
+    /// when it is absent, email attachments are refused rather than read unscanned.
+    /// </summary>
+    public ProductionDocumentReader(
+        ILogger<ProductionDocumentReader> log,
+        IWebHostEnvironment env,
+        IEvidenceObjectStorage evidenceStorage,
+        IFileInspectionService inspection)
+        : this(log, env, evidenceStorage, null, inspection)
     {
     }
 
@@ -67,11 +128,13 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         ILogger<ProductionDocumentReader> log,
         IWebHostEnvironment env,
         IEvidenceObjectStorage evidenceStorage,
-        Func<byte[], IReadOnlyList<string>>? tiffFrameOcr)
+        Func<byte[], IReadOnlyList<string>>? tiffFrameOcr,
+        IFileInspectionService? inspection = null)
     {
         _log = log;
         _evidenceStorage = evidenceStorage;
         _tiffFrameOcr = tiffFrameOcr;
+        _inspection = inspection;
         _tessDataPath = Path.Combine(env.ContentRootPath, "tessdata");
         // EPPlus 7 requires a license context; the app sets this at startup, set it here too
         // so the reader is safe to use independently of startup ordering.
@@ -101,6 +164,35 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         {
             _log.LogError(ex, "Verified evidence read failed for extraction job {JobId}.", job.Id);
             throw new EvidenceIntegrityException(job.Id, "verified_read_failed", ex);
+        }
+
+        // An EMAIL is an envelope, not a document: it has a body AND attachments, and the RFQ is
+        // usually in the attachment. Handled before everything else because the answer is a
+        // recursive read, not a text decode. Every attachment is re-inspected on the way out.
+        if (bytes.Length > 0 && ext is "eml" or "msg")
+        {
+            return Unstructured(job, name, await ReadEmailContainerAsync(bytes, ext, ct));
+        }
+
+        if (bytes.Length > 0 && ext is "html" or "htm")
+        {
+            return Unstructured(job, name, Native(ExtractTextFromHtml(bytes)));
+        }
+
+        // DEFENCE IN DEPTH for the known real-world case: portal exports (SEC, Aramco and every
+        // "export to Excel" button that emits an HTML table) arrive named .xls. Intake inspection
+        // rejects those at the door with an actionable reason — magic-byte typing is not weakened
+        // to let them through — but a job created before that check existed, or bytes that reach
+        // this reader by any other route, must still be READ as what they are rather than thrown
+        // at a binary workbook parser that can only fail.
+        if (bytes.Length > 0 && ext is "xls" or "xlsx" or "xlsm"
+            && HtmlDocumentTextExtractor.HasHtmlSignature(bytes))
+        {
+            _log.LogInformation(
+                "Spreadsheet-named document {Name} carries HTML content; reading it as HTML.", name);
+            return Unstructured(job, name, Native(ExtractTextFromHtml(bytes)),
+                "This file is named as a spreadsheet but its contents are a web page (HTML). "
+                + "Nexora read it as HTML so its table rows were preserved.");
         }
 
         // Structured spreadsheets/CSV bypass the LLM entirely via the deterministic
@@ -193,7 +285,11 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             IsStructured = false,
             HeaderText = header,
             LineItemRegions = regions,
-            StructuredFallbackNote = structuredFallbackNote
+            // The reader's own note (why OCR was or was not taken, what an email container
+            // refused) travels on the SAME field the spreadsheet fallback uses, because the
+            // worker already prefixes that field onto the failure reason a reviewer reads.
+            // Neither is ever silent.
+            StructuredFallbackNote = structuredFallbackNote ?? read.Note
         };
     }
 
@@ -350,41 +446,288 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             lines.Add(value.Trim());
     }
 
+    // ---- HTML ------------------------------------------------------------
+
+    /// <summary>
+    /// Table-aware HTML text. An HTML RFQ's line items are rows in a &lt;table&gt;; the previous
+    /// treatment (no reader at all, so <c>.html</c> fell to <see cref="DecodeText"/> and the raw
+    /// markup went to the extractor) and the tag-strip regex the mail path used both destroy the
+    /// grid. <see cref="HtmlDocumentTextExtractor"/> emits the same tab-joined row shape the DOCX
+    /// reader produces, so the chunker sees one familiar layout.
+    /// </summary>
+    private string ExtractTextFromHtml(byte[] bytes)
+    {
+        string text;
+        try
+        {
+            text = HtmlDocumentTextExtractor.ExtractText(bytes);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "HTML extraction failed.");
+            throw new DocumentParsingException(
+                "This web page (HTML) file could not be read. It may be damaged; ask the sender to "
+                + "export it again, or to send the original document.");
+        }
+
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            throw new DocumentParsingException(
+                "This web page (HTML) file was opened successfully but contains no readable text. "
+                + "If the content is a picture of a table, ask the sender for the underlying "
+                + "document or a spreadsheet.");
+        }
+
+        return text;
+    }
+
+    // ---- email containers (.eml / .msg) ----------------------------------
+
+    /// <summary>
+    /// Reads an uploaded email as an envelope: the sender's own words plus every attachment's
+    /// content. Attachments are re-inspected by the SAME security inspection the top-level file
+    /// passed, so an <c>.eml</c> can never be used to smuggle an unscanned document past intake;
+    /// nested messages recurse only to <see cref="EmailContainerReader.MaxContainerDepth"/>.
+    ///
+    /// <para>
+    /// Everything the container refused — an unsupported attachment, a macro-enabled workbook, an
+    /// attachment held because scanning was unavailable, a forward nested too deep — becomes a
+    /// user-visible note. A message from which nothing at all could be read is a terminal parse
+    /// failure carrying those same reasons, never an empty success.
+    /// </para>
+    /// </summary>
+    private async Task<DocumentReadResult> ReadEmailContainerAsync(byte[] bytes, string ext, CancellationToken ct)
+    {
+        ParsedEmailMessage message;
+        try
+        {
+            message = ext == "msg"
+                ? EmailContainerReader.ParseMsg(bytes)
+                : EmailContainerReader.ParseEml(bytes);
+        }
+        catch (OleCompoundFileException ex)
+        {
+            _log.LogWarning(ex, "Outlook .msg could not be parsed.");
+            throw new DocumentParsingException(
+                "This Outlook message could not be opened — its internal structure is damaged or "
+                + "incomplete. Ask the sender to forward it again, or save its attachments and "
+                + "upload them directly.");
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Email container could not be parsed.");
+            throw new DocumentParsingException(
+                "This email file could not be opened. Ask the sender to forward the message again, "
+                + "or save its attachments and upload them directly.");
+        }
+
+        var flattened = await EmailContainerReader.FlattenAsync(
+            message,
+            _inspection,
+            (fileName, attachmentExt, attachmentBytes, token) =>
+                Task.FromResult(ReadAttachmentText(fileName, attachmentExt, attachmentBytes)),
+            ct);
+
+        if (_inspection is null)
+        {
+            _log.LogWarning(
+                "No file-inspection service is available to this reader; email attachments were refused "
+                + "rather than read unscanned.");
+        }
+
+        var note = ComposeContainerNote(flattened);
+
+        if (string.IsNullOrWhiteSpace(flattened.Text) || IsNearEmpty(flattened.Text))
+        {
+            throw new DocumentParsingException(
+                "Nexora opened this email but could not read anything from it. "
+                + (note ?? "It carries no message text and no readable attachments."));
+        }
+
+        return new DocumentReadResult(flattened.Text, ExtractionProcessingPath.NativeParser,
+            ExtractionOcrStatus.NotRequired, 0, false)
+        {
+            Note = note
+        };
+    }
+
+    /// <summary>Turns the container's refusal list into ONE user-safe sentence, bounded so a
+    /// message with many refused attachments cannot produce an unbounded reason string.</summary>
+    private static string? ComposeContainerNote(EmailContainerReadResult flattened)
+    {
+        if (flattened.Notes.Count == 0) return null;
+
+        var head = $"This email carried {flattened.AttachmentsExtracted + flattened.AttachmentsRefused} "
+                   + $"attachment(s); {flattened.AttachmentsExtracted} were read and "
+                   + $"{flattened.AttachmentsRefused} were not.";
+        var detail = new StringBuilder(head);
+        foreach (var note in flattened.Notes)
+        {
+            if (detail.Length + note.Length + 1 > 900) break;
+            detail.Append(' ').Append(note);
+        }
+        return detail.ToString();
+    }
+
+    /// <summary>
+    /// Reads ONE attachment with exactly the parser an upload of that same file would use, so a
+    /// PDF attached to an email and the same PDF uploaded directly cannot be read differently.
+    ///
+    /// <para>
+    /// Spreadsheets take their RENDERED TEXT rather than the deterministic structured-row
+    /// fast-path: the container is ONE extraction input and a single input cannot be both
+    /// structured and unstructured. The deterministic path stays available to the same workbook
+    /// uploaded on its own, and is fully restored by the per-attachment job fan-out reported as
+    /// a seam.
+    /// </para>
+    /// </summary>
+    private string ReadAttachmentText(string fileName, string ext, byte[] bytes)
+    {
+        if (bytes.Length == 0) return string.Empty;
+
+        switch (ext)
+        {
+            case "xlsx":
+            case "xlsm":
+                return _spreadsheetParser.RenderXlsxText(bytes);
+            case "xls":
+                return HtmlDocumentTextExtractor.HasHtmlSignature(bytes)
+                    ? ExtractTextFromHtml(bytes)
+                    : _spreadsheetParser.RenderXlsText(bytes);
+            case "csv":
+                return _spreadsheetParser.RenderCsvText(bytes);
+            case "pdf":
+                return ExtractTextFromPdf(bytes).Text;
+            case "doc":
+                return ExtractTextFromLegacyDoc(bytes);
+            case "docx":
+                return ExtractTextFromDocx(bytes);
+            case "html":
+            case "htm":
+                return ExtractTextFromHtml(bytes);
+            case "tif":
+            case "tiff":
+                return ExtractTextFromTiff(bytes).Text;
+            case "jpg":
+            case "jpeg":
+            case "png":
+            case "bmp":
+            case "gif":
+            case "webp":
+                return ExtractTextFromImage(bytes).Text;
+            default:
+                return DecodeText(bytes);
+        }
+    }
+
     // ---- PDF (text layer + OCR fallback) ---------------------------------
 
     private DocumentReadResult ExtractTextFromPdf(byte[] bytes)
     {
-        string pdfText = string.Empty;
+        var pdfText = string.Empty;
+        var pageCount = 0;
         try
         {
             using var doc = PdfDocument.Open(bytes);
+            pageCount = doc.NumberOfPages;
             var sb = new StringBuilder();
             foreach (var page in doc.GetPages())
                 sb.AppendLine(page.Text);
             pdfText = sb.ToString();
         }
+        catch (PdfDocumentEncryptedException ex)
+        {
+            // A DISTINCT, TERMINAL disposition. Previously this landed in the catch-all below,
+            // was logged as a warning, fell through to the OCR branch, and — because pdfium
+            // cannot render an encrypted document either — surfaced as OcrStatus='Failed'. The
+            // user was told OCR had failed on a document that is not scanned at all, and the one
+            // remedy that works (ask the sender for an unlocked copy) was never mentioned.
+            _log.LogWarning(ex, "PDF is password-protected; extraction stopped with a truthful disposition.");
+            throw new UnsupportedDocumentFormatException(
+                "This PDF is password-protected, so Nexora cannot open it. Ask the sender for a "
+                + "copy without a password, or remove the password and upload it again.");
+        }
         catch (Exception ex)
         {
-            _log.LogWarning(ex, "PDF text extraction failed.");
+            // Not terminal on its own: a PDF whose text layer cannot be parsed may still be a
+            // perfectly rasterisable scan. It becomes terminal below only if OCR also finds
+            // nothing, and then it is reported as unreadable rather than as "scanned".
+            _log.LogWarning(ex, "PDF text extraction failed; the document may be scanned or damaged.");
         }
 
-        // Fast path: the PDF already carries an embedded text layer.
-        if (!IsNearEmpty(pdfText))
-            return Native(pdfText);
+        var nativeCharacters = CountNonWhitespace(pdfText);
+        var threshold = NativeTextThreshold(pageCount);
+        var density = pageCount > 0 ? nativeCharacters / (double)pageCount : nativeCharacters;
 
-        _log.LogInformation("PDF has little/no embedded text; attempting OCR fallback.");
+        // Fast path: the PDF carries a text layer DENSE ENOUGH to be the document's content.
+        if (nativeCharacters >= threshold)
+        {
+            _log.LogInformation(
+                "PDF text layer accepted as native content: {Characters} characters over {Pages} page(s) "
+                + "({Density:0.#} per page, threshold {Threshold}).",
+                nativeCharacters, pageCount, density, threshold);
+            return Native(pdfText);
+        }
+
+        _log.LogInformation(
+            "PDF text layer is too sparse to be the content ({Characters} characters over {Pages} page(s), "
+            + "{Density:0.#} per page, below {PerPage} per page); attempting OCR.",
+            nativeCharacters, pageCount, density, MinimumNativeCharactersPerPage);
+
         var ocr = TryOcrScannedPdf(bytes);
-        if (!IsNearEmpty(ocr.Text))
+        var ocrCharacters = CountNonWhitespace(ocr.Text);
+
+        // OCR wins only when it actually recovered MORE than the text layer held. This is what
+        // makes the per-page threshold safe to set high: a genuinely sparse one-page covering
+        // note keeps its own text instead of being replaced by an empty OCR pass.
+        if (ocrCharacters > nativeCharacters && ocrCharacters >= NearEmptyThreshold)
+        {
             return new DocumentReadResult(
                 "[OCR-EXTRACTED TEXT FROM SCANNED PDF - lower confidence, may contain recognition errors]\n" + ocr.Text,
                 ExtractionProcessingPath.LocalOcr,
                 ocr.FailedPageCount > 0 ? ExtractionOcrStatus.Partial : ExtractionOcrStatus.Completed,
-                ocr.PageCount, ocr.Truncated);
+                ocr.PageCount, ocr.Truncated)
+            {
+                Note = ocr.Truncated
+                    ? $"This PDF is a scan. Text was recovered by OCR from the first {ocr.PageCount} page(s) only; "
+                      + "later pages were not read. OCR text is lower confidence than a native text layer."
+                    : null
+            };
+        }
 
-        _log.LogWarning("Scanned PDF could not be OCR'd (OCR unavailable or produced no text).");
+        if (nativeCharacters > 0)
+        {
+            // Keep what the text layer held — losing it would be the very silent loss this change
+            // exists to remove — but say plainly that the document looks like a scan and that OCR
+            // added nothing, so a reviewer reads a sparse result as a scan, not as a poor RFQ.
+            return new DocumentReadResult(pdfText, ExtractionProcessingPath.NativeParser,
+                ExtractionOcrStatus.Failed, ocr.PageCount, ocr.Truncated)
+            {
+                Note = $"This PDF carries only {nativeCharacters} characters of text across "
+                       + $"{Math.Max(pageCount, 1)} page(s), which is the pattern of a SCANNED document "
+                       + "with a stamp or footer rather than a document with real text. Optical "
+                       + "character recognition was attempted and recovered nothing further, so only "
+                       + "that text was read."
+            };
+        }
+
+        _log.LogWarning("PDF yielded no text: the text layer is empty and OCR recovered nothing.");
         return new DocumentReadResult(string.Empty, ExtractionProcessingPath.LocalOcr,
-            ExtractionOcrStatus.Failed, ocr.PageCount, ocr.Truncated);
+            ExtractionOcrStatus.Failed, ocr.PageCount, ocr.Truncated)
+        {
+            Note = "Nexora could not read any text from this PDF. It is either a scan that optical "
+                   + "character recognition could not process, or the file is damaged. Ask the sender "
+                   + "for a text-based PDF, or for the original document."
+        };
     }
+
+    /// <summary>
+    /// Non-whitespace characters a PDF's text layer must carry before it counts as the document's
+    /// content. Per-PAGE by design — see <see cref="MinimumNativeCharactersPerPage"/>.
+    /// </summary>
+    internal static int NativeTextThreshold(int pageCount) => pageCount <= 0
+        ? MinimumNativeCharacters
+        : Math.Max(MinimumNativeCharacters, pageCount * MinimumNativeCharactersPerPage);
 
     /// <summary>Rasterizes a scanned PDF with Docnet and OCRs each page with Tesseract.</summary>
     private OcrReadResult TryOcrScannedPdf(byte[] pdfBytes)
@@ -692,7 +1035,12 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         ExtractionProcessingPath ProcessingPath,
         ExtractionOcrStatus OcrStatus,
         int OcrPageCount,
-        bool OcrTruncated);
+        bool OcrTruncated)
+    {
+        /// <summary>User-safe sentence explaining anything the reader did not take, or why it
+        /// took the path it did. Surfaced through <c>DocumentExtractionInput.StructuredFallbackNote</c>.</summary>
+        public string? Note { get; init; }
+    }
 
     private sealed record OcrReadResult(string Text, int PageCount, bool Truncated, int FailedPageCount);
 }

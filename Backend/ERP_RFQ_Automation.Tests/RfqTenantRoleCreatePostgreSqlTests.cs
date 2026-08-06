@@ -187,8 +187,18 @@ public sealed class RfqTenantRoleCreatePostgreSqlTests
         long rfqId;
         await using (var tenantContext = _database.TenantContextWithRls(Tenant))
         {
+            // No catalog product matches "Bearing 6204-2RS", so the resolver raises the soft
+            // warning "No catalog match found". That used to convert silently; the WP-B1 gate
+            // now requires it to be acknowledged with a reason. This test is about the tenant
+            // role and RLS, not about the gate, so it acknowledges — and the acknowledgement
+            // travelling through the tenant-role path is itself worth proving.
             rfqId = await new LeadConversionIntelligence(tenantContext)
-                .ConvertAsync(leadId, Tenant, new ConvertRequest { ActingUser = "tests" }, default);
+                .ConvertAsync(leadId, Tenant, new ConvertRequest
+                {
+                    ActingUser = "tests",
+                    AcknowledgeAllWarnings = true,
+                    WarningAcknowledgementReason = "Catalog not seeded in this fixture; part verified by the test"
+                }, default);
         }
 
         await using var assertOwner = _database.ContextFor(null);

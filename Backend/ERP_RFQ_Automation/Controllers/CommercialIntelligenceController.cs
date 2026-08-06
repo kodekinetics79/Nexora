@@ -96,6 +96,63 @@ public sealed class CommercialIntelligenceController(
     [RequireModulePermission("Users", PermissionAction.View)]
     public async Task<ActionResult> Reps(CancellationToken ct) => Ok(await BuildRepSummaries(TenantId(), ct));
 
+    /// <summary>
+    /// Creates or updates a sales rep's routing profile.
+    ///
+    /// <para><b>Why this endpoint exists.</b> <c>SalesApplicationService.UpsertProfileAsync</c>
+    /// was fully implemented — validation, optimistic concurrency, idempotent replay — and
+    /// reachable from nothing. <c>sales_rep_profiles</c> therefore had zero rows, the routing
+    /// engine's eligibility gate could never be satisfied, and 44 of 44 production leads routed
+    /// to <c>NO_MATCH_EVIDENCE</c>/Unassigned. This is the missing write path, not a new
+    /// capability: no engine, no rules table, no admin module.</para>
+    ///
+    /// <para>Placed on the controller that already owns <c>reps</c> and already injects the sales
+    /// service, under the same <c>Users</c> permission plus manager role that rep administration
+    /// already uses.</para>
+    /// </summary>
+    [HttpPost("reps/{userId:long}/routing-profile")]
+    [RequireManagerRole]
+    [RequireModulePermission("Users", PermissionAction.Edit)]
+    public async Task<ActionResult> UpsertRepRoutingProfile(
+        long userId, [FromBody] UpsertRepRoutingProfileRequest request, CancellationToken ct)
+    {
+        if (request is null) return BadRequest(new { error = "A routing profile body is required." });
+        var tenant = TenantId();
+
+        // The rep must be a real user in THIS tenant. Without this a manager could mint a
+        // routing profile for any user id and have leads assigned to it.
+        var exists = await db.Users.AsNoTracking()
+            .AnyAsync(u => u.Id == userId && u.Buid == tenant, ct);
+        if (!exists) return NotFound(new { error = $"User {userId} was not found in this business unit." });
+
+        try
+        {
+            var profile = await sales.UpsertProfileAsync(tenant, new UpsertSalesRepProfileCommand(
+                UserId: userId,
+                IsRoutingEligible: request.IsRoutingEligible,
+                CapacityPercent: request.CapacityPercent,
+                DistributionWeight: request.DistributionWeight,
+                TerritoryKeys: request.TerritoryKeys ?? Array.Empty<string>(),
+                ProductCategoryKeys: request.ProductCategoryKeys ?? Array.Empty<string>(),
+                // Floored to midnight UTC, not DateTime.UtcNow.
+                //
+                // Two reasons, found by driving this endpoint against a real backend. (1) An
+                // effective-dated ownership record starts on a DAY — "eligible from 6 August",
+                // not "from 14:12:55.441094". (2) A sub-second default defeats the idempotency
+                // key: a genuine retry sends the same key with a different timestamp, the service
+                // sees different content and answers 409, so no caller can safely retry.
+                EffectiveFromUtc: request.EffectiveFromUtc ?? DateTime.UtcNow.Date,
+                EffectiveToUtc: request.EffectiveToUtc,
+                ExpectedVersion: request.ExpectedVersion,
+                ActorId: User.FindFirst(ClaimTypes.Email)?.Value ?? User.Identity?.Name ?? "System",
+                IdempotencyKey: IdempotencyKey()), ct);
+            return Ok(profile);
+        }
+        catch (SalesNotFoundException ex) { return NotFound(new { error = ex.Message }); }
+        catch (SalesConflictException ex) { return Conflict(new { error = ex.Message }); }
+        catch (SalesValidationException ex) { return BadRequest(new { error = ex.Message }); }
+    }
+
     [HttpGet("reps/{userId:long}")]
     [RequireModulePermission("Users", PermissionAction.View)]
     public async Task<ActionResult> Rep(long userId, [FromQuery] DateTime? from, [FromQuery] DateTime? to, CancellationToken ct)
@@ -590,3 +647,33 @@ public sealed record CurrencyPipelineGroup(long? CurrencyId, string? CurrencyCod
 public sealed record CurrencyAmountGroup(string CurrencyCode, decimal Value);
 public sealed record ActivityEvidence(string? NexoraSerial, string? Reference, string? CustomerName,
     long? CustomerId, string? ActionRoute, string? RequiredModule);
+
+/// <summary>
+/// Body for <c>POST reps/{userId}/routing-profile</c>. Deliberately a thin projection of
+/// <c>UpsertSalesRepProfileCommand</c>: the user id comes from the route, and ActorId and
+/// IdempotencyKey are server-derived, so neither can be spoofed from the body.
+/// </summary>
+public sealed class UpsertRepRoutingProfileRequest
+{
+    /// <summary>Whether the routing engine may assign leads to this rep at all.</summary>
+    public bool IsRoutingEligible { get; set; } = true;
+
+    /// <summary>0-100. Feeds the workload-relief factor in the routing engine.</summary>
+    public int CapacityPercent { get; set; } = 100;
+
+    /// <summary>Relative share when several eligible reps tie. Must be > 0 and &lt;= 1000.</summary>
+    public decimal DistributionWeight { get; set; } = 1m;
+
+    public IReadOnlyCollection<string>? TerritoryKeys { get; set; }
+
+    public IReadOnlyCollection<string>? ProductCategoryKeys { get; set; }
+
+    /// <summary>Defaults to now (UTC) when omitted.</summary>
+    public DateTime? EffectiveFromUtc { get; set; }
+
+    public DateTime? EffectiveToUtc { get; set; }
+
+    /// <summary>Optimistic concurrency. 0 creates; an existing profile requires its current
+    /// Version, so two managers editing the same rep cannot silently overwrite each other.</summary>
+    public long ExpectedVersion { get; set; }
+}

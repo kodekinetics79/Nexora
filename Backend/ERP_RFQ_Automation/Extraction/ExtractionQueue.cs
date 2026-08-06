@@ -23,6 +23,22 @@ namespace ERP_RFQ_Automation.Extraction;
 /// Scoped service — resolve one per worker loop / request. The entity types are read
 /// through <c>context.Set&lt;T&gt;()</c>; the orchestrator registers the model config
 /// (table name, text enum conversions, unique + claim indexes) per WIRING.md.
+///
+/// R-REL-01 (poison-pill isolation). <c>trg_release01b_intake_before_claim_guard</c>
+/// refuses any transition to <c>Leased</c> whose durable intake occurrence is not
+/// <c>Queued</c>/<c>Retryable</c> (or reclaimably <c>Processing</c>), raising 23514. That
+/// invariant is correct and is deliberately NOT weakened here. What was wrong was the
+/// queue's reaction to it: the candidate CTE never looked at the occurrence, so the same
+/// unclaimable row was re-selected every poll, and the raised transaction rolled back the
+/// <c>Attempts</c> increment, so it could never exhaust and never dead-letter — one row
+/// starved every tenant, forever. Two changes close that:
+///   (1) the claim now selects only jobs the guard would accept, so a poisoned row never
+///       blocks the rest of the queue; and
+///   (2) a poisoned row at the head of the queue is charged an attempt with a truthful
+///       <c>LastError</c> and dead-letters at <c>MaxAttempts</c>, so it becomes visible in
+///       the dead-letter queue and in operations readiness instead of being silently
+///       skipped. A savepoint around the claim keeps that record durable even when the
+///       trigger (or any future invariant) still refuses a job the CTE believed claimable.
 /// </summary>
 public sealed class ExtractionQueue : IExtractionQueue
 {
@@ -56,17 +72,28 @@ public sealed class ExtractionQueue : IExtractionQueue
         "j.\"LeasedBy\", j.\"LeaseExpiresAt\", j.\"LastError\", j.\"ResultLeadId\", " +
         "j.\"CreatedOn\", j.\"UpdatedOn\"";
 
-    // Atomic weighted-fair claim. Live (non-expired) leases per tenant are counted so a
-    // tenant already at its cap is skipped; among eligible jobs the highest Priority then
-    // the lowest WFQ SchedulerTag wins. Expired leases (crashed workers) are reclaimable.
+    // The claim resolves inside a bounded head-of-line window taken in claim order. A job
+    // that cannot be claimed only starves the queue while it sits AHEAD of claimable work,
+    // and every blocked row in the window is charged an attempt and backed off in the same
+    // statement, so it leaves the window immediately instead of holding it.
     //
+    // The window is what keeps the poll cost independent of queue depth: the occurrence is
+    // probed for at most this many rows, not for every eligible job (measured on a 20k-job
+    // queue: ~10ms with the window, ~95ms when the probe is pushed into the scan predicate).
+    // No new index is required — the probe is a single lookup on the existing
+    // ak_source_document_occurrences_tenant_id (business_unit_id, id) unique key.
+    //
+    // Must stay comfortably above ExtractionWorkerOptions.WorkerCount: concurrent workers
+    // SKIP LOCKED past each other's rows inside the window.
+    private const int HeadOfLineLookahead = 32;
+
     // Per-tenant concurrency entitlement (P0): the effective cap for a tenant is its
     // plan's MaxConcurrentExtractionJobs (resolved via platform.Tenants →
     // platform.Plans on PrimaryBusinessUnitId, inside the same atomic statement), and
     // @cap — the ExtractionWorkerOptions.PerTenantConcurrencyCap config default —
     // remains the fallback for tenants without a plan or without a Tenant row.
-    private static readonly string ClaimSql = $@"
-WITH plan_caps AS (
+    private const string SchedulingCtes = @"
+plan_caps AS (
     SELECT t.""PrimaryBusinessUnitId"" AS buid,
            MAX(p.""MaxConcurrentExtractionJobs"") AS cap
     FROM platform.""Tenants"" t
@@ -82,6 +109,86 @@ blocked_tenants AS (
     WHERE t.""PrimaryBusinessUnitId"" IS NOT NULL
       AND t.""Status"" IN ('Suspended','Archived')
 ),
+inflight AS (
+    SELECT ""BusinessUnitId"" AS buid, COUNT(*) AS cnt
+    FROM ""ExtractionJobs""
+    WHERE ""Status"" IN ('Leased','Extracting','Persisting')
+      AND ""LeaseExpiresAt"" > @now
+    GROUP BY ""BusinessUnitId""
+)";
+
+    // Everything except the intake-occurrence predicate that decides whether a job may be
+    // worked right now. Shared verbatim by the claim, the head-of-line sweep and the
+    // refusal recorder so the three can never disagree about which job is next.
+    private const string EligibleJobs = @"
+    FROM ""ExtractionJobs"" j
+    LEFT JOIN inflight f ON f.buid = j.""BusinessUnitId""
+    LEFT JOIN plan_caps pc ON pc.buid = j.""BusinessUnitId""
+    LEFT JOIN blocked_tenants bt ON bt.buid = j.""BusinessUnitId""
+    WHERE (
+            j.""Status"" = 'Pending'
+            OR (j.""Status"" IN ('Leased','Extracting','Persisting')
+                AND (j.""LeaseExpiresAt"" IS NULL OR j.""LeaseExpiresAt"" <= @now))
+          )
+      AND j.""NextAttemptAt"" <= @now
+      AND j.""Attempts"" < j.""MaxAttempts""
+      AND bt.buid IS NULL
+      -- P1-A3: a plan cap of 0 is 'not configured' → fall back to @cap, matching
+      -- EntitlementService's <= 0 semantics (NULLIF), never a silent clamp to 1.
+      AND COALESCE(f.cnt, 0) < GREATEST(COALESCE(NULLIF(pc.cap, 0), @cap), 1)";
+
+    // Mirror of nexora_release01b_intake_before_claim_guard (deployed body:
+    // Migrations/20260725035352_Release01CTransactionalIntakeHardening.cs:173-188). When this
+    // is false the trigger raises 23514 on the transition to 'Leased' and the whole claim
+    // rolls back — so the scheduler must not pick such a row. j is the pre-update (OLD) row
+    // the trigger sees. Jobs with no occurrence link keep the legacy behaviour of being
+    // claimable; if the deployed guard refuses one anyway, the 23514 recorder below charges
+    // the attempt so it dead-letters visibly rather than looping.
+    private const string IntakeAllowsClaim = @"(
+            j.""SourceDocumentOccurrenceId"" IS NULL
+            OR EXISTS (
+                SELECT 1
+                FROM source_document_occurrences o
+                WHERE o.business_unit_id = j.""BusinessUnitId""
+                  AND o.id = j.""SourceDocumentOccurrenceId""
+                  AND o.extraction_job_id = j.""Id""
+                  AND (o.intake_status IN ('Queued','Retryable')
+                    OR (o.intake_status = 'Processing'
+                        AND j.""Status"" IN ('Leased','Extracting','Persisting')
+                        AND (j.""LeaseExpiresAt"" IS NULL OR j.""LeaseExpiresAt"" <= @now)))))";
+
+    private const string ClaimOrder =
+        @"ORDER BY j.""Priority"" DESC, j.""SchedulerTag"" ASC, j.""CreatedOn"" ASC";
+
+    // Exponential backoff identical to FailAsync, so a refused claim is rescheduled on the
+    // same curve as a failed one instead of being retried on the 2s idle-poll cadence.
+    private const string BackoffFromAttempts =
+        @"@now + (LEAST(POWER(2, j.""Attempts"")::double precision, 3600) * INTERVAL '1 second')";
+
+    // Bounded head-of-line window in claim order, tagged with claimability. Claimability is
+    // projected (not filtered) so the occurrence is probed only for the rows that survive the
+    // LIMIT — one scan and one top-N sort serve both the sweep and the claim. MATERIALIZED is
+    // explicit so the two references can never become two scans.
+    private static readonly string HeadCte = $@"head AS MATERIALIZED (
+    SELECT j.""Id"" AS job_id, {IntakeAllowsClaim} AS intake_allows_claim
+    {EligibleJobs}
+    {ClaimOrder}
+    LIMIT {HeadOfLineLookahead}
+)";
+
+    // Atomic weighted-fair claim. Live (non-expired) leases per tenant are counted so a
+    // tenant already at its cap is skipped; among eligible jobs the highest Priority then
+    // the lowest WFQ SchedulerTag wins. Expired leases (crashed workers) are reclaimable.
+    //
+    // R-REL-01: the claim is resolved inside `head`, and `candidate` takes the best row the
+    // intake guard would accept — so an unclaimable job can no longer head-of-line block
+    // every tenant. `struck` charges each unclaimable row in the window an attempt with a
+    // truthful reason in the SAME statement, so it dead-letters into the operator's
+    // dead-letter queue rather than being skipped in silence, and its backoff drops it out
+    // of the window meanwhile. The two sets are disjoint by construction (claimable vs not),
+    // so they never contend for a row, and both use SKIP LOCKED so workers never wait.
+    private static readonly string ClaimSql = $@"
+WITH {SchedulingCtes},
 exhausted AS (
     UPDATE ""ExtractionJobs""
     SET ""Status"" = 'DeadLetter',
@@ -97,31 +204,54 @@ exhausted AS (
           )
     RETURNING ""Id""
 ),
-inflight AS (
-    SELECT ""BusinessUnitId"" AS buid, COUNT(*) AS cnt
-    FROM ""ExtractionJobs""
-    WHERE ""Status"" IN ('Leased','Extracting','Persisting')
-      AND ""LeaseExpiresAt"" > @now
-    GROUP BY ""BusinessUnitId""
+{HeadCte},
+blocked AS (
+    -- EVERY unclaimable row in the window, so a run of them cannot hold the window: each is
+    -- charged an attempt and backed off below, which drops it out of eligibility at once.
+    SELECT j.""Id""
+    FROM ""ExtractionJobs"" j
+    JOIN head h ON h.job_id = j.""Id"" AND NOT h.intake_allows_claim
+    FOR UPDATE OF j SKIP LOCKED
+),
+struck AS (
+    -- The job is NOT silently skipped: the refusal is charged to this attempt with the
+    -- reason an operator needs, and the job dead-letters once the attempts are spent.
+    -- Status is otherwise left alone — moving a blocked job to Pending would fire
+    -- trg_release01c_sync_intake_from_job and rewrite its intake occurrence to Retryable,
+    -- laundering the very state the guard is protecting.
+    UPDATE ""ExtractionJobs"" j
+    SET ""Attempts"" = j.""Attempts"" + 1,
+        ""Status"" = CASE WHEN j.""Attempts"" + 1 >= j.""MaxAttempts""
+                        THEN 'DeadLetter' ELSE j.""Status"" END,
+        ""LeasedBy"" = NULL,
+        ""LeaseExpiresAt"" = NULL,
+        ""LastError"" = left(
+            'Extraction cannot start: ' || COALESCE(
+                (SELECT 'intake occurrence ' || o.id || ' is ' || o.intake_status
+                        || CASE WHEN o.extraction_job_id IS DISTINCT FROM j.""Id""
+                                THEN ' and is linked to extraction job '
+                                     || COALESCE(o.extraction_job_id::text, '(none)')
+                                ELSE '' END
+                 FROM source_document_occurrences o
+                 WHERE o.business_unit_id = j.""BusinessUnitId""
+                   AND o.id = j.""SourceDocumentOccurrenceId""),
+                'intake occurrence '
+                    || COALESCE(j.""SourceDocumentOccurrenceId""::text, '(none)')
+                    || ' does not exist')
+            || '. The durable intake occurrence must be Queued or Retryable before '
+            || 'extraction may start (refused attempt ' || (j.""Attempts"" + 1)
+            || ' of ' || j.""MaxAttempts"" || ').', 4000),
+        ""NextAttemptAt"" = {BackoffFromAttempts},
+        ""UpdatedOn"" = @now
+    FROM blocked b
+    WHERE j.""Id"" = b.""Id""
+    RETURNING j.""Id""
 ),
 candidate AS (
     SELECT j.""Id""
     FROM ""ExtractionJobs"" j
-    LEFT JOIN inflight f ON f.buid = j.""BusinessUnitId""
-    LEFT JOIN plan_caps pc ON pc.buid = j.""BusinessUnitId""
-    LEFT JOIN blocked_tenants bt ON bt.buid = j.""BusinessUnitId""
-    WHERE (
-            j.""Status"" = 'Pending'
-            OR (j.""Status"" IN ('Leased','Extracting','Persisting')
-                AND (j.""LeaseExpiresAt"" IS NULL OR j.""LeaseExpiresAt"" <= @now))
-          )
-      AND j.""NextAttemptAt"" <= @now
-      AND j.""Attempts"" < j.""MaxAttempts""
-      AND bt.buid IS NULL
-      -- P1-A3: a plan cap of 0 is 'not configured' → fall back to @cap, matching
-      -- EntitlementService's <= 0 semantics (NULLIF), never a silent clamp to 1.
-      AND COALESCE(f.cnt, 0) < GREATEST(COALESCE(NULLIF(pc.cap, 0), @cap), 1)
-    ORDER BY j.""Priority"" DESC, j.""SchedulerTag"" ASC, j.""CreatedOn"" ASC
+    JOIN head h ON h.job_id = j.""Id"" AND h.intake_allows_claim
+    {ClaimOrder}
     FOR UPDATE OF j SKIP LOCKED
     LIMIT 1
 )
@@ -134,6 +264,37 @@ SET ""Status"" = 'Leased',
 FROM candidate c
 WHERE j.""Id"" = c.""Id""
 RETURNING {ReturningColumns};";
+
+    // Backstop for the case the head window cannot model: the database refused a claim the
+    // scheduler believed legal (23514). Re-selects from the same window on the same
+    // deterministic order — rows the sweep already doubts first, then the exact row the claim
+    // would have taken — and charges the refusal so it can exhaust. Runs only after a
+    // refusal, never on the hot path.
+    private static readonly string RecordRefusedClaimSql = $@"
+WITH {SchedulingCtes},
+{HeadCte},
+target AS (
+    SELECT j.""Id""
+    FROM ""ExtractionJobs"" j
+    JOIN head h ON h.job_id = j.""Id""
+    ORDER BY h.intake_allows_claim ASC, j.""Priority"" DESC, j.""SchedulerTag"" ASC, j.""CreatedOn"" ASC
+    FOR UPDATE OF j SKIP LOCKED
+    LIMIT 1
+)
+UPDATE ""ExtractionJobs"" j
+SET ""Attempts"" = j.""Attempts"" + 1,
+    ""Status"" = CASE WHEN j.""Attempts"" + 1 >= j.""MaxAttempts""
+                    THEN 'DeadLetter' ELSE j.""Status"" END,
+    ""LeasedBy"" = NULL,
+    ""LeaseExpiresAt"" = NULL,
+    ""LastError"" = left(@error, 4000),
+    ""NextAttemptAt"" = {BackoffFromAttempts},
+    ""UpdatedOn"" = @now
+FROM target t
+WHERE j.""Id"" = t.""Id""
+RETURNING j.""Id"", j.""BusinessUnitId"", j.""Status"", j.""Attempts"", j.""MaxAttempts"";";
+
+    private const string ClaimSavepoint = "extraction_claim";
 
     public async Task<EnqueueResult> EnqueueAsync(EnqueueExtractionRequest request, CancellationToken ct = default)
     {
@@ -285,23 +446,76 @@ RETURNING {ReturningColumns};";
         var conn = await OpenAsync(ct);
         await using var transaction = await conn.BeginTransactionAsync(ct);
         await PrepareExecutionScopeAsync(conn, transaction, ct);
-        await using var cmd = conn.CreateCommand();
-        cmd.Transaction = transaction;
-        cmd.CommandText = ClaimSql;
-        AddParam(cmd, "now", now);
-        AddParam(cmd, "leaseExpiry", now.Add(leaseDuration));
-        AddParam(cmd, "worker", workerId);
-        AddParam(cmd, "cap", perTenantCap < 1 ? 1 : perTenantCap);
+
+        // R-REL-01. A database invariant may still refuse the claim (23514 from the intake
+        // guard). Without this savepoint the refusal rolls the whole transaction back and
+        // DISCARDS the Attempts increment, so the offending job could never exhaust its
+        // attempts, never dead-lettered, and was re-selected by every worker every 2s — one
+        // row starving every tenant. The savepoint keeps the refusal recordable.
+        await transaction.SaveAsync(ClaimSavepoint, ct);
 
         ExtractionJob? job = null;
-        await using (var reader = await cmd.ExecuteReaderAsync(ct))
+        try
         {
+            await using var cmd = conn.CreateCommand();
+            cmd.Transaction = transaction;
+            cmd.CommandText = ClaimSql;
+            AddParam(cmd, "now", now);
+            AddParam(cmd, "leaseExpiry", now.Add(leaseDuration));
+            AddParam(cmd, "worker", workerId);
+            AddParam(cmd, "cap", perTenantCap < 1 ? 1 : perTenantCap);
+
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
             if (await reader.ReadAsync(ct))
                 job = MapJob(reader);
+        }
+        catch (PostgresException refused) when (refused.SqlState == PostgresErrorCodes.CheckViolation)
+        {
+            // ExtractionJobs carries no CHECK constraint, so 23514 here is a trigger refusing
+            // the transition to Leased. The invariant is right; looping on it was not.
+            await transaction.RollbackAsync(ClaimSavepoint, ct);
+            var reason =
+                $"Extraction claim refused by a database invariant (SQLSTATE {refused.SqlState}): " +
+                $"{refused.MessageText} The refusal is recorded against this attempt so the job " +
+                "dead-letters visibly instead of blocking every tenant's queue.";
+            var recorded = await RecordRefusedClaimAsync(conn, transaction, reason, now, perTenantCap, ct);
+            await transaction.CommitAsync(ct);
+            if (recorded is { } strike)
+                _log.LogError(refused,
+                    "Extraction job {JobId} (tenant {BusinessUnitId}) could not be claimed: {SqlState}. " +
+                    "Refusal recorded as attempt {Attempts}/{MaxAttempts}; job is now {Status}.",
+                    strike.JobId, strike.BusinessUnitId, refused.SqlState,
+                    strike.Attempts, strike.MaxAttempts, strike.Status);
+            else
+                _log.LogError(refused,
+                    "A claim was refused with {SqlState} but the offending job could not be " +
+                    "re-identified, so no attempt was recorded.", refused.SqlState);
+            return null;
         }
         await transaction.CommitAsync(ct);
         return job;
     }
+
+    private async Task<RefusedClaim?> RecordRefusedClaimAsync(
+        DbConnection conn, DbTransaction transaction, string reason,
+        DateTime now, int perTenantCap, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.Transaction = transaction;
+        cmd.CommandText = RecordRefusedClaimSql;
+        AddParam(cmd, "now", now);
+        AddParam(cmd, "cap", perTenantCap < 1 ? 1 : perTenantCap);
+        AddParam(cmd, "error", Trim(reason, 4000));
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+            return null;
+        return new RefusedClaim(
+            reader.GetInt64(0), reader.GetInt64(1), reader.GetString(2),
+            reader.GetInt32(3), reader.GetInt32(4));
+    }
+
+    private readonly record struct RefusedClaim(
+        long JobId, long BusinessUnitId, string Status, int Attempts, int MaxAttempts);
 
     public async Task<bool> RenewLeaseAsync(
         long jobId, string workerId, int leaseAttempt, TimeSpan leaseDuration, CancellationToken ct = default)

@@ -153,6 +153,29 @@ public sealed class LeadMatchCandidate
     public string MatchEvidenceJson { get; set; } = "{}";
     public string DifferencesJson { get; set; } = "[]";
     public string DownstreamImpactJson { get; set; } = "[]";
+
+    /// <summary>
+    /// The incoming document's VERBATIM commercial values, held while the match waits for a
+    /// human decision.
+    ///
+    /// <para>
+    /// <see cref="DifferencesJson"/> is NOT this. It carries the normalised
+    /// <c>Snapshot()</c> on both sides — lowercased, punctuation stripped, five item
+    /// properties out of twenty-two — because its only job is to feed a SHA-256 fingerprint
+    /// and a field-level diff. Projecting it back onto a canonical <c>Lead</c> rewrote
+    /// <c>RFQ-2026/0012</c> as <c>rfq20260012</c> and deleted <c>UnitPrice</c>,
+    /// <c>Currency</c>, <c>CustomerRfqno</c> and six other columns outright.
+    /// </para>
+    ///
+    /// <para>
+    /// The automatic revision path never had that problem: it still holds the incoming
+    /// <c>Lead</c> in memory and copies it field-for-field. The human path resumes in a
+    /// later request, after that object is gone, so the verbatim values have to be durable.
+    /// This column is that copy. Null on candidates raised before it existed — the decision
+    /// path then leaves the canonical record untouched rather than projecting hash text.
+    /// </para>
+    /// </summary>
+    public string? ProposedLeadSnapshotJson { get; set; }
     public LeadMatchReviewState ReviewState { get; set; }
     public string? ReviewedBy { get; set; }
     public DateTimeOffset? ReviewedAtUtc { get; set; }

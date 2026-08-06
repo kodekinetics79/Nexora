@@ -5,6 +5,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace ERP_RFQ_Automation.Notifications
 {
@@ -45,17 +46,36 @@ namespace ERP_RFQ_Automation.Notifications
 
             // Select the transport by configuration. "console" is the safe default
             // for any unset / unrecognized value.
+            // The transport is registered as its CONCRETE type, then IEmailSender resolves to the
+            // containment decorator wrapping it. Registering the decorator as the only
+            // IEmailSender is what makes containment unbypassable: a fourth transport added later
+            // is wrapped by construction, and no caller can reach a raw sender through DI.
             switch ((options.Provider ?? string.Empty).Trim().ToLowerInvariant())
             {
                 case "smtp":
-                    services.TryAddSingleton<IEmailSender, SmtpEmailSender>();
+                    services.TryAddSingleton<SmtpEmailSender>();
+                    services.TryAddSingleton<IEmailSender>(sp => new GuardedEmailSender(
+                        sp.GetRequiredService<SmtpEmailSender>(),
+                        sp.GetRequiredService<IOptions<NotificationsOptions>>(),
+                        sp.GetRequiredService<ILogger<GuardedEmailSender>>()));
                     break;
                 case "sendgrid":
-                    services.TryAddSingleton<IEmailSender, SendGridEmailSender>();
+                    services.TryAddSingleton<SendGridEmailSender>();
+                    services.TryAddSingleton<IEmailSender>(sp => new GuardedEmailSender(
+                        sp.GetRequiredService<SendGridEmailSender>(),
+                        sp.GetRequiredService<IOptions<NotificationsOptions>>(),
+                        sp.GetRequiredService<ILogger<GuardedEmailSender>>()));
                     break;
                 case "console":
                 default:
-                    services.TryAddSingleton<IEmailSender, ConsoleEmailSender>();
+                    // Console never leaves the process, but it is wrapped anyway so that the
+                    // DraftOnly/Redirect/AllowListOnly semantics a test asserts are identical
+                    // whichever transport is configured.
+                    services.TryAddSingleton<ConsoleEmailSender>();
+                    services.TryAddSingleton<IEmailSender>(sp => new GuardedEmailSender(
+                        sp.GetRequiredService<ConsoleEmailSender>(),
+                        sp.GetRequiredService<IOptions<NotificationsOptions>>(),
+                        sp.GetRequiredService<ILogger<GuardedEmailSender>>()));
                     break;
             }
 

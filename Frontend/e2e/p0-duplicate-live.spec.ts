@@ -1,18 +1,18 @@
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
 import { loginThroughUi } from './support/login';
+import { requireEnv } from './support/environment';
 
-const email = process.env.E2E_MANAGER_EMAIL;
-const password = process.env.E2E_MANAGER_PASSWORD;
-const businessUnitId = process.env.E2E_MANAGER_BUSINESS_UNIT_ID;
 const uploadFile = process.env.E2E_UPLOAD_FILE
   || path.resolve('e2e/fixtures/release-01c-inquiry.csv');
 
-if (!email || !password || !businessUnitId) {
-  throw new Error('P0 duplicate browser acceptance requires local manager credentials.');
-}
+// Resolved inside the test, not at module scope: a module-scope throw aborts collection for the
+// WHOLE suite (see requireEnv). The failure stays just as loud, it simply happens at run time.
+const env = () => requireEnv('P0 duplicate browser acceptance',
+  'E2E_MANAGER_EMAIL', 'E2E_MANAGER_PASSWORD', 'E2E_MANAGER_BUSINESS_UNIT_ID');
 
 test('exact duplicate is persisted and visible without repeated extraction', async ({ page }) => {
+  const { E2E_MANAGER_EMAIL: email, E2E_MANAGER_PASSWORD: password, E2E_MANAGER_BUSINESS_UNIT_ID: businessUnitId } = env();
   const consoleErrors: string[] = [];
   page.on('console', (message) => {
     if (message.type() === 'error') consoleErrors.push(message.text());

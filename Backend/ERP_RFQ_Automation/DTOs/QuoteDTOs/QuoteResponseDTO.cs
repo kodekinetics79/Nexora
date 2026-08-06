@@ -80,6 +80,43 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public long? DiscountTypeId { get; set; }
         public string? DiscountTypeName { get; set; }
         public decimal? DiscountValue { get; set; }
+
+        // ---- What the customer actually asked for, read through the linked RFQ line ----
+        //
+        // These are NOT stored on QuoteItem. Rfqitem already carries every one of them and
+        // QuoteItem.RfqitemId already points at it, so copying them onto the quote line would
+        // duplicate governed data and create two versions of the buyer's request that can
+        // drift. They are projected read-only instead.
+        //
+        // Why they must be visible: a sales engineer pricing a line was being shown quantity,
+        // UoM and a description — and no manufacturer and no part number. On an industrial bid
+        // list where "BALL VALVE 2IN" is a dozen different parts at a dozen different prices,
+        // that is not enough information to quote, and the buyer's own requested date was
+        // invisible too. Null on manually-created quote lines with no RFQ line behind them.
+
+        /// <summary>Manufacturer named on the customer's RFQ line.</summary>
+        public string? RequestedManufacturerName { get; set; }
+
+        /// <summary>Manufacturer part number from the customer's RFQ line.</summary>
+        public string? RequestedManufacturerPartNumber { get; set; }
+
+        /// <summary>Customer's own material/item code (e.g. an SAP material number).</summary>
+        public string? RequestedItemMaterialCode { get; set; }
+
+        /// <summary>Alternate/substitute part number offered on the customer's RFQ line.</summary>
+        public string? RequestedAlternatePartNumber { get; set; }
+
+        /// <summary>Delivery date the CUSTOMER requested. Deliberately distinct from
+        /// <see cref="DeliveryLeadTime"/>, which is what Nexora will COMMIT to and stays null
+        /// until costing. Conflating the two would let a request masquerade as a promise.</summary>
+        public DateTime? RequestedDeliveryDate { get; set; }
+
+        /// <summary>Lead time in days stated on the customer's RFQ line, if any.</summary>
+        public int? RequestedLeadTimeDays { get; set; }
+
+        /// <summary>Currency stated on the customer's RFQ line. The quote's own currency is
+        /// header-level and is a separate commercial decision.</summary>
+        public string? RequestedCurrency { get; set; }
     }
 
     public class QuoteCreateRequestDTO

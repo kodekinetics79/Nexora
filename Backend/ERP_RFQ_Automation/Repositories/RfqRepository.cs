@@ -249,7 +249,11 @@ namespace ERP_RFQ_Automation.Repositories
                     CreatedDate = i.CreatedDate,
                     ModifiedBy = i.ModifiedBy,
                     ModifiedDate = i.ModifiedDate,
-                    Aiconfidence = i.Aiconfidence
+                    Aiconfidence = i.Aiconfidence,
+                    ParticipationDecision = i.ParticipationDecision,
+                    NoQuoteReason = i.NoQuoteReason,
+                    ParticipationDecidedBy = i.ParticipationDecidedBy,
+                    ParticipationDecidedOn = i.ParticipationDecidedOn
                 }).ToList()
             };
         }

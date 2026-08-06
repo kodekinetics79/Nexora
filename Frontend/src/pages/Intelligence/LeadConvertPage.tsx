@@ -4,6 +4,7 @@ import { useQuery, useMutation } from '@tanstack/react-query';
 import {
   Box, Typography, Paper, Button, Stack, Chip, Switch,
   TextField, MenuItem, CircularProgress, Alert, Breadcrumbs, Link, Divider,
+  Checkbox, FormControlLabel,
 } from '@mui/material';
 import {
   AutoAwesome as SparkleIcon,
@@ -66,6 +67,11 @@ const LeadConvertPage: React.FC = () => {
 
   const [edits, setEdits] = React.useState<Record<number, LineEdit>>({});
   const [notes, setNotes] = React.useState('');
+  // Warning governance. The server refuses a conversion that leaves a flagged line neither
+  // corrected nor acknowledged, so the page has to collect the decision rather than colouring
+  // the line and leaving the button enabled — which is exactly what it used to do.
+  const [acknowledgeAll, setAcknowledgeAll] = React.useState(false);
+  const [acknowledgementReason, setAcknowledgementReason] = React.useState('');
 
   // Pre-fill editable state once the preview arrives (normalized values win).
   React.useEffect(() => {
@@ -103,6 +109,8 @@ const LeadConvertPage: React.FC = () => {
       return intelligenceService.convertLead(leadId, {
         items,
         notes: notes.trim() || undefined,
+        acknowledgeAllWarnings: acknowledgeAll || undefined,
+        warningAcknowledgementReason: acknowledgementReason.trim() || undefined,
       });
     },
     onSuccess: (result) => {
@@ -181,7 +189,6 @@ const LeadConvertPage: React.FC = () => {
     (a, b) => Number(b.needsAttention) - Number(a.needsAttention)
   );
 
-  const attentionCount = preview.items.filter((i) => i.needsAttention).length;
   const includedCount = preview.items.filter((i) => edits[i.leadItemId]?.include ?? true).length;
 
   // An included line with text in the qty box that isn't a number blocks submit.
@@ -191,7 +198,22 @@ const LeadConvertPage: React.FC = () => {
     return e.quantity.trim() !== '' && parseUserNumber(e.quantity) == null;
   });
 
-  const canSubmit = includedCount > 0 && !hasInvalidQty && !convertMutation.isPending;
+  // Flagged lines that are actually being converted. Excluded lines need no acknowledgement —
+  // dropping a line the system could not read is a legitimate answer.
+  const includedAttentionCount = preview.items.filter(
+    (i) => i.needsAttention && (edits[i.leadItemId]?.include ?? true)
+  ).length;
+
+  // Mirrors the server rule (LeadConversionIntelligence.EnforceLineWarningGovernance) so the
+  // operator is told BEFORE submitting, not by a 409 afterwards. The server remains the
+  // authority — this is a courtesy, not the enforcement.
+  const MIN_ACK_REASON = 5;
+  const acknowledgementSatisfied =
+    includedAttentionCount === 0 ||
+    (acknowledgeAll && acknowledgementReason.trim().length >= MIN_ACK_REASON);
+
+  const canSubmit =
+    includedCount > 0 && !hasInvalidQty && acknowledgementSatisfied && !convertMutation.isPending;
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
@@ -236,11 +258,55 @@ const LeadConvertPage: React.FC = () => {
         </Stack>
       </Paper>
 
-      {attentionCount > 0 && (
-        <Alert severity="warning" icon={<AttentionIcon />} sx={{ borderRadius: 2, mb: 2, fontWeight: 600 }}>
-          {attentionCount === 1
-            ? '1 line needs a quick look — it’s at the top.'
-            : `${attentionCount} lines need a quick look — they’re at the top.`}
+      {includedAttentionCount > 0 && (
+        <Alert
+          severity="warning"
+          icon={<AttentionIcon />}
+          sx={{ borderRadius: 2, mb: 2, fontWeight: 600 }}
+        >
+          <Typography variant="body2" sx={{ fontWeight: 700, mb: 1 }}>
+            {includedAttentionCount === 1
+              ? '1 line couldn’t be read with confidence — it’s at the top.'
+              : `${includedAttentionCount} lines couldn’t be read with confidence — they’re at the top.`}
+          </Typography>
+          <Typography variant="caption" sx={{ display: 'block', mb: 1.5, fontWeight: 500 }}>
+            Correct them below, leave them out of the RFQ, or record why you’re going ahead
+            anyway. Whichever you choose is saved against the RFQ.
+          </Typography>
+          <FormControlLabel
+            control={
+              <Checkbox
+                checked={acknowledgeAll}
+                onChange={(e) => setAcknowledgeAll(e.target.checked)}
+                size="small"
+                slotProps={{ input: { 'aria-label': 'Acknowledge the flagged lines and convert anyway' } }}
+              />
+            }
+            label={
+              <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                I’ve reviewed {includedAttentionCount === 1 ? 'this line' : 'these lines'} and want to go ahead
+              </Typography>
+            }
+          />
+          {acknowledgeAll && (
+            <TextField
+              fullWidth
+              size="small"
+              required
+              label="Why are you going ahead?"
+              placeholder="e.g. Part numbers confirmed against the buyer’s drawing pack by phone"
+              value={acknowledgementReason}
+              onChange={(e) => setAcknowledgementReason(e.target.value)}
+              error={acknowledgementReason.trim().length > 0 && acknowledgementReason.trim().length < MIN_ACK_REASON}
+              helperText={
+                acknowledgementReason.trim().length < MIN_ACK_REASON
+                  ? 'A short explanation is recorded against the RFQ, so a colleague can see why.'
+                  : ' '
+              }
+              slotProps={{ htmlInput: { maxLength: 500 } }}
+              sx={{ mt: 1, bgcolor: 'background.paper' }}
+            />
+          )}
         </Alert>
       )}
 

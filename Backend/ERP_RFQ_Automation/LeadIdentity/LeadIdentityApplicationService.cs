@@ -112,6 +112,9 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             var occurrence = NewOccurrence(candidate.BusinessUnitId, intake, fingerprint, scope,
                 LeadOccurrenceClassification.ExactDuplicate, 1m, ["High-trust source identity or exact content within the same customer scope."], exact.Id, exact.CurrentRevisionId);
             await EnsureBatchAsync(candidate.BusinessUnitId, intake, ct); _db.Add(occurrence);
+            // Saved before the audit so the event carries the real occurrence id: an audit row
+            // that cannot be joined back to its occurrence is not an audit trail.
+            await _db.SaveChangesAsync(ct);
             AddAudit(occurrence, exact.Id, "INGESTION_DUPLICATE_RECORDED", intake, new { exact.CurrentRevisionNumber });
             await _db.SaveChangesAsync(ct); if (ownsTransaction) await tx.CommitAsync(ct);
             return new(exact.Id, exact.CommercialCaseReference, occurrence.Id, exact.CurrentRevisionId,
@@ -132,8 +135,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             ? candidates.FirstOrDefault(x => x.Id == strongLeadId.Value)
                 ?? await _db.Leads.Include(x => x.LeadItems).SingleAsync(x => x.BusinessUnitId == candidate.BusinessUnitId && x.Id == strongLeadId.Value, ct)
             : candidates.FirstOrDefault(x => scope is not null && CustomerScope(x, null) == scope
-                && normalizedRfq is not null && Normalize(x.Rfqno ?? x.LeadItems.Select(i => i.CustomerRfqno)
-                    .FirstOrDefault(v => !string.IsNullOrWhiteSpace(v))) == normalizedRfq);
+                && normalizedRfq is not null && CustomerReference(x) == normalizedRfq);
         if (strong is not null)
             return await CreateRevisionAsync(strong, candidate, intake, fingerprint, scope,
                 ["Same tenant, customer scope and normalized customer RFQ reference with changed commercial content."], tx, ownsTransaction, ct);
@@ -144,47 +146,82 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
                 .Where(x => x.BusinessUnitId == candidate.BusinessUnitId
                     && x.LogicalGroupKey == intake.LogicalGroupKey && x.LeadId.HasValue)
                 .Select(x => x.LeadId!.Value).Distinct().ToArrayAsync(ct);
-        var grouped = candidates.Where(x => groupedLeadIds.Contains(x.Id))
-            .Select(x => new { Lead = x, Score = Similarity(candidate, x) })
-            .OrderByDescending(x => x.Score).FirstOrDefault();
-        if (grouped is { Score: >= 0.65m })
-        {
-            var groupedScope = CustomerScope(grouped.Lead, null);
-            var groupedRfq = Normalize(grouped.Lead.Rfqno ?? grouped.Lead.LeadItems.Select(x => x.CustomerRfqno)
-                .FirstOrDefault(x => !string.IsNullOrWhiteSpace(x)));
-            if ((scope is not null && groupedScope == scope)
-                || (normalizedRfq is not null && groupedRfq == normalizedRfq))
-                return await CreateRevisionAsync(grouped.Lead, candidate, intake, fingerprint, scope,
-                    ["Corroborated logical document group, customer identity, and commercial content."], tx, ownsTransaction, ct);
-        }
+        // Every tenant-scoped candidate scored once, with its identity evidence resolved on both
+        // axes. Ordering is by EVIDENCE first and similarity second: the lead whose customer and
+        // reference corroborate is the one to offer a reviewer, even when a commodity line item
+        // makes an unrelated lead score marginally higher.
+        var assessments = candidates
+            .Select(x => new MatchAssessment(x, Similarity(candidate, x),
+                Evidence(scope, CustomerScope(x, null)),
+                ReferenceEvidence(normalizedRfq, CustomerReference(x)),
+                ReferenceAmends(normalizedRfq, CustomerReference(x)),
+                groupedLeadIds.Contains(x.Id)))
+            .Where(x => x.Score >= PossibleMatchThreshold)
+            .OrderByDescending(x => x.EvidenceRank).ThenByDescending(x => x.Score)
+            .ToList();
 
-        var ranked = (grouped is { Score: >= 0.65m }
-                ? new[] { grouped }
-                : candidates.Select(x => new { Lead = x, Score = Similarity(candidate, x) }))
-            .Where(x => x.Score >= 0.65m).OrderByDescending(x => x.Score).FirstOrDefault();
-        if (ranked is not null && (groupedLeadIds.Contains(ranked.Lead.Id)
-            || scope is null || CustomerScope(ranked.Lead, null) is null))
+        // Same logical document group (one mail message, one upload set) plus corroborating
+        // customer identity or reference. The group key is itself strong evidence, so this arm
+        // keeps its lower similarity bar — but it no longer fires when the buyer's own reference
+        // says the two documents are different inquiries.
+        var grouped = assessments.FirstOrDefault(x => x.Grouped && !x.Contradicted
+            && (x.Scope == MatchEvidence.Corroborating || x.Reference == MatchEvidence.Corroborating));
+        if (grouped is not null)
+            return await CreateRevisionAsync(grouped.Lead, candidate, intake, fingerprint, scope,
+                ["Corroborated logical document group, customer identity, and commercial content."], tx, ownsTransaction, ct);
+
+        var ranked = assessments.FirstOrDefault();
+        if (ranked is not null && !ranked.Contradicted)
         {
+            // An amendment whose reference gained a revision marker ("RFQ-4471" -> "RFQ-4471 Rev B")
+            // from a customer already on the lead, with near-identical commercial content, is a
+            // version of that inquiry. Anything short of that stays a human decision.
+            if (ranked.Scope == MatchEvidence.Corroborating
+                && ranked.Reference == MatchEvidence.Corroborating
+                && ranked.ReferenceAmends
+                && ranked.Score >= ConfidentRevisionThreshold)
+                return await CreateRevisionAsync(ranked.Lead, candidate, intake, fingerprint, scope,
+                    ["Same tenant and customer, an amended form of the same customer RFQ reference, and near-identical commercial content."],
+                    tx, ownsTransaction, ct);
+
             var occurrence = NewOccurrence(candidate.BusinessUnitId, intake, fingerprint, scope,
                 LeadOccurrenceClassification.PossibleMatchReviewRequired, ranked.Score,
-                [groupedLeadIds.Contains(ranked.Lead.Id)
+                [ranked.Grouped
                     ? "Documents share a logical group and similar content, but canonical identity requires review."
-                    : "Commercial content is similar, but customer identity is unresolved or conflicting."], null, null);
+                    : ranked.Reference == MatchEvidence.Corroborating
+                        ? "The customer RFQ reference and commercial content match an existing inquiry, but customer identity is unresolved or differs."
+                        : ranked.Scope == MatchEvidence.Corroborating
+                            ? "The same customer's commercial content matches an existing inquiry, and no customer RFQ reference confirms whether it is an amendment."
+                            : "Commercial content is similar, but customer identity is unresolved or conflicting."], null, null);
             await EnsureBatchAsync(candidate.BusinessUnitId, intake, ct); _db.Add(occurrence);
+            await _db.SaveChangesAsync(ct);
             _db.Add(new LeadMatchCandidate { BusinessUnitId = candidate.BusinessUnitId, Occurrence = occurrence,
                 CandidateLeadId = ranked.Lead.Id, Confidence = ranked.Score, ReviewState = LeadMatchReviewState.Pending,
-                MatchEvidenceJson = JsonSerializer.Serialize(new { lineOverlap = ranked.Score, policy = PolicyVersion }),
+                MatchEvidenceJson = JsonSerializer.Serialize(new { lineOverlap = ranked.Score, policy = PolicyVersion,
+                    customerIdentity = ranked.Scope.ToString(), customerReference = ranked.Reference.ToString(), logicalGroup = ranked.Grouped }),
                 DifferencesJson = Diff(Snapshot(ranked.Lead), Snapshot(candidate)),
+                // The buyer's real values, kept verbatim for the human decision. DifferencesJson
+                // above is normalised hash input and must never be projected onto a Lead.
+                ProposedLeadSnapshotJson = VerbatimSnapshotJson(candidate),
                 DownstreamImpactJson = await DownstreamImpactJsonAsync(ranked.Lead, ct) });
-            AddAudit(occurrence, null, "POSSIBLE_MATCH_RAISED", intake, new { candidateLeadId = ranked.Lead.Id, ranked.Score });
+            AddAudit(occurrence, null, "POSSIBLE_MATCH_RAISED", intake, new { candidateLeadId = ranked.Lead.Id, ranked.Score,
+                customerIdentity = ranked.Scope.ToString(), customerReference = ranked.Reference.ToString() });
             await _db.SaveChangesAsync(ct); if (ownsTransaction) await tx.CommitAsync(ct);
             return new(0, string.Empty, occurrence.Id, null, 0, occurrence.Classification, occurrence.Confidence, occurrence.DecisionReasons(), false);
         }
 
         await EnsureBatchAsync(candidate.BusinessUnitId, intake, ct);
         _db.Add(candidate); await _db.SaveChangesAsync(ct);
+        // A rejected high-similarity candidate is named in the decision reasons. "New" is a
+        // decision, and the evidence behind it has to be readable in the batch view.
+        string[] newReasons = ranked is null
+            ? ["No reliable tenant-scoped canonical inquiry match."]
+            : ["No reliable tenant-scoped canonical inquiry match.",
+               ranked.Reference == MatchEvidence.Contradicting
+                   ? $"Commercial content resembles {ranked.Lead.CommercialCaseReference}, but the customer's own RFQ reference identifies a different inquiry."
+                   : $"Commercial content resembles {ranked.Lead.CommercialCaseReference}, but it was received from a different customer."];
         var newOccurrence = NewOccurrence(candidate.BusinessUnitId, intake, fingerprint, scope,
-            LeadOccurrenceClassification.New, 1m, ["No reliable tenant-scoped canonical inquiry match."], candidate.Id, null);
+            LeadOccurrenceClassification.New, 1m, newReasons, candidate.Id, null);
         _db.Add(newOccurrence); await _db.SaveChangesAsync(ct);
         var revision = BuildRevision(candidate, newOccurrence, 1, fingerprint, intake);
         _db.Add(revision); await _db.SaveChangesAsync(ct);
@@ -211,6 +248,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             var duplicate = NewOccurrence(canonical.BusinessUnitId, intake, fingerprint, scope, LeadOccurrenceClassification.ExactDuplicate, 1m,
                 ["Strong business identity and content exactly matches an immutable canonical revision."], canonical.Id, matchingRevision.Id);
             await EnsureBatchAsync(canonical.BusinessUnitId, intake, ct); _db.Add(duplicate);
+            await _db.SaveChangesAsync(ct);
             AddAudit(duplicate, canonical.Id, "INGESTION_DUPLICATE_RECORDED", intake,
                 new { matchedRevision = matchingRevision.RevisionNumber, currentRevision = canonical.CurrentRevisionNumber });
             await _db.SaveChangesAsync(ct); if (ownsTransaction) await tx.CommitAsync(ct);
@@ -692,6 +730,10 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             "revision" or "link" => LeadMatchReviewState.ConfirmedRevision, "create_new" => LeadMatchReviewState.CreatedNew,
             "reject" => LeadMatchReviewState.Rejected, _ => LeadMatchReviewState.Deferred };
         candidate.ReviewedBy = actorId; candidate.ReviewedAtUtc = DateTimeOffset.UtcNow; candidate.ReviewReason = request.Reason; candidate.Version++;
+        // Whether the buyer's verbatim values were available to apply. False only for
+        // candidates raised before ProposedLeadSnapshotJson existed; recorded on the audit
+        // event either way so "the amendment did not land" is never a silent outcome.
+        bool? verbatimApplied = null;
         if (request.Action == "exact_duplicate") { occurrence.Classification = LeadOccurrenceClassification.ExactDuplicate; occurrence.LeadId = candidate.CandidateLeadId; occurrence.LeadRevisionId = await _db.Leads.Where(x => x.Id == candidate.CandidateLeadId).Select(x => x.CurrentRevisionId).SingleAsync(ct); }
         else if (request.Action is "revision" or "link")
         {
@@ -712,7 +754,15 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             occurrence.Classification = LeadOccurrenceClassification.Revision; occurrence.LeadId = canonical.Id; occurrence.LeadRevisionId = revision.Id;
             canonical.CurrentRevisionId = revision.Id; canonical.CurrentRevisionNumber = revision.RevisionNumber;
             canonical.CurrentInquiryFingerprint = occurrence.LogicalInquiryFingerprint; canonical.CurrentOccurrenceClassification = LeadOccurrenceClassification.Revision.ToString();
-            ApplySnapshotProjection(canonical, proposed);
+            verbatimApplied = ApplyVerbatimProjection(canonical, candidate.ProposedLeadSnapshotJson);
+            if (verbatimApplied == true)
+            {
+                // The revision indexes the reference the amendment actually carries. Reading it
+                // from the pre-projection canonical made the newest revision index the SUPERSEDED
+                // reference, so the unbounded revision lookup lagged one amendment behind.
+                revision.CustomerRfqReference = canonical.Rfqno;
+                revision.NormalizedCustomerRfqReference = Normalize(canonical.Rfqno);
+            }
             await AddImpactsAsync(canonical, revision, ct);
         }
         else if (request.Action == "create_new")
@@ -727,7 +777,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
                 Clientemail = occurrence.Sender, EmailSource = occurrence.MimeType, CreatedBy = actorId, CreatedDate = now,
                 BusinessUnitId = bu, EmailIngests = ingest, RequiresCommercialReview = true, CommercialFactsVerified = false };
             var proposed = ProposedSnapshot(candidate.DifferencesJson);
-            ApplySnapshotProjection(newLead, proposed);
+            verbatimApplied = ApplyVerbatimProjection(newLead, candidate.ProposedLeadSnapshotJson);
             _db.Add(newLead); await _db.SaveChangesAsync(ct);
             var revision = new LeadRevision { BusinessUnitId = bu, LeadId = newLead.Id, RevisionNumber = 1,
                 EstablishedByOccurrence = occurrence, LogicalInquiryFingerprint = occurrence.LogicalInquiryFingerprint,
@@ -743,14 +793,18 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         else if (request.Action == "reject") occurrence.Classification = LeadOccurrenceClassification.RejectedOrUnprocessable;
         occurrence.Version++;
         _db.Add(new LeadIdentityAuditEvent { BusinessUnitId = bu, LeadId = occurrence.LeadId, OccurrenceId = occurrence.Id,
-            EventType = "POSSIBLE_MATCH_DECIDED", PayloadJson = JsonSerializer.Serialize(new { request.Action, request.Reason, request.CandidateLeadId }),
+            EventType = "POSSIBLE_MATCH_DECIDED", PayloadJson = JsonSerializer.Serialize(new { request.Action, request.Reason, request.CandidateLeadId, verbatimProjectionApplied = verbatimApplied }),
             ActorType = "User", ActorId = actorId, CorrelationId = $"review:{occurrence.Id}", IdempotencyKey = request.IdempotencyKey, OccurredAtUtc = DateTimeOffset.UtcNow });
         await _db.SaveChangesAsync(ct);
         var lead = occurrence.LeadId.HasValue ? await _db.Leads.AsNoTracking().SingleAsync(x => x.Id == occurrence.LeadId, ct) : null;
         if (ownsTransaction) await transaction!.CommitAsync(ct);
         if (request.Action == "create_new") await RouteReviewedNewAsync(bu, lead?.Id, request.IdempotencyKey, ct);
+        string[] decisionReasons = verbatimApplied == false
+            ? ["Governed human match-review decision.",
+               "Verbatim source values were not retained for this match, so no commercial values were applied; re-ingest the document to apply its content."]
+            : ["Governed human match-review decision."];
         return new(lead?.Id ?? 0, lead?.CommercialCaseReference ?? "", occurrence.Id, occurrence.LeadRevisionId, lead?.CurrentRevisionNumber ?? 0,
-            occurrence.Classification, candidate.Confidence, ["Governed human match-review decision."], request.Action == "create_new");
+            occurrence.Classification, candidate.Confidence, decisionReasons, request.Action == "create_new");
     }
 
     private async Task RouteReviewedNewAsync(long bu, long? leadId, string idempotencyKey, CancellationToken ct)
@@ -879,6 +933,96 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         var containment = (decimal)overlap / Math.Min(left.Count, right.Count);
         return Math.Max(jaccard, containment * .75m);
     }
+    /// <summary>Similarity at or above which an existing lead is offered as a match candidate at all.</summary>
+    private const decimal PossibleMatchThreshold = .65m;
+
+    /// <summary>
+    /// Similarity at or above which corroborating identity evidence may create a revision with
+    /// NO human in the loop.
+    ///
+    /// <para>Set at .90 against what <see cref="Similarity"/> can actually produce. Line identity
+    /// hashes part + description + UoM and deliberately excludes quantity, so an amendment that
+    /// only re-prices or re-quantifies existing lines scores 1.00 and links automatically — the
+    /// FR-RFQ-05 case. Adding one line to a five-line RFQ scores .83 and one added line to a
+    /// two-line RFQ scores .67; both stay below this bar and go to a human. Containment alone is
+    /// capped at .75 by <see cref="Similarity"/>, so a subset can never auto-link.</para>
+    /// </summary>
+    private const decimal ConfidentRevisionThreshold = .90m;
+
+    /// <summary>
+    /// What an identity signal says about two documents. The distinction that matters is
+    /// <see cref="Absent"/> versus <see cref="Contradicting"/>: a signal nobody could resolve is
+    /// no evidence and must never be read as agreement, while a signal that resolved on both
+    /// sides and DISAGREES is positive evidence of two different inquiries.
+    /// </summary>
+    private enum MatchEvidence { Contradicting, Absent, Corroborating }
+
+    private sealed record MatchAssessment(Lead Lead, decimal Score, MatchEvidence Scope, MatchEvidence Reference,
+        bool ReferenceAmends, bool Grouped)
+    {
+        /// <summary>
+        /// The identity evidence positively says "different inquiry". The customer's own RFQ
+        /// reference is decisive: when both documents carry one and they differ, the buyer has
+        /// told us these are two inquiries, however identical the line items look — that is why a
+        /// repeat order for the same commodity does not become an amendment. A differing sender
+        /// is decisive too, unless the shared reference contradicts it, which is exactly the
+        /// "two contacts at one company, one RFQ" case a human should see.
+        /// </summary>
+        public bool Contradicted =>
+            Reference == MatchEvidence.Contradicting
+            || (Scope == MatchEvidence.Contradicting && Reference != MatchEvidence.Corroborating);
+
+        public int EvidenceRank => Contradicted ? 0
+            : Scope == MatchEvidence.Corroborating || Reference == MatchEvidence.Corroborating ? 3
+            : Grouped ? 2
+            : 1;
+    }
+
+    private static MatchEvidence Evidence(string? left, string? right) =>
+        left is null || right is null ? MatchEvidence.Absent
+        : string.Equals(left, right, StringComparison.Ordinal) ? MatchEvidence.Corroborating
+        : MatchEvidence.Contradicting;
+
+    private static string? CustomerReference(Lead x) => Normalize(x.Rfqno
+        ?? x.LeadItems.Select(i => i.CustomerRfqno).FirstOrDefault(v => !string.IsNullOrWhiteSpace(v)));
+
+    /// <summary>
+    /// Customer RFQ reference evidence, tolerant of the one way a reference legitimately changes
+    /// on an amendment: a revision marker appended to the original ("RFQ-4471" -> "RFQ-4471 Rev B",
+    /// normalising to <c>rfq4471</c> -> <c>rfq4471revb</c>).
+    ///
+    /// <para>The longer reference must EXTEND the shorter one and the extension must begin with a
+    /// letter. That keeps a genuine revision suffix corroborating while a different sequence
+    /// number — <c>RFQ-1</c> against <c>RFQ-10</c>, or <c>SEPARATE-1</c> against
+    /// <c>SEPARATE-10</c> — stays a contradiction rather than silently merging two orders.</para>
+    /// </summary>
+    private static MatchEvidence ReferenceEvidence(string? incoming, string? existing)
+    {
+        var exact = Evidence(incoming, existing);
+        if (exact != MatchEvidence.Contradicting) return exact;
+        var (shorter, longer) = incoming!.Length <= existing!.Length ? (incoming!, existing!) : (existing!, incoming!);
+        return Extends(longer, shorter) ? MatchEvidence.Corroborating : MatchEvidence.Contradicting;
+    }
+
+    /// <summary>
+    /// The INCOMING document carries the amended form of the reference already on file
+    /// ("RFQ-4471" on the lead, "RFQ-4471 Rev B" arriving) — or the identical reference.
+    ///
+    /// <para>Direction matters, and only this arm cares about it. An amendment extends the
+    /// reference it supersedes; the reverse — the ORIGINAL arriving after the amendment — must
+    /// not silently roll the canonical record back to older commercial values, so it goes to a
+    /// human even though the two references are just as related. <see cref="ReferenceEvidence"/>
+    /// stays symmetric because "related but ambiguous" is exactly what a review queue is for.</para>
+    /// </summary>
+    private static bool ReferenceAmends(string? incoming, string? existing) =>
+        incoming is not null && existing is not null
+        && (string.Equals(incoming, existing, StringComparison.Ordinal) || Extends(incoming, existing));
+
+    private static bool Extends(string longer, string shorter) =>
+        shorter.Length >= 4 && longer.Length > shorter.Length
+        && longer.StartsWith(shorter, StringComparison.Ordinal)
+        && char.IsLetter(longer[shorter.Length]);
+
     private static string Diff(object previous, object current) => JsonSerializer.Serialize(new { previous, current });
     private static string ProposedSnapshot(string differencesJson)
     {
@@ -958,22 +1102,73 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         }
     }
 
-    private void ApplySnapshotProjection(Lead lead, string snapshotJson)
+    /// <summary>
+    /// Captures the incoming document's values verbatim, for a human decision that will be
+    /// taken in a later request once this <see cref="Lead"/> object no longer exists.
+    /// </summary>
+    private static string VerbatimSnapshotJson(Lead lead) => JsonSerializer.Serialize(new VerbatimLeadSnapshot(
+        lead.Rfqno, lead.BuyersName, lead.RecDate, lead.BidClosingDate, lead.HeaderRemarks,
+        lead.NoOfLineItems, lead.Rfqtype,
+        lead.LeadItems.Select(x => new VerbatimLeadItemSnapshot(
+            x.CompanyRef, x.CustomerAccountPortalId, x.CustomerRfqno, x.ItemMaterialCode, x.CommodityProduct,
+            x.BuyerName, x.LineItemNo, x.ProductShortName, x.Alternative, x.ProductShortDescription,
+            x.Currency, x.UnitOfMeasure, x.UnitPrice, x.Quantity, x.StorageLocation, x.ManufacturerName,
+            x.ManufacturerPartNumber, x.AlternateProductName, x.AlternatePartNumber, x.ItemText,
+            x.MaterialPotext, x.LeadTime, x.ReceivedDate, x.BidClosingDateLine, x.Aiconfidence, x.ExtraFields)).ToArray()));
+
+    /// <summary>
+    /// Applies a human-confirmed amendment to a canonical <see cref="Lead"/> using the
+    /// buyer's REAL values.
+    ///
+    /// <para>This replaces a projection that read <c>LeadMatchCandidate.DifferencesJson</c> —
+    /// the normalised fingerprint snapshot. That snapshot exists to be hashed: it lowercases,
+    /// strips every non-alphanumeric character and keeps five of a line item's twenty-two
+    /// properties. Writing it back turned <c>RFQ-2026/0012</c> into <c>rfq20260012</c>,
+    /// <c>AB-123/X</c> into <c>ab123x</c>, and deleted <c>UnitPrice</c>, <c>Currency</c>,
+    /// <c>CustomerRfqno</c>, <c>ItemMaterialCode</c>, <c>ManufacturerName</c>,
+    /// <c>LeadTime</c>, <c>BidClosingDateLine</c>, <c>Aiconfidence</c> and <c>ExtraFields</c>
+    /// with no verbatim copy anywhere in the database. A fingerprint is a hashing artefact
+    /// and is never business data.</para>
+    ///
+    /// <para>Returns false — and changes NOTHING — when no verbatim snapshot was captured
+    /// (a candidate raised before this column existed). Refusing to project is the honest
+    /// outcome: the canonical record keeps the values it already has, and the decision's
+    /// audit event records that the projection was skipped.</para>
+    /// </summary>
+    private bool ApplyVerbatimProjection(Lead lead, string? verbatimJson)
     {
-        using var document = JsonDocument.Parse(snapshotJson);
-        var root = document.RootElement;
-        lead.Rfqno = StringProperty(root, "rfq");
-        lead.BuyersName = StringProperty(root, "buyer");
-        if (root.TryGetProperty("closing", out var closing) && closing.ValueKind == JsonValueKind.String
-            && DateTime.TryParse(closing.GetString(), out var closingDate)) lead.BidClosingDate = closingDate;
-        if (!root.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array) return;
+        VerbatimLeadSnapshot? snapshot;
+        if (string.IsNullOrWhiteSpace(verbatimJson)) return false;
+        try { snapshot = JsonSerializer.Deserialize<VerbatimLeadSnapshot>(verbatimJson); }
+        catch (JsonException) { return false; }
+        if (snapshot is null) return false;
+
+        lead.Rfqno = snapshot.Rfqno;
+        lead.BuyersName = snapshot.BuyersName;
+        if (snapshot.RecDate.HasValue) lead.RecDate = snapshot.RecDate.Value;
+        lead.BidClosingDate = snapshot.BidClosingDate;
+        lead.HeaderRemarks = snapshot.HeaderRemarks;
+        lead.Rfqtype = snapshot.Rfqtype;
+        lead.NoOfLineItems = snapshot.NoOfLineItems ?? snapshot.Items.Count;
+        lead.ModifiedDate = DateTime.UtcNow;
         if (lead.Id != 0) { _db.RemoveRange(lead.LeadItems); lead.LeadItems.Clear(); }
-        foreach (var item in items.EnumerateArray())
-            lead.LeadItems.Add(new LeadItem { LineItemNo = StringProperty(item, "line"), ManufacturerPartNumber = StringProperty(item, "part"),
-                ProductShortDescription = StringProperty(item, "description"), Quantity = item.TryGetProperty("Quantity", out var upperQuantity)
-                    ? upperQuantity.GetInt32() : item.TryGetProperty("quantity", out var quantity) ? quantity.GetInt32() : 0,
-                UnitOfMeasure = StringProperty(item, "uom") });
-        lead.NoOfLineItems = items.GetArrayLength();
+        foreach (var item in snapshot.Items)
+            lead.LeadItems.Add(new LeadItem
+            {
+                CompanyRef = item.CompanyRef, CustomerAccountPortalId = item.CustomerAccountPortalId,
+                CustomerRfqno = item.CustomerRfqno, ItemMaterialCode = item.ItemMaterialCode,
+                CommodityProduct = item.CommodityProduct, BuyerName = item.BuyerName,
+                LineItemNo = item.LineItemNo, ProductShortName = item.ProductShortName,
+                Alternative = item.Alternative, ProductShortDescription = item.ProductShortDescription,
+                Currency = item.Currency, UnitOfMeasure = item.UnitOfMeasure, UnitPrice = item.UnitPrice,
+                Quantity = item.Quantity, StorageLocation = item.StorageLocation,
+                ManufacturerName = item.ManufacturerName, ManufacturerPartNumber = item.ManufacturerPartNumber,
+                AlternateProductName = item.AlternateProductName, AlternatePartNumber = item.AlternatePartNumber,
+                ItemText = item.ItemText, MaterialPotext = item.MaterialPotext, LeadTime = item.LeadTime,
+                ReceivedDate = item.ReceivedDate, BidClosingDateLine = item.BidClosingDateLine,
+                Aiconfidence = item.Aiconfidence, ExtraFields = item.ExtraFields
+            });
+        return true;
     }
 
     private static LeadItem CloneCurrentItem(LeadItem x) => new()

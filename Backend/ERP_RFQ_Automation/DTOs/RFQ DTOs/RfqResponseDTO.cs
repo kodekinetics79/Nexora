@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.Models;
 ﻿using System.ComponentModel.DataAnnotations;
 
 namespace ERP_RFQ_Automation.DTOs.RfqDTOs
@@ -88,6 +89,25 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public string? ModifiedBy { get; set; }
         public DateTime? ModifiedDate { get; set; }
         public decimal? Aiconfidence { get; set; }
+
+        // ---- Line participation: which lines Nexora will actually quote ----
+        // A partial bid is the normal case on an industrial bid list; see
+        // Models/Rfqitem.Participation.cs for why this is line-level and not a header field.
+        public string ParticipationDecision { get; set; } = Rfqitem.ParticipationPending;
+        public string? NoQuoteReason { get; set; }
+        public string? ParticipationDecidedBy { get; set; }
+        public DateTime? ParticipationDecidedOn { get; set; }
+    }
+
+    /// <summary>Body for <c>POST api/Rfq/{id}/lines/{lineId}/participation</c>.</summary>
+    public class RfqLineParticipationRequestDTO
+    {
+        /// <summary>Pending, Quote or NoQuote.</summary>
+        public string Decision { get; set; } = string.Empty;
+
+        /// <summary>Mandatory for NoQuote; ignored otherwise. The rule is enforced in the
+        /// domain (<c>Rfqitem.DecideParticipation</c>), not here, so every caller obeys it.</summary>
+        public string? Reason { get; set; }
     }
 
     public class RfqCreateRequestDTO
@@ -154,6 +174,10 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public DateTime? BidClosingDateLine { get; set; }
         public string? CreatedBy { get; set; }
         public decimal? Aiconfidence { get; set; }
+        // Participation is deliberately NOT settable here. It carries an actor, a timestamp and
+        // a mandatory decline reason, so it goes through its own governed endpoint
+        // (POST api/Rfq/{id}/lines/{lineId}/participation) rather than riding along on a bulk
+        // header update where those could be silently omitted.
     }
 
     public class RfqUpdateRequestDTO

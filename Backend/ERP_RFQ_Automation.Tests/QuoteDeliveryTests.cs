@@ -268,7 +268,8 @@ public sealed class QuoteDeliveryTests
     private sealed class RecordingEmailService : IEmailService
     {
         public int SendCount { get; private set; }
-        public Task FetchAndSaveLeadsAsync(long? businessUnitId = null) => Task.CompletedTask;
+        public Task<MailboxPollReport> FetchAndSaveLeadsAsync(long? businessUnitId = null)
+            => Task.FromResult(MailboxPollReport.Empty);
         public Task SendEmailAsync(string to, string subject, string body,
             List<(string FileName, byte[] FileContent, string ContentType)> attachments = null!,
             string fromEmail = null!, long? businessUnitId = null)

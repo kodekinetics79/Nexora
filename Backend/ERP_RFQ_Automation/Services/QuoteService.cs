@@ -126,7 +126,7 @@ namespace ERP_RFQ_Automation.Services
             var quoteNo = request.QuoteNo;
             if (string.IsNullOrWhiteSpace(quoteNo))
             {
-                quoteNo = await GenerateNextQuoteNumber();
+                quoteNo = await GenerateNextQuoteNumber(request.BusinessUnitId);
             }
 
             // FIN-12: reject non-positive quantity/price and negative tax up front.
@@ -220,7 +220,18 @@ namespace ERP_RFQ_Automation.Services
                 if (!rfq.CustomerId.HasValue) throw new InvalidOperationException("Resolve the RFQ customer before preparing a Quote Draft.");
                 if (rfq.Rfqitems.Count == 0) throw new InvalidOperationException("Add at least one verified RFQ line before preparing a Quote Draft.");
 
-                var invalidLines = rfq.Rfqitems
+                // A Quote Draft is a partial-bid instrument: an 84-line SEC bid list routinely
+                // yields 12 quoted lines. Which lines those are is an explicit, recorded human
+                // decision — never "all of them by default", because a line nobody has looked at
+                // must not silently become a commercial commitment.
+                var markedForQuote = rfq.Rfqitems.Where(item => item.IsMarkedForQuote).ToArray();
+                if (markedForQuote.Length == 0)
+                    throw new InvalidOperationException(
+                        "Mark at least one RFQ line as Quote before preparing a Customer Quote Draft.");
+
+                // Only the lines being quoted must be complete. A line we are declining is
+                // allowed to be missing a part number — that is frequently WHY it is declined.
+                var invalidLines = markedForQuote
                     .Where(item => item.Quantity <= 0
                         || string.IsNullOrWhiteSpace(item.UnitOfMeasure)
                         || string.IsNullOrWhiteSpace(item.ItemMaterialCode)
@@ -248,7 +259,7 @@ namespace ERP_RFQ_Automation.Services
                 var now = DateTime.UtcNow;
                 var quote = new Quote
                 {
-                    QuoteNo = await GenerateNextQuoteNumber(),
+                    QuoteNo = await GenerateNextQuoteNumber(businessUnitId),
                     Rfqid = rfq.Id,
                     CustomerId = rfq.CustomerId,
                     BusinessUnitId = businessUnitId,
@@ -260,7 +271,7 @@ namespace ERP_RFQ_Automation.Services
                     HeaderRemarks = "Commercial Review Required: pricing, inventory, lead time, tax, freight and validity remain pending.",
                     CreatedBy = actor.Trim(),
                     CreatedDate = now,
-                    QuoteItems = rfq.Rfqitems.OrderBy(item => item.Id).Select(item => new QuoteItem
+                    QuoteItems = rfq.Rfqitems.Where(item => item.IsMarkedForQuote).OrderBy(item => item.Id).Select(item => new QuoteItem
                     {
                         RfqitemId = item.Id,
                         ProductId = item.ProductId,
@@ -289,15 +300,29 @@ namespace ERP_RFQ_Automation.Services
             return await GetQuoteByIdAsync(quoteId);
         }
 
-        private async Task<string> GenerateNextQuoteNumber()
+        /// <summary>
+        /// Format: QT-MMYY-0001, allocated within one tenant.
+        ///
+        /// <para><b>Known limitation, deliberately left visible.</b> This is still read-max-plus-one
+        /// and is therefore not concurrency-safe on its own. It is now backstopped by the unique
+        /// index <c>UX_Quotes_BusinessUnitID_QuoteNo</c>, so a collision fails loudly instead of
+        /// producing two customer documents bearing the same number. Replacing all three
+        /// generators with a single row-locked allocator (the <c>LegalDocumentCounters</c> pattern
+        /// already used by finance) is tracked as separate work — doing it here, untested, would
+        /// be the more dangerous change.</para>
+        ///
+        /// <para>The tenant scope is the repair: this previously filtered on prefix ALONE, so
+        /// tenant B's quotes advanced tenant A's counter and every tenant could see how many
+        /// quotes the others had issued.</para>
+        /// </summary>
+        private async Task<string> GenerateNextQuoteNumber(long businessUnitId)
         {
-            // Format: QT-MMYY-0001
             var now = DateTime.UtcNow;
             var prefix = $"QT-{now:MM}{now:yy}-";
 
-            // Get the last quote number with this prefix
+            // Get the last quote number with this prefix, WITHIN THIS TENANT.
             var lastQuote = await _context.Quotes
-                .Where(q => q.QuoteNo.StartsWith(prefix))
+                .Where(q => q.BusinessUnitId == businessUnitId && q.QuoteNo.StartsWith(prefix))
                 .OrderByDescending(q => q.QuoteNo)
                 .FirstOrDefaultAsync();
 
@@ -556,6 +581,9 @@ namespace ERP_RFQ_Automation.Services
         {
             var quote = await _context.Quotes
                .Include(q => q.QuoteItems)
+                   .ThenInclude(i => i.Rfqitem) // the buyer's requested manufacturer/part/date
+               .Include(q => q.QuoteItems)
+                   .ThenInclude(i => i.Product)
                .Include(q => q.Customer)
                .Include(q => q.BusinessUnit)
                .Include(q => q.Currency)
@@ -648,7 +676,16 @@ namespace ERP_RFQ_Automation.Services
                     DiscountValue = i.DiscountValue, // Input Value
                     DiscountTypeName = i.DiscountTypeId.HasValue && itemDiscountTypes.ContainsKey(i.DiscountTypeId.Value) ? itemDiscountTypes[i.DiscountTypeId.Value] : null,
                     TaxAmount = i.TaxAmount,
-                    DeliveryLeadTime = i.DeliveryLeadTime
+                    DeliveryLeadTime = i.DeliveryLeadTime,
+                    // Read through the existing RfqitemId link — never copied onto QuoteItem.
+                    // See QuoteItemResponseDTO for why these are projected rather than stored.
+                    RequestedManufacturerName = i.Rfqitem?.ManufacturerName,
+                    RequestedManufacturerPartNumber = i.Rfqitem?.ManufacturerPartNumber,
+                    RequestedItemMaterialCode = i.Rfqitem?.ItemMaterialCode,
+                    RequestedAlternatePartNumber = i.Rfqitem?.AlternatePartNumber,
+                    RequestedDeliveryDate = i.Rfqitem?.RequiredDesiredDate,
+                    RequestedLeadTimeDays = i.Rfqitem?.LeadTime,
+                    RequestedCurrency = i.Rfqitem?.Currency
                 }).ToList()
             };
         }

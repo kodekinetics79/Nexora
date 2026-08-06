@@ -73,6 +73,26 @@ public sealed class ConvertRequest
     public string? Notes { get; set; }
 
     /// <summary>
+    /// One reason covering every line acknowledged in <see cref="ConvertRequestItem.AcknowledgeWarning"/>
+    /// that does not carry its own. Operators acknowledge a batch of lines with a single
+    /// explanation ("supplier confirmed pack sizes by phone"), so a per-line reason is optional
+    /// and this is the fallback — but between them a reason must always exist.
+    /// </summary>
+    public string? WarningAcknowledgementReason { get; set; }
+
+    /// <summary>
+    /// Acknowledges every soft-flagged line in one action, without ticking each one.
+    ///
+    /// <para>A real SEC bid list runs to 84 lines and it is normal for most of them to raise
+    /// "No catalog match found" on a brand the tenant has not loaded yet. Demanding 60 individual
+    /// ticks would train operators to click through the gate without reading it, which is worse
+    /// than no gate. The audit is unaffected: every waived line is still recorded by name with
+    /// its specific reason, and <b>hard integrity failures are still refused</b> — this waives
+    /// soft warnings only.</para>
+    /// </summary>
+    public bool AcknowledgeAllWarnings { get; set; }
+
+    /// <summary>
     /// Acting user for CreatedBy stamping. Set server-side from the JWT /
     /// agent context; never bound from the request body.
     /// </summary>
@@ -90,4 +110,19 @@ public sealed class ConvertRequestItem
     public int? Quantity { get; set; }
     /// <summary>Corrected unit of measure; falls back to the lead line's raw value.</summary>
     public string? UnitOfMeasure { get; set; }
+
+    /// <summary>
+    /// The operator has seen this line's extraction warning and is converting anyway.
+    ///
+    /// <para>Required for any line the resolver flagged <c>NeedsAttention</c> whose reasons are
+    /// all soft (no catalog match, low-confidence match, UoM needs review). It can NEVER waive a
+    /// hard integrity failure — a missing quantity or a missing unit is refused whatever this
+    /// says, because acknowledging "I don't know how many" produces an RFQ that cannot be
+    /// quoted.</para>
+    /// </summary>
+    public bool AcknowledgeWarning { get; set; }
+
+    /// <summary>Per-line explanation. Falls back to
+    /// <see cref="ConvertRequest.WarningAcknowledgementReason"/> when omitted.</summary>
+    public string? AcknowledgementReason { get; set; }
 }

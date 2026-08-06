@@ -76,6 +76,7 @@ public static class LeadIdentityModelBuilderExtensions
         {
             e.ToTable("LeadMatchCandidates"); e.HasKey(x => x.Id); e.Property(x => x.Confidence).HasPrecision(6, 5);
             e.Property(x => x.MatchEvidenceJson).HasColumnType("jsonb"); e.Property(x => x.DifferencesJson).HasColumnType("jsonb"); e.Property(x => x.DownstreamImpactJson).HasColumnType("jsonb");
+            e.Property(x => x.ProposedLeadSnapshotJson).HasColumnType("jsonb");
             e.Property(x => x.ReviewState).HasConversion<string>().HasMaxLength(32); e.Property(x => x.ReviewedBy).HasMaxLength(256); e.Property(x => x.ReviewReason).HasMaxLength(2000); e.Property(x => x.Version).IsConcurrencyToken();
             e.HasIndex(x => new { x.BusinessUnitId, x.OccurrenceId, x.CandidateLeadId }).IsUnique();
             e.HasOne(x => x.Occurrence).WithMany(x => x.MatchCandidates).HasForeignKey(x => new { x.BusinessUnitId, x.OccurrenceId }).HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);

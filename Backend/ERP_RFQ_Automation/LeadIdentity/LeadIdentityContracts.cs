@@ -30,6 +30,55 @@ public sealed record LeadIntakeDescriptor(
     public string? LogicalGroupKey { get; init; }
 }
 
+/// <summary>
+/// The incoming document's commercial values EXACTLY as extracted — no normalisation, no
+/// field pruning. Persisted on <see cref="LeadMatchCandidate.ProposedLeadSnapshotJson"/> so a
+/// human match decision taken minutes or days later can apply the buyer's real text instead
+/// of the lowercased, punctuation-stripped hash input that feeds the dedup fingerprint.
+///
+/// <para>The field list is deliberately the union of what the AUTOMATIC revision path
+/// preserves (<c>ApplyCurrentProjection</c> for the header, <c>CloneCurrentItem</c> for the
+/// lines). If a property is added there it must be added here, or the human path silently
+/// starts losing it again.</para>
+/// </summary>
+public sealed record VerbatimLeadSnapshot(
+    string? Rfqno,
+    string? BuyersName,
+    DateTime? RecDate,
+    DateTime? BidClosingDate,
+    string? HeaderRemarks,
+    int? NoOfLineItems,
+    string? Rfqtype,
+    IReadOnlyList<VerbatimLeadItemSnapshot> Items);
+
+public sealed record VerbatimLeadItemSnapshot(
+    string? CompanyRef,
+    string? CustomerAccountPortalId,
+    string? CustomerRfqno,
+    string? ItemMaterialCode,
+    string? CommodityProduct,
+    string? BuyerName,
+    string? LineItemNo,
+    string? ProductShortName,
+    string? Alternative,
+    string? ProductShortDescription,
+    string? Currency,
+    string? UnitOfMeasure,
+    decimal? UnitPrice,
+    int Quantity,
+    string? StorageLocation,
+    string? ManufacturerName,
+    string? ManufacturerPartNumber,
+    string? AlternateProductName,
+    string? AlternatePartNumber,
+    string? ItemText,
+    string? MaterialPotext,
+    int? LeadTime,
+    DateTime? ReceivedDate,
+    DateTime? BidClosingDateLine,
+    decimal? Aiconfidence,
+    string? ExtraFields);
+
 public sealed record LeadReconciliationResult(
     long LeadId,
     string NexoraSerial,

@@ -149,6 +149,12 @@ builder.Services.AddSingleton(malwareScannerSelection);
 builder.Services.AddSingleton<IMalwareScanner>(_ =>
     MalwareScannerFactory.Create(malwareScannerSelection, builder.Configuration));
 builder.Services.AddHostedService<MalwareScannerStartupProbe>();
+// FR-RFQ-02: OCR had never executed on a production job and nothing anywhere verified that the
+// native Tesseract/pdfium libraries bind in the deployed image — the first scanned tender in
+// front of a client would also have been the first test of them. This probe settles it at boot
+// and reports on /ready (Degraded, not Unhealthy: text documents are unaffected).
+builder.Services.AddSingleton<IOcrEngineHealth, OcrEngineHealth>();
+builder.Services.AddHostedService<OcrEngineStartupProbe>();
 builder.Services.AddSingleton<IFileInspectionService>(services =>
 {
     var options = builder.Configuration.GetSection("DocumentInspection:Limits")
@@ -173,6 +179,11 @@ builder.Services.AddSingleton<ERP_RFQ_Automation.HealthChecks.IQuoteDeliveryWork
 // health check below names any that stop.
 builder.Services.AddSingleton<ERP_RFQ_Automation.HealthChecks.IBackgroundWorkerHeartbeats,
     ERP_RFQ_Automation.HealthChecks.BackgroundWorkerHeartbeats>();
+// ING-08: mailbox CHANNEL health, distinct from poll-loop liveness above. The loop can be
+// perfectly alive while the mailbox refuses every authentication attempt — which is exactly
+// what happened from 2026-07-30 to 2026-08-06 with every surface green.
+builder.Services.AddSingleton<ERP_RFQ_Automation.HealthChecks.IEmailPollerHealth,
+    ERP_RFQ_Automation.HealthChecks.EmailPollerHealth>();
 builder.Services.AddHealthChecks()
     .AddCheck<ERP_RFQ_Automation.HealthChecks.DatabaseHealthCheck>("database", tags: new[] { "live", "ready" })
     .AddCheck<ERP_RFQ_Automation.HealthChecks.EvidenceStorageHealthCheck>("evidence-storage", tags: new[] { "ready" })
@@ -185,7 +196,11 @@ builder.Services.AddHealthChecks()
     .AddCheck<ERP_RFQ_Automation.HealthChecks.QuoteDeliveryWorkerHealthCheck>("quote-delivery-worker", tags: new[] { "ready" })
     .AddCheck<ProcurementDispatchHealthCheck>("procurement-dispatch-worker", tags: new[] { "ready" })
     .AddCheck<ERP_RFQ_Automation.HealthChecks.BackgroundWorkerHealthCheck>(
-        "background-workers", tags: new[] { "ready" });
+        "background-workers", tags: new[] { "ready" })
+    .AddCheck<ERP_RFQ_Automation.HealthChecks.EmailPollerHealthCheck>(
+        "email-poll-channel", tags: new[] { "ready" })
+    .AddCheck<ERP_RFQ_Automation.Security.DocumentInspection.OcrEngineHealthCheck>(
+        "ocr-engine", tags: new[] { "ready" });
 // Register repositories
 builder.Services.AddScoped<ISetupMasterRepository, SetupMasterRepository>();
 builder.Services.AddScoped<ICurrencyRepository, CurrencyRepository>();

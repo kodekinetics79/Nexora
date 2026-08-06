@@ -36,6 +36,14 @@ namespace ERP_RFQ_Automation.Notifications
         public SendGridOptions SendGrid { get; set; } = new();
 
         /// <summary>
+        /// Non-production containment for outbound mail. Defaults to Live (no containment), so
+        /// binding this section changes nothing for an existing deployment. See
+        /// <see cref="OutboundEmailGuardOptions"/> — set Mode to Redirect or AllowListOnly for
+        /// any rehearsal that runs against real supplier records.
+        /// </summary>
+        public OutboundEmailGuardOptions OutboundGuard { get; set; } = new();
+
+        /// <summary>
         /// True when the configured provider is "smtp" (case-insensitive).
         /// </summary>
         public bool IsSmtp => string.Equals(Provider, "smtp", System.StringComparison.OrdinalIgnoreCase);
@@ -69,6 +77,16 @@ namespace ERP_RFQ_Automation.Notifications
                 if (string.IsNullOrWhiteSpace(SendGrid.ApiKey))
                     warnings.Add("Notifications:Provider is 'sendgrid' but Notifications:SendGrid:ApiKey is empty. SendGrid sends will fail.");
             }
+
+            warnings.AddRange(OutboundGuard.Validate());
+
+            // The dangerous combination, stated plainly: a real transport with no containment.
+            // Non-fatal by design — this is exactly the production configuration — but it must
+            // never be the silent default of a rehearsal run.
+            if ((IsSmtp || IsSendGrid) && OutboundGuard.ResolvedMode == OutboundEmailMode.Live)
+                warnings.Add(
+                    $"Notifications:Provider is '{Provider}' with OutboundGuard:Mode=Live — mail will reach REAL recipients. " +
+                    "For any pilot or rehearsal set Notifications:OutboundGuard:Mode to Redirect or AllowListOnly.");
 
             return warnings;
         }

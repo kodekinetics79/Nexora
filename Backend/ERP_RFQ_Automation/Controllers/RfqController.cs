@@ -100,6 +100,63 @@ namespace ERP_RFQ_Automation.Controllers
             }
         }
 
+        /// <summary>
+        /// Records whether Nexora will quote one RFQ line.
+        ///
+        /// <para>A partial bid is the normal case: an 84-line SEC bid list routinely yields 12
+        /// quoted lines, the rest declined for stock, lead time or scope. Only lines explicitly
+        /// marked <c>Quote</c> reach a Customer Quote Draft, and a <c>NoQuote</c> requires a
+        /// reason — a silent decline is indistinguishable from an oversight when the buyer asks
+        /// why a line is missing from our quote.</para>
+        ///
+        /// <para>Gated on <c>RFQ Management:Edit</c>: deciding what we bid on is a commercial
+        /// act, not a view. The decision rules live in <c>Rfqitem.DecideParticipation</c> so
+        /// this endpoint cannot be the only thing enforcing them.</para>
+        /// </summary>
+        [HttpPost("{id}/lines/{lineId}/participation")]
+        [RequireModulePermission("RFQ Management", PermissionAction.Edit)]
+        public async Task<ActionResult> SetLineParticipation(
+            long id, long lineId, [FromBody] RfqLineParticipationRequestDTO request, CancellationToken ct)
+        {
+            if (request is null)
+                return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid request", "A decision is required."));
+            if (!TryGetAuthenticatedBusinessUnitId(out var businessUnitId))
+                return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid request", "Business Unit ID is required."));
+            var actor = User.FindFirst(ClaimTypes.Email)?.Value ?? User.Identity?.Name;
+            if (string.IsNullOrWhiteSpace(actor)) return Unauthorized();
+
+            // Tenant-scoped by the RFQ, and the line must belong to THAT RFQ — never trust a
+            // caller-supplied line id to be inside the RFQ they named.
+            var line = await _context.Rfqitems
+                .Include(item => item.Rfq)
+                .SingleOrDefaultAsync(item => item.Id == lineId
+                                              && item.Rfqid == id
+                                              && item.Rfq.BusinessUnitId == businessUnitId, ct);
+            if (line is null) return NotFound();
+
+            try
+            {
+                line.DecideParticipation(request.Decision, request.Reason, actor!, DateTime.UtcNow);
+                await _context.SaveChangesAsync(ct);
+                return Ok(new
+                {
+                    lineId = line.Id,
+                    participationDecision = line.ParticipationDecision,
+                    noQuoteReason = line.NoQuoteReason,
+                    participationDecidedBy = line.ParticipationDecidedBy,
+                    participationDecidedOn = line.ParticipationDecidedOn
+                });
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid decision", ex.Message));
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(Problem(StatusCodes.Status400BadRequest, "Decision refused", ex.Message));
+            }
+        }
+
         [HttpPost("{id}/prepare-quote-draft")]
         [RequireModulePermission("RFQ Management", PermissionAction.View)]
         [RequireModulePermission("Quotations", PermissionAction.Create)]

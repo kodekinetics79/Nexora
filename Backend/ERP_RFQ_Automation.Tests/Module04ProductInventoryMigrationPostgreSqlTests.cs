@@ -66,15 +66,25 @@ public sealed class Module04ProductInventoryMigrationPostgreSqlTests(PostgreSqlT
                 Id = 98_420, BusinessUnitId = 98_400, Lead = lead, Rfqno = "M04-RFQ",
                 RecDate = DateTime.UtcNow, CreatedBy = "tests", CreatedDate = DateTime.UtcNow,
             };
-            var rfqItem = new Rfqitem
-            {
-                Id = 98_421, Rfq = rfq, LineItemNo = "1", ProductId = 98_410,
-                ManufacturerPartNumber = "M04-PART", Quantity = 20,
-                CreatedBy = "tests", CreatedDate = DateTime.UtcNow,
-            };
             rfq.InheritCommercialIdentity(lead);
-            context.AddRange(revision, rfqItem);
+            context.AddRange(revision, rfq);
             await context.SaveChangesAsync();
+
+            // The RFQ LINE is inserted with raw SQL naming only the columns that exist at
+            // PreviousMigration, exactly as lead_line_commercial_resolutions is below.
+            //
+            // It used to be written through the EF model, which silently assumed that every
+            // column the CURRENT model knows about already exists at the pinned historical
+            // migration. That assumption breaks the moment anyone adds a column to RFQItems —
+            // the insert emits the new column and Postgres answers 42703. Naming the columns
+            // explicitly pins the test to the schema era it is actually rehearsing, so a future
+            // column addition can no longer fail a migration test that has nothing to do with it.
+            await context.Database.ExecuteSqlRawAsync("""
+                INSERT INTO public."RFQItems"
+                    ("ID", "RFQID", "LineItemNo", "ProductID", "ManufacturerPartNumber",
+                     "Quantity", "CreatedBy", "CreatedDate")
+                VALUES (98421, 98420, '1', 98410, 'M04-PART', 20, 'tests', now())
+                """);
 
             await context.Database.ExecuteSqlRawAsync("""
                 INSERT INTO public.lead_line_commercial_resolutions

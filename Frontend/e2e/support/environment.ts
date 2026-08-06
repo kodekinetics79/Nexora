@@ -56,3 +56,25 @@ export const fixture = {
 
 export const missingFixtureValues = (...entries: Array<[string, string | undefined]>): string[] =>
   entries.filter(([, value]) => !value).map(([name]) => name);
+
+/**
+ * Asserts that every named environment variable is present, and returns them typed.
+ *
+ * <p><b>Why this exists.</b> Four specs performed the same check at MODULE scope
+ * (`if (!password) throw …` beside the imports). Playwright evaluates every spec file to collect
+ * its tests, so one missing variable threw during collection and aborted discovery for the
+ * ENTIRE suite — `npx playwright test --list` reported `0 tests in 0 files`. The whole acceptance
+ * suite became invisible, and the discovered-test-count gate in `zero-skips-reporter.ts` could
+ * not fire either, because there was nothing to count.</p>
+ *
+ * <p>Discovery must never depend on runtime secrets. Called from inside a test body, this keeps
+ * the failure exactly as loud — the test fails with the same message naming the same variables —
+ * while leaving every other spec discoverable and runnable. It deliberately does NOT skip: a
+ * silently skipped acceptance test is the failure mode the zero-skips reporter exists to catch.</p>
+ */
+export const requireEnv = <K extends string>(context: string, ...names: K[]): Record<K, string> => {
+  const missing = names.filter((name) => !process.env[name]?.trim());
+  if (missing.length > 0)
+    throw new Error(`${context} requires these environment values: ${missing.join(', ')}.`);
+  return Object.fromEntries(names.map((name) => [name, process.env[name]!.trim()])) as Record<K, string>;
+};

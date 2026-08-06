@@ -1,16 +1,19 @@
 import { expect, test } from "@playwright/test";
 import { loginThroughUi } from "./support/login";
+import { requireEnv } from "./support/environment";
 
-const email = process.env.E2E_MANAGER_EMAIL;
-const password = process.env.E2E_MANAGER_PASSWORD;
-const businessUnitId = process.env.E2E_MANAGER_BUSINESS_UNIT_ID;
-const customerId = process.env.E2E_CUSTOMER_ID;
-
-if (!email || !password || !businessUnitId || !customerId || !/^\d+$/.test(customerId)) {
-  throw new Error("V2.5 live browser acceptance requires manager login and customer environment values.");
-}
+// Resolved inside the test, not at module scope — see requireEnv.
+const env = () => {
+  const values = requireEnv("V2.5 live browser acceptance", "E2E_MANAGER_EMAIL",
+    "E2E_MANAGER_PASSWORD", "E2E_MANAGER_BUSINESS_UNIT_ID", "E2E_CUSTOMER_ID");
+  if (!/^\d+$/.test(values.E2E_CUSTOMER_ID))
+    throw new Error("E2E_CUSTOMER_ID must be a numeric customer id.");
+  return values;
+};
 
 test("manager reviews real coaching and records a governed acknowledgement", async ({ page }) => {
+  const { E2E_MANAGER_EMAIL: email, E2E_MANAGER_PASSWORD: password,
+    E2E_MANAGER_BUSINESS_UNIT_ID: businessUnitId, E2E_CUSTOMER_ID: customerId } = env();
   const consoleErrors: string[] = [];
   page.on("console", (message) => { if (message.type() === "error") consoleErrors.push(message.text()); });
   await loginThroughUi(page, { email, password, businessUnitId });

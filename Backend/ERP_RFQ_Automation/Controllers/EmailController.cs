@@ -34,9 +34,38 @@ namespace ERP_RFQ_Automation.Controllers
                 if (businessUnitId.HasValue && businessUnitId.Value != claimBUId) return Forbid();
 
                 _logger.LogInformation("Manual email fetch requested for BU: {BU}", claimBUId);
-                await _emailService.FetchAndSaveLeadsAsync(claimBUId);
-                _logger.LogInformation("Manual email fetch completed successfully.");
-                return Ok("Email data fetched and inserted into the database successfully.");
+                // ING-08: the same lie lived here — a 200 with "fetched successfully" was
+                // returned even when every mailbox had refused authentication. The caller is
+                // told what actually happened.
+                var report = await _emailService.FetchAndSaveLeadsAsync(claimBUId);
+                if (report.AnyFailed)
+                {
+                    _logger.LogError("Manual email fetch failed for {Failed} of {Total} mailbox(es): {Reasons}",
+                        report.Failed, report.Polled, report.FailureSummary);
+                    return StatusCode(502, new
+                    {
+                        message = $"{report.Failed} of {report.Polled} mailbox(es) could not be polled. "
+                            + "No mail has been ingested from them.",
+                        reasons = report.Failures.Select(f => new
+                        {
+                            mailbox = f.EmailAddress,
+                            reason = f.FailureReason,
+                            lastSuccessfulPoll = f.LastSuccessfulPollOn
+                        })
+                    });
+                }
+                if (report.Polled == 0)
+                {
+                    _logger.LogWarning("Manual email fetch found no active IMAP mailbox for BU {BU}.", claimBUId);
+                    return Ok(new { message = "No active IMAP mailbox is configured, so no mail was fetched." });
+                }
+                _logger.LogInformation("Manual email fetch completed successfully for {Total} mailbox(es).", report.Polled);
+                return Ok(new
+                {
+                    message = "Email data fetched and inserted into the database successfully.",
+                    mailboxes = report.Polled,
+                    newMessages = report.Mailboxes.Sum(m => m.MessagesDownloaded)
+                });
             }
             catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
             {

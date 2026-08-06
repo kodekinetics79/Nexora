@@ -895,16 +895,39 @@ public sealed class LeadPersister : ILeadPersister
         {
             long? sourceDocumentId = null;
             string? logicalGroupKey = null;
+            // Document identity for FR-RFQ-06. The evidence ledger already holds the real
+            // detected MIME type and byte size of these exact bytes; both used to be passed as
+            // literal null, leaving the duplicate-detection signals empty on every occurrence.
+            string? detectedMimeType = null;
+            long? fileSize = null;
             if (_context.Model.FindEntityType(typeof(SourceDocument)) is not null)
             {
-                sourceDocumentId = await _context.Set<SourceDocument>()
+                var sourceDocument = await _context.Set<SourceDocument>()
                     .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.ContentHash == job.ContentHash)
-                    .Select(x => (long?)x.Id).SingleOrDefaultAsync(ct);
+                    .Select(x => new { x.Id, x.DetectedMimeType, x.ByteSize })
+                    .SingleOrDefaultAsync(ct);
+                sourceDocumentId = sourceDocument?.Id;
+                detectedMimeType = sourceDocument?.DetectedMimeType;
+                fileSize = sourceDocument?.ByteSize;
                 if (job.SourceDocumentOccurrenceId.HasValue)
                     logicalGroupKey = await _context.Set<SourceDocumentOccurrence>()
                         .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.Id == job.SourceDocumentOccurrenceId)
                         .Select(x => x.LogicalGroupKey).SingleOrDefaultAsync(ct);
             }
+            // Message identity for FR-RFQ-06. The mail door records the RFC-822 Message-Id on the
+            // EmailIngest row it creates and as the job's logical group key ("email:{Message-Id}").
+            // That id is a LOWER BOUND on thread identity: documents sharing it are provably from
+            // one message and therefore one thread, so it can only ever miss a relationship, never
+            // invent one. A reply carries its own Message-Id and will NOT match — real
+            // In-Reply-To/References threading needs the mail door to persist the header chain.
+            // Manual upload and watched folders have no mail message at all, so this stays null
+            // rather than carrying a manufactured identity that the scorer would read as evidence.
+            var emailThreadId = job.SourceType != ExtractionSourceType.Email
+                ? null
+                : metadata?.LogicalGroupKey is { Length: > 0 } messageGroupKey
+                    && messageGroupKey.StartsWith("email:", StringComparison.Ordinal)
+                    ? messageGroupKey
+                    : ingest?.MessageId is { Length: > 0 } messageId ? $"email:{messageId}" : null;
             var externalRequests = await _context.Set<ERP_RFQ_Automation.AI.AiRequest>()
                 .AsNoTracking()
                 .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.ExtractionJobId == job.Id
@@ -924,8 +947,8 @@ public sealed class LeadPersister : ILeadPersister
                         $"extraction:{job.BusinessUnitId}:{job.Id}:inquiry:{i + 1}",
                         results.Count > 1 && metadata?.SourceOccurrenceId is { } sourceOccurrenceId
                             ? $"{sourceOccurrenceId}:inquiry:{i + 1}" : metadata?.SourceOccurrenceId,
-                        null, job.SourceType.ToString(), metadata?.FromEmail,
-                        metadata?.Subject, job.FileName, null, null, job.ContentHash, sourceDocumentId, job.Id,
+                        Truncate(emailThreadId, 512), job.SourceType.ToString(), metadata?.FromEmail,
+                        metadata?.Subject, job.FileName, Truncate(detectedMimeType, 255), fileSize, job.ContentHash, sourceDocumentId, job.Id,
                         metadata?.SourceReceivedAtUtc, DateTimeOffset.UtcNow, path, path == ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.ExternalModel,
                         attributedExternalCost, "Service", "extraction-worker", $"extraction:{job.Id}")
                     {

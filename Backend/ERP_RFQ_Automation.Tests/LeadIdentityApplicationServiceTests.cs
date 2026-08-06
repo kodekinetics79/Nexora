@@ -402,6 +402,261 @@ public sealed class LeadIdentityApplicationServiceTests
         Assert.Empty(await context.Set<LeadMatchCandidate>().ToListAsync());
     }
 
+    [Fact]
+    public async Task Human_revision_decision_keeps_the_buyers_verbatim_values_and_drops_no_columns()
+    {
+        // The match snapshot is a HASH INPUT: normalised, five item properties out of twenty-two.
+        // Projecting it onto the canonical lead rewrote RFQ-2026/0012 as rfq20260012 and deleted
+        // UnitPrice, Currency, CustomerRfqno and six other columns on one operator click.
+        using var db = new TestDb();
+        await using var context = db.ContextFor(84);
+        Seed.BusinessUnit(context, 84); Seed.EmailConfig(context, 8401, 84); Seed.EmailIngest(context, 8501, 8401, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var original = VerbatimCandidate(84, 8501, "RFQ-2026/0012", "buyer@verbatim.test", buyer: "Buyer", quantity: 10);
+        var created = await service.ReconcileAsync(original,
+            Intake("verbatim-original", "verbatim-a", Guid.NewGuid(), "buyer@verbatim.test"));
+        Assert.Equal(LeadOccurrenceClassification.New, created.Classification);
+
+        context.ChangeTracker.Clear();
+        // Same customer reference, unresolved sender: a possible match for a human, not an
+        // automatic revision.
+        var amended = VerbatimCandidate(84, 8501, "RFQ-2026/0012", clientEmail: null, buyer: "John Smith", quantity: 25);
+        var review = await service.ReconcileAsync(amended,
+            Intake("verbatim-amendment", "verbatim-b", Guid.NewGuid(), sender: null));
+        Assert.Equal(LeadOccurrenceClassification.PossibleMatchReviewRequired, review.Classification);
+
+        context.ChangeTracker.Clear();
+        var match = Assert.Single(await context.Set<LeadMatchCandidate>()
+            .Where(x => x.OccurrenceId == review.OccurrenceId).ToListAsync());
+        Assert.False(string.IsNullOrWhiteSpace(match.ProposedLeadSnapshotJson));
+
+        context.ChangeTracker.Clear();
+        var decided = await service.DecideMatchAsync(84, review.OccurrenceId,
+            new MatchDecisionRequest("revision", match.CandidateLeadId, match.Version,
+                "Buyer confirmed the amendment.", "verbatim-decision-1"), "reviewer");
+        Assert.Equal(LeadOccurrenceClassification.Revision, decided.Classification);
+        Assert.Equal(created.LeadId, decided.LeadId);
+
+        context.ChangeTracker.Clear();
+        var canonical = await context.Leads.Include(x => x.LeadItems).SingleAsync(x => x.Id == created.LeadId);
+        Assert.Equal("RFQ-2026/0012", canonical.Rfqno);
+        Assert.Equal("John Smith", canonical.BuyersName);
+        var line = Assert.Single(canonical.LeadItems);
+        Assert.Equal("AB-123/X", line.ManufacturerPartNumber);
+        Assert.Equal("1/2\" SS Ball Valve, 300#", line.ProductShortDescription);
+        Assert.Equal(25, line.Quantity);
+        Assert.Equal(1234.56m, line.UnitPrice);
+        Assert.Equal("SAR", line.Currency);
+        Assert.Equal("CUST-REF/77", line.CustomerRfqno);
+        Assert.Equal("MAT-9/1", line.ItemMaterialCode);
+        Assert.Equal("Acme Valves", line.ManufacturerName);
+        Assert.Equal(14, line.LeadTime);
+        Assert.Equal(.91m, line.Aiconfidence);
+        Assert.Equal("EA", line.UnitOfMeasure);
+
+        // The new revision indexes the reference the amendment carries, not a superseded one.
+        var newest = await context.Set<LeadRevision>().Where(x => x.LeadId == created.LeadId)
+            .OrderByDescending(x => x.RevisionNumber).FirstAsync();
+        Assert.Equal("RFQ-2026/0012", newest.CustomerRfqReference);
+        Assert.Equal("rfq20260012", newest.NormalizedCustomerRfqReference);
+    }
+
+    [Fact]
+    public async Task Match_review_without_a_verbatim_snapshot_changes_nothing_on_the_canonical_lead()
+    {
+        // Candidates raised before the verbatim column existed carry only normalised hash text.
+        // Refusing to project is the honest outcome; projecting it destroys the buyer's values.
+        using var db = new TestDb();
+        await using var context = db.ContextFor(85);
+        Seed.BusinessUnit(context, 85); Seed.EmailConfig(context, 8501, 85); Seed.EmailIngest(context, 8601, 8501, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var created = await service.ReconcileAsync(
+            VerbatimCandidate(85, 8601, "RFQ-2026/0013", "buyer@legacy.test", buyer: "Buyer", quantity: 10),
+            Intake("legacy-original", "legacy-a", Guid.NewGuid(), "buyer@legacy.test"));
+        context.ChangeTracker.Clear();
+        var review = await service.ReconcileAsync(
+            VerbatimCandidate(85, 8601, "RFQ-2026/0013", clientEmail: null, buyer: "John Smith", quantity: 25),
+            Intake("legacy-amendment", "legacy-b", Guid.NewGuid(), sender: null));
+        Assert.Equal(LeadOccurrenceClassification.PossibleMatchReviewRequired, review.Classification);
+
+        var match = await context.Set<LeadMatchCandidate>().SingleAsync(x => x.OccurrenceId == review.OccurrenceId);
+        match.ProposedLeadSnapshotJson = null;
+        await context.SaveChangesAsync();
+        context.ChangeTracker.Clear();
+
+        var decided = await service.DecideMatchAsync(85, review.OccurrenceId,
+            new MatchDecisionRequest("revision", match.CandidateLeadId, match.Version,
+                "Confirmed.", "legacy-decision-1"), "reviewer");
+
+        Assert.Equal(LeadOccurrenceClassification.Revision, decided.Classification);
+        Assert.Contains(decided.Reasons, x => x.Contains("no commercial values were applied", StringComparison.Ordinal));
+        context.ChangeTracker.Clear();
+        var canonical = await context.Leads.Include(x => x.LeadItems).SingleAsync(x => x.Id == created.LeadId);
+        Assert.Equal("RFQ-2026/0013", canonical.Rfqno);
+        var line = Assert.Single(canonical.LeadItems);
+        Assert.Equal("AB-123/X", line.ManufacturerPartNumber);
+        Assert.Equal(10, line.Quantity);
+        Assert.Equal(1234.56m, line.UnitPrice);
+    }
+
+    [Fact]
+    public async Task Same_customer_and_reference_with_a_changed_quantity_versions_the_existing_rfq()
+    {
+        // FR-RFQ-05: an amendment is a VERSION of the existing RFQ, with a difference row and an
+        // audit event — never a second canonical lead with a second client-facing reference.
+        using var db = new TestDb();
+        await using var context = db.ContextFor(86);
+        Seed.BusinessUnit(context, 86); Seed.EmailConfig(context, 8601, 86); Seed.EmailIngest(context, 8701, 8601, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var created = await service.ReconcileAsync(Candidate(86, 8701, "RFQ-2026/0014", "buyer@version.test", 10),
+            Intake("version-original", "version-a", Guid.NewGuid(), "buyer@version.test"));
+        context.ChangeTracker.Clear();
+        var revision = await service.ReconcileAsync(Candidate(86, 8701, "RFQ-2026/0014", "buyer@version.test", 25),
+            Intake("version-amendment", "version-b", Guid.NewGuid(), "buyer@version.test"));
+
+        Assert.Equal(LeadOccurrenceClassification.Revision, revision.Classification);
+        Assert.Equal(created.LeadId, revision.LeadId);
+        Assert.Equal(created.NexoraSerial, revision.NexoraSerial);
+        Assert.Equal(2, revision.RevisionNumber);
+        Assert.Equal(1, await context.Leads.CountAsync());
+        Assert.Contains(await context.Set<LeadRevisionDifference>()
+                .Where(x => x.LeadRevisionId == revision.RevisionId).ToListAsync(),
+            x => x.Scope == "Line" && x.ChangeType == LeadRevisionChangeType.Modified);
+        Assert.True(await context.Set<LeadIdentityAuditEvent>()
+            .AnyAsync(x => x.LeadId == created.LeadId && x.EventType == "LEAD_REVISION_CREATED"));
+        Assert.Equal(25, (await context.Leads.Include(x => x.LeadItems)
+            .SingleAsync(x => x.Id == created.LeadId)).LeadItems.Single().Quantity);
+    }
+
+    [Fact]
+    public async Task Amended_reference_from_a_known_customer_versions_the_existing_rfq()
+    {
+        // The reported production failure: the buyer resends as "Rev B", both customer scopes
+        // resolve, similarity is 1.00 — and the match used to be discarded for a brand-new RFQ.
+        using var db = new TestDb();
+        await using var context = db.ContextFor(87);
+        Seed.BusinessUnit(context, 87); Seed.EmailConfig(context, 8701, 87); Seed.EmailIngest(context, 8801, 8701, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var created = await service.ReconcileAsync(Candidate(87, 8801, "RFQ-4471", "buyer@amend.test", 10),
+            Intake("amend-original", "amend-a", Guid.NewGuid(), "buyer@amend.test"));
+        context.ChangeTracker.Clear();
+        var revision = await service.ReconcileAsync(Candidate(87, 8801, "RFQ-4471 Rev B", "buyer@amend.test", 25),
+            Intake("amend-revb", "amend-b", Guid.NewGuid(), "buyer@amend.test"));
+
+        Assert.Equal(LeadOccurrenceClassification.Revision, revision.Classification);
+        Assert.Equal(created.LeadId, revision.LeadId);
+        Assert.Equal(created.NexoraSerial, revision.NexoraSerial);
+        Assert.Equal(2, revision.RevisionNumber);
+        Assert.Equal(1, await context.Leads.CountAsync());
+        Assert.True(await context.Set<LeadIdentityAuditEvent>()
+            .AnyAsync(x => x.LeadId == created.LeadId && x.EventType == "LEAD_REVISION_CREATED"));
+        var canonical = await context.Leads.Include(x => x.LeadItems).SingleAsync(x => x.Id == created.LeadId);
+        Assert.Equal("RFQ-4471 Rev B", canonical.Rfqno);
+        Assert.Equal(25, canonical.LeadItems.Single().Quantity);
+    }
+
+    [Fact]
+    public async Task Original_arriving_after_its_amendment_is_reviewed_rather_than_rolled_back()
+    {
+        // The two references are just as related in this direction, but applying the older
+        // document would silently revert the canonical record to superseded commercial values.
+        using var db = new TestDb();
+        await using var context = db.ContextFor(90);
+        Seed.BusinessUnit(context, 90); Seed.EmailConfig(context, 9001, 90); Seed.EmailIngest(context, 9101, 9001, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var created = await service.ReconcileAsync(Candidate(90, 9101, "RFQ-4471 Rev B", "buyer@order.test", 25),
+            Intake("order-amendment", "order-a", Guid.NewGuid(), "buyer@order.test"));
+        context.ChangeTracker.Clear();
+        var late = await service.ReconcileAsync(Candidate(90, 9101, "RFQ-4471", "buyer@order.test", 10),
+            Intake("order-original", "order-b", Guid.NewGuid(), "buyer@order.test"));
+
+        Assert.Equal(LeadOccurrenceClassification.PossibleMatchReviewRequired, late.Classification);
+        Assert.Equal(1, await context.Leads.CountAsync());
+        var canonical = await context.Leads.Include(x => x.LeadItems).SingleAsync(x => x.Id == created.LeadId);
+        Assert.Equal("RFQ-4471 Rev B", canonical.Rfqno);
+        Assert.Equal(25, canonical.LeadItems.Single().Quantity);
+    }
+
+    [Fact]
+    public async Task Known_customer_resend_without_a_reference_is_reviewed_not_silently_new()
+    {
+        // 12 of 47 production leads carry no RFQ reference at all. Same buyer, identical line
+        // identity, no reference to confirm it: a human decides. It must never mint a second RFQ.
+        using var db = new TestDb();
+        await using var context = db.ContextFor(88);
+        Seed.BusinessUnit(context, 88); Seed.EmailConfig(context, 8801, 88); Seed.EmailIngest(context, 8901, 8801, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var created = await service.ReconcileAsync(Candidate(88, 8901, "RFQ-9000", "buyer@absent.test", 10),
+            Intake("absent-original", "absent-a", Guid.NewGuid(), "buyer@absent.test"));
+        context.ChangeTracker.Clear();
+        var review = await service.ReconcileAsync(Candidate(88, 8901, null, "buyer@absent.test", 12),
+            Intake("absent-amendment", "absent-b", Guid.NewGuid(), "buyer@absent.test"));
+
+        Assert.Equal(LeadOccurrenceClassification.PossibleMatchReviewRequired, review.Classification);
+        Assert.Equal(0, review.LeadId);
+        Assert.Equal(1, await context.Leads.CountAsync());
+        var match = Assert.Single(await context.Set<LeadMatchCandidate>()
+            .Where(x => x.OccurrenceId == review.OccurrenceId).ToListAsync());
+        Assert.Equal(created.LeadId, match.CandidateLeadId);
+        Assert.Equal(LeadMatchReviewState.Pending, match.ReviewState);
+        Assert.True(await context.Set<LeadIdentityAuditEvent>()
+            .AnyAsync(x => x.OccurrenceId == review.OccurrenceId && x.EventType == "POSSIBLE_MATCH_RAISED"));
+    }
+
+    [Fact]
+    public async Task A_second_reference_from_the_same_buyer_stays_new_and_records_the_rejected_candidate()
+    {
+        // The buyer's own reference is an identity statement. Two references means two inquiries,
+        // however identical the commodity lines look — but the rejected candidate is named, so
+        // the decision is explainable rather than silent.
+        using var db = new TestDb();
+        await using var context = db.ContextFor(89);
+        Seed.BusinessUnit(context, 89); Seed.EmailConfig(context, 8901, 89); Seed.EmailIngest(context, 9001, 8901, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var created = await service.ReconcileAsync(Candidate(89, 9001, "RFQ-7001", "buyer@repeat.test", 10),
+            Intake("repeat-first", "repeat-a", Guid.NewGuid(), "buyer@repeat.test"));
+        context.ChangeTracker.Clear();
+        var second = await service.ReconcileAsync(Candidate(89, 9001, "RFQ-7002", "buyer@repeat.test", 10),
+            Intake("repeat-second", "repeat-b", Guid.NewGuid(), "buyer@repeat.test"));
+
+        Assert.Equal(LeadOccurrenceClassification.New, second.Classification);
+        Assert.NotEqual(created.LeadId, second.LeadId);
+        Assert.Equal(2, second.Reasons.Count);
+        Assert.Contains(second.Reasons, x => x.Contains(created.NexoraSerial, StringComparison.Ordinal)
+            && x.Contains("different inquiry", StringComparison.Ordinal));
+        Assert.Empty(await context.Set<LeadMatchCandidate>().ToListAsync());
+    }
+
+    /// <summary>A candidate carrying the commercial columns the human decision path used to drop.</summary>
+    private static Lead VerbatimCandidate(long bu, long ingestId, string? rfq, string? clientEmail, string? buyer, int quantity)
+    {
+        var lead = new Lead { Rfqno = rfq, BuyersName = buyer, RecDate = DateTime.UtcNow,
+            LeadSource = "ManualUpload", CreatedBy = "test", CreatedDate = DateTime.UtcNow, BusinessUnitId = bu,
+            EmailIngestsId = ingestId, Clientemail = clientEmail, RequiresCommercialReview = true };
+        lead.LeadItems.Add(new LeadItem
+        {
+            LineItemNo = "1", ManufacturerPartNumber = "AB-123/X",
+            ProductShortDescription = "1/2\" SS Ball Valve, 300#", Quantity = quantity, UnitOfMeasure = "EA",
+            UnitPrice = 1234.56m, Currency = "SAR", CustomerRfqno = "CUST-REF/77", ItemMaterialCode = "MAT-9/1",
+            ManufacturerName = "Acme Valves", LeadTime = 14, Aiconfidence = .91m
+        });
+        return lead;
+    }
+
     private static Lead Candidate(long bu, long ingestId, string? rfq, string? email, int quantity)
     {
         var lead = new Lead { Rfqno = rfq, BuyersName = email is null ? null : "Buyer", RecDate = DateTime.UtcNow,

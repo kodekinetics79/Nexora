@@ -76,6 +76,14 @@ public interface IExtractionQueue
     /// SchedulerTag. Uses <c>FOR UPDATE ... SKIP LOCKED</c> so concurrent workers never
     /// collide. Returns null when nothing is currently claimable. Increments Attempts
     /// and sets the lease.
+    /// <para>
+    /// Poison-pill isolation (R-REL-01): a job whose durable intake occurrence forbids the
+    /// transition to Leased is never selected, so it cannot head-of-line block other tenants'
+    /// work. It is not silently skipped either — the refusal is charged to the job's attempts
+    /// with a truthful <c>LastError</c>, and it dead-letters at MaxAttempts into the operator
+    /// dead-letter queue and the operations-readiness count. Recovering the job (which repairs
+    /// the intake link) returns it to Pending.
+    /// </para>
     /// </summary>
     Task<ExtractionJob?> ClaimAsync(string workerId, TimeSpan leaseDuration, int perTenantCap, CancellationToken ct = default);
 
