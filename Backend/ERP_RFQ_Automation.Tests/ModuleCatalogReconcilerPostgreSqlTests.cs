@@ -80,9 +80,9 @@ public sealed class ModuleCatalogReconcilerPostgreSqlTests(PostgreSqlTestDatabas
 
         await RunAsync();
 
-        // Reconciliation is insert-only. Reactivating a module an administrator switched off would
-        // silently restore an access path, and rewriting the description would overwrite
-        // platform-global reference data on the strength of a code comment.
+        // Reconciliation is insert-only, so both the administrator's flag and their wording stand.
+        // (IsActive does not itself gate access today — CheckPermissionAsync matches on module name
+        // alone — so this is about preserving administrator intent, not about closing a hole.)
         await using var context = database.ContextFor(null);
         var row = await context.Modules.AsNoTracking().SingleAsync(m => m.ModuleName == "Shipments");
         Assert.False(row.IsActive);

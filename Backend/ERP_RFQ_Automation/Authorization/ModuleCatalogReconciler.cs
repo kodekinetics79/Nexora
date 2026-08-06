@@ -20,12 +20,17 @@ public sealed record ModuleCatalogResult(int Inserted, int AlreadyPresent, IRead
 /// the catalogue — which the tests already demand.</para>
 ///
 /// <para><b>Insert-only, deliberately.</b> Rows that exist are left completely alone: not renamed,
-/// not re-described, not reactivated. <c>Module</c> is platform-global reference data whose Ids
-/// are foreign-keyed by every tenant's <c>RolePermissions</c>. An UPDATE here would rewrite
-/// reference data shared by every customer on the platform on the strength of a code comment, and
-/// reactivating a row an administrator deliberately deactivated would silently restore an access
-/// path. Nothing is ever deleted for the same reason — deleting a module cascades away the grants
-/// referencing it.</para>
+/// not re-described, not reactivated. <c>Module</c> is platform-global reference data whose Ids are
+/// foreign-keyed by every tenant's <c>RolePermissions</c>, so an UPDATE here rewrites data shared
+/// by every customer on the platform on the strength of a code comment — including any description
+/// a customer edited for their own operators. Nothing is ever deleted, because removing a module
+/// cascades away every grant referencing it.</para>
+///
+/// <para><b>Note on <c>IsActive</c>:</b> it is NOT consulted by
+/// <c>RolePermissionRepository.CheckPermissionAsync</c>, which matches on module NAME alone. So
+/// deactivating a module does not currently revoke anything, and this class not reactivating rows
+/// is about leaving administrator intent intact rather than about closing an access path. If
+/// <c>IsActive</c> is ever made to gate access, that is the moment to re-check this decision.</para>
 ///
 /// <para>Idempotent, so every boot after the first is a no-op. Failures are logged and swallowed:
 /// a transient database problem must not stop the API from starting, and the next boot retries.</para>
