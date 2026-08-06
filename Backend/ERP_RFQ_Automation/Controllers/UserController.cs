@@ -243,27 +243,11 @@ namespace ERP_RFQ_Automation.Controllers
                 if (request.IsActive != false && await SeatLimitDenialAsync(claimBUId) is { } seatDenial)
                     return seatDenial;
 
-                var user = new User
-                {
-                    FirstName = request.FirstName,
-                    MiddleName = request.MiddleName,
-                    LastName = request.LastName,
-                    Email = request.Email,
-                    PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.Password),
-                    ImageUrl = imagePath ?? request.ImageUrl ?? string.Empty,
-                    RoleId = request.RoleId,
-                    TeamId = request.TeamId,
-                    Timezone = request.Timezone,
-                    Region = request.Region,
-                    ManagerId = request.ManagerId,
-                    Buid = request.Buid,
-                    UserGroupId = request.UserGroupId,
-                    IsActive = request.IsActive ?? true,
-                    // RC-7: server-derived. `User.Identity?.Name` was always null (the tenant JWT
-                    // never set NameClaimType), so the client-supplied request.CreatedBy always won.
-                    CreatedBy = ActorContext.From(User).Stamp,
-                    CreatedOn = DateTime.UtcNow
-                };
+                // Hoisted deliberately: BCrypt mints a fresh random salt per call, so hashing
+                // inside the retriable delegate would burn a ~100ms KDF and change the stored
+                // hash on every attempt. The password is the same either way.
+                var passwordHash = BCrypt.Net.BCrypt.HashPassword(request.Password);
+                var createdBy = ActorContext.From(User).Stamp;
 
                 // The audit row and the user row commit together or not at all. The user's Id is
                 // only assigned by the INSERT, so the audit write has to follow it — the explicit
@@ -273,8 +257,39 @@ namespace ERP_RFQ_Automation.Controllers
                 // 'NpgsqlRetryingExecutionStrategy' does not support user-initiated transactions"
                 // at SAVE time — after BeginAtomicAsync's try/catch had already returned — so
                 // every single user creation returned a 500.
+                //
+                // The entity is constructed INSIDE the delegate because the delegate is RETRIABLE.
+                // Built outside, a first attempt that fails on a transient Npgsql fault leaves the
+                // instance tracked as Added; the retry re-adds the same instance against a change
+                // tracker that still holds it, which can insert the user twice. A fresh instance
+                // per attempt has no prior tracked state. Everything non-transactional — the image
+                // write and the KDF above — stays outside so it happens exactly once.
+                User? user = null;
                 await ExecuteAtomicAsync(async () =>
                 {
+                    user = new User
+                    {
+                        FirstName = request.FirstName,
+                        MiddleName = request.MiddleName,
+                        LastName = request.LastName,
+                        Email = request.Email,
+                        PasswordHash = passwordHash,
+                        ImageUrl = imagePath ?? request.ImageUrl ?? string.Empty,
+                        RoleId = request.RoleId,
+                        TeamId = request.TeamId,
+                        Timezone = request.Timezone,
+                        Region = request.Region,
+                        ManagerId = request.ManagerId,
+                        Buid = request.Buid,
+                        UserGroupId = request.UserGroupId,
+                        IsActive = request.IsActive ?? true,
+                        // RC-7: server-derived. `User.Identity?.Name` was always null (the tenant
+                        // JWT never set NameClaimType), so the client-supplied request.CreatedBy
+                        // always won.
+                        CreatedBy = createdBy,
+                        CreatedOn = DateTime.UtcNow
+                    };
+
                     await _repository.AddAsync(user);
                     await AuditAsync(IamAuditActions.UserCreated, user.Id, user.Email, after: new
                     {
@@ -286,8 +301,14 @@ namespace ERP_RFQ_Automation.Controllers
                     });
                 });
 
-                var response = MapToResponse(user);
-                return CreatedAtAction(nameof(GetById), new { id = user.Id, businessUnitId = user.Buid }, response);
+                // Non-null on every path where the transaction committed; the throw is unreachable
+                // in practice and exists so a future refactor that stops assigning cannot silently
+                // return a 201 for a user that was never written.
+                var created = user ?? throw new InvalidOperationException(
+                    "User creation committed without producing an entity.");
+
+                var response = MapToResponse(created);
+                return CreatedAtAction(nameof(GetById), new { id = created.Id, businessUnitId = created.Buid }, response);
             }
             catch (ArgumentException ex)
             {

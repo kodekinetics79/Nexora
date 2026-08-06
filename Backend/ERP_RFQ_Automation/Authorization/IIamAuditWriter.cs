@@ -96,6 +96,21 @@ namespace ERP_RFQ_Automation.Authorization
         ///
         /// <para>The whole unit must be retriable, which means the strategy has to own the
         /// transaction — hence this method rather than a fix at each call site.</para>
+        ///
+        /// <para><b>WARNING — <paramref name="work"/> MAY RUN MORE THAN ONCE.</b> That is the
+        /// point of a retrying strategy: on a transient fault the transaction is rolled back and
+        /// the delegate is invoked again. Two rules follow, and violating either reintroduces the
+        /// duplicate-write bug this method was added to avoid:</para>
+        /// <list type="number">
+        /// <item><description>Construct and <c>Add</c> entities INSIDE the delegate. An entity
+        /// built outside is still tracked as <c>Added</c> after a failed attempt; re-adding the
+        /// same instance on retry can insert the row twice.</description></item>
+        /// <item><description>Reset any accumulator the delegate mutates (counters, output lists)
+        /// on entry, and re-read any state it decides from — a retry that appends to totals from
+        /// the failed attempt reports numbers that never happened.</description></item>
+        /// </list>
+        /// <para>Non-transactional side effects — file writes, password hashing, outbound calls —
+        /// belong OUTSIDE the delegate so they happen exactly once.</para>
         /// </summary>
         Task ExecuteAtomicAsync(Func<Task> work, CancellationToken cancellationToken = default);
     }

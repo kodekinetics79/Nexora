@@ -132,25 +132,34 @@ namespace ERP_RFQ_Automation.Controllers
                         request.ModuleId, request.CanView, request.CanCreate, request.CanEdit, request.CanDelete, claimBUId))
                     return await DenyAsync(request.RoleId, request.ModuleId, "grant exceeds caller's own permissions");
 
-                var rolePermission = new RolePermission
-                {
-                    RoleId = request.RoleId,
-                    ModuleId = request.ModuleId,
-                    BusinessUnitId = request.BusinessUnitId,
-                    CanView = request.CanView,
-                    CanCreate = request.CanCreate,
-                    CanEdit = request.CanEdit,
-                    CanDelete = request.CanDelete,
-                    // RC-7: server-derived. `User.Identity?.Name` was always null on this token, so
-                    // the client-supplied request.CreatedBy always decided its own attribution.
-                    CreatedBy = ActorContext.From(User).Stamp,
-                    CreatedOn = DateTime.UtcNow
-                };
+                var createdBy = ActorContext.From(User).Stamp;
 
                 // Retry-safe: see IIamAuditWriter.ExecuteAtomicAsync. Opening the transaction
                 // directly made every permission grant fail with a 500 at save time.
+                //
+                // The entity is constructed INSIDE the delegate because the delegate is RETRIABLE.
+                // Built outside, a transient Npgsql fault on the first attempt leaves it tracked as
+                // Added and the retry re-adds the same instance, which can grant the permission
+                // twice. A fresh instance per attempt carries no prior tracked state.
+                RolePermission? rolePermission = null;
                 await ExecuteAtomicAsync(async () =>
                 {
+                    rolePermission = new RolePermission
+                    {
+                        RoleId = request.RoleId,
+                        ModuleId = request.ModuleId,
+                        BusinessUnitId = request.BusinessUnitId,
+                        CanView = request.CanView,
+                        CanCreate = request.CanCreate,
+                        CanEdit = request.CanEdit,
+                        CanDelete = request.CanDelete,
+                        // RC-7: server-derived. `User.Identity?.Name` was always null on this
+                        // token, so the client-supplied request.CreatedBy always decided its own
+                        // attribution.
+                        CreatedBy = createdBy,
+                        CreatedOn = DateTime.UtcNow
+                    };
+
                     await _repository.AddAsync(rolePermission);
                     if (_audit is not null)
                         await _audit.WriteAsync(User, new IamAuditEntry(
@@ -159,8 +168,11 @@ namespace ERP_RFQ_Automation.Controllers
                             After: Snapshot(rolePermission)));
                 });
 
-                var response = MapToResponse(rolePermission);
-                return CreatedAtAction(nameof(GetById), new { id = rolePermission.Id, businessUnitId = rolePermission.BusinessUnitId }, response);
+                var granted = rolePermission ?? throw new InvalidOperationException(
+                    "Permission grant committed without producing an entity.");
+
+                var response = MapToResponse(granted);
+                return CreatedAtAction(nameof(GetById), new { id = granted.Id, businessUnitId = granted.BusinessUnitId }, response);
             }
             catch (ArgumentException ex)
             {
