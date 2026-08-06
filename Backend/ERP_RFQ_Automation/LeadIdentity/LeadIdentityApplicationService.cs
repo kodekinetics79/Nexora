@@ -59,15 +59,33 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         var tx = _db.Database.CurrentTransaction!;
         if (_db.Database.IsNpgsql())
             await _db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock(hashtextextended({candidate.BusinessUnitId + ":" + (scope is not null && normalizedRfq is not null ? scope + ":" + normalizedRfq : intake.ExternalSourceId ?? intake.ContentHash ?? fingerprint)}, 0))", ct);
-        if (intake.ExternalAiUsed)
-        {
-            var recent = await _db.Set<LeadIngestionOccurrence>().AsNoTracking()
-                .Where(x => x.BusinessUnitId == candidate.BusinessUnitId)
-                .OrderByDescending(x => x.Id).Take(100)
-                .Select(x => x.ExternalAiUsed).ToListAsync(ct);
-            if ((recent.Count(x => x) + 1m) / (recent.Count + 1m) > .10m)
-                throw new InvalidOperationException("External AI dependency policy would exceed 10%; route this occurrence to human review.");
-        }
+        // THE EXTERNAL-DEPENDENCY CEILING IS NOT ENFORCED HERE — DELIBERATELY.
+        //
+        // This used to re-implement it: last 100 occurrences, hardcoded .10m, throw on
+        // breach. Three things were wrong with that, and together they cost 1,133 paid,
+        // successful AI calls that produced zero leads on 2026-08-06.
+        //
+        // 1. WRONG PLACE. A ceiling on external egress is a decision about whether to
+        //    MAKE a call. AiGovernanceService.ReserveAsync makes it, before the call,
+        //    and every AI request in this product goes through that reserve/attempt/
+        //    settle ledger. By the time control reaches here the call has been
+        //    authorized, made, paid for and has returned. Refusing to persist the result
+        //    does not prevent the egress that already happened — it only destroys the
+        //    work, and guarantees the retry does the same thing again.
+        // 2. WRONG NUMBER. It used a literal .10m while the tenant's configured
+        //    AiProcessingPolicy.ExternalDependencyCeilingPercent sat in the Trust Center
+        //    being ignored — the same defect already fixed in AiGovernanceService.
+        // 3. NO EXEMPTION. AiGovernanceService exempts endpoints the tenant explicitly
+        //    authorized through the allow-list, precisely because "on a deployment with
+        //    no local model the ratio is always 100%". This copy never got that fix, so
+        //    on THIS deployment it refused every document after roughly the tenth.
+        //
+        // Its message also promised "route this occurrence to human review" while
+        // throwing — which dead-letters the document instead of routing it anywhere.
+        //
+        // ExternalAiUsed is still recorded on the occurrence below for audit and for the
+        // Trust Center's dependency reporting. Enforcement stays where it can act:
+        // AiGovernanceService, before egress.
 
         var replay = await _db.Set<LeadIngestionOccurrence>().AsNoTracking()
             .Where(x => x.BusinessUnitId == candidate.BusinessUnitId && x.IdempotencyKey == intake.IdempotencyKey)
