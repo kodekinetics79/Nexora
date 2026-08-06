@@ -36,9 +36,33 @@ public sealed class LeadIngestionBatch
     public ICollection<LeadIngestionOccurrence> Occurrences { get; } = new List<LeadIngestionOccurrence>();
 }
 
+/// <summary>
+/// What a <see cref="LeadIngestionOccurrence"/> row actually records.
+///
+/// <para>A revision cannot exist without an occurrence — <c>EstablishedByOccurrenceId</c> is NOT
+/// NULL. So establishing an identity baseline for a lead that never had one must mint an
+/// occurrence row, and that row describes no received document. Without a discriminator every
+/// analytics reader counts it as a real inbound document: ingestion volume, leads-received, the
+/// touchless-decision KPI on the auditor-facing screen, and the extraction-accuracy ground
+/// truth all move. This column is what keeps a baseline from masquerading as an arrival.</para>
+/// </summary>
+public enum LeadOccurrenceRecordKind
+{
+    /// <summary>A document really arrived through a channel. Everything counts this.</summary>
+    Ingestion = 0,
+
+    /// <summary>Canonical identity established from a lead's stored commercial facts. Records
+    /// CONTENT, not arrival: no receipt time, no content hash, no sender, no document.</summary>
+    IdentityBaseline = 1
+}
+
 public sealed class LeadIngestionOccurrence
 {
     public long Id { get; set; }
+
+    /// <summary>Ingestion vs identity baseline — see <see cref="LeadOccurrenceRecordKind"/>.
+    /// Provenance-immutable: the update guard refuses to change it.</summary>
+    public LeadOccurrenceRecordKind RecordKind { get; set; } = LeadOccurrenceRecordKind.Ingestion;
     public long BusinessUnitId { get; set; }
     public Guid BatchId { get; set; }
     public long? LeadId { get; set; }

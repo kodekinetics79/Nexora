@@ -17,10 +17,14 @@ namespace ERP_RFQ_Automation.Services
         private readonly ErpRfqAutomationContext _context;
         private readonly ILogger<LeadUploaderService> _logger;
 
-        public LeadUploaderService(ErpRfqAutomationContext context, ILogger<LeadUploaderService> logger)
+        private readonly ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService _identity;
+
+        public LeadUploaderService(ErpRfqAutomationContext context, ILogger<LeadUploaderService> logger,
+            ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService identity)
         {
             _context = context;
             _logger = logger;
+            _identity = identity;
         }
 
         public async Task<byte[]> GenerateTemplateAsync(long businessUnitId)
@@ -177,6 +181,7 @@ namespace ERP_RFQ_Automation.Services
                 }
 
                 int leadCount = 0;
+                var importedLeadIds = new List<long>();
                 int itemViewCount = 0;
 
                 // The batch ingest was stamped "Success" at creation, BEFORE any row was
@@ -203,6 +208,7 @@ namespace ERP_RFQ_Automation.Services
                         lead.RequiresCommercialReview = true;
                     _context.Leads.Add(lead);
                     await _context.SaveChangesAsync(); // Save to get Lead.Id
+                    importedLeadIds.Add(lead.Id);
 
                     foreach (var item in entry.Items)
                     {
@@ -214,6 +220,21 @@ namespace ERP_RFQ_Automation.Services
                 }
 
                 await _context.SaveChangesAsync();
+
+                // Canonical identity for every imported lead, in the SAME transaction.
+                //
+                // This door used to add Leads directly and never call the identity service, so
+                // every bulk-imported lead was born with line items and NO revision — and was
+                // therefore permanently unconvertible to an RFQ. Run after the final
+                // SaveChangesAsync so revision 1 records the lines.
+                foreach (var importedLeadId in importedLeadIds)
+                    await _identity.EstablishBaselineRevisionAsync(businessUnitId, importedLeadId,
+                        new ERP_RFQ_Automation.LeadIdentity.LeadIdentityBaselineRequest(
+                            "BulkUpload",
+                            "Bulk lead import: commercial facts were supplied in the uploaded workbook. "
+                            + "Canonical identity established at creation.",
+                            "User", "System", $"bulk-upload:{businessUnitId}:{importedLeadId}"));
+
                 await transaction.CommitAsync();
 
                 return ServiceResult<string>.CreateSuccess($"{leadCount} leads and {itemViewCount} items imported successfully.");

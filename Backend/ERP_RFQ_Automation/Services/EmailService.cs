@@ -1054,7 +1054,27 @@ namespace ERP_RFQ_Automation.Services
                     }
                     if (items.Count > 0)
                         await context.SaveChangesAsync();
-                    
+
+                    // Canonical identity, in the SAME transaction as the lead and its lines.
+                    //
+                    // This door used to add a Lead directly and never call the identity service,
+                    // so every emailed lead was born with line items and NO revision — and was
+                    // therefore permanently unconvertible to an RFQ, because commercial line
+                    // resolution refuses a lead with no immutable current revision.
+                    //
+                    // Constructed on the SAME `context` this method was handed, so it enlists in
+                    // this transaction. The service takes only the DbContext, so this is
+                    // behaviourally identical to resolving it from the owning scope — and it
+                    // avoids changing the constructor for three existing test construction sites
+                    // without making the wiring any more correct.
+                    await new ERP_RFQ_Automation.LeadIdentity.LeadIdentityApplicationService(context)
+                        .EstablishBaselineRevisionAsync(config.BusinessUnitId, lead.Id,
+                            new ERP_RFQ_Automation.LeadIdentity.LeadIdentityBaselineRequest(
+                                "Email",
+                                "Inbound email: commercial facts were extracted from the message and its "
+                                + "attachments. Canonical identity established at creation.",
+                                "Service", "email-poller", $"email-lead:{config.BusinessUnitId}:{lead.Id}"));
+
                     // Save attachments. Anything storage refuses is appended to the SAME durable
                     // skip record, so the ingest carries one complete list.
                     var storageSkips = await SaveAttachmentsAsync(message, lead.Id, context);

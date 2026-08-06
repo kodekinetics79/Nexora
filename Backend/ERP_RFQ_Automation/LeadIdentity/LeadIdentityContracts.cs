@@ -2,6 +2,21 @@ using ERP_RFQ_Automation.Models;
 
 namespace ERP_RFQ_Automation.LeadIdentity;
 
+/// <summary>
+/// Request to establish canonical identity for a Lead that has none.
+///
+/// <para><b>The type is the guarantee.</b> There is deliberately no field for a content hash,
+/// file name, MIME type, sender, subject or receipt time — so a baseline cannot assert that a
+/// document arrived, because the caller has no way to say it did. It records the lead's own
+/// stored commercial facts and nothing else.</para>
+/// </summary>
+public sealed record LeadIdentityBaselineRequest(
+    string SourceChannel,
+    string Reason,
+    string ActorType,
+    string ActorId,
+    string CorrelationId);
+
 public sealed record LeadIntakeDescriptor(
     Guid BatchId,
     string SourceChannel,

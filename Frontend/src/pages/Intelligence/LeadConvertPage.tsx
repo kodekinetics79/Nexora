@@ -139,6 +139,10 @@ const LeadConvertPage: React.FC = () => {
         presentableErrorMessage(err, "Couldn't create the RFQ. Nothing was changed — please try again."),
         { variant: 'error' },
       );
+      // A refusal usually means the page is looking at stale facts (someone moved the lead, or
+      // flagged it) — re-read them so the reason is also on the page, not only in a snackbar.
+      void queryClient.invalidateQueries({ queryKey: ['lifecycle', 'leads', leadId] });
+      void queryClient.invalidateQueries({ queryKey: ['lead-detail', leadId] });
     },
   });
 

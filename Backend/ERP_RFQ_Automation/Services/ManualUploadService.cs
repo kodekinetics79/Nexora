@@ -52,6 +52,8 @@ namespace ERP_RFQ_Automation.Services
         private readonly bool _useUnifiedQueue;
         private readonly ERP_RFQ_Automation.Extraction.IDocumentIngestion? _ingestion;
 
+        private readonly ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService _identity;
+
         public ManualUploadService(
             ErpRfqAutomationContext context,
             IWebHostEnvironment env,
@@ -59,8 +61,13 @@ namespace ERP_RFQ_Automation.Services
             ILLMService llmService,
             IConfiguration configuration,
             IFileStorage storage,
+            ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService identity,
             ERP_RFQ_Automation.Extraction.IDocumentIngestion? ingestion = null)
         {
+            // Required, not optional-with-null: an optional collaborator is always supplied in
+            // production and always absent in tests, which is exactly how a step that must always
+            // run becomes a step nothing ever exercises.
+            _identity = identity;
             _context = context;
             _env = env;
             _logger = logger;
@@ -357,6 +364,21 @@ namespace ERP_RFQ_Automation.Services
 
                     if (items.Count > 0)
                         await _context.SaveChangesAsync();
+
+                    // Canonical identity, in the SAME transaction as the lead and its lines.
+                    //
+                    // This door used to create a Lead with _context.Leads.Add and never touch the
+                    // identity service, so the lead was born with line items and NO revision.
+                    // Everything that needs the immutable revision then refused it — commercial
+                    // line resolution throws, which fails RFQ conversion outright. A lead uploaded
+                    // through this screen could never be converted. Called after the lines are
+                    // saved so revision 1 records them.
+                    await _identity.EstablishBaselineRevisionAsync(businessUnitId, lead.Id,
+                        new ERP_RFQ_Automation.LeadIdentity.LeadIdentityBaselineRequest(
+                            "ManualUpload",
+                            "Manual upload: commercial facts were extracted from the uploaded file. "
+                            + "Canonical identity established at creation.",
+                            "User", lead.CreatedBy ?? "System", $"manual-upload:{businessUnitId}:{lead.Id}"));
 
                     await SaveAttachmentsAsync(files, lead.Id);
 

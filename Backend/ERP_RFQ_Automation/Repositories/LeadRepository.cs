@@ -1347,7 +1347,12 @@ namespace ERP_RFQ_Automation.Repositories
             // has a handful of ingestion occurrences at most, so the sort is free.
             var occurrences = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadIngestionOccurrence>()
                 .AsNoTracking()
-                .Where(x => x.BusinessUnitId == businessUnitId && x.LeadId == lead.Id)
+                // Identity baselines are excluded: a baseline is always the NEWEST occurrence on
+                // the lead, so without this filter it would win the OrderByDescending below and
+                // relabel this corpus entry's ExtractionPath as Deterministic — moving a
+                // published extraction-accuracy bound onto a pipeline that never ran.
+                .Where(x => x.BusinessUnitId == businessUnitId && x.LeadId == lead.Id
+                            && x.RecordKind == ERP_RFQ_Automation.LeadIdentity.LeadOccurrenceRecordKind.Ingestion)
                 .Select(x => new { x.IngestedAtUtc, x.ProcessingPath })
                 .ToListAsync();
             var path = occurrences

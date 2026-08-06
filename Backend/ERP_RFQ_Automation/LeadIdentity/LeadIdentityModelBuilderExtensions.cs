@@ -25,6 +25,7 @@ public static class LeadIdentityModelBuilderExtensions
             e.Property(x => x.Subject).HasMaxLength(1000); e.Property(x => x.OriginalFileName).HasMaxLength(512);
             e.Property(x => x.MimeType).HasMaxLength(255); e.Property(x => x.ContentHash).HasMaxLength(64).IsFixedLength();
             e.Property(x => x.CustomerScopeKey).HasMaxLength(256); e.Property(x => x.LogicalInquiryFingerprint).HasMaxLength(64).IsFixedLength();
+            e.Property(x => x.RecordKind).HasConversion<string>().HasMaxLength(32);
             e.Property(x => x.Classification).HasConversion<string>().HasMaxLength(48);
             e.Property(x => x.ProcessingPath).HasConversion<string>().HasMaxLength(32);
             e.Property(x => x.Confidence).HasPrecision(6, 5); e.Property(x => x.ExternalCost).HasPrecision(18, 6);
@@ -36,6 +37,8 @@ public static class LeadIdentityModelBuilderExtensions
             e.HasIndex(x => new { x.BusinessUnitId, x.LogicalInquiryFingerprint });
             e.HasIndex(x => new { x.BusinessUnitId, x.Classification, x.CreatedAtUtc });
             e.HasIndex(x => new { x.BusinessUnitId, x.SourceDocumentOccurrenceId });
+            // The three analytics readers all filter on RecordKind before windowing.
+            e.HasIndex(x => new { x.BusinessUnitId, x.RecordKind });
             e.HasOne(x => x.Batch).WithMany(x => x.Occurrences).HasForeignKey(x => new { x.BusinessUnitId, x.BatchId }).HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
             e.HasOne(x => x.Lead).WithMany(x => x.IngestionOccurrences).HasForeignKey(x => new { x.BusinessUnitId, x.LeadId }).HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
         });

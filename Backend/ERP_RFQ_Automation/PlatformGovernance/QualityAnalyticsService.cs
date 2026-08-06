@@ -41,8 +41,12 @@ public sealed class QualityAnalyticsService(ErpRfqAutomationContext db)
             where occurrence.BusinessUnitId == tenantId && occurrence.ReceivedOn >= fromDate
                 && occurrence.ReceivedOn <= toDate
             select new { Occurrence = occurrence, Document = document }).ToListAsync(ct);
+        // Identity baselines are excluded: they are always ProcessingPath.Deterministic, so
+        // counting them would inflate the touchless-decision rate published on this
+        // auditor-facing screen with decisions no pipeline actually made.
         var leadPaths = await db.Set<LeadIngestionOccurrence>().AsNoTracking()
-            .Where(x => x.BusinessUnitId == tenantId && x.IngestedAtUtc >= fromDate && x.IngestedAtUtc <= toDate)
+            .Where(x => x.BusinessUnitId == tenantId && x.IngestedAtUtc >= fromDate && x.IngestedAtUtc <= toDate
+                        && x.RecordKind == LeadOccurrenceRecordKind.Ingestion)
             .Select(x => new { x.SourceDocumentOccurrenceId, x.ProcessingPath, x.ExternalAiUsed })
             .ToListAsync(ct);
         var leadPathByOccurrence = leadPaths.Where(x => x.SourceDocumentOccurrenceId.HasValue)

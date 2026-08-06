@@ -35,23 +35,34 @@ public sealed class Module04ProductInventoryMigrationPostgreSqlTests(PostgreSqlT
                 IsActive = true, CreatedBy = "tests", CreatedOn = DateTime.UtcNow,
             });
             await context.SaveChangesAsync();
-            var batch = new LeadIngestionBatch
-            {
-                Id = Guid.NewGuid(), BusinessUnitId = 98_400, SourceChannel = "Test",
-                CreatedBy = "tests", CreatedAtUtc = DateTimeOffset.UtcNow, UpdatedAtUtc = DateTimeOffset.UtcNow,
-            };
-            var occurrence = new LeadIngestionOccurrence
-            {
-                BusinessUnitId = 98_400, Batch = batch, SourceChannel = "Test",
-                IdempotencyKey = "module04-occurrence", LogicalInquiryFingerprint = new string('a', 64),
-                Classification = LeadOccurrenceClassification.New, ProcessingPath = LeadProcessingPath.Deterministic,
-                IngestedAtUtc = DateTimeOffset.UtcNow, CreatedAtUtc = DateTimeOffset.UtcNow,
-                ActorId = "tests", CorrelationId = "module04-migration",
-            };
+            // Batch and occurrence are inserted with raw SQL naming only the columns that exist
+            // at PreviousMigration — same reason as the RFQ line below. Writing them through the
+            // EF model emits every column the CURRENT model knows about, so adding any column to
+            // LeadIngestionOccurrences (e.g. RecordKind) breaks a migration test that has nothing
+            // to do with it, with a bare 42703.
+            var batchId = Guid.NewGuid();
+            var fingerprintA = new string('a', 64);
+            await context.Database.ExecuteSqlInterpolatedAsync($"""
+                INSERT INTO "LeadIngestionBatches"
+                    ("Id","BusinessUnitId","SourceChannel","CreatedBy","CreatedAtUtc","UpdatedAtUtc","Version")
+                VALUES ({batchId},98400,'Test','tests',now(),now(),1)
+                """);
+            await context.Database.ExecuteSqlInterpolatedAsync($"""
+                INSERT INTO "LeadIngestionOccurrences"
+                    ("BusinessUnitId","BatchId","SourceChannel","IdempotencyKey","LogicalInquiryFingerprint",
+                     "Classification","Confidence","DecisionReasonsJson","PolicyVersion","ProcessingPath",
+                     "ExternalAiUsed","IngestedAtUtc","CreatedAtUtc","ActorType","ActorId","CorrelationId","Version")
+                VALUES (98400,{batchId},'Test','module04-occurrence',{fingerprintA},
+                        'New',1,'[]','release-01a/v1','Deterministic',
+                        false,now(),now(),'Service','tests','module04-migration',1)
+                """);
+            var occurrenceId = (await context.Database.SqlQueryRaw<long>(
+                """SELECT "Id" AS "Value" FROM "LeadIngestionOccurrences" WHERE "IdempotencyKey" = 'module04-occurrence'""").ToListAsync()).Single();
+
             var revision = new LeadRevision
             {
                 BusinessUnitId = 98_400, Lead = lead, RevisionNumber = 1,
-                EstablishedByOccurrence = occurrence, LogicalInquiryFingerprint = new string('b', 64),
+                EstablishedByOccurrenceId = occurrenceId, LogicalInquiryFingerprint = new string('b', 64),
                 SnapshotJson = "{}", CreatedAtUtc = DateTimeOffset.UtcNow, CreatedBy = "tests",
                 ProcessingPath = LeadProcessingPath.Deterministic,
             };

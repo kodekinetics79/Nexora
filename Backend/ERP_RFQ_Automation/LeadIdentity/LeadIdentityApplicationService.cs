@@ -21,11 +21,17 @@ public interface ILeadIdentityApplicationService
     Task<IReadOnlyList<LeadRevisionDto>> GetRevisionsAsync(long businessUnitId, long leadId, CancellationToken ct = default);
     Task<LeadReconciliationResult> DecideMatchAsync(long businessUnitId, long occurrenceId, MatchDecisionRequest request, string actorId, CancellationToken ct = default);
     Task<LeadIdentityAnalyticsDto> GetAnalyticsAsync(long businessUnitId, DateTimeOffset from, DateTimeOffset to, CancellationToken ct = default);
+
+    /// <summary>Gives a Lead that has no canonical identity its revision 1, from its own stored
+    /// commercial facts. Safe to call unconditionally — a lead that already has one is untouched.</summary>
+    Task<LeadReconciliationResult> EstablishBaselineRevisionAsync(
+        long businessUnitId, long leadId, LeadIdentityBaselineRequest request, CancellationToken ct = default);
 }
 
 public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationService
 {
     private const string PolicyVersion = "release-01a/v1";
+    private const string BaselinePolicyVersion = "release-01a/baseline-v1";
     private static readonly Regex NonWord = new("[^a-z0-9]+", RegexOptions.Compiled);
     private readonly ErpRfqAutomationContext _db;
     private readonly ICommercialRoutingApplicationService? _routing;
@@ -610,7 +616,12 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         if (to <= from) throw new ArgumentException("The analytics window must have a positive duration.");
         var windowStart = from;
         var asOf = DateTimeOffset.UtcNow;
-        var source = _db.Set<LeadIngestionOccurrence>().AsNoTracking().Where(x => x.BusinessUnitId == bu);
+        // Identity baselines are excluded at the SOURCE, so every branch below inherits it:
+        // ingestion-volume, leads-received and the rate denominators all read from this query. A
+        // baseline records content, not arrival, and counting it as a received document would
+        // inflate every published ingestion number.
+        var source = _db.Set<LeadIngestionOccurrence>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == bu && x.RecordKind == LeadOccurrenceRecordKind.Ingestion);
         var hasDurableIntake = _db.Model.FindEntityType(typeof(ERP_RFQ_Automation.DocumentIntelligence.Persistence.SourceDocumentOccurrence)) is not null;
         long[] intakeOccurrenceIds;
         List<LeadIngestionOccurrence> rows;
@@ -812,6 +823,184 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         if (_routing is null || !leadId.HasValue) return;
         await _routing.RouteLeadAsync(bu, new RouteLeadCommand(leadId.Value, $"match-review:{Hash(idempotencyKey)}",
             $"match-review:{leadId.Value}"), ct);
+    }
+
+    // ================================================================ Identity baseline
+
+    /// <summary>
+    /// Establishes canonical identity (revision 1) for a Lead that has none, from the lead's OWN
+    /// stored lines and header.
+    ///
+    /// <para><b>Why this exists.</b> Three ingestion doors — ManualUploadService, EmailService and
+    /// LeadUploaderService — create a Lead with <c>_context.Leads.Add(lead)</c> and never call
+    /// <see cref="ReconcileAsync"/>. Those leads have line items but no revision, and every read
+    /// path that needs the immutable revision refuses them: commercial line resolution throws
+    /// "The lead has no immutable current revision", which fails RFQ conversion outright. A lead
+    /// uploaded today is born unconvertible. This is the writer those doors call.</para>
+    ///
+    /// <para><b>What it deliberately does NOT do.</b> It never calls
+    /// <c>ApplyCurrentProjection</c> (which deletes and recreates LeadItems, churning ids that
+    /// other tables reference), never adds impacts or diffs, and never adds a candidate Lead. It
+    /// writes one occurrence, one revision, one audit row, and points the lead at it.</para>
+    ///
+    /// <para><b>Honesty.</b> The occurrence it must mint (a revision cannot exist without one —
+    /// EstablishedByOccurrenceId is NOT NULL) records CONTENT, not arrival. Every document field
+    /// is null, <c>SourceReceivedAtUtc</c> is null, and it is marked
+    /// <see cref="LeadOccurrenceRecordKind.IdentityBaseline"/> so the analytics readers exclude
+    /// it from ingestion volume, leads-received, the touchless KPI and the extraction corpus.
+    /// The fingerprint is the real SHA-256 from <see cref="Fingerprint(Lead)"/> over real lines —
+    /// not a synthesised value.</para>
+    /// </summary>
+    public Task<LeadReconciliationResult> EstablishBaselineRevisionAsync(
+        long businessUnitId, long leadId, LeadIdentityBaselineRequest request, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (_db.Database.CurrentTransaction is not null || !_db.Database.IsRelational())
+            return EstablishBaselineCoreAsync(businessUnitId, leadId, request, ct);
+        return _db.Database.CreateExecutionStrategy().ExecuteAsync(
+            () => EstablishBaselineCoreAsync(businessUnitId, leadId, request, ct));
+    }
+
+    private async Task<LeadReconciliationResult> EstablishBaselineCoreAsync(
+        long businessUnitId, long leadId, LeadIdentityBaselineRequest request, CancellationToken ct)
+    {
+        if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
+
+        // An owned transaction when none is ambient — pg_advisory_xact_lock is transaction-scoped,
+        // so without this the lock would be taken and released by a single autocommit statement
+        // and protect nothing.
+        var ownsTransaction = _db.Database.CurrentTransaction is null;
+        await using var ownedTransaction = ownsTransaction
+            ? await _db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, ct)
+            : null;
+        if (_db.Database.IsNpgsql())
+            await _db.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT pg_advisory_xact_lock(hashtextextended({$"lead-identity-baseline:{businessUnitId}:{leadId}"}, 0))", ct);
+
+        var lead = await _db.Leads.Include(x => x.LeadItems)
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == leadId, ct)
+            ?? throw new KeyNotFoundException($"Lead {leadId} was not found in business unit {businessUnitId}.");
+
+        // Already has identity — no writes at all. This is what makes the call safe to make
+        // unconditionally from every door and from the backlog sweeper.
+        if (lead.CurrentRevisionId.HasValue)
+        {
+            if (ownedTransaction is not null) await ownedTransaction.CommitAsync(ct);
+            return new LeadReconciliationResult(lead.Id, lead.CommercialCaseReference ?? string.Empty, 0,
+                lead.CurrentRevisionId, lead.CurrentRevisionNumber, LeadOccurrenceClassification.New, 1m,
+                new[] { "Lead already carries a canonical revision." }, ShouldRoute: false);
+        }
+
+        // Pointer repair: a revision exists but the Lead does not point at it. Repair the pointer
+        // rather than minting a second revision, and audit against the EXISTING occurrence —
+        // LeadIdentityAuditEvent.OccurrenceId is non-nullable, so a synthetic 0 would be silently
+        // written into an append-only ledger.
+        var orphan = await _db.Set<LeadRevision>()
+            .Where(x => x.BusinessUnitId == businessUnitId && x.LeadId == leadId)
+            .OrderByDescending(x => x.RevisionNumber).FirstOrDefaultAsync(ct);
+        if (orphan is not null)
+        {
+            lead.CurrentRevisionId = orphan.Id;
+            lead.CurrentRevisionNumber = orphan.RevisionNumber;
+            lead.CurrentInquiryFingerprint = orphan.LogicalInquiryFingerprint;
+            lead.IdentityVersion += 1;
+            _db.Add(new LeadIdentityAuditEvent
+            {
+                BusinessUnitId = businessUnitId, LeadId = lead.Id,
+                OccurrenceId = orphan.EstablishedByOccurrenceId, EventType = "CANONICAL_POINTER_REPAIRED",
+                PayloadJson = JsonSerializer.Serialize(new { revision = orphan.RevisionNumber, reason = request.Reason }),
+                ActorType = request.ActorType, ActorId = request.ActorId, CorrelationId = request.CorrelationId,
+                IdempotencyKey = $"identity-pointer-repair:{businessUnitId}:{leadId}",
+                OccurredAtUtc = DateTimeOffset.UtcNow
+            });
+            await _db.SaveChangesAsync(ct);
+            if (ownedTransaction is not null) await ownedTransaction.CommitAsync(ct);
+            return new LeadReconciliationResult(lead.Id, lead.CommercialCaseReference ?? string.Empty,
+                orphan.EstablishedByOccurrenceId, orphan.Id, orphan.RevisionNumber,
+                LeadOccurrenceClassification.New, 1m, new[] { "Canonical revision pointer repaired." }, ShouldRoute: false);
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var fingerprint = Fingerprint(lead);
+        var idempotencyKey = $"identity-baseline:{businessUnitId}:{leadId}";
+
+        // No document fields: the descriptor is built with nulls throughout so nothing can assert
+        // a receipt. The batch is keyed per (tenant, channel) — EnsureBatchAsync is
+        // ON CONFLICT DO NOTHING, so one shared batch would take whichever channel wrote first
+        // and mislabel every later one on the batch-review screen.
+        var intake = new LeadIntakeDescriptor(
+            BatchId: BaselineBatchId(businessUnitId, request.SourceChannel),
+            SourceChannel: request.SourceChannel, IdempotencyKey: idempotencyKey,
+            ExternalSourceId: null, EmailThreadId: null, SourceSystem: "IdentityBaseline",
+            Sender: null, Subject: null, OriginalFileName: null, MimeType: null, FileSize: null,
+            ContentHash: null, SourceDocumentId: null, ExtractionJobId: null,
+            SourceReceivedAtUtc: null, IngestedAtUtc: now,
+            ProcessingPath: LeadProcessingPath.Deterministic, ExternalAiUsed: false, ExternalCost: null,
+            ActorType: request.ActorType, ActorId: request.ActorId, CorrelationId: request.CorrelationId);
+
+        await EnsureBatchAsync(businessUnitId, intake, ct);
+
+        // Reuse an occurrence from a crashed earlier attempt rather than colliding on the unique
+        // (BusinessUnitId, IdempotencyKey) index.
+        var occurrence = await _db.Set<LeadIngestionOccurrence>()
+            .FirstOrDefaultAsync(x => x.BusinessUnitId == businessUnitId
+                                      && x.IdempotencyKey == idempotencyKey
+                                      && x.LeadRevisionId == null, ct);
+        if (occurrence is null)
+        {
+            occurrence = NewOccurrence(businessUnitId, intake, fingerprint, scope: null,
+                LeadOccurrenceClassification.New, 1m,
+                new[]
+                {
+                    $"Canonical identity established from the lead's stored commercial facts at {now:O}. " +
+                    "No inquiry document was received, no receipt time is known, and no matching was attempted. " +
+                    "This records content, not arrival.",
+                    request.Reason
+                },
+                leadId: lead.Id, revisionId: null);
+            occurrence.PolicyVersion = BaselinePolicyVersion;
+            occurrence.RecordKind = LeadOccurrenceRecordKind.IdentityBaseline;
+            _db.Add(occurrence);
+            await _db.SaveChangesAsync(ct);
+        }
+
+        // SnapshotJson is the literal Snapshot(lead) with no wrapper envelope: Fingerprint hashes
+        // that exact string, and Diff/IndexedLines read rfq/buyer/closing/items positionally at
+        // the top level. Wrapping it would break the first real amendment's diff.
+        var revision = BuildRevision(lead, occurrence, 1, fingerprint, intake);
+        _db.Add(revision);
+        await _db.SaveChangesAsync(ct);
+
+        lead.CurrentRevisionId = revision.Id;
+        lead.CurrentRevisionNumber = 1;
+        lead.CurrentInquiryFingerprint = fingerprint;
+        lead.CurrentOccurrenceClassification = nameof(LeadOccurrenceRecordKind.IdentityBaseline);
+        lead.IdentityVersion += 1;
+        occurrence.LeadRevisionId = revision.Id;
+
+        AddAudit(occurrence, lead.Id, "CANONICAL_BASELINE_ESTABLISHED", intake, new
+        {
+            revision = 1,
+            lineCount = lead.LeadItems.Count,
+            leadCreatedDate = lead.CreatedDate,
+            door = request.SourceChannel,
+            reason = request.Reason
+        });
+
+        await _db.SaveChangesAsync(ct);
+        if (ownedTransaction is not null) await ownedTransaction.CommitAsync(ct);
+
+        return new LeadReconciliationResult(lead.Id, lead.CommercialCaseReference ?? string.Empty,
+            occurrence.Id, revision.Id, 1, LeadOccurrenceClassification.New, 1m,
+            new[] { "Canonical identity baseline established." }, ShouldRoute: false);
+    }
+
+    /// <summary>Stable batch id per (tenant, channel). A random Guid would create a new batch on
+    /// every call and litter the batch-review screen.</summary>
+    private static Guid BaselineBatchId(long businessUnitId, string sourceChannel)
+    {
+        var seed = $"identity-baseline-batch:{businessUnitId}:{sourceChannel}";
+        return new Guid(System.Security.Cryptography.MD5.HashData(System.Text.Encoding.UTF8.GetBytes(seed)));
     }
 
     private async Task EnsureBatchAsync(long bu, LeadIntakeDescriptor intake, CancellationToken ct)
