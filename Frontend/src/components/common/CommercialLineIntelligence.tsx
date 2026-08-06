@@ -3,6 +3,7 @@ import { Alert, Box, Button, Chip, CircularProgress, MenuItem, Paper, Stack, Tex
 import { Inventory2Outlined as InventoryIcon, Refresh as RefreshIcon } from '@mui/icons-material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import commercialIntelligenceService, { type CommercialLineResolutionDTO } from '../../api/services/commercialIntelligenceService';
+import { presentableErrorMessage } from '../../utils/apiErrors';
 
 type Props = { stage: 'lead' | 'rfq' | 'quote'; recordId: number };
 const labels: Record<CommercialLineResolutionDTO['classification'], { text: string; color: 'success' | 'info' | 'warning' | 'error' }> = {
@@ -54,7 +55,22 @@ const CommercialLineIntelligence: React.FC<Props> = ({ stage, recordId }) => {
           </Stack>
         )}
       </Stack>
-      {(query.isError || resolve.isError) && <Alert severity="error" action={<Button color="inherit" onClick={() => stage === 'lead' ? resolve.mutate() : query.refetch()}>Retry</Button>}>Inventory Check Unavailable. No product, stock, or supplier commitment was selected automatically.</Alert>}
+      {(query.isError || resolve.isError) && (
+        <Alert
+          severity="error"
+          action={<Button color="inherit" onClick={() => stage === 'lead' ? resolve.mutate() : query.refetch()}>Retry</Button>}
+        >
+          {/* Show the server's actual reason when it is safe to render — a lead with no
+              immutable current revision, a lead outside this tenant, and a provider fault are
+              three different problems with three different fixes, and this Alert used to print
+              one sentence for all of them. The generic line stays as the fallback for genuinely
+              unrenderable failures. */}
+          {presentableErrorMessage(
+            resolve.error ?? query.error,
+            'Inventory Check Unavailable. No product, stock, or supplier commitment was selected automatically.',
+          )}
+        </Alert>
+      )}
       {query.isLoading && <CircularProgress size={22} />}
       {!query.isLoading && !query.isError && !resolve.isError && rows.length === 0 && <Typography variant="body2" color="text.secondary">No persisted line resolution is available yet.</Typography>}
       <Stack spacing={1.25}>

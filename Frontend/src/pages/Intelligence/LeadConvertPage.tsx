@@ -1,9 +1,9 @@
 import React from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { useQuery, useMutation } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Box, Typography, Paper, Button, Stack, Chip, Switch,
-  TextField, MenuItem, CircularProgress, Alert, Breadcrumbs, Link, Divider,
+  TextField, MenuItem, CircularProgress, Alert, AlertTitle, Breadcrumbs, Link, Divider,
   Checkbox, FormControlLabel,
 } from '@mui/material';
 import {
@@ -19,6 +19,10 @@ import type { ConversionPreviewItem } from '../../api/services/intelligenceServi
 import { ConfidenceChip, parseUserNumber } from './common';
 import CommercialLineIntelligence from '../../components/common/CommercialLineIntelligence';
 import leadService from '../../api/services/leadService';
+import lifecycleService from '../../api/services/commercialLifecycleService';
+import type { LifecycleTransitionOption } from '../../api/services/commercialLifecycleService';
+import { useAuth } from '../../context/AuthContext';
+import { conversionBlockers, QUALIFIED_STATUS_CODE } from './leadConversionGate';
 
 /** Sentinel for "None of these — leave unmatched" in the product dropdown. */
 const NO_MATCH = 'none';
@@ -52,6 +56,8 @@ const LeadConvertPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { enqueueSnackbar } = useSnackbar();
+  const queryClient = useQueryClient();
+  const { hasPermission } = useAuth();
   const leadId = Number(id);
 
   const { data: preview, isLoading, isError, refetch } = useQuery({
@@ -62,6 +68,13 @@ const LeadConvertPage: React.FC = () => {
   const { data: lead } = useQuery({
     queryKey: ['lead-detail', leadId],
     queryFn: () => leadService.getById(leadId),
+    enabled: !!id && Number.isFinite(leadId),
+  });
+  // The canonical lifecycle state — not lead.status, which is a tenant-authored display string.
+  // Same query key as LifecycleActions so a transition made anywhere refreshes this page too.
+  const lifecycleQuery = useQuery({
+    queryKey: ['lifecycle', 'leads', leadId],
+    queryFn: () => lifecycleService.getState('leads', leadId),
     enabled: !!id && Number.isFinite(leadId),
   });
 
@@ -124,6 +137,28 @@ const LeadConvertPage: React.FC = () => {
       // the error object entirely, which hid an honest 403/400 behind this text.
       enqueueSnackbar(
         presentableErrorMessage(err, "Couldn't create the RFQ. Nothing was changed — please try again."),
+        { variant: 'error' },
+      );
+    },
+  });
+
+  // Qualifying is the one blocker a user can clear without leaving this page, so it is offered
+  // here rather than sending them to the lead and back. Everything the conversion depends on is
+  // re-read afterwards, so the page unblocks in place.
+  const qualifyMutation = useMutation({
+    mutationFn: (option: LifecycleTransitionOption) =>
+      lifecycleService.transition('leads', leadId, lifecycleQuery.data!, option),
+    onSuccess: async () => {
+      enqueueSnackbar('Lead qualified — you can create the RFQ now.', { variant: 'success' });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['lifecycle', 'leads', leadId] }),
+        queryClient.invalidateQueries({ queryKey: ['lead-detail', leadId] }),
+        queryClient.invalidateQueries({ queryKey: ['lead-conversion-preview', leadId] }),
+      ]);
+    },
+    onError: (err: unknown) => {
+      enqueueSnackbar(
+        presentableErrorMessage(err, "Couldn't qualify this lead. Nothing was changed — please try again."),
         { variant: 'error' },
       );
     },
@@ -212,8 +247,37 @@ const LeadConvertPage: React.FC = () => {
     includedAttentionCount === 0 ||
     (acknowledgeAll && acknowledgementReason.trim().length >= MIN_ACK_REASON);
 
-  const canSubmit =
-    includedCount > 0 && !hasInvalidQty && acknowledgementSatisfied && !convertMutation.isPending;
+  // Lead-level gates the server will apply on submit (lifecycle, duplicate flag, unapproved
+  // commercial facts). Shown up front so nobody edits twenty lines only to be refused at the end.
+  const blockers = conversionBlockers({
+    lifecycleStatusCode: lifecycleQuery.data?.currentStatusCode,
+    duplicateStatus: lead?.duplicateStatus,
+    duplicateOfLeadId: lead?.duplicateOfLeadId,
+    requiresCommercialReview: lead?.requiresCommercialReview,
+    commercialFactsVerified: lead?.commercialFactsVerified,
+  });
+
+  // The one blocker this page can clear itself: the lifecycle graph allows QUALIFIED from here
+  // and the user may edit leads. A transition that demands a reason code is left to the lead's
+  // own lifecycle control rather than re-implementing that prompt here.
+  const qualifyOption = lifecycleQuery.data?.allowedTransitions.find(
+    (option) => option.statusCode === QUALIFIED_STATUS_CODE && !option.requiresReason,
+  );
+  const canQualifyHere = Boolean(qualifyOption) && hasPermission('Leads', 'edit');
+
+  // "Still checking" is not "blocked": the button waits rather than lying about the reason.
+  const lifecycleUnknown = lifecycleQuery.isLoading;
+
+  const disabledReason =
+    blockers[0]?.shortReason
+    ?? (lifecycleUnknown ? 'Checking this lead’s status…' : null)
+    ?? (includedCount === 0 ? 'Include at least one line to create the RFQ.' : null)
+    ?? (hasInvalidQty ? 'One of the quantities isn’t a number yet.' : null)
+    ?? (!acknowledgementSatisfied
+      ? 'Record why you’re going ahead with the flagged lines before creating the RFQ.'
+      : null);
+
+  const canSubmit = !disabledReason && !convertMutation.isPending;
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
@@ -257,6 +321,62 @@ const LeadConvertPage: React.FC = () => {
           <HeaderField label="Lines" value={String(preview.items.length)} />
         </Stack>
       </Paper>
+
+      {/* Lead-level blockers, above the work. Each one names the reason in commercial language
+          and carries its own next step, so the page never hands back a bare refusal. */}
+      {blockers.map((blocker) => (
+        <Alert
+          key={blocker.key}
+          severity={blocker.severity}
+          sx={{ borderRadius: 2, mb: 2, '& .MuiAlert-message': { width: '100%' } }}
+        >
+          <AlertTitle sx={{ fontWeight: 800 }}>{blocker.title}</AlertTitle>
+          <Typography variant="body2" sx={{ mb: 1.5, fontWeight: 500 }}>
+            {blocker.detail}
+          </Typography>
+          <Stack direction="row" spacing={1.5} sx={{ flexWrap: 'wrap', gap: 1 }}>
+            {blocker.action === 'qualify' && canQualifyHere && (
+              <Button
+                size="small"
+                variant="contained"
+                startIcon={qualifyMutation.isPending ? <CircularProgress size={16} color="inherit" /> : undefined}
+                disabled={qualifyMutation.isPending}
+                onClick={() => qualifyOption && qualifyMutation.mutate(qualifyOption)}
+                sx={{ fontWeight: 800, borderRadius: 2 }}
+              >
+                {qualifyMutation.isPending ? 'Qualifying…' : 'Qualify this lead'}
+              </Button>
+            )}
+            {blocker.action === 'open-extraction-review' && (
+              <Button
+                size="small"
+                variant="contained"
+                onClick={() => navigate(`/procurement/extraction/review/${leadId}`)}
+                sx={{ fontWeight: 800, borderRadius: 2 }}
+              >
+                Open extraction review
+              </Button>
+            )}
+            {(blocker.action === 'open-lead' || (blocker.action === 'qualify' && !canQualifyHere)) && (
+              <Button
+                size="small"
+                variant="contained"
+                onClick={() => navigate(`/procurement/leads/view/${leadId}`)}
+                sx={{ fontWeight: 800, borderRadius: 2 }}
+              >
+                {blocker.action === 'open-lead' ? 'Open the lead to decide' : 'Open the lead'}
+              </Button>
+            )}
+            {blocker.action === 'qualify' && !canQualifyHere && (
+              <Typography variant="caption" sx={{ alignSelf: 'center', fontWeight: 600 }}>
+                {hasPermission('Leads', 'edit')
+                  ? 'Qualifying isn’t available from this state — the lead shows what can happen next.'
+                  : 'Your access doesn’t include qualifying leads — ask the lead’s owner.'}
+              </Typography>
+            )}
+          </Stack>
+        </Alert>
+      ))}
 
       {includedAttentionCount > 0 && (
         <Alert
@@ -457,10 +577,17 @@ const LeadConvertPage: React.FC = () => {
           sx={{ mb: 2 }}
         />
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
-          <Typography sx={{ fontWeight: 700, fontSize: '0.85rem', color: 'text.secondary' }}>
-            {includedCount === 0
-              ? 'Include at least one line to create the RFQ.'
-              : `${includedCount} of ${preview.items.length} lines will go on the RFQ.`}
+          {/* The reason the button is off is written out here. A greyed-out control with no
+              explanation is what sent people into the submit-time error in the first place. */}
+          <Typography
+            sx={{
+              fontWeight: 700,
+              fontSize: '0.85rem',
+              color: disabledReason ? 'warning.dark' : 'text.secondary',
+              maxWidth: 560,
+            }}
+          >
+            {disabledReason ?? `${includedCount} of ${preview.items.length} lines will go on the RFQ.`}
           </Typography>
           <Stack direction="row" spacing={1.5}>
             <Button

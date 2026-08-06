@@ -28,10 +28,51 @@ public sealed class InventoryIntelligenceController(
     /// <summary>The largest number of rows any list endpoint will return in one response.</summary>
     private const int MaxRows = 500;
 
+    /// <summary>
+    /// Runs the commercial line resolution for a lead and returns the per-line result.
+    ///
+    /// <para><b>Why this has explicit error mapping.</b> It used to be a bare expression body, so
+    /// every failure — a lead with no immutable current revision, a lead in another tenant, a
+    /// product-resolver fault — left the pipeline as an unhandled 500. The screen renders a
+    /// single fixed sentence on any error ("Inventory Check Unavailable. No product, stock, or
+    /// supplier commitment was selected automatically."), which reads like an empty result rather
+    /// than a fault and names no cause. Diagnosing a lead that could not be checked therefore
+    /// meant reading server logs. The gate messages are written for operators and are safe to
+    /// render, so they are returned instead of being swallowed.</para>
+    /// </summary>
     [HttpPost("leads/{leadId:long}/resolve")]
     [RequireModulePermission("Leads", PermissionAction.Edit)]
     public async Task<ActionResult> ResolveLead(long leadId, [FromQuery] int limit = 10, CancellationToken ct = default)
-        => Ok((await lineResolution.ResolveLeadAsync(TenantId(), leadId, limit, ct)).Select(ResolutionRow));
+    {
+        try
+        {
+            var rows = await lineResolution.ResolveLeadAsync(TenantId(), leadId, limit, ct);
+            return Ok(rows.Select(ResolutionRow));
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(Problem(StatusCodes.Status404NotFound, "Lead not found", ex.Message));
+        }
+        catch (InvalidOperationException ex)
+        {
+            // Domain preconditions — most commonly "The lead has no immutable current revision",
+            // which is what a legacy lead created before the identity pipeline looks like.
+            return Conflict(Problem(StatusCodes.Status409Conflict, "Inventory check not run", ex.Message));
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(Problem(StatusCodes.Status400BadRequest, "Inventory check not run", ex.Message));
+        }
+    }
+
+    /// <summary>RFC 7807 body carrying a traceId, matching ConversionIntelligenceController.</summary>
+    private ProblemDetails Problem(int status, string title, string detail) => new()
+    {
+        Status = status,
+        Title = title,
+        Detail = detail,
+        Extensions = { ["traceId"] = HttpContext.TraceIdentifier }
+    };
 
     [HttpGet("leads/{leadId:long}/resolutions")]
     [RequireModulePermission("Leads", PermissionAction.View)]
