@@ -335,6 +335,16 @@ builder.Services.AddAuthorization(options =>
     // RFQ Policies
     options.AddPolicy("CanCreateRFQ", policy => policy.Requirements.Add(new PermissionRequirement("RFQ", "CanCreate")));
     options.AddPolicy("CanEditRFQ", policy => policy.Requirements.Add(new PermissionRequirement("RFQ", "CanEdit")));
+// Testing-only tenant data reset. Scoped because it reads the EF model through the request
+// context; refuses Production internally regardless of how it is registered.
+builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Testing.TenantDataReset>();
+// Makes the Module table match ModuleCatalog once the host starts. [RequireModulePermission]
+// resolves by joining to a Module row on exact name and DENIES when nothing matches, so a gated
+// endpoint whose module was never inserted is permanently forbidden to every non-super-admin —
+// which is why most of this product was usable only by a super admin. Registered as a hosted
+// service so it runs after any startup migration has applied, and so a slow or failing database
+// delays reconciliation rather than the whole boot.
+builder.Services.AddHostedService<ModuleCatalogStartupService>();
     options.AddPolicy("CanDeleteRFQ", policy => policy.Requirements.Add(new PermissionRequirement("RFQ", "CanDelete")));
 
     // Quotation Policies

@@ -43,6 +43,9 @@ namespace ERP_RFQ_Automation.Authorization
         /// <summary>Every outbound SMTP configuration was deactivated at once, halting
         /// customer-facing mail. A containment action, and a deliberate one.</summary>
         public const string OutboundMailPaused = "OUTBOUND_MAIL_PAUSED";
+        /// <summary>A tenant's transactional data was erased wholesale. Written after the erasure,
+        /// so the record of it survives the very operation it describes.</summary>
+        public const string TenantDataReset = "TENANT_DATA_RESET";
 
         /// <summary>Every action this system emits, in the order they appear above.</summary>
         public static readonly string[] All =
@@ -51,7 +54,7 @@ namespace ERP_RFQ_Automation.Authorization
             PasswordChanged, PermissionGranted, PermissionModified, PermissionRevoked,
             PermissionGrantDenied, RoleCreated, RoleRenamed, RoleRankChanged, RoleDeleted,
             MailboxCreated, MailboxUpdated, MailboxDeleted, MailboxCredentialChanged,
-            MailboxTested, OutboundMailPaused
+            MailboxTested, OutboundMailPaused, TenantDataReset
         };
     }
 
@@ -61,6 +64,7 @@ namespace ERP_RFQ_Automation.Authorization
         public const string Role = "Role";
         public const string RolePermission = "RolePermission";
         public const string Mailbox = "Mailbox";
+        public const string BusinessUnit = "BusinessUnit";
     }
 
     /// <summary>The mutation being recorded. Actor and tenant are NOT part of this record —
