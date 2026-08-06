@@ -24,6 +24,12 @@ export async function loginThroughUi(page: Page, credentials: LoginCredentials):
     await continueButton.click();
   }
 
-  await expect(page).toHaveURL(/\/dashboard(?:\?|$)/, { timeout: 20_000 });
-  await expect.poll(() => page.evaluate(() => Boolean(localStorage.getItem('token')))).toBe(true);
+  // The landing route after login is a product/UX choice — it is /dashboard for some roles and
+  // /analytics/deadlines for others, and a role landing somewhere else is not an auth failure.
+  // Assert the two things that actually define a successful login: we left /login, and a token
+  // was issued. Pinning a specific landing route made this helper fail for a perfectly
+  // authenticated user and would break every spec each time the landing page is retuned.
+  await expect(page).not.toHaveURL(/\/login(?:\?|$)/, { timeout: 20_000 });
+  await expect.poll(() => page.evaluate(() => Boolean(localStorage.getItem('token'))),
+    { timeout: 20_000 }).toBe(true);
 }

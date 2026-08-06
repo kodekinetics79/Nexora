@@ -177,7 +177,11 @@ public sealed class DeterministicRoutingEngine
             BusinessUnitId = request.BusinessUnitId,
             LeadId = request.LeadId,
             CustomerId = candidate?.CustomerId,
-            MatchedIdentifierId = candidate?.IdentifierId,
+            // IdentifierId 0 means the match came from a customer a human already CONFIRMED on
+            // the lead, not from a customer_identifiers row. MatchedIdentifierId carries a real
+            // foreign key to that table, so a synthetic 0 must be written as null rather than
+            // fabricating a reference to a row that does not exist.
+            MatchedIdentifierId = candidate?.IdentifierId is > 0 ? candidate.IdentifierId : null,
             OwnershipId = ownership?.Id,
             SuggestedUserId = ownership?.PrimaryUserId,
             SelectedUserId = selectedUserId,

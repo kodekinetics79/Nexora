@@ -49,3 +49,10 @@ Frontend/test-results/
 Thumbs.db
 *.swp
 *~
+
+# Local E2E run scratch (service logs, generated ids, throwaway credentials)
+.e2e-run/
+
+# Playwright generated output
+Frontend/playwright-report/
+Frontend/test-results/

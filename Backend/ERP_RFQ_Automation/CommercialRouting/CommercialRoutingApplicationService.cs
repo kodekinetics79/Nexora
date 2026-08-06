@@ -70,7 +70,27 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
 
                 var evidence = BuildEvidence(lead);
                 var identifiers = await LoadMatchingIdentifiersAsync(businessUnitId, evidence, ct);
-                var customerIds = identifiers.Select(i => i.CustomerId).Distinct().ToArray();
+
+                // A customer a HUMAN has already confirmed on this lead is the strongest evidence
+                // that exists — stronger than any inferred email/domain identifier. It was being
+                // ignored: the engine only ever looked at customer_identifiers, so a lead whose
+                // customer was confirmed still routed NO_MATCH_EVIDENCE and landed in the
+                // unassigned queue. That is why 44 of 44 production leads were unassigned even
+                // where ownership existed.
+                //
+                // Modelled as a top-precedence ErpAccount candidate at full confidence rather
+                // than as a bypass, so ownership precedence, workload relief, the ambiguity
+                // margin and the audit trail all still apply exactly as they do for a matched
+                // identifier. IdentifierId 0 marks it as derived from the lead rather than from
+                // a customer_identifiers row.
+                var confirmedCustomerId =
+                    LeadCustomerMatchStatuses.IsHumanDecided(lead.CustomerMatchStatus) && lead.CustomerId.HasValue
+                        ? lead.CustomerId
+                        : null;
+
+                var customerIds = identifiers.Select(i => i.CustomerId)
+                    .Concat(confirmedCustomerId.HasValue ? [confirmedCustomerId.Value] : Array.Empty<long>())
+                    .Distinct().ToArray();
                 var ownerships = await _db.Set<CustomerOwnership>()
                     .Where(o => o.BusinessUnitId == businessUnitId && customerIds.Contains(o.CustomerId))
                     .AsNoTracking()
@@ -81,7 +101,12 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
                 var availability = await LoadUserAvailabilityAsync(businessUnitId, userIds, occurredOn, ct);
 
                 var candidates = identifiers.Select(i => new CustomerMatchCandidate(
-                    i.BusinessUnitId, i.CustomerId, i.Id, i.IdentifierType, i.Confidence, i.IsVerified)).ToArray();
+                        i.BusinessUnitId, i.CustomerId, i.Id, i.IdentifierType, i.Confidence, i.IsVerified))
+                    .Concat(confirmedCustomerId.HasValue
+                        ? [new CustomerMatchCandidate(businessUnitId, confirmedCustomerId.Value, 0,
+                            CustomerIdentifierType.ErpAccount, 1m, IsVerified: true)]
+                        : Array.Empty<CustomerMatchCandidate>())
+                    .ToArray();
                 var scopeKeys = command.ScopeKeys ?? await BuildScopeKeysAsync(businessUnitId, lead, ct);
                 var request = new RoutingRequest(
                     businessUnitId,

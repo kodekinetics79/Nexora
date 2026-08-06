@@ -711,6 +711,8 @@ static async Task ValidateRuntimeDatabaseRoleAsync(string runtimeConnection)
 }
 
 await DemoUserSeeder.EnsureAsync(app.Services, app.Configuration, app.Environment);
+// Local E2E only: fail-closed on GoldenJourneySeed:Enabled and refuses under Production.
+await GoldenCommercialJourneySeeder.EnsureAsync(app.Services, app.Configuration, app.Environment);
 await app.SeedPlatformOwnerAsync();
 
 // Global exception handler — return a generic message to clients and log the
