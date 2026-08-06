@@ -235,8 +235,23 @@ public sealed class LeadIdentityApplicationServiceTests
     }
 
     [Fact]
-    public async Task External_processing_is_fail_closed_above_ten_percent()
+    public async Task External_ai_result_is_persisted_and_recorded_not_destroyed_at_reconciliation()
     {
+        // This test previously asserted the opposite: that reconciliation THROWS when
+        // external-AI usage exceeds a hardcoded 10% of recent occurrences. That guard was
+        // removed on 2026-08-06 after it destroyed 1,133 successful, paid-for AI calls in
+        // production without producing a single lead.
+        //
+        // The ceiling is real, but it belongs where it can prevent egress:
+        // AiGovernanceService.ReserveAsync, which runs BEFORE the model call, honours the
+        // tenant's configured ExternalDependencyCeilingPercent, and exempts endpoints the
+        // tenant explicitly authorized (on a deployment with no local model the external
+        // ratio is permanently 100%). By the time reconciliation runs, the call is already
+        // authorized, made and billed — refusing to persist prevents no egress, it only
+        // loses the work and guarantees the retry repeats it.
+        //
+        // Contract pinned here: the occurrence persists, and ExternalAiUsed is recorded so
+        // the Trust Center's dependency reporting stays truthful.
         using var db = new TestDb();
         await using var context = db.ContextFor(73);
         Seed.BusinessUnit(context, 73); Seed.EmailConfig(context, 7301, 73); Seed.EmailIngest(context, 7401, 7301, "NeedsReview");
@@ -244,9 +259,41 @@ public sealed class LeadIdentityApplicationServiceTests
         var service = new LeadIdentityApplicationService(context);
         var external = Intake("external", "h-ext", Guid.NewGuid()) with
         { ProcessingPath = LeadProcessingPath.ExternalModel, ExternalAiUsed = true };
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            service.ReconcileAsync(Candidate(73, 7401, "RFQ-X", "x@test", 1), external));
-        Assert.Empty(await context.Set<LeadIngestionOccurrence>().ToListAsync());
+
+        var result = await service.ReconcileAsync(
+            Candidate(73, 7401, "RFQ-X", "x@test", 1), external);
+
+        Assert.NotNull(result);
+        var occurrences = await context.Set<LeadIngestionOccurrence>().ToListAsync();
+        var persisted = Assert.Single(occurrences);
+        Assert.True(persisted.ExternalAiUsed);
+        Assert.NotNull(persisted.LeadId);
+    }
+
+    [Fact]
+    public async Task Repeated_external_ai_occurrences_all_persist()
+    {
+        // The removed guard compared the last 100 occurrences, so it began refusing at
+        // roughly the eleventh external document and never recovered — every subsequent
+        // document in the tenant was lost. Ten in a row must all survive.
+        using var db = new TestDb();
+        await using var context = db.ContextFor(83);
+        Seed.BusinessUnit(context, 83); Seed.EmailConfig(context, 8301, 83); Seed.EmailIngest(context, 8401, 8301, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        for (var i = 0; i < 10; i++)
+        {
+            var intake = Intake($"external-{i}", $"h-ext-{i}", Guid.NewGuid()) with
+            { ProcessingPath = LeadProcessingPath.ExternalModel, ExternalAiUsed = true };
+            await service.ReconcileAsync(
+                Candidate(83, 8401, $"RFQ-EXT-{i}", $"buyer{i}@test", 1), intake);
+            context.ChangeTracker.Clear();
+        }
+
+        var occurrences = await context.Set<LeadIngestionOccurrence>().ToListAsync();
+        Assert.Equal(10, occurrences.Count);
+        Assert.All(occurrences, x => Assert.True(x.ExternalAiUsed));
     }
 
     [Fact]
