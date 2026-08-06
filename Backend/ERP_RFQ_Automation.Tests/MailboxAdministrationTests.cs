@@ -213,3 +213,60 @@ public sealed class MailboxAdministrationTests
         }
     }
 }
+
+/// <summary>
+/// Two defects found only by running the probe against a real mail server. Neither was reachable
+/// from the C#-object tests above, because both live in what crosses the wire and in which advice
+/// the operator is given.
+/// </summary>
+public sealed class MailboxProbeWireContractTests
+{
+    [Fact]
+    public async Task Stage_and_status_cross_the_wire_as_NAMES_not_ordinals()
+    {
+        // This API registers no global string-enum converter, so these serialised as 0..5 and the
+        // client read undefined for every stage label and status icon. Ordinals are also a silent
+        // breaking change the moment a stage is inserted in the middle.
+        var result = await new MailboxConnectionProbe().ProbeAsync(
+            new MailboxProbeRequest("IMAP", "169.254.169.254", 993, "u", "p", true),
+            CancellationToken.None);
+
+        var json = System.Text.Json.JsonSerializer.Serialize(result);
+
+        Assert.Contains("\"Policy\"", json);
+        Assert.Contains("\"Failed\"", json);
+        Assert.Contains("\"Skipped\"", json);
+        Assert.DoesNotContain("\"stage\":0", json);
+        Assert.DoesNotContain("\"status\":0", json);
+    }
+
+    [Theory]
+    [InlineData("An incomplete certificate revocation check occurred.")]
+    [InlineData("The remote certificate is invalid according to the validation procedure.")]
+    public void A_certificate_failure_never_tells_the_operator_to_disable_encryption(string detail)
+    {
+        // A certificate failure and a wrong-TLS-mode failure both arrive as SslHandshakeException,
+        // and their fixes are opposites. The mode advice ("try turning off 'use a secure
+        // connection'") is actively dangerous here: it tells someone to stop encrypting in order
+        // to work around a trust problem. Observed for real against imap.gmail.com:993, where an
+        // OCSP check that cannot complete produced exactly that instruction.
+        var remedy = (string)typeof(MailboxConnectionProbe)
+            .GetMethod("TlsRemedy", BindingFlags.NonPublic | BindingFlags.Static)!
+            .Invoke(null, [993, true, new InvalidOperationException(detail)])!;
+
+        Assert.Contains("Do NOT turn off", remedy, StringComparison.Ordinal);
+        Assert.DoesNotContain("try turning off", remedy, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("certificate", remedy, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void A_genuine_mode_mismatch_still_gets_the_mode_advice()
+    {
+        // The certificate branch must not swallow the case it was carved out of.
+        var remedy = (string)typeof(MailboxConnectionProbe)
+            .GetMethod("TlsRemedy", BindingFlags.NonPublic | BindingFlags.Static)!
+            .Invoke(null, [143, true, new InvalidOperationException("The SSL handshake was terminated.")])!;
+
+        Assert.Contains("turning off", remedy, StringComparison.OrdinalIgnoreCase);
+    }
+}

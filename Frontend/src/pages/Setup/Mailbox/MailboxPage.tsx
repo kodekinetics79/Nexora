@@ -13,6 +13,7 @@ import {
   Visibility, VisibilityOff, ShieldOutlined as ShieldIcon, PauseCircleOutlined as PauseIcon,
 } from '@mui/icons-material';
 import { toast } from 'react-hot-toast';
+import { useAuth } from '../../../context/AuthContext';
 import mailboxService, {
   type Mailbox, type MailboxWriteRequest, type MailboxProbeResult, type MailboxProtocol,
   type ProbeStatus,
@@ -108,6 +109,13 @@ const ProbeReport: React.FC<{ result: MailboxProbeResult }> = ({ result }) => (
 
 const MailboxPage: React.FC = () => {
   const queryClient = useQueryClient();
+  // The API already refuses these (403), but offering a control that always fails is its own
+  // defect — the operator cannot tell "not allowed" from "broken". Read-only users get a
+  // read-only screen. This mirrors the exact actions the controller gates.
+  const { hasPermission } = useAuth();
+  const canCreate = hasPermission('Email & SMTP', 'create');
+  const canEdit = hasPermission('Email & SMTP', 'edit');
+  const canDelete = hasPermission('Email & SMTP', 'delete');
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<Mailbox | null>(null);
   const [form, setForm] = React.useState<MailboxWriteRequest>(EMPTY);
@@ -226,18 +234,22 @@ const MailboxPage: React.FC = () => {
             color={HEALTH_COLOUR[mailbox.healthState] ?? 'default'}
             sx={{ fontWeight: 700 }}
           />
-          <Tooltip title="Edit">
-            <IconButton size="small" onClick={() => openEdit(mailbox)}><EditIcon fontSize="small" /></IconButton>
-          </Tooltip>
-          <Tooltip title="Remove">
-            <IconButton
-              size="small"
-              onClick={() => deleteMutation.mutate(mailbox.id)}
-              disabled={deleteMutation.isPending}
-            >
-              <DeleteIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
+          {canEdit && (
+            <Tooltip title="Edit">
+              <IconButton size="small" onClick={() => openEdit(mailbox)}><EditIcon fontSize="small" /></IconButton>
+            </Tooltip>
+          )}
+          {canDelete && (
+            <Tooltip title="Remove">
+              <IconButton
+                size="small"
+                onClick={() => deleteMutation.mutate(mailbox.id)}
+                disabled={deleteMutation.isPending}
+              >
+                <DeleteIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          )}
         </Stack>
 
         <Typography variant="body2" color="text.secondary">{mailbox.emailAddress}</Typography>
@@ -276,12 +288,14 @@ const MailboxPage: React.FC = () => {
         <Typography variant="h4" sx={{ fontWeight: 900, letterSpacing: '-0.02em', flex: 1 }}>
           Email Inboxes
         </Typography>
-        <Button
-          variant="contained" startIcon={<AddIcon />} onClick={openCreate}
-          sx={{ fontWeight: 800, borderRadius: 2, px: 2.5 }}
-        >
-          Add mailbox
-        </Button>
+        {canCreate && (
+          <Button
+            variant="contained" startIcon={<AddIcon />} onClick={openCreate}
+            sx={{ fontWeight: 800, borderRadius: 2, px: 2.5 }}
+          >
+            Add mailbox
+          </Button>
+        )}
       </Stack>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
         Connect the inbox your customers send enquiries to, and the account quotes are sent from.
@@ -296,7 +310,7 @@ const MailboxPage: React.FC = () => {
           severity={outbound.canSendToCustomers ? 'warning' : 'success'}
           icon={<ShieldIcon />}
           sx={{ mb: 3, borderRadius: 2 }}
-          action={outbound.canSendToCustomers ? (
+          action={outbound.canSendToCustomers && canEdit ? (
             <Button
               size="small" color="inherit" startIcon={<PauseIcon />}
               disabled={pauseMutation.isPending}

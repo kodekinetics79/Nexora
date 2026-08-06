@@ -9,7 +9,12 @@ using MailKit.Security;
 namespace ERP_RFQ_Automation.Mailbox;
 
 /// <summary>Ordered stages of a mailbox connection attempt. The order is the dependency order:
-/// a later stage cannot be evaluated if an earlier one failed.</summary>
+/// a later stage cannot be evaluated if an earlier one failed.
+///
+/// <para>Serialised BY NAME. This API registers no global string-enum converter, so without the
+/// attribute these leave as 0..5 and every client has to hardcode the ordinal — which silently
+/// breaks the moment a stage is inserted.</para></summary>
+[System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter))]
 public enum MailboxProbeStage
 {
     Policy,
@@ -20,6 +25,7 @@ public enum MailboxProbeStage
     Mailbox
 }
 
+[System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter))]
 public enum MailboxProbeStatus
 {
     Passed,
@@ -94,8 +100,17 @@ public interface IMailboxConnectionProbe
 /// endpoint would be a tenant-operable SSRF probe with timing and error detail helpfully reported
 /// back in the response body.</para>
 /// </summary>
-public sealed class MailboxConnectionProbe : IMailboxConnectionProbe
+public sealed class MailboxConnectionProbe(ILogger<MailboxConnectionProbe>? logger = null) : IMailboxConnectionProbe
 {
+    /// <summary>
+    /// The operator sees a clean, remedy-bearing sentence; support needs the actual exception.
+    /// Without this the server keeps no record of WHY a probe failed, so a report of "the TLS step
+    /// fails" cannot be diagnosed after the fact.
+    /// </summary>
+    private void LogStageFailure(MailboxProbeStage stage, string host, int port, Exception exception) =>
+        logger?.LogWarning(exception,
+            "Mailbox probe failed at {Stage} for {Host}:{Port}.", stage, host, port);
+
     public const string Imap = "IMAP";
     public const string Smtp = "SMTP";
 
@@ -159,6 +174,7 @@ public sealed class MailboxConnectionProbe : IMailboxConnectionProbe
         }
         catch (Exception exception)
         {
+            LogStageFailure(MailboxProbeStage.Dns, host, request.Port, exception);
             steps.Add(new MailboxProbeStep(MailboxProbeStage.Dns, MailboxProbeStatus.Failed,
                 Describe(exception), watch.ElapsedMilliseconds, DnsRemedy(exception)));
             return Abort("The mail server's hostname could not be resolved.");
@@ -174,6 +190,7 @@ public sealed class MailboxConnectionProbe : IMailboxConnectionProbe
         }
         catch (Exception exception)
         {
+            LogStageFailure(MailboxProbeStage.Tcp, host, request.Port, exception);
             steps.Add(new MailboxProbeStep(MailboxProbeStage.Tcp, MailboxProbeStatus.Failed,
                 Describe(exception), watch.ElapsedMilliseconds,
                 $"Nothing answered on port {request.Port}. Confirm the port is correct for {protocol} " +
@@ -204,8 +221,9 @@ public sealed class MailboxConnectionProbe : IMailboxConnectionProbe
         }
         catch (Exception exception)
         {
+            LogStageFailure(MailboxProbeStage.Tls, host, request.Port, exception);
             steps.Add(new MailboxProbeStep(MailboxProbeStage.Tls, MailboxProbeStatus.Failed,
-                Describe(exception), watch.ElapsedMilliseconds, TlsRemedy(request.Port, request.UseSsl)));
+                Describe(exception), watch.ElapsedMilliseconds, TlsRemedy(request.Port, request.UseSsl, exception)));
             return new MailboxProbeResult(false, Imap, host, request.Port,
                 "The secure connection could not be established.", Fill(steps), CredentialsSentInClear: clear);
         }
@@ -219,6 +237,7 @@ public sealed class MailboxConnectionProbe : IMailboxConnectionProbe
         }
         catch (Exception exception)
         {
+            LogStageFailure(MailboxProbeStage.Authentication, host, request.Port, exception);
             steps.Add(new MailboxProbeStep(MailboxProbeStage.Authentication, MailboxProbeStatus.Failed,
                 Describe(exception), watch.ElapsedMilliseconds, AuthenticationRemedy(host, Imap)));
             return new MailboxProbeResult(false, Imap, host, request.Port,
@@ -249,6 +268,7 @@ public sealed class MailboxConnectionProbe : IMailboxConnectionProbe
         }
         catch (Exception exception)
         {
+            LogStageFailure(MailboxProbeStage.Mailbox, host, request.Port, exception);
             steps.Add(new MailboxProbeStep(MailboxProbeStage.Mailbox, MailboxProbeStatus.Failed,
                 Describe(exception), watch.ElapsedMilliseconds,
                 "Signed in, but INBOX could not be opened. The account may be a shared mailbox " +
@@ -273,8 +293,9 @@ public sealed class MailboxConnectionProbe : IMailboxConnectionProbe
         }
         catch (Exception exception)
         {
+            LogStageFailure(MailboxProbeStage.Tls, host, request.Port, exception);
             steps.Add(new MailboxProbeStep(MailboxProbeStage.Tls, MailboxProbeStatus.Failed,
-                Describe(exception), watch.ElapsedMilliseconds, TlsRemedy(request.Port, request.UseSsl)));
+                Describe(exception), watch.ElapsedMilliseconds, TlsRemedy(request.Port, request.UseSsl, exception)));
             return new MailboxProbeResult(false, Smtp, host, request.Port,
                 "The secure connection could not be established.", Fill(steps), CredentialsSentInClear: clear);
         }
@@ -288,6 +309,7 @@ public sealed class MailboxConnectionProbe : IMailboxConnectionProbe
         }
         catch (Exception exception)
         {
+            LogStageFailure(MailboxProbeStage.Authentication, host, request.Port, exception);
             steps.Add(new MailboxProbeStep(MailboxProbeStage.Authentication, MailboxProbeStatus.Failed,
                 Describe(exception), watch.ElapsedMilliseconds, AuthenticationRemedy(host, Smtp)));
             return new MailboxProbeResult(false, Smtp, host, request.Port,
@@ -369,7 +391,28 @@ public sealed class MailboxConnectionProbe : IMailboxConnectionProbe
         return provider + " The connection itself succeeded, so the host and port are correct.";
     }
 
-    private static string TlsRemedy(int port, bool useSsl) => useSsl
+    private static string TlsRemedy(int port, bool useSsl, Exception exception)
+    {
+        // A certificate failure and a wrong-encryption-mode failure both surface as
+        // SslHandshakeException, but their fixes are opposites. Handing the mode-mismatch advice
+        // to someone whose certificate could not be validated tells them to TURN OFF ENCRYPTION to
+        // fix a trust problem — the single worst instruction this screen could give. The most
+        // common form in practice is a revocation (OCSP/CRL) check that cannot complete because
+        // egress to the CA is blocked, which has nothing to do with the port or the TLS mode.
+        var message = exception.ToString();
+        if (message.Contains("certificate", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("revocation", StringComparison.OrdinalIgnoreCase))
+            return "The connection was encrypted, but the mail server's certificate could not be " +
+                   "validated. Do NOT turn off the secure connection to work around this. If the " +
+                   "message mentions a revocation check, this server cannot reach the certificate " +
+                   "authority — usually a firewall or proxy blocking outbound OCSP/CRL traffic. " +
+                   "Otherwise the certificate may be expired, self-signed, or issued for a " +
+                   "different hostname than the one entered.";
+
+        return TlsModeRemedy(port, useSsl);
+    }
+
+    private static string TlsModeRemedy(int port, bool useSsl) => useSsl
         ? $"The server did not offer an encrypted connection on port {port} from the first byte. " +
           "Try turning off 'use a secure connection' (the connection will still upgrade to TLS where " +
           "the server supports it), or use port 993 for IMAP / 465 for SMTP."
