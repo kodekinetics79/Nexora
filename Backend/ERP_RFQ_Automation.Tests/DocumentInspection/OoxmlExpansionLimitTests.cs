@@ -25,12 +25,13 @@ public sealed class OoxmlExpansionLimitTests
     [Fact]
     public async Task GiantButHonestDocumentXml_ClearsInspection()
     {
-        // ~60MB expanded / high-but-legitimate compression: past the OLD 50MB per-entry
-        // cap, inside the 100MB package cap. Varied row content keeps the ratio in the
-        // real-document band (~well under 300x) rather than the uniform-fill bomb band.
+        // 121MB expanded — the EXACT size of the real Aramco RFP part production rejected
+        // twice (first at the 50MB cap, then at 100MB). Varied row content keeps the
+        // ratio in the real-document band (~well under 300x) rather than the uniform-fill
+        // bomb band. Must clear under the default caps.
         var row = new StringBuilder();
         var document = new StringBuilder("<?xml version=\"1.0\"?><w:document><w:body><w:tbl>");
-        for (var i = 0; document.Length < 60 * 1024 * 1024; i++)
+        for (var i = 0; document.Length < 121 * 1024 * 1024; i++)
         {
             row.Clear();
             row.Append("<w:tr><w:tc><w:t>MAT-").Append(i)
@@ -72,8 +73,9 @@ public sealed class OoxmlExpansionLimitTests
     [Fact]
     public async Task PackageTotalPastTheCap_IsStillRejected()
     {
-        // Two varied-content parts summing past the 100MB package cap. Each alone is
+        // Two varied-content parts summing past an explicit package cap. Each alone is
         // inside the per-entry limit; the mid-stream TOTAL check must still refuse.
+        // Explicit small caps pin the branch without CI-hostile allocations.
         static byte[] Varied(int megabytes, int seed)
         {
             var sb = new StringBuilder();
@@ -85,10 +87,15 @@ public sealed class OoxmlExpansionLimitTests
         var bytes = MacroPolicyAndRejectionTruthTests.CreateOpenXmlPackage(
             "word/document2.xml",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
-            ("word/document.xml", Varied(60, 1)),
-            ("word/document3.xml", Varied(55, 2)));
+            ("word/document.xml", Varied(13, 1)),
+            ("word/document3.xml", Varied(13, 2)));
 
-        var result = await Inspect(bytes, "too-big-in-total.docx");
+        var result = await Inspect(bytes, "too-big-in-total.docx", new DocumentInspectionOptions
+        {
+            MaximumFileBytes = 256L * 1024 * 1024,
+            MaximumArchiveEntryBytes = 20L * 1024 * 1024,
+            MaximumArchiveExpandedBytes = 24L * 1024 * 1024,
+        });
 
         Assert.Equal(FileInspectionStatus.Rejected, result.Status);
         Assert.Contains("in total", result.Reason, StringComparison.OrdinalIgnoreCase);
@@ -99,10 +106,9 @@ public sealed class OoxmlExpansionLimitTests
     {
         // Entry names are attacker-controlled text inside the archive, and rejection
         // reasons render verbatim as product copy. The oversize message must name
-        // sizes, not parts.
-        var oversize = new byte[101 * 1024 * 1024];
-        // Vary the content so the RATIO tripwire doesn't fire first — this pins the
-        // per-entry size branch specifically.
+        // sizes, not parts. Explicit small per-entry cap pins the size branch (varied
+        // bytes keep the RATIO tripwire from firing first).
+        var oversize = new byte[9 * 1024 * 1024];
         for (var i = 0; i < oversize.Length; i++) oversize[i] = (byte)(i * 31 % 251);
 
         var bytes = MacroPolicyAndRejectionTruthTests.CreateOpenXmlPackage(
@@ -110,20 +116,25 @@ public sealed class OoxmlExpansionLimitTests
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
             ("word/EVIL-CALL-1-800-000-0000.xml", oversize));
 
-        var result = await Inspect(bytes, "named-entry.docx");
+        var result = await Inspect(bytes, "named-entry.docx", new DocumentInspectionOptions
+        {
+            MaximumFileBytes = 256L * 1024 * 1024,
+            MaximumArchiveEntryBytes = 8L * 1024 * 1024,
+        });
 
         Assert.Equal(FileInspectionStatus.Rejected, result.Status);
         Assert.DoesNotContain("EVIL", result.Reason, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("MB", result.Reason, StringComparison.Ordinal);
     }
 
-    private static async Task<FileInspectionResult> Inspect(byte[] bytes, string fileName)
+    private static async Task<FileInspectionResult> Inspect(
+        byte[] bytes, string fileName, DocumentInspectionOptions? options = null)
     {
         // Mirror production request shape: no declared content type (the ingestion door
         // sends none), declared length from the actual byte count.
         var service = new DocumentFileInspectionService(
             new EicarMalwareScanner(),
-            new DocumentInspectionOptions { MaximumFileBytes = 256L * 1024 * 1024 });
+            options ?? new DocumentInspectionOptions { MaximumFileBytes = 256L * 1024 * 1024 });
         await using var stream = new MemoryStream(bytes, writable: false);
         return await service.InspectAsync(new FileInspectionRequest(
             stream, fileName, DeclaredLength: bytes.LongLength));

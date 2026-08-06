@@ -5,6 +5,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
 using Docnet.Core;
@@ -228,30 +229,84 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         {
             using var ms = new MemoryStream(bytes, writable: false);
             using var doc = WordprocessingDocument.Open(ms, false);
-            var body = doc.MainDocumentPart?.Document?.Body;
-            if (body == null)
+            var mainPart = doc.MainDocumentPart;
+            if (mainPart == null)
                 throw new DocumentParsingException("The DOCX document has no readable main document body.");
 
+            // STREAMING, NOT DOM — deliberately. The previous implementation read
+            // MainDocumentPart.Document.Body, which materialises the entire main part as
+            // an object tree. A real Aramco RFP arrived on 2026-08-06 whose document.xml
+            // expands to 121 MB (4.4 MB on disk — a materials table with thousands of
+            // rows); the DOM for that is several times larger again, and this service
+            // runs on a 512 MB instance. Accepting the file into a DOM reader would have
+            // traded an intake rejection for a worker OOM. OpenXmlReader walks the part
+            // as a token stream: memory is bounded by one line of output, not by the
+            // document, so the intake size limit — not this method — decides what fits.
+            //
+            // Output shape preserved from the DOM version: one line per top-level
+            // paragraph; one line per table row with cell texts tab-joined; paragraphs
+            // inside a cell joined by spaces.
             var lines = new List<string>();
-            foreach (var element in body.Elements())
+            var paragraph = new StringBuilder(); // current paragraph text (any depth)
+            var cell = new StringBuilder();      // accumulated text of the current cell
+            var row = new List<string>();        // completed cells of the current row
+            var cellDepth = 0;                   // >0 while inside w:tc (nested tables stay flattened into the cell)
+
+            using var reader = OpenXmlReader.Create(mainPart);
+            while (reader.Read())
             {
-                switch (element)
+                if (reader.IsStartElement)
                 {
-                    case Paragraph paragraph:
-                        AddLine(lines, ExtractParagraphText(paragraph));
-                        break;
-                    case Table table:
-                        foreach (var row in table.Elements<TableRow>())
+                    if (reader.ElementType == typeof(Text))
+                    {
+                        paragraph.Append(reader.GetText());
+                    }
+                    else if (reader.ElementType == typeof(TabChar))
+                    {
+                        paragraph.Append('\t');
+                    }
+                    else if (reader.ElementType == typeof(Break) || reader.ElementType == typeof(CarriageReturn))
+                    {
+                        paragraph.Append(' ');
+                    }
+                    else if (reader.ElementType == typeof(TableCell))
+                    {
+                        cellDepth++;
+                    }
+                }
+                else if (reader.IsEndElement)
+                {
+                    if (reader.ElementType == typeof(Paragraph))
+                    {
+                        var text = paragraph.ToString();
+                        paragraph.Clear();
+                        if (cellDepth > 0)
                         {
-                            var cells = row.Elements<TableCell>()
-                                .Select(cell => string.Join(" ", cell.Elements<Paragraph>()
-                                    .Select(ExtractParagraphText)
-                                    .Where(value => !string.IsNullOrWhiteSpace(value))))
-                                .Select(value => value.Trim())
-                                .ToArray();
-                            AddLine(lines, string.Join('\t', cells));
+                            if (!string.IsNullOrWhiteSpace(text))
+                            {
+                                if (cell.Length > 0) cell.Append(' ');
+                                cell.Append(text.Trim());
+                            }
                         }
-                        break;
+                        else
+                        {
+                            AddLine(lines, text);
+                        }
+                    }
+                    else if (reader.ElementType == typeof(TableCell))
+                    {
+                        cellDepth--;
+                        if (cellDepth == 0)
+                        {
+                            row.Add(cell.ToString().Trim());
+                            cell.Clear();
+                        }
+                    }
+                    else if (reader.ElementType == typeof(TableRow) && cellDepth == 0 && row.Count > 0)
+                    {
+                        AddLine(lines, string.Join('\t', row));
+                        row.Clear();
+                    }
                 }
             }
 
