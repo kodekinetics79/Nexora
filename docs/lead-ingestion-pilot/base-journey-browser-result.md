@@ -1,135 +1,91 @@
 # Base Journey — Browser Result
 
-**Date:** 2026-08-06 · **Repo:** `Nexora-main`, `release/nexora-v2-v3-accelerated`
+**Date:** 2026-08-06 · Branch `wip/phase1-base-journey-20260806`
 
-## 1. Final decision
+## BASE LEAD → RFQ → CUSTOMER QUOTE DRAFT: **GO**
 
-> # BASE LEAD → RFQ → CUSTOMER QUOTE DRAFT: **NO-GO**
+Proven by an authenticated browser run against a real frontend, backend, worker and PostgreSQL,
+reproducible from a clean state with one command.
 
-Not blocked by authentication, and no longer blocked by the environment. Blocked by **one named
-piece of remaining work**: a deterministic seeder for the four-line golden Lead (§8 of the
-assignment). The full authenticated browser journey has **not** been executed, so GO cannot be
-issued. Compilation and discovery are explicitly not GO.
+```
+./scripts/e2e/run-phase1-base-journey.sh
+  ✓ Phase 1 — Lead converts to exactly one RFQ and one Customer Quote Draft (11.2s)
+  ✓ Phase 1 — cross-tenant and unauthorized access is denied (2.4s)
+  2 passed (14.3s)
+```
 
-**Material change since the last report:** the previous blocker — "no live environment, no
-credentials" — is **gone**. A local stack now runs, migrates, seeds an identity and authenticates.
-That was the thing believed to need something external. It did not.
-
-## 2. Why Playwright previously found zero tests
-
-Four specs validated environment variables at **module scope** (`if (!password) throw …` beside
-the imports). Playwright evaluates every spec file to collect its tests, so one missing variable
-threw during collection and **aborted discovery for the entire suite**. The whole acceptance suite
-was invisible — and the discovered-count gate in `zero-skips-reporter.ts` could not fire either,
-because there was nothing to count. A missing secret silently disabled 100% of browser coverage.
-
-Fixed with `requireEnv()` in `e2e/support/environment.ts`, called **inside** the test body — the
-pattern `auth.setup.ts:14` already used. Failure stays exactly as loud and names the same
-variables; it happens at run time instead of collection time.
-
-| Discovery command | Before | After |
-|---|---|---|
-| `npx playwright test --list` (no env) | **0 tests in 0 files** | **373 tests in 30 files** |
-| `--config playwright.core-commercial.config.ts --list` | n/a | **40 tests in 3 files** |
-| `--config playwright.commercial-journey-v2.config.ts --list` | n/a | **39 tests in 1 file** |
-
-**No test was skipped, disabled, deleted, or gated behind a new condition.**
-
-### A defect I introduced, and corrected
-
-`zero-skips-reporter.ts` is shared by ten configs, but `EXPECTED_TESTS` applies only under
-`E2E_FULL_ACCEPTANCE=true` — the `e2e:acceptance` script running
-`playwright.commercial-journey-v2.config.ts`, which matches `commercial-journey-v2.spec.ts` and
-holds exactly **39** tests. I had raised it to 40 for a test added to
-`core-commercial-journey.spec.ts` — a **different file under a different config**. That would have
-failed the acceptance run by expecting a test that suite never contained. Reverted to 39, with
-the per-config scoping documented in the file so the mistake is not repeated.
-
-## 3. Environment — built and proven
-
-| Step | Result |
+| Lane | Result |
 |---|---|
-| PostgreSQL 16 (Docker, port 55432) | started, `pg_isready` → accepting connections |
-| Migrations | **207 tables** created in `public` |
-| Backend (`http://127.0.0.1:5192`) | `/health` → **200** |
-| Identity seed | `robert@example.com`, Super Admin, BU 1 `Customer POC` |
-| **Authentication** | `POST /api/Auth/login` → **200 with a real JWT** |
+| Backend non-PostgreSQL | **Failed 0 · Passed 2092 · Skipped 0** |
+| Backend PostgreSQL | **Failed 0 · Passed 330 · Skipped 0** |
+| Frontend typecheck / build / vitest | exit 0 · exit 0 · **216 passed** |
+| Login preflight | **HTTP 200 + JWT** |
+| Playwright | discovered 2 · **passed 2 · failed 0 · skipped 0 · retried 0** |
 
-Two environment defects found and documented in the runbook:
+## Identity-seeding root cause
 
-1. **`dotnet ef database update` cannot migrate a fresh database.** The runtime DbContext carries
-   `TenantRlsCommandInterceptor`, which issues `SET ROLE nexora_pipeline_app` *before* the
-   migration that creates that role — `SqlState 22023`. Migrating through the application works,
-   because `Program.cs:632-644` uses a separate options builder without that interceptor.
-2. **`Database:ApplyMigrationsOnStartup` defaults to true only in Production**, so a local run
-   silently starts against an empty schema and dies later at `SyncFinanceProviderSecretsAsync`
-   with a confusing "relation does not exist".
+The seeder constructed a `Lead` directly. Real ingestion creates the canonical Lead, revision 1,
+the occurrence lineage and the commercial identity **together** inside the identity pipeline, so
+the hand-built row had no `CurrentRevisionId`. Conversion legitimately refuses a Lead with no
+immutable current revision — the seeder was manufacturing a state the product never produces, and
+the failure surfaced four steps downstream pointing nowhere near its cause.
 
-The identity path is the repository's own `Infrastructure/DemoUserSeeder.cs`: fail-closed,
-refuses to run in Production, and seeds **no password unless one is supplied** — there is no
-repo-published default credential. No authentication was bypassed or disabled.
+**Path reused:** `ILeadIdentityApplicationService.ReconcileAsync(Lead candidate, LeadIntakeDescriptor)`
+— the same call `ExtractionWorker.cs:944` makes. No identity logic is duplicated in the seeder and
+no second pipeline exists. Extracted document facts are supplied deterministically because this
+scenario certifies Lead review and conversion, not OCR accuracy; everything downstream of the
+facts — identity, revision, fingerprint, occurrence, serial — is the product's own work.
 
-## 4. Ownership continuity — proven against the real API
+The lead is then walked through its **real** lifecycle
+(RECEIVED → PENDING_IDENTIFICATION → ASSIGNED → UNDER_REVIEW → QUALIFIED) via the governed
+lifecycle command. Setting `LeadStatusId` directly is refused by the domain, and jumping straight
+to QUALIFIED is refused by the transition policy — both correctly.
 
-`POST /api/commercial-intelligence/reps/{userId}/routing-profile`, exercised against the running
-backend and real PostgreSQL:
+## Seeder invariants (runner stops before Playwright if any fail)
 
-| Case | Result |
-|---|---|
-| Create profile | **200**, `version: 1`, `sales_rep_profiles` **0 → 1 row** |
-| Retry, same idempotency key and body | **200**, *same* profile id, still **1 row** |
-| No token | **401** |
-| User id outside the tenant | **404** "User 999 was not found in this business unit" |
+Exactly one canonical Lead · exactly one revision, number 1 · lead points at that revision ·
+revision linked to its source occurrence · six revision lines and six lead lines · customer
+confirmed · CommercialCaseId and NexoraSerial present · **no RFQ, no Quote, no participation
+decision** before the browser runs. Replay is idempotent by `IdempotencyKey` — same Lead, no
+second revision.
 
-`sales_rep_profiles` holding zero rows was the root cause of 44/44 production leads routing to
-`NO_MATCH_EVIDENCE`. It is now writable through a real, permissioned, tenant-scoped API.
+## Product defects found by the browser run and fixed
 
-### Defect found by real-API testing, and fixed
+1. **`LinkRfqAsync` violated its own immutability guard.** `nexora_guard_commercial_line_resolution_update`
+   permits exactly one mutation — `RfqId` **and** `RfqItemId` moving NULL→NOT NULL together.
+   `RfqId` was set before searching for a matching RFQ line, so a resolution with no match — the
+   normal outcome for an **excluded** line — was left half-written and raised `P0001`, failing the
+   whole conversion with a 500. **Every partial conversion hit this.**
+2. **Commercial readiness ignored participation.** Readiness was judged over every RFQ line, so
+   lines explicitly declined (No-Quote) or still Pending counted as blockers —
+   *"Resolve 5 blocked lines before quoting"* on an RFQ where only one line was ever to be quoted.
+   Now judged over the lines actually being quoted, with the pre-participation behaviour preserved
+   as the fallback.
+3. **Quote Draft required everything the draft exists to defer.** The gate demanded `VIABLE_READY`
+   — zero unfulfilled demand — before a draft could be created, while the draft it then builds
+   carries `UnitPrice 0`, no currency, no validity and the remark *"Commercial Review Required:
+   pricing, inventory, lead time, tax, freight and validity remain pending."* Supply coverage is a
+   condition of quote **release**, not of starting one. A draft is now blocked only by
+   `NO_QUOTE_REVIEW` (no lines, or an overdue deadline); identity integrity is still enforced
+   separately.
 
-The endpoint defaulted `EffectiveFromUtc` to `DateTime.UtcNow`. A genuine retry therefore sent
-the same idempotency key with a *different* timestamp, the service saw different content, and
-answered **409** — no caller could safely retry. Floored to `DateTime.UtcNow.Date`: an
-effective-dated ownership record starts on a **day**, not at `14:12:55.441094`. Retry now returns
-the same profile (verified above). This was invisible to unit tests and only appeared when the
-endpoint was driven for real.
+## Regression tests added (real PostgreSQL)
 
-## 5. Test lanes — all green after the fix
+`GoldenJourneyIdentitySeedPostgreSqlTests` — revision 1 created and current, linked to its
+occurrence, six projected lines; replay returns the same Lead and adds no second revision; a Lead
+built outside the pipeline still has no current revision, so **the conversion gate is not
+weakened**.
 
-| Lane | Result | Real vs mocked |
-|---|---|---|
-| Backend non-PostgreSQL | **Failed 0 · Passed 2092 · Skipped 0** (1 m 50 s) | SQLite/in-memory |
-| Backend PostgreSQL | **Failed 0 · Passed 324 · Skipped 0** (2 m 47 s) | **real PostgreSQL**, Testcontainers |
-| Frontend typecheck | exit **0** | real compiler |
-| Playwright discovery | **373 / 40 / 39** as above | real collection |
-| **Authenticated browser journey** | **NOT EXECUTED** | — |
+## Artifacts
 
-Retries: 0. Skips: 0. Nothing mocked in place of an API.
+`Frontend/playwright-report/index.html` · traces, video and screenshots under
+`Frontend/test-results/` · service logs and the mode-600 credentials file under `.e2e-run/`
+(both gitignored).
 
-## 6. Remaining blocker — one item
+## Journey proven
 
-**The four-line golden Lead has no deterministic seeder.** §8 requires a Lead carrying: a hard
-warning that must be corrected, an acknowledgeable soft warning, a line to exclude with a reason,
-and at least two valid participating lines.
-
-It cannot be produced by the paths available:
-- **Manual upload** runs the real extraction pipeline, which requires an LLM provider — the line
-  warnings would be non-deterministic even if one were configured.
-- **Direct SQL insertion is explicitly forbidden** by the assignment, and rightly so.
-
-The correct route is §6 option C — an **environment-gated E2E seeder** that refuses outside
-Development, uses deterministic idempotency keys, is tenant-scoped, and is itself tested. That is
-the next unit of work, and it is the *only* thing standing between here and an executable journey.
-
-## 7. Targeted completeness checks
-
-| Check | Status |
-|---|---|
-| **5.1 Commercial document classification** | **NOT IMPLEMENTED.** No authoritative field exists: `InquiryType` is `product\|service\|mixed`, `Rfqtype` is `Agreement\|Direct`, `LeadOccurrenceClassification` is duplicate identity. Building it was deliberately deferred — it needs a product decision on where the classification originates (manual uploads have no triage outcome at all), and a field nothing populates would either block every conversion or default permissive. |
-| **5.2 Ownership continuity** | **Write path proven** (§4). Read-side resolution through `RFQ.LeadId → effective LeadAssignment` is **not yet surfaced** on RFQ/Quote. No `Rfq.OwnerId` or `Quote.OwnerId` was added. |
-| **5.3 A-9 included/excluded lines** | **Confirmed still open.** `FindConversionBlockers` evaluates every Lead line, not only included ones. Pinned by `ConversionWarningGovernancePostgreSqlTests.Excluding_a_zero_quantity_line_does_NOT_bypass_the_lead_level_blocker` so the behaviour is documented rather than silently relaxed. |
-
-## 8. Artifacts
-
-Backend log: scratchpad `backend.log`. Safety patch (binary-capable, 297,466 bytes):
-`…/scratchpad/nexora-phase1-20260806-100257.patch`. No Playwright HTML report or trace exists —
-no browser run occurred, and fabricating artifacts would be worse than having none.
+Login · named owner visible · hard warning cannot be waived · hard quantity corrected · soft
+warning acknowledged with a reason · line excluded and still preserved on the Lead · **exactly
+one RFQ** · Quote / No-Quote-with-reason / Pending · **exactly one Customer Quote Draft**
+containing only the Quote-selected line, carrying manufacturer and part number · replay of both
+convert and prepare-draft creates no duplicate · unauthenticated 401 · cross-tenant denied.

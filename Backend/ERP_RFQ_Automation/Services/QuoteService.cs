@@ -199,7 +199,23 @@ namespace ERP_RFQ_Automation.Services
             if (_commercialLearning is not null)
             {
                 var intelligence = await _commercialLearning.GetRfqIntelligenceAsync(businessUnitId, rfqId, ct);
-                if (intelligence.CommercialDecision != "VIABLE_READY")
+
+                // A DRAFT is blocked only by NO_QUOTE_REVIEW — no lines at all, or a deadline
+                // already past. It is deliberately NOT blocked by ACTIONABLE_WITH_BLOCKERS.
+                //
+                // This gate previously demanded VIABLE_READY, which requires zero unfulfilled
+                // demand: full stock or an approved supplier offer for every quoted line. That
+                // contradicts what this method builds three lines below — a draft with
+                // UnitPrice 0, no currency, no validity and the header remark "Commercial Review
+                // Required: pricing, inventory, lead time, tax, freight and validity remain
+                // pending". The draft exists precisely to hold work that is not yet resolved, so
+                // requiring it to be resolved first made the draft unreachable for any line
+                // needing sourcing — the normal case. Supply coverage is a condition of quote
+                // RELEASE, not of starting one.
+                //
+                // Identity integrity is not waived: customer, canonical Lead and Nexora Serial
+                // are each checked explicitly above and below this block.
+                if (intelligence.CommercialDecision == "NO_QUOTE_REVIEW")
                     throw new InvalidOperationException(
                         $"Customer Quote preparation is blocked: {intelligence.NextBestAction.Explanation}");
             }

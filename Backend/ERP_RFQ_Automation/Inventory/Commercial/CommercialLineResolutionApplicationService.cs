@@ -178,7 +178,6 @@ public sealed class CommercialLineResolutionApplicationService(
         var unassigned = new HashSet<long>(rfqItems.Select(x => x.Id));
         foreach (var row in rows.OrderBy(x => revisionLineNumbers.GetValueOrDefault(x.LeadLineId)).ThenBy(x => x.LeadLineId))
         {
-            row.RfqId = rfqId;
             var lineNumber = revisionLineNumbers.GetValueOrDefault(row.LeadLineId);
             var exact = rfqItems.FirstOrDefault(x => unassigned.Contains(x.Id)
                 && int.TryParse(x.LineItemNo, out var rfqLineNumber) && rfqLineNumber == lineNumber);
@@ -188,7 +187,17 @@ public sealed class CommercialLineResolutionApplicationService(
                 && PartIdentity(x) == CommercialInventoryNormalization.PartNumber(row.RequestedPartNumber));
             if (exact is null && unassigned.Count == rows.Count(r => r.RfqItemId is null))
                 exact = rfqItems.FirstOrDefault(x => unassigned.Contains(x.Id));
+            // RfqId and RfqItemId must be written TOGETHER or not at all.
+            //
+            // nexora_guard_commercial_line_resolution_update permits exactly one mutation of an
+            // otherwise-immutable row: both columns moving NULL -> NOT NULL in the same update.
+            // This used to set RfqId before searching for a matching RFQ line, so a resolution
+            // with no match — the normal outcome for a line the operator EXCLUDED from the RFQ —
+            // was left with RfqId set and RfqItemId null. The guard then raised
+            // "commercial line resolutions are immutable" (P0001) and failed the entire
+            // conversion with a 500. Every partial conversion hit this.
             if (exact is null) continue;
+            row.RfqId = rfqId;
             row.RfqItemId = exact.Id;
             unassigned.Remove(exact.Id);
         }

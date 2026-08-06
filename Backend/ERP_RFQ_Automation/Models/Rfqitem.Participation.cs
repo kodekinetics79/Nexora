@@ -46,6 +46,10 @@ public partial class Rfqitem
     /// <summary>True only for an explicit, recorded decision to quote this line.</summary>
     public bool IsMarkedForQuote => ParticipationDecision == ParticipationQuote;
 
+    /// <summary>True only for an explicit, recorded decision NOT to quote this line. Distinct
+    /// from "undecided" — a Pending line is not a declined one.</summary>
+    public bool IsDeclined => ParticipationDecision == ParticipationNoQuote;
+
     /// <summary>
     /// Records a line participation decision. The reason rule is enforced here, in the domain,
     /// rather than in a controller, so every caller — API, worker, test — obeys it.

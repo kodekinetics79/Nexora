@@ -412,7 +412,21 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
         var rfq = await context.Rfqs.AsNoTracking().Include(x => x.Rfqitems)
             .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == rfqId, cancellationToken)
             ?? throw new KeyNotFoundException("RFQ was not found in this tenant.");
-        var lines = rfq.Rfqitems.OrderBy(x => x.Id).ToArray();
+        // Commercial readiness is judged over the lines Nexora is ACTUALLY quoting.
+        //
+        // This used to take every RFQ line, so a line explicitly declined (No-Quote) or still
+        // undecided (Pending) counted as a blocker and the whole Customer Quote Draft was
+        // refused — "Resolve 5 blocked lines before quoting" on an RFQ where only one line was
+        // ever meant to be quoted. A partial bid is the normal case on an industrial bid list,
+        // and demanding stock coverage for lines we are declining is asking the operator to
+        // resolve work they have already decided not to do.
+        //
+        // Before any participation decision exists every line is Pending, so the fallback keeps
+        // the original whole-RFQ behaviour and nothing regresses for RFQs that never used the
+        // participation controls.
+        var quoted = rfq.Rfqitems.Where(x => x.IsMarkedForQuote).ToArray();
+        var lines = (quoted.Length > 0 ? quoted : rfq.Rfqitems.Where(x => !x.IsDeclined).ToArray())
+            .OrderBy(x => x.Id).ToArray();
         var lineIds = lines.Select(x => x.Id).ToArray();
         var productIds = lines.Where(x => x.ProductId.HasValue).Select(x => x.ProductId!.Value).Distinct().ToArray();
         var inventory = await context.Set<Models.Inventory>().AsNoTracking().Where(x => x.Buid == businessUnitId &&

@@ -3,6 +3,7 @@ using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.CommercialIntelligence.Sales;
 using ERP_RFQ_Automation.CommercialRouting;
+using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 
@@ -61,6 +62,7 @@ public static class GoldenCommercialJourneySeeder
 
         var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
         var routing = scope.ServiceProvider.GetRequiredService<ICommercialRoutingApplicationService>();
+        var identity = scope.ServiceProvider.GetRequiredService<ILeadIdentityApplicationService>();
         var sales = scope.ServiceProvider.GetRequiredService<ISalesApplicationService>();
         var now = DateTime.UtcNow;
 
@@ -123,8 +125,8 @@ public static class GoldenCommercialJourneySeeder
                 EffectiveFrom: now.Date, EffectiveTo: null, Source: Actor,
                 Reason: "Golden journey seed"), CancellationToken.None);
 
-        var leadA = await EnsureGoldenLeadAsync(db, tenantA.Id, customerA.Id, now);
-        var leadB = await EnsureGoldenLeadAsync(db, tenantB.Id, customerB.Id, now, reference: "E2E-GOLDEN-B-001");
+        var leadA = await EnsureGoldenLeadAsync(db, identity, tenantA.Id, customerA.Id, now);
+        var leadB = await EnsureGoldenLeadAsync(db, identity, tenantB.Id, customerB.Id, now, reference: "E2E-GOLDEN-B-001");
 
         // Real routing/assignment path — not a hand-written LeadAssignment row.
         try
@@ -136,6 +138,8 @@ public static class GoldenCommercialJourneySeeder
         {
             logger.LogWarning(ex, "Golden journey: routing did not assign lead {LeadId}; it will surface in the unassigned queue.", leadA);
         }
+
+        await AssertStartingStateAsync(db, tenantA.Id, leadA, logger);
 
         var manifest = new
         {
@@ -184,16 +188,29 @@ public static class GoldenCommercialJourneySeeder
     private const string GoldenLine5Part = "GOLD-NOQT-0005";   // valid -> marked NoQuote with a reason
     private const string GoldenLine6Part = "GOLD-PEND-0006";   // valid -> deliberately left Pending
 
+    /// <summary>
+    /// Establishes the golden Lead through <see cref="ILeadIdentityApplicationService.ReconcileAsync"/>
+    /// — the SAME call the extraction worker makes (ExtractionWorker.cs:944).
+    ///
+    /// <para><b>Why not construct the Lead directly.</b> The seeder used to, and the resulting row
+    /// had no <c>CurrentRevisionId</c>: real ingestion creates the canonical Lead, revision 1, the
+    /// occurrence lineage and the commercial identity together, inside the identity pipeline.
+    /// Conversion legitimately refuses a Lead with no immutable current revision, so a
+    /// directly-built Lead could never convert — the seeder was manufacturing a state the product
+    /// never produces. Reconcile owns all of it; nothing here duplicates that logic.</para>
+    ///
+    /// <para>The extracted document facts are supplied deterministically because this scenario
+    /// certifies Lead review and conversion, not OCR accuracy. Everything downstream of the facts
+    /// — identity, revision, fingerprint, occurrence, serial — is the product's own work.</para>
+    ///
+    /// <para>Idempotent by <c>IdempotencyKey</c>: replaying returns the same Lead and creates no
+    /// second revision, which is the identity service's own guarantee rather than a seeder trick.</para>
+    /// </summary>
     private static async Task<long> EnsureGoldenLeadAsync(
-        ErpRfqAutomationContext db, long businessUnitId, long customerId, DateTime now, string reference = "E2E-GOLDEN-A-001")
+        ErpRfqAutomationContext db, ILeadIdentityApplicationService identity,
+        long businessUnitId, long customerId, DateTime now, string reference = "E2E-GOLDEN-A-001")
     {
-        var existing = await db.Leads.IgnoreQueryFilters()
-            .FirstOrDefaultAsync(l => l.BusinessUnitId == businessUnitId && l.Rfqno == reference);
-        if (existing is not null) return existing.Id;
-
-        var qualifiedId = await LifecycleStatusCatalog.ResolveIdAsync(db, businessUnitId, "Lead", "QUALIFIED");
-
-        var lead = new Lead
+        var candidate = new Lead
         {
             Rfqno = reference,
             BuyersName = "SEC Bid Desk",
@@ -203,25 +220,99 @@ public static class GoldenCommercialJourneySeeder
             CreatedBy = Actor,
             CreatedDate = now,
             BusinessUnitId = businessUnitId,
-            LeadStatusId = qualifiedId,
-            NoOfLineItems = 6
+            NoOfLineItems = 6,
+            HeaderRemarks = "Golden journey: six deterministic lines."
         };
 
         // Line 1 carries quantity 0 — the HARD blocker the operator must correct in the browser.
-        lead.LeadItems.Add(Line("00010", GoldenLine1Part, "Ball valve 2IN class 300", 0, "EA"));
+        candidate.LeadItems.Add(Line("00010", GoldenLine1Part, "Ball valve 2IN class 300", 0, "EA"));
         // Line 2 has no catalog row, so the resolver raises "No catalog match found" — SOFT.
-        lead.LeadItems.Add(Line("00020", GoldenLine2Part, "Gasket spiral wound 4IN", 12, "EA"));
-        lead.LeadItems.Add(Line("00030", GoldenLine3Part, "Hex bolt M12 x 60 A4-80", 200, "EA"));
-        lead.LeadItems.Add(Line("00040", GoldenLine4Part, "Centrifugal pump seal kit", 4, "EA"));
-        lead.LeadItems.Add(Line("00050", GoldenLine5Part, "Alstom obsolete relay card", 2, "EA"));
-        lead.LeadItems.Add(Line("00060", GoldenLine6Part, "Cable tray 300mm hot-dip", 30, "EA"));
+        candidate.LeadItems.Add(Line("00020", GoldenLine2Part, "Gasket spiral wound 4IN", 12, "EA"));
+        candidate.LeadItems.Add(Line("00030", GoldenLine3Part, "Hex bolt M12 x 60 A4-80", 200, "EA"));
+        candidate.LeadItems.Add(Line("00040", GoldenLine4Part, "Centrifugal pump seal kit", 4, "EA"));
+        candidate.LeadItems.Add(Line("00050", GoldenLine5Part, "Alstom obsolete relay card", 2, "EA"));
+        candidate.LeadItems.Add(Line("00060", GoldenLine6Part, "Cable tray 300mm hot-dip", 30, "EA"));
 
-        db.Leads.Add(lead);
+        var key = $"golden-journey:{businessUnitId}:{reference}";
+        var result = await identity.ReconcileAsync(candidate, new LeadIntakeDescriptor(
+            BatchId: DeterministicBatchId(businessUnitId),
+            SourceChannel: "ManualUpload",
+            IdempotencyKey: key,
+            ExternalSourceId: key,
+            EmailThreadId: null,
+            SourceSystem: "GoldenJourneySeed",
+            Sender: "bids@sec.com.sa",
+            Subject: $"RFQ {reference} — six line golden scenario",
+            OriginalFileName: $"{reference}.xlsx",
+            MimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            FileSize: 20480,
+            // Deterministic content hash: the same document identity on every replay, which is
+            // what makes duplicate/revision behaviour reproducible.
+            ContentHash: DeterministicHash(key),
+            SourceDocumentId: null,
+            ExtractionJobId: null,
+            SourceReceivedAtUtc: now,
+            IngestedAtUtc: now,
+            ProcessingPath: LeadProcessingPath.Deterministic,
+            ExternalAiUsed: false,
+            ExternalCost: null,
+            ActorType: "Service",
+            ActorId: Actor,
+            CorrelationId: key), CancellationToken.None);
+
+        var lead = await db.Leads.IgnoreQueryFilters()
+            .Include(l => l.LeadItems)
+            .SingleAsync(l => l.Id == result.LeadId);
+
+        // Starting state only, through the domain: a confirmed customer and a qualified lead.
+        // No acknowledgement, exclusion, RFQ, participation or quote — those are the browser's job.
+        if (!lead.CustomerId.HasValue)
+            lead.ResolveCommercialIdentity(customerId, null, "CUSTOMER_CONFIRMED");
+        lead.CommercialFactsVerified = true;
         await db.SaveChangesAsync();
-        lead.ResolveCommercialIdentity(customerId, null, "CUSTOMER_CONFIRMED");
-        await db.SaveChangesAsync();
+
+        // Lead status is domain-protected: "Lead status must be changed through the governed
+        // lifecycle command." Setting LeadStatusId directly is refused, and rightly — the
+        // transition writes a lifecycle event and bumps the version. Qualify through the same
+        // service the product uses, inside its own transaction.
+        // Walk the REAL lead lifecycle rather than jumping to QUALIFIED. The policy graph
+        // (LifecyclePolicy.LeadTransitions) allows RECEIVED -> PENDING_IDENTIFICATION ->
+        // ASSIGNED -> UNDER_REVIEW -> QUALIFIED, and refuses any shortcut. A seeded lead that
+        // teleported into QUALIFIED would carry a lifecycle history no real lead can have, and
+        // the browser test would then be certifying a state the product cannot produce.
+        // TransitionLeadAsync owns its own retriable transaction; opening one here fails against
+        // NpgsqlRetryingExecutionStrategy.
+        var lifecycle = new LifecycleApplicationService(db);
+        foreach (var target in new[] { "PENDING_IDENTIFICATION", "ASSIGNED", "UNDER_REVIEW", "QUALIFIED" })
+        {
+            var current = await db.Leads.IgnoreQueryFilters()
+                .Include(l => l.LeadStatus)
+                .SingleAsync(l => l.Id == lead.Id);
+            if (LifecyclePolicy.Canonicalize("Lead", current.LeadStatus?.SetupCode, current.LeadStatus?.SetupValue) == "QUALIFIED")
+                break;
+            await lifecycle.TransitionLeadAsync(
+                businessUnitId, current.Id, new LifecycleActor(Actor, "GoldenJourneySeed"),
+                new LifecycleTransitionCommand(target, current.LifecycleVersion, null, null,
+                    "Seed", $"golden-journey-{current.Id}", $"lead-{current.Id}",
+                    $"golden-journey-{target.ToLowerInvariant()}:{businessUnitId}:{current.Id}"),
+                false, CancellationToken.None);
+            db.ChangeTracker.Clear();
+        }
         return lead.Id;
     }
+
+    /// <summary>Stable per-tenant batch id — a random Guid would break replay idempotency.</summary>
+    private static Guid DeterministicBatchId(long businessUnitId)
+    {
+        var bytes = new byte[16];
+        BitConverter.GetBytes(businessUnitId).CopyTo(bytes, 0);
+        "GOLDEN"u8.ToArray().CopyTo(bytes, 8);
+        return new Guid(bytes);
+    }
+
+    private static string DeterministicHash(string seed) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(seed))).ToLowerInvariant();
 
     private static LeadItem Line(string lineNo, string partNo, string description, int quantity, string uom) => new()
     {
@@ -326,4 +417,72 @@ public static class GoldenCommercialJourneySeeder
         await db.SaveChangesAsync();
     }
 
+
+    /// <summary>
+    /// Refuses to hand a wrong starting state to the browser test.
+    ///
+    /// <para>A browser suite that begins from the wrong state fails somewhere in the middle with
+    /// a misleading message, and the hours go into the wrong place — as they did when a Lead with
+    /// no current revision surfaced only as a 409 four steps into the journey. These assertions
+    /// state the contract the test depends on, and fail here where the cause is obvious.</para>
+    /// </summary>
+    private static async Task AssertStartingStateAsync(
+        ErpRfqAutomationContext db, long businessUnitId, long leadId, ILogger logger)
+    {
+        var problems = new List<string>();
+
+        var leads = await db.Leads.IgnoreQueryFilters()
+            .Where(l => l.BusinessUnitId == businessUnitId && l.Rfqno == "E2E-GOLDEN-A-001")
+            .ToListAsync();
+        if (leads.Count != 1) problems.Add($"expected exactly 1 canonical Lead, found {leads.Count}");
+
+        var lead = leads.FirstOrDefault(l => l.Id == leadId);
+        if (lead is null) problems.Add($"lead {leadId} is not the canonical golden lead");
+        else
+        {
+            if (!lead.CurrentRevisionId.HasValue)
+                problems.Add("lead has no immutable current revision — conversion would refuse it");
+            if (!lead.CustomerId.HasValue) problems.Add("lead has no confirmed customer");
+            if (lead.CommercialCaseId <= 0) problems.Add("lead has no CommercialCaseId");
+            if (string.IsNullOrWhiteSpace(lead.CommercialCaseReference))
+                problems.Add("lead has no NexoraSerial");
+        }
+
+        var revisions = await db.Set<LeadRevision>().IgnoreQueryFilters()
+            .Include(r => r.Items)
+            .Where(r => r.BusinessUnitId == businessUnitId && r.LeadId == leadId)
+            .ToListAsync();
+        if (revisions.Count != 1) problems.Add($"expected exactly 1 revision, found {revisions.Count}");
+        var revision = revisions.FirstOrDefault();
+        if (revision is not null)
+        {
+            if (revision.RevisionNumber != 1) problems.Add($"expected revision 1, found {revision.RevisionNumber}");
+            if (lead?.CurrentRevisionId != revision.Id) problems.Add("lead does not point at its only revision");
+            if (revision.EstablishedByOccurrenceId <= 0) problems.Add("revision is not linked to a source occurrence");
+            if (revision.Items.Count != 6) problems.Add($"expected 6 revision lines, found {revision.Items.Count}");
+        }
+
+        var lineCount = await db.LeadItems.IgnoreQueryFilters().CountAsync(i => i.LeadId == leadId);
+        if (lineCount != 6) problems.Add($"expected 6 lead lines, found {lineCount}");
+
+        // Nothing the browser test is supposed to CREATE may already exist, or its assertions
+        // prove nothing.
+        var rfqs = await db.Rfqs.IgnoreQueryFilters().CountAsync(r => r.LeadId == leadId);
+        if (rfqs != 0) problems.Add($"expected no RFQ before the browser converts, found {rfqs}");
+        var quotes = await db.Quotes.IgnoreQueryFilters()
+            .CountAsync(q => q.Rfq != null && q.Rfq.LeadId == leadId);
+        if (quotes != 0) problems.Add($"expected no Quote before the browser prepares one, found {quotes}");
+        var decided = await db.Rfqitems.IgnoreQueryFilters()
+            .CountAsync(i => i.Rfq.LeadId == leadId && i.ParticipationDecision != Rfqitem.ParticipationPending);
+        if (decided != 0) problems.Add($"expected no participation decisions, found {decided}");
+
+        if (problems.Count > 0)
+            throw new InvalidOperationException(
+                "Golden journey starting state is invalid, so the browser test would assert against the "
+                + $"wrong scenario: {string.Join("; ", problems)}.");
+
+        logger.LogInformation(
+            "Golden starting state verified: 1 lead, revision 1 with 6 lines linked to its occurrence, "
+            + "customer confirmed, no RFQ, no Quote, no participation decisions.");
+    }
 }
