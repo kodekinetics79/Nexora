@@ -24,12 +24,34 @@ namespace ERP_RFQ_Automation.Authorization
         public const string RoleRankChanged = "ROLE_RANK_CHANGED";
         public const string RoleDeleted = "ROLE_DELETED";
 
+        // Mailbox administration. These belong in the IAM trail rather than an application log:
+        // a mailbox row carries a stored credential and decides which server this system logs
+        // into and which address customer-facing mail leaves from. Whoever changes one is
+        // exercising privilege, and "who repointed the RFQ inbox, and when" has to be answerable
+        // months later.
+        public const string MailboxCreated = "MAILBOX_CREATED";
+        public const string MailboxUpdated = "MAILBOX_UPDATED";
+        public const string MailboxDeleted = "MAILBOX_DELETED";
+        /// <summary>The stored password was replaced. Separate from <see cref="MailboxUpdated"/>
+        /// because a credential rotation is the event a reviewer looks for, and it must not be
+        /// buried inside a diff of host/port edits.</summary>
+        public const string MailboxCredentialChanged = "MAILBOX_CREDENTIAL_CHANGED";
+        /// <summary>A connection test was run. Recorded because it causes this server to open an
+        /// outbound socket to an operator-supplied host — the audit trail is what makes that
+        /// attributable.</summary>
+        public const string MailboxTested = "MAILBOX_TESTED";
+        /// <summary>Every outbound SMTP configuration was deactivated at once, halting
+        /// customer-facing mail. A containment action, and a deliberate one.</summary>
+        public const string OutboundMailPaused = "OUTBOUND_MAIL_PAUSED";
+
         /// <summary>Every action this system emits, in the order they appear above.</summary>
         public static readonly string[] All =
         {
             UserCreated, UserUpdated, UserRoleChanged, UserDeactivated, UserDeleted,
             PasswordChanged, PermissionGranted, PermissionModified, PermissionRevoked,
-            PermissionGrantDenied, RoleCreated, RoleRenamed, RoleRankChanged, RoleDeleted
+            PermissionGrantDenied, RoleCreated, RoleRenamed, RoleRankChanged, RoleDeleted,
+            MailboxCreated, MailboxUpdated, MailboxDeleted, MailboxCredentialChanged,
+            MailboxTested, OutboundMailPaused
         };
     }
 
@@ -38,6 +60,7 @@ namespace ERP_RFQ_Automation.Authorization
         public const string User = "User";
         public const string Role = "Role";
         public const string RolePermission = "RolePermission";
+        public const string Mailbox = "Mailbox";
     }
 
     /// <summary>The mutation being recorded. Actor and tenant are NOT part of this record —

@@ -116,18 +116,10 @@ public sealed class SmtpController(
         }
     }
 
+    // Delegates to the shared SSRF policy; kept here under the original name because
+    // AdministrativeSecurityTests binds it by reflection.
     internal static bool IsValidConfiguredEndpoint(string? host, int port)
-    {
-        if (string.IsNullOrWhiteSpace(host) || host.Length > 253 || port is < 1 or > 65535)
-            return false;
-        var normalized = host.Trim().TrimEnd('.');
-        if (normalized.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
-            normalized.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase))
-            return false;
-        if (IPAddress.TryParse(normalized, out var address))
-            return IsPublicAddress(address);
-        return Uri.CheckHostName(normalized) == UriHostNameType.Dns;
-    }
+        => MailEndpointPolicy.IsAllowedEndpoint(host, port);
 
     internal static bool IsPublicAddress(IPAddress address)
         => MailKitOutboundSmtpTransport.IsPublicAddress(address);

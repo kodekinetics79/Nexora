@@ -80,6 +80,7 @@ const ShipmentViewPage = lazy(() => import('./pages/Sales/Shipments/ShipmentView
 const ShipmentInvoicePage = lazy(() => import('./pages/Sales/Shipments/ShipmentInvoicePage'));
 const PriceStructurePage = lazy(() => import('./pages/Setup/PriceStructure/PriceStructurePage'));
 const SlaSettingsPage = lazy(() => import('./pages/Setup/Sla/SlaSettingsPage'));
+const MailboxPage = lazy(() => import('./pages/Setup/Mailbox/MailboxPage'));
 const SalesTodayPage = lazy(() => import('./pages/SalesManagement/SalesTodayPage'));
 const TeamOverviewPage = lazy(() => import('./pages/SalesManagement/TeamOverviewPage'));
 const RepDirectoryPage = lazy(() => import('./pages/SalesManagement/RepDirectoryPage'));
@@ -255,6 +256,10 @@ function App() {
       {/* SLA & alert policy (WP-A2). Guarded by the generic setup module ("UOM"),
           matching /setup/master and /setup/price-structure. */}
       <Route path="/setup/sla" element={<MainLayout><PermissionGuard moduleName="UOM"><SlaSettingsPage /></PermissionGuard></MainLayout>} />
+      {/* Mailbox administration. Guarded by "Email & SMTP" — the module the supplier-email
+          screen already uses — rather than the generic setup module, because these rows hold
+          stored credentials and decide where customer-facing mail is sent from. */}
+      <Route path="/setup/mailboxes" element={<MainLayout><PermissionGuard moduleName="Email & SMTP"><MailboxPage /></PermissionGuard></MainLayout>} />
 
       {/* Security Routes */}
       <Route path="/security/users" element={<MainLayout><PermissionGuard moduleName="Users"><UsersPage /></PermissionGuard></MainLayout>} />

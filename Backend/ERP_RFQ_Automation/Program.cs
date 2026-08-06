@@ -15,6 +15,7 @@ using Microsoft.AspNetCore.Authorization;
 using OfficeOpenXml;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.LeadIdentity;
+using ERP_RFQ_Automation.Mailbox;
 using ERP_RFQ_Automation.Platform.Auth;
 using ERP_RFQ_Automation.Platform.Hardening;
 using ERP_RFQ_Automation.Notifications;
@@ -322,6 +323,8 @@ builder.Services.AddScoped<IRoleGate, RoleGate>();
 builder.Services.AddScoped<IIamAuditWriter, IamAuditWriter>();
 builder.Services.AddSingleton<TenantSmtpConcurrencyGate>();
 builder.Services.AddSingleton<IOutboundSmtpTransport, MailKitOutboundSmtpTransport>();
+// Stateless — every call carries its own settings — so a singleton is correct.
+builder.Services.AddSingleton<IMailboxConnectionProbe, MailboxConnectionProbe>();
 builder.Services.AddScoped<IAuthorizationHandler, ManagerRoleHandler>();
 builder.Services.AddSingleton<IAuthorizationPolicyProvider, ModulePermissionPolicyProvider>();
 builder.Services.AddSingleton<IAuthorizationMiddlewareResultHandler, ForbiddenJsonResultHandler>();
