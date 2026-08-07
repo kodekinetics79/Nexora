@@ -69,7 +69,65 @@ export interface UpsertPlanInput {
 
 // --- Tenants ----------------------------------------------------------------
 
-export interface Tenant {
+/**
+ * How a tenant is charged. Anything other than `Billable` is service given away,
+ * so the platform records a written reason alongside it and the console refuses
+ * to create one without.
+ */
+export type BillingMode = 'Billable' | 'Trial' | 'Internal' | 'Partner';
+
+export const BILLING_MODES: BillingMode[] = ['Billable', 'Trial', 'Internal', 'Partner'];
+
+/**
+ * The company behind a tenant. Every field is nullable because the registry is
+ * older than these columns: a tenant provisioned before them holds nothing, and
+ * the console renders "—" rather than inventing a value.
+ */
+export interface TenantCompanyProfile {
+  legalName: string | null;
+  registrationNumber: string | null;
+  taxNumber: string | null;
+  /** ISO-3166 alpha-2, upper-cased. */
+  countryCode: string | null;
+  industry: string | null;
+  website: string | null;
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  stateProvince: string | null;
+  postalCode: string | null;
+  phone: string | null;
+  contactEmail: string | null;
+  logoUrl: string | null;
+}
+
+/** The money side of a tenant: who pays, on what terms, from when. */
+export interface TenantCommercialTerms {
+  billingMode: BillingMode | null;
+  billingModeReason: string | null;
+  rateCardId: string | null;
+  billingStartsOn: string | null; // ISO date
+  /** Set only for trials. A trial without one is an unbounded giveaway. */
+  trialEndsOn: string | null; // ISO date
+  contractStartOn: string | null; // ISO date
+  contractEndOn: string | null; // ISO date
+  paymentTermsDays: number | null;
+  purchaseOrderReference: string | null;
+  billingContactName: string | null;
+  billingContactEmail: string | null;
+  billingAddress: string | null;
+  /** Internal owner of the commercial relationship. */
+  accountOwnerEmail: string | null;
+  /** ISO-4217. */
+  baseCurrencyCode: string | null;
+  /** IANA time zone id. */
+  timeZoneId: string | null;
+  /** BCP-47 language tag. */
+  locale: string | null;
+  dataRegion: string | null;
+}
+
+export interface Tenant extends TenantCompanyProfile, TenantCommercialTerms {
   id: string;
   name: string;
   slug: string;
@@ -284,6 +342,11 @@ export interface BillingStatementLine {
   unitPrice: number;
   amount: number;
   sourceNote: string | null;
+  /**
+   * The meter's signal-coverage caveat, separate from provenance so a priced line still
+   * visibly carries its "not billing ready" warning. Null when the signal is complete.
+   */
+  coverageNote: string | null;
 }
 
 export interface BillingStatement {
@@ -323,11 +386,43 @@ export interface TenantCostReport {
 
 // --- Command inputs ---------------------------------------------------------
 
-export interface ProvisionTenantInput {
+/**
+ * How the founding administrator gets their first credential.
+ *
+ * `invite` sends them a single-use activation link and no password is ever created
+ * platform-side, so nothing secret has to travel through the operator. `password`
+ * keeps the older hand-carried path for customers who cannot receive mail from us.
+ */
+export type AdminActivationMode = 'invite' | 'password';
+
+export interface ProvisionTenantInput extends TenantCompanyProfile {
   name: string;
   slug: string;
-  /** Persisted plan id to assign at provisioning time (optional). */
+
+  /**
+   * Persisted plan id. Null is only legitimate for a non-Billable tenant — a
+   * billable workspace without a plan runs without quotas AND without a price.
+   */
   planId: string | null;
+  billingMode: BillingMode;
+  /** Required for every mode except `Billable`; this is the giveaway's paper trail. */
+  billingModeReason: string | null;
+  rateCardId: string | null;
+  billingStartsOn: string | null;
+  trialEndsOn: string | null;
+  contractStartOn: string | null;
+  contractEndOn: string | null;
+  paymentTermsDays: number | null;
+  purchaseOrderReference: string | null;
+  billingContactName: string | null;
+  billingContactEmail: string | null;
+  billingAddress: string | null;
+  accountOwnerEmail: string | null;
+  baseCurrencyCode: string | null;
+  timeZoneId: string | null;
+  locale: string | null;
+  dataRegion: string | null;
+
   /**
    * The tenant's founding Super Administrator. Required: a tenant without one is a shell
    * nobody can log into, which is the state every portal-provisioned tenant used to land in.
@@ -335,12 +430,21 @@ export interface ProvisionTenantInput {
   adminEmail: string;
   adminFirstName: string;
   adminLastName: string;
-  /** Omit to have the server generate one and return it exactly once. */
-  adminPassword?: string | null;
+  adminJobTitle: string | null;
+  adminPhone: string | null;
+  adminActivation: AdminActivationMode;
+  /** Only meaningful on the `password` path; null there asks the server to generate one. */
+  adminPassword: string | null;
+}
+
+export interface FoundingAdminInvitation {
+  expiresAtUtc: string; // ISO
+  /** Single-use link the administrator opens to choose their own password. */
+  activationUrl: string;
 }
 
 export interface FoundingAdmin {
-  userId: number;
+  userId: string;
   email: string;
   roleName: string;
   /**
@@ -349,9 +453,661 @@ export interface FoundingAdmin {
    * before handover, the credential must be reset rather than looked up.
    */
   generatedPassword: string | null;
+  /** Present ONLY on the invite path, where no password exists yet. */
+  invitation: FoundingAdminInvitation | null;
+}
+
+/**
+ * What provisioning actually seeded. The operator needs this to answer "is the
+ * workspace usable?" without signing in as the customer to check.
+ */
+export interface ProvisionedBaseline {
+  quoteConfiguration: boolean;
+  baseCurrency: string | null;
+  unitsOfMeasure: number;
+  roles: number;
+  permissionGrants: number;
+  leadReferencePrefix: string | null;
+}
+
+/** The server's own reading of the commercial terms, including what it objected to. */
+export interface ProvisionedBilling {
+  mode: string;
+  planCode: string | null;
+  rateCardCode: string | null;
+  billingStartsOn: string | null;
+  /** Revenue risks the server detected but did not block on. Always shown to the operator. */
+  warnings: string[];
 }
 
 export interface ProvisionTenantResult {
   tenant: Tenant;
   foundingAdmin: FoundingAdmin;
+  /** Null when the server did not report one — the checklist then says so instead of claiming success. */
+  baseline: ProvisionedBaseline | null;
+  billing: ProvisionedBilling | null;
+}
+
+// --- Durable provisioning ---------------------------------------------------
+
+/**
+ * The wire body of `ProvisionTenantRequest`. It is the payload of both the durable
+ * submit and a saved draft, so it is named rather than inlined: a draft loaded back
+ * into the wizard has to be reconstructed from exactly these fields.
+ */
+export interface ProvisionTenantRequestBody {
+  name: string;
+  slug: string | null;
+  legalName: string | null;
+  registrationNumber: string | null;
+  taxNumber: string | null;
+  countryCode: string | null;
+  industry: string | null;
+  website: string | null;
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  stateProvince: string | null;
+  postalCode: string | null;
+  phone: string | null;
+  contactEmail: string | null;
+  logoUrl: string | null;
+
+  baseCurrencyCode: string | null;
+  timeZoneId: string | null;
+  locale: string | null;
+  dataRegion: string | null;
+
+  /** Numeric on the wire; the console keeps ids as strings everywhere else. */
+  planId: number | null;
+  billingMode: string | null;
+  billingModeReason: string | null;
+  rateCardId: number | null;
+  billingStartsOn: string | null;
+  trialEndsOn: string | null;
+  contractStartOn: string | null;
+  contractEndOn: string | null;
+  paymentTermsDays: number | null;
+  purchaseOrderReference: string | null;
+  billingContactName: string | null;
+  billingContactEmail: string | null;
+  billingAddress: string | null;
+  accountOwnerEmail: string | null;
+
+  adminEmail: string;
+  adminFirstName: string;
+  adminLastName: string;
+  adminJobTitle: string | null;
+  adminPhone: string | null;
+  adminActivation: string | null;
+  adminPassword: string | null;
+}
+
+export type ProvisioningExecutionState =
+  | 'Pending'
+  | 'Running'
+  | 'Succeeded'
+  | 'Failed'
+  | 'Cancelled';
+
+/**
+ * `Skipped` is a real outcome, not an absence: the invitation step does not run on the
+ * password path, and a blank row there would look identical to a step that never started.
+ */
+export type ProvisioningStepStatus =
+  | 'Pending'
+  | 'Running'
+  | 'Succeeded'
+  | 'Failed'
+  | 'Skipped'
+  | 'Cancelled';
+
+export interface ProvisioningStep {
+  /** Stable step code, e.g. "founding-admin". The retry request names this. */
+  step: string;
+  /** Sentence-case label, served by the API so every client says the same thing. */
+  label: string;
+  ordinal: number;
+  status: ProvisioningStepStatus;
+  attemptCount: number;
+  startedOn: string | null;
+  completedOn: string | null;
+  durationMs: number | null;
+  failureCode: string | null;
+  failureReason: string | null;
+  /** Raw JSON evidence the step produced — row counts, ids, expiries. */
+  detail: string | null;
+  /**
+   * False when re-running would duplicate rather than repair. The console must never
+   * offer a retry that makes the situation worse.
+   */
+  isRetriable: boolean;
+}
+
+export interface ProvisioningExecution {
+  id: string;
+  state: ProvisioningExecutionState;
+  slug: string;
+  name: string;
+  adminEmail: string;
+  adminActivation: string;
+  currentStep: string | null;
+  failedStep: string | null;
+  failureReason: string | null;
+  /** True when retrying is pointless — the slug or address now belongs to somebody else. */
+  failureIsTerminal: boolean;
+  tenantId: string | null;
+  provisionedBusinessUnitId: string | null;
+  foundingUserId: string | null;
+  correlationId: string;
+  requestedBy: string;
+  createdOn: string;
+  startedOn: string | null;
+  completedOn: string | null;
+  attemptCount: number;
+  cancelledBy: string | null;
+  cancellationReason: string | null;
+  steps: ProvisioningStep[];
+  completedStepCount: number;
+  totalStepCount: number;
+}
+
+export interface SubmitProvisioningResult {
+  execution: ProvisioningExecution;
+  /** False when an identical request had already been accepted under the same key. */
+  created: boolean;
+  /**
+   * Present ONLY on the call that created the execution, and nowhere else ever: the
+   * server stores a BCrypt hash and a replay deliberately returns null rather than
+   * turning an idempotency key into a credential-retrieval endpoint.
+   */
+  generatedPassword: string | null;
+  /** Explains a null password or activation link so it never reads as a failure. */
+  secretNotice: string | null;
+}
+
+export interface SlugAvailability {
+  /** The normalised address the request would actually get. */
+  slug: string | null;
+  isAvailable: boolean;
+  /** A `SlugRefusalReason` name; "None" when available. */
+  reason: string;
+  message: string | null;
+}
+
+export interface ProvisioningDraftSummary {
+  id: string;
+  name: string;
+  ownerEmail: string;
+  createdOn: string;
+  updatedOn: string;
+  /** Sent back on save so two tabs on one draft cannot silently overwrite each other. */
+  version: number;
+  submittedExecutionId: string | null;
+  /** Populated on load, omitted on list. */
+  payload: ProvisionTenantRequestBody | null;
+}
+
+// --- Tenant offboarding -----------------------------------------------------
+
+/** The destruction axis. Orthogonal to `TenantStatus`, which stays Archived throughout. */
+export type TenantOffboardingStage = 'NotScheduled' | 'PendingDeletion' | 'Purged';
+
+export interface TenantLifecycleEvent {
+  id: string;
+  action: string;
+  fromStage: string | null;
+  toStage: string | null;
+  tenantStatus: string;
+  reason: string;
+  actorEmail: string;
+  detail: string | null;
+  occurredOn: string;
+}
+
+export interface TenantExportReceipt {
+  id: string;
+  requestedOn: string;
+  completedOn: string;
+  requestedBy: string;
+  totalRows: number;
+  sizeBytes: number;
+  /** SHA-256 of the bytes handed back. The proof of what was exported. */
+  contentSha256: string;
+  format: string;
+  sections: string;
+}
+
+export interface TenantOffboardingStatus {
+  tenantId: string;
+  tenantName: string;
+  tenantSlug: string;
+  tenantStatus: string;
+  stage: TenantOffboardingStage;
+
+  retentionDays: number | null;
+  deletionScheduledOn: string | null;
+  purgeEligibleOn: string | null;
+  isPurgeEligible: boolean;
+  daysUntilPurgeEligible: number | null;
+  deletionReason: string | null;
+  deletionScheduledBy: string | null;
+
+  purgedOn: string | null;
+  purgedBy: string | null;
+  purgedRowCount: number | null;
+  personalDataErasedOn: string | null;
+  personalDataErasedBy: string | null;
+  erasedIdentityCount: number | null;
+  lastExportedOn: string | null;
+  lastExportedBy: string | null;
+
+  /**
+   * Resolved server-side. The console renders buttons from THESE and never re-derives
+   * them: a client that recomputes the state machine is a client that will eventually
+   * disagree with the server about whether a purge is legal.
+   */
+  canScheduleDeletion: boolean;
+  canCancelDeletion: boolean;
+  canPurge: boolean;
+  canErasePersonalData: boolean;
+
+  /** The exact string the operator must type to purge or erase — the tenant's name. */
+  confirmationRequired: string;
+
+  history: TenantLifecycleEvent[];
+  exports: TenantExportReceipt[];
+  disclosures: string[];
+}
+
+export interface PendingTenantDeletion {
+  tenantId: string;
+  tenantName: string;
+  tenantSlug: string;
+  deletionScheduledOn: string | null;
+  purgeEligibleOn: string | null;
+  isPurgeEligible: boolean;
+  daysUntilPurgeEligible: number | null;
+  deletionReason: string | null;
+  deletionScheduledBy: string | null;
+}
+
+export interface TenantPurgeTableCount {
+  table: string;
+  tenantColumn: string;
+  rows: number;
+}
+
+export interface TenantPurgePreview {
+  tenantId: string;
+  businessUnitId: string;
+  tables: TenantPurgeTableCount[];
+  totalRows: number;
+  /** What the purge deliberately leaves standing. */
+  preserved: string[];
+}
+
+export interface TenantPurgeResult {
+  tenantId: string;
+  tenantSlug: string;
+  rowsDeleted: number;
+  tablesTouched: number;
+  tables: TenantPurgeTableCount[];
+  lifecycleEventsRetained: number;
+  platformAuditRecordsRetained: number;
+  supportTicketsRedacted: number;
+  supportNotesErased: number;
+  summary: string;
+  disclosures: string[];
+}
+
+export interface TenantErasureTarget {
+  target: string;
+  identitiesErased: number;
+  description: string;
+}
+
+export interface TenantErasureResult {
+  tenantId: string;
+  identitiesErased: number;
+  targets: TenantErasureTarget[];
+  summary: string;
+  disclosures: string[];
+}
+
+/** The export is a download, not a stored artefact — the receipt is what persists. */
+export interface TenantExportDownload {
+  blob: Blob;
+  filename: string;
+  /** From `X-Nexora-Export-Sha256`; null when the header did not survive a proxy. */
+  sha256: string | null;
+  receiptId: string | null;
+  totalRows: number | null;
+}
+
+// --- Billing: revenue risk & commercial terms -------------------------------
+
+/**
+ * The remediation badge, derived server-side from the tenant row rather than stored,
+ * so it cannot be dismissed while its cause remains.
+ */
+export type CommercialConfigurationState = 'complete' | 'plan-missing' | 'exemption-unrecorded';
+
+export interface TenantRevenueRisk {
+  tenantId: string;
+  tenantName: string;
+  tenantSlug: string;
+  tenantStatus: string;
+  billingMode: string;
+  billingModeReason: string | null;
+  planId: string | null;
+  planCode: string | null;
+  planMonthlyPriceUsd: number | null;
+  pinnedRateCardId: string | null;
+  pinnedRateCardCode: string | null;
+  billingStartsOn: string | null;
+  trialEndsOn: string | null;
+  trialExpired: boolean;
+  trialDaysRemaining: number | null;
+  lastStatementPeriod: string | null;
+  lastStatementStatus: string | null;
+  lastStatementTotal: number | null;
+  lastStatementComputedAtUtc: string | null;
+  lastStatementRateCardId: string | null;
+  lastStatementCharged: boolean;
+  atRisk: boolean;
+  /** Machine-readable causes, e.g. "no-plan", "trial-expired". */
+  leakReasons: string[];
+  commercialConfigurationState: string;
+  commercialConfigurationRequired: boolean;
+}
+
+export interface RevenueRiskReport {
+  generatedAtUtc: string;
+  /** Always over the WHOLE fleet, never the filtered list. */
+  tenantCount: number;
+  atRiskCount: number;
+  expiredTrialCount: number;
+  billableTenantsChargedNothingCount: number;
+  commercialConfigurationRequiredCount: number;
+  tenants: TenantRevenueRisk[];
+}
+
+export interface BillingStatementSummary {
+  id: string;
+  period: string; // YYYY-MM
+  periodStartUtc: string;
+  periodEndUtc: string;
+  rateCardId: string;
+  currency: string;
+  status: string;
+  totalAmount: number;
+  computedAtUtc: string;
+  finalizedAtUtc: string | null;
+  finalizedBy: string | null;
+}
+
+export interface TenantBillingProfile {
+  tenantId: string;
+  name: string;
+  slug: string;
+  status: string;
+  billingMode: string;
+  billingModeReason: string | null;
+  planId: string | null;
+  planCode: string | null;
+  planName: string | null;
+  planMonthlyPriceUsd: number | null;
+  pinnedRateCardId: string | null;
+  pinnedRateCardCode: string | null;
+  /** The tenant carries a rate-card id that no longer resolves — billing refuses to compute. */
+  pinnedRateCardMissing: boolean;
+  billingStartsOn: string | null;
+  trialEndsOn: string | null;
+  contractStartOn: string | null;
+  contractEndOn: string | null;
+  paymentTermsDays: number | null;
+  purchaseOrderReference: string | null;
+  billingContactName: string | null;
+  billingContactEmail: string | null;
+  accountOwnerEmail: string | null;
+  revenueRisk: TenantRevenueRisk;
+  statements: BillingStatementSummary[];
+}
+
+export interface SetCommercialTermsInput {
+  billingMode: BillingMode;
+  billingModeReason: string | null;
+  trialEndsOn: string | null;
+  billingStartsOn: string | null;
+}
+
+// --- Support desk -----------------------------------------------------------
+
+export type SupportTicketStatus = 'New' | 'Open' | 'Pending' | 'Resolved' | 'Closed';
+
+export const SUPPORT_TICKET_STATUSES: SupportTicketStatus[] = [
+  'New',
+  'Open',
+  'Pending',
+  'Resolved',
+  'Closed',
+];
+
+/** Ordered most urgent first, which is also how the queue sorts. */
+export type SupportTicketSeverity = 'Critical' | 'High' | 'Normal' | 'Low';
+
+export const SUPPORT_TICKET_SEVERITIES: SupportTicketSeverity[] = [
+  'Critical',
+  'High',
+  'Normal',
+  'Low',
+];
+
+export interface SupportTicketSummary {
+  id: string;
+  tenantId: string;
+  tenantName: string | null;
+  tenantSlug: string | null;
+  /** Carried on every row: "cannot log in" on a Suspended tenant is an invoice, not a bug. */
+  tenantStatus: string | null;
+  subject: string;
+  severity: string;
+  status: string;
+  origin: string;
+  assignedToPlatformUserId: string | null;
+  assignedToEmail: string | null;
+  openedByPlatformUserId: string | null;
+  openedByEmail: string | null;
+  requesterEmail: string | null;
+  createdAtUtc: string;
+  updatedAtUtc: string;
+  firstRespondedAtUtc: string | null;
+  resolvedAtUtc: string | null;
+  closedAtUtc: string | null;
+  noteCount: number;
+  linkCount: number;
+  isRedacted: boolean;
+  /** Optimistic-concurrency token; sent back on every mutation. */
+  version: number;
+}
+
+export interface SupportTicketNote {
+  id: string;
+  authorPlatformUserId: string | null;
+  authorKind: string;
+  authorLabel: string;
+  body: string;
+  isInternal: boolean;
+  createdAtUtc: string;
+}
+
+export interface SupportTicketLink {
+  id: string;
+  kind: string;
+  targetKey: string;
+  note: string | null;
+  linkedByLabel: string;
+  linkedAtUtc: string;
+  /** Null when the target no longer resolves — information, not an error. */
+  targetSummary: string | null;
+  targetOccurredAtUtc: string | null;
+}
+
+export interface SupportTicketDetail extends SupportTicketSummary {
+  body: string | null;
+  resolution: string | null;
+  requesterTenantUserId: string | null;
+  redactedReason: string | null;
+  redactedAtUtc: string | null;
+  notes: SupportTicketNote[];
+  links: SupportTicketLink[];
+  /** Served from the server's lifecycle graph; the console never hard-codes it. */
+  allowedTransitions: string[];
+}
+
+export interface SupportTicketTimelineEntry {
+  /** "note" or "audit". */
+  kind: string;
+  id: string;
+  occurredAtUtc: string;
+  action: string;
+  actor: string | null;
+  body: string | null;
+  result: string | null;
+  metadata: unknown;
+}
+
+export interface SupportTicketTimeline {
+  ticketId: string;
+  tenantId: string;
+  entries: SupportTicketTimelineEntry[];
+}
+
+export interface CreateSupportTicketInput {
+  tenantId: string;
+  subject: string;
+  body: string;
+  severity: SupportTicketSeverity;
+  requesterEmail: string | null;
+  assignToPlatformUserId: string | null;
+}
+
+// --- Audit explorer ---------------------------------------------------------
+
+export interface PagedResult<T> {
+  items: T[];
+  page: number;
+  pageSize: number;
+  totalCount: number;
+  hasMore: boolean;
+}
+
+export interface PlatformAuditEntry {
+  id: string;
+  occurredAtUtc: string;
+  actorPlatformUserId: string;
+  actor: string;
+  actorEmail: string | null;
+  action: string;
+  targetType: string | null;
+  targetId: string | null;
+  tenantId: string | null;
+  tenantName: string | null;
+  ip: string | null;
+  result: string;
+  /** Structured JSON, already parsed by the server. Shape varies per action. */
+  metadata: unknown;
+}
+
+export interface PlatformAuditFieldChange {
+  field: string;
+  before: string | null;
+  after: string | null;
+}
+
+export interface PlatformAuditEntryDetail extends PlatformAuditEntry {
+  before: unknown;
+  after: unknown;
+  /** Empty rather than invented when the row recorded no before/after pair. */
+  changes: PlatformAuditFieldChange[];
+}
+
+/** The real verb vocabulary present in the log — the filter is built from this. */
+export interface PlatformAuditAction {
+  action: string;
+  count: number;
+  lastSeenAtUtc: string;
+}
+
+export interface TenantTimelineEntry {
+  /** "audit", "impersonation" or "ticket". */
+  kind: string;
+  id: string;
+  occurredAtUtc: string;
+  action: string;
+  actor: string | null;
+  summary: string | null;
+  result: string | null;
+  metadata: unknown;
+}
+
+// --- Tenant operations summary ---------------------------------------------
+
+export interface TenantLifecycleSnapshot {
+  tenantId: string;
+  name: string;
+  slug: string;
+  status: string;
+  statusReason: string | null;
+  planId: string | null;
+  planCode: string | null;
+  primaryBusinessUnitId: string | null;
+  createdOn: string;
+  modifiedOn: string | null;
+  modifiedBy: string | null;
+}
+
+export interface TenantSupportSnapshot {
+  openTicketCount: number;
+  unassignedOpenTicketCount: number;
+  openByStatus: Record<string, number>;
+  openBySeverity: Record<string, number>;
+  oldestOpenTicketCreatedAtUtc: string | null;
+  recentTickets: SupportTicketSummary[];
+}
+
+export interface TenantAuditSnapshot {
+  entryCountLast30Days: number;
+  failureCountLast30Days: number;
+  lastActionAtUtc: string | null;
+  recentEntries: PlatformAuditEntry[];
+}
+
+export interface TenantImpersonationSessionSnapshot {
+  jti: string;
+  actorPlatformUserId: string;
+  actorEmail: string | null;
+  reason: string;
+  issuedAtUtc: string;
+  expiresAtUtc: string;
+  revokedAtUtc: string | null;
+  revokedBy: string | null;
+  status: string;
+  /** Empty means an operator entered the account without recording why. */
+  linkedTicketIds: string[];
+}
+
+export interface TenantImpersonationSnapshot {
+  activeSessionCount: number;
+  sessionCountLast30Days: number;
+  sessions: TenantImpersonationSessionSnapshot[];
+}
+
+export interface TenantOperationsSummary {
+  generatedAtUtc: string;
+  lifecycle: TenantLifecycleSnapshot;
+  support: TenantSupportSnapshot;
+  audit: TenantAuditSnapshot;
+  impersonation: TenantImpersonationSnapshot;
 }

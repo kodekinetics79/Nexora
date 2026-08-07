@@ -79,6 +79,14 @@ public sealed record TenantUsageReadout(
     /// for a whole-fleet or multi-BU aggregate.
     /// </summary>
     public string MeteringScope { get; init; } = "primary-business-unit";
+
+    /// <summary>
+    /// Lower bound actually applied to the FLOW meters (documents, pages, external tokens).
+    /// Equal to <see cref="PeriodStartUtc"/> for a normal period; the tenant's billing start
+    /// date when the period straddles it. Seats and storage are period-end snapshots and
+    /// ignore it — each of those lines carries the caveat in its own coverage note.
+    /// </summary>
+    public DateTime MeteredFromUtc { get; init; }
 }
 
 /// <summary>
@@ -149,6 +157,124 @@ public interface IBillingStatementService
 
     /// <summary>AI cost vs statement total → gross margin (honest nulls when cost is unpriceable).</summary>
     Task<TenantCostReport> GetCostAsync(long tenantId, BillingPeriod period, CancellationToken ct = default);
+
+    /// <summary>
+    /// Fleet-wide revenue posture: per tenant, how it is charged, against which plan and
+    /// pinned rate card, whether its most recent statement moved any money, its trial
+    /// state, and every reason it may be running free. Archived tenants are offboarded
+    /// and excluded unless <paramref name="includeArchived"/> says otherwise.
+    /// </summary>
+    Task<IReadOnlyList<TenantRevenueRisk>> GetRevenueRiskAsync(
+        bool includeArchived = false, CancellationToken ct = default);
+}
+
+/// <summary>
+/// What a statement is permitted to charge, decided once from the tenant's commercial
+/// terms and then applied uniformly to every line.
+///
+/// <para>It exists because the charge decision is NOT per line and never was: a Trial
+/// tenant's document line and its seat line are waived for the same single reason, and
+/// deciding that once — instead of re-deriving it inside each branch of the line loop —
+/// is what keeps "why is this zero?" answerable from one place.</para>
+/// </summary>
+public sealed record BillingChargePolicy(
+    TenantBillingMode Mode,
+    bool Charging,
+    string? SuppressionMarker,
+    DateTime? BillingStartsOn,
+    DateTime? TrialEndsOn,
+    bool TrialExpired,
+    RateCardSource RateCardSource)
+{
+    /// <summary>
+    /// First instant of the period that this tenant is charged for. Equal to the period
+    /// start for a full period; the billing start date for a period that straddles it;
+    /// null when nothing in the period is chargeable.
+    /// </summary>
+    public DateTime? ChargeableFromUtc { get; init; }
+
+    /// <summary>Whole days of the period that are charged.</summary>
+    public int BillableDays { get; init; }
+
+    /// <summary>Whole days in the period (28–31).</summary>
+    public int PeriodDays { get; init; }
+
+    /// <summary>True when the period straddles <see cref="BillingStartsOn"/> and is charged pro rata.</summary>
+    public bool IsProrated => Charging && BillableDays > 0 && BillableDays < PeriodDays;
+
+    /// <summary>
+    /// Fraction of the period that is charged, as an exact rational — NOT pre-rounded, so
+    /// money is computed once from the true ratio instead of from a display value.
+    /// </summary>
+    public decimal BillableFraction
+        => PeriodDays <= 0 ? 1m : (decimal)BillableDays / PeriodDays;
+
+    /// <summary>
+    /// Derives the policy for one tenant-period.
+    ///
+    /// <para><b>A period that straddles BillingStartsOn is PRORATED by days.</b> The two
+    /// alternatives are both wrong in ways a customer notices. Charging the full month
+    /// over-bills someone who signed on the 20th, and the first time they check it becomes a
+    /// refund and a credibility problem. Charging nothing — which this did before — hands
+    /// them up to a whole month free, which is the exact failure this billing work exists to
+    /// close. Days are counted whole and inclusive of the start date: a billing start of the
+    /// 20th in a 31-day month bills 12 days, the 20th through the 31st.</para>
+    ///
+    /// <para>The date is truncated to midnight UTC deliberately. Billing starts on a DAY,
+    /// not at a signing timestamp, so two customers who signed on the same date pay the same
+    /// amount regardless of what time the operator got to the form.</para>
+    /// </summary>
+    public static BillingChargePolicy For(
+        Tenant tenant, RateCardSource rateCardSource, BillingPeriod period, DateTime nowUtc)
+    {
+        var trialExpired = RevenueLeakEvaluator.IsTrialExpired(tenant, nowUtc);
+        var periodDays = (int)Math.Round((period.EndUtc - period.StartUtc).TotalDays);
+
+        if (tenant.BillingMode != TenantBillingMode.Billable)
+            return new BillingChargePolicy(
+                tenant.BillingMode, Charging: false,
+                BillingStatementMarkers.ExemptionFor(tenant.BillingMode),
+                tenant.BillingStartsOn, tenant.TrialEndsOn, trialExpired, rateCardSource)
+            {
+                ChargeableFromUtc = null,
+                BillableDays = 0,
+                PeriodDays = periodDays
+            };
+
+        // No start date, or one already passed when the period opened: the whole period bills.
+        var startsOn = tenant.BillingStartsOn?.Date;
+        if (startsOn is null || startsOn <= period.StartUtc)
+            return new BillingChargePolicy(
+                TenantBillingMode.Billable, Charging: true, SuppressionMarker: null,
+                tenant.BillingStartsOn, tenant.TrialEndsOn, trialExpired, rateCardSource)
+            {
+                ChargeableFromUtc = period.StartUtc,
+                BillableDays = periodDays,
+                PeriodDays = periodDays
+            };
+
+        // Billing begins at or after this period ends: nothing here is chargeable at all.
+        if (startsOn >= period.EndUtc)
+            return new BillingChargePolicy(
+                TenantBillingMode.Billable, Charging: false,
+                BillingStatementMarkers.ExemptionPreBillingStart,
+                tenant.BillingStartsOn, tenant.TrialEndsOn, trialExpired, rateCardSource)
+            {
+                ChargeableFromUtc = null,
+                BillableDays = 0,
+                PeriodDays = periodDays
+            };
+
+        var chargeableFrom = DateTime.SpecifyKind(startsOn.Value, DateTimeKind.Utc);
+        return new BillingChargePolicy(
+            TenantBillingMode.Billable, Charging: true, SuppressionMarker: null,
+            tenant.BillingStartsOn, tenant.TrialEndsOn, trialExpired, rateCardSource)
+        {
+            ChargeableFromUtc = chargeableFrom,
+            BillableDays = (int)Math.Round((period.EndUtc - chargeableFrom).TotalDays),
+            PeriodDays = periodDays
+        };
+    }
 }
 
 /// <summary>
@@ -205,6 +331,26 @@ public class BillingStatementService : IBillingStatementService
     /// </summary>
     internal static readonly TimeSpan FinalizeSettleLag = TimeSpan.FromHours(48);
 
+    /// <summary>
+    /// Why the seats and storage meters do not shrink when a period is only partly billed.
+    ///
+    /// <para>Both are period-END SNAPSHOTS of a stock, not sums of a flow: "users holding a
+    /// seat on the last day" and "bytes still retained on the last day". A stock has no
+    /// sub-period to bound — a seat occupied on the final day was occupied on the final day
+    /// whether billing began on the 1st or the 20th. So these two are charged for the whole
+    /// period even when the base subscription is prorated, and the line says so rather than
+    /// letting the reader assume the boundary was applied uniformly.</para>
+    ///
+    /// <para>The flow meters — documents, pages and external AI tokens — ARE bounded exactly,
+    /// because every one of them is attributed to the period by a row timestamp that can take
+    /// a lower bound.</para>
+    /// </summary>
+    internal const string PeriodEndSnapshotProrationNote =
+        "NOT PRORATED — this meter is a period-end snapshot of a stock, not a sum over the billed days, " +
+        "so it cannot be bounded to the part of the period that is charged. The quantity covers the whole period " +
+        "even though the base subscription is charged pro rata from the billing start date. " +
+        "The flow meters on this statement (documents, pages, external AI tokens) ARE counted from the billing start date only.";
+
     private readonly ErpRfqAutomationContext _context;
     private readonly ILogger<BillingStatementService> _logger;
 
@@ -214,9 +360,30 @@ public class BillingStatementService : IBillingStatementService
         _logger = logger;
     }
 
-    public async Task<TenantUsageReadout> GetUsageAsync(
+    public Task<TenantUsageReadout> GetUsageAsync(
         long tenantId, BillingPeriod period, CancellationToken ct = default)
+        => GetUsageAsync(tenantId, period, meterFromUtc: null, ct);
+
+    /// <summary>
+    /// The metering core, with an optional lower bound on the flow meters.
+    ///
+    /// <para><paramref name="meterFromUtc"/> is how a prorated period is metered: the
+    /// documents, pages and external-token meters take it as their lower bound so a
+    /// customer whose billing began on the 20th is not charged for work done on the 3rd.
+    /// It is deliberately NOT applied to seats or storage — see
+    /// <see cref="PeriodEndSnapshotProrationNote"/> — and those two lines say so.</para>
+    ///
+    /// <para>The public readout passes null, so the usage screen keeps showing what the
+    /// tenant actually consumed over the whole period. That is the honest answer to "what
+    /// did they use"; the bounded reading answers a different question, "what may we charge
+    /// for", and conflating the two is how a usage screen starts disagreeing with an invoice
+    /// for reasons nobody can explain.</para>
+    /// </summary>
+    internal async Task<TenantUsageReadout> GetUsageAsync(
+        long tenantId, BillingPeriod period, DateTime? meterFromUtc, CancellationToken ct)
     {
+        var meterFrom = meterFromUtc is DateTime bound && bound > period.StartUtc ? bound : period.StartUtc;
+        var bounded = meterFrom > period.StartUtc;
         var tenant = await RequireTenantAsync(tenantId, ct);
         // v1 invariant (P2-B7): 1 tenant = 1 business unit. Metering deliberately
         // covers tenant.PrimaryBusinessUnitId ONLY (surfaced on the wire as
@@ -236,7 +403,10 @@ public class BillingStatementService : IBillingStatementService
             {
                 CoverageNote = StorageCoverageNote
             });
-            return new TenantUsageReadout(tenantId, null, period.Key, period.StartUtc, period.EndUtc, meters);
+            return new TenantUsageReadout(tenantId, null, period.Key, period.StartUtc, period.EndUtc, meters)
+            {
+                MeteredFromUtc = meterFrom
+            };
         }
 
         // P0-B1: bill only delivered-or-in-flight work. Failed/DeadLetter jobs are
@@ -244,11 +414,15 @@ public class BillingStatementService : IBillingStatementService
         // the Duplicate exclusion in that policy is defensive only — no code path
         // assigns that status today, because de-duplication happens at enqueue and
         // a duplicate submission never creates a second job.
+        //
+        // Flow meter #1, and the lower bound is meterFrom rather than the period start: a
+        // job is attributed to a period by CreatedOn, so the same timestamp that places it
+        // in the period also places it before or after the billing start date.
         var nonBillable = BillableDocumentPolicy.NonBillableStatuses;
         var billableJobs = _context.Set<ExtractionJob>().IgnoreQueryFilters().AsNoTracking()
             .Where(j => j.BusinessUnitId == businessUnitId
                         && !nonBillable.Contains(j.Status)
-                        && j.CreatedOn >= period.StartUtc && j.CreatedOn < period.EndUtc);
+                        && j.CreatedOn >= meterFrom && j.CreatedOn < period.EndUtc);
         var documents = await billableJobs.LongCountAsync(ct);
 
         // pages.processed / pages.ocr: evidence-ledger ExtractionRuns joined to the
@@ -301,11 +475,12 @@ public class BillingStatementService : IBillingStatementService
                 .SumAsync(d => (long?)d.ByteSize, ct) ?? 0L;
         }
 
+        // Flow meter #3, bounded on the same CreatedOn that attributes it to the period.
         var externalTokens = await _context.Set<AiRequest>().IgnoreQueryFilters().AsNoTracking()
             .Where(r => r.BusinessUnitId == businessUnitId
                         && r.ProviderClass == AiProviderClass.External
                         && r.Status == AiCallStatuses.Succeeded
-                        && r.CreatedOn >= period.StartUtc && r.CreatedOn < period.EndUtc)
+                        && r.CreatedOn >= meterFrom && r.CreatedOn < period.EndUtc)
             .SumAsync(r => (long?)(r.InputTokens + r.OutputTokens), ct) ?? 0L;
 
         // P0-B2: seats are derived reproducibly from timestamps, not from the live
@@ -320,11 +495,18 @@ public class BillingStatementService : IBillingStatementService
                                  && u.CreatedOn < period.EndUtc
                                  && (u.IsActive == true || u.DeactivatedAtUtc >= period.EndUtc), ct);
 
+        // The billed-window suffix names the exact lower bound on every flow meter's
+        // provenance, so "why is this month's document count lower than the usage screen's"
+        // is answerable from the statement instead of from someone's memory of the contract.
+        var window = bounded
+            ? $" counted from {meterFrom:yyyy-MM-dd} (the tenant's billing start date), not from the start of the period"
+            : "";
+
         meters.Add(new MeterReading(BillingMeterKeys.Documents, documents, "document",
-            $"ExtractionJobs count {period.Key}, billable statuses only (excludes Duplicate/Failed/DeadLetter) (BU {businessUnitId})"));
+            $"ExtractionJobs count {period.Key}, billable statuses only (excludes Duplicate/Failed/DeadLetter){window} (BU {businessUnitId})"));
         meters.Add(PageMeter(BillingMeterKeys.PagesProcessed, pagesProcessed,
             runLedgerMapped
-                ? $"ExtractionRuns page evidence for billable ExtractionJobs {period.Key}: MAX(PageCount) per job across retry attempts, summed; {jobsWithPageEvidence} of {documents} billable job(s) carry run evidence and {jobsWithPages} report a non-zero page count — the remainder meter 0 pages (BU {businessUnitId})"
+                ? $"ExtractionRuns page evidence for billable ExtractionJobs {period.Key}: MAX(PageCount) per job across retry attempts, summed; {jobsWithPageEvidence} of {documents} billable job(s) carry run evidence and {jobsWithPages} report a non-zero page count — the remainder meter 0 pages{window} (BU {businessUnitId})"
                 : $"Evidence ledger (ExtractionRuns) is not mapped in this database; pages meter reads zero for {period.Key} (BU {businessUnitId})"));
         meters.Add(PageMeter(BillingMeterKeys.PagesOcr, ocrPages,
             runLedgerMapped
@@ -332,21 +514,33 @@ public class BillingStatementService : IBillingStatementService
                   + (truncatedOcrJobs > 0
                       ? $"; {truncatedOcrJobs} job(s) hit the 10-page OCR cap (OcrTruncated) so their OCR pages are a floor"
                       : "")
-                  + $" (BU {businessUnitId})"
+                  + $"{window} (BU {businessUnitId})"
                 : $"Evidence ledger (ExtractionRuns) is not mapped in this database; OCR pages meter reads zero for {period.Key} (BU {businessUnitId})"));
         meters.Add(new MeterReading(BillingMeterKeys.AiTokensExternal, externalTokens, "token",
-            $"AiRequests settled external tokens (input+output, status Succeeded) {period.Key} (BU {businessUnitId})"));
+            $"AiRequests settled external tokens (input+output, status Succeeded) {period.Key}{window} (BU {businessUnitId})"));
+        // Seats and storage are period-END SNAPSHOTS of a stock. There is no sub-period to
+        // bound, so when the period is only partly billed they are the two lines that do NOT
+        // shrink — and they say so instead of leaving a reader to assume the boundary was
+        // applied everywhere.
         meters.Add(new MeterReading(BillingMeterKeys.Seats, seats, "seat",
-            $"Users with CreatedOn < {period.EndUtc:yyyy-MM-dd} AND (IsActive OR DeactivatedAtUtc >= {period.EndUtc:yyyy-MM-dd}) — reproducible timestamp derivation (BU {businessUnitId})"));
+            $"Users with CreatedOn < {period.EndUtc:yyyy-MM-dd} AND (IsActive OR DeactivatedAtUtc >= {period.EndUtc:yyyy-MM-dd}) — reproducible timestamp derivation (BU {businessUnitId})")
+        {
+            CoverageNote = bounded ? PeriodEndSnapshotProrationNote : null
+        });
         meters.Add(new MeterReading(BillingMeterKeys.StorageGb, storageBytes, "byte",
             storageLedgerMapped
                 ? $"SourceDocuments.ByteSize sum for documents received before {period.EndUtc:yyyy-MM-dd} (period-end snapshot {period.Key}; append-only evidence ledger, received = retained); metered in bytes, priced per GiB = {BillingMeterKeys.BytesPerGigabyte:0} bytes (BU {businessUnitId})"
                 : $"Evidence ledger (SourceDocuments) is not mapped in this database; storage meter reads zero for {period.Key} (BU {businessUnitId})")
         {
-            CoverageNote = StorageCoverageNote
+            CoverageNote = bounded
+                ? StorageCoverageNote + " " + PeriodEndSnapshotProrationNote
+                : StorageCoverageNote
         });
 
-        return new TenantUsageReadout(tenantId, businessUnitId, period.Key, period.StartUtc, period.EndUtc, meters);
+        return new TenantUsageReadout(tenantId, businessUnitId, period.Key, period.StartUtc, period.EndUtc, meters)
+        {
+            MeteredFromUtc = meterFrom
+        };
     }
 
     public async Task<BillingStatement> ComputeStatementAsync(
@@ -375,7 +569,7 @@ public class BillingStatementService : IBillingStatementService
         if (finalStatement is { Status: BillingStatementStatus.Final })
             return finalStatement;
 
-        var rateCard = await ResolveRateCardAsync(rateCardId, period, ct);
+        var (rateCard, rateCardSource) = await ResolveRateCardAsync(rateCardId, tenant, period, ct);
 
         // P0-B3 (v1 constraint): billing is USD-only. The plan's base price is
         // MonthlyPriceUsd and statement math has no FX conversion, so a non-USD
@@ -387,9 +581,32 @@ public class BillingStatementService : IBillingStatementService
                 $"Rate card {rateCard.Id} ('{rateCard.Code}') is denominated in '{rateCard.Currency}', but v1 billing is USD-only; " +
                 "statements cannot be computed against a non-USD rate card.");
 
-        var usage = await GetUsageAsync(tenantId, period, ct);
-        var lines = BuildLines(rateCard, tenant.Plan, usage);
+        var policy = BillingChargePolicy.For(tenant, rateCardSource, period, now);
+        // The flow meters are metered from the first chargeable instant, so a prorated
+        // period never prices work the tenant did before its billing start date.
+        var usage = await GetUsageAsync(tenantId, period, policy.ChargeableFromUtc, ct);
+        var lines = BuildLines(rateCard, tenant.Plan, usage, policy);
         var total = BillingMath.Round2(lines.Sum(l => l.Amount));
+
+        // A Billable tenant whose statement moves no money is the headline defect
+        // this whole file exists to prevent, so it is stated at WARNING even though
+        // the statement itself already carries the marker line. The console readout
+        // is where an operator goes looking; the log is what tells them to look.
+        if (policy.Mode == TenantBillingMode.Billable && total <= 0m)
+            _logger.LogWarning(
+                "REVENUE RISK: billable tenant {TenantId} computed a {Total} {Currency} statement for period {Period}. "
+                + "Markers on the statement: {Markers}.",
+                tenantId, total, rateCard.Currency, period.Key,
+                string.Join(", ", lines
+                    .Select(l => BillingStatementMarkers.RiskCodeOf(l.MeterKey, l.CoverageNote))
+                    .Where(code => code is not null)
+                    .DefaultIfEmpty("none — usage itself was zero")));
+
+        if (policy.TrialExpired)
+            _logger.LogWarning(
+                "REVENUE RISK: tenant {TenantId} is still in Trial billing mode but its trial ended {TrialEndsOn:yyyy-MM-dd}; "
+                + "period {Period} was metered and not charged. The account needs converting to a Billable mode.",
+                tenantId, policy.TrialEndsOn, period.Key);
 
         var strategy = _context.Database.CreateExecutionStrategy();
         try
@@ -627,6 +844,47 @@ public class BillingStatementService : IBillingStatementService
         };
     }
 
+    public async Task<IReadOnlyList<TenantRevenueRisk>> GetRevenueRiskAsync(
+        bool includeArchived = false, CancellationToken ct = default)
+    {
+        var nowUtc = DateTime.UtcNow;
+
+        // Platform plane: deliberate cross-tenant read, same as every other query here.
+        var tenantQuery = _context.Set<Tenant>().IgnoreQueryFilters().AsNoTracking().Include(t => t.Plan);
+        var tenants = includeArchived
+            ? await tenantQuery.OrderBy(t => t.Id).ToListAsync(ct)
+            : await tenantQuery.Where(t => t.Status != TenantStatus.Archived).OrderBy(t => t.Id).ToListAsync(ct);
+        if (tenants.Count == 0)
+            return Array.Empty<TenantRevenueRisk>();
+
+        var tenantIds = tenants.Select(t => t.Id).ToList();
+        // Statements are loaded WITHOUT their lines: the readout answers "did this move
+        // money", which is the header, and pulling every line of every statement in the
+        // fleet to answer it would make the console page the most expensive query we own.
+        var statements = await _context.Set<BillingStatement>().AsNoTracking()
+            .Where(s => tenantIds.Contains(s.TenantId))
+            .ToListAsync(ct);
+        var latestByTenant = statements
+            .GroupBy(s => s.TenantId)
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(s => s.PeriodStartUtc).First());
+
+        var pinnedCardIds = tenants.Where(t => t.RateCardId.HasValue).Select(t => t.RateCardId!.Value).Distinct().ToList();
+        var pinnedCards = pinnedCardIds.Count == 0
+            ? new Dictionary<long, RateCard>()
+            : (await _context.Set<RateCard>().AsNoTracking()
+                .Where(c => pinnedCardIds.Contains(c.Id))
+                .ToListAsync(ct)).ToDictionary(c => c.Id);
+
+        return tenants.Select(tenant =>
+        {
+            latestByTenant.TryGetValue(tenant.Id, out var latest);
+            RateCard? pinned = null;
+            if (tenant.RateCardId is long pinnedId)
+                pinnedCards.TryGetValue(pinnedId, out pinned);
+            return RevenueLeakEvaluator.Describe(tenant, tenant.Plan, pinned, latest, nowUtc);
+        }).ToList();
+    }
+
     /// <summary>
     /// Page meters carry the audited signal-coverage verdict: the aggregation is
     /// exact, the underlying pipeline instrumentation is not (see
@@ -656,23 +914,75 @@ public class BillingStatementService : IBillingStatementService
             s => s.TenantId == tenantId && s.PeriodStartUtc == period.StartUtc, ct);
     }
 
-    private async Task<RateCard> ResolveRateCardAsync(
-        long? rateCardId, BillingPeriod period, CancellationToken ct)
+    /// <summary>
+    /// Which price list this tenant is charged on, in strict precedence: the card named
+    /// explicitly for this run → the card PINNED to the tenant → "whichever active card
+    /// is effective for the period".
+    ///
+    /// <para>The pin comes before the fallback because the fallback silently reprices
+    /// customers: a tenant on negotiated terms was charged against whatever card happened
+    /// to be active when its statement computed, so activating a new price list changed
+    /// what every un-pinned customer paid, with no record that anything had changed. The
+    /// pin is the only representation of "the price list this customer agreed to".</para>
+    ///
+    /// <para>A DANGLING pin — <c>RateCardId</c> pointing at a card that no longer exists —
+    /// is refused rather than quietly resolved by the fallback. There is no foreign key
+    /// behind the pin (the billing aggregate sits above the platform model), so a dangling
+    /// pin is reachable, and the fallback would answer it by charging the customer on a
+    /// price list nobody chose for them. Refusing produces no statement, which the revenue
+    /// readout reports as a leak; repricing produces an invoice the customer disputes.
+    /// A delayed bill is recoverable, a wrong one is a credit note and a phone call.</para>
+    ///
+    /// <para>The fallback survives for tenants provisioned before pinning existed, and is
+    /// logged at WARNING for a Billable tenant precisely because it is not normal
+    /// operation — it is a finding with an owner and a fix (pin the card).</para>
+    /// </summary>
+    private async Task<(RateCard Card, RateCardSource Source)> ResolveRateCardAsync(
+        long? rateCardId, Tenant tenant, BillingPeriod period, CancellationToken ct)
     {
-        if (rateCardId is long id)
-            return await _context.Set<RateCard>().AsNoTracking().Include(c => c.Lines)
-                       .FirstOrDefaultAsync(c => c.Id == id, ct)
-                   ?? throw new BillingNotFoundException($"Rate card {id} does not exist.");
+        if (rateCardId is long explicitId)
+            return (await LoadRateCardAsync(explicitId, ct)
+                    ?? throw new BillingNotFoundException($"Rate card {explicitId} does not exist."),
+                RateCardSource.Explicit);
 
-        return await _context.Set<RateCard>().AsNoTracking().Include(c => c.Lines)
-                   .Where(c => c.IsActive
-                               && c.EffectiveFromUtc <= period.StartUtc
-                               && (c.EffectiveToUtc == null || c.EffectiveToUtc > period.StartUtc))
-                   .OrderByDescending(c => c.EffectiveFromUtc).ThenByDescending(c => c.Id)
-                   .FirstOrDefaultAsync(ct)
-               ?? throw new BillingConflictException(
-                   $"No active rate card is effective for period {period.Key}; pass rateCardId explicitly or activate one.");
+        if (tenant.RateCardId is long pinnedId)
+        {
+            var pinned = await LoadRateCardAsync(pinnedId, ct);
+            if (pinned is not null)
+                return (pinned, RateCardSource.TenantPin);
+
+            _logger.LogError(
+                "Tenant {TenantId} is pinned to rate card {RateCardId}, which does not exist. "
+                + "Statement compute for period {Period} is refused rather than repricing the tenant onto the active card.",
+                tenant.Id, pinnedId, period.Key);
+            throw new BillingConflictException(
+                $"Tenant {tenant.Id} is pinned to rate card {pinnedId}, which does not exist. " +
+                "Billing will not fall back to the active card, because that would charge this tenant on a price list " +
+                "nobody agreed to. Repair the tenant's RateCardId, or pass rateCardId explicitly for this run.");
+        }
+
+        var fallback = await _context.Set<RateCard>().AsNoTracking().Include(c => c.Lines)
+                           .Where(c => c.IsActive
+                                       && c.EffectiveFromUtc <= period.StartUtc
+                                       && (c.EffectiveToUtc == null || c.EffectiveToUtc > period.StartUtc))
+                           .OrderByDescending(c => c.EffectiveFromUtc).ThenByDescending(c => c.Id)
+                           .FirstOrDefaultAsync(ct)
+                       ?? throw new BillingConflictException(
+                           $"No active rate card is effective for period {period.Key}; pass rateCardId explicitly or activate one.");
+
+        if (tenant.BillingMode == TenantBillingMode.Billable)
+            _logger.LogWarning(
+                "REVENUE RISK: billable tenant {TenantId} has no pinned rate card, so period {Period} was priced against "
+                + "rate card {RateCardId} ('{RateCardCode}') purely because it is the active card. Activating a different "
+                + "card reprices this tenant with no record of the change. Pin the tenant's agreed rate card.",
+                tenant.Id, period.Key, fallback.Id, fallback.Code);
+
+        return (fallback, RateCardSource.ActiveFallback);
     }
+
+    private Task<RateCard?> LoadRateCardAsync(long id, CancellationToken ct)
+        => _context.Set<RateCard>().AsNoTracking().Include(c => c.Lines)
+            .FirstOrDefaultAsync(c => c.Id == id, ct);
 
     /// <summary>
     /// Priced-unit divisor per meter: some meters are metered in raw units but
@@ -694,40 +1004,39 @@ public class BillingStatementService : IBillingStatementService
     /// amounts round to 2dp away-from-zero. Meters are ADDITIVE: only meters
     /// with a rate-card line produce a charge line — usage on a meter the card
     /// does not price is simply not charged.
+    ///
+    /// <para><b>Metering and charging are separated.</b> Every line keeps its real
+    /// MeteredQuantity, IncludedQuantity, BillableQuantity and UnitPrice regardless of
+    /// billing mode; <paramref name="policy"/> decides only whether Amount follows them
+    /// or is zeroed. That is what makes a Trial statement worth computing: at conversion
+    /// the account team can read exactly what the tenant consumed AND what the list price
+    /// would have been, from the statement itself, without re-running history. A waived
+    /// line is therefore a line where UnitPrice × BillableQuantity ≠ Amount — visibly so —
+    /// and the exemption marker line states the total that was given away.</para>
     /// </summary>
     internal static List<BillingStatementLine> BuildLines(
-        RateCard rateCard, Plan? plan, TenantUsageReadout usage)
+        RateCard rateCard, Plan? plan, TenantUsageReadout usage, BillingChargePolicy policy)
     {
         var lines = new List<BillingStatementLine>();
 
-        // Base subscription from the plan's monthly price when available.
-        if (plan is not null)
-        {
-            // P2-B11: direct property access — Plan.MonthlyPriceUsd landed with WS-B.
-            var monthlyPrice = plan.MonthlyPriceUsd;
-            lines.Add(new BillingStatementLine
-            {
-                MeterKey = BillingMeterKeys.BaseSubscription,
-                Description = $"Base subscription — plan '{plan.Code}'",
-                MeteredQuantity = 1m,
-                IncludedQuantity = 0m,
-                BillableQuantity = 1m,
-                UnitPrice = monthlyPrice ?? 0m,
-                Amount = BillingMath.Round2(monthlyPrice ?? 0m),
-                SourceNote = monthlyPrice is null
-                    ? $"Plan '{plan.Code}' has no monthly price configured; base charge 0."
-                    : $"Plan '{plan.Code}' monthly subscription price."
-            });
-        }
+        // The base subscription is MANDATORY for a Billable tenant, including one with no
+        // plan at all. It used to be emitted only when a plan existed, so a plan-less
+        // tenant was metered and never charged a subscription, and the statement gave no
+        // hint that a line was missing — you had to know it should have been there.
+        if (policy.Mode == TenantBillingMode.Billable)
+            lines.Add(BaseSubscriptionLine(plan, policy));
 
         var meterByKey = usage.Meters.ToDictionary(m => m.MeterKey, StringComparer.Ordinal);
+        var waivedTotal = 0m;
         foreach (var cardLine in rateCard.Lines.OrderBy(l => l.MeterKey, StringComparer.Ordinal))
         {
             meterByKey.TryGetValue(cardLine.MeterKey, out var meter);
             var metered = meter?.Quantity ?? 0m;
             var included = cardLine.IncludedQuantity;
             var billable = Math.Max(0m, metered - included);
-            var amount = BillingMath.Round2(billable / PricedUnitDivisor(cardLine.MeterKey) * cardLine.UnitPrice);
+            var listAmount = BillingMath.Round2(billable / PricedUnitDivisor(cardLine.MeterKey) * cardLine.UnitPrice);
+            if (!policy.Charging)
+                waivedTotal += listAmount;
 
             lines.Add(new BillingStatementLine
             {
@@ -738,7 +1047,7 @@ public class BillingStatementService : IBillingStatementService
                 IncludedQuantity = included,
                 BillableQuantity = billable,
                 UnitPrice = cardLine.UnitPrice,
-                Amount = amount,
+                Amount = policy.Charging ? listAmount : 0m,
                 // Traceability: SourceNote carries provenance (source ledger +
                 // period + BU) and nothing else. The meter's coverage caveat
                 // travels in its OWN field — a priced line must never look more
@@ -752,8 +1061,148 @@ public class BillingStatementService : IBillingStatementService
             });
         }
 
+        if (!policy.Charging)
+            lines.Add(SuppressionMarkerLine(policy, usage, BillingMath.Round2(waivedTotal)));
+
+        // A partial month is arithmetic the customer is entitled to see spelled out. The
+        // marker states the split once, in one place, so the invoice answers "why is this
+        // less than my monthly price" without anyone having to reconstruct it.
+        if (policy.IsProrated)
+            lines.Add(MarkerLine(
+                BillingStatementMarkers.ProrationBillingStart,
+                $"Partial period — charged {policy.BillableDays} of {policy.PeriodDays} days",
+                $"Billing for this tenant starts {policy.ChargeableFromUtc:yyyy-MM-dd}, inside period {usage.Period}. " +
+                $"The base subscription is charged pro rata for {policy.BillableDays} of the period's {policy.PeriodDays} days. " +
+                "Metered flow (documents, pages, external AI tokens) is counted from that date only. " +
+                "Seats and storage are period-end snapshots and are NOT reduced — each of those lines states so itself."));
+
+        // A fallback-priced Billable tenant is charged correctly TODAY and repriced the
+        // day someone activates a different card. The marker puts that on the statement
+        // so the exposure is discoverable from billing history, not only from a log line
+        // that has since rolled off.
+        if (policy.Mode == TenantBillingMode.Billable && policy.RateCardSource == RateCardSource.ActiveFallback)
+            lines.Add(MarkerLine(
+                BillingStatementMarkers.RiskUnpinnedRateCard,
+                "REVENUE RISK — priced against the active rate card, not a pinned one",
+                $"Rate card {rateCard.Id} ('{rateCard.Code}') was selected only because it is the active card effective for " +
+                $"{usage.Period}. This tenant has no pinned RateCardId, so activating a different card silently changes what " +
+                "it pays. Pin the rate card the customer actually agreed to."));
+
+        // Trial expiry rides on the statement as well as the log: an expired trial that
+        // keeps producing zero-charge Drafts is the account nobody converted.
+        if (policy.TrialExpired)
+            lines.Add(MarkerLine(
+                BillingStatementMarkers.RiskTrialExpired,
+                "REVENUE RISK — trial has ended and the tenant is still uncharged",
+                $"Billing mode is Trial and the trial ended {policy.TrialEndsOn:yyyy-MM-dd}, yet {usage.Period} was metered " +
+                "and charged nothing. Convert the account to a Billable mode with a plan and a pinned rate card, or record " +
+                "an explicit Internal/Partner exemption with a reason. Suspension is a commercial decision and is never automatic."));
+
         return lines;
     }
+
+    /// <summary>
+    /// The base subscription line. Always present for a Billable tenant; carries the
+    /// revenue-risk code at the FRONT of its CoverageNote when there is no plan, or a plan
+    /// with no price, so a zero base charge can never read as a priced-at-zero plan.
+    /// </summary>
+    private static BillingStatementLine BaseSubscriptionLine(Plan? plan, BillingChargePolicy policy)
+    {
+        // P2-B11: direct property access — Plan.MonthlyPriceUsd landed with WS-B.
+        var monthlyPrice = plan?.MonthlyPriceUsd;
+
+        // Money is computed from the EXACT day ratio, never from the rounded fraction the
+        // line displays: 12/31 is 0.387096..., and pricing 0.387 instead would quietly lose
+        // a fraction of a cent on every prorated invoice the platform ever issues.
+        var listAmount = BillingMath.Round2((monthlyPrice ?? 0m) * policy.BillableFraction);
+
+        var riskNote = plan is null
+            ? BillingStatementMarkers.RiskNoPlan
+              + " REVENUE RISK: this tenant's billing mode is Billable but no plan is assigned, so there is no subscription "
+              + "price to charge and only metered usage is billed. Assign a priced plan, or record an explicit non-Billable "
+              + "billing mode with a reason."
+            : monthlyPrice is null
+                ? BillingStatementMarkers.RiskPlanNotPriced
+                  + $" REVENUE RISK: plan '{plan.Code}' carries no MonthlyPriceUsd, so the base subscription charges 0.00 for a "
+                  + "Billable tenant. Price the plan; a null price is not a free plan, it is an unfinished one."
+                : null;
+
+        var suppressionNote = policy.Charging
+            ? null
+            : $" Charging is suppressed for this period ({policy.SuppressionMarker}), so the amount is 0.00 regardless.";
+
+        // The line carries the billable FRACTION as its quantity, and the SourceNote carries
+        // the day counts the fraction came from. The fraction is stored at the column's 3dp,
+        // so it is a display value and cannot be multiplied back out to the exact amount —
+        // which is why the note states the arithmetic in full. A customer query about a
+        // partial month is answerable from this one line.
+        var prorationNote = policy.IsProrated
+            ? $" Prorated: {policy.BillableDays} of {policy.PeriodDays} days billable, from {policy.ChargeableFromUtc:yyyy-MM-dd} " +
+              $"(the tenant's billing start date) to the end of the period. " +
+              $"{policy.BillableDays}/{policy.PeriodDays} x {monthlyPrice ?? 0m:0.00} USD = {listAmount:0.00} USD."
+            : "";
+
+        return new BillingStatementLine
+        {
+            MeterKey = BillingMeterKeys.BaseSubscription,
+            Description = plan is null
+                ? "Base subscription — NO PLAN ASSIGNED"
+                : $"Base subscription — plan '{plan.Code}'"
+                  + (policy.IsProrated ? $" ({policy.BillableDays}/{policy.PeriodDays} days)" : ""),
+            MeteredQuantity = policy.BillableFraction,
+            IncludedQuantity = 0m,
+            BillableQuantity = policy.BillableFraction,
+            UnitPrice = monthlyPrice ?? 0m,
+            Amount = policy.Charging ? listAmount : 0m,
+            SourceNote = (plan is null
+                ? "Tenant is Billable but carries no plan, so no monthly price exists to charge."
+                : monthlyPrice is null
+                    ? $"Plan '{plan.Code}' has no monthly price configured; base charge 0."
+                    : $"Plan '{plan.Code}' monthly subscription price.") + prorationNote,
+            CoverageNote = riskNote is null && suppressionNote is null ? null : (riskNote ?? "") + (suppressionNote ?? "")
+        };
+    }
+
+    /// <summary>Names the decision that zeroed every charge on this statement, and what it cost.</summary>
+    private static BillingStatementLine SuppressionMarkerLine(
+        BillingChargePolicy policy, TenantUsageReadout usage, decimal waivedTotal)
+    {
+        var marker = policy.SuppressionMarker!;
+        var explanation = marker == BillingStatementMarkers.ExemptionPreBillingStart
+            ? $"Period {usage.Period} ends on or before this tenant's BillingStartsOn ({policy.BillingStartsOn:yyyy-MM-dd}), so the " +
+              "whole period precedes billing: usage is metered and nothing is charged. A period that STRADDLES the billing start " +
+              "date is not treated this way — it is charged pro rata by days (billing.proration.billing-start)."
+            : policy.Mode == TenantBillingMode.Trial
+                ? $"Billing mode is Trial{(policy.TrialEndsOn is null ? " with no end date" : $" until {policy.TrialEndsOn:yyyy-MM-dd}")}. " +
+                  "Usage is fully metered so conversion has a real baseline; the charge is a deliberate zero."
+                : $"Billing mode is {policy.Mode}: this tenant is never charged through this system. Usage is still metered so " +
+                  "the cost of serving it stays visible.";
+
+        return MarkerLine(marker,
+            $"Not charged — {policy.Mode} ({waivedTotal:0.00} USD of metered usage waived)",
+            $"{explanation} List value of the metered usage waived this period: {waivedTotal:0.00} USD (the base subscription " +
+            "is excluded from that figure — only rate-card meters are counted).");
+    }
+
+    /// <summary>
+    /// A zero-amount statement line whose whole purpose is to be read. Quantities are zero
+    /// so it can never perturb a total; the MeterKey is the machine-readable code.
+    /// </summary>
+    private static BillingStatementLine MarkerLine(string markerKey, string description, string note) => new()
+    {
+        MeterKey = markerKey,
+        Description = Truncate(description, 256),
+        MeteredQuantity = 0m,
+        IncludedQuantity = 0m,
+        BillableQuantity = 0m,
+        UnitPrice = 0m,
+        Amount = 0m,
+        SourceNote = "Statement marker emitted by billing-mode evaluation; carries no charge.",
+        CoverageNote = note
+    };
+
+    private static string Truncate(string value, int maxLength)
+        => value.Length <= maxLength ? value : value[..maxLength];
 
     internal static bool IsUniqueViolation(DbUpdateException exception)
     {

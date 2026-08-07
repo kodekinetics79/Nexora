@@ -28,11 +28,23 @@ public class TenantsController : ControllerBase
     private readonly ILogger<TenantsController> _logger;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ITenantScopeAccessor _tenantScope;
+    private readonly ITenantBaselineSeeder _baseline;
+    private readonly Onboarding.ITenantAdminInvitationService _invitations;
     private readonly Entitlements.ITenantAccessService? _tenantAccess;
 
+    /// <summary>
+    /// <paramref name="baseline"/> and <paramref name="invitations"/> are REQUIRED dependencies,
+    /// unlike the optional <paramref name="tenantAccess"/> cache. A tenant provisioned without its
+    /// baseline is the empty-workspace defect this controller exists to prevent, and an invite
+    /// path that silently degrades to a generated password would hand the operator a credential
+    /// they were never supposed to hold. Neither has a configuration in which skipping it is
+    /// correct, so a missing registration must fail loudly at activation.
+    /// </summary>
     public TenantsController(
         ErpRfqAutomationContext context, IPlatformAuditService audit, ILogger<TenantsController> logger,
         IServiceScopeFactory scopeFactory, ITenantScopeAccessor tenantScope,
+        ITenantBaselineSeeder baseline,
+        Onboarding.ITenantAdminInvitationService invitations,
         Entitlements.ITenantAccessService? tenantAccess = null)
     {
         _context = context;
@@ -40,6 +52,8 @@ public class TenantsController : ControllerBase
         _logger = logger;
         _scopeFactory = scopeFactory;
         _tenantScope = tenantScope;
+        _baseline = baseline;
+        _invitations = invitations;
         _tenantAccess = tenantAccess;
     }
 
@@ -72,24 +86,79 @@ public class TenantsController : ControllerBase
     // POST /api/platform/tenants  (provision)
     [HttpPost]
     [Authorize(Policy = PlatformPolicies.TenantAdmin)]
-    public async Task<ActionResult<TenantSummaryDto>> Provision(
+    public async Task<ActionResult<ProvisionTenantResponse>> Provision(
         [FromBody] ProvisionTenantRequest request, CancellationToken ct)
     {
         if (!ModelState.IsValid)
             return BadRequest(ModelState);
 
-        var slug = Slugify(string.IsNullOrWhiteSpace(request.Slug) ? request.Name : request.Slug);
-        if (string.IsNullOrEmpty(slug))
-            return BadRequest(new { error = "Could not derive a valid slug from the name." });
+        // The slug is far more permanent than "part of a URL". It becomes the BusinessUnitCode,
+        // which becomes the tenant's LeadReferenceConfiguration prefix, which is stamped into every
+        // commercial case's IMMUTABLE MasterReference and printed on their quotes — so a tenant
+        // provisioned as "admin" issues quotes referenced ADMIN-2026-000001 forever, with no rename
+        // path. This also refuses a slug that would fit Tenants.Slug but overflow
+        // BusinessUnits.BusinessUnitCode (varchar(50)), which previously passed the tenant insert
+        // and then failed the business-unit insert inside the same transaction, surfacing to the
+        // operator as a bare "Provisioning failed." naming no field.
+        var verdict = Provisioning.ReservedTenantSlugs.Evaluate(request.Slug, request.Name);
+        if (!verdict.IsAccepted)
+            return BadRequest(new { error = verdict.Message });
+        var slug = verdict.Slug!;
 
         var slugTaken = await _context.Set<Tenant>().IgnoreQueryFilters()
             .AnyAsync(t => t.Slug == slug, ct);
         if (slugTaken)
             return Conflict(new { error = $"A tenant with slug '{slug}' already exists." });
 
-        if (request.PlanId is long planId &&
-            !await _context.Set<Plan>().AnyAsync(p => p.Id == planId, ct))
-            return BadRequest(new { error = $"Plan {planId} does not exist." });
+        // Sec9, applied at the moment the price is FIRST set rather than only when it is changed.
+        // ChangePlan below is Billing-gated with that reasoning written out; this endpoint took the
+        // same commercial fields under a support-level policy, so the separation of duties held for
+        // repricing an existing customer and was absent for creating a new one.
+        var levers = Auth.PlatformCommercialAuthority.CommercialLeversIn(
+            request.PlanId, request.BillingMode, request.BillingModeReason, request.RateCardId,
+            request.BillingStartsOn, request.TrialEndsOn);
+        if (levers.Count > 0 && !Auth.PlatformCommercialAuthority.HoldsCommercialAuthority(User))
+            return StatusCode(StatusCodes.Status403Forbidden,
+                new { error = Auth.PlatformCommercialAuthority.DescribeRefusal(levers) });
+
+        if (ValidateCompanyProfile(request) is string profileError)
+            return BadRequest(new { error = profileError });
+
+        var billingMode = TenantBillingMode.Billable;
+        if (Normalize(request.BillingMode) is string requestedMode
+            && !Enum.TryParse(requestedMode, ignoreCase: true, out billingMode))
+            return BadRequest(new
+            {
+                error = $"billingMode '{requestedMode}' is not recognised; use one of " +
+                        $"{string.Join(", ", Enum.GetNames<TenantBillingMode>())}."
+            });
+
+        if (ValidateCommercialTerms(request, billingMode, DateTime.UtcNow) is string commercialError)
+            return BadRequest(new { error = commercialError });
+
+        Plan? plan = null;
+        if (request.PlanId is long planId)
+        {
+            plan = await _context.Set<Plan>().AsNoTracking().FirstOrDefaultAsync(p => p.Id == planId, ct);
+            if (plan is null)
+                return BadRequest(new { error = $"Plan {planId} does not exist." });
+            if (!plan.IsActive)
+                return BadRequest(new { error = $"Plan '{plan.Code}' is not active and cannot be assigned." });
+        }
+
+        // The pinned price list is verified to EXIST before the tenant is written, so a typo in the
+        // rate-card id degrades into the active-card fallback silently rather than loudly.
+        string? rateCardCode = null;
+        if (request.RateCardId is long rateCardId)
+        {
+            var card = await _context.Set<Billing.RateCard>().AsNoTracking()
+                .FirstOrDefaultAsync(c => c.Id == rateCardId, ct);
+            if (card is null)
+                return BadRequest(new { error = $"Rate card {rateCardId} does not exist." });
+            if (!card.IsActive)
+                return BadRequest(new { error = $"Rate card '{card.Code}' is not active and cannot be pinned." });
+            rateCardCode = card.Code;
+        }
 
         // Users.Email is GLOBALLY unique — one address, one account, one tenant. Checked here so
         // the operator gets a clear 409 naming the problem instead of a transaction rollback
@@ -103,18 +172,56 @@ public class TenantsController : ControllerBase
                         "one account on one tenant; use a different address for this tenant's administrator."
             });
 
-        // Generated when the operator did not supply one: returned exactly once in the response,
-        // stored only as a BCrypt hash. Hashing happens OUTSIDE the retriable transaction — BCrypt
-        // mints a fresh salt per call, and the stored hash must not change between retry attempts.
-        var generatedPassword = string.IsNullOrEmpty(request.AdminPassword)
-            ? GenerateInitialPassword()
-            : null;
-        var adminPasswordHash = BCrypt.Net.BCrypt.HashPassword(generatedPassword ?? request.AdminPassword);
+        var activation = Normalize(request.AdminActivation)?.ToLowerInvariant()
+                         ?? AdminActivationMethods.Invite;
+        var invited = activation == AdminActivationMethods.Invite;
+
+        // On the invite path NOBODY holds a credential for this account — not the customer, who
+        // has not chosen one yet, and deliberately not the operator either. The column is
+        // non-nullable, so it is filled with the hash of a discarded random value: unusable by
+        // construction, and it cannot be brute-forced into something that logs in because no
+        // plaintext for it exists anywhere. The account stays inactive until the invitation is
+        // redeemed, which also keeps it off the seats meter until the customer is really using it.
+        string? generatedPassword = null;
+        string passwordToHash;
+        if (invited)
+        {
+            passwordToHash = GenerateInitialPassword() + GenerateInitialPassword();
+        }
+        else if (!string.IsNullOrEmpty(request.AdminPassword))
+        {
+            passwordToHash = request.AdminPassword;
+        }
+        else
+        {
+            generatedPassword = GenerateInitialPassword();
+            passwordToHash = generatedPassword;
+        }
+
+        // Hashing happens OUTSIDE the retriable transaction — BCrypt mints a fresh salt per call,
+        // and the stored hash must not change between retry attempts.
+        var adminPasswordHash = BCrypt.Net.BCrypt.HashPassword(passwordToHash);
 
         var actor = User.FindFirst("email")?.Value ?? "platform";
         Tenant created;
         User foundingAdmin = null!;
         SetupMaster foundingRole = null!;
+        TenantBaselineSummary workspace = null!;
+
+        // Overwritten by EVERY execution-strategy attempt, deliberately: the token that activates
+        // the account is the one belonging to the attempt that COMMITTED. A token from an attempt
+        // whose transaction rolled back hashes to a row that no longer exists and activates nothing.
+        Onboarding.IssuedTenantAdminInvitation? issuedInvitation = null;
+
+        // The letterhead line the customer's first quote prints. Composed from the parts the
+        // operator typed rather than asking for a second, free-text copy of the same address —
+        // two addresses that can disagree is how a compliant document becomes a non-compliant one.
+        var postalAddress = string.Join(", ", new[]
+        {
+            Normalize(request.AddressLine1), Normalize(request.AddressLine2), Normalize(request.City),
+            Normalize(request.StateProvince), Normalize(request.PostalCode),
+            Normalize(request.CountryCode)?.ToUpperInvariant()
+        }.Where(part => part is not null));
 
         // The context enables EnableRetryOnFailure, so an explicit transaction must
         // run inside the execution strategy or EF throws. Provision Tenant + primary
@@ -137,7 +244,45 @@ public class TenantsController : ControllerBase
                     Status = TenantStatus.Provisioning,
                     PlanId = request.PlanId,
                     CreatedBy = actor,
-                    CreatedOn = DateTime.UtcNow
+                    CreatedOn = DateTime.UtcNow,
+
+                    LegalName = Normalize(request.LegalName),
+                    RegistrationNumber = Normalize(request.RegistrationNumber),
+                    TaxNumber = Normalize(request.TaxNumber),
+                    CountryCode = Normalize(request.CountryCode)?.ToUpperInvariant(),
+                    Industry = Normalize(request.Industry),
+                    Website = Normalize(request.Website),
+                    AddressLine1 = Normalize(request.AddressLine1),
+                    AddressLine2 = Normalize(request.AddressLine2),
+                    City = Normalize(request.City),
+                    StateProvince = Normalize(request.StateProvince),
+                    PostalCode = Normalize(request.PostalCode),
+                    Phone = Normalize(request.Phone),
+                    ContactEmail = Normalize(request.ContactEmail),
+                    LogoUrl = Normalize(request.LogoUrl),
+
+                    BaseCurrencyCode = Normalize(request.BaseCurrencyCode)?.ToUpperInvariant(),
+                    TimeZoneId = Normalize(request.TimeZoneId),
+                    Locale = Normalize(request.Locale),
+                    DataRegion = Normalize(request.DataRegion),
+
+                    BillingMode = billingMode,
+                    BillingModeReason = Normalize(request.BillingModeReason),
+                    RateCardId = request.RateCardId,
+                    // Charges accrue from creation unless the sale agreed otherwise: the default
+                    // that costs the business nothing is the one where billing has already started.
+                    BillingStartsOn = request.BillingStartsOn ?? DateTime.UtcNow.Date,
+                    TrialEndsOn = request.TrialEndsOn,
+                    ContractStartOn = request.ContractStartOn,
+                    ContractEndOn = request.ContractEndOn,
+                    PaymentTermsDays = request.PaymentTermsDays,
+                    PurchaseOrderReference = Normalize(request.PurchaseOrderReference),
+                    BillingContactName = Normalize(request.BillingContactName),
+                    // Statements have to reach somebody. Absent a dedicated AP contact, the
+                    // founding administrator is a far better default than nobody at all.
+                    BillingContactEmail = Normalize(request.BillingContactEmail) ?? adminEmail,
+                    BillingAddress = Normalize(request.BillingAddress),
+                    AccountOwnerEmail = Normalize(request.AccountOwnerEmail) ?? actor
                 };
                 _context.Set<Tenant>().Add(tenant);
                 await _context.SaveChangesAsync(ct);
@@ -199,12 +344,53 @@ public class TenantsController : ControllerBase
                     ImageUrl = string.Empty,
                     RoleId = foundingRole.SetupId,
                     Buid = bu.Id,
-                    IsActive = true,
+                    // An invited administrator is dormant until they redeem their link. That is not
+                    // ceremony: the account holds no usable credential yet, and an account nobody
+                    // can sign into must not occupy a billable seat while the invitation is in
+                    // flight — the seats meter reads exactly this flag.
+                    IsActive = !invited,
+                    Timezone = Normalize(request.TimeZoneId),
                     CreatedBy = actor,
                     CreatedOn = DateTime.UtcNow
                 };
                 _context.Users.Add(foundingAdmin);
                 await _context.SaveChangesAsync(ct);
+
+                // ---- the workspace itself -----------------------------------------------
+                // Runs INSIDE this transaction, so a tenant is never left half-furnished: either
+                // the customer gets a workspace with a letterhead, a base currency, units of
+                // measure and usable starter roles, or the tenant does not exist at all. The
+                // seeder re-reads its own state on every execution-strategy attempt, which is what
+                // makes it safe under the ChangeTracker.Clear() above.
+                workspace = await _baseline.SeedAsync(
+                    bu.Id,
+                    new TenantBaselineProfile(
+                        CountryCode: Normalize(request.CountryCode)?.ToUpperInvariant(),
+                        BaseCurrencyCode: Normalize(request.BaseCurrencyCode)?.ToUpperInvariant(),
+                        CompanyName: Normalize(request.LegalName) ?? request.Name.Trim(),
+                        CompanyAddress: string.IsNullOrEmpty(postalAddress) ? null : postalAddress,
+                        CompanyPhone: Normalize(request.Phone),
+                        CompanyEmail: Normalize(request.ContactEmail),
+                        LogoUrl: Normalize(request.LogoUrl),
+                        Locale: Normalize(request.Locale)),
+                    actor,
+                    ct);
+
+                // The invitation is minted inside the transaction so a provision that fails takes
+                // the activation link down with it. The EMAIL is sent after the commit — a sent
+                // email cannot be rolled back, and a live activation link for a tenant that never
+                // existed is worse than no email at all.
+                issuedInvitation = invited
+                    ? await _invitations.IssueAsync(_context, new Onboarding.TenantAdminInvitationRequest
+                    {
+                        TenantId = tenant.Id,
+                        UserId = foundingAdmin.Id,
+                        Email = adminEmail,
+                        RecipientName = foundingAdmin.FirstName,
+                        TenantName = tenant.Name,
+                        IssuedBy = actor
+                    }, ct)
+                    : null;
 
                 tenant.PrimaryBusinessUnitId = bu.Id;
                 tenant.Status = TenantStatus.Active;
@@ -212,13 +398,34 @@ public class TenantsController : ControllerBase
                 tenant.ModifiedOn = DateTime.UtcNow;
                 await _context.SaveChangesAsync(ct);
 
-                // The admin's EMAIL is audited; the password never is, generated or not.
+                // The admin's EMAIL is audited; the password never is, generated or not, and neither
+                // is the activation token. The COMMERCIAL terms are audited in full: who decided
+                // that this customer pays (or does not), against which plan and price list, is the
+                // record that has to survive the salesperson who agreed it.
                 await _audit.WriteAsync(User, "tenant.provision", nameof(Tenant), tenant.Id.ToString(),
                     new
                     {
-                        tenant.Name, tenant.Slug, tenant.PlanId, tenant.PrimaryBusinessUnitId,
+                        tenant.Name, tenant.Slug, tenant.LegalName, tenant.CountryCode,
+                        tenant.PlanId, tenant.PrimaryBusinessUnitId,
+                        BillingMode = billingMode.ToString(),
+                        tenant.BillingModeReason, tenant.RateCardId,
+                        tenant.BillingStartsOn, tenant.TrialEndsOn,
+                        tenant.ContractStartOn, tenant.ContractEndOn,
+                        tenant.BillingContactEmail, tenant.AccountOwnerEmail,
                         AdminEmail = adminEmail, AdminUserId = foundingAdmin.Id,
-                        PasswordGenerated = generatedPassword is not null
+                        AdminActivation = activation,
+                        PasswordGenerated = generatedPassword is not null,
+                        // The invitation's EXISTENCE and expiry are auditable; its token is not,
+                        // and neither is the URL that carries it.
+                        InvitationIssued = issuedInvitation is not null,
+                        InvitationExpiresAtUtc = issuedInvitation?.ExpiresAtUtc,
+                        Baseline = new
+                        {
+                            workspace.BaseCurrencyCode, workspace.UnitsOfMeasureCreated,
+                            workspace.RolesCreated, workspace.RolePermissionsCreated,
+                            workspace.QuoteConfigurationCreated, workspace.LeadReferencePrefix,
+                            Roles = workspace.RoleNames
+                        }
                     },
                     actAsTenantId: tenant.Id, httpContext: HttpContext, ct: ct);
 
@@ -236,12 +443,19 @@ public class TenantsController : ControllerBase
             return StatusCode(500, new { error = "Provisioning failed." });
         }
 
+        // Outside the transaction on purpose (see IssueAsync). SendInvitationEmailAsync never
+        // throws: a mail outage must not turn a committed provision into a 500 the operator reads
+        // as failure, and the link is in this response either way.
+        var emailSent = issuedInvitation is not null
+                        && await _invitations.SendInvitationEmailAsync(issuedInvitation, ct);
+
         var withPlan = await _context.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
             .Include(t => t.Plan).FirstAsync(t => t.Id == created.Id, ct);
 
-        // ProvisionTenantResponse, not TenantSummaryDto: the generated password appears in THIS
-        // response and nowhere else, ever — not on list, not on get, not in the audit log. Only a
-        // BCrypt hash is stored, so there is nothing to retrieve later by design.
+        // ProvisionTenantResponse, not TenantSummaryDto: the generated password and the activation
+        // link appear in THIS response and nowhere else, ever — not on list, not on get, not in the
+        // audit log. Only a BCrypt hash and a token HASH are stored, so there is nothing to
+        // retrieve later by design; a lost link is re-issued, never recovered.
         return CreatedAtAction(nameof(Get), new { id = created.Id }, new ProvisionTenantResponse
         {
             Tenant = ToDto(withPlan),
@@ -250,9 +464,185 @@ public class TenantsController : ControllerBase
                 UserId = foundingAdmin.Id,
                 Email = foundingAdmin.Email,
                 RoleName = foundingRole.SetupValue,
-                GeneratedPassword = generatedPassword
+                GeneratedPassword = generatedPassword,
+                Invitation = issuedInvitation is null ? null : new AdminInvitationDto
+                {
+                    ExpiresAtUtc = issuedInvitation.ExpiresAtUtc,
+                    // Withheld when the mail went out: see AdminInvitationDto.ActivationUrl. The
+                    // operator gets the link only in the case where nobody else has it.
+                    ActivationUrl = emailSent ? null : issuedInvitation.ActivationUrl,
+                    EmailSent = emailSent
+                }
+            },
+            Baseline = new TenantBaselineDto
+            {
+                QuoteConfiguration = workspace.QuoteConfigurationCreated,
+                BaseCurrency = workspace.BaseCurrencyCode,
+                UnitsOfMeasure = workspace.UnitsOfMeasureCreated,
+                Roles = workspace.RolesCreated,
+                PermissionGrants = workspace.RolePermissionsCreated,
+                LeadReferencePrefix = workspace.LeadReferencePrefix
+            },
+            Billing = new TenantBillingPostureDto
+            {
+                Mode = billingMode.ToString(),
+                PlanCode = plan?.Code,
+                RateCardCode = rateCardCode,
+                BillingStartsOn = created.BillingStartsOn,
+                TrialEndsOn = created.TrialEndsOn,
+                Warnings = DescribeRevenueRisk(created, plan, billingMode, rateCardCode is not null)
             }
         });
+    }
+
+    /// <summary>
+    /// Mirrors the floor the provisioning wizard enforces. Kept in sync deliberately: a rule that
+    /// lives only in the client is a rule any other caller can ignore.
+    /// </summary>
+    private const int MinimumBillingModeReasonLength = 15;
+
+    /// <summary>
+    /// The commercial half of provisioning validation, kept together because these rules only
+    /// make sense as a set: what a tenant is charged, from when, and against which price list.
+    ///
+    /// <para><b>Every rule here closes a measured revenue leak.</b> A Billable tenant with no
+    /// plan produces a statement with no base-subscription line, because
+    /// <c>BillingStatementService.BuildLines</c> emits that line only when a plan exists — so the
+    /// customer is metered and never charged. A Trial with no end date is indistinguishable from
+    /// permanent free service and nothing ever prompts conversion. A non-Billable mode with no
+    /// written reason is free service that nobody signed for. These were all reachable through a
+    /// form that called the plan "optional".</para>
+    /// </summary>
+    private static string? ValidateCommercialTerms(
+        ProvisionTenantRequest request, TenantBillingMode mode, DateTime now)
+    {
+        if (mode == TenantBillingMode.Billable && request.PlanId is null)
+            return "A billable tenant must be assigned a plan: without one its statements carry no " +
+                   "base subscription line and the customer is never charged. Assign a plan, or set " +
+                   "billingMode to Trial, Internal or Partner with a reason.";
+
+        if (mode != TenantBillingMode.Billable)
+        {
+            // A length floor, not just presence. An exemption justified as "x" satisfies a
+            // required-field check while leaving the paper trail worth nothing — and the whole
+            // point of demanding a reason is that somebody has to be able to read it later and
+            // understand why this customer was not charged.
+            var reason = request.BillingModeReason?.Trim();
+            if (string.IsNullOrEmpty(reason) || reason.Length < MinimumBillingModeReasonLength)
+                return $"billingMode '{mode}' means this tenant is not charged; billingModeReason " +
+                       $"is required and must be at least {MinimumBillingModeReasonLength} characters " +
+                       "so the exemption is attributable to a real decision.";
+        }
+
+        if (mode == TenantBillingMode.Trial)
+        {
+            if (request.TrialEndsOn is not DateTime trialEnd)
+                return "A trial tenant must carry trialEndsOn. An open-ended trial is free service " +
+                       "with no conversion date.";
+            if (trialEnd <= now)
+                return $"trialEndsOn {trialEnd:yyyy-MM-dd} is not in the future; the trial would be " +
+                       "expired the moment it is created.";
+        }
+
+        if (request.ContractStartOn is DateTime start && request.ContractEndOn is DateTime end
+            && end <= start)
+            return "contractEndOn must fall after contractStartOn.";
+
+        return null;
+    }
+
+    /// <summary>
+    /// Non-commercial field validation. Codes are checked for SHAPE and, where the runtime can
+    /// answer authoritatively (time zones), for existence — a mistyped IANA id would otherwise
+    /// surface much later as an SLA clock running in the wrong offset.
+    /// </summary>
+    private static string? ValidateCompanyProfile(ProvisionTenantRequest request)
+    {
+        if (Normalize(request.CountryCode) is string country
+            && (country.Length != 2 || !country.All(char.IsAsciiLetter)))
+            return $"countryCode '{country}' is not an ISO-3166-1 alpha-2 code (two letters, e.g. 'SA').";
+
+        // Required, not optional. Every consequence of a missing base currency is INVISIBLE:
+        // FxConversionService cannot resolve a base, so the dashboard total reports itself
+        // unavailable; unit costs silently null out; the general ledger refuses to open a book.
+        // Provisioning is the last moment at which anyone can still be told.
+        if (Normalize(request.BaseCurrencyCode) is not string currency)
+            return "baseCurrencyCode is required: without a base currency the tenant's totals, " +
+                   "unit costs and general ledger all fail silently rather than visibly.";
+        if (currency.Length != 3 || !currency.All(char.IsAsciiLetter))
+            return $"baseCurrencyCode '{currency}' is not an ISO-4217 code (three letters, e.g. 'SAR').";
+
+        if (Normalize(request.TimeZoneId) is string timeZone)
+        {
+            try
+            {
+                TimeZoneInfo.FindSystemTimeZoneById(timeZone);
+            }
+            catch (Exception exception) when (
+                exception is TimeZoneNotFoundException or InvalidTimeZoneException)
+            {
+                return $"timeZoneId '{timeZone}' is not a time zone this server recognises; use an " +
+                       "IANA identifier such as 'Asia/Riyadh'.";
+            }
+        }
+
+        var activation = Normalize(request.AdminActivation)?.ToLowerInvariant()
+                         ?? AdminActivationMethods.Invite;
+        if (activation is not (AdminActivationMethods.Invite or AdminActivationMethods.Password))
+            return $"adminActivation '{activation}' is not recognised; use " +
+                   $"'{AdminActivationMethods.Invite}' or '{AdminActivationMethods.Password}'.";
+
+        // Refused rather than ignored. "No password exists until the administrator sets one" is
+        // the entire security property of the invite path; silently discarding a supplied one
+        // would leave that property resting on a client's good manners, and a caller who sent a
+        // password believes it was set.
+        if (activation == AdminActivationMethods.Invite && !string.IsNullOrEmpty(request.AdminPassword))
+            return "adminPassword cannot be supplied with adminActivation 'invite': the invited " +
+                   "administrator chooses their own credential and none exists until they do. " +
+                   $"Use adminActivation '{AdminActivationMethods.Password}' to set one directly.";
+
+        return null;
+    }
+
+    /// <summary>
+    /// Names, at creation time, every way this tenant might fail to produce the revenue it should.
+    /// An empty list is the contract: this customer will be charged exactly as intended.
+    ///
+    /// <para>Warnings rather than refusals, because each of these is a legitimate deliberate
+    /// choice for SOME customer — an unpriced plan during a pricing rollout, an unpinned rate card
+    /// for a standard-price account. What is not legitimate is discovering it at quarter end.</para>
+    /// </summary>
+    private static List<string> DescribeRevenueRisk(
+        Tenant tenant, Plan? plan, TenantBillingMode mode, bool rateCardPinned)
+    {
+        var warnings = new List<string>();
+
+        if (mode == TenantBillingMode.Billable)
+        {
+            if (plan is null)
+                warnings.Add("No plan assigned — statements will carry no base subscription charge.");
+            else if (plan.MonthlyPriceUsd is null)
+                warnings.Add($"Plan '{plan.Code}' has no monthly price configured, so the base " +
+                             "subscription charges 0.00 until one is set.");
+            else if (plan.MonthlyPriceUsd <= 0m)
+                warnings.Add($"Plan '{plan.Code}' is priced at {plan.MonthlyPriceUsd:0.00} USD/month.");
+
+            if (!rateCardPinned)
+                warnings.Add("No rate card pinned — metered usage will be priced against whichever " +
+                             "card is active for the period, and a period with no active card " +
+                             "produces no statement at all.");
+        }
+        else
+        {
+            warnings.Add($"Billing mode is {mode}: this tenant consumes the platform without being " +
+                         $"charged. Reason on record: {tenant.BillingModeReason}");
+        }
+
+        if (mode == TenantBillingMode.Trial && tenant.TrialEndsOn is DateTime ends)
+            warnings.Add($"Trial converts on {ends:yyyy-MM-dd}; after that date the tenant must be " +
+                         "moved to Billable or it is free service.");
+
+        return warnings;
     }
 
     /// <summary>
@@ -541,7 +931,41 @@ public class TenantsController : ControllerBase
         PlanCode = t.Plan?.Code,
         PrimaryBusinessUnitId = t.PrimaryBusinessUnitId,
         CreatedOn = t.CreatedOn,
-        StatusReason = t.StatusReason
+        StatusReason = t.StatusReason,
+
+        LegalName = t.LegalName,
+        RegistrationNumber = t.RegistrationNumber,
+        TaxNumber = t.TaxNumber,
+        CountryCode = t.CountryCode,
+        Industry = t.Industry,
+        Website = t.Website,
+        AddressLine1 = t.AddressLine1,
+        AddressLine2 = t.AddressLine2,
+        City = t.City,
+        StateProvince = t.StateProvince,
+        PostalCode = t.PostalCode,
+        Phone = t.Phone,
+        ContactEmail = t.ContactEmail,
+        LogoUrl = t.LogoUrl,
+
+        BaseCurrencyCode = t.BaseCurrencyCode,
+        TimeZoneId = t.TimeZoneId,
+        Locale = t.Locale,
+        DataRegion = t.DataRegion,
+
+        BillingMode = t.BillingMode.ToString(),
+        BillingModeReason = t.BillingModeReason,
+        RateCardId = t.RateCardId,
+        BillingStartsOn = t.BillingStartsOn,
+        TrialEndsOn = t.TrialEndsOn,
+        ContractStartOn = t.ContractStartOn,
+        ContractEndOn = t.ContractEndOn,
+        PaymentTermsDays = t.PaymentTermsDays,
+        PurchaseOrderReference = t.PurchaseOrderReference,
+        BillingContactName = t.BillingContactName,
+        BillingContactEmail = t.BillingContactEmail,
+        BillingAddress = t.BillingAddress,
+        AccountOwnerEmail = t.AccountOwnerEmail
     };
 
     private static TenantAiPolicyDto ToAiPolicyDto(AiProcessingPolicy p) => new()

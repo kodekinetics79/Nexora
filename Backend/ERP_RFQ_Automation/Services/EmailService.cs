@@ -127,13 +127,18 @@ namespace ERP_RFQ_Automation.Services
         // ING-08: channel (not loop) health for the inbound mailbox. Optional so the intake
         // unit tests can construct the service without the readiness surface.
         private readonly IEmailPollerHealth? _pollerHealth;
+        // Suspension enforcement for the one background path that spends real money. Optional so
+        // the intake unit tests can construct the service without it; absent means "poll every
+        // mailbox", which is the behaviour that existed before it.
+        private readonly ERP_RFQ_Automation.Platform.Lifecycle.ITenantWorkGate? _workGate;
         private readonly TimeSpan _initialLookback;
         private readonly TimeSpan _minLookback;
         private readonly TimeSpan _maxLookback;
         public EmailService(ErpRfqAutomationContext context, IWebHostEnvironment env,
             ILogger<EmailService> logger, ILLMService llmService, IServiceScopeFactory scopeFactory,
             IConfiguration configuration, IFileStorage storage,
-            IEmailPollerHealth? pollerHealth = null)
+            IEmailPollerHealth? pollerHealth = null,
+            ERP_RFQ_Automation.Platform.Lifecycle.ITenantWorkGate? workGate = null)
         {
             _context = context;
             _env = env;
@@ -141,6 +146,7 @@ namespace ERP_RFQ_Automation.Services
             _llmService = llmService;
             _scopeFactory = scopeFactory;
             _pollerHealth = pollerHealth;
+            _workGate = workGate;
             _useUnifiedQueue = configuration.GetValue("Ingestion:UseUnifiedQueue", true);
             _initialLookback = PositiveDays(
                 configuration.GetValue("Ingestion:Email:InitialLookbackDays", DEFAULT_INITIAL_LOOKBACK_DAYS),
@@ -172,6 +178,38 @@ namespace ERP_RFQ_Automation.Services
             }
 
             var configs = await query.ToListAsync();
+
+            // The most expensive gate in the product. ProcessConfigAsync resolves ILLMService from
+            // its own scope and enqueues every attachment for extraction, so an unpolled mailbox is
+            // the difference between a suspended tenant costing nothing and a suspended tenant
+            // spending inference tokens on documents nobody will be invoiced for.
+            //
+            // Skipping is genuine DEFERRAL, not loss: the mail stays on the customer's IMAP server
+            // (nothing is deleted, only flagged Seen after a successful ingest) and
+            // LastSuccessfulPollOn is not advanced for a mailbox that was never polled, so the
+            // lookback window on reinstatement still starts where the tenant left off. The one
+            // bound is Ingestion:Email:MaxLookbackDays — a suspension longer than that window
+            // leaves the oldest mail outside it, and the operator has to widen the setting before
+            // reinstating a long-suspended tenant.
+            //
+            // Called BEFORE any tenant scope is pushed; see ITenantWorkGate for why that matters.
+            if (_workGate is not null && configs.Count > 0)
+            {
+                var serviceable = await _workGate.FilterServiceableAsync(
+                    configs.Select(c => c.BusinessUnitId));
+                var admitted = serviceable.ToHashSet();
+                var deferred = configs.Where(c => !admitted.Contains(c.BusinessUnitId)).ToList();
+
+                if (deferred.Count > 0)
+                    _logger.LogInformation(
+                        "Skipping {Blocked} mailbox(es) whose tenant is suspended or archived; their mail "
+                        + "stays on the server and is ingested when the tenant is reinstated.",
+                        deferred.Count);
+
+                foreach (var config in deferred) WarnIfSuspensionHasOutrunTheLookback(config);
+                configs = configs.Where(c => admitted.Contains(c.BusinessUnitId)).ToList();
+            }
+
             _logger.LogInformation("Found {Count} active IMAP email configurations to process.", configs.Count);
 
             var outcomes = new List<MailboxPollOutcome>(configs.Count);
@@ -474,6 +512,41 @@ namespace ERP_RFQ_Automation.Services
             if (since > newestAllowed) since = newestAllowed;
 
             return new LookbackWindow(since, cappedDays, firstEver);
+        }
+
+        /// <summary>
+        /// Says out loud, WHILE the tenant is still suspended, how much of their mail reinstating
+        /// them will no longer reach.
+        ///
+        /// <para>The deferral this gate creates is only lossless while the suspension is shorter
+        /// than <c>Ingestion:Email:MaxLookbackDays</c> — and the default cap is 30 days while the
+        /// default retention window before deletion is also 30, so for the commonest reason a
+        /// tenant is suspended (non-payment) the two are the same length and the loss begins on
+        /// the day somebody was going to make a decision anyway.</para>
+        ///
+        /// <para>The cap already warns, but only inside <see cref="LogLookbackWindow"/> — which
+        /// runs when the mailbox is polled, i.e. AFTER reinstatement, when the mail is already out
+        /// of reach and nobody can widen the setting in time. Warning on every skipped cycle puts
+        /// it in front of the operator during the window in which it is still actionable: widen
+        /// the cap before reinstating, or recover the gap from the mailbox by hand.</para>
+        /// </summary>
+        private void WarnIfSuspensionHasOutrunTheLookback(EmailConfiguration config)
+        {
+            if (config.LastSuccessfulPollOn is not DateTime lastSuccess) return;
+
+            var oldestReachable = DateTime.UtcNow - _maxLookback;
+            if (lastSuccess >= oldestReachable) return;
+
+            var lostDays = (int)Math.Ceiling((oldestReachable - lastSuccess).TotalDays);
+            _logger.LogWarning(
+                "Mailbox {Email} (business unit {BusinessUnitId}) has been deferred by tenant "
+                + "suspension since {LastSuccess:O}, which is now longer ago than the {MaxDays}-day "
+                + "lookback cap. Reinstating this tenant today will NOT ingest mail sent before "
+                + "{OldestReachable:O} — {LostDays} day(s) of it. Widen "
+                + "Ingestion:Email:MaxLookbackDays before reinstating, or recover that period from "
+                + "the mailbox manually.",
+                config.EmailAddress, config.BusinessUnitId, lastSuccess, _maxLookback.TotalDays,
+                oldestReachable, lostDays);
         }
 
         private void LogLookbackWindow(EmailConfiguration config, LookbackWindow window)

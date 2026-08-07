@@ -1,7 +1,10 @@
 import { useMemo, useState, type ReactNode } from 'react';
+import { useNavigate } from 'react-router-dom';
 import Stack from '../components/Flex';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  Alert,
+  AlertTitle,
   Box,
   Button,
   Chip,
@@ -32,19 +35,29 @@ import {
   DeleteOutlined as RemoveLineIcon,
   EditOutlined as EditIcon,
   GppGoodOutlined as FinalizeIcon,
+  MonetizationOnOutlined as RevenueIcon,
+  ReportProblemOutlined as RiskIcon,
+  RuleOutlined as ConfigIcon,
+  TimerOffOutlined as ExpiredTrialIcon,
 } from '@mui/icons-material';
 import { useSnackbar } from 'notistack';
 import { platformApi } from '../api/client';
 import { platformErrorMessage } from '../api/apiError';
 import { platformKeys } from '../api/queryKeys';
+import { usePlatformPermissions } from '../auth/usePlatformPermissions';
+import { REQUIRED_ROLE_COPY } from '../auth/permissions';
 import type {
   BillingStatement,
   RateCard,
   RateCardLineInput,
+  TenantRevenueRisk,
 } from '../types';
 import PageHeader from '../components/PageHeader';
-import { SoftChip } from '../components/StatusChip';
-import { EmptyState, ErrorState, LoadingState } from '../components/States';
+import PageSection from '../components/PageSection';
+import StatTile from '../components/StatTile';
+import { Dash, SoftChip } from '../components/StatusChip';
+import { EmptyState, ErrorState, LoadingState, TilesSkeleton } from '../components/States';
+import { leakReasonLabel } from '../components/commercialTermsValidation';
 import { fmtDate, fmtDateTime, fmtNumber } from '../components/format';
 
 const currentPeriod = () => new Date().toISOString().slice(0, 7);
@@ -91,10 +104,19 @@ const formFromCard = (card: RateCard): RateCardForm => ({
   })),
 });
 
+/** Which slice of the revenue board is on screen. Kept as one control because the counts
+ *  describe the whole fleet and the filter describes what is listed — mixing the two is
+ *  how a badge starts changing when you apply a filter. */
+type RiskFilter = 'all' | 'at-risk' | 'configuration-required';
+
 export default function BillingPage() {
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
+  const navigate = useNavigate();
+  const permissions = usePlatformPermissions();
 
+  const [riskFilter, setRiskFilter] = useState<RiskFilter>('at-risk');
+  const [includeArchived, setIncludeArchived] = useState(false);
   const [tenantId, setTenantId] = useState('');
   const [period, setPeriod] = useState(currentPeriod());
   const [selectedStatementId, setSelectedStatementId] = useState<string | null>(null);
@@ -107,6 +129,17 @@ export default function BillingPage() {
   const { data: tenants } = useQuery({
     queryKey: platformKeys.tenants(),
     queryFn: () => platformApi.listTenants(),
+  });
+
+  const riskQuery = useQuery({
+    queryKey: platformKeys.revenueRisk({ riskFilter, includeArchived }),
+    queryFn: () =>
+      platformApi.getRevenueRisk({
+        onlyAtRisk: riskFilter === 'at-risk',
+        onlyCommercialConfigurationRequired: riskFilter === 'configuration-required',
+        includeArchived,
+      }),
+    enabled: permissions.canAdministerBilling,
   });
 
   const usageQuery = useQuery({
@@ -212,12 +245,211 @@ export default function BillingPage() {
       lines: form.lines.map((line, i) => (i === index ? { ...line, ...patch } : line)),
     }));
 
+  if (!permissions.canAdministerBilling) {
+    // Every endpoint on this page carries the Billing policy. Rendering the page and
+    // letting six queries 403 in the network tab would tell the operator nothing.
+    return (
+      <Box>
+        <PageHeader title="Billing" subtitle="Revenue posture, statements and rate cards." />
+        <Alert severity="info" sx={{ borderRadius: 2 }}>
+          <AlertTitle sx={{ fontWeight: 800 }}>Billing is a separate duty</AlertTitle>
+          {REQUIRED_ROLE_COPY.billing} A support administrator can suspend, resume and archive a tenant — those
+          are operational acts — and must never be able to move a customer onto a cheaper rate card, extend a
+          trial, or convert one to an unbilled mode.
+        </Alert>
+      </Box>
+    );
+  }
+
+  const risk = riskQuery.data;
+
   return (
     <Box>
       <PageHeader
         title="Billing"
-        subtitle="Usage meters, statements, rate cards, and cost vs revenue per tenant-period."
+        subtitle="Who is paying, who is not, and what has actually been charged."
       />
+
+      {/* The revenue board leads the page: a list you have to scan for red is not read,
+          and "which of our customers is getting this for free?" is the question this
+          page exists to answer without opening forty tenants in turn. */}
+      {riskQuery.isLoading ? (
+        <TilesSkeleton count={4} />
+      ) : riskQuery.isError || !risk ? (
+        <ErrorState
+          message={platformErrorMessage(riskQuery.error, 'The revenue readout could not be loaded.')}
+          onRetry={() => riskQuery.refetch()}
+          minHeight={200}
+        />
+      ) : (
+        <>
+          <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr', lg: 'repeat(4, 1fr)' }, gap: 2.5, mb: 2.5 }}>
+            <StatTile
+              label="Tenants"
+              value={fmtNumber(risk.tenantCount)}
+              icon={<RevenueIcon />}
+              color="#6366f1"
+              caption={`as at ${fmtDateTime(risk.generatedAtUtc)}`}
+            />
+            <StatTile
+              label="At risk"
+              value={fmtNumber(risk.atRiskCount)}
+              icon={<RiskIcon />}
+              color={risk.atRiskCount > 0 ? '#f59e0b' : '#10b981'}
+              caption="leaking revenue for at least one reason"
+            />
+            <StatTile
+              label="Expired trials"
+              value={fmtNumber(risk.expiredTrialCount)}
+              icon={<ExpiredTrialIcon />}
+              color={risk.expiredTrialCount > 0 ? '#ef4444' : '#10b981'}
+              caption="past their end date, still served"
+            />
+            <StatTile
+              label="Configuration required"
+              value={fmtNumber(risk.commercialConfigurationRequiredCount)}
+              icon={<ConfigIcon />}
+              color={risk.commercialConfigurationRequiredCount > 0 ? '#ef4444' : '#10b981'}
+              caption="running on terms nobody set"
+            />
+          </Box>
+
+          {risk.billableTenantsChargedNothingCount > 0 && (
+            <Alert severity="warning" sx={{ mb: 2.5, borderRadius: 2 }}>
+              <AlertTitle sx={{ fontWeight: 800 }}>
+                {risk.billableTenantsChargedNothingCount} billable{' '}
+                {risk.billableTenantsChargedNothingCount === 1 ? 'tenant has' : 'tenants have'} been charged nothing
+              </AlertTitle>
+              Either no statement has ever been computed for them, or the most recent one totalled zero.
+            </Alert>
+          )}
+
+          <PageSection
+            title="Revenue risk"
+            subtitle="One row per tenant. The counts above are always over the whole fleet, never over this list."
+            actions={
+              <Stack direction="row" spacing={1} alignItems="center">
+                <TextField
+                  size="small"
+                  select
+                  label="Show"
+                  value={riskFilter}
+                  onChange={(event) => setRiskFilter(event.target.value as RiskFilter)}
+                  sx={{ minWidth: 230 }}
+                >
+                  <MenuItem value="all">Every tenant</MenuItem>
+                  <MenuItem value="at-risk">At risk only</MenuItem>
+                  <MenuItem value="configuration-required">Commercial configuration required</MenuItem>
+                </TextField>
+                <FormControlLabel
+                  control={
+                    <Switch checked={includeArchived} onChange={(event) => setIncludeArchived(event.target.checked)} />
+                  }
+                  label="Include archived"
+                />
+              </Stack>
+            }
+            sx={{ mb: 2.5 }}
+          >
+            {risk.tenants.length === 0 ? (
+              <EmptyState
+                title="Nothing flagged"
+                message="Every tenant in this view is either priced or exempt on the record."
+                minHeight={160}
+              />
+            ) : (
+              <Box sx={{ overflowX: 'auto' }}>
+                <Table size="small">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell sx={{ fontWeight: 700 }}>Tenant</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>Mode</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>Plan</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>Rate card</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>Last statement</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>Why it is at risk</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {risk.tenants.map((row: TenantRevenueRisk) => (
+                      <TableRow
+                        key={row.tenantId}
+                        hover
+                        sx={{ cursor: 'pointer' }}
+                        onClick={() => navigate(`/platform/tenants/${row.tenantId}?tab=commercial`)}
+                      >
+                        <TableCell>
+                          <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                            {row.tenantName}
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            {row.tenantSlug} · {row.tenantStatus}
+                          </Typography>
+                        </TableCell>
+                        <TableCell>
+                          <Stack direction="row" spacing={0.5} alignItems="center">
+                            <SoftChip
+                              label={row.billingMode}
+                              tone={row.billingMode === 'Billable' ? 'success' : row.trialExpired ? 'error' : 'warning'}
+                              dot={false}
+                            />
+                            {row.commercialConfigurationRequired && (
+                              <SoftChip label="config required" tone="error" dot={false} />
+                            )}
+                          </Stack>
+                        </TableCell>
+                        <TableCell>{row.planCode ?? <Dash />}</TableCell>
+                        <TableCell>
+                          {row.pinnedRateCardCode ? (
+                            <Box component="code" sx={{ fontSize: 12.5 }}>
+                              {row.pinnedRateCardCode}
+                            </Box>
+                          ) : (
+                            <Typography variant="caption" color="warning.main" sx={{ fontWeight: 700 }}>
+                              unpinned
+                            </Typography>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          {row.lastStatementPeriod ? (
+                            <Box>
+                              <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                                {row.lastStatementTotal == null
+                                  ? '—'
+                                  : fmtMoney(row.lastStatementTotal, 'USD')}
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                {row.lastStatementPeriod} · {row.lastStatementStatus ?? '—'}
+                              </Typography>
+                            </Box>
+                          ) : (
+                            <Typography variant="caption" color="error.main" sx={{ fontWeight: 700 }}>
+                              never billed
+                            </Typography>
+                          )}
+                        </TableCell>
+                        <TableCell sx={{ maxWidth: 340 }}>
+                          {row.leakReasons.length === 0 ? (
+                            <Dash />
+                          ) : (
+                            <Stack spacing={0.25}>
+                              {row.leakReasons.map((code) => (
+                                <Typography key={code} variant="caption" color="text.secondary">
+                                  {leakReasonLabel(code)}
+                                </Typography>
+                              ))}
+                            </Stack>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </Box>
+            )}
+          </PageSection>
+        </>
+      )}
 
       {/* Tenant + period selector */}
       <Paper sx={{ p: 1.5, mb: 2.5, borderRadius: 3 }}>

@@ -88,19 +88,39 @@ public sealed class QuoteDeliveryDispatcher(
     /// BYPASSRLS pipeline role): the distinct business units with a deliverable row. It reads
     /// nothing but tenant ids, and the predicate mirrors the store's own claim eligibility so a
     /// tenant with nothing to send is never scoped up at all.
+    ///
+    /// <para><b>Suspended and archived tenants are dropped here, and this is the worker where that
+    /// matters most.</b> It sends a quote PDF, from the customer's own address, to the customer's
+    /// CLIENT. A suspended tenant that keeps dispatching means the product is transacting on behalf
+    /// of an account we have told the customer is switched off, in front of a third party who
+    /// cannot know that — a conduct problem before it is a cost one.</para>
+    ///
+    /// <para>Skipping DEFERS rather than drops: the row is never claimed, so no lease is taken,
+    /// <c>AttemptCount</c> is untouched, no retry budget is spent, and the delivery goes out
+    /// unchanged on the first cycle after reinstatement. The gate is consulted in THIS scope
+    /// because it is the only one with no tenant pushed — under a pushed scope its platform read is
+    /// refused at column level and fails OPEN (see <c>ITenantWorkGate</c>).</para>
     /// </summary>
     private async Task<IReadOnlyList<long>> ResolvePendingBusinessUnitsAsync(CancellationToken ct)
     {
         await using var scope = scopes.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
         var now = DateTime.UtcNow;
-        return await db.Set<QuoteDeliveryRequest>().AsNoTracking().IgnoreQueryFilters()
+        var businessUnits = await db.Set<QuoteDeliveryRequest>().AsNoTracking().IgnoreQueryFilters()
             .Where(x => x.CompletedOn == null && x.DeadLetteredOn == null)
             .Where(x => x.AvailableOn <= now || x.LeaseUntil != null)
             .Select(x => x.BusinessUnitId)
             .Distinct()
             .OrderBy(id => id)
             .ToListAsync(ct);
+
+        // Resolved from THIS scope rather than injected: the dispatcher is a singleton and the gate
+        // is scoped, so a constructor dependency would fail startup scope validation.
+        var gate = scope.ServiceProvider
+            .GetService<ERP_RFQ_Automation.Platform.Lifecycle.ITenantWorkGate>();
+        if (gate is null || businessUnits.Count == 0) return businessUnits;
+
+        return await gate.FilterServiceableAsync(businessUnits, ct);
     }
 
     private async Task<int> DispatchTenantAsync(long businessUnitId, CancellationToken ct)

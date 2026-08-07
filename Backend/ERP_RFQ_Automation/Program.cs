@@ -18,6 +18,9 @@ using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Mailbox;
 using ERP_RFQ_Automation.Platform.Auth;
 using ERP_RFQ_Automation.Platform.Hardening;
+using ERP_RFQ_Automation.Platform.Lifecycle;
+using ERP_RFQ_Automation.Platform.Onboarding;
+using ERP_RFQ_Automation.Platform.Provisioning;
 using ERP_RFQ_Automation.Notifications;
 using ERP_RFQ_Automation.Agent;
 using ERP_RFQ_Automation.Intelligence.Conversion;
@@ -177,6 +180,20 @@ builder.Services.AddScoped<ExtractionDeadLetterService>();
 // Platform-Owner control-plane services (ADR-0005)
 builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Auth.IPlatformAuthService, ERP_RFQ_Automation.Platform.Auth.PlatformAuthService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Services.IPlatformAuditService, ERP_RFQ_Automation.Platform.Services.PlatformAuditService>();
+// Scoped because it seeds through the SAME request-scoped DbContext and transaction as the
+// provisioning that calls it — that shared instance is what makes the baseline commit or roll
+// back with the tenant it belongs to, rather than surviving a failed provision as orphan rows.
+builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Services.ITenantBaselineSeeder, ERP_RFQ_Automation.Platform.Services.TenantBaselineSeeder>();
+// Operator support desk (Platform/Support). The controllers need no registration; this is the
+// tenant-purge erasure hook. Scoped because it writes through the SAME request-scoped DbContext as
+// the purge that calls it — that shared instance is what lets the erasure commit or roll back with
+// the purge, rather than emptying a customer's tickets beside a purge that then failed.
+builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Support.ISupportTicketRedactionService,
+    ERP_RFQ_Automation.Platform.Support.SupportTicketRedactionService>();
+// Tenant offboarding (Platform/Lifecycle): export, scheduled deletion with a retention clock,
+// purge, and the separate personal-data erasure. Registered next to provisioning because it is
+// the other end of the same lifecycle — creation is one line here and so is everything after it.
+builder.Services.AddTenantLifecycle(builder.Configuration);
 
 // Readiness/liveness health checks (DATA-05)
 builder.Services.AddSingleton<ERP_RFQ_Automation.HealthChecks.IExtractionWorkerHeartbeat,
@@ -224,7 +241,7 @@ builder.Services.AddScoped<IBusinessUnitRepository, BusinessUnitRepository>();
 builder.Services.AddScoped<IUserRepository, UserRepository>();
 builder.Services.AddScoped<IAuthRepository, AuthRepository>();
 builder.Services.AddPlatformEntitlements();
-builder.Services.AddPlatformBilling();
+builder.Services.AddPlatformBilling(builder.Configuration);
 builder.Services.AddScoped<IGeneralDropdownRepository, GeneralDropdownRepository>();
 builder.Services.AddScoped<ICustomerRepository, CustomerRepository>();
 builder.Services.AddScoped<ISupplierRepository, SupplierRepository>();
@@ -532,6 +549,20 @@ builder.Services.AddScoped<ISecurityScanRecoveryService, SecurityScanRecoverySer
 // (defaults to the safe console provider until an SMTP/SendGrid provider is
 // configured). Powers RFQ→quote→order communications.
 builder.Services.AddNotifications(builder.Configuration);
+
+// Founding-administrator activation (Platform/Onboarding): invite email + single-use
+// activation link, so a customer's first credential is chosen by the customer and never
+// passes through the operator's hands. Registered AFTER AddNotifications — it composes its
+// invite through IEmailSender and reads Notifications:AppBaseUrl to build the link.
+builder.Services.AddTenantOnboarding(builder.Configuration);
+
+// Durable tenant provisioning (Platform/Provisioning): an execution + step journal per
+// provisioning attempt, idempotency keys, reserved-address refusal, step-level retry with
+// compensation, and server-side wizard drafts. Registered AFTER AddTenantOnboarding and after
+// the baseline seeder above, because the step executor composes both. Replaces a single HTTP
+// request wrapping a single transaction that did seven things, where a failure anywhere rolled
+// all seven back and surfaced as a bare 500 with no record of which step broke.
+builder.Services.AddDurableTenantProvisioning(builder.Configuration);
 
 // Platform Hardening (Platform/Hardening): OpenTelemetry traces+metrics and
 // tenant/IP-fair rate limiting. Both config-driven with safe fallbacks so an

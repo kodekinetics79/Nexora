@@ -1,0 +1,311 @@
+using ERP_RFQ_Automation.Authorization;
+
+namespace ERP_RFQ_Automation.Platform.Services;
+
+/// <summary>
+/// The reference data and role templates a freshly provisioned <c>BusinessUnit</c> is opened with.
+///
+/// <para><b>Why the data lives apart from the seeder.</b> Everything here is a commercial
+/// judgement — which units a trading desk transacts in, which modules a sales representative may
+/// write to — and each entry has to be arguable on its own. The mechanics of check-then-insert are
+/// not commercial judgements at all. Splitting them is the same separation
+/// <see cref="ModuleCatalog"/> and <c>ModuleCatalogReconciler</c> already use, and it means a
+/// change to what a role may do is a change to a list, never to a query.</para>
+/// </summary>
+public static class TenantBaselineCatalog
+{
+    // ── Units of measure ────────────────────────────────────────────────────────────────────
+    // Exactly the canonical codes UomCanonicalizer emits — no more, no fewer.
+    //
+    // That correspondence is the whole point rather than a convenience. SetUomVocabulary indexes
+    // a tenant's SetUom rows by folded code and name, and UomCanonicalizer consults it to attach
+    // Rfqitem.UomId / OrderItem.UomId to an extracted line. A tenant with no rows resolves every
+    // extracted unit to a canonical STRING with a null foreign key, so the unit shows on the line
+    // but joins to nothing; a tenant whose list omits, say, M2 gets the same silent null on every
+    // square-metre line a customer sends. Seeding the canonicaliser's own vocabulary makes the
+    // invariant exact in both directions: every unit Nexora can resolve has a tenant row to point
+    // at, and every unit it deliberately REFUSES to resolve (PACK, PALLET, LENGTH, TON — see the
+    // Refusals table there) is absent here too, so no seeded row can quietly legitimise a
+    // quantity nobody stated.
+
+    public sealed record UnitOfMeasureDefinition(string Code, string Name, string Description);
+
+    public static readonly IReadOnlyList<UnitOfMeasureDefinition> UnitsOfMeasure =
+    [
+        // Count and assemblies.
+        new("EA", "Each", "Individual item — the count unit behind each/pcs/piece/Nos"),
+        new("SET", "Set", "Assembly or kit priced and delivered as one line"),
+        new("PR", "Pair", "Two matched items; kept separate from Each because it carries a multiplier"),
+        new("DZ", "Dozen", "Twelve items; kept separate from Each because it carries a multiplier"),
+        new("LOT", "Lot", "Whole scope of supply priced as a single lump sum"),
+        new("AU", "Activity unit", "Unit of activity rather than a physical item (SAP Activ.unit)"),
+
+        // Length.
+        new("MM", "Millimetre", "Length in millimetres"),
+        new("CM", "Centimetre", "Length in centimetres"),
+        new("M", "Metre", "Length in metres, including linear and running metres"),
+        new("KM", "Kilometre", "Length in kilometres"),
+        new("IN", "Inch", "Length in inches"),
+        new("FT", "Foot", "Length in feet"),
+        new("YD", "Yard", "Length in yards"),
+
+        // Area and volume.
+        new("M2", "Square metre", "Area in square metres"),
+        new("FT2", "Square foot", "Area in square feet"),
+        new("M3", "Cubic metre", "Volume in cubic metres"),
+        new("L", "Litre", "Volume in litres"),
+        new("ML", "Millilitre", "Volume in millilitres"),
+
+        // Mass.
+        new("KG", "Kilogram", "Mass in kilograms"),
+        new("G", "Gram", "Mass in grams"),
+        new("MT", "Metric tonne", "Mass in metric tonnes (1,000 kg)"),
+        new("LB", "Pound", "Mass in pounds"),
+
+        // Effort and duration.
+        new("HR", "Hour", "Effort in hours, including man-hours"),
+        new("DAY", "Day", "Effort in days, including man-days"),
+        new("WK", "Week", "Duration in weeks"),
+        new("MTH", "Month", "Duration in months"),
+        new("YR", "Year", "Duration in years")
+    ];
+
+    // ── Discount types ──────────────────────────────────────────────────────────────────────
+    // QuoteService.CalculateQuoteTotals resolves the discount type by SetupCode and applies the
+    // discount ONLY when the code reads PERCENTAGE or FIXED (Services/QuoteService.cs:489, :524).
+    // Anything else falls through the if/else and contributes zero. With no rows at all the
+    // discount fields on the quote form have nothing to select, so the commonest concession in
+    // trading — "5% off the line" — cannot be expressed on a tenant's first quote.
+
+    public static readonly IReadOnlyList<(string Code, string Label, string Description)> DiscountTypes =
+    [
+        ("PERCENTAGE", "Percentage", "Discount entered as a percentage of the line or quote value"),
+        ("FIXED", "Fixed amount", "Discount entered as an absolute amount in the quote currency")
+    ];
+
+    // ── Currencies ──────────────────────────────────────────────────────────────────────────
+    // A hand-held table rather than anything derived from CultureInfo/RegionInfo. Two reasons.
+    // Mapping an ISO-4217 code back to a name through the framework means scanning every culture
+    // and taking whichever region matches first, which is neither stable nor obviously correct.
+    // More importantly, Currency.CurrencyName and Currency.Symbol are PRINTED on the customer's
+    // quotes and statements: reference data written into a customer's database must not vary with
+    // the ICU version that happens to be installed on the node that provisioned them.
+    //
+    // Gulf currencies carry their Latin abbreviation as the symbol rather than their Arabic glyph,
+    // because the symbol is rendered into the quote PDF by a font chosen for Latin commercial
+    // documents; an Arabic glyph the font lacks prints as a replacement box on the very first
+    // document the customer sends out. A tenant that wants the glyph can set it — this is the
+    // opening value, not a constraint.
+
+    public sealed record CurrencyDefinition(string Code, string Name, string Symbol);
+
+    private static readonly IReadOnlyDictionary<string, CurrencyDefinition> KnownCurrencies =
+        new[]
+        {
+            new CurrencyDefinition("AED", "UAE Dirham", "AED"),
+            new CurrencyDefinition("SAR", "Saudi Riyal", "SAR"),
+            new CurrencyDefinition("QAR", "Qatari Riyal", "QAR"),
+            new CurrencyDefinition("KWD", "Kuwaiti Dinar", "KWD"),
+            new CurrencyDefinition("BHD", "Bahraini Dinar", "BHD"),
+            new CurrencyDefinition("OMR", "Omani Rial", "OMR"),
+            new CurrencyDefinition("EGP", "Egyptian Pound", "EGP"),
+            new CurrencyDefinition("JOD", "Jordanian Dinar", "JOD"),
+            new CurrencyDefinition("USD", "US Dollar", "$"),
+            new CurrencyDefinition("EUR", "Euro", "€"),
+            new CurrencyDefinition("GBP", "Pound Sterling", "£"),
+            new CurrencyDefinition("CHF", "Swiss Franc", "CHF"),
+            new CurrencyDefinition("INR", "Indian Rupee", "₹"),
+            new CurrencyDefinition("PKR", "Pakistani Rupee", "PKR"),
+            new CurrencyDefinition("TRY", "Turkish Lira", "TRY"),
+            new CurrencyDefinition("CNY", "Chinese Yuan", "CNY"),
+            new CurrencyDefinition("JPY", "Japanese Yen", "¥"),
+            new CurrencyDefinition("SGD", "Singapore Dollar", "SGD"),
+            new CurrencyDefinition("ZAR", "South African Rand", "ZAR"),
+            new CurrencyDefinition("CAD", "Canadian Dollar", "CAD"),
+            new CurrencyDefinition("AUD", "Australian Dollar", "AUD")
+        }.ToDictionary(definition => definition.Code, StringComparer.Ordinal);
+
+    /// <summary>
+    /// The row to write for an ISO-4217 code. A code outside the table above is still accepted:
+    /// it becomes its own name and symbol, which is honest ("USD"/"USD" reads as an unfinished
+    /// setting an administrator can complete) and is far better than refusing to provision a
+    /// customer whose currency we simply have not listed yet.
+    /// </summary>
+    public static CurrencyDefinition ResolveCurrency(string code) =>
+        KnownCurrencies.TryGetValue(code, out var known) ? known : new CurrencyDefinition(code, code, code);
+
+    // ── Roles ───────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>What one starter role may do on one module. Every flag is stated, including
+    /// <see cref="CanView"/>: since RC-3/RC-4 the existence of a RolePermissions row is NOT the
+    /// read grant, and a row with all four flags false grants nothing at all.</summary>
+    public sealed record ModuleGrant(string Module, bool CanView, bool CanCreate, bool CanEdit, bool CanDelete);
+
+    public sealed record StarterRole(
+        string Code, string Name, string Description, short Rank, IReadOnlyList<ModuleGrant> Grants);
+
+    private static ModuleGrant Read(string module) => new(module, true, false, false, false);
+    private static ModuleGrant ReadAdd(string module) => new(module, true, true, false, false);
+    private static ModuleGrant ReadAmend(string module) => new(module, true, false, true, false);
+    private static ModuleGrant Work(string module) => new(module, true, true, true, false);
+    private static ModuleGrant Own(string module) => new(module, true, true, true, true);
+
+    /// <summary>
+    /// The four desks of a trading business, alongside the founding Super Administrator that
+    /// provisioning creates separately.
+    ///
+    /// <para><b>Why nothing here sits at <see cref="RoleRanks.Admin"/> or above.</b>
+    /// <c>PermissionHandler</c> satisfies EVERY module requirement for a role at Admin or above
+    /// before it reads a single RolePermissions row. A starter role at that tier would therefore
+    /// hold the entire tenant while displaying a carefully curated set of ticked boxes on the
+    /// Roles &amp; Permissions matrix — a permission screen that actively lies. Delegated
+    /// administration is a decision the customer's own Super Administrator makes, with the rank
+    /// stated; it is not something to hand out at provisioning under a reassuring name.</para>
+    ///
+    /// <para><b>Why the sales manager is a strict superset of the sales representative.</b>
+    /// <c>RoleGate.CanManageRoleAsync</c> refuses to let one role administer another that holds a
+    /// grant the caller lacks. If the manager did not dominate the representative, the manager
+    /// could not edit their own team's role — the first administrative act a sales desk performs.
+    /// The other two desks are deliberately NOT dominated by anyone below Owner: procurement and
+    /// finance answer to the tenant owner, not to sales.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<StarterRole> StarterRoles =
+    [
+        new("SALES_MANAGER", "Sales Manager",
+            "Runs the sales desk: owns the pipeline end to end, sets quote branding and terms, and " +
+            "sees what customers owe without being able to move money.",
+            RoleRanks.Manager,
+            [
+                Read("Dashboard"),
+                Own("Leads"),
+                Own("RFQ Management"),
+                Own("Quotations"),
+                Work("Orders"),
+                Work("Shipments"),
+                Work("Customers"),
+                Work("Customer Awards"),
+                Read("Suppliers"),
+                Read("Supplier History"),
+                Read("Products"),
+                Read("Product Categories"),
+
+                // The letterhead, terms and colours every quote this desk sends is printed with.
+                // QuoteConfigurationController.CreateOrUpdate gates on Edit, so View alone would
+                // render a form that cannot be saved.
+                ReadAmend("Quote Configuration"),
+
+                // Read-only on the user list because lead assignment is a name-picker over it.
+                // Create/Edit stay with administration — assigning work is not the same authority
+                // as minting the people it is assigned to.
+                Read("Users"),
+
+                // Credit awareness, not credit authority. A manager quoting a customer who is on
+                // stop needs to know before they quote; nothing here lets them raise, adjust or
+                // write off a receivable.
+                Read("Accounts Receivable"),
+                Read("Customer Statements"),
+                Read("Collection Controls")
+            ]),
+
+        new("SALES_REP", "Sales Representative",
+            "Works enquiries through to quotes and orders for their own customers. No finance, no " +
+            "supplier negotiation, no administration.",
+            RoleRanks.Member,
+            [
+                Read("Dashboard"),
+
+                // Create and edit but never delete. A lead, RFQ or quote is the evidence trail
+                // behind a commercial commitment; withdrawing one is a status change, and erasing
+                // one is an act the desk's manager owns.
+                Work("Leads"),
+                Work("RFQ Management"),
+                Work("Quotations"),
+
+                // Raise the order that a won quote becomes, but not amend one afterwards: an
+                // accepted order is a commitment to the customer, and changing it after the fact
+                // is the manager's call.
+                ReadAdd("Orders"),
+                Read("Shipments"),
+
+                Work("Customers"),
+                Read("Customer Awards"),
+
+                // Supplier data is procurement's to maintain; a representative reads it to answer
+                // "have we bought this before, and at what price".
+                Read("Suppliers"),
+                Read("Supplier History"),
+                Read("Products"),
+                Read("Product Categories")
+            ]),
+
+        new("PROCUREMENT_OFFICER", "Procurement Officer",
+            "Sources the supply side: suppliers, supplier quotes and negotiation, purchase orders " +
+            "and goods receipts, and the product catalogue they populate.",
+            RoleRanks.Member,
+            [
+                Read("Dashboard"),
+
+                // Sourcing updates an existing RFQ's supply side. Raising and withdrawing the RFQ
+                // itself belongs to the sales desk that owns the customer enquiry.
+                ReadAmend("RFQ Management"),
+
+                Work("Suppliers"),
+                Work("Supplier History"),
+                ReadAmend("Supplier Negotiation"),
+                Work("Products"),
+                Work("Product Categories"),
+
+                // "Orders" gates SUPPLIER purchase orders as well as customer sales orders
+                // (ProcurementController raises, issues and cancels purchase orders and posts
+                // goods receipts behind Orders Create/Edit). One module name covers both
+                // directions of trade, so purchase-order authority cannot currently be granted
+                // without also granting sales-order write. That is a limitation of the module
+                // list, not a decision taken here — a procurement officer who cannot issue a
+                // purchase order has no job.
+                Work("Orders")
+            ]),
+
+        new("FINANCE_OFFICER", "Finance Officer",
+            "Runs receivables and collections and prepares bank reconciliation. Deliberately holds " +
+            "no approval or ledger-control authority.",
+            RoleRanks.Member,
+            [
+                Read("Dashboard"),
+
+                // The commercial context behind an invoice; neither is editable from here.
+                Read("Customers"),
+                Read("Orders"),
+
+                Work("Accounts Receivable"),
+                Work("Customer Payments"),
+                Work("Customer Statements"),
+                Work("Dunning Cases"),
+                Work("Dunning Notices"),
+                Read("Dunning Policies"),
+
+                // Segregation of duties, stated as read-only rather than omitted: an officer must
+                // be able to SEE the refunds, adjustments and write-offs raised against the ledger
+                // they are reconciling. Every one of those is money leaving or a debt being
+                // forgiven, so raising them stays with the tenant's owner until they delegate it
+                // deliberately.
+                Read("Customer Refunds"),
+                Read("Receivable Adjustments"),
+                Read("Receivable Write-offs"),
+                Read("Collection Controls"),
+
+                // Prepare a reconciliation; never approve one.
+                Read("Bank Accounts"),
+                ReadAdd("Bank Statement Import"),
+                Work("Bank Reconciliation"),
+                ReadAdd("Bank Adjustments"),
+
+                // Enquiry on the ledger, no posting. General Ledger Posting, Ledger Control,
+                // Period Close, Bank Reconciliation Approval, Bank Adjustment Approval and both
+                // Bank Matching Rule modules are all absent on purpose: they are the controls that
+                // make the preparer and the approver different people, and a starter role that
+                // held them would collapse that distinction on day one.
+                Read("General Ledger"),
+                Read("Accounting Periods")
+            ])
+    ];
+}

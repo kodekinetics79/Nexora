@@ -136,6 +136,9 @@ export const userFromLogin = (
     id: pick(body.id, bodyUser.id, claims.sub),
     email: pick(body.email, bodyUser.email, claims.email, fallbackEmail) ?? fallbackEmail,
     name: pick(body.name, body.userName, bodyUser.name, claims.name),
-    role: pick(body.platformRole, body.role, bodyUser.role, claims.platformRole, claims.role) ?? 'Platform Owner',
+    // No fallback role. The console gates destructive, billing and support controls on
+    // this value, and inventing "Platform Owner" for a response that never named a role
+    // would show an operator an authority the server will refuse.
+    role: pick(body.platformRole, body.role, bodyUser.role, claims.platformRole, claims.role),
   };
 };

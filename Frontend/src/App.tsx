@@ -120,6 +120,11 @@ const CopilotActivityPage = lazy(() => import('./pages/Copilot/ActivityPage'));
 // own guard + layout; see src/platform/.
 const PlatformRoutes = lazy(() => import('./platform/PlatformRoutes'));
 
+// Account activation for an invited founding administrator. Public by
+// necessity — the person opening it has no session yet — and outside MainLayout
+// because the app shell renders navigation for a workspace they cannot enter.
+const ActivateAccountPage = lazy(() => import('./pages/Activation/ActivateAccountPage'));
+
 const PageLoader = () => (
   <Box
     role="status"
@@ -322,6 +327,7 @@ function App() {
       <Route path="/platform/*" element={<PlatformRoutes />} />
 
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/activate/:token" element={<ActivateAccountPage />} />
       <Route path="*" element={<NotFoundPage />} />
     </Routes>
     </Suspense>

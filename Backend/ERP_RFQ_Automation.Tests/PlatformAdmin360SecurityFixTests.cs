@@ -319,6 +319,8 @@ public sealed class PlatformAdmin360SecurityFixTests
             NullLogger<TenantsController>.Instance,
             services.GetRequiredService<IServiceScopeFactory>(),
             new TenantScopeAccessor(),
+            ProvisioningFixture.Baseline(context),
+            ProvisioningFixture.Invitations(context),
             tenantAccess));
     }
 
@@ -331,7 +333,7 @@ public sealed class PlatformAdmin360SecurityFixTests
                 User = new ClaimsPrincipal(new ClaimsIdentity(
                 [
                     new Claim("sub", "7"),
-                    new Claim("email", "operator@example.test")
+                    new Claim("email", "operator@example.test"), new Claim("platformRole", "Owner")
                 ], "Platform"))
             }
         };

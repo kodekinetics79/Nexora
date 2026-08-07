@@ -2,6 +2,8 @@ import { useState } from 'react';
 import Stack from '../components/Flex';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  Alert,
+  AlertTitle,
   Box,
   Button,
   Dialog,
@@ -34,6 +36,8 @@ import {
   type PlatformOperatorRole,
 } from '../types';
 import PageHeader from '../components/PageHeader';
+import { usePlatformPermissions } from '../auth/usePlatformPermissions';
+import { REQUIRED_ROLE_COPY } from '../auth/permissions';
 import { SoftChip } from '../components/StatusChip';
 import { ErrorState } from '../components/States';
 import { fmtDateTime, fmtRelative } from '../components/format';
@@ -61,6 +65,7 @@ const ROLE_TONE: Record<string, 'success' | 'info' | 'warning' | 'neutral'> = {
 
 export default function PlatformUsersPage() {
   const queryClient = useQueryClient();
+  const permissions = usePlatformPermissions();
   const { enqueueSnackbar } = useSnackbar();
 
   const [dialog, setDialog] = useState<DialogState>(null);
@@ -71,6 +76,7 @@ export default function PlatformUsersPage() {
   const { data: users, isLoading, isError, refetch } = useQuery({
     queryKey: platformKeys.platformUsers(),
     queryFn: () => platformApi.listPlatformUsers(),
+    enabled: permissions.isOwner,
   });
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: platformKeys.platformUsers() });
@@ -224,6 +230,21 @@ export default function PlatformUsersPage() {
 
   const createValid =
     /.+@.+\..+/.test(createForm.email.trim()) && createForm.password.length >= 12;
+
+  if (!permissions.isOwner) {
+    // Every endpoint behind this screen — list included — carries Platform.Owner. The
+    // operator registry is where authority itself is granted, so seeing it is a privilege.
+    return (
+      <Box>
+        <PageHeader title="Platform Users" subtitle="Control-plane operator accounts." />
+        <Alert severity="info" sx={{ borderRadius: 2 }}>
+          <AlertTitle sx={{ fontWeight: 800 }}>Owner only</AlertTitle>
+          {REQUIRED_ROLE_COPY.owner} This registry is where platform authority is granted and revoked, so it is
+          not readable by the tiers it governs.
+        </Alert>
+      </Box>
+    );
+  }
 
   return (
     <Box>

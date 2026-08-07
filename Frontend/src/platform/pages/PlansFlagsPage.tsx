@@ -29,6 +29,9 @@ import { platformErrorMessage } from '../api/apiError';
 import { platformKeys } from '../api/queryKeys';
 import type { Plan, UpsertPlanInput } from '../types';
 import PageHeader from '../components/PageHeader';
+import RoleGate from '../components/RoleGate';
+import { usePlatformPermissions } from '../auth/usePlatformPermissions';
+import { REQUIRED_ROLE_COPY } from '../auth/permissions';
 import { PlanChip } from '../components/StatusChip';
 import { ErrorState, LoadingState } from '../components/States';
 import { fmtCurrency, fmtNumber } from '../components/format';
@@ -94,6 +97,9 @@ const featuresError = (raw: string): string | null => {
 
 export default function PlansFlagsPage() {
   const queryClient = useQueryClient();
+  // Plan create/update is Owner-only server-side: a plan is what every tenant on it is
+  // charged and quota'd by, so editing one reaches every customer at once.
+  const permissions = usePlatformPermissions();
   const { enqueueSnackbar } = useSnackbar();
   const [dialog, setDialog] = useState<{ mode: 'create' } | { mode: 'edit'; plan: Plan } | null>(null);
   const [form, setForm] = useState<PlanForm>(emptyForm);
@@ -159,9 +165,19 @@ export default function PlansFlagsPage() {
         title="Plans"
         subtitle="Persisted scheduling, quota, pricing, and entitlement configuration."
         actions={
-          <Button variant="contained" startIcon={<AddIcon />} onClick={openCreate} sx={{ fontWeight: 700 }}>
-            New Plan
-          </Button>
+          <RoleGate allowed={permissions.isOwner} requirement={REQUIRED_ROLE_COPY.owner}>
+            {(disabled) => (
+              <Button
+                variant="contained"
+                startIcon={<AddIcon />}
+                disabled={disabled}
+                onClick={openCreate}
+                sx={{ fontWeight: 700 }}
+              >
+                New Plan
+              </Button>
+            )}
+          </RoleGate>
         }
       />
 
@@ -174,9 +190,19 @@ export default function PlansFlagsPage() {
                 <Stack direction="row" spacing={1} alignItems="center">
                   <WorkspacePremium sx={{ color: accent }} />
                   <Typography variant="h6" sx={{ fontWeight: 800, flex: 1 }}>{plan.name}</Typography>
-                  <Button size="small" startIcon={<EditIcon fontSize="small" />} onClick={() => openEdit(plan)} sx={{ fontWeight: 700 }}>
-                    Edit
-                  </Button>
+                  <RoleGate allowed={permissions.isOwner} requirement={REQUIRED_ROLE_COPY.owner}>
+                    {(disabled) => (
+                      <Button
+                        size="small"
+                        startIcon={<EditIcon fontSize="small" />}
+                        disabled={disabled}
+                        onClick={() => openEdit(plan)}
+                        sx={{ fontWeight: 700 }}
+                      >
+                        Edit
+                      </Button>
+                    )}
+                  </RoleGate>
                 </Stack>
                 <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
                   {formatPrice(plan)} · code <Box component="code">{plan.code}</Box>

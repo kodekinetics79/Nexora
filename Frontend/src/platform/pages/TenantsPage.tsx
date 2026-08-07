@@ -4,7 +4,6 @@ import { useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Alert,
-  AlertTitle,
   Box,
   Button,
   Dialog,
@@ -12,7 +11,6 @@ import {
   DialogContent,
   DialogContentText,
   DialogTitle,
-  Divider,
   IconButton,
   InputAdornment,
   MenuItem,
@@ -40,11 +38,19 @@ import { platformApi } from '../api/client';
 import { platformErrorMessage } from '../api/apiError';
 import { platformKeys } from '../api/queryKeys';
 import { setImpersonation } from '../../api/impersonation';
-import type { ProvisionTenantResult, Tenant, TenantStatus } from '../types';
+import { BILLING_MODES } from '../types';
+import type { BillingMode, SubmitProvisioningResult, Tenant, TenantStatus } from '../types';
+import { usePlatformPermissions } from '../auth/usePlatformPermissions';
+import { REQUIRED_ROLE_COPY } from '../auth/permissions';
 import PageHeader from '../components/PageHeader';
-import { PlanChip, TenantStatusChip } from '../components/StatusChip';
+import ProvisionTenantWizard from '../components/ProvisionTenantWizard';
+import ProvisioningProgressDialog from '../components/ProvisioningProgressDialog';
+import RoleGate from '../components/RoleGate';
+import { BillingModeChip, Dash, PlanChip, TenantStatusChip } from '../components/StatusChip';
 import { ErrorState } from '../components/States';
-import { fmtRelative } from '../components/format';
+import { countryLabel, countryName } from '../components/localeData';
+import { isTrialExpired } from '../components/provisionValidation';
+import { fmtDate, fmtRelative } from '../components/format';
 
 type ActionKind = 'suspend' | 'resume' | 'archive' | 'restore' | 'impersonate';
 
@@ -56,16 +62,6 @@ const ACTION_COPY: Record<ActionKind, { title: string; verb: string }> = {
   impersonate: { title: 'Impersonate tenant', verb: 'Impersonate' },
 };
 
-const emptyForm = {
-  name: '',
-  slug: '',
-  planId: '',
-  adminEmail: '',
-  adminFirstName: '',
-  adminLastName: '',
-  adminPassword: '',
-};
-
 export default function TenantsPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -74,14 +70,16 @@ export default function TenantsPage() {
   const [search, setSearch] = useState('');
   const [planFilter, setPlanFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<TenantStatus | 'all'>('all');
+  const [billingFilter, setBillingFilter] = useState<BillingMode | 'all' | 'expired-trial'>('all');
+  const [countryFilter, setCountryFilter] = useState<string>('all');
+
+  const permissions = usePlatformPermissions();
 
   const [provisionOpen, setProvisionOpen] = useState(false);
-  const [form, setForm] = useState(emptyForm);
   const [confirm, setConfirm] = useState<{ kind: ActionKind; tenant: Tenant } | null>(null);
-  // Shown after a successful provision. The generated credential lives ONLY in this response,
-  // so the operator gets one deliberate handover step rather than a toast that scrolls away.
-  const [handover, setHandover] = useState<ProvisionTenantResult | null>(null);
-  const [credentialCopied, setCredentialCopied] = useState(false);
+  // Held after the submit is accepted. The generated credential lives ONLY in this
+  // response, so it is handed to the progress dialog rather than a toast that scrolls away.
+  const [submission, setSubmission] = useState<SubmitProvisioningResult | null>(null);
   const [actionReason, setActionReason] = useState('');
 
   const { data: tenants, isLoading, isError, refetch } = useQuery({
@@ -89,29 +87,10 @@ export default function TenantsPage() {
     queryFn: () => platformApi.listTenants(),
   });
 
-  const { data: plans } = useQuery({
-    queryKey: platformKeys.plans(),
-    queryFn: () => platformApi.listPlans(),
-  });
-
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: platformKeys.tenants() });
     queryClient.invalidateQueries({ queryKey: platformKeys.overview() });
   };
-
-  const provisionMutation = useMutation({
-    mutationFn: () => platformApi.provisionTenant({ ...form, planId: form.planId || null }),
-    onSuccess: (result) => {
-      enqueueSnackbar(`${result.tenant.name} provisioned`, { variant: 'success' });
-      setProvisionOpen(false);
-      setForm(emptyForm);
-      setCredentialCopied(false);
-      setHandover(result);
-      invalidate();
-    },
-    onError: (error) =>
-      enqueueSnackbar(platformErrorMessage(error, 'Failed to provision tenant'), { variant: 'error' }),
-  });
 
   const actionMutation = useMutation({
     mutationFn: async ({ kind, tenant }: { kind: ActionKind; tenant: Tenant }) => {
@@ -153,29 +132,37 @@ export default function TenantsPage() {
     return [...codes].sort();
   }, [tenants]);
 
+  // Only countries actually present in the fleet are offered, so the filter never
+  // lists 249 options of which two match anything.
+  const countryCodes = useMemo(() => {
+    const codes = new Set<string>();
+    (tenants ?? []).forEach((t) => { if (t.countryCode) codes.add(t.countryCode); });
+    return [...codes].sort((a, b) => countryName(a).localeCompare(countryName(b)));
+  }, [tenants]);
+
+  const expiredTrials = useMemo(
+    () => (tenants ?? []).filter((t) => isTrialExpired(t.billingMode, t.trialEndsOn)),
+    [tenants],
+  );
+
   const rows = useMemo(() => {
     let list = tenants ?? [];
     if (planFilter !== 'all') list = list.filter((t) => (t.planCode ?? 'none') === planFilter);
     if (statusFilter !== 'all') list = list.filter((t) => t.status === statusFilter);
+    if (billingFilter === 'expired-trial') list = list.filter((t) => isTrialExpired(t.billingMode, t.trialEndsOn));
+    else if (billingFilter !== 'all') list = list.filter((t) => t.billingMode === billingFilter);
+    if (countryFilter !== 'all') list = list.filter((t) => t.countryCode === countryFilter);
     if (search.trim()) {
       const q = search.toLowerCase();
-      list = list.filter((t) => t.name.toLowerCase().includes(q) || t.slug.toLowerCase().includes(q));
+      list = list.filter((t) =>
+        t.name.toLowerCase().includes(q) ||
+        t.slug.toLowerCase().includes(q) ||
+        (t.legalName ?? '').toLowerCase().includes(q) ||
+        (t.contactEmail ?? '').toLowerCase().includes(q));
     }
     return list;
-  }, [tenants, planFilter, statusFilter, search]);
+  }, [tenants, planFilter, statusFilter, billingFilter, countryFilter, search]);
 
-  const slugValid = /^[a-z0-9-]{2,}$/.test(form.slug);
-  const adminEmailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.adminEmail.trim());
-  // A supplied password is optional, but a too-short one must not reach the server only to
-  // come back as a validation error after the tenant name is already typed.
-  const adminPasswordValid = form.adminPassword.length === 0 || form.adminPassword.length >= 8;
-  const formValid =
-    form.name.trim().length > 1 &&
-    slugValid &&
-    adminEmailValid &&
-    form.adminFirstName.trim().length > 0 &&
-    form.adminLastName.trim().length > 0 &&
-    adminPasswordValid;
   const openConfirm = (kind: ActionKind, tenant: Tenant) => {
     setActionReason('');
     setConfirm({ kind, tenant });
@@ -199,21 +186,62 @@ export default function TenantsPage() {
       ),
     },
     {
+      field: 'countryCode',
+      headerName: 'Country',
+      width: 130,
+      valueGetter: (_v, row) => row.countryCode ?? '',
+      renderCell: (p) =>
+        p.row.countryCode ? (
+          <Tooltip title={countryLabel(p.row.countryCode)}>
+            <Typography variant="body2" sx={{ fontWeight: 700 }}>
+              {p.row.countryCode}
+            </Typography>
+          </Tooltip>
+        ) : (
+          <Dash />
+        ),
+    },
+    {
       field: 'planCode',
       headerName: 'Plan',
-      width: 130,
+      width: 120,
       renderCell: (p) => <PlanChip tier={p.row.planCode ?? 'none'} />,
+    },
+    {
+      field: 'billingMode',
+      headerName: 'Billing',
+      width: 120,
+      valueGetter: (_v, row) => row.billingMode ?? '',
+      renderCell: (p) => <BillingModeChip mode={p.row.billingMode} />,
+    },
+    {
+      field: 'trialEndsOn',
+      headerName: 'Trial ends',
+      width: 150,
+      valueGetter: (_v, row) => row.trialEndsOn ?? '',
+      renderCell: (p) => {
+        if (!p.row.trialEndsOn) return <Dash />;
+        const expired = isTrialExpired(p.row.billingMode, p.row.trialEndsOn);
+        return (
+          <Typography
+            variant="caption"
+            sx={{ fontWeight: expired ? 800 : 600, color: expired ? 'error.main' : 'text.secondary' }}
+          >
+            {expired ? `Expired ${fmtDate(p.row.trialEndsOn)}` : fmtDate(p.row.trialEndsOn)}
+          </Typography>
+        );
+      },
     },
     {
       field: 'status',
       headerName: 'Status',
-      width: 140,
+      width: 130,
       renderCell: (p) => <TenantStatusChip status={p.row.status} />,
     },
     {
       field: 'createdAt',
       headerName: 'Created',
-      width: 120,
+      width: 110,
       valueGetter: (_v, row) => row.createdAt,
       renderCell: (p) => (
         <Typography variant="caption" color="text.secondary">
@@ -224,51 +252,74 @@ export default function TenantsPage() {
     {
       field: 'actions',
       headerName: 'Actions',
-      width: 190,
+      width: 170,
       sortable: false,
       filterable: false,
       renderCell: (p) => (
         <Stack direction="row" spacing={0.5} onClick={(e) => e.stopPropagation()}>
-          {p.row.status === 'suspended' || p.row.status === 'archived' ? (
-            <Tooltip title={p.row.status === 'archived' ? 'Restore to suspended' : 'Resume'}>
-              <IconButton
-                size="small"
-                color="success"
-                onClick={() => openConfirm(p.row.status === 'archived' ? 'restore' : 'resume', p.row)}
-              >
-                {p.row.status === 'archived' ? <RestoreIcon fontSize="small" /> : <ResumeIcon fontSize="small" />}
-              </IconButton>
-            </Tooltip>
-          ) : (
-            <Tooltip title="Suspend">
-              <IconButton
-                size="small"
-                color="warning"
-                disabled={p.row.status === 'provisioning'}
-                onClick={() => openConfirm('suspend', p.row)}
-              >
-                <SuspendIcon fontSize="small" />
-              </IconButton>
-            </Tooltip>
-          )}
-          <Tooltip title="Archive (suspended tenants only)">
+          {/* Every lifecycle verb here is Owner|SupportAdmin server-side, so a BillingAdmin
+              or ReadOnlyOps operator sees them disabled with the reason rather than a 403. */}
+          <Tooltip
+            title={
+              permissions.canAdministerTenants
+                ? p.row.status === 'archived'
+                  ? 'Restore to suspended'
+                  : p.row.status === 'suspended'
+                    ? 'Resume'
+                    : 'Suspend'
+                : REQUIRED_ROLE_COPY.tenantAdmin
+            }
+          >
+            <span>
+              {p.row.status === 'suspended' || p.row.status === 'archived' ? (
+                <IconButton
+                  size="small"
+                  color="success"
+                  disabled={!permissions.canAdministerTenants}
+                  aria-label={p.row.status === 'archived' ? 'Restore tenant' : 'Resume tenant'}
+                  onClick={() => openConfirm(p.row.status === 'archived' ? 'restore' : 'resume', p.row)}
+                >
+                  {p.row.status === 'archived' ? <RestoreIcon fontSize="small" /> : <ResumeIcon fontSize="small" />}
+                </IconButton>
+              ) : (
+                <IconButton
+                  size="small"
+                  color="warning"
+                  aria-label="Suspend tenant"
+                  disabled={p.row.status === 'provisioning' || !permissions.canAdministerTenants}
+                  onClick={() => openConfirm('suspend', p.row)}
+                >
+                  <SuspendIcon fontSize="small" />
+                </IconButton>
+              )}
+            </span>
+          </Tooltip>
+          <Tooltip
+            title={
+              permissions.canAdministerTenants
+                ? 'Archive (suspended tenants only)'
+                : REQUIRED_ROLE_COPY.tenantAdmin
+            }
+          >
             <span>
               <IconButton
                 size="small"
                 color="error"
-                disabled={p.row.status !== 'suspended'}
+                aria-label="Archive tenant"
+                disabled={p.row.status !== 'suspended' || !permissions.canAdministerTenants}
                 onClick={() => openConfirm('archive', p.row)}
               >
                 <ArchiveIcon fontSize="small" />
               </IconButton>
             </span>
           </Tooltip>
-          <Tooltip title="Impersonate">
+          <Tooltip title={permissions.canImpersonate ? 'Impersonate' : REQUIRED_ROLE_COPY.impersonate}>
             <span>
               <IconButton
                 size="small"
                 color="primary"
-                disabled={p.row.status !== 'active'}
+                aria-label="Impersonate tenant"
+                disabled={p.row.status !== 'active' || !permissions.canImpersonate}
                 onClick={() => openConfirm('impersonate', p.row)}
               >
                 <ImpersonateIcon fontSize="small" />
@@ -286,23 +337,52 @@ export default function TenantsPage() {
         title="Tenants"
         subtitle="Provision, manage, and inspect every workspace on the platform."
         actions={
-          <Button variant="contained" startIcon={<AddIcon />} onClick={() => setProvisionOpen(true)} sx={{ fontWeight: 700 }}>
-            Provision Tenant
-          </Button>
+          <RoleGate allowed={permissions.canAdministerTenants} requirement={REQUIRED_ROLE_COPY.tenantAdmin}>
+            {(disabled) => (
+              <Button
+                variant="contained"
+                startIcon={<AddIcon />}
+                disabled={disabled}
+                onClick={() => setProvisionOpen(true)}
+                sx={{ fontWeight: 700 }}
+              >
+                Create Company
+              </Button>
+            )}
+          </RoleGate>
         }
       />
 
+      {/* An expired trial is a workspace still being served for free. It gets a
+          standing banner, not just a red cell somebody has to scroll to. */}
+      {expiredTrials.length > 0 && billingFilter !== 'expired-trial' && (
+        <Alert
+          severity="error"
+          sx={{ mb: 2, borderRadius: 2 }}
+          action={
+            <Button color="inherit" size="small" onClick={() => setBillingFilter('expired-trial')} sx={{ fontWeight: 700 }}>
+              Show them
+            </Button>
+          }
+        >
+          {expiredTrials.length === 1
+            ? '1 trial has passed its end date and is still being served.'
+            : `${expiredTrials.length} trials have passed their end date and are still being served.`}
+        </Alert>
+      )}
+
       <Paper sx={{ p: 1.5, mb: 2, borderRadius: 3 }}>
-        <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5}>
+        <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} sx={{ flexWrap: 'wrap' }}>
           <TextField
             size="small"
-            placeholder="Search tenants…"
+            placeholder="Search name, slug, legal name or contact…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            sx={{ flex: 1 }}
+            aria-label="Search tenants"
+            sx={{ flex: 1, minWidth: 220 }}
             slotProps={{ input: { startAdornment: <InputAdornment position="start"><SearchIcon fontSize="small" /></InputAdornment> } }}
           />
-          <TextField size="small" select label="Plan" value={planFilter} onChange={(e) => setPlanFilter(e.target.value)} sx={{ minWidth: 160 }}>
+          <TextField size="small" select label="Plan" value={planFilter} onChange={(e) => setPlanFilter(e.target.value)} sx={{ minWidth: 140 }}>
             <MenuItem value="all">All Plans</MenuItem>
             {planCodes.map((code) => (
               <MenuItem key={code} value={code} sx={{ textTransform: 'capitalize' }}>
@@ -310,7 +390,31 @@ export default function TenantsPage() {
               </MenuItem>
             ))}
           </TextField>
-          <TextField size="small" select label="Status" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as TenantStatus | 'all')} sx={{ minWidth: 160 }}>
+          <TextField
+            size="small"
+            select
+            label="Billing"
+            value={billingFilter}
+            onChange={(e) => setBillingFilter(e.target.value as BillingMode | 'all' | 'expired-trial')}
+            sx={{ minWidth: 160 }}
+          >
+            <MenuItem value="all">All Billing Modes</MenuItem>
+            {BILLING_MODES.map((mode) => (
+              <MenuItem key={mode} value={mode}>
+                {mode}
+              </MenuItem>
+            ))}
+            <MenuItem value="expired-trial">Expired trials</MenuItem>
+          </TextField>
+          <TextField size="small" select label="Country" value={countryFilter} onChange={(e) => setCountryFilter(e.target.value)} sx={{ minWidth: 160 }}>
+            <MenuItem value="all">All Countries</MenuItem>
+            {countryCodes.map((code) => (
+              <MenuItem key={code} value={code}>
+                {countryLabel(code)}
+              </MenuItem>
+            ))}
+          </TextField>
+          <TextField size="small" select label="Status" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as TenantStatus | 'all')} sx={{ minWidth: 140 }}>
             <MenuItem value="all">All Statuses</MenuItem>
             <MenuItem value="active">Active</MenuItem>
             <MenuItem value="trial">Trial</MenuItem>
@@ -345,193 +449,25 @@ export default function TenantsPage() {
         )}
       </Paper>
 
-      {/* Provision dialog */}
-      <Dialog open={provisionOpen} onClose={() => setProvisionOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle sx={{ fontWeight: 800 }}>Provision New Tenant</DialogTitle>
-        <DialogContent dividers>
-          <Stack spacing={2.5} sx={{ mt: 0.5 }}>
-            <TextField
-              label="Organization name"
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value, slug: form.slug || e.target.value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') })}
-              fullWidth
-              required
-            />
-            <TextField
-              label="Slug"
-              value={form.slug}
-              onChange={(e) => setForm({ ...form, slug: e.target.value })}
-              error={form.slug.length > 0 && !slugValid}
-              helperText={form.slug.length > 0 && !slugValid ? 'Lowercase letters, numbers, and hyphens only.' : 'Used in tenant URLs and the tenant id.'}
-              fullWidth
-              required
-            />
-            <TextField
-              label="Plan"
-              select
-              value={form.planId}
-              onChange={(e) => setForm({ ...form, planId: e.target.value })}
-              helperText="Optional — a tenant without a plan runs without plan limits."
-              fullWidth
-            >
-              <MenuItem value="">No plan</MenuItem>
-              {(plans ?? []).map((plan) => (
-                <MenuItem key={plan.id} value={plan.id}>
-                  {plan.name} ({plan.code})
-                </MenuItem>
-              ))}
-            </TextField>
+      <ProvisionTenantWizard
+        open={provisionOpen}
+        onClose={() => setProvisionOpen(false)}
+        onSubmitted={(result) => {
+          // 202, not 201: nothing exists yet. The operator moves straight to the progress
+          // list rather than a toast claiming a workspace that is still eight steps away.
+          setProvisionOpen(false);
+          setSubmission(result);
+        }}
+      />
 
-            <Divider textAlign="left" sx={{ pt: 1 }}>
-              <Typography variant="overline" sx={{ fontWeight: 800, letterSpacing: '0.06em' }}>
-                Founding administrator
-              </Typography>
-            </Divider>
-            <Typography variant="body2" color="text.secondary" sx={{ mt: -1 }}>
-              This person receives full authority over the new workspace and creates the customer&apos;s
-              own users from there. A tenant provisioned without one cannot be logged into at all.
-            </Typography>
-
-            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
-              <TextField
-                label="First name"
-                value={form.adminFirstName}
-                onChange={(e) => setForm({ ...form, adminFirstName: e.target.value })}
-                fullWidth
-                required
-              />
-              <TextField
-                label="Last name"
-                value={form.adminLastName}
-                onChange={(e) => setForm({ ...form, adminLastName: e.target.value })}
-                fullWidth
-                required
-              />
-            </Stack>
-            <TextField
-              label="Work email"
-              type="email"
-              value={form.adminEmail}
-              onChange={(e) => setForm({ ...form, adminEmail: e.target.value })}
-              error={form.adminEmail.length > 0 && !adminEmailValid}
-              helperText={
-                form.adminEmail.length > 0 && !adminEmailValid
-                  ? 'Enter a valid email address.'
-                  : 'Also their sign-in username. One address belongs to one workspace.'
-              }
-              fullWidth
-              required
-            />
-            <TextField
-              label="Initial password"
-              type="text"
-              value={form.adminPassword}
-              onChange={(e) => setForm({ ...form, adminPassword: e.target.value })}
-              error={!adminPasswordValid}
-              helperText={
-                !adminPasswordValid
-                  ? 'At least 8 characters.'
-                  : 'Leave blank and one will be generated for you — shown once, on the next screen.'
-              }
-              fullWidth
-            />
-          </Stack>
-        </DialogContent>
-        <DialogActions sx={{ p: 2 }}>
-          <Button onClick={() => setProvisionOpen(false)} color="inherit">
-            Cancel
-          </Button>
-          <Button variant="contained" onClick={() => provisionMutation.mutate()} disabled={!formValid || provisionMutation.isPending} sx={{ fontWeight: 700, px: 3 }}>
-            {provisionMutation.isPending ? 'Provisioning…' : 'Provision'}
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* Credential handover. A separate, deliberate step: the generated password exists in the
-          provisioning response and NOWHERE else — not in the audit log, not retrievable later —
-          so it must not be delivered as a toast the operator can miss or dismiss. */}
-      <Dialog
-        open={handover !== null}
-        onClose={() => { /* deliberately not dismissible by backdrop — see the close button */ }}
-        fullWidth
-        maxWidth="sm"
-      >
-        <DialogTitle sx={{ fontWeight: 800 }}>
-          {handover?.tenant.name} is ready
-        </DialogTitle>
-        <DialogContent dividers>
-          <Stack spacing={2}>
-            <Alert severity="success" sx={{ borderRadius: 2 }}>
-              The workspace is active and its founding administrator can sign in now.
-            </Alert>
-
-            <Stack spacing={0.5}>
-              <Typography variant="overline" sx={{ fontWeight: 800, color: 'text.secondary' }}>
-                Sign-in email
-              </Typography>
-              <Typography sx={{ fontFamily: 'monospace', fontSize: '0.95rem' }}>
-                {handover?.foundingAdmin.email}
-              </Typography>
-            </Stack>
-
-            {handover?.foundingAdmin.generatedPassword ? (
-              <>
-                <Stack spacing={0.5}>
-                  <Typography variant="overline" sx={{ fontWeight: 800, color: 'text.secondary' }}>
-                    Temporary password
-                  </Typography>
-                  <Stack direction="row" spacing={1} alignItems="center">
-                    <Typography
-                      sx={{
-                        fontFamily: 'monospace', fontSize: '1.05rem', fontWeight: 700,
-                        px: 1.5, py: 1, borderRadius: 1.5, flex: 1,
-                        bgcolor: 'action.hover', wordBreak: 'break-all',
-                      }}
-                    >
-                      {handover.foundingAdmin.generatedPassword}
-                    </Typography>
-                    <Button
-                      variant="outlined"
-                      onClick={() => {
-                        navigator.clipboard
-                          ?.writeText(handover.foundingAdmin.generatedPassword ?? '')
-                          .then(() => setCredentialCopied(true))
-                          .catch(() => enqueueSnackbar('Copy failed — select the password manually.', { variant: 'warning' }));
-                      }}
-                      sx={{ fontWeight: 700, whiteSpace: 'nowrap' }}
-                    >
-                      {credentialCopied ? 'Copied' : 'Copy'}
-                    </Button>
-                  </Stack>
-                </Stack>
-                <Alert severity="warning" sx={{ borderRadius: 2 }}>
-                  <AlertTitle sx={{ fontWeight: 800 }}>Shown once — it cannot be retrieved</AlertTitle>
-                  Only a one-way hash is stored, so nobody can look this up later, including us.
-                  Send it to {handover.foundingAdmin.email} through a secure channel and have them
-                  change it on first sign-in. If it is lost, the password must be reset instead.
-                </Alert>
-              </>
-            ) : (
-              <Alert severity="info" sx={{ borderRadius: 2 }}>
-                You set the password yourself, so it is not repeated here. Share it with{' '}
-                {handover?.foundingAdmin.email} through a secure channel.
-              </Alert>
-            )}
-          </Stack>
-        </DialogContent>
-        <DialogActions sx={{ p: 2 }}>
-          <Button
-            variant="contained"
-            onClick={() => setHandover(null)}
-            disabled={Boolean(handover?.foundingAdmin.generatedPassword) && !credentialCopied}
-            sx={{ fontWeight: 700, px: 3 }}
-          >
-            {handover?.foundingAdmin.generatedPassword && !credentialCopied
-              ? 'Copy the password first'
-              : 'Done'}
-          </Button>
-        </DialogActions>
-      </Dialog>
+      <ProvisioningProgressDialog
+        executionId={submission?.execution.id ?? null}
+        submission={submission}
+        onClose={() => {
+          setSubmission(null);
+          invalidate();
+        }}
+      />
 
       {/* Confirm action dialog */}
       <Dialog open={!!confirm} onClose={() => setConfirm(null)} maxWidth="xs" fullWidth>

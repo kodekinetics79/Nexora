@@ -16,6 +16,10 @@ using ERP_RFQ_Automation.Inventory.Commercial;
 using ERP_RFQ_Automation.CommercialIntelligence.Exceptions;
 using ERP_RFQ_Automation.CommercialIntelligence.Opportunity;
 using ERP_RFQ_Automation.CommercialIntelligence.Growth;
+using ERP_RFQ_Automation.Platform.Onboarding;
+using ERP_RFQ_Automation.Platform.Provisioning;
+using ERP_RFQ_Automation.Platform.Lifecycle;
+using ERP_RFQ_Automation.Platform.Support;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Models;
@@ -35,6 +39,14 @@ public partial class ErpRfqAutomationContext
     // Null when there is no tenant context -> filters become no-ops.
     private long? CurrentTenantId => _tenant?.BusinessUnitId;
     internal long? ScopedTenantId => CurrentTenantId;
+
+    /// <summary>
+    /// Founding-administrator activation links. Platform schema and deliberately UNFILTERED: the
+    /// invitation is redeemed by an anonymous caller who has no tenant context yet — a query
+    /// filter here would hide the very row that establishes which tenant they belong to. Same
+    /// exemption, for the same reason, as the pre-authentication login counter.
+    /// </summary>
+    public virtual DbSet<TenantAdminInvitation> TenantAdminInvitations { get; set; } = null!;
 
     partial void OnModelCreatingPartial(ModelBuilder modelBuilder)
     {
@@ -561,6 +573,49 @@ public partial class ErpRfqAutomationContext
             e.Property(x => x.Status).HasConversion<string>().HasMaxLength(32);
             e.Property(x => x.StatusReason).HasMaxLength(1000);
             e.HasOne(x => x.Plan).WithMany().HasForeignKey(x => x.PlanId).OnDelete(DeleteBehavior.SetNull);
+
+            // Legal identity. Widths follow what actually gets printed on a commercial document;
+            // LegalName matches Name because a registered entity name can be longer than its brand.
+            e.Property(x => x.LegalName).HasMaxLength(256);
+            e.Property(x => x.RegistrationNumber).HasMaxLength(64);
+            e.Property(x => x.TaxNumber).HasMaxLength(64);
+            e.Property(x => x.CountryCode).HasMaxLength(2).IsFixedLength();
+            e.Property(x => x.Industry).HasMaxLength(128);
+            e.Property(x => x.Website).HasMaxLength(512);
+            e.Property(x => x.AddressLine1).HasMaxLength(256);
+            e.Property(x => x.AddressLine2).HasMaxLength(256);
+            e.Property(x => x.City).HasMaxLength(128);
+            e.Property(x => x.StateProvince).HasMaxLength(128);
+            e.Property(x => x.PostalCode).HasMaxLength(32);
+            e.Property(x => x.Phone).HasMaxLength(64);
+            e.Property(x => x.ContactEmail).HasMaxLength(320);
+            e.Property(x => x.LogoUrl).HasMaxLength(1024);
+
+            // Operating defaults seeded into the tenant's own reference data.
+            e.Property(x => x.BaseCurrencyCode).HasMaxLength(3).IsFixedLength();
+            e.Property(x => x.TimeZoneId).HasMaxLength(64);
+            e.Property(x => x.Locale).HasMaxLength(16);
+            e.Property(x => x.DataRegion).HasMaxLength(32);
+
+            // Commercial terms. BillingMode is stored as its NAME, not its ordinal: a statement
+            // produced today has to remain explainable years later, and reordering the enum must
+            // not silently reclassify historical tenants from Trial to Internal.
+            e.Property(x => x.BillingMode).HasConversion<string>().HasMaxLength(16)
+                .HasDefaultValue(ERP_RFQ_Automation.Platform.Models.TenantBillingMode.Billable);
+            e.Property(x => x.BillingModeReason).HasMaxLength(1000);
+            e.Property(x => x.PurchaseOrderReference).HasMaxLength(128);
+            e.Property(x => x.BillingContactName).HasMaxLength(200);
+            e.Property(x => x.BillingContactEmail).HasMaxLength(320);
+            e.Property(x => x.BillingAddress).HasMaxLength(1024);
+            e.Property(x => x.AccountOwnerEmail).HasMaxLength(320);
+
+            // No navigation to RateCard: the billing aggregate sits above the platform model in
+            // the dependency order, so the pin is carried as a plain id and resolved by
+            // BillingStatementService. Indexed because the billing run sweeps tenants by card.
+            e.HasIndex(x => x.RateCardId);
+
+            // The billing run's working set: every tenant that should produce a statement.
+            e.HasIndex(x => new { x.Status, x.BillingMode });
         });
         modelBuilder.Entity<ERP_RFQ_Automation.Platform.Models.PlatformAuditLog>(e =>
         {
@@ -605,6 +660,18 @@ public partial class ErpRfqAutomationContext
         // ==== Service RFQ → BOQ engine (Boq/) ====
         // Same partial-splice pattern; implementation in ErpRfqAutomationContext.Boq.cs.
         ConfigureBoqModel(modelBuilder);
+
+        // ==== Founding-administrator activation (Platform/Onboarding/) ====
+        modelBuilder.ApplyTenantOnboardingModel();
+
+        // ==== Durable tenant provisioning (Platform/Provisioning/) ====
+        modelBuilder.ApplyTenantProvisioningModel();
+
+        // ==== Tenant offboarding: retention, export, purge, erasure (Platform/Lifecycle/) ====
+        modelBuilder.ApplyTenantLifecycleModel();
+
+        // ==== Operator support desk (Platform/Support/) ====
+        modelBuilder.ApplyPlatformSupportModel();
     }
 
     /// <summary>

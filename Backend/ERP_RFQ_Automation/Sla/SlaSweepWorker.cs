@@ -132,6 +132,21 @@ public sealed class SlaSweepWorker : BackgroundService
     /// The ONLY query in this worker that runs without a tenant scope (and therefore
     /// under the BYPASSRLS pipeline role): the distinct BUs seen on Leads or Quotes.
     /// It reads nothing but tenant ids.
+    ///
+    /// <para>Suspended and archived tenants are dropped HERE, inside this scope, for two reasons.
+    /// A suspended tenant's staff cannot sign in, so an escalation telling them a bid closes
+    /// tomorrow reaches an inbox nobody can act from, and an auto-expiry silently changes the state
+    /// of quotes they cannot see. And this is the one scope in the worker with no tenant pushed,
+    /// which is a hard requirement of the gate: consulted under a pushed scope its platform read is
+    /// refused at column level and fails OPEN, admitting everyone silently
+    /// (see <c>ITenantWorkGate</c>).</para>
+    ///
+    /// <para>Skipping is safe for the ALERTS — they are derived from dates and re-evaluated from
+    /// scratch every sweep, so a suspension is a gap in notification, not a lost record. It DEFERS
+    /// the state transitions (quote auto-expiry, approval ageing), which are likewise computed from
+    /// <c>BidClosingDate</c> and quote timestamps, so the first sweep after reinstatement applies
+    /// whatever the dates say by then. Nothing here is a one-shot side effect that a skipped cycle
+    /// destroys.</para>
     /// </summary>
     private async Task<IReadOnlyList<long>> ResolveActiveBusinessUnitsAsync(CancellationToken ct)
     {
@@ -142,7 +157,15 @@ public sealed class SlaSweepWorker : BackgroundService
             .Select(l => l.BusinessUnitId).Distinct().ToListAsync(ct);
         var quoteBus = await db.Quotes.AsNoTracking().IgnoreQueryFilters()
             .Select(q => q.BusinessUnitId).Distinct().ToListAsync(ct);
-        return leadBus.Union(quoteBus).OrderBy(id => id).ToList();
+        var businessUnits = leadBus.Union(quoteBus).OrderBy(id => id).ToList();
+
+        // Resolved from THIS scope rather than injected: the worker is a singleton and the gate is
+        // scoped, so a constructor dependency would fail startup scope validation.
+        var gate = scope.ServiceProvider
+            .GetService<ERP_RFQ_Automation.Platform.Lifecycle.ITenantWorkGate>();
+        if (gate is null || businessUnits.Count == 0) return businessUnits;
+
+        return await gate.FilterServiceableAsync(businessUnits, ct);
     }
 
     private async Task SweepTenantAsync(long bu, CancellationToken ct)

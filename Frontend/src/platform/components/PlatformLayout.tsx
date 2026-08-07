@@ -29,6 +29,7 @@ import {
   Paid as BillingIcon,
   ReceiptLong as AuditIcon,
   Shield as SecurityIcon,
+  SupportAgent as SupportIcon,
   Tune as PlansIcon,
   Workspaces as TenantsIcon,
   LightMode as SunIcon,
@@ -36,6 +37,7 @@ import {
 } from '@mui/icons-material';
 import { useAppTheme } from '../../context/ThemeContext';
 import { usePlatformAuth } from '../auth/usePlatformAuth';
+import { usePlatformPermissions } from '../auth/usePlatformPermissions';
 import SkipLink, { MAIN_CONTENT_ID } from '../../components/layout/SkipLink';
 
 /** Referenced by the mobile drawer toggle's `aria-controls`. */
@@ -48,6 +50,7 @@ const NAV = [
   { to: '/platform/plans', label: 'Plans', icon: <PlansIcon /> },
   { to: '/platform/users', label: 'Users', icon: <UsersIcon /> },
   { to: '/platform/billing', label: 'Billing', icon: <BillingIcon /> },
+  { to: '/platform/support', label: 'Support', icon: <SupportIcon /> },
   { to: '/platform/security', label: 'Security', icon: <SecurityIcon /> },
   { to: '/platform/audit', label: 'Audit Log', icon: <AuditIcon /> },
 ];
@@ -56,6 +59,7 @@ const DRAWER_WIDTH = 264;
 
 function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   const { mode } = useAppTheme();
+  const permissions = usePlatformPermissions();
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <Toolbar sx={{ px: 2.5 }}>
@@ -85,9 +89,15 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       </Toolbar>
 
       <Box sx={{ px: 2, pb: 1 }}>
+        {/* The operator's real tier, not a decoration. Which controls this console offers
+            is decided by this value, so misreporting it would be misreporting authority. */}
         <Chip
           size="small"
-          label="OWNER · scope=platform"
+          label={
+            permissions.role
+              ? `${permissions.role.toUpperCase()} · scope=platform`
+              : 'ROLE NOT RECOGNISED · read-only'
+          }
           sx={{
             width: '100%',
             justifyContent: 'flex-start',
@@ -240,7 +250,7 @@ export default function PlatformLayout() {
                   {displayName}
                 </Typography>
                 <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                  {platformUser?.role ?? 'Platform Owner'}
+                  {platformUser?.role ?? 'Role not recognised'}
                 </Typography>
               </Box>
             </Box>

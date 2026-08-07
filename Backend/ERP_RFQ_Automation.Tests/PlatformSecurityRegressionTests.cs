@@ -122,7 +122,13 @@ public class PlatformSecurityRegressionTests
         {
             Name = "Audit Failure Tenant",
             Slug = "audit-failure-tenant",
-            AdminEmail = "admin@audit-failure.test", AdminFirstName = "A", AdminLastName = "F"
+            AdminEmail = "admin@audit-failure.test", AdminFirstName = "A", AdminLastName = "F",
+            BaseCurrencyCode = "USD",
+            // These cases exercise audit and transaction behaviour, not pricing. Internal is the
+            // honest mode for a fixture nobody invoices, and it satisfies the rule that a tenant
+            // may only escape a plan by naming why.
+            BillingMode = nameof(TenantBillingMode.Internal),
+            BillingModeReason = "Regression fixture; never invoiced."
         }, CancellationToken.None);
 
         Assert.Equal(StatusCodes.Status500InternalServerError, Assert.IsType<ObjectResult>(result.Result).StatusCode);
@@ -158,7 +164,10 @@ public class PlatformSecurityRegressionTests
         {
             Name = "Fresh Provisioning Tenant",
             Slug = "fresh-provisioning-tenant",
-            AdminEmail = "admin@fresh-provisioning.test", AdminFirstName = "F", AdminLastName = "P"
+            AdminEmail = "admin@fresh-provisioning.test", AdminFirstName = "F", AdminLastName = "P",
+            BaseCurrencyCode = "USD",
+            BillingMode = nameof(TenantBillingMode.Internal),
+            BillingModeReason = "Regression fixture; never invoiced."
         }, CancellationToken.None);
 
         Assert.IsType<CreatedAtActionResult>(result.Result);
@@ -190,7 +199,10 @@ public class PlatformSecurityRegressionTests
         {
             Name = "Retried Provisioning Tenant",
             Slug = "retried-provisioning-tenant",
-            AdminEmail = "admin@retried-provisioning.test", AdminFirstName = "R", AdminLastName = "P"
+            AdminEmail = "admin@retried-provisioning.test", AdminFirstName = "R", AdminLastName = "P",
+            BaseCurrencyCode = "USD",
+            BillingMode = nameof(TenantBillingMode.Internal),
+            BillingModeReason = "Regression fixture; never invoiced."
         }, CancellationToken.None);
 
         Assert.IsType<CreatedAtActionResult>(result.Result);
@@ -325,7 +337,9 @@ public class PlatformSecurityRegressionTests
             audit,
             NullLogger<TenantsController>.Instance,
             services.GetRequiredService<IServiceScopeFactory>(),
-            new TenantScopeAccessor())
+            new TenantScopeAccessor(),
+            ProvisioningFixture.Baseline(context),
+            ProvisioningFixture.Invitations(context))
         {
             ControllerContext = new ControllerContext
             {
@@ -337,7 +351,7 @@ public class PlatformSecurityRegressionTests
     private static ClaimsPrincipal PlatformActor() => new(new ClaimsIdentity(
     [
         new Claim("sub", "7"),
-        new Claim("email", "operator@example.test")
+        new Claim("email", "operator@example.test"), new Claim("platformRole", "Owner")
     ], "Platform"));
 
     private static async Task<long> SeedActiveTenant(TestDb db, string slug)

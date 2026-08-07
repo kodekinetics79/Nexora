@@ -267,6 +267,28 @@ public sealed class TenantRlsCommandInterceptor : DbCommandInterceptor
         if (httpContext.Request.Path.StartsWithSegments("/api/Auth/Login"))
             return IdentityRole;
 
+        // Founding-administrator activation is a PRE-TENANT identity operation, and it is
+        // resolved here for exactly the same two reasons as the login paths above.
+        //
+        // It cannot run as nexora_tenant_app, the role every other anonymous request falls
+        // through to. That role is RLS-constrained and this request carries no tenant scope —
+        // there is nobody to derive one from until the invitation itself says which account is
+        // being activated — so nexora.business_unit_id is never set and the Users row the
+        // redemption must update is invisible. The endpoint would return "invalid link" for a
+        // perfectly good link, and no test on the SQLite suite can see it because SQLite has
+        // neither roles nor row-level security.
+        //
+        // It is hoisted ABOVE the tenant check for the login branches' reason: the frontend
+        // attaches whatever bearer token it holds to every request, so an operator or an
+        // already-signed-in user opening an activation link would otherwise arrive with a
+        // business unit set and downgrade the role out of the privileges the flow requires.
+        //
+        // nexora_identity_app rather than the bypass-everything pipeline role: activation needs
+        // to read one invitation and write one password, and 20260807002500 grants it precisely
+        // that — column-scoped UPDATE on Users that cannot touch RoleId, Buid or Email.
+        if (httpContext.Request.Path.StartsWithSegments("/api/tenant-activation"))
+            return IdentityRole;
+
         // NOT hoisted above this line: the REST of /api/platform. nexora_pipeline_app is
         // BYPASSRLS, and an impersonation token (PlatformAuthService) is a TENANT token that
         // carries businessUnitId and no platform scope — so hoisting the whole platform prefix

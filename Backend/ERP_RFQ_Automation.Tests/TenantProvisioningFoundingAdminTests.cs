@@ -36,25 +36,52 @@ public sealed class TenantProvisioningFoundingAdminTests
         var controller = new TenantsController(
             context, new NullAudit(), NullLogger<TenantsController>.Instance,
             new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
-            new MultiTenancy.TenantScopeAccessor());
+            new MultiTenancy.TenantScopeAccessor(),
+            ProvisioningFixture.Baseline(context),
+            ProvisioningFixture.Invitations(context));
         controller.ControllerContext = new ControllerContext
         {
             HttpContext = new DefaultHttpContext
             {
                 User = new ClaimsPrincipal(new ClaimsIdentity(
-                    [new Claim("email", "owner@nexora.app")], "Platform"))
+                    [new Claim("email", "owner@nexora.app"), new Claim("platformRole", "Owner")], "Platform"))
             }
         };
         return controller;
     }
 
-    private static ProvisionTenantRequest Request(string slug, string email, string? password = null) => new()
+    /// <summary>
+    /// A plan every fixture attaches, because a Billable tenant with none is refused outright —
+    /// that refusal is the subject of <see cref="TenantProvisioningCommercialTests"/> and would
+    /// only obscure the identity behaviour under test here.
+    /// </summary>
+    private static async Task<long> PlanIdAsync(ErpRfqAutomationContext context)
+    {
+        var plan = new Platform.Models.Plan
+        {
+            Code = $"pro-{Guid.NewGuid():N}", Name = "Pro", MonthlyPriceUsd = 499m
+        };
+        context.Set<Platform.Models.Plan>().Add(plan);
+        await context.SaveChangesAsync();
+        return plan.Id;
+    }
+
+    /// <summary>
+    /// Defaults to the PASSWORD path. The product default is an emailed activation link, but the
+    /// one-time-credential contract still has to hold for the customers who are onboarded on a
+    /// call, and that is what these tests pin.
+    /// </summary>
+    private static ProvisionTenantRequest Request(
+        string slug, string email, long planId, string? password = null) => new()
     {
         Name = $"Tenant {slug}",
         Slug = slug,
+        PlanId = planId,
+        BaseCurrencyCode = "USD",
         AdminEmail = email,
         AdminFirstName = "Founding",
         AdminLastName = "Admin",
+        AdminActivation = AdminActivationMethods.Password,
         AdminPassword = password
     };
 
@@ -65,7 +92,8 @@ public sealed class TenantProvisioningFoundingAdminTests
         await using var context = db.ContextFor(null);
 
         var result = await Controller(context).Provision(
-            Request("founding-admin-tenant", "ceo@customer.example"), CancellationToken.None);
+            Request("founding-admin-tenant", "ceo@customer.example", await PlanIdAsync(context)),
+            CancellationToken.None);
 
         var created = Assert.IsType<CreatedAtActionResult>(result.Result);
         var response = Assert.IsType<ProvisionTenantResponse>(created.Value);
@@ -99,13 +127,54 @@ public sealed class TenantProvisioningFoundingAdminTests
     }
 
     [Fact]
+    public async Task The_default_path_invites_the_administrator_and_mints_no_credential_at_all()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(null);
+
+        var request = Request("invited-admin-tenant", "founder@customer.example", await PlanIdAsync(context));
+        request.AdminActivation = null;   // the product default
+        request.AdminPassword = null;
+
+        var response = Assert.IsType<ProvisionTenantResponse>(Assert.IsType<CreatedAtActionResult>(
+            (await Controller(context).Provision(request, CancellationToken.None)).Result).Value);
+
+        // Nothing the operator can read aloud: no password exists yet, because the administrator
+        // has not chosen one. That is the whole point of the invite path.
+        Assert.Null(response.FoundingAdmin.GeneratedPassword);
+        var invitation = Assert.IsType<AdminInvitationDto>(response.FoundingAdmin.Invitation);
+        Assert.Contains("/activate/", invitation.ActivationUrl);
+        Assert.True(invitation.ExpiresAtUtc > DateTime.UtcNow);
+
+        await using var verify = db.ContextFor(null);
+        var user = await verify.Users.IgnoreQueryFilters()
+            .SingleAsync(u => u.Email == "founder@customer.example");
+
+        // Dormant until the link is redeemed. An account nobody can sign into must not occupy a
+        // billable seat while the invitation is in flight, and the seats meter reads this flag.
+        Assert.False(user.IsActive);
+
+        // The stored hash is real but corresponds to a value that was generated, hashed and
+        // discarded — there is no plaintext for it anywhere, so it cannot be handed over by
+        // accident or recovered under pressure.
+        Assert.False(string.IsNullOrWhiteSpace(user.PasswordHash));
+
+        // Only the token's SHA-256 is persisted; the cleartext lives in the response and the
+        // recipient's mailbox and nowhere else.
+        var stored = await verify.TenantAdminInvitations.IgnoreQueryFilters()
+            .SingleAsync(i => i.UserId == user.Id);
+        Assert.DoesNotContain(invitation.ActivationUrl, stored.TokenHash);
+    }
+
+    [Fact]
     public async Task An_operator_supplied_password_is_used_and_never_echoed_back()
     {
         using var db = new TestDb();
         await using var context = db.ContextFor(null);
 
         var result = await Controller(context).Provision(
-            Request("supplied-password-tenant", "ops@customer.example", password: "Agreed-Beforehand-9!"),
+            Request("supplied-password-tenant", "ops@customer.example", await PlanIdAsync(context),
+                password: "Agreed-Beforehand-9!"),
             CancellationToken.None);
 
         var response = Assert.IsType<ProvisionTenantResponse>(
@@ -127,15 +196,16 @@ public sealed class TenantProvisioningFoundingAdminTests
         using var db = new TestDb();
         await using var context = db.ContextFor(null);
         var controller = Controller(context);
+        var planId = await PlanIdAsync(context);
 
         Assert.IsType<CreatedAtActionResult>((await controller.Provision(
-            Request("first-tenant", "shared@customer.example"), CancellationToken.None)).Result);
+            Request("first-tenant", "shared@customer.example", planId), CancellationToken.None)).Result);
 
         // Users.Email is globally unique: one address, one account, one tenant. The second
         // provision must fail as a NAMED conflict, not a transaction rollback surfacing as
         // "Provisioning failed."
         var second = await controller.Provision(
-            Request("second-tenant", "shared@customer.example"), CancellationToken.None);
+            Request("second-tenant", "shared@customer.example", planId), CancellationToken.None);
         Assert.IsType<ConflictObjectResult>(second.Result);
 
         await using var verify = db.ContextFor(null);

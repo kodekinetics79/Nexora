@@ -94,13 +94,23 @@ public sealed class RoutingReconciliationWorker : BackgroundService
     /// <summary>
     /// The ONLY query that runs without a tenant scope. It projects tenant ids and
     /// nothing else, so the bypass role can never surface another tenant's data.
+    ///
+    /// <para>Suspended and archived tenants are dropped HERE, in the one scope that has no tenant
+    /// pushed — a hard requirement of the gate, whose platform read is refused at column level
+    /// under the RLS tenant role and then fails OPEN (see <c>ITenantWorkGate</c>). Routing a
+    /// suspended tenant's leads assigns them to owners who cannot sign in, and notifies them.</para>
+    ///
+    /// <para>Skipping is pure DEFERRAL and cannot lose a lead: the selection above IS the
+    /// definition of unfinished work — no <c>AssignTo</c>, no <c>LeadRoutingDecision</c> — so a
+    /// lead not routed this cycle still matches on the next one and is routed on the first cycle
+    /// after reinstatement, however long that takes.</para>
     /// </summary>
     private async Task<IReadOnlyList<long>> ResolveTenantsWithUnroutedLeadsAsync(CancellationToken ct)
     {
         await using var scope = _scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
 
-        return await db.Leads.IgnoreQueryFilters().AsNoTracking()
+        var businessUnits = await db.Leads.IgnoreQueryFilters().AsNoTracking()
             .Where(l => l.AssignTo == null)
             .Where(l => !db.Set<LeadRoutingDecision>().IgnoreQueryFilters().Any(d =>
                 d.BusinessUnitId == l.BusinessUnitId && d.LeadId == l.Id))
@@ -108,6 +118,14 @@ public sealed class RoutingReconciliationWorker : BackgroundService
             .Distinct()
             .OrderBy(id => id)
             .ToListAsync(ct);
+
+        // Resolved from THIS scope rather than injected: the worker is a singleton and the gate is
+        // scoped, so a constructor dependency would fail startup scope validation.
+        var gate = scope.ServiceProvider
+            .GetService<ERP_RFQ_Automation.Platform.Lifecycle.ITenantWorkGate>();
+        if (gate is null || businessUnits.Count == 0) return businessUnits;
+
+        return await gate.FilterServiceableAsync(businessUnits, ct);
     }
 
     private async Task<int> ReconcileTenantAsync(long businessUnitId, CancellationToken ct)

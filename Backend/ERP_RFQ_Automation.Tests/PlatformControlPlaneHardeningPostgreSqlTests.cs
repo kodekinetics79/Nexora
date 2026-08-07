@@ -206,16 +206,34 @@ public sealed class PlatformControlPlaneHardeningPostgreSqlTests
         NpgsqlConnection connection, long statementId, long rateCardId, bool wasFinal)
     {
         await using var command = connection.CreateCommand();
-        // The guard trigger is the point of the test, so the fixture-hygiene delete has to
-        // put the row back into Draft first. Session-local disabling keeps that explicit.
+        // The guard trigger is the point of the test, so the fixture-hygiene delete has to get past
+        // it — and there is now exactly one way to do that.
+        //
+        // This teardown used to lean on `SET session_replication_role = replica`, which suspended
+        // the guard because it was an ordinary trigger. 20260807022229 promoted it to ENABLE
+        // ALWAYS, so replica mode no longer suspends it — that promotion is the whole point, since
+        // the tenant purge runs in replica mode on the owner connection and could otherwise have
+        // rewritten the record of what a customer was charged. Nor can the row be demoted to Draft
+        // first: the guard refuses EVERY write to a Final row, the status change included.
+        //
+        // Suspending the trigger by name is what remains, and it states the shipped property
+        // accurately: removing a finalized statement now requires an operator who can ALTER the
+        // table, not merely one who can reach the database. Re-enabled unconditionally afterwards
+        // so a failure here cannot leave the guard disarmed for every later test in the container.
         command.CommandText = $"""
             {(wasFinal ? """
-                SET session_replication_role = replica;
+                ALTER TABLE platform."BillingStatements" DISABLE TRIGGER billing_statements_guard_update;
+                ALTER TABLE platform."BillingStatements" DISABLE TRIGGER billing_statements_guard_delete;
+                ALTER TABLE platform."BillingStatementLines" DISABLE TRIGGER billing_statement_lines_guard_write;
                 """ : string.Empty)}
             DELETE FROM platform."BillingStatementLines" WHERE "BillingStatementId" = @statementId;
             DELETE FROM platform."BillingStatements" WHERE "Id" = @statementId;
             DELETE FROM platform."RateCards" WHERE "Id" = @rateCardId;
-            SET session_replication_role = origin;
+            {(wasFinal ? """
+                ALTER TABLE platform."BillingStatements" ENABLE ALWAYS TRIGGER billing_statements_guard_update;
+                ALTER TABLE platform."BillingStatements" ENABLE ALWAYS TRIGGER billing_statements_guard_delete;
+                ALTER TABLE platform."BillingStatementLines" ENABLE ALWAYS TRIGGER billing_statement_lines_guard_write;
+                """ : string.Empty)}
             """;
         command.Parameters.AddWithValue("statementId", statementId);
         command.Parameters.AddWithValue("rateCardId", rateCardId);

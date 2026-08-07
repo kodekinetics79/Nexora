@@ -1,5 +1,6 @@
 import { Box, Chip } from '@mui/material';
 import type {
+  BillingMode,
   HealthStatus,
   JobStatus,
   PlanTier,
@@ -92,4 +93,24 @@ const PLAN_TONE: Record<string, Tone> = {
 
 export const PlanChip = ({ tier }: { tier: PlanTier }) => (
   <SoftChip label={tier} tone={PLAN_TONE[tier] ?? 'info'} dot={false} />
+);
+
+// Billable is the only mode that earns money, so it is the only one that reads
+// as "good". Everything else is service given away and is toned to say so —
+// Trial is time-boxed (info), Internal and Partner are open-ended (warning).
+const BILLING_MODE_TONE: Record<BillingMode, Tone> = {
+  Billable: 'success',
+  Trial: 'info',
+  Internal: 'warning',
+  Partner: 'warning',
+};
+
+/** Renders "—" for a tenant provisioned before billing modes existed. */
+export const BillingModeChip = ({ mode }: { mode: BillingMode | null }) =>
+  mode ? <SoftChip label={mode} tone={BILLING_MODE_TONE[mode]} dot={false} /> : <Dash />;
+
+export const Dash = () => (
+  <Box component="span" sx={{ color: 'text.disabled', fontWeight: 700 }}>
+    —
+  </Box>
 );

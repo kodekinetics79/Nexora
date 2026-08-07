@@ -16,6 +16,7 @@ const PlansFlagsPage = lazy(() => import('./pages/PlansFlagsPage'));
 const AuditLogPage = lazy(() => import('./pages/AuditLogPage'));
 const PlatformUsersPage = lazy(() => import('./pages/PlatformUsersPage'));
 const BillingPage = lazy(() => import('./pages/BillingPage'));
+const SupportPage = lazy(() => import('./pages/SupportPage'));
 const SecurityPage = lazy(() => import('./pages/SecurityPage'));
 
 const PlatformLoader = () => (
@@ -52,6 +53,7 @@ export default function PlatformRoutes() {
             <Route path="plans" element={<PlansFlagsPage />} />
             <Route path="users" element={<PlatformUsersPage />} />
             <Route path="billing" element={<BillingPage />} />
+            <Route path="support" element={<SupportPage />} />
             <Route path="security" element={<SecurityPage />} />
             <Route path="audit" element={<AuditLogPage />} />
             {/*

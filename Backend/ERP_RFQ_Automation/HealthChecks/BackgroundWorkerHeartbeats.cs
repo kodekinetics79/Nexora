@@ -15,6 +15,13 @@ public static class BackgroundWorkerNames
     public const string RoutingReconciliation = "routing-reconciliation";
     public const string EmailPoller = "email-poller";
     public const string AiReservationReconciliation = "ai-reservation-reconciliation";
+
+    /// <summary>
+    /// The scheduled billing run. A faulted billing loop is the most expensive silent
+    /// failure the platform has — nothing is charged, no error surfaces, and the shortfall
+    /// is only discovered when somebody asks why the month invoiced nothing.
+    /// </summary>
+    public const string BillingRun = "billing-run";
 }
 
 public sealed record BackgroundWorkerHeartbeatStatus(

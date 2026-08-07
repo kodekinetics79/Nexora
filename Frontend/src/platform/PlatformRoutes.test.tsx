@@ -22,6 +22,7 @@ vi.mock('./pages/PipelinePage', () => ({ default: () => <div>pipeline page</div>
 vi.mock('./pages/PlansFlagsPage', () => ({ default: () => <div>plans page</div> }));
 vi.mock('./pages/PlatformUsersPage', () => ({ default: () => <div>users page</div> }));
 vi.mock('./pages/BillingPage', () => ({ default: () => <div>billing page</div> }));
+vi.mock('./pages/SupportPage', () => ({ default: () => <div>support page</div> }));
 vi.mock('./pages/SecurityPage', () => ({ default: () => <div>security page</div> }));
 vi.mock('./pages/AuditLogPage', () => ({ default: () => <div>audit page</div> }));
 
@@ -86,5 +87,12 @@ describe('platform console routing', () => {
 
     expect(await screen.findByText('billing page')).toBeInTheDocument();
     expect(currentPath()).toBe('/platform/billing');
+  });
+
+  it('serves the support desk rather than swallowing it into the catch-all', async () => {
+    const currentPath = renderAt('/platform/support');
+
+    expect(await screen.findByText('support page')).toBeInTheDocument();
+    expect(currentPath()).toBe('/platform/support');
   });
 });

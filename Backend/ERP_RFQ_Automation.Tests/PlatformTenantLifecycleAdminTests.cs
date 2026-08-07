@@ -220,7 +220,9 @@ public sealed class PlatformTenantLifecycleAdminTests
             new PlatformAuditService(context, NullLogger<PlatformAuditService>.Instance),
             NullLogger<TenantsController>.Instance,
             services.GetRequiredService<IServiceScopeFactory>(),
-            new TenantScopeAccessor())
+            new TenantScopeAccessor(),
+            ProvisioningFixture.Baseline(context),
+            ProvisioningFixture.Invitations(context))
         {
             ControllerContext = new ControllerContext
             {
@@ -232,7 +234,7 @@ public sealed class PlatformTenantLifecycleAdminTests
     private static ClaimsPrincipal PlatformActor() => new(new ClaimsIdentity(
     [
         new Claim("sub", "7"),
-        new Claim("email", "operator@example.test")
+        new Claim("email", "operator@example.test"), new Claim("platformRole", "Owner")
     ], "Platform"));
 
     private static async Task<long> SeedTenant(TestDb db, string slug, TenantStatus status)

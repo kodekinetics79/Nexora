@@ -6,6 +6,7 @@ export const platformKeys = {
   overview: () => [...platformKeys.all, 'overview'] as const,
   tenants: () => [...platformKeys.all, 'tenants'] as const,
   tenant: (id: string) => [...platformKeys.all, 'tenant', id] as const,
+  tenantOperations: (id: string) => [...platformKeys.all, 'tenant', id, 'operations'] as const,
   queue: () => [...platformKeys.all, 'queue'] as const,
   jobs: (filter?: unknown) => [...platformKeys.all, 'jobs', filter ?? null] as const,
   plans: () => [...platformKeys.all, 'plans'] as const,
@@ -19,4 +20,31 @@ export const platformKeys = {
     [...platformKeys.all, 'billing', 'cost', tenantId, period] as const,
   rateCards: () => [...platformKeys.all, 'billing', 'rate-cards'] as const,
   statements: (filter?: unknown) => [...platformKeys.all, 'billing', 'statements', filter ?? null] as const,
+  statement: (id: string) => [...platformKeys.all, 'billing', 'statement', id] as const,
+  revenueRisk: (filter?: unknown) => [...platformKeys.all, 'billing', 'revenue-risk', filter ?? null] as const,
+  tenantBilling: (tenantId: string) => [...platformKeys.all, 'billing', 'tenant', tenantId] as const,
+
+  // Durable provisioning. The execution key is polled, so it is per-id rather than a list.
+  provisioningExecution: (id: string) => [...platformKeys.all, 'provisioning', 'execution', id] as const,
+  provisioningExecutions: (filter?: unknown) =>
+    [...platformKeys.all, 'provisioning', 'executions', filter ?? null] as const,
+  provisioningDrafts: () => [...platformKeys.all, 'provisioning', 'drafts'] as const,
+  provisioningDraft: (id: string) => [...platformKeys.all, 'provisioning', 'draft', id] as const,
+  slugCheck: (slug: string) => [...platformKeys.all, 'provisioning', 'slug-check', slug] as const,
+
+  // Offboarding. Keyed per tenant because every button on the lifecycle tab is driven by
+  // the server's `can*` flags in this one payload.
+  offboarding: (tenantId: string) => [...platformKeys.all, 'offboarding', tenantId] as const,
+  offboardingPending: () => [...platformKeys.all, 'offboarding', 'pending'] as const,
+  purgePreview: (tenantId: string) => [...platformKeys.all, 'offboarding', tenantId, 'purge-preview'] as const,
+
+  supportTickets: (filter?: unknown) => [...platformKeys.all, 'support', 'tickets', filter ?? null] as const,
+  supportTicket: (id: string) => [...platformKeys.all, 'support', 'ticket', id] as const,
+  supportTicketTimeline: (id: string) => [...platformKeys.all, 'support', 'ticket', id, 'timeline'] as const,
+
+  auditQuery: (filter?: unknown) => [...platformKeys.all, 'audit', 'query', filter ?? null] as const,
+  auditEntry: (id: string) => [...platformKeys.all, 'audit', 'entry', id] as const,
+  auditActions: (filter?: unknown) => [...platformKeys.all, 'audit', 'actions', filter ?? null] as const,
+  tenantTimeline: (tenantId: string, filter?: unknown) =>
+    [...platformKeys.all, 'audit', 'tenant-timeline', tenantId, filter ?? null] as const,
 };

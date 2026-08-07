@@ -1,24 +1,55 @@
 import { jwtDecode } from 'jwt-decode';
 import platformHttp from './platformHttp';
+import { BILLING_MODES } from '../types';
 import type {
   AuditEntry,
+  BillingMode,
   BillingStatement,
+  BillingStatementSummary,
   CreatePlatformOperatorInput,
   CreateRateCardInput,
+  CreateSupportTicketInput,
   ExtractionJob,
   ImpersonationSession,
   ImpersonationTicket,
   JobStatus,
   OverviewMetrics,
+  PagedResult,
+  PendingTenantDeletion,
   Plan,
+  PlatformAuditAction,
+  PlatformAuditEntry,
+  PlatformAuditEntryDetail,
   PlatformOperator,
   PlatformOperatorRole,
+  ProvisionedBaseline,
+  ProvisionedBilling,
+  ProvisioningDraftSummary,
+  ProvisioningExecution,
   ProvisionTenantInput,
+  ProvisionTenantRequestBody,
   ProvisionTenantResult,
   QueueStats,
   RateCard,
+  RevenueRiskReport,
+  SetCommercialTermsInput,
+  SlugAvailability,
+  SubmitProvisioningResult,
+  SupportTicketDetail,
+  SupportTicketSeverity,
+  SupportTicketSummary,
+  SupportTicketTimeline,
   Tenant,
+  TenantBillingProfile,
   TenantCostReport,
+  TenantErasureResult,
+  TenantExportDownload,
+  TenantOffboardingStatus,
+  TenantOperationsSummary,
+  TenantPurgePreview,
+  TenantPurgeResult,
+  TenantRevenueRisk,
+  TenantTimelineEntry,
   TenantUsageReadout,
   UpdateRateCardInput,
   UpsertPlanInput,
@@ -39,6 +70,41 @@ export interface JobQuery {
 export interface StatementQuery {
   tenantId?: string;
   status?: string;
+}
+
+export interface RevenueRiskQuery {
+  onlyAtRisk?: boolean;
+  includeArchived?: boolean;
+  onlyCommercialConfigurationRequired?: boolean;
+}
+
+export interface SupportTicketQuery {
+  tenantId?: string;
+  status?: string[];
+  severity?: string[];
+  assignedToPlatformUserId?: string;
+  unassigned?: boolean;
+  includeFinished?: boolean;
+  search?: string;
+  fromUtc?: string;
+  toUtc?: string;
+  page?: number;
+  pageSize?: number;
+}
+
+export interface AuditExplorerQuery {
+  tenantId?: string;
+  actorPlatformUserId?: string;
+  action?: string[];
+  actionPrefix?: string;
+  targetType?: string;
+  targetId?: string;
+  result?: string;
+  fromUtc?: string;
+  toUtc?: string;
+  search?: string;
+  page?: number;
+  pageSize?: number;
 }
 
 export interface PlatformApi {
@@ -74,6 +140,88 @@ export interface PlatformApi {
   finalizeStatement(id: string): Promise<BillingStatement>;
   getBillingCost(tenantId: string, period: string): Promise<TenantCostReport>;
   listAudit(query?: AuditQuery): Promise<AuditEntry[]>;
+
+  // --- durable provisioning ---
+  submitProvisioning(
+    input: ProvisionTenantInput,
+    options: { idempotencyKey: string; fromDraftId?: string | null },
+  ): Promise<SubmitProvisioningResult>;
+  getProvisioningExecution(id: string): Promise<ProvisioningExecution>;
+  listProvisioningExecutions(query?: { state?: string; take?: number }): Promise<ProvisioningExecution[]>;
+  retryProvisioning(id: string, body: { step?: string | null; reason: string }): Promise<ProvisioningExecution>;
+  cancelProvisioning(id: string, reason: string): Promise<ProvisioningExecution>;
+  checkSlug(params: { slug?: string; name?: string }): Promise<SlugAvailability>;
+  listReservedSlugs(): Promise<string[]>;
+  listProvisioningDrafts(): Promise<ProvisioningDraftSummary[]>;
+  getProvisioningDraft(id: string): Promise<ProvisioningDraftSummary>;
+  createProvisioningDraft(name: string, payload: ProvisionTenantRequestBody): Promise<ProvisioningDraftSummary>;
+  updateProvisioningDraft(
+    id: string,
+    name: string,
+    payload: ProvisionTenantRequestBody,
+    version: number,
+  ): Promise<ProvisioningDraftSummary>;
+  deleteProvisioningDraft(id: string): Promise<void>;
+
+  // --- offboarding ---
+  getOffboarding(tenantId: string): Promise<TenantOffboardingStatus>;
+  listPendingDeletions(): Promise<PendingTenantDeletion[]>;
+  getPurgePreview(tenantId: string): Promise<TenantPurgePreview>;
+  exportTenantData(tenantId: string, reason: string): Promise<TenantExportDownload>;
+  scheduleTenantDeletion(
+    tenantId: string,
+    body: { reason: string; retentionDays?: number | null },
+  ): Promise<TenantOffboardingStatus>;
+  cancelTenantDeletion(tenantId: string, reason: string): Promise<TenantOffboardingStatus>;
+  purgeTenant(tenantId: string, body: { reason: string; confirmation: string }): Promise<TenantPurgeResult>;
+  eraseTenantPersonalData(
+    tenantId: string,
+    body: { reason: string; confirmation: string },
+  ): Promise<TenantErasureResult>;
+
+  // --- billing console ---
+  getRevenueRisk(query?: RevenueRiskQuery): Promise<RevenueRiskReport>;
+  getTenantBillingProfile(tenantId: string): Promise<TenantBillingProfile>;
+  setTenantRateCard(
+    tenantId: string,
+    body: { rateCardId: string | null; reason: string },
+  ): Promise<TenantBillingProfile>;
+  setTenantCommercialTerms(tenantId: string, body: SetCommercialTermsInput): Promise<TenantBillingProfile>;
+  getStatement(id: string): Promise<BillingStatement>;
+
+  // --- support desk ---
+  listSupportTickets(query?: SupportTicketQuery): Promise<PagedResult<SupportTicketSummary>>;
+  getSupportTicket(id: string): Promise<SupportTicketDetail>;
+  getSupportTicketTimeline(id: string): Promise<SupportTicketTimeline>;
+  createSupportTicket(input: CreateSupportTicketInput): Promise<SupportTicketDetail>;
+  addSupportTicketNote(
+    id: string,
+    body: { body: string; isInternal: boolean; expectedVersion?: number },
+  ): Promise<SupportTicketDetail>;
+  transitionSupportTicket(
+    id: string,
+    body: { status: string; reason: string; resolution?: string | null; expectedVersion?: number },
+  ): Promise<SupportTicketDetail>;
+  assignSupportTicket(
+    id: string,
+    body: { assignToPlatformUserId: string | null; reason?: string; expectedVersion?: number },
+  ): Promise<SupportTicketDetail>;
+  changeSupportTicketSeverity(
+    id: string,
+    body: { severity: SupportTicketSeverity; reason: string; expectedVersion?: number },
+  ): Promise<SupportTicketDetail>;
+
+  // --- audit explorer ---
+  queryAudit(query?: AuditExplorerQuery): Promise<PagedResult<PlatformAuditEntry>>;
+  getAuditEntry(id: string): Promise<PlatformAuditEntryDetail>;
+  listAuditActions(query?: { tenantId?: string; fromUtc?: string }): Promise<PlatformAuditAction[]>;
+  getTenantTimeline(
+    tenantId: string,
+    query?: { fromUtc?: string; toUtc?: string; limit?: number },
+  ): Promise<TenantTimelineEntry[]>;
+
+  // --- one-call tenant operations summary ---
+  getTenantOperationsSummary(tenantId: string): Promise<TenantOperationsSummary>;
 }
 
 // --- backend wire shapes (ids arrive as numbers) ----------------------------
@@ -87,6 +235,53 @@ type BackendTenant = {
   planCode?: string | null;
   createdOn?: string | null;
   statusReason?: string | null;
+  // Company + commercial columns. Optional on the wire because the tenant list
+  // predates them: an older DTO simply omits them and every consumer already
+  // treats a missing value as "not recorded".
+  legalName?: string | null;
+  registrationNumber?: string | null;
+  taxNumber?: string | null;
+  countryCode?: string | null;
+  industry?: string | null;
+  website?: string | null;
+  addressLine1?: string | null;
+  addressLine2?: string | null;
+  city?: string | null;
+  stateProvince?: string | null;
+  postalCode?: string | null;
+  phone?: string | null;
+  contactEmail?: string | null;
+  logoUrl?: string | null;
+  billingMode?: string | null;
+  billingModeReason?: string | null;
+  rateCardId?: string | number | null;
+  billingStartsOn?: string | null;
+  trialEndsOn?: string | null;
+  contractStartOn?: string | null;
+  contractEndOn?: string | null;
+  paymentTermsDays?: number | null;
+  purchaseOrderReference?: string | null;
+  billingContactName?: string | null;
+  billingContactEmail?: string | null;
+  billingAddress?: string | null;
+  accountOwnerEmail?: string | null;
+  baseCurrencyCode?: string | null;
+  timeZoneId?: string | null;
+  locale?: string | null;
+  dataRegion?: string | null;
+};
+
+type BackendProvisionResult = {
+  tenant: BackendTenant;
+  foundingAdmin: {
+    userId: string | number;
+    email: string;
+    roleName: string;
+    generatedPassword?: string | null;
+    invitation?: { expiresAtUtc: string; activationUrl: string } | null;
+  };
+  baseline?: ProvisionedBaseline | null;
+  billing?: (Omit<ProvisionedBilling, 'warnings'> & { warnings?: string[] | null }) | null;
 };
 
 type BackendImpersonation = {
@@ -134,9 +329,25 @@ const normalizeTenantStatus = (status?: string | null): Tenant['status'] => {
 };
 
 /**
+ * A billing mode is only trusted when it is one the console actually knows how
+ * to reason about. An unrecognised string becomes null so the UI shows "—"
+ * rather than a chip claiming a commercial posture nobody defined.
+ */
+const normalizeBillingMode = (mode?: string | null): BillingMode | null => {
+  const match = BILLING_MODES.find((known) => known.toLowerCase() === (mode ?? '').toLowerCase());
+  return match ?? null;
+};
+
+/** Blank strings on the wire mean "not recorded", exactly like an absent field. */
+const orNull = (value?: string | null): string | null => {
+  const trimmed = (value ?? '').trim();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
+/**
  * Maps the backend TenantSummaryDto 1:1. Fields the backend does not send
- * (usage, region, contact, pipeline health) are NOT fabricated here — the UI
- * renders "—" for anything it does not have.
+ * (usage, pipeline health) are NOT fabricated here — the UI renders "—" for
+ * anything it does not have.
  */
 const normalizeTenant = (tenant: BackendTenant): Tenant => ({
   id: String(tenant.id),
@@ -147,6 +358,41 @@ const normalizeTenant = (tenant: BackendTenant): Tenant => ({
   status: normalizeTenantStatus(tenant.status),
   statusReason: tenant.statusReason ?? null,
   createdAt: tenant.createdOn ?? null,
+
+  legalName: orNull(tenant.legalName),
+  registrationNumber: orNull(tenant.registrationNumber),
+  taxNumber: orNull(tenant.taxNumber),
+  // Upper-cased because ISO-3166 alpha-2 is, and because the country filter and
+  // Intl.DisplayNames both key off the canonical form.
+  countryCode: orNull(tenant.countryCode)?.toUpperCase() ?? null,
+  industry: orNull(tenant.industry),
+  website: orNull(tenant.website),
+  addressLine1: orNull(tenant.addressLine1),
+  addressLine2: orNull(tenant.addressLine2),
+  city: orNull(tenant.city),
+  stateProvince: orNull(tenant.stateProvince),
+  postalCode: orNull(tenant.postalCode),
+  phone: orNull(tenant.phone),
+  contactEmail: orNull(tenant.contactEmail),
+  logoUrl: orNull(tenant.logoUrl),
+
+  billingMode: normalizeBillingMode(tenant.billingMode),
+  billingModeReason: orNull(tenant.billingModeReason),
+  rateCardId: tenant.rateCardId == null ? null : String(tenant.rateCardId),
+  billingStartsOn: orNull(tenant.billingStartsOn),
+  trialEndsOn: orNull(tenant.trialEndsOn),
+  contractStartOn: orNull(tenant.contractStartOn),
+  contractEndOn: orNull(tenant.contractEndOn),
+  paymentTermsDays: tenant.paymentTermsDays ?? null,
+  purchaseOrderReference: orNull(tenant.purchaseOrderReference),
+  billingContactName: orNull(tenant.billingContactName),
+  billingContactEmail: orNull(tenant.billingContactEmail),
+  billingAddress: orNull(tenant.billingAddress),
+  accountOwnerEmail: orNull(tenant.accountOwnerEmail),
+  baseCurrencyCode: orNull(tenant.baseCurrencyCode)?.toUpperCase() ?? null,
+  timeZoneId: orNull(tenant.timeZoneId),
+  locale: orNull(tenant.locale),
+  dataRegion: orNull(tenant.dataRegion),
 });
 
 const normalizePlan = (plan: BackendPlan): Plan => ({ ...plan, id: String(plan.id) });
@@ -184,6 +430,252 @@ const readJti = (token: string): string | null => {
   }
 };
 
+// --- id normalisation -------------------------------------------------------
+// Every platform id is a `long` on the wire. The console keeps them as strings so
+// nothing rounds at 2^53 and so a react key, a route param and a DTO field all
+// compare with `===`.
+
+const asId = (value: string | number): string => String(value);
+const asIdOrNull = (value: string | number | null | undefined): string | null =>
+  value === null || value === undefined ? null : String(value);
+
+/**
+ * The one place the console's `ProvisionTenantInput` becomes the server's
+ * `ProvisionTenantRequest`. Shared by the legacy synchronous endpoint and the durable
+ * submit so the two can never drift into sending different tenants for the same form.
+ */
+export const toProvisionRequestBody = (input: ProvisionTenantInput): ProvisionTenantRequestBody => ({
+  name: input.name.trim(),
+  slug: orNull(input.slug),
+  legalName: orNull(input.legalName),
+  registrationNumber: orNull(input.registrationNumber),
+  taxNumber: orNull(input.taxNumber),
+  countryCode: orNull(input.countryCode)?.toUpperCase() ?? null,
+  industry: orNull(input.industry),
+  website: orNull(input.website),
+  addressLine1: orNull(input.addressLine1),
+  addressLine2: orNull(input.addressLine2),
+  city: orNull(input.city),
+  stateProvince: orNull(input.stateProvince),
+  postalCode: orNull(input.postalCode),
+  phone: orNull(input.phone),
+  contactEmail: orNull(input.contactEmail),
+  logoUrl: orNull(input.logoUrl),
+
+  baseCurrencyCode: orNull(input.baseCurrencyCode)?.toUpperCase() ?? null,
+  timeZoneId: orNull(input.timeZoneId),
+  locale: orNull(input.locale),
+  dataRegion: orNull(input.dataRegion),
+
+  planId: input.planId == null ? null : Number(input.planId),
+  billingMode: input.billingMode,
+  billingModeReason: orNull(input.billingModeReason),
+  rateCardId: input.rateCardId == null ? null : Number(input.rateCardId),
+  billingStartsOn: orNull(input.billingStartsOn),
+  trialEndsOn: orNull(input.trialEndsOn),
+  contractStartOn: orNull(input.contractStartOn),
+  contractEndOn: orNull(input.contractEndOn),
+  paymentTermsDays: input.paymentTermsDays,
+  purchaseOrderReference: orNull(input.purchaseOrderReference),
+  billingContactName: orNull(input.billingContactName),
+  billingContactEmail: orNull(input.billingContactEmail),
+  billingAddress: orNull(input.billingAddress),
+  accountOwnerEmail: orNull(input.accountOwnerEmail),
+
+  adminFirstName: input.adminFirstName.trim(),
+  adminLastName: input.adminLastName.trim(),
+  adminEmail: input.adminEmail.trim(),
+  adminJobTitle: orNull(input.adminJobTitle),
+  adminPhone: orNull(input.adminPhone),
+  adminActivation: input.adminActivation,
+  // A password must never ride along on the invite path, where the whole point is that no
+  // credential exists until the administrator sets one themselves.
+  adminPassword: input.adminActivation === 'password' ? input.adminPassword || null : null,
+});
+
+// --- normalizers for the operations surfaces --------------------------------
+// Each takes the wire shape (numeric ids, nullable collections) and produces the
+// console's shape. Absent collections become empty arrays; absent scalars stay null,
+// because the UI renders "—" for anything the backend did not send.
+
+type WireRecord = Record<string, unknown>;
+
+const num = (value: unknown): number => (typeof value === 'number' ? value : Number(value ?? 0));
+
+const normalizeExecution = (wire: WireRecord): ProvisioningExecution => ({
+  id: asId(wire.id as string | number),
+  state: wire.state as ProvisioningExecution['state'],
+  slug: (wire.slug as string) ?? '',
+  name: (wire.name as string) ?? '',
+  adminEmail: (wire.adminEmail as string) ?? '',
+  adminActivation: (wire.adminActivation as string) ?? '',
+  currentStep: (wire.currentStep as string) ?? null,
+  failedStep: (wire.failedStep as string) ?? null,
+  failureReason: (wire.failureReason as string) ?? null,
+  failureIsTerminal: Boolean(wire.failureIsTerminal),
+  tenantId: asIdOrNull(wire.tenantId as string | number | null),
+  provisionedBusinessUnitId: asIdOrNull(wire.provisionedBusinessUnitId as string | number | null),
+  foundingUserId: asIdOrNull(wire.foundingUserId as string | number | null),
+  correlationId: (wire.correlationId as string) ?? '',
+  requestedBy: (wire.requestedBy as string) ?? '',
+  createdOn: wire.createdOn as string,
+  startedOn: (wire.startedOn as string) ?? null,
+  completedOn: (wire.completedOn as string) ?? null,
+  attemptCount: num(wire.attemptCount),
+  cancelledBy: (wire.cancelledBy as string) ?? null,
+  cancellationReason: (wire.cancellationReason as string) ?? null,
+  steps: ((wire.steps as WireRecord[]) ?? []).map((step) => ({
+    step: step.step as string,
+    label: step.label as string,
+    ordinal: num(step.ordinal),
+    status: step.status as ProvisioningExecution['steps'][number]['status'],
+    attemptCount: num(step.attemptCount),
+    startedOn: (step.startedOn as string) ?? null,
+    completedOn: (step.completedOn as string) ?? null,
+    durationMs: step.durationMs == null ? null : num(step.durationMs),
+    failureCode: (step.failureCode as string) ?? null,
+    failureReason: (step.failureReason as string) ?? null,
+    detail: (step.detail as string) ?? null,
+    isRetriable: Boolean(step.isRetriable),
+  })),
+  completedStepCount: num(wire.completedStepCount),
+  totalStepCount: num(wire.totalStepCount),
+});
+
+const normalizeDraft = (wire: WireRecord): ProvisioningDraftSummary => ({
+  id: asId(wire.id as string | number),
+  name: (wire.name as string) ?? '',
+  ownerEmail: (wire.ownerEmail as string) ?? '',
+  createdOn: wire.createdOn as string,
+  updatedOn: wire.updatedOn as string,
+  version: num(wire.version),
+  submittedExecutionId: asIdOrNull(wire.submittedExecutionId as string | number | null),
+  payload: (wire.payload as ProvisionTenantRequestBody | null) ?? null,
+});
+
+const normalizeOffboarding = (wire: WireRecord): TenantOffboardingStatus => ({
+  ...(wire as unknown as TenantOffboardingStatus),
+  tenantId: asId(wire.tenantId as string | number),
+  history: ((wire.history as WireRecord[]) ?? []).map((event) => ({
+    ...(event as unknown as TenantOffboardingStatus['history'][number]),
+    id: asId(event.id as string | number),
+  })),
+  exports: ((wire.exports as WireRecord[]) ?? []).map((receipt) => ({
+    ...(receipt as unknown as TenantOffboardingStatus['exports'][number]),
+    id: asId(receipt.id as string | number),
+  })),
+  disclosures: (wire.disclosures as string[]) ?? [],
+});
+
+const normalizeRevenueRisk = (wire: WireRecord): TenantRevenueRisk => ({
+  ...(wire as unknown as TenantRevenueRisk),
+  tenantId: asId(wire.tenantId as string | number),
+  planId: asIdOrNull(wire.planId as string | number | null),
+  pinnedRateCardId: asIdOrNull(wire.pinnedRateCardId as string | number | null),
+  lastStatementRateCardId: asIdOrNull(wire.lastStatementRateCardId as string | number | null),
+  leakReasons: (wire.leakReasons as string[]) ?? [],
+});
+
+const normalizeStatementSummary = (wire: WireRecord): BillingStatementSummary => ({
+  ...(wire as unknown as BillingStatementSummary),
+  id: asId(wire.id as string | number),
+  rateCardId: asId(wire.rateCardId as string | number),
+});
+
+const normalizeBillingProfile = (wire: WireRecord): TenantBillingProfile => ({
+  ...(wire as unknown as TenantBillingProfile),
+  tenantId: asId(wire.tenantId as string | number),
+  planId: asIdOrNull(wire.planId as string | number | null),
+  pinnedRateCardId: asIdOrNull(wire.pinnedRateCardId as string | number | null),
+  revenueRisk: normalizeRevenueRisk(wire.revenueRisk as WireRecord),
+  statements: ((wire.statements as WireRecord[]) ?? []).map(normalizeStatementSummary),
+});
+
+const normalizeTicketSummary = (wire: WireRecord): SupportTicketSummary => ({
+  ...(wire as unknown as SupportTicketSummary),
+  id: asId(wire.id as string | number),
+  tenantId: asId(wire.tenantId as string | number),
+  assignedToPlatformUserId: asIdOrNull(wire.assignedToPlatformUserId as string | number | null),
+  openedByPlatformUserId: asIdOrNull(wire.openedByPlatformUserId as string | number | null),
+});
+
+const normalizeTicketDetail = (wire: WireRecord): SupportTicketDetail => ({
+  ...normalizeTicketSummary(wire),
+  ...(wire as unknown as Pick<SupportTicketDetail, 'body' | 'resolution' | 'redactedReason' | 'redactedAtUtc'>),
+  requesterTenantUserId: asIdOrNull(wire.requesterTenantUserId as string | number | null),
+  notes: ((wire.notes as WireRecord[]) ?? []).map((note) => ({
+    ...(note as unknown as SupportTicketDetail['notes'][number]),
+    id: asId(note.id as string | number),
+    authorPlatformUserId: asIdOrNull(note.authorPlatformUserId as string | number | null),
+  })),
+  links: ((wire.links as WireRecord[]) ?? []).map((link) => ({
+    ...(link as unknown as SupportTicketDetail['links'][number]),
+    id: asId(link.id as string | number),
+  })),
+  allowedTransitions: (wire.allowedTransitions as string[]) ?? [],
+});
+
+const normalizeAuditEntry = (wire: WireRecord): PlatformAuditEntry => ({
+  ...(wire as unknown as PlatformAuditEntry),
+  id: asId(wire.id as string | number),
+  actorPlatformUserId: asId(wire.actorPlatformUserId as string | number),
+  tenantId: asIdOrNull(wire.tenantId as string | number | null),
+});
+
+const normalizePaged = <TWire extends WireRecord, TOut>(
+  wire: { items?: TWire[]; page?: number; pageSize?: number; totalCount?: number; hasMore?: boolean },
+  map: (item: TWire) => TOut,
+): PagedResult<TOut> => ({
+  items: (wire.items ?? []).map(map),
+  page: wire.page ?? 1,
+  pageSize: wire.pageSize ?? 0,
+  totalCount: wire.totalCount ?? 0,
+  hasMore: Boolean(wire.hasMore),
+});
+
+/**
+ * Axios serialises `{ status: ['New','Open'] }` as `status[]=New`, which ASP.NET Core's
+ * `string[]` binder does not read. Repeating the bare key is what it does understand, so
+ * array filters are expanded here rather than at every call site.
+ */
+const listParams = (query: Record<string, unknown>): URLSearchParams => {
+  const params = new URLSearchParams();
+  Object.entries(query).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return;
+    if (Array.isArray(value)) {
+      value.forEach((item) => params.append(key, String(item)));
+      return;
+    }
+    params.append(key, String(value));
+  });
+  return params;
+};
+
+/**
+ * Pulls the download name out of `Content-Disposition`, falling back to a generated one.
+ * The server already names the file after the receipt id; losing that through a proxy
+ * must not stop the operator from saving the export.
+ */
+const filenameFromDisposition = (disposition: string | undefined, fallback: string): string => {
+  const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition ?? '');
+  return match ? decodeURIComponent(match[1]) : fallback;
+};
+
+/**
+ * Replaces a Blob error body with the parsed problem object, in place, so the shared
+ * message extractor can read it. Silent on failure: an unparseable body means the caller
+ * falls back to its own message, which is still better than surfacing raw bytes.
+ */
+const decodeBlobProblem = async (error: unknown): Promise<void> => {
+  const response = (error as { response?: { data?: unknown } } | undefined)?.response;
+  if (!response || !(response.data instanceof Blob)) return;
+  try {
+    response.data = JSON.parse(await response.data.text());
+  } catch {
+    // Not JSON — leave the Blob alone.
+  }
+};
+
 const httpPlatformApi: PlatformApi = {
   getOverview: async () => (await platformHttp.get<OverviewMetrics>('/api/platform/overview')).data,
   listTenants: async () =>
@@ -194,19 +686,22 @@ const httpPlatformApi: PlatformApi = {
     // The response is ProvisionTenantResponse, not a bare tenant: it carries the founding
     // admin and, when the server generated it, a one-time credential that exists in this
     // payload and nowhere else.
-    const { data } = await platformHttp.post<{
-      tenant: BackendTenant;
-      foundingAdmin: { userId: number; email: string; roleName: string; generatedPassword: string | null };
-    }>('/api/platform/tenants', {
-      name: input.name,
-      slug: input.slug,
-      planId: input.planId == null ? null : Number(input.planId),
-      adminEmail: input.adminEmail,
-      adminFirstName: input.adminFirstName,
-      adminLastName: input.adminLastName,
-      adminPassword: input.adminPassword || null,
-    });
-    return { tenant: normalizeTenant(data.tenant), foundingAdmin: data.foundingAdmin };
+    const { data } = await platformHttp.post<BackendProvisionResult>(
+      '/api/platform/tenants',
+      toProvisionRequestBody(input),
+    );
+    return {
+      tenant: normalizeTenant(data.tenant),
+      foundingAdmin: {
+        userId: String(data.foundingAdmin.userId),
+        email: data.foundingAdmin.email,
+        roleName: data.foundingAdmin.roleName,
+        generatedPassword: data.foundingAdmin.generatedPassword ?? null,
+        invitation: data.foundingAdmin.invitation ?? null,
+      },
+      baseline: data.baseline ?? null,
+      billing: data.billing ? { ...data.billing, warnings: data.billing.warnings ?? [] } : null,
+    };
   },
   suspendTenant: async (id, reason) =>
     normalizeTenant((await platformHttp.post<BackendTenant>(`/api/platform/tenants/${id}/suspend`, { reason })).data),
@@ -288,6 +783,326 @@ const httpPlatformApi: PlatformApi = {
   },
   listAudit: async (query) =>
     (await platformHttp.get<AuditEntry[]>('/api/platform/audit', { params: query })).data,
+
+  // --- durable provisioning -------------------------------------------------
+
+  submitProvisioning: async (input, { idempotencyKey, fromDraftId }) => {
+    // The key travels as the conventional header. A double-submit — an impatient second
+    // click, a retried request after a proxy timeout — then replays the ORIGINAL execution
+    // instead of creating a second tenant for the same customer.
+    const { data } = await platformHttp.post<{
+      execution: WireRecord;
+      created?: boolean;
+      generatedPassword?: string | null;
+      secretNotice?: string | null;
+    }>(
+      '/api/platform/provisioning/tenants',
+      {
+        tenant: toProvisionRequestBody(input),
+        idempotencyKey,
+        fromDraftId: fromDraftId == null ? null : Number(fromDraftId),
+      },
+      { headers: { 'Idempotency-Key': idempotencyKey } },
+    );
+    return {
+      execution: normalizeExecution(data.execution),
+      created: Boolean(data.created),
+      generatedPassword: data.generatedPassword ?? null,
+      secretNotice: data.secretNotice ?? null,
+    };
+  },
+  getProvisioningExecution: async (id) =>
+    normalizeExecution(
+      (await platformHttp.get<WireRecord>(`/api/platform/provisioning/executions/${id}`)).data,
+    ),
+  listProvisioningExecutions: async (query) =>
+    (await platformHttp.get<WireRecord[]>('/api/platform/provisioning/executions', { params: query })).data.map(
+      normalizeExecution,
+    ),
+  retryProvisioning: async (id, body) =>
+    normalizeExecution(
+      (await platformHttp.post<WireRecord>(`/api/platform/provisioning/executions/${id}/retry`, {
+        step: body.step ?? null,
+        reason: body.reason,
+      })).data,
+    ),
+  cancelProvisioning: async (id, reason) =>
+    normalizeExecution(
+      (await platformHttp.post<WireRecord>(`/api/platform/provisioning/executions/${id}/cancel`, { reason })).data,
+    ),
+  checkSlug: async (params) =>
+    (await platformHttp.get<SlugAvailability>('/api/platform/provisioning/slug-check', { params })).data,
+  listReservedSlugs: async () =>
+    (await platformHttp.get<string[]>('/api/platform/provisioning/reserved-slugs')).data,
+  listProvisioningDrafts: async () =>
+    (await platformHttp.get<WireRecord[]>('/api/platform/provisioning/drafts')).data.map(normalizeDraft),
+  getProvisioningDraft: async (id) =>
+    normalizeDraft((await platformHttp.get<WireRecord>(`/api/platform/provisioning/drafts/${id}`)).data),
+  createProvisioningDraft: async (name, payload) =>
+    normalizeDraft(
+      (await platformHttp.post<WireRecord>('/api/platform/provisioning/drafts', { name, payload })).data,
+    ),
+  updateProvisioningDraft: async (id, name, payload, version) =>
+    normalizeDraft(
+      // The version goes back with every save so two tabs open on one draft cannot
+      // silently overwrite each other — the server answers 409 rather than losing work.
+      (await platformHttp.put<WireRecord>(`/api/platform/provisioning/drafts/${id}`, {
+        name,
+        payload,
+        version,
+      })).data,
+    ),
+  deleteProvisioningDraft: async (id) => {
+    await platformHttp.delete(`/api/platform/provisioning/drafts/${id}`);
+  },
+
+  // --- offboarding ----------------------------------------------------------
+
+  getOffboarding: async (tenantId) =>
+    normalizeOffboarding(
+      (await platformHttp.get<WireRecord>(`/api/platform/tenants/${tenantId}/offboarding`)).data,
+    ),
+  listPendingDeletions: async () =>
+    (await platformHttp.get<WireRecord[]>('/api/platform/tenants/offboarding/pending')).data.map((wire) => ({
+      ...(wire as unknown as PendingTenantDeletion),
+      tenantId: asId(wire.tenantId as string | number),
+    })),
+  getPurgePreview: async (tenantId) => {
+    const wire = (
+      await platformHttp.get<WireRecord>(`/api/platform/tenants/${tenantId}/offboarding/purge-preview`)
+    ).data;
+    return {
+      ...(wire as unknown as TenantPurgePreview),
+      tenantId: asId(wire.tenantId as string | number),
+      businessUnitId: asId(wire.businessUnitId as string | number),
+      tables: (wire.tables as TenantPurgePreview['tables']) ?? [],
+      preserved: (wire.preserved as string[]) ?? [],
+    };
+  },
+  exportTenantData: async (tenantId, reason) => {
+    // The export is a file, not JSON: it is handed to the customer, and the receipt hash
+    // in the response headers is what proves the bytes they received are the bytes we sent.
+    const response = await platformHttp
+      .post<Blob>(
+        `/api/platform/tenants/${tenantId}/offboarding/export`,
+        { reason },
+        { responseType: 'blob' },
+      )
+      .catch(async (error: unknown) => {
+        // `responseType: 'blob'` applies to the FAILURE body too, so a refusal arrives as
+        // a Blob containing `{error: "…"}` and every message extractor downstream sees an
+        // object with no `error` property. Decoded here, once, so a refused export reads
+        // like every other refused platform call instead of a generic failure line.
+        await decodeBlobProblem(error);
+        throw error;
+      });
+    const headers = response.headers as Record<string, string | undefined>;
+    const rows = headers['x-nexora-export-rows'];
+    return {
+      blob: response.data,
+      filename: filenameFromDisposition(
+        headers['content-disposition'],
+        `nexora-export-tenant-${tenantId}.json`,
+      ),
+      sha256: headers['x-nexora-export-sha256'] ?? null,
+      receiptId: headers['x-nexora-export-receipt'] ?? null,
+      totalRows: rows == null ? null : Number(rows),
+    };
+  },
+  scheduleTenantDeletion: async (tenantId, body) =>
+    normalizeOffboarding(
+      (await platformHttp.post<WireRecord>(
+        `/api/platform/tenants/${tenantId}/offboarding/schedule-deletion`,
+        { reason: body.reason, retentionDays: body.retentionDays ?? null },
+      )).data,
+    ),
+  cancelTenantDeletion: async (tenantId, reason) =>
+    normalizeOffboarding(
+      (await platformHttp.post<WireRecord>(
+        `/api/platform/tenants/${tenantId}/offboarding/cancel-deletion`,
+        { reason },
+      )).data,
+    ),
+  purgeTenant: async (tenantId, body) => {
+    const wire = (
+      await platformHttp.post<WireRecord>(`/api/platform/tenants/${tenantId}/offboarding/purge`, body)
+    ).data;
+    return {
+      ...(wire as unknown as TenantPurgeResult),
+      tenantId: asId(wire.tenantId as string | number),
+      tables: (wire.tables as TenantPurgeResult['tables']) ?? [],
+      disclosures: (wire.disclosures as string[]) ?? [],
+    };
+  },
+  eraseTenantPersonalData: async (tenantId, body) => {
+    const wire = (
+      await platformHttp.post<WireRecord>(
+        `/api/platform/tenants/${tenantId}/offboarding/erase-personal-data`,
+        body,
+      )
+    ).data;
+    return {
+      ...(wire as unknown as TenantErasureResult),
+      tenantId: asId(wire.tenantId as string | number),
+      targets: (wire.targets as TenantErasureResult['targets']) ?? [],
+      disclosures: (wire.disclosures as string[]) ?? [],
+    };
+  },
+
+  // --- billing console ------------------------------------------------------
+
+  getRevenueRisk: async (query) => {
+    const wire = (await platformHttp.get<WireRecord>('/api/platform/billing/revenue-risk', { params: query }))
+      .data;
+    return {
+      ...(wire as unknown as RevenueRiskReport),
+      tenants: ((wire.tenants as WireRecord[]) ?? []).map(normalizeRevenueRisk),
+    };
+  },
+  getTenantBillingProfile: async (tenantId) =>
+    normalizeBillingProfile(
+      (await platformHttp.get<WireRecord>(`/api/platform/billing/tenants/${tenantId}`)).data,
+    ),
+  setTenantRateCard: async (tenantId, body) =>
+    normalizeBillingProfile(
+      (await platformHttp.put<WireRecord>(`/api/platform/billing/tenants/${tenantId}/rate-card`, {
+        rateCardId: body.rateCardId == null ? null : Number(body.rateCardId),
+        reason: body.reason,
+      })).data,
+    ),
+  setTenantCommercialTerms: async (tenantId, body) =>
+    normalizeBillingProfile(
+      (await platformHttp.put<WireRecord>(
+        `/api/platform/billing/tenants/${tenantId}/commercial-terms`,
+        body,
+      )).data,
+    ),
+  getStatement: async (id) =>
+    normalizeStatement((await platformHttp.get<BackendStatement>(`/api/platform/billing/statements/${id}`)).data),
+
+  // --- support desk ---------------------------------------------------------
+
+  listSupportTickets: async (query) =>
+    normalizePaged(
+      (await platformHttp.get<{ items?: WireRecord[] }>('/api/platform/support/tickets', {
+        params: listParams((query ?? {}) as Record<string, unknown>),
+      })).data,
+      normalizeTicketSummary,
+    ),
+  getSupportTicket: async (id) =>
+    normalizeTicketDetail((await platformHttp.get<WireRecord>(`/api/platform/support/tickets/${id}`)).data),
+  getSupportTicketTimeline: async (id) => {
+    const wire = (await platformHttp.get<WireRecord>(`/api/platform/support/tickets/${id}/timeline`)).data;
+    return {
+      ticketId: asId(wire.ticketId as string | number),
+      tenantId: asId(wire.tenantId as string | number),
+      entries: (wire.entries as SupportTicketTimeline['entries']) ?? [],
+    };
+  },
+  createSupportTicket: async (input) =>
+    normalizeTicketDetail(
+      (await platformHttp.post<WireRecord>('/api/platform/support/tickets', {
+        tenantId: Number(input.tenantId),
+        subject: input.subject,
+        body: input.body,
+        severity: input.severity,
+        requesterEmail: input.requesterEmail,
+        assignToPlatformUserId:
+          input.assignToPlatformUserId == null ? null : Number(input.assignToPlatformUserId),
+      })).data,
+    ),
+  addSupportTicketNote: async (id, body) =>
+    normalizeTicketDetail(
+      (await platformHttp.post<WireRecord>(`/api/platform/support/tickets/${id}/notes`, body)).data,
+    ),
+  transitionSupportTicket: async (id, body) =>
+    normalizeTicketDetail(
+      (await platformHttp.post<WireRecord>(`/api/platform/support/tickets/${id}/transition`, body)).data,
+    ),
+  assignSupportTicket: async (id, body) =>
+    normalizeTicketDetail(
+      (await platformHttp.post<WireRecord>(`/api/platform/support/tickets/${id}/assign`, {
+        assignToPlatformUserId:
+          body.assignToPlatformUserId == null ? null : Number(body.assignToPlatformUserId),
+        reason: body.reason,
+        expectedVersion: body.expectedVersion,
+      })).data,
+    ),
+  changeSupportTicketSeverity: async (id, body) =>
+    normalizeTicketDetail(
+      (await platformHttp.post<WireRecord>(`/api/platform/support/tickets/${id}/severity`, body)).data,
+    ),
+
+  // --- audit explorer -------------------------------------------------------
+
+  queryAudit: async (query) =>
+    normalizePaged(
+      (await platformHttp.get<{ items?: WireRecord[] }>('/api/platform/audit/query', {
+        params: listParams((query ?? {}) as Record<string, unknown>),
+      })).data,
+      normalizeAuditEntry,
+    ),
+  getAuditEntry: async (id) => {
+    const wire = (await platformHttp.get<WireRecord>(`/api/platform/audit/entries/${id}`)).data;
+    return {
+      ...normalizeAuditEntry(wire),
+      before: wire.before ?? null,
+      after: wire.after ?? null,
+      // Empty rather than invented: an explorer that fabricates a plausible diff is worse
+      // than one that says the row recorded no before/after pair.
+      changes: (wire.changes as PlatformAuditEntryDetail['changes']) ?? [],
+    };
+  },
+  listAuditActions: async (query) =>
+    (await platformHttp.get<PlatformAuditAction[]>('/api/platform/audit/actions', { params: query })).data,
+  getTenantTimeline: async (tenantId, query) =>
+    (await platformHttp.get<TenantTimelineEntry[]>(`/api/platform/audit/tenants/${tenantId}/timeline`, {
+      params: query,
+    })).data,
+
+  // --- one-call tenant operations summary -----------------------------------
+
+  getTenantOperationsSummary: async (tenantId) => {
+    const wire = (
+      await platformHttp.get<WireRecord>(`/api/platform/tenants/${tenantId}/operations-summary`)
+    ).data;
+    const lifecycle = wire.lifecycle as WireRecord;
+    const support = wire.support as WireRecord;
+    const audit = wire.audit as WireRecord;
+    const impersonation = wire.impersonation as WireRecord;
+    return {
+      generatedAtUtc: wire.generatedAtUtc as string,
+      lifecycle: {
+        ...(lifecycle as unknown as TenantOperationsSummary['lifecycle']),
+        tenantId: asId(lifecycle.tenantId as string | number),
+        planId: asIdOrNull(lifecycle.planId as string | number | null),
+        primaryBusinessUnitId: asIdOrNull(lifecycle.primaryBusinessUnitId as string | number | null),
+      },
+      support: {
+        openTicketCount: num(support.openTicketCount),
+        unassignedOpenTicketCount: num(support.unassignedOpenTicketCount),
+        openByStatus: (support.openByStatus as Record<string, number>) ?? {},
+        openBySeverity: (support.openBySeverity as Record<string, number>) ?? {},
+        oldestOpenTicketCreatedAtUtc: (support.oldestOpenTicketCreatedAtUtc as string) ?? null,
+        recentTickets: ((support.recentTickets as WireRecord[]) ?? []).map(normalizeTicketSummary),
+      },
+      audit: {
+        entryCountLast30Days: num(audit.entryCountLast30Days),
+        failureCountLast30Days: num(audit.failureCountLast30Days),
+        lastActionAtUtc: (audit.lastActionAtUtc as string) ?? null,
+        recentEntries: ((audit.recentEntries as WireRecord[]) ?? []).map(normalizeAuditEntry),
+      },
+      impersonation: {
+        activeSessionCount: num(impersonation.activeSessionCount),
+        sessionCountLast30Days: num(impersonation.sessionCountLast30Days),
+        sessions: ((impersonation.sessions as WireRecord[]) ?? []).map((session) => ({
+          ...(session as unknown as TenantOperationsSummary['impersonation']['sessions'][number]),
+          actorPlatformUserId: asId(session.actorPlatformUserId as string | number),
+          linkedTicketIds: ((session.linkedTicketIds as (string | number)[]) ?? []).map(asId),
+        })),
+      },
+    };
+  },
 };
 
 export const platformApi: PlatformApi = httpPlatformApi;

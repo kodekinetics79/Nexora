@@ -20,6 +20,27 @@ public sealed class AiReservationReconciler : IAiReservationReconciler
         _tenantScope = tenantScope;
     }
 
+    /// <summary>
+    /// Settles AI reservations that were taken and never completed, across every business unit.
+    ///
+    /// <para><b>This sweep deliberately does NOT consult <c>ITenantWorkGate</c>, and that is not an
+    /// oversight.</b> It looks like an AI path and is the opposite of one: it calls no provider and
+    /// spends no tokens. It is the janitor that hands a leaked reservation BACK, moving
+    /// <c>ReservedTokens</c> into <c>SettledTokens</c> on the budget period.</para>
+    ///
+    /// <para>Gating it on tenant status would make suspension actively harmful in two directions.
+    /// A tenant is usually suspended mid-flight, which is exactly when reservations are left
+    /// dangling — so the suspended tenants are the ones with the most to reconcile. Skip them and
+    /// their <c>ReservedTokens</c> stays inflated for the whole suspension, so on reinstatement the
+    /// budget reports headroom it does not have and the tenant hits its hard limit on the first
+    /// call. Worse, <c>SettledTokens</c> is what the usage meter bills from: an unsettled
+    /// reservation is consumption that was incurred and never charged. Withholding this work to
+    /// save a suspended tenant money would UNDER-bill them and corrupt the ledger that closes their
+    /// final invoice.</para>
+    ///
+    /// <para>What it costs to leave ungated is a per-cycle scan of business units every two
+    /// minutes. That is the right trade against a wrong budget.</para>
+    /// </summary>
     public async Task<int> ReconcileAsync(DateTime staleBeforeUtc, CancellationToken ct)
     {
         using var scope = _scopeFactory.CreateScope();

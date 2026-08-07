@@ -279,7 +279,24 @@ namespace ERP_RFQ_Automation.Services
             {
                 var tenantScope = scopedServices.GetRequiredService<ITenantScopeAccessor>();
                 var discovery = scopedServices.GetRequiredService<FolderService>();
-                foreach (var businessUnitId in discovery.DiscoverTenantFolderIds())
+
+                // The tenant list here comes from DIRECTORY NAMES under Uploads/Tenants and has
+                // never touched the platform database, so this channel had no way of knowing a
+                // tenant was suspended — a directory outlives every lifecycle decision made about
+                // its owner. Everything the mailbox poller ingests, this ingests too: documents
+                // are enqueued for extraction and reach the inference endpoint the same way.
+                //
+                // Skipping DEFERS. ProcessAllFoldersAsync is driven by what is sitting in the
+                // watched directory; nothing is moved or deleted for a tenant that is skipped, so
+                // the same files are picked up on the first sweep after reinstatement. Resolved
+                // before the per-tenant push below — see ITenantWorkGate.
+                var businessUnitIds = (IReadOnlyList<long>)discovery.DiscoverTenantFolderIds().ToList();
+                var workGate = scopedServices
+                    .GetService<ERP_RFQ_Automation.Platform.Lifecycle.ITenantWorkGate>();
+                if (workGate is not null && businessUnitIds.Count > 0)
+                    businessUnitIds = await workGate.FilterServiceableAsync(businessUnitIds, stoppingToken);
+
+                foreach (var businessUnitId in businessUnitIds)
                 {
                     try
                     {

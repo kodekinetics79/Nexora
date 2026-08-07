@@ -80,6 +80,112 @@ public static class BillingMeterKeys
 }
 
 /// <summary>
+/// Zero-amount marker lines that state, ON the statement itself, why a tenant was
+/// charged less than its consumption.
+///
+/// <para><b>Why the MeterKey column.</b> These are not meters, but MeterKey is the
+/// statement's only machine-readable discriminator, it is indexed alongside the
+/// statement id, and a marker written there renders in every surface that already
+/// renders lines — the console, the DTO, an operator's ad-hoc SQL. The alternative
+/// (a statement-level boolean) would need a schema change AND a matching change in
+/// every renderer, and a flag nobody renders is exactly how a billable tenant ends
+/// up charged nothing without anyone noticing. Query the whole risk population with
+/// <c>MeterKey LIKE 'billing.revenue-risk.%'</c>.</para>
+///
+/// <para>Two families, deliberately distinct: <c>billing.revenue-risk.*</c> means
+/// money that SHOULD be flowing is not, and someone must act; <c>billing.exemption.*</c>
+/// means the platform is knowingly giving service away under a named, audited
+/// decision. Conflating them would bury the first family inside the second.</para>
+/// </summary>
+public static class BillingStatementMarkers
+{
+    /// <summary>Prefix shared by every revenue-risk marker. A statement carrying one is a finding.</summary>
+    public const string RevenueRiskPrefix = "billing.revenue-risk.";
+
+    /// <summary>Prefix shared by every deliberate non-charge marker.</summary>
+    public const string ExemptionPrefix = "billing.exemption.";
+
+    /// <summary>
+    /// Prefix for markers that explain a PARTIAL charge. Deliberately its own family: money
+    /// did move, so it is not an exemption, and nothing is wrong, so it is not a revenue
+    /// risk — it is arithmetic a customer is entitled to have explained on the invoice.
+    /// </summary>
+    public const string ProrationPrefix = "billing.proration.";
+
+    /// <summary>The period straddles <c>BillingStartsOn</c> and is charged pro rata by days.</summary>
+    public const string ProrationBillingStart = ProrationPrefix + "billing-start";
+
+    /// <summary>Billable tenant with no <c>PlanId</c>: metered usage is charged, the subscription is not.</summary>
+    public const string RiskNoPlan = RevenueRiskPrefix + "no-plan";
+
+    /// <summary>Billable tenant whose plan carries no <c>MonthlyPriceUsd</c>: the base charge is a real zero.</summary>
+    public const string RiskPlanNotPriced = RevenueRiskPrefix + "plan-not-priced";
+
+    /// <summary>
+    /// Billable tenant priced by the "whichever card is active" fallback rather than by a
+    /// pinned <see cref="ERP_RFQ_Automation.Platform.Models.Tenant.RateCardId"/> — the amounts
+    /// on this statement change the day someone activates a new card.
+    /// </summary>
+    public const string RiskUnpinnedRateCard = RevenueRiskPrefix + "unpinned-rate-card";
+
+    /// <summary>Trial tenant past <c>TrialEndsOn</c> and still not charged: the account needs converting.</summary>
+    public const string RiskTrialExpired = RevenueRiskPrefix + "trial-expired";
+
+    /// <summary>Usage in a period that starts before <c>BillingStartsOn</c> — metered, not billed.</summary>
+    public const string ExemptionPreBillingStart = ExemptionPrefix + "pre-billing-start";
+
+    /// <summary>The exemption marker for a non-<c>Billable</c> billing mode ("billing.exemption.trial", …).</summary>
+    public static string ExemptionFor(ERP_RFQ_Automation.Platform.Models.TenantBillingMode mode)
+        => ExemptionPrefix + mode.ToString().ToLowerInvariant();
+
+    public static bool IsRevenueRisk(string meterKey)
+        => meterKey.StartsWith(RevenueRiskPrefix, StringComparison.Ordinal);
+
+    public static bool IsExemption(string meterKey)
+        => meterKey.StartsWith(ExemptionPrefix, StringComparison.Ordinal);
+
+    /// <summary>
+    /// The revenue-risk code a line carries, read from EITHER channel.
+    ///
+    /// <para>Stand-alone markers put the code in <c>MeterKey</c>. The base-subscription
+    /// line cannot: it has to keep MeterKey <c>base.subscription</c> or statements stop
+    /// being comparable to one another and every consumer that looks up the base charge
+    /// by key breaks. So when the base charge is the thing at risk, the code is written
+    /// at the FRONT of <c>CoverageNote</c> instead. One reader for both channels, so no
+    /// caller has to know which line put it where.</para>
+    /// </summary>
+    public static string? RiskCodeOf(string meterKey, string? coverageNote)
+    {
+        if (IsRevenueRisk(meterKey))
+            return meterKey;
+        if (coverageNote is null || !coverageNote.StartsWith(RevenueRiskPrefix, StringComparison.Ordinal))
+            return null;
+        var separator = coverageNote.IndexOf(' ');
+        return separator < 0 ? coverageNote : coverageNote[..separator];
+    }
+}
+
+/// <summary>
+/// Where the rate card a statement was computed against came from. Recorded because
+/// "which price list did we bill this customer on, and did anybody choose it?" is
+/// the difference between an invoice a customer will pay and one they will dispute.
+/// </summary>
+public enum RateCardSource
+{
+    /// <summary>Passed explicitly to compute — an operator named this card for this run.</summary>
+    Explicit,
+
+    /// <summary>The tenant's own pinned <c>RateCardId</c>: the price list they signed.</summary>
+    TenantPin,
+
+    /// <summary>
+    /// "Whichever active card is effective for the period." Correct for tenants that predate
+    /// pinning, a finding for anybody else: activating a new card silently reprices them.
+    /// </summary>
+    ActiveFallback
+}
+
+/// <summary>
 /// v1 job-status billing/quota policy (fix P0-B1): only delivered-or-in-flight
 /// work is billable. EXCLUDED from both the billing "documents" meter and the
 /// docs/month quota:
@@ -121,6 +227,18 @@ public static class BillableDocumentPolicy
 public readonly record struct BillingPeriod(DateTime StartUtc, DateTime EndUtc)
 {
     public string Key => StartUtc.ToString("yyyy-MM", CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// The calendar month containing <paramref name="utcMoment"/>. The scheduled billing
+    /// run derives its periods from the clock rather than from a wire string, and going
+    /// through <c>ToString("yyyy-MM")</c> and back to parse them would make a formatting
+    /// change able to break billing.
+    /// </summary>
+    public static BillingPeriod Containing(DateTime utcMoment)
+    {
+        var start = DateTime.SpecifyKind(new DateTime(utcMoment.Year, utcMoment.Month, 1), DateTimeKind.Utc);
+        return new BillingPeriod(start, start.AddMonths(1));
+    }
 
     public static bool TryParse(string? period, out BillingPeriod value)
     {

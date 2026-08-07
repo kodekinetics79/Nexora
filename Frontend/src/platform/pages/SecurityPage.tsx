@@ -23,6 +23,9 @@ import { platformErrorMessage } from '../api/apiError';
 import { platformKeys } from '../api/queryKeys';
 import type { AuditEntry, ImpersonationSession } from '../types';
 import PageHeader from '../components/PageHeader';
+import RoleGate from '../components/RoleGate';
+import { usePlatformPermissions } from '../auth/usePlatformPermissions';
+import { REQUIRED_ROLE_COPY } from '../auth/permissions';
 import { SoftChip } from '../components/StatusChip';
 import { EmptyState, ErrorState, LoadingState } from '../components/States';
 import { fmtDateTime } from '../components/format';
@@ -37,6 +40,7 @@ const FAILED_LOGIN_ACTION = 'platform.login.failed';
 
 export default function SecurityPage() {
   const queryClient = useQueryClient();
+  const permissions = usePlatformPermissions();
   const { enqueueSnackbar } = useSnackbar();
   const [revokeTarget, setRevokeTarget] = useState<ImpersonationSession | null>(null);
 
@@ -126,15 +130,20 @@ export default function SecurityPage() {
                     </TableCell>
                     <TableCell align="right">
                       {session.status === 'active' && (
-                        <Button
-                          size="small"
-                          color="error"
-                          startIcon={<RevokeIcon fontSize="small" />}
-                          onClick={() => setRevokeTarget(session)}
-                          sx={{ fontWeight: 700 }}
-                        >
-                          Revoke
-                        </Button>
+                        <RoleGate allowed={permissions.canImpersonate} requirement={REQUIRED_ROLE_COPY.impersonate}>
+                          {(disabled) => (
+                            <Button
+                              size="small"
+                              color="error"
+                              startIcon={<RevokeIcon fontSize="small" />}
+                              disabled={disabled}
+                              onClick={() => setRevokeTarget(session)}
+                              sx={{ fontWeight: 700 }}
+                            >
+                              Revoke
+                            </Button>
+                          )}
+                        </RoleGate>
                       )}
                     </TableCell>
                   </TableRow>

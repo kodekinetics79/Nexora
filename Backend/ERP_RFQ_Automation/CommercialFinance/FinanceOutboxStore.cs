@@ -6,6 +6,18 @@ namespace ERP_RFQ_Automation.CommercialFinance;
 
 public interface IFinanceOutboxStore
 {
+    /// <summary>
+    /// Leases the next batch of unpublished finance events.
+    ///
+    /// <para><b>The scope of this call is the caller's ambient tenant scope, and there is no
+    /// parameter for it.</b> With a tenant pushed it claims that tenant's rows; with none it claims
+    /// EVERY tenant's rows in one batch. That wildcard is reached by fallback rather than by
+    /// decision (<c>ScopedTenantId ?? 0</c> below), which made it easy to arrive at by accident —
+    /// <c>FinanceOutboxDispatcherService</c> did for as long as it existed. It no longer does: the
+    /// dispatcher resolves its tenants, filters them through <c>ITenantWorkGate</c>, and claims
+    /// inside a pushed scope with a fail-closed guard. Anything else calling this without a scope
+    /// is asking for every customer's finance events and should say so out loud.</para>
+    /// </summary>
     Task<IReadOnlyList<FinanceOutboxEnvelope>> ClaimAsync(
         string workerId,
         int batchSize,
@@ -79,6 +91,12 @@ public sealed class FinanceOutboxStore : IFinanceOutboxStore
 
             var now = await DatabaseUtcNowAsync(cancellationToken);
             var leaseUntil = now.Add(leaseDuration);
+            // 0 is the "no ambient tenant" wildcard, not a business unit id: HttpTenantContext
+            // only ever yields a positive id, so no tenant can collide with it. Both provider
+            // branches below agree on what it means — the raw SQL says so inline, and the LINQ
+            // branch inherits the same rule from FinanceOutboxMessage's global query filter
+            // (CurrentTenantId == null || BusinessUnitId == CurrentTenantId). See the interface
+            // for why the production caller no longer relies on it.
             var tenantId = _db.ScopedTenantId ?? 0;
             var ready = _db.Database.IsNpgsql()
                 ? _db.Set<FinanceOutboxMessage>().FromSqlInterpolated($$"""

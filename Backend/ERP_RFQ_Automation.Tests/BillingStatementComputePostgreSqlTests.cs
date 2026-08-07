@@ -455,13 +455,21 @@ public sealed class BillingStatementComputePostgreSqlTests
     };
 
     /// <summary>
-    /// Fixture hygiene: the collection shares one database, so every row this
-    /// test created is removed. Both governed ledgers it touched refuse deletes
-    /// by design — the Final billing statement (immutability trigger) and the
-    /// append-only evidence ledger — so the teardown disables triggers for THIS
-    /// session only, exactly as PlatformControlPlaneHardeningPostgreSqlTests
-    /// does. The guards being in the way is the point; suspending them is
-    /// explicit, session-local, and restored immediately.
+    /// Fixture hygiene: the collection shares one database, so this removes what it can.
+    ///
+    /// <para><b>A finalized statement is never removed, and that is the production contract
+    /// working.</b> 20260807022229 promoted the billing immutability guards to
+    /// <c>ENABLE ALWAYS</c>, so they fire for the owner connection and inside
+    /// <c>session_replication_role = 'replica'</c> — the one mode that previously let the
+    /// purge path rewrite the record of what a customer was charged. There is deliberately no
+    /// idiom that gets a test out of it, so the teardown stops asking: Draft rows go, Final
+    /// rows stay, and the platform rows a Final statement pins by foreign key stay with it.
+    /// Every id this fixture seeds is unique per run (identity columns plus a Guid suffix on
+    /// the codes and slugs), so the residue is inert rather than something the next run has to
+    /// step around.</para>
+    ///
+    /// <para><c>session_replication_role</c> is still set for the EVIDENCE ledger, whose
+    /// guards remain ordinary triggers. It no longer reaches the billing guards, by design.</para>
     /// </summary>
     private async Task CleanupAsync(SeededFixture seed)
     {
@@ -470,19 +478,32 @@ public sealed class BillingStatementComputePostgreSqlTests
         command.CommandText = """
             SET session_replication_role = replica;
             DELETE FROM platform."BillingStatementLines"
-             WHERE "BillingStatementId" IN (SELECT "Id" FROM platform."BillingStatements" WHERE "TenantId" = @tenantId);
-            DELETE FROM platform."BillingStatements" WHERE "TenantId" = @tenantId;
-            DELETE FROM platform."Tenants" WHERE "Id" = @tenantId;
-            DELETE FROM platform."Plans" WHERE "Id" = @planId;
-            DELETE FROM platform."RateCardLines" WHERE "RateCardId" = @rateCardId;
-            DELETE FROM platform."RateCards" WHERE "Id" = @rateCardId;
+             WHERE "BillingStatementId" IN (
+                 SELECT "Id" FROM platform."BillingStatements"
+                  WHERE "TenantId" = @tenantId AND "Status" <> 'Final');
+            DELETE FROM platform."BillingStatements"
+             WHERE "TenantId" = @tenantId AND "Status" <> 'Final';
             DELETE FROM extraction_runs WHERE business_unit_id = @businessUnitId;
             DELETE FROM source_documents WHERE business_unit_id = @businessUnitId;
             DELETE FROM document_corpora WHERE business_unit_id = @businessUnitId;
             DELETE FROM public."ExtractionJobs" WHERE "BusinessUnitId" = @businessUnitId;
             DELETE FROM public."AiRequests" WHERE "BusinessUnitId" = @businessUnitId;
             DELETE FROM public."Users" WHERE "BUID" = @businessUnitId;
-            DELETE FROM public."BusinessUnits" WHERE "ID" = @businessUnitId;
+            DELETE FROM platform."Tenants"
+             WHERE "Id" = @tenantId
+               AND NOT EXISTS (SELECT 1 FROM platform."BillingStatements" WHERE "TenantId" = @tenantId);
+            DELETE FROM platform."Plans"
+             WHERE "Id" = @planId
+               AND NOT EXISTS (SELECT 1 FROM platform."Tenants" WHERE "Id" = @tenantId);
+            DELETE FROM platform."RateCardLines"
+             WHERE "RateCardId" = @rateCardId
+               AND NOT EXISTS (SELECT 1 FROM platform."BillingStatements" WHERE "RateCardId" = @rateCardId);
+            DELETE FROM platform."RateCards"
+             WHERE "Id" = @rateCardId
+               AND NOT EXISTS (SELECT 1 FROM platform."BillingStatements" WHERE "RateCardId" = @rateCardId);
+            DELETE FROM public."BusinessUnits"
+             WHERE "ID" = @businessUnitId
+               AND NOT EXISTS (SELECT 1 FROM platform."Tenants" WHERE "Id" = @tenantId);
             SET session_replication_role = origin;
             """;
         command.Parameters.AddWithValue("tenantId", seed.TenantId);
