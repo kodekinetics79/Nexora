@@ -1844,7 +1844,16 @@ namespace ERP_RFQ_Automation.Services
             using var client = new SmtpClient();
             try
             {
-                await client.ConnectAsync(config.Host, config.Port, config.UseSsl ? SecureSocketOptions.Auto : SecureSocketOptions.StartTls);
+                // The host and port on this row are supplied by a TENANT ADMINISTRATOR, and this
+                // path dialled them directly — the only quote-delivery send in the product that did
+                // not go through MailEndpointPolicy. That made it a working SSRF primitive: a
+                // mailbox row pointed at 169.254.169.254 or an RFC 1918 address had this server open
+                // the socket from inside the trust boundary. Resolving and connecting through the
+                // policy closes it; the TLS mode and the credential below are deliberately
+                // unchanged, so nothing about a legitimate host behaves differently.
+                using var socket = await ERP_RFQ_Automation.Security.MailEndpointPolicy
+                    .ConnectAsync(config.Host, config.Port, CancellationToken.None);
+                await client.ConnectAsync(socket, config.Host, config.Port, config.UseSsl ? SecureSocketOptions.Auto : SecureSocketOptions.StartTls);
                 await client.AuthenticateAsync(config.EmailAddress, config.Password);
                 await client.SendAsync(message);
                 await client.DisconnectAsync(true);

@@ -1111,3 +1111,188 @@ export interface TenantOperationsSummary {
   audit: TenantAuditSnapshot;
   impersonation: TenantImpersonationSnapshot;
 }
+
+// ---------------------------------------------------------------------------
+// Outbound email — the platform's own sending identity.
+//
+// This is how activation links, invitations and every other transactional message
+// leave the product. Until it is configured the provider is `console`, which logs
+// each message and DISCARDS it: provisioning appears to succeed and no customer ever
+// receives anything. That is why `isSending` is the first field the screen reads.
+//
+// Mirrors `Platform/Notifications/PlatformEmailDtos.cs`.
+// ---------------------------------------------------------------------------
+
+/** `console` transmits nothing; `smtp` covers GoDaddy, Microsoft 365, SES, Postmark
+ *  and anything else reachable over SMTP; `sendgrid` is the HTTP submission API. */
+export type PlatformEmailProvider = 'console' | 'smtp' | 'sendgrid';
+
+/**
+ * What to do with mail that is addressed outside the allow list. A non-Live mode is
+ * what makes it safe to exercise the product against a database full of plausible
+ * addresses without mailing a stranger.
+ */
+export type OutboundGuardMode = 'Live' | 'AllowListOnly' | 'Redirect' | 'DraftOnly';
+
+/**
+ * The stored configuration.
+ *
+ * No secret appears here and none can be added by accident: the server has no password
+ * property to populate, only `hasSmtpPassword`. A masked value would still travel, still
+ * land in a browser cache, and tell the operator nothing they did not already know.
+ */
+export interface PlatformEmailSettings {
+  provider: PlatformEmailProvider;
+  fromAddress: string;
+  fromName: string;
+  replyToAddress: string | null;
+  appBaseUrl: string;
+
+  smtpHost: string | null;
+  smtpPort: number;
+  smtpUsername: string | null;
+  hasSmtpPassword: boolean;
+  smtpEnableSsl: boolean;
+  smtpTimeoutMs: number;
+
+  hasSendGridApiKey: boolean;
+  sendGridApiBaseUrl: string | null;
+
+  outboundGuardMode: OutboundGuardMode;
+  outboundGuardRedirectTo: string | null;
+  outboundGuardAllowedRecipients: string[];
+  outboundGuardAllowedDomains: string[];
+  outboundGuardSubjectTag: string | null;
+
+  /** `Configuration` until somebody saves for the first time — "nobody has set this up,
+   *  you are looking at appsettings" versus "somebody set it up and chose this". */
+  origin: string;
+  /** Echo back on save. Null when nothing is stored yet. */
+  version: number | null;
+  updatedAtUtc: string | null;
+  updatedBy: string | null;
+  updateReason: string | null;
+}
+
+/**
+ * A full replacement of the stored configuration.
+ *
+ * Secret semantics, stated once and applied everywhere: `null`/omitted KEEPS the stored
+ * secret, `''` CLEARS it. The console renders an empty password box because it is never
+ * given the value — treating that as a deliberate blank would wipe the credential every
+ * time an operator changed the port.
+ */
+export interface SavePlatformEmailSettingsInput {
+  provider: PlatformEmailProvider;
+  fromAddress: string;
+  fromName: string;
+  replyToAddress?: string | null;
+  appBaseUrl: string;
+
+  smtpHost?: string | null;
+  smtpPort: number;
+  smtpUsername?: string | null;
+  smtpPassword?: string | null;
+  smtpEnableSsl: boolean;
+  smtpTimeoutMs: number;
+
+  sendGridApiKey?: string | null;
+  sendGridApiBaseUrl?: string | null;
+
+  outboundGuardMode: OutboundGuardMode;
+  outboundGuardRedirectTo?: string | null;
+  outboundGuardAllowedRecipients: string[];
+  outboundGuardAllowedDomains: string[];
+  outboundGuardSubjectTag?: string | null;
+
+  /** The version the operator was editing. A mismatch is a 409 rather than a silent
+   *  overwrite of somebody else's credentials. */
+  expectedVersion?: number | null;
+  /** Required and audited. "Who changed the From address in March" gets asked. */
+  reason: string;
+}
+
+/** Unsaved settings to test without committing them. */
+export interface CandidatePlatformEmailSettings {
+  provider?: PlatformEmailProvider;
+  fromAddress?: string;
+  fromName?: string;
+  replyToAddress?: string | null;
+  smtpHost?: string;
+  smtpPort?: number;
+  smtpUsername?: string;
+  smtpPassword?: string;
+  smtpEnableSsl?: boolean;
+  smtpTimeoutMs?: number;
+  sendGridApiKey?: string;
+  sendGridApiBaseUrl?: string;
+}
+
+export interface TestOutboundEmailResult {
+  succeeded: boolean;
+  /** False when nothing left the process. The console provider "succeeds" and transmits
+   *  nothing, and an operator must not read that as proof that mail works. */
+  transmitted: boolean;
+  kind: string;
+  /** Names the next action. Never the provider's raw text. */
+  message: string;
+  providerStatus: string | null;
+  provider: string;
+  outboundGuardMode: string;
+  intendedRecipient: string;
+  /** Different from the intended address when the outbound guard is redirecting. */
+  effectiveRecipient: string;
+  acceptanceReference: string | null;
+  attemptedAtUtc: string;
+  elapsedMs: number;
+}
+
+/** "Is mail working?" in one response. */
+export interface OutboundEmailStatus {
+  summary: string;
+  provider: string;
+  origin: string;
+  /** The fact everything else hangs off: false means messages are logged and discarded. */
+  isSending: boolean;
+  credentialsSet: boolean;
+  fromAddress: string;
+  fromName: string;
+  replyToAddress: string | null;
+  appBaseUrl: string;
+  hasSmtpPassword: boolean;
+  hasSendGridApiKey: boolean;
+
+  outboundGuardMode: string;
+  outboundGuardRedirectTo: string | null;
+
+  lastSuccessfulSendAtUtc: string | null;
+  lastSuccessfulSendProvider: string | null;
+  lastFailureAtUtc: string | null;
+  lastFailureKind: string | null;
+  lastFailureReason: string | null;
+  consecutiveFailures: number;
+
+  /** Durable, unlike the in-process counters above, which reset on restart. */
+  lastVerifiedAtUtc: string | null;
+  lastVerifiedBy: string | null;
+  lastVerifiedRecipient: string | null;
+  lastVerificationFailureAtUtc: string | null;
+  lastVerificationFailureKind: string | null;
+  lastVerificationFailureReason: string | null;
+
+  configuredAtUtc: string | null;
+  configuredBy: string | null;
+  /** Non-fatal problems in the settings that are actually in force. */
+  warnings: string[];
+}
+
+/** What to connect to. Every field is optional: what is supplied overrides the stored
+ *  settings for this one attempt, and a blank password means "use the stored one". */
+export interface PlatformConnectionTestInput {
+  providerKey?: string;
+  host?: string;
+  port?: number;
+  tls?: 'None' | 'StartTls' | 'Implicit';
+  username?: string;
+  password?: string;
+}

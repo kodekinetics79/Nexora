@@ -42,6 +42,12 @@ export const platformKeys = {
   supportTicket: (id: string) => [...platformKeys.all, 'support', 'ticket', id] as const,
   supportTicketTimeline: (id: string) => [...platformKeys.all, 'support', 'ticket', id, 'timeline'] as const,
 
+  // Outbound email. Status is separate from settings because it is the one the screen
+  // polls after a test — settings only change when somebody saves.
+  emailSettings: () => [...platformKeys.all, 'email', 'settings'] as const,
+  emailStatus: () => [...platformKeys.all, 'email', 'status'] as const,
+  emailProviders: () => [...platformKeys.all, 'email', 'providers'] as const,
+
   auditQuery: (filter?: unknown) => [...platformKeys.all, 'audit', 'query', filter ?? null] as const,
   auditEntry: (id: string) => [...platformKeys.all, 'audit', 'entry', id] as const,
   auditActions: (filter?: unknown) => [...platformKeys.all, 'audit', 'actions', filter ?? null] as const,

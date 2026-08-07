@@ -1,4 +1,5 @@
 import axiosInstance from '../axiosInstance';
+import type { EmailProviderCapability } from '../../email/types';
 
 // Mailbox administration: the IMAP inboxes leads are read from, and the SMTP accounts
 // quotes are sent through.
@@ -142,6 +143,21 @@ const mailboxService = {
 
   getPresets: async (): Promise<MailboxPreset[]> => {
     const { data } = await axiosInstance.get('/api/Mailbox/presets');
+    return data;
+  },
+
+  /**
+   * The provider catalogue, which supersedes `getPresets` for anything that needs to know
+   * HOW a connection is encrypted.
+   *
+   * `MailboxPreset` carries a single `useSsl` for both directions, and no single boolean can
+   * describe Microsoft 365: inbound is implicit TLS on 993 and outbound is STARTTLS on 587.
+   * Applying one flag to the other direction produces a mailbox that is saved with settings
+   * that cannot connect — which is the exact failure the catalogue exists to remove, so the
+   * screen binds to this and the older shape stays only for callers not yet moved.
+   */
+  getProviders: async (): Promise<EmailProviderCapability[]> => {
+    const { data } = await axiosInstance.get('/api/email/providers');
     return data;
   },
 };

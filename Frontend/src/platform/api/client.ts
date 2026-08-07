@@ -1,6 +1,7 @@
 import { jwtDecode } from 'jwt-decode';
 import platformHttp from './platformHttp';
 import { BILLING_MODES } from '../types';
+import type { EmailProviderCapability, MailConnectionTestResult } from '../../email/types';
 import type {
   AuditEntry,
   BillingMode,
@@ -8,8 +9,10 @@ import type {
   BillingStatementSummary,
   CreatePlatformOperatorInput,
   CreateRateCardInput,
+  CandidatePlatformEmailSettings,
   CreateSupportTicketInput,
   ExtractionJob,
+  OutboundEmailStatus,
   ImpersonationSession,
   ImpersonationTicket,
   JobStatus,
@@ -20,6 +23,8 @@ import type {
   PlatformAuditAction,
   PlatformAuditEntry,
   PlatformAuditEntryDetail,
+  PlatformConnectionTestInput,
+  PlatformEmailSettings,
   PlatformOperator,
   PlatformOperatorRole,
   ProvisionedBaseline,
@@ -32,6 +37,7 @@ import type {
   QueueStats,
   RateCard,
   RevenueRiskReport,
+  SavePlatformEmailSettingsInput,
   SetCommercialTermsInput,
   SlugAvailability,
   SubmitProvisioningResult,
@@ -51,6 +57,7 @@ import type {
   TenantRevenueRisk,
   TenantTimelineEntry,
   TenantUsageReadout,
+  TestOutboundEmailResult,
   UpdateRateCardInput,
   UpsertPlanInput,
 } from '../types';
@@ -222,6 +229,17 @@ export interface PlatformApi {
 
   // --- one-call tenant operations summary ---
   getTenantOperationsSummary(tenantId: string): Promise<TenantOperationsSummary>;
+
+  // --- outbound email ---
+  getEmailSettings(): Promise<PlatformEmailSettings>;
+  getEmailStatus(): Promise<OutboundEmailStatus>;
+  saveEmailSettings(input: SavePlatformEmailSettingsInput): Promise<PlatformEmailSettings>;
+  listEmailProviders(): Promise<EmailProviderCapability[]>;
+  testEmailConnection(input: PlatformConnectionTestInput): Promise<MailConnectionTestResult>;
+  testSendEmail(body: {
+    recipient: string;
+    settings?: CandidatePlatformEmailSettings;
+  }): Promise<TestOutboundEmailResult>;
 }
 
 // --- backend wire shapes (ids arrive as numbers) ----------------------------
@@ -1103,6 +1121,38 @@ const httpPlatformApi: PlatformApi = {
       },
     };
   },
+
+  // --- outbound email --------------------------------------------------------
+  //
+  // No normalisation layer here, deliberately: this surface carries no ids, so
+  // there is nothing to coerce, and a hand-written mapper would only be one more
+  // place for a field to be dropped silently.
+
+  getEmailSettings: async () =>
+    (await platformHttp.get<PlatformEmailSettings>('/api/platform/notifications/email/settings')).data,
+
+  getEmailStatus: async () =>
+    (await platformHttp.get<OutboundEmailStatus>('/api/platform/notifications/email/status')).data,
+
+  saveEmailSettings: async (input) =>
+    (await platformHttp.put<PlatformEmailSettings>('/api/platform/notifications/email/settings', input)).data,
+
+  listEmailProviders: async () =>
+    (await platformHttp.get<EmailProviderCapability[]>('/api/platform/notifications/email/providers')).data,
+
+  // Always 200, even when the connection is refused: a refusal is a successful
+  // diagnosis, not a failed request, and the screen renders the staged report either way.
+  testEmailConnection: async (input) =>
+    (await platformHttp.post<MailConnectionTestResult>(
+      '/api/platform/notifications/email/connection-test',
+      input,
+    )).data,
+
+  testSendEmail: async (body) =>
+    (await platformHttp.post<TestOutboundEmailResult>(
+      '/api/platform/notifications/email/test-send',
+      body,
+    )).data,
 };
 
 export const platformApi: PlatformApi = httpPlatformApi;

@@ -15,6 +15,7 @@ using Microsoft.AspNetCore.Authorization;
 using OfficeOpenXml;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.LeadIdentity;
+using ERP_RFQ_Automation.Email;
 using ERP_RFQ_Automation.Mailbox;
 using ERP_RFQ_Automation.Platform.Auth;
 using ERP_RFQ_Automation.Platform.Hardening;
@@ -353,6 +354,9 @@ builder.Services.AddSingleton<TenantSmtpConcurrencyGate>();
 builder.Services.AddSingleton<IOutboundSmtpTransport, MailKitOutboundSmtpTransport>();
 // Stateless — every call carries its own settings — so a singleton is correct.
 builder.Services.AddSingleton<IMailboxConnectionProbe, MailboxConnectionProbe>();
+// The provider catalogue and the one connection test both planes share. After the probe, which it
+// delegates the staged mail-protocol diagnosis to.
+builder.Services.AddEmailProviders();
 // Testing-only tenant data reset. Scoped because it reads the EF model through the request
 // context; refuses Production internally regardless of how it is registered.
 builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Testing.TenantDataReset>();

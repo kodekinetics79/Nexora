@@ -28,6 +28,7 @@ import {
   Menu as MenuIcon,
   Paid as BillingIcon,
   ReceiptLong as AuditIcon,
+  MarkEmailReadOutlined as EmailIcon,
   Shield as SecurityIcon,
   SupportAgent as SupportIcon,
   Tune as PlansIcon,
@@ -51,6 +52,7 @@ const NAV = [
   { to: '/platform/users', label: 'Users', icon: <UsersIcon /> },
   { to: '/platform/billing', label: 'Billing', icon: <BillingIcon /> },
   { to: '/platform/support', label: 'Support', icon: <SupportIcon /> },
+  { to: '/platform/email', label: 'Email', icon: <EmailIcon /> },
   { to: '/platform/security', label: 'Security', icon: <SecurityIcon /> },
   { to: '/platform/audit', label: 'Audit Log', icon: <AuditIcon /> },
 ];

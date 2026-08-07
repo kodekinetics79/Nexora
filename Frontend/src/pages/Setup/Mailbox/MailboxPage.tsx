@@ -2,7 +2,7 @@ import React from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Box, Typography, Paper, Button, Grid, TextField, CircularProgress, Stack, Chip,
-  Dialog, DialogTitle, DialogContent, DialogActions, MenuItem, Switch, FormControlLabel,
+  Dialog, DialogTitle, DialogContent, DialogActions, Switch, FormControlLabel,
   Alert, AlertTitle, Divider, IconButton, Tooltip, LinearProgress, InputAdornment,
   ToggleButton, ToggleButtonGroup, Collapse,
 } from '@mui/material';
@@ -14,6 +14,7 @@ import {
 } from '@mui/icons-material';
 import { toast } from 'react-hot-toast';
 import { useAuth } from '../../../context/AuthContext';
+import ProviderPicker from '../../../email/ProviderPicker';
 import mailboxService, {
   type Mailbox, type MailboxWriteRequest, type MailboxProbeResult, type MailboxProtocol,
   type ProbeStatus,
@@ -121,6 +122,7 @@ const MailboxPage: React.FC = () => {
   const [form, setForm] = React.useState<MailboxWriteRequest>(EMPTY);
   const [showPassword, setShowPassword] = React.useState(false);
   const [probe, setProbe] = React.useState<MailboxProbeResult | null>(null);
+  const [providerKey, setProviderKey] = React.useState('');
 
   const { data: mailboxes = [], isLoading } = useQuery({
     queryKey: ['mailboxes'], queryFn: mailboxService.getAll,
@@ -128,9 +130,15 @@ const MailboxPage: React.FC = () => {
   const { data: outbound } = useQuery({
     queryKey: ['mailbox-outbound-status'], queryFn: mailboxService.getOutboundStatus,
   });
-  const { data: presets = [] } = useQuery({
-    queryKey: ['mailbox-presets'], queryFn: mailboxService.getPresets,
+  const { data: providers = [] } = useQuery({
+    queryKey: ['mail-providers'], queryFn: mailboxService.getProviders,
+    staleTime: 60 * 60 * 1000,   // a table of published hostnames; it does not move
   });
+
+  /** Only providers that can BE a mailbox row — a send-only HTTP API cannot. */
+  const mailboxProviders = React.useMemo(
+    () => providers.filter((p) => p.supportsTenantMailbox), [providers],
+  );
 
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: ['mailboxes'] });
@@ -181,7 +189,7 @@ const MailboxPage: React.FC = () => {
   });
 
   const openCreate = () => {
-    setEditing(null); setForm(EMPTY); setProbe(null); setShowPassword(false); setDialogOpen(true);
+    setEditing(null); setForm(EMPTY); setProbe(null); setProviderKey(''); setShowPassword(false); setDialogOpen(true);
   };
 
   const openEdit = (mailbox: Mailbox) => {
@@ -193,26 +201,43 @@ const MailboxPage: React.FC = () => {
       pollingInterval: mailbox.pollingInterval, isActive: mailbox.isActive,
       verifyBeforeSave: true,
     });
-    setProbe(null); setShowPassword(false); setDialogOpen(true);
+    setProbe(null); setProviderKey(''); setShowPassword(false); setDialogOpen(true);
   };
 
-  const applyPreset = (key: string) => {
-    const preset = presets.find((p) => p.key === key);
-    if (!preset) return;
-    const imap = form.protocol === 'IMAP';
-    setForm({
-      ...form,
-      host: imap ? preset.imapHost : preset.smtpHost,
-      port: imap ? preset.imapPort : preset.smtpPort,
-      useSsl: preset.useSsl,
-    });
-    if (preset.guidance) toast(preset.guidance, { duration: 9000, icon: 'ℹ️' });
+  /**
+   * Fill in a provider's published settings for the direction being configured.
+   *
+   * `useSsl` is taken from the ENDPOINT, never carried across directions. The runtime reads
+   * that one flag differently per protocol — for IMAP `false` means cleartext, for SMTP it
+   * means STARTTLS — so Microsoft 365 needs `true` on its inbound row (993, implicit TLS)
+   * and `false` on its outbound one (587, STARTTLS). Sharing a single flag between the two
+   * is how a mailbox gets saved with settings that cannot connect.
+   */
+  const applyProvider = (key: string) => {
+    const provider = mailboxProviders.find((p) => p.key === key);
+    if (!provider) return;
+    setProviderKey(key);
+    const endpoint = form.protocol === 'IMAP' ? provider.inbound : provider.outboundSmtp;
+    if (!endpoint) {
+      toast(`${provider.displayName} does not support ${form.protocol}.`, { icon: '⚠️' });
+      return;
+    }
+    setForm({ ...form, host: endpoint.host, port: endpoint.port, useSsl: endpoint.useSsl });
+    setProbe(null);
   };
 
   const setProtocol = (protocol: MailboxProtocol) => {
     // Ports differ per protocol; carrying 993 into an SMTP row is the single most common
     // way a mailbox ends up saved with settings that cannot work.
-    setForm({ ...form, protocol, port: protocol === 'IMAP' ? 993 : 587 });
+    //
+    // When a provider is already chosen, re-apply ITS settings for the new direction rather
+    // than falling back to a generic default — GoDaddy's send host is not its read host, and
+    // an operator who picked GoDaddy once should not have to pick it again.
+    const provider = mailboxProviders.find((p) => p.key === providerKey);
+    const endpoint = provider && (protocol === 'IMAP' ? provider.inbound : provider.outboundSmtp);
+    setForm(endpoint
+      ? { ...form, protocol, host: endpoint.host, port: endpoint.port, useSsl: endpoint.useSsl }
+      : { ...form, protocol, port: protocol === 'IMAP' ? 993 : 587 });
     setProbe(null);
   };
 
@@ -383,15 +408,13 @@ const MailboxPage: React.FC = () => {
               </ToggleButton>
             </ToggleButtonGroup>
 
-            <TextField
-              select fullWidth size="small" label="Mail provider"
-              value="" onChange={(e) => applyPreset(e.target.value)}
+            <ProviderPicker
+              providers={mailboxProviders}
+              value={providerKey}
+              direction={form.protocol === 'IMAP' ? 'Inbound' : 'Outbound'}
+              onApply={(provider) => applyProvider(provider.key)}
               helperText="Choose a provider to fill in its documented server settings."
-            >
-              {presets.map((preset) => (
-                <MenuItem key={preset.key} value={preset.key}>{preset.displayName}</MenuItem>
-              ))}
-            </TextField>
+            />
 
             <Grid container spacing={2}>
               <Grid size={{ xs: 12, md: 6 }}>

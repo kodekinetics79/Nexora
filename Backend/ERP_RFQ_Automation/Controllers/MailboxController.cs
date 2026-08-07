@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.Email;
 using ERP_RFQ_Automation.Mailbox;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Security;
@@ -33,7 +34,7 @@ namespace ERP_RFQ_Automation.Controllers;
 [Authorize]
 public sealed class MailboxController(
     ErpRfqAutomationContext context,
-    IMailboxConnectionProbe probe,
+    IMailConnectionTester tester,
     IIamAuditWriter audit,
     ILogger<MailboxController> logger) : ControllerBase
 {
@@ -128,7 +129,7 @@ public sealed class MailboxController(
     /// </summary>
     [HttpPost("test")]
     [RequireModulePermission(Module, PermissionAction.Edit)]
-    public async Task<ActionResult<MailboxProbeResult>> Test([FromBody] MailboxTestRequestDTO request)
+    public async Task<ActionResult<MailConnectionTestResult>> Test([FromBody] MailboxTestRequestDTO request)
     {
         if (!ModelState.IsValid) return BadRequest(ModelState);
         if (!TryTenant(out var tenant)) return Forbid();
@@ -151,8 +152,8 @@ public sealed class MailboxController(
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
         deadline.CancelAfter(TestDeadline);
 
-        var result = await probe.ProbeAsync(
-            new MailboxProbeRequest(protocol, request.Host, request.Port, request.Username, password, request.UseSsl),
+        var result = await tester.TestAsync(
+            TestRequestFor(protocol, request.Host, request.Port, request.Username, password, request.UseSsl),
             deadline.Token);
 
         // Audited because it makes this server open a socket to an operator-chosen host. The
@@ -379,8 +380,8 @@ public sealed class MailboxController(
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
         deadline.CancelAfter(TestDeadline);
 
-        var result = await probe.ProbeAsync(
-            new MailboxProbeRequest(protocol, host, port, username, password, useSsl), deadline.Token);
+        var result = await tester.TestAsync(
+            TestRequestFor(protocol, host, port, username, password, useSsl), deadline.Token);
 
         return result.Succeeded
             ? null
@@ -391,6 +392,31 @@ public sealed class MailboxController(
                          "Correct the settings, or save without verification.",
                 probe = result
             });
+    }
+
+    /// <summary>
+    /// Translates a stored mailbox row into the shared tester's vocabulary.
+    ///
+    /// <para>The stored <c>UseSsl</c> flag is a boolean whose meaning depends on the protocol, and
+    /// this is the one place in this controller that knows it: for IMAP it is implicit TLS or no
+    /// encryption at all, for SMTP it is implicit TLS or STARTTLS. The tester takes an explicit
+    /// mode so that ambiguity stops at this boundary, and the provider is inferred from the host so
+    /// a mailbox configured long before the catalogue existed still gets provider-specific
+    /// remedies when it fails.</para>
+    /// </summary>
+    private static MailConnectionTestRequest TestRequestFor(
+        string protocol, string host, int port, string username, string password, bool useSsl)
+    {
+        var smtp = IsSmtp(protocol);
+        var tls = useSsl
+            ? MailTlsMode.Implicit
+            : smtp ? MailTlsMode.StartTls : MailTlsMode.None;
+
+        return new MailConnectionTestRequest(
+            smtp ? MailDirection.Outbound : MailDirection.Inbound,
+            smtp ? MailTransport.Smtp : MailTransport.Imap,
+            host, port, tls, username, password,
+            EmailProviderCatalog.InferKeyFromHost(host));
     }
 
     private bool TryTenant(out long tenant)
@@ -478,32 +504,51 @@ public sealed class MailboxController(
     }
 }
 
-/// <summary>Connection settings for the mail providers customers in this market actually use.
-/// Ports and TLS modes are the providers' documented values.</summary>
+/// <summary>
+/// The legacy shape of the provider presets, projected from <see cref="EmailProviderCatalog"/>.
+///
+/// <para>This list is no longer the source of truth — the catalogue is, and it is asserted by
+/// <c>EmailProviderCatalogTests</c>. The projection is kept because the mailbox screen in
+/// production binds to it, and because removing an endpoint to tidy up a shape is how a working
+/// screen becomes a blank dropdown.</para>
+///
+/// <para><b>What this shape cannot say.</b> There is ONE encryption flag for both directions, and
+/// Microsoft 365 needs two different ones — 993 implicit TLS to read, 587 STARTTLS to send. The
+/// flag here is the INBOUND one, and for any provider whose outbound differs the guidance says so
+/// in its first sentence, because that is the only channel this DTO leaves open. The screen should
+/// move to <c>GET /api/email/providers</c>, which carries a TLS mode and a <c>useSsl</c> value per
+/// direction and needs no such warning.</para>
+/// </summary>
 internal static class MailboxPresets
 {
     public static readonly IReadOnlyList<MailboxPresetDTO> All =
-    [
-        new("microsoft365", "Microsoft 365 / Outlook", "outlook.office365.com", 993,
-            "smtp.office365.com", 587, true,
-            "Microsoft disables IMAP per-mailbox by default and rejects basic authentication when MFA " +
-            "is on. Ask your administrator to enable IMAP for this mailbox, and use an app password."),
+        EmailProviderCatalog.ForTenantMailbox.Select(provider => new MailboxPresetDTO(
+            provider.Key,
+            provider.DisplayName,
+            provider.Inbound?.Host ?? string.Empty,
+            provider.Inbound?.Port ?? 993,
+            provider.OutboundSmtp?.Host ?? string.Empty,
+            provider.OutboundSmtp?.Port ?? 587,
+            provider.Inbound?.UseSsl ?? provider.OutboundSmtp?.UseSsl ?? true,
+            Guidance(provider))).ToList();
 
-        new("google", "Google Workspace / Gmail", "imap.gmail.com", 993,
-            "smtp.gmail.com", 465, true,
-            "Requires an App Password when 2-Step Verification is enabled; the normal account password " +
-            "is always rejected. IMAP must also be enabled in Gmail settings."),
+    /// <summary>Leads with the direction mismatch when there is one, then the provider's own
+    /// advice. An operator who applies a preset and then switches to SMTP has to be told that the
+    /// encryption toggle no longer matches, or they save a row that cannot connect.</summary>
+    private static string Guidance(EmailProviderDefinition provider)
+    {
+        var mismatch = provider.Inbound is { } inbound && provider.OutboundSmtp is { } outbound &&
+                       inbound.UseSsl != outbound.UseSsl;
 
-        new("zoho", "Zoho Mail", "imap.zoho.com", 993, "smtp.zoho.com", 465, true,
-            "Use an application-specific password generated in Zoho account security settings."),
+        var prefix = mismatch
+            ? $"For SENDING, use port {provider.OutboundSmtp!.Port} with 'use a secure connection' " +
+              $"{(provider.OutboundSmtp.UseSsl ? "ON" : "OFF")} — the value filled in above is the one " +
+              $"for READING mail on port {provider.Inbound!.Port}. "
+            : string.Empty;
 
-        new("cpanel", "cPanel / company mail server", "mail.yourcompany.com", 993,
-            "mail.yourcompany.com", 465, true,
-            "Replace the host with your own mail server name. If your provider does not offer TLS on " +
-            "993/465, use 143/587 with a secure connection turned off — the connection still upgrades " +
-            "to TLS where the server supports it."),
+        var limit = provider.SendingLimit is { Length: > 0 } cap ? " " + cap : string.Empty;
+        var enablement = provider.InboundEnablementNote is { Length: > 0 } note ? " " + note : string.Empty;
 
-        new("custom", "Something else", string.Empty, 993, string.Empty, 587, true,
-            "Enter the hostname and port your mail provider documents for IMAP and SMTP.")
-    ];
+        return prefix + provider.Guidance + enablement + limit;
+    }
 }
