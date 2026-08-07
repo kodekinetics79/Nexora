@@ -29,8 +29,9 @@ namespace ERP_RFQ_Automation.Notifications.Providers
         {
             var smtp = _options.Smtp;
             if (string.IsNullOrWhiteSpace(smtp.Host))
-                throw new InvalidOperationException(
-                    "SMTP host is not configured (Notifications:Smtp:Host). Cannot send email.");
+                throw new OutboundEmailTransportException(
+                    OutboundEmailFailureKind.NotConfigured,
+                    "SMTP host is not configured. Cannot send email.");
 
             using var mail = BuildMailMessage(message);
             var messageId = $"<{Guid.NewGuid():N}@nexora.local>";

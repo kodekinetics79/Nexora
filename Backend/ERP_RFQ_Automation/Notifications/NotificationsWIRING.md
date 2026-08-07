@@ -22,15 +22,69 @@ builder.Services.AddNotifications(builder.Configuration);
 
 That single call registers:
 
-- `NotificationsOptions` (bound + validated from the `Notifications` config section)
+- `NotificationsOptions` (bound + validated from the `Notifications` config section) —
+  now the **fallback**, see §1a
 - `IEmailTemplateRenderer` → `EmailTemplateRenderer` (singleton)
 - `INotificationService` → `NotificationService` (scoped)
-- `IEmailSender` → the provider chosen by `Notifications:Provider`
-  (`smtp` | `sendgrid` | `console`; **defaults to `console`** when unset/unknown)
+- `IEmailSender` → `RuntimeConfiguredEmailSender` (singleton), which resolves the active
+  transport per send through `OutboundEmailTransportResolver`
+- `OutboundEmailTransportResolver`, `OutboundEmailProbe`, `IOutboundEmailHealth` (singletons)
+- `IOptions<NotificationsOptions>` → `EffectiveNotificationsOptions`, so existing consumers
+  (notably the activation-link builder) see the settings actually in force
 - A named `HttpClient` (`"NotificationsSendGrid"`) via `IHttpClientFactory` for the
-  SendGrid provider.
+  SendGrid provider
+- The `outbound-email` health check, tagged `ready`
 
-No other Program.cs edits are required. No middleware, no endpoints.
+Add the second line for the operator-configurable half:
+
+```csharp
+using ERP_RFQ_Automation.Platform.Notifications;
+
+builder.Services.AddPlatformEmailSettings();   // AFTER AddNotifications
+```
+
+No other Program.cs edits are required. No middleware.
+
+---
+
+## 1a. Where the settings come from
+
+The transport used to be selected **once**, in `AddNotifications`, from
+`Notifications:Provider`, and registered as a singleton. Changing it meant editing
+appsettings and redeploying; the default was `console`, which logs instead of sending; and
+nothing said so. A pilot deployment swallowed every activation link, invoice notice and
+quote delivery, and the only signal was `emailSent: false` in a provisioning response.
+
+Precedence now:
+
+1. `platform."PlatformEmailSettings"` — one row, saved by a platform Owner through the API
+   below. Takes effect **without a restart**.
+2. The `Notifications` configuration section — used when no row exists, and as the
+   fallback if the row cannot be read (a database outage must not become an outbound
+   outage).
+
+The resolved transport is cached and revalidated against the row's `Version`
+(a two-column read). A save in the same process invalidates immediately; other instances
+converge within `OutboundEmailTransportResolver.RevalidationInterval` (30 s).
+
+**Containment is unchanged.** `GuardedEmailSender` is still the only thing that can send:
+`OutboundEmailTransportResolver.ResolveAsync` and `.BuildTransport` return the *concrete*
+`GuardedEmailSender` type, so no path through them can produce an unwrapped transport, and
+the concrete providers are no longer registered in DI at all.
+
+### Operator API (all under the platform token, `/api/platform`)
+
+- `GET /api/platform/notifications/email/settings` — policy `PlatformScope`. Current
+  configuration; secrets reported as `hasSmtpPassword` / `hasSendGridApiKey` only.
+- `GET /api/platform/notifications/email/status` — policy `PlatformScope`. "Is mail
+  working?": provider, whether it really sends, last success, last failure with reason.
+- `PUT /api/platform/notifications/email/settings` — policy `Platform.Owner`. Replaces the
+  configuration. `reason` is required, and every save is audited.
+- `POST /api/platform/notifications/email/test-send` — policy `Platform.Owner`. Sends one
+  real message using the saved **or candidate** settings and classifies the outcome.
+
+Secret semantics on PUT: `null` (or omitted) **keeps** the stored secret, `""` **clears**
+it. The console is never given the value, so an empty field must not mean "wipe it".
 
 ---
 
@@ -152,6 +206,38 @@ Also: verify the `FromAddress` / sending domain in the provider console, and kee
 
 Until these are in place, keep `Provider=console` (logs only) so nothing is sent from
 an unauthenticated domain.
+
+**No UI can do any of this for the operator.** The product cannot publish DNS records for
+a domain it does not control, cannot complete a provider's sender-verification flow, and
+cannot create the provider account or issue its API key. What it can do — and now does —
+is tell the operator the instant the channel is not working, and let them prove it works
+before a customer depends on it: `POST .../test-send` reports a relay refusal as
+`RelayDenied` with "verify the sending domain with the provider", which is exactly the
+DNS work above.
+
+---
+
+## 4a. Database objects (owned by the migration author)
+
+One table, `platform."PlatformEmailSettings"`, single row pinned by
+`CK_PlatformEmailSettings_Singleton` (`"Id" = 1`). No indexes beyond the primary key —
+one row is never scanned. `SmtpPassword` and `SendGridApiKey` are `varchar(2048)`
+carrying the `ProtectedSecretConverter` AES-256-GCM envelope, exactly as
+`Email_Configurations.Password` does.
+
+Grants (verified against real PostgreSQL by
+`PlatformEmailSettingsPostgreSqlTests`, which executes the DDL and the GRANT block it
+specifies):
+
+- `nexora_pipeline_app` — `SELECT, INSERT, UPDATE`; `DELETE`/`TRUNCATE` revoked. A
+  single-row configuration that can be deleted is a way to silently revert the platform to
+  the console provider.
+- `nexora_tenant_app`, `nexora_identity_app` — column-level `SELECT` on the transport
+  columns only, no writes. They need it because outbound mail is sent from tenant-scoped
+  requests too (quote delivery, lead routing), and those resolve the transport on their own
+  connection. `PlatformEmailSettingsStore` therefore **projects** every query; an
+  unprojected `SELECT *` fails with 42501 on the first tenant request that sends an email
+  while every SQLite test stays green.
 
 ---
 

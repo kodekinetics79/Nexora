@@ -45,8 +45,9 @@ namespace ERP_RFQ_Automation.Notifications.Providers
         {
             var sg = _options.SendGrid;
             if (string.IsNullOrWhiteSpace(sg.ApiKey))
-                throw new InvalidOperationException(
-                    "SendGrid API key is not configured (Notifications:SendGrid:ApiKey). Cannot send email.");
+                throw new OutboundEmailTransportException(
+                    OutboundEmailFailureKind.NotConfigured,
+                    "SendGrid API key is not configured. Cannot send email.");
 
             var payload = BuildPayload(message);
             var json = JsonSerializer.Serialize(payload, JsonOptions);
@@ -68,8 +69,13 @@ namespace ERP_RFQ_Automation.Notifications.Providers
 
             using var response = await client.SendAsync(request, ct).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
-                throw new InvalidOperationException(
-                    $"SendGrid send failed with status {(int)response.StatusCode} {response.ReasonPhrase}.");
+                // Classified at the point the status is known. A REST API states its refusal in the
+                // status line — 401 is a dead API key, 403 an unverified sender — and re-deriving
+                // that later from an exception message would be guessing at a fact we already had.
+                throw new OutboundEmailTransportException(
+                    OutboundEmailFailureClassifier.ClassifyHttpStatus(response.StatusCode).Kind,
+                    $"SendGrid send failed with status {(int)response.StatusCode} {response.ReasonPhrase}.",
+                    ((int)response.StatusCode).ToString());
 
             _logger.LogInformation(
                 "[SendGridEmailSender] Email accepted by SendGrid (status {Status}) Tenant={TenantId} Subject=\"{Subject}\"",

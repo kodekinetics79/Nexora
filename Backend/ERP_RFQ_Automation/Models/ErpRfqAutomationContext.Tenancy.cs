@@ -20,6 +20,7 @@ using ERP_RFQ_Automation.Platform.Onboarding;
 using ERP_RFQ_Automation.Platform.Provisioning;
 using ERP_RFQ_Automation.Platform.Lifecycle;
 using ERP_RFQ_Automation.Platform.Support;
+using ERP_RFQ_Automation.Platform.Notifications;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Models;
@@ -672,6 +673,9 @@ public partial class ErpRfqAutomationContext
 
         // ==== Operator support desk (Platform/Support/) ====
         modelBuilder.ApplyPlatformSupportModel();
+
+        // ==== Platform outbound email identity (Platform/Notifications/) ====
+        modelBuilder.ApplyPlatformEmailModel();
     }
 
     /// <summary>

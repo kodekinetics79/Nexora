@@ -22,6 +22,7 @@ using ERP_RFQ_Automation.Platform.Lifecycle;
 using ERP_RFQ_Automation.Platform.Onboarding;
 using ERP_RFQ_Automation.Platform.Provisioning;
 using ERP_RFQ_Automation.Notifications;
+using ERP_RFQ_Automation.Platform.Notifications;
 using ERP_RFQ_Automation.Agent;
 using ERP_RFQ_Automation.Intelligence.Conversion;
 using ERP_RFQ_Automation.Intelligence.Pricing;
@@ -549,6 +550,15 @@ builder.Services.AddScoped<ISecurityScanRecoveryService, SecurityScanRecoverySer
 // (defaults to the safe console provider until an SMTP/SendGrid provider is
 // configured). Powers RFQ→quote→order communications.
 builder.Services.AddNotifications(builder.Configuration);
+
+// Platform-operator-configurable outbound email (Platform/Notifications): the persisted
+// sending identity, transport and credentials that AddNotifications resolves through at
+// runtime, plus the operator endpoints and the startup warm-up. Registered AFTER
+// AddNotifications, which declares the source seam this fills. Without it the module keeps
+// working exactly as before, reading Notifications:* from configuration — which is the
+// deployment where the CEO's provisioned tenant never received its activation email,
+// because the default provider logs instead of sending and nothing said so.
+builder.Services.AddPlatformEmailSettings();
 
 // Founding-administrator activation (Platform/Onboarding): invite email + single-use
 // activation link, so a customer's first credential is chosen by the customer and never
