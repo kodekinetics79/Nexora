@@ -1,21 +1,52 @@
 using System;
-using System.IO;
-using System.Net;
-using System.Net.Mail;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using ERP_RFQ_Automation.Security;
+using MailKit.Security;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using MimeKit;
+using MimeKit.Text;
+using MimeKit.Utils;
 
 namespace ERP_RFQ_Automation.Notifications.Providers
 {
     /// <summary>
-    /// SMTP sender built on the framework's <see cref="System.Net.Mail.SmtpClient"/>
-    /// so it works today against any SMTP host with NO extra NuGet dependency.
-    /// Host / port / credentials / from are read from <see cref="NotificationsOptions"/>.
+    /// SMTP sender built on MailKit, sharing the connection policy the tenant mailbox path uses.
+    ///
+    /// <para><b>Why not <c>System.Net.Mail.SmtpClient</c>, which this used to be.</b> That client
+    /// treats <c>EnableSsl</c> as "negotiate STARTTLS on a connection that starts in the clear" and
+    /// has no way to express implicit TLS — the mode where the socket is wrapped in TLS before a
+    /// single byte of SMTP is spoken. Microsoft documents it as not supporting it and marks the
+    /// type as not recommended for new development. Port 465 is implicit TLS, and 465 is what a
+    /// great many hosts publish as their recommended setting — GoDaddy's own instructions say
+    /// "Port 465, SSL/TLS". Configured exactly as the provider told the operator to, the old client
+    /// opened a plaintext socket, waited for a greeting that a TLS listener will never send, and
+    /// hung until the timeout. The operator sees "email not sent" and has no reason to suspect the
+    /// settings they copied verbatim.</para>
+    ///
+    /// <para><b>The TLS mode is derived from the port, not from a second setting.</b> 465 means
+    /// implicit TLS and everything else means STARTTLS — the same inference every mail client
+    /// makes, and the reason no user of a mail client has ever been asked which one to pick. A
+    /// separate toggle would only create a state where the port and the mode disagree, which is
+    /// precisely the failure this replaces.</para>
+    ///
+    /// <para><b>Egress goes through <see cref="MailEndpointPolicy"/></b>, the same guard the
+    /// tenant-mailbox transport uses. An operator-supplied hostname is attacker-influenced input in
+    /// the SSRF sense: without it, "SMTP host" is a box in an admin screen that will happily open a
+    /// socket to 169.254.169.254 or to something on the loopback interface. The old sender had no
+    /// such check, which mattered far less when the host could only come from a deployment config
+    /// file and matters a great deal now that it is editable in the console.</para>
     /// </summary>
     public sealed class SmtpEmailSender : IEmailSender
     {
+        /// <summary>
+        /// The one port that means implicit TLS. 587 and 25 are STARTTLS ports; 2525 is a common
+        /// alternate for hosts that block 587, and is also STARTTLS.
+        /// </summary>
+        private const int ImplicitTlsPort = 465;
+
         private readonly NotificationsOptions _options;
         private readonly ILogger<SmtpEmailSender> _logger;
 
@@ -33,28 +64,41 @@ namespace ERP_RFQ_Automation.Notifications.Providers
                     OutboundEmailFailureKind.NotConfigured,
                     "SMTP host is not configured. Cannot send email.");
 
-            using var mail = BuildMailMessage(message);
-            var messageId = $"<{Guid.NewGuid():N}@nexora.local>";
-            mail.Headers.Add("Message-ID", messageId);
+            var port = smtp.Port > 0 ? smtp.Port : 587;
+            var messageId = MimeUtils.GenerateMessageId();
+            using var mime = BuildMimeMessage(message, messageId);
 
-            using var client = new SmtpClient(smtp.Host, smtp.Port > 0 ? smtp.Port : 587)
+            // Implicit TLS when the port says so; STARTTLS otherwise, and REQUIRED rather than
+            // optional when TLS is asked for at all — StartTlsWhenAvailable would silently send
+            // credentials in the clear against a server that fails to advertise STARTTLS.
+            var socketOptions = !smtp.EnableSsl
+                ? SecureSocketOptions.None
+                : port == ImplicitTlsPort
+                    ? SecureSocketOptions.SslOnConnect
+                    : SecureSocketOptions.StartTls;
+
+            using var client = new MailKit.Net.Smtp.SmtpClient
             {
-                EnableSsl = smtp.EnableSsl,
-                Timeout = smtp.TimeoutMs > 0 ? smtp.TimeoutMs : 30000,
-                DeliveryMethod = SmtpDeliveryMethod.Network
+                Timeout = smtp.TimeoutMs > 0 ? smtp.TimeoutMs : 30000
             };
 
-            if (!string.IsNullOrWhiteSpace(smtp.Username))
-                client.Credentials = new NetworkCredential(smtp.Username, smtp.Password);
-
             _logger.LogInformation(
-                "[SmtpEmailSender] Sending email via {Host}:{Port} Tenant={TenantId} BU={BusinessUnitId} Subject=\"{Subject}\"",
-                smtp.Host, client.Port, message.TenantId ?? "-", message.BusinessUnitId ?? "-", message.Subject);
+                "[SmtpEmailSender] Sending via {Host}:{Port} ({Tls}) Tenant={TenantId} BU={BusinessUnitId} Subject=\"{Subject}\"",
+                smtp.Host, port, socketOptions, message.TenantId ?? "-", message.BusinessUnitId ?? "-",
+                message.Subject);
 
-            // SmtpClient.SendMailAsync does not accept a CancellationToken on net8;
-            // honor cancellation cooperatively before the (potentially blocking) send.
-            ct.ThrowIfCancellationRequested();
-            await client.SendMailAsync(mail).ConfigureAwait(false);
+            using var socket = await MailEndpointPolicy.ConnectAsync(smtp.Host, port, ct).ConfigureAwait(false);
+            await client.ConnectAsync(socket, smtp.Host, port, socketOptions, ct).ConfigureAwait(false);
+
+            // Anonymous relay is legitimate on an internal smarthost, so an absent username is not
+            // an error — but a username with no password is a half-filled form, and letting it
+            // through produces an authentication failure that reads like a wrong password.
+            if (!string.IsNullOrWhiteSpace(smtp.Username))
+                await client.AuthenticateAsync(smtp.Username, smtp.Password ?? string.Empty, ct)
+                    .ConfigureAwait(false);
+
+            await client.SendAsync(mime, ct).ConfigureAwait(false);
+            await client.DisconnectAsync(quit: true, ct).ConfigureAwait(false);
 
             _logger.LogInformation(
                 "[SmtpEmailSender] Email sent Tenant={TenantId} Subject=\"{Subject}\"",
@@ -62,49 +106,47 @@ namespace ERP_RFQ_Automation.Notifications.Providers
             return new EmailDeliveryReceipt("smtp", messageId, DateTimeOffset.UtcNow);
         }
 
-        private MailMessage BuildMailMessage(EmailMessage message)
+        private MimeMessage BuildMimeMessage(EmailMessage message, string messageId)
         {
-            var from = message.From is not null
-                ? new MailAddress(message.From.Address, message.From.DisplayName)
-                : new MailAddress(_options.FromAddress, _options.FromName);
+            var mime = new MimeMessage { MessageId = messageId, Subject = message.Subject };
 
-            var mail = new MailMessage
-            {
-                From = from,
-                Subject = message.Subject,
-                Body = string.IsNullOrWhiteSpace(message.HtmlBody) ? (message.TextBody ?? string.Empty) : message.HtmlBody,
-                IsBodyHtml = !string.IsNullOrWhiteSpace(message.HtmlBody)
-            };
+            mime.From.Add(message.From is not null
+                ? Address(message.From)
+                : new MailboxAddress(_options.FromName ?? string.Empty, _options.FromAddress));
 
-            foreach (var to in message.To)
-                mail.To.Add(new MailAddress(to.Address, to.DisplayName));
-            foreach (var cc in message.Cc)
-                mail.CC.Add(new MailAddress(cc.Address, cc.DisplayName));
-            foreach (var bcc in message.Bcc)
-                mail.Bcc.Add(new MailAddress(bcc.Address, bcc.DisplayName));
+            foreach (var to in message.To) mime.To.Add(Address(to));
+            foreach (var cc in message.Cc) mime.Cc.Add(Address(cc));
+            foreach (var bcc in message.Bcc) mime.Bcc.Add(Address(bcc));
 
             var replyTo = message.ReplyTo
-                ?? (string.IsNullOrWhiteSpace(_options.ReplyToAddress) ? null : new EmailAddress(_options.ReplyToAddress!));
-            if (replyTo is not null)
-                mail.ReplyToList.Add(new MailAddress(replyTo.Address, replyTo.DisplayName));
+                ?? (string.IsNullOrWhiteSpace(_options.ReplyToAddress)
+                    ? null
+                    : new EmailAddress(_options.ReplyToAddress!));
+            if (replyTo is not null) mime.ReplyTo.Add(Address(replyTo));
 
-            // Provide both HTML and plain-text alternate views when both are present,
-            // so non-HTML clients get the readable fallback.
-            if (!string.IsNullOrWhiteSpace(message.HtmlBody) && !string.IsNullOrWhiteSpace(message.TextBody))
-            {
-                mail.AlternateViews.Add(AlternateView.CreateAlternateViewFromString(
-                    message.TextBody, null, "text/plain"));
-                mail.AlternateViews.Add(AlternateView.CreateAlternateViewFromString(
-                    message.HtmlBody, null, "text/html"));
-            }
+            var builder = new BodyBuilder();
+            if (!string.IsNullOrWhiteSpace(message.HtmlBody)) builder.HtmlBody = message.HtmlBody;
+            if (!string.IsNullOrWhiteSpace(message.TextBody)) builder.TextBody = message.TextBody;
 
-            foreach (var att in message.Attachments)
-            {
-                var stream = new MemoryStream(att.Content);
-                mail.Attachments.Add(new Attachment(stream, att.FileName, att.ContentType));
-            }
+            // A body-less message is still a valid send (a bare subject line), but MimeKit needs
+            // something to build; an empty text part keeps the message well-formed.
+            if (string.IsNullOrWhiteSpace(builder.HtmlBody) && string.IsNullOrWhiteSpace(builder.TextBody))
+                builder.TextBody = string.Empty;
 
-            return mail;
+            foreach (var attachment in message.Attachments)
+                builder.Attachments.Add(
+                    attachment.FileName, attachment.Content, ContentType.Parse(attachment.ContentType));
+
+            mime.Body = builder.ToMessageBody();
+            return mime;
         }
+
+        /// <summary>
+        /// MimeKit parses a display name and address together; the two are kept apart here because
+        /// a display name containing a comma or an angle bracket would otherwise be read as extra
+        /// recipients.
+        /// </summary>
+        private static MailboxAddress Address(EmailAddress address)
+            => new(address.DisplayName ?? string.Empty, address.Address);
     }
 }
