@@ -65,6 +65,10 @@ export interface EmailProviderCapability {
   requiresAppPassword: boolean;
   /** SMTP submission is off until somebody turns it on at the provider. */
   smtpAuthDisabledByDefault: boolean;
+  /** The provider refuses a message whose From is not the mailbox that authenticated — it hosts
+   *  mailboxes rather than relaying for a domain. False for SendGrid, SES, Postmark and Mailgun,
+   *  where sending as many addresses is the point. */
+  requiresSenderMatchesMailbox: boolean;
   /** A ceiling worth stating before it is discovered as a partial outage. */
   sendingLimit: string | null;
   inboundEnablementNote: string | null;

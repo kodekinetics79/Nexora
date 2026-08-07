@@ -53,6 +53,11 @@ public sealed record EmailProviderCapabilityDto
     /// before correct credentials can succeed.</summary>
     public bool SmtpAuthDisabledByDefault { get; init; }
 
+    /// <summary>True when the provider will refuse a message whose From is not the mailbox that
+    /// authenticated — a mailbox host rather than a relay. Sent rather than re-derived on the
+    /// client, so the rule has exactly one definition.</summary>
+    public bool RequiresSenderMatchesMailbox { get; init; }
+
     /// <summary>A daily or monthly ceiling worth stating before the tenant discovers it as a
     /// partial outage. Null when the provider publishes none that matters at this scale.</summary>
     public string? SendingLimit { get; init; }
@@ -83,6 +88,7 @@ public static class EmailProviderCapabilityMapper
             RequiredFields = RequiredFields(provider),
             RequiresAppPassword = provider.RequiresAppPassword,
             SmtpAuthDisabledByDefault = provider.SmtpAuthDisabledByDefault,
+            RequiresSenderMatchesMailbox = provider.RequiresSenderMatchesMailbox,
             SendingLimit = provider.SendingLimit,
             InboundEnablementNote = provider.InboundEnablementNote,
             Guidance = provider.Guidance,

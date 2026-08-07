@@ -30,6 +30,7 @@ const microsoft365: EmailProviderCapability = {
   requiredFields: ['host', 'port', 'username', 'password'],
   requiresAppPassword: true,
   smtpAuthDisabledByDefault: true,
+  requiresSenderMatchesMailbox: true,   // a mailbox host: From must be the account signed in as
   sendingLimit: '10,000 recipients per day',
   inboundEnablementNote: 'IMAP is off by default on Microsoft 365 mailboxes.',
   guidance: 'Use 993 to read and 587 to send.',
@@ -55,6 +56,7 @@ const sendgrid: EmailProviderCapability = {
   requiredFields: ['host', 'port', 'apiKey'],
   requiresAppPassword: false,
   smtpAuthDisabledByDefault: false,
+  requiresSenderMatchesMailbox: false,  // a relay: sending as many addresses is the point
   sendingLimit: '100 per day on the free tier',
   inboundEnablementNote: null,
   guidance: 'The username is the literal string "apikey".',

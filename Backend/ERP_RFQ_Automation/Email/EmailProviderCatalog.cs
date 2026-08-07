@@ -153,6 +153,23 @@ public sealed record EmailProviderDefinition(
     /// <summary>True when the same provider can both feed ingestion and carry quotes out, which is
     /// the only shape the tenant mailbox screen can store — it writes host/port rows, not API keys.</summary>
     public bool SupportsTenantMailbox => SupportsInbound && OutboundSmtp is not null;
+
+    /// <summary>
+    /// True when this provider will refuse a message whose <c>From</c> is not the mailbox that
+    /// authenticated.
+    ///
+    /// <para><b>Derived rather than declared per entry</b>, because the distinction is structural
+    /// and a per-provider flag is one more thing to forget. A provider that both receives and sends
+    /// is hosting a MAILBOX: the credential identifies one address and the provider signs and
+    /// stamps outbound mail as that address, so a mismatched From is refused (GoDaddy, Microsoft
+    /// 365, Google Workspace, Zoho, cPanel). A send-only provider is a RELAY: the credential
+    /// identifies an ACCOUNT authorised to send for whole verified domains, and sending as many
+    /// different addresses is the entire point (SendGrid, SES, Postmark, Mailgun).</para>
+    ///
+    /// <para>False for <c>custom</c>, which has no presets — an unknown host might be either, and
+    /// a warning that fires on a guess trains operators to ignore the banner it appears in.</para>
+    /// </summary>
+    public bool RequiresSenderMatchesMailbox => SupportsTenantMailbox;
 }
 
 /// <summary>

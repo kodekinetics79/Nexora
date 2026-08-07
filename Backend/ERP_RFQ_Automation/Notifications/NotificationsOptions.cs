@@ -71,6 +71,8 @@ namespace ERP_RFQ_Automation.Notifications
                     warnings.Add("Notifications:Provider is 'smtp' but Notifications:Smtp:Host is empty. SMTP sends will fail.");
                 if (Smtp.Port <= 0)
                     warnings.Add("Notifications:Smtp:Port is not set; defaulting to 587.");
+
+                warnings.AddRange(ValidateSenderAlignment());
             }
             else if (IsSendGrid)
             {
@@ -89,6 +91,47 @@ namespace ERP_RFQ_Automation.Notifications
                     "For any pilot or rehearsal set Notifications:OutboundGuard:Mode to Redirect or AllowListOnly.");
 
             return warnings;
+        }
+
+        /// <summary>
+        /// The From address and the authenticated mailbox must be the same address on a
+        /// mailbox-hosting provider.
+        ///
+        /// <para><b>Why this is a warning and not a footnote.</b> Sending activation links as
+        /// <c>info@</c> while authenticating as <c>zack@</c> is the natural thing to configure —
+        /// one is the address customers should see, the other is the mailbox whose password you
+        /// have. GoDaddy, Microsoft 365, Google Workspace and Zoho all refuse it, and the refusal
+        /// arrives as a bare SMTP 5xx during the send, long after the settings screen said
+        /// everything was fine. Every provisioned tenant would report success and no founding
+        /// administrator would receive anything.</para>
+        ///
+        /// <para><b>Only for hosts the catalogue recognises as mailbox providers.</b> A relay is
+        /// SUPPOSED to send as addresses other than its username — SendGrid's username is the
+        /// literal string "apikey" — so warning there would be wrong, and warning on an
+        /// unrecognised host would be a guess. Both would teach the operator to dismiss the
+        /// banner, which costs more than the warning is worth.</para>
+        /// </summary>
+        private IReadOnlyList<string> ValidateSenderAlignment()
+        {
+            if (string.IsNullOrWhiteSpace(FromAddress) || string.IsNullOrWhiteSpace(Smtp.Username))
+                return [];
+            if (string.Equals(FromAddress.Trim(), Smtp.Username.Trim(), System.StringComparison.OrdinalIgnoreCase))
+                return [];
+
+            var provider = Email.EmailProviderCatalog.Find(
+                Email.EmailProviderCatalog.InferKeyFromHost(Smtp.Host));
+            if (provider is not { RequiresSenderMatchesMailbox: true })
+                return [];
+
+            return
+            [
+                $"The From address ({FromAddress.Trim()}) is not the mailbox being signed in as "
+                + $"({Smtp.Username.Trim()}). {provider.DisplayName} hosts mailboxes rather than "
+                + "relaying for a domain, so it will reject a message claiming to be from a "
+                + "different address — the connection will test clean and every send will still "
+                + "fail. Either send as the mailbox you authenticate as, or set that mailbox up as "
+                + "an alias of the From address at the provider first."
+            ];
         }
     }
 

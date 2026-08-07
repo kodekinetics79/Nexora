@@ -292,6 +292,37 @@ export default function EmailSettingsPage() {
     [providersQuery.data],
   );
 
+  /**
+   * The provider currently configured, recognised by HOST rather than by the picker — the host is
+   * what the server will actually dial, and it survives a page reload where the picker selection
+   * does not.
+   */
+  const configuredProvider = useMemo(() => {
+    const host = form?.smtpHost.trim().toLowerCase();
+    if (!host) return null;
+    return (
+      (providersQuery.data ?? []).find((provider) =>
+        [provider.inbound, provider.outboundSmtp, provider.outboundApi].some(
+          (endpoint) => endpoint?.host.toLowerCase() === host,
+        ),
+      ) ?? null
+    );
+  }, [providersQuery.data, form?.smtpHost]);
+
+  /**
+   * Set when the From address and the authenticated mailbox differ on a provider that hosts
+   * mailboxes. Null for a relay, where sending as another address is the entire point, and null
+   * for a host the catalogue does not recognise — a warning fired on a guess is a warning
+   * operators learn to dismiss.
+   */
+  const senderMismatch = useMemo(() => {
+    if (!form || !configuredProvider?.requiresSenderMatchesMailbox) return null;
+    const from = form.fromAddress.trim().toLowerCase();
+    const username = form.smtpUsername.trim().toLowerCase();
+    if (!from || !username || from === username) return null;
+    return configuredProvider;
+  }, [form, configuredProvider]);
+
   if (settingsQuery.isLoading || !form) return <LoadingState label="Loading email settings…" />;
   if (settingsQuery.isError)
     return <ErrorState message={platformErrorMessage(settingsQuery.error, 'Could not load email settings')} />;
@@ -510,6 +541,28 @@ export default function EmailSettingsPage() {
                 helperText="Usually the full mailbox address."
               />
             </Grid>
+
+            {senderMismatch && (
+              <Grid size={{ xs: 12 }}>
+                {/*
+                  Shown while typing, not after a reload. The connection test will pass with these
+                  settings — it authenticates and disconnects, and never states a From address — so
+                  without this the first evidence of the problem is a tenant whose founding
+                  administrator never received their activation link.
+                */}
+                <Alert severity="warning" sx={{ borderRadius: 2 }}>
+                  <AlertTitle sx={{ fontWeight: 800 }}>
+                    The From address is not the mailbox you are signing in as
+                  </AlertTitle>
+                  Sending as <strong>{form.fromAddress.trim()}</strong> while authenticating as{' '}
+                  <strong>{form.smtpUsername.trim()}</strong>. {senderMismatch.displayName} hosts
+                  mailboxes rather than relaying for a domain, so it will reject the message —
+                  the connection test will still pass, because it never states a From address.
+                  Either send as the mailbox you authenticate as, or add it as an alias at{' '}
+                  {senderMismatch.displayName} first.
+                </Alert>
+              </Grid>
+            )}
             <Grid size={{ xs: 12, md: 6 }}>
               <TextField
                 fullWidth

@@ -71,7 +71,35 @@ vi.mock('../api/client', () => ({
         warnings: [],
       }),
     ),
-    listEmailProviders: vi.fn(() => Promise.resolve([])),
+    listEmailProviders: vi.fn(() =>
+      Promise.resolve([
+        {
+          key: 'godaddy',
+          displayName: 'GoDaddy',
+          supportsInbound: true,
+          supportsOutbound: true,
+          supportsTenantMailbox: true,
+          inbound: {
+            direction: 'Inbound', transport: 'Imap', host: 'imap.secureserver.net',
+            port: 993, tls: 'Implicit', useSsl: true,
+          },
+          outboundSmtp: {
+            direction: 'Outbound', transport: 'Smtp', host: 'smtpout.secureserver.net',
+            port: 465, tls: 'Implicit', useSsl: true,
+          },
+          outboundApi: null,
+          authModes: ['Password'],
+          requiredFields: ['host', 'port', 'username', 'password'],
+          requiresAppPassword: false,
+          smtpAuthDisabledByDefault: false,
+          requiresSenderMatchesMailbox: true,
+          sendingLimit: '250 per day',
+          inboundEnablementNote: null,
+          guidance: 'Port 465, SSL/TLS.',
+          documentationUrl: null,
+        },
+      ]),
+    ),
     saveEmailSettings,
     testEmailConnection,
     testSendEmail: vi.fn(),
@@ -183,6 +211,37 @@ describe('platform email settings', () => {
     // tested. Editing the host must retract the claim.
     fireEvent.change(screen.getByLabelText(/^host$/i), { target: { value: 'smtp.office365.com' } });
     await waitFor(() => expect(screen.queryByTestId('mail-connection-report')).not.toBeInTheDocument());
+  });
+
+  it('warns when the From address is not the mailbox being authenticated as', async () => {
+    renderPage();
+    const from = await screen.findByLabelText(/from address/i);
+
+    // The fixture starts aligned (info@ signing in as info@), so nothing is said.
+    await waitFor(() =>
+      expect(screen.queryByText(/not the mailbox you are signing in as/i)).not.toBeInTheDocument(),
+    );
+
+    // The configuration everyone reaches for: send as the address customers should see, using
+    // the credentials you happen to hold. GoDaddy rejects it — at SEND time, long after the
+    // connection test has passed, because a connection test never states a From address.
+    fireEvent.change(from, { target: { value: 'zack@kodekinetics.com' } });
+    expect(await screen.findByText(/not the mailbox you are signing in as/i)).toBeInTheDocument();
+    expect(screen.getByText(/GoDaddy hosts mailboxes rather than relaying/i)).toBeInTheDocument();
+  });
+
+  it('says nothing about an unrecognised host, rather than guessing', async () => {
+    renderPage();
+    await screen.findByLabelText(/^host$/i);
+
+    fireEvent.change(screen.getByLabelText(/^host$/i), { target: { value: 'mail.internal.example' } });
+    fireEvent.change(screen.getByLabelText(/from address/i), { target: { value: 'zack@kodekinetics.com' } });
+
+    // It might be a corporate relay that is supposed to send for the whole domain. A warning
+    // fired on a guess is one operators learn to dismiss.
+    await waitFor(() =>
+      expect(screen.queryByText(/not the mailbox you are signing in as/i)).not.toBeInTheDocument(),
+    );
   });
 
   it('tests the connection with the stored credential when no password is typed', async () => {
