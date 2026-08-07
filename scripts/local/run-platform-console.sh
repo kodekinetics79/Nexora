@@ -70,10 +70,15 @@ for tool in docker dotnet node npx curl python3 lsof; do
 done
 docker info >/dev/null 2>&1 || die "Docker is installed but not running. Start Docker Desktop."
 
-for pair in "API:$BACKEND_PORT" "frontend:$FRONTEND_PORT"; do
-  name="${pair%%:*}"; port="${pair##*:}"
-  lsof -ti "tcp:${port}" >/dev/null 2>&1 && \
-    die "Port $port is already in use (needed for the $name). Free it, or set NEXORA_${name^^}_PORT."
+# macOS ships bash 3.2, which has no `${var^^}`. Using it here turned a clear "port is in
+# use" diagnostic into "bad substitution" — the script failed to explain its own failure, on
+# the only platform this script is run on. The override variable name is spelled out instead.
+for pair in "API:$BACKEND_PORT:NEXORA_BACKEND_PORT" "frontend:$FRONTEND_PORT:NEXORA_FRONTEND_PORT"; do
+  name="${pair%%:*}"; rest="${pair#*:}"; port="${rest%%:*}"; override="${rest##*:}"
+  if lsof -ti "tcp:${port}" >/dev/null 2>&1; then
+    holder="$(lsof -nP -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1" (pid "$2")"}')"
+    die "Port $port is already in use${holder:+ by $holder} (needed for the $name). Free it, or set $override."
+  fi
 done
 
 mkdir -p "$RUN_DIR"
