@@ -428,7 +428,9 @@ public sealed class TenantProvisioningRunner : ITenantProvisioningRunner
                 var tenant = await db.Set<Tenant>().IgnoreQueryFilters()
                     .FirstAsync(t => t.Id == tenantId, ct);
                 tenant.PrimaryBusinessUnitId = execution.ProvisionedBusinessUnitId;
-                tenant.Status = TenantStatus.Active;
+                // Provisioning completion is evidence consumed by the activation authority;
+                // it must not independently decide that the tenant is commercially ready.
+                tenant.Status = TenantStatus.Provisioning;
                 tenant.ModifiedBy = execution.RequestedBy;
                 tenant.ModifiedOn = DateTime.UtcNow;
             }

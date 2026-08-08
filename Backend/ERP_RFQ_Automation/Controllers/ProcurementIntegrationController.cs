@@ -9,6 +9,7 @@ namespace ERP_RFQ_Automation.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/procurement-integrations")]
+[ERP_RFQ_Automation.Platform.Entitlements.RequiresEntitlement(ERP_RFQ_Automation.Platform.Entitlements.TypedEntitlementCatalog.Integrations)]
 public sealed class ProcurementIntegrationController(IProcurementIntegrationService service) : ControllerBase
 {
     [HttpGet("status")]

@@ -401,7 +401,9 @@ public class TenantsController : ControllerBase
                     : null;
 
                 tenant.PrimaryBusinessUnitId = bu.Id;
-                tenant.Status = TenantStatus.Active;
+                // Provisioning completion is not activation. The authoritative activation
+                // policy owns the only Provisioning -> Active transition.
+                tenant.Status = TenantStatus.Provisioning;
                 tenant.ModifiedBy = actor;
                 tenant.ModifiedOn = DateTime.UtcNow;
                 await _context.SaveChangesAsync(ct);

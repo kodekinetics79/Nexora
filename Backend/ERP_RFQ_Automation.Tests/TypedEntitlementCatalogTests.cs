@@ -17,7 +17,7 @@ public sealed class TypedEntitlementCatalogTests
     }
 
     [Fact]
-    public async Task Feature_authority_is_default_deny_and_legacy_boundary_is_explicit()
+    public async Task Feature_authority_is_default_deny_including_ungoverned_legacy_boundary()
     {
         const long businessUnitId = 44;
         var denied = new EntitlementService(
@@ -40,8 +40,54 @@ public sealed class TypedEntitlementCatalogTests
 
         var legacy = new EntitlementService(
             new FixedAccess(new TenantAccessSnapshot(businessUnitId, null, null, null)), null!);
-        Assert.True((await legacy.CheckFeatureAsync(
+        Assert.False((await legacy.CheckFeatureAsync(
             businessUnitId, TypedEntitlementCatalog.Exports)).Allowed);
+    }
+
+    [Fact]
+    public void Declarations_reject_unknown_keys_at_construction_time()
+    {
+        Assert.Equal(TypedEntitlementCatalog.Rfq,
+            TypedEntitlementCatalog.RequireKnown(TypedEntitlementCatalog.Rfq));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            TypedEntitlementCatalog.RequireKnown("future.unreviewed"));
+    }
+
+    [Fact]
+    public void Real_domain_controllers_declare_their_server_entitlement_boundary()
+    {
+        var expected = new Dictionary<Type, string>
+        {
+            [typeof(ERP_RFQ_Automation.Controllers.RfqController)] = TypedEntitlementCatalog.Rfq,
+            [typeof(ERP_RFQ_Automation.Controllers.QuoteController)] = TypedEntitlementCatalog.Quotes,
+            [typeof(ERP_RFQ_Automation.Controllers.OrderController)] = TypedEntitlementCatalog.Orders,
+            [typeof(ERP_RFQ_Automation.Controllers.ProcurementController)] = TypedEntitlementCatalog.Procurement,
+            [typeof(ERP_RFQ_Automation.Controllers.InventoryIntelligenceController)] = TypedEntitlementCatalog.Inventory,
+            [typeof(ERP_RFQ_Automation.Controllers.AgentController)] = TypedEntitlementCatalog.Ai,
+            [typeof(ERP_RFQ_Automation.Controllers.ProcurementIntegrationController)] = TypedEntitlementCatalog.Integrations,
+            [typeof(ERP_RFQ_Automation.Controllers.EmailTriageController)] = TypedEntitlementCatalog.EmailIntake,
+            [typeof(ERP_RFQ_Automation.Controllers.MailboxController)] = TypedEntitlementCatalog.EmailIntake,
+            [typeof(ERP_RFQ_Automation.Controllers.ExtractionController)] = TypedEntitlementCatalog.Rfq
+        };
+
+        foreach (var (controller, key) in expected)
+        {
+            var declaration = Assert.Single(controller.GetCustomAttributes(
+                typeof(RequiresEntitlementAttribute), inherit: true).Cast<RequiresEntitlementAttribute>());
+            Assert.Equal(key, declaration.Key);
+        }
+
+        var supplierSearch = typeof(ERP_RFQ_Automation.Controllers.ProcurementController)
+            .GetMethod(nameof(ERP_RFQ_Automation.Controllers.ProcurementController.SearchSourcingCandidates))!;
+        Assert.Contains(supplierSearch.GetCustomAttributes(typeof(RequiresEntitlementAttribute), true)
+                .Cast<RequiresEntitlementAttribute>(),
+            x => x.Key == TypedEntitlementCatalog.SupplierSearch);
+
+        Assert.Empty(EntitlementEnforcementCoverage.Enforced.Keys
+            .Intersect(EntitlementEnforcementCoverage.Missing.Keys));
+        Assert.Equal(TypedEntitlementCatalog.Keys.Order(),
+            EntitlementEnforcementCoverage.Enforced.Keys
+                .Concat(EntitlementEnforcementCoverage.Missing.Keys).Order());
     }
 
     private sealed class FixedAccess(TenantAccessSnapshot snapshot) : ITenantAccessService

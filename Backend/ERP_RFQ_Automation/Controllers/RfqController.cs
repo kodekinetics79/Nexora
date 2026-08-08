@@ -17,6 +17,7 @@ namespace ERP_RFQ_Automation.Controllers
     [Route("api/[controller]")]
     [ApiController]
     [Authorize]
+    [ERP_RFQ_Automation.Platform.Entitlements.RequiresEntitlement(ERP_RFQ_Automation.Platform.Entitlements.TypedEntitlementCatalog.Rfq)]
     public class RfqController : ControllerBase
     {
         private readonly IRfqRepository _repository;

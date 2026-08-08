@@ -11,6 +11,7 @@ namespace ERP_RFQ_Automation.Controllers;
 [ApiController]
 [Route("api/procurement")]
 [Authorize]
+[ERP_RFQ_Automation.Platform.Entitlements.RequiresEntitlement(ERP_RFQ_Automation.Platform.Entitlements.TypedEntitlementCatalog.Procurement)]
 public sealed class ProcurementController(
     IProcurementApplicationService service,
     ILogger<ProcurementController> logger) : ControllerBase
@@ -40,6 +41,7 @@ public sealed class ProcurementController(
 
     [HttpPost("sourcing-cases/{sourcingCaseId:long}/supplier-candidates/search")]
     [RequireModulePermission("Supplier History", PermissionAction.Edit)]
+    [ERP_RFQ_Automation.Platform.Entitlements.RequiresEntitlement(ERP_RFQ_Automation.Platform.Entitlements.TypedEntitlementCatalog.SupplierSearch)]
     public Task<IActionResult> SearchSourcingCandidates(long sourcingCaseId,
         [FromBody] SearchSourcingCandidatesRequest request)
         => ExecuteAsync(async () => Ok(await service.SearchSourcingCandidatesAsync(

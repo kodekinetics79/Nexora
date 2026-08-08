@@ -15,6 +15,7 @@ namespace ERP_RFQ_Automation.Controllers;
 [ApiController]
 [Route("api/email-triage")]
 [Authorize]
+[ERP_RFQ_Automation.Platform.Entitlements.RequiresEntitlement(ERP_RFQ_Automation.Platform.Entitlements.TypedEntitlementCatalog.EmailIntake)]
 public sealed class EmailTriageController : ControllerBase
 {
     private readonly IEmailTriageService _service;

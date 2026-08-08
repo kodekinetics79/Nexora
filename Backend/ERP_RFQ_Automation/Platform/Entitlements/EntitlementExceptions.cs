@@ -12,6 +12,7 @@ public static class NexoraProblems
     public const string Base = "https://nexora.invalid/problems/";
 
     public const string TenantSuspended = Base + "tenant-suspended";
+    public const string FeatureNotEntitled = Base + "feature-not-entitled";
     public const string DocumentQuotaExceeded = Base + "document-quota-exceeded";
     public const string SeatLimitExceeded = Base + "seat-limit-exceeded";
     public const string ReadOnlyImpersonation = Base + "read-only-impersonation";
