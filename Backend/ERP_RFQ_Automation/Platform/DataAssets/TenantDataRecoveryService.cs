@@ -93,8 +93,8 @@ public sealed partial class TenantDataRecoveryService(
                 x => x.TenantId == tenantId && x.IdempotencyKey == idempotencyKey, ct);
             if (existing is not null)
             {
-                if (existing.EvidenceType == request.EvidenceType && existing.EvidenceSha256 == hash
-                    && existing.ScopeKey == scopeKey)
+                if (SameEvidence(existing, request, scopeKey, provider, backupSet, evidenceReference,
+                        hash, correlationId, completed, started, recoveryPoint))
                     return ToDto(existing);
                 throw new TenantDataAssetConflictException(
                     "The idempotency key is already bound to different recovery evidence.");
@@ -134,7 +134,10 @@ public sealed partial class TenantDataRecoveryService(
                 var tombstoneApplied = await context.Set<TenantDataRecoveryEvidence>().AsNoTracking()
                     .AnyAsync(x => x.TenantId == tenantId && x.ScopeKey == scopeKey
                                    && x.EvidenceType == TenantDataRecoveryEvidenceTypes.TombstoneReapplied
-                                   && x.CustomerRowsObserved == 0 && x.CompletedUtc <= completed, ct);
+                                   && x.CustomerRowsObserved == 0 && x.CompletedUtc >= started
+                                   && x.CompletedUtc <= completed
+                                   && x.OpaqueBackupSetReference == backupSet
+                                   && x.CorrelationId == correlationId, ct);
                 if (!tombstoneApplied || request.CustomerRowsObserved != 0)
                     throw new TenantDataAssetConflictException(
                         "A purged tenant restore cannot complete until its tombstone is reapplied and zero customer rows remain.");
@@ -196,6 +199,9 @@ public sealed partial class TenantDataRecoveryService(
             blockers.Add("An active legal hold prevents deletion certification.");
         if (assets.Count == 0)
             blockers.Add("No tenant data boundaries are registered; external data state is unknown.");
+        foreach (var requiredType in TenantDataAssetTypes.All.Order())
+            if (assets.All(x => !string.Equals(x.AssetType, requiredType, StringComparison.Ordinal)))
+                blockers.Add($"Required data boundary type '{requiredType}' is not registered; provider state is unknown.");
 
         foreach (var asset in assets.Where(x => x.Disposition != TenantDataAssetDispositions.PreserveOperatorEvidence))
         {
@@ -225,6 +231,7 @@ public sealed partial class TenantDataRecoveryService(
         {
             context.ChangeTracker.Clear();
             await using var tx = await context.Database.BeginTransactionAsync(ct);
+            await TenantLegalHoldFence.AcquireTransactionAsync(context, tenantId, ct);
             var existing = await context.Set<TenantDeletionCertificate>().AsNoTracking()
                 .SingleOrDefaultAsync(x => x.TenantId == tenantId, ct);
             if (existing is not null) return ToDto(existing);
@@ -269,6 +276,21 @@ public sealed partial class TenantDataRecoveryService(
     private static TenantDeletionCertificateDto ToDto(TenantDeletionCertificate x) => new(
         x.Id, x.TenantId, x.TenantSlug, x.PurgedUtc, x.CertifiedUtc, x.ActorEmail,
         x.EvidenceManifestSha256, JsonSerializer.Deserialize<long[]>(x.EvidenceIdsJson) ?? [], x.Reason);
+
+    private static bool SameEvidence(
+        TenantDataRecoveryEvidence stored, RecordTenantDataRecoveryEvidenceRequest request,
+        string scopeKey, string provider, string? backupSet, string evidenceReference, string hash,
+        string correlationId, DateTime completed, DateTime? started, DateTime? recoveryPoint) =>
+        stored.TenantDataAssetId == request.TenantDataAssetId
+        && stored.ScopeKey == scopeKey && stored.EvidenceType == request.EvidenceType
+        && stored.OpaqueProviderReference == provider && stored.OpaqueBackupSetReference == backupSet
+        && stored.RecoveryPointUtc == recoveryPoint && stored.OperationStartedUtc == started
+        && stored.CompletedUtc == completed && stored.ConfiguredRpoSeconds == request.ConfiguredRpoSeconds
+        && stored.ConfiguredRtoSeconds == request.ConfiguredRtoSeconds
+        && stored.RetainUntilUtc == request.RetainUntilUtc
+        && stored.CustomerRowsObserved == request.CustomerRowsObserved
+        && stored.EvidenceReference == evidenceReference && stored.EvidenceSha256 == hash
+        && stored.CorrelationId == correlationId;
 
     private static DateTime Utc(DateTime value, string label)
     {

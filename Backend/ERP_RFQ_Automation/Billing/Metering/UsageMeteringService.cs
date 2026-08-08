@@ -154,8 +154,8 @@ public sealed class UsageMeteringService(ErpRfqAutomationContext db)
             throw new UsageMeteringException("Adjustment quantity cannot be zero.");
         if (value.AllowanceApplied < 0 || value.AllowanceApplied > Math.Max(0, value.Quantity))
             throw new UsageMeteringException("Applied allowance is outside the event quantity.");
-        if (value.CostAmount < 0 || value.UnitPrice < 0)
-            throw new UsageMeteringException("Cost and unit price cannot be negative.");
+        if (value.AdjustsUsageEventId is null && value.CostAmount < 0 || value.UnitPrice < 0)
+            throw new UsageMeteringException("Consumption cost and unit price cannot be negative.");
         if (value.OccurredAtUtc.Kind != DateTimeKind.Utc || value.OccurredAtUtc > DateTime.UtcNow.AddMinutes(5))
             throw new UsageMeteringException("OccurredAt must be UTC and cannot be in the future.");
         if (value.OccurredAtUtc < DateTime.UtcNow.AddYears(-7))

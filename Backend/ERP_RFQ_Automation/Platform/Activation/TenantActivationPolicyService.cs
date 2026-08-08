@@ -8,6 +8,8 @@ using ERP_RFQ_Automation.Platform.Provisioning;
 using ERP_RFQ_Automation.Platform.Services;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
+using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.Platform.Lifecycle;
 
 namespace ERP_RFQ_Automation.Platform.Activation;
 
@@ -80,8 +82,14 @@ public sealed class TenantActivationPolicyService(
             "All typed keys and finite positive seat, document and extraction limits are required.",
             plan is null ? null : $"plan:{plan.Id}:entitlements");
 
-        var adminActive = tenant.PrimaryBusinessUnitId is long bu && await db.Users.IgnoreQueryFilters().AsNoTracking()
-            .AnyAsync(x => x.Buid == bu && x.IsActive == true && x.RoleId != null, ct);
+        var adminActive = tenant.PrimaryBusinessUnitId is long bu && await (
+                from user in db.Users.IgnoreQueryFilters().AsNoTracking()
+                join role in db.SetupMasters.IgnoreQueryFilters().AsNoTracking()
+                    on new { Id = user.RoleId!.Value, Bu = user.Buid!.Value }
+                    equals new { Id = role.SetupId, Bu = role.BusinessUnitId }
+                where user.Buid == bu && user.IsActive == true && user.RoleId != null
+                      && role.IsActive == true && role.RoleRank >= RoleRanks.Admin
+                select user.Id).AnyAsync(ct);
         Add("admin.first-activated", adminActive,
             "The founding privileged tenant administrator must have activated their account.",
             tenant.PrimaryBusinessUnitId is long adminBu ? $"business-unit:{adminBu}:admin" : null);
@@ -122,13 +130,30 @@ public sealed class TenantActivationPolicyService(
         Add("provisioning.completed-verified", provisioningComplete,
             "Provisioning must be terminally successful and auditable.", $"tenant:{tenant.Id}:provisioning");
 
+        var offboarding = await db.Set<TenantOffboarding>().AsNoTracking()
+            .SingleOrDefaultAsync(x => x.TenantId == tenantId, ct);
+        var destructiveStateClear = offboarding is null
+            || offboarding.Stage == TenantOffboardingStage.NotScheduled
+               && offboarding.PurgeStartedOn is null && offboarding.PurgeExecutedOn is null
+               && offboarding.PersonalDataErasedOn is null;
+        Add("data.lifecycle-operational", destructiveStateClear,
+            "Pending deletion, purge, or erasure state cannot become operational.",
+            offboarding is null ? null : $"tenant-offboarding:{offboarding.Id}");
+
+        var activeLegalHold = await db.Set<TenantLegalHold>().AsNoTracking()
+            .AnyAsync(x => x.TenantId == tenantId && x.ReleasedOn == null, ct);
+
         var blockers = controls.Where(x => !x.Satisfied).Select(x => x.Code).ToArray();
         var warnings = new List<string>();
         if (tenant.Status == TenantStatus.Active)
             warnings.Add("Tenant is already Active; this is a current-state reassessment, not transition evidence.");
 
+        var pastDue = await db.Set<SubscriptionInvoice>().AsNoTracking().AnyAsync(x =>
+            x.TenantId == tenantId && x.DueAtUtc < now
+            && x.TotalAmount > x.CreditedAmount + x.PaidAmount && x.Status != SubscriptionInvoiceStatus.Void, ct);
         return new TenantActivationDecision(tenant.Id, blockers.Length == 0,
-            CommercialState(tenant), AccessState(tenant), "LIVE", "NONE", controls, blockers,
+            CommercialState(tenant, pastDue), AccessState(tenant), DataState(offboarding),
+            activeLegalHold ? "ACTIVE" : "NONE", controls, blockers,
             warnings, TenantActivationPolicy.Version, now);
     }
 
@@ -224,8 +249,17 @@ public sealed class TenantActivationPolicyService(
             return false;
         return uri.Scheme == "urn" || !string.IsNullOrWhiteSpace(uri.Host);
     }
-    private static string CommercialState(Tenant t) => t.Status == TenantStatus.Archived ? "TERMINATED" :
-        t.BillingMode == TenantBillingMode.Trial ? "TRIAL" : t.Status == TenantStatus.Active ? "ACTIVE" : "PROSPECT";
+    private static string CommercialState(Tenant t, bool pastDue) => t.Status == TenantStatus.Archived ? "TERMINATED" :
+        pastDue ? "PAST_DUE" : t.BillingMode == TenantBillingMode.Trial ? "TRIAL" :
+        t.Status == TenantStatus.Active ? "ACTIVE" : "PROSPECT";
+    private static string DataState(TenantOffboarding? state) => state switch
+    {
+        { Stage: TenantOffboardingStage.Purged } => "PURGED",
+        { PurgeExecutedOn: not null } => "PURGING",
+        { PurgeStartedOn: not null } => "PURGE_CLAIMED",
+        { Stage: TenantOffboardingStage.PendingDeletion } => "DELETION_SCHEDULED",
+        _ => "LIVE"
+    };
     private static string AccessState(Tenant t) => t.Status switch
     {
         TenantStatus.Active => "ENABLED", TenantStatus.Suspended => "SUSPENDED",

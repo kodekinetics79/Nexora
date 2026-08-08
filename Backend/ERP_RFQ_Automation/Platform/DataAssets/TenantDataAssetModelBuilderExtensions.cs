@@ -53,6 +53,11 @@ public static class TenantDataAssetModelBuilderExtensions
             entity.Property(x => x.IdempotencyKey).HasMaxLength(128).IsRequired();
             entity.Property(x => x.ActorEmail).HasMaxLength(320).IsRequired();
             entity.Property(x => x.Reason).HasMaxLength(1000).IsRequired();
+            entity.Property(x => x.RecoveryPointUtc).HasColumnType("timestamp with time zone");
+            entity.Property(x => x.OperationStartedUtc).HasColumnType("timestamp with time zone");
+            entity.Property(x => x.CompletedUtc).HasColumnType("timestamp with time zone");
+            entity.Property(x => x.RetainUntilUtc).HasColumnType("timestamp with time zone");
+            entity.Property(x => x.RecordedUtc).HasColumnType("timestamp with time zone");
             entity.HasIndex(x => new { x.TenantId, x.IdempotencyKey }).IsUnique();
             entity.HasIndex(x => new { x.TenantId, x.ScopeKey, x.EvidenceType, x.CompletedUtc });
         });
@@ -66,6 +71,8 @@ public static class TenantDataAssetModelBuilderExtensions
             entity.Property(x => x.EvidenceManifestSha256).HasMaxLength(64).IsFixedLength().IsRequired();
             entity.Property(x => x.EvidenceIdsJson).HasColumnType("jsonb").IsRequired();
             entity.Property(x => x.Reason).HasMaxLength(1000).IsRequired();
+            entity.Property(x => x.PurgedUtc).HasColumnType("timestamp with time zone");
+            entity.Property(x => x.CertifiedUtc).HasColumnType("timestamp with time zone");
             entity.HasIndex(x => x.TenantId).IsUnique();
         });
 

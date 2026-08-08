@@ -11,6 +11,7 @@ using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.Platform.Lifecycle;
 using ERP_RFQ_Automation.PlatformGovernance;
+using ERP_RFQ_Automation.Platform.Activation;
 
 namespace ERP_RFQ_Automation.Platform.Controllers;
 
@@ -33,6 +34,7 @@ public class TenantsController : ControllerBase
     private readonly ITenantBaselineSeeder _baseline;
     private readonly Onboarding.ITenantAdminInvitationService _invitations;
     private readonly Entitlements.ITenantAccessService? _tenantAccess;
+    private readonly ITenantActivationPolicyService? _activationPolicy;
 
     /// <summary>
     /// <paramref name="baseline"/> and <paramref name="invitations"/> are REQUIRED dependencies,
@@ -47,7 +49,8 @@ public class TenantsController : ControllerBase
         IServiceScopeFactory scopeFactory, ITenantScopeAccessor tenantScope,
         ITenantBaselineSeeder baseline,
         Onboarding.ITenantAdminInvitationService invitations,
-        Entitlements.ITenantAccessService? tenantAccess = null)
+        Entitlements.ITenantAccessService? tenantAccess = null,
+        ITenantActivationPolicyService? activationPolicy = null)
     {
         _context = context;
         _audit = audit;
@@ -57,6 +60,7 @@ public class TenantsController : ControllerBase
         _baseline = baseline;
         _invitations = invitations;
         _tenantAccess = tenantAccess;
+        _activationPolicy = activationPolicy;
     }
 
     // GET /api/platform/tenants
@@ -983,6 +987,14 @@ public class TenantsController : ControllerBase
                     throw new InvalidTenantStatusTransitionException(
                         tenant.Status, requiredCurrent.ToString(), operationVerb);
 
+                if (target == TenantStatus.Active && _activationPolicy is not null)
+                {
+                    var activation = await _activationPolicy.EvaluateAsync(tenant.Id, ct)
+                                     ?? throw new TenantNotFoundException();
+                    if (!activation.Ready)
+                        throw new TenantActivationBlockedException(activation);
+                }
+
                 var cancelsScheduledDeletion = action is "tenant.restore" or "tenant.resume";
                 var deletionCancelled = false;
                 if (cancelsScheduledDeletion)
@@ -1038,6 +1050,14 @@ public class TenantsController : ControllerBase
         catch (TenantNotFoundException)
         {
             return NotFound();
+        }
+        catch (TenantActivationBlockedException blocked)
+        {
+            return Conflict(new
+            {
+                error = "Tenant resume is blocked by the authoritative activation policy.",
+                decision = blocked.Decision
+            });
         }
         catch (InvalidTenantStatusTransitionException ex)
         {

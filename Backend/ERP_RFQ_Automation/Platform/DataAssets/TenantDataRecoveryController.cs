@@ -17,6 +17,7 @@ public sealed class TenantDataRecoveryController(
         long tenantId, CancellationToken ct) => Execute(() => recovery.ListAsync(tenantId, ct));
 
     [HttpPost("evidence")]
+    [Authorize(Policy = PlatformPolicies.Mfa)]
     public Task<ActionResult<TenantDataRecoveryEvidenceDto>> Record(
         long tenantId, [FromBody] RecordTenantDataRecoveryEvidenceRequest request, CancellationToken ct) =>
         Execute(() => recovery.RecordAsync(tenantId, request, User, HttpContext, ct));
@@ -26,6 +27,7 @@ public sealed class TenantDataRecoveryController(
         long tenantId, CancellationToken ct) => Execute(() => recovery.DecisionAsync(tenantId, ct));
 
     [HttpPost("deletion-certification")]
+    [Authorize(Policy = PlatformPolicies.Mfa)]
     public Task<ActionResult<TenantDeletionCertificateDto>> Certify(
         long tenantId, [FromBody] CreateTenantDeletionCertificateRequest request, CancellationToken ct) =>
         Execute(() => recovery.CertifyAsync(tenantId, request, User, HttpContext, ct));

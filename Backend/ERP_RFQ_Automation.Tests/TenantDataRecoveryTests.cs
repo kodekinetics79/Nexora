@@ -27,18 +27,33 @@ public sealed class TenantDataRecoveryTests
         Assert.False(blocked.Ready);
         Assert.Contains(blocked.Blockers, x => x.Contains("no post-purge", StringComparison.Ordinal));
 
-        var evidence = await service.RecordAsync(41, Evidence(
-            TenantDataRecoveryEvidenceTypes.BackupDestructionConfirmed), Actor(), null, default);
+        TenantDataRecoveryEvidenceDto? evidence = null;
+        foreach (var asset in await context.Set<TenantDataAsset>().OrderBy(x => x.Id).ToListAsync())
+        {
+            var evidenceType = asset.AssetType is TenantDataAssetTypes.Subprocessor or TenantDataAssetTypes.AiOcrProvider
+                ? TenantDataRecoveryEvidenceTypes.SubprocessorDeletionConfirmed
+                : TenantDataRecoveryEvidenceTypes.BackupDestructionConfirmed;
+            var recorded = await service.RecordAsync(41, Evidence(evidenceType) with
+            {
+                TenantDataAssetId = asset.Id,
+                ScopeKey = asset.LogicalKey,
+                OpaqueProviderReference = asset.OpaqueProviderReference,
+                CorrelationId = $"correlation:{asset.LogicalKey}",
+                IdempotencyKey = $"destroy:{asset.LogicalKey}",
+                EvidenceReference = $"evidence:{asset.LogicalKey}"
+            }, Actor(), null, default);
+            if (asset.AssetType == TenantDataAssetTypes.PostgreSqlTenantScope) evidence = recorded;
+        }
         var ready = await service.DecisionAsync(41, default);
         var certificate = await service.CertifyAsync(41,
             new CreateTenantDeletionCertificateRequest("All registered deletion evidence was independently reviewed."),
             Actor(), null, default);
 
         Assert.True(ready.Ready);
-        Assert.Equal([evidence.Id], ready.EvidenceIds);
+        Assert.Contains(evidence!.Id, ready.EvidenceIds);
         Assert.Equal(64, certificate.EvidenceManifestSha256.Length);
-        Assert.Equal([evidence.Id], certificate.EvidenceIds);
-        Assert.Equal(2, await context.Set<PlatformAuditLog>().CountAsync());
+        Assert.Contains(evidence.Id, certificate.EvidenceIds);
+        Assert.Equal(TenantDataAssetTypes.All.Count + 1, await context.Set<PlatformAuditLog>().CountAsync());
     }
 
     [Fact]
@@ -100,6 +115,12 @@ public sealed class TenantDataRecoveryTests
         var attribute = Assert.Single(typeof(TenantDataRecoveryController)
             .GetCustomAttributes(typeof(AuthorizeAttribute), true).Cast<AuthorizeAttribute>());
         Assert.Equal(PlatformPolicies.Owner, attribute.Policy);
+        foreach (var action in new[] { nameof(TenantDataRecoveryController.Record), nameof(TenantDataRecoveryController.Certify) })
+        {
+            var method = typeof(TenantDataRecoveryController).GetMethod(action)!;
+            Assert.Contains(method.GetCustomAttributes(typeof(AuthorizeAttribute), true).Cast<AuthorizeAttribute>(),
+                x => x.Policy == PlatformPolicies.Mfa);
+        }
     }
 
     private static TenantDataRecoveryService Service(ERP_RFQ_Automation.Models.ErpRfqAutomationContext context) =>
@@ -130,6 +151,21 @@ public sealed class TenantDataRecoveryTests
             Status = TenantDataAssetStatuses.Verified, Version = 1,
             CreatedOn = Now.AddDays(-10), CreatedBy = "owner@nexora.test"
         });
+        foreach (var assetType in TenantDataAssetTypes.All.Where(x => x != TenantDataAssetTypes.PostgreSqlTenantScope))
+        {
+            context.Set<TenantDataAsset>().Add(new TenantDataAsset
+            {
+                TenantId = 41, LogicalKey = assetType.ToLowerInvariant(), AssetType = assetType,
+                OpaqueProviderReference = $"provider:{assetType.ToLowerInvariant()}", Region = "us-east-1",
+                Classification = TenantDataAssetClassifications.CustomerData,
+                Disposition = assetType is TenantDataAssetTypes.Subprocessor or TenantDataAssetTypes.AiOcrProvider
+                    ? TenantDataAssetDispositions.ProviderDeletionRequired
+                    : TenantDataAssetDispositions.BackupRetainedUntilExpiryThenDestroy,
+                BackupPolicyReference = "policy:standard", BackupPolicyVersion = 1,
+                Status = TenantDataAssetStatuses.Verified, Version = 1,
+                CreatedOn = Now.AddDays(-10), CreatedBy = "owner@nexora.test"
+            });
+        }
         await context.SaveChangesAsync();
     }
 

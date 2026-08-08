@@ -142,6 +142,7 @@ public static class BillingModelConfiguration
             e.Property(x => x.Version).HasDefaultValue(1L).IsConcurrencyToken();
             e.HasIndex(x => x.InvoiceNumber).IsUnique();
             e.HasIndex(x => x.BillingStatementId).IsUnique();
+            e.HasAlternateKey(x => new { x.TenantId, x.Id });
             e.HasIndex(x => new { x.TenantId, x.Status, x.DueAtUtc });
             e.HasOne<BillingStatement>().WithMany().HasForeignKey(x => x.BillingStatementId)
                 .OnDelete(DeleteBehavior.Restrict);

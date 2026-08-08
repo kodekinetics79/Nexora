@@ -14,6 +14,8 @@ public static class UsageMeteringModelConfiguration
             entity.Property(x => x.EventType).HasMaxLength(64).IsRequired();
             entity.Property(x => x.Quantity).HasPrecision(20, 6);
             entity.Property(x => x.Unit).HasMaxLength(32).IsRequired();
+            entity.Property(x => x.OccurredAtUtc).HasColumnType("timestamp with time zone");
+            entity.Property(x => x.ReceivedAtUtc).HasColumnType("timestamp with time zone");
             entity.Property(x => x.SourceRecordType).HasMaxLength(64).IsRequired();
             entity.Property(x => x.SourceRecordId).HasMaxLength(128).IsRequired();
             entity.Property(x => x.SourceSystem).HasMaxLength(64).IsRequired();
@@ -32,9 +34,12 @@ public static class UsageMeteringModelConfiguration
             entity.Property(x => x.RatedAmount).HasPrecision(18, 6);
             entity.HasIndex(x => new { x.TenantId, x.IdempotencyKey }).IsUnique()
                 .HasDatabaseName("UX_UsageEvents_Tenant_IdempotencyKey");
+            entity.HasAlternateKey(x => new { x.TenantId, x.UsageEventId });
             entity.HasIndex(x => new { x.TenantId, x.EventType, x.OccurredAtUtc });
             entity.HasIndex(x => x.AdjustsUsageEventId);
-            entity.HasOne<UsageEvent>().WithMany().HasForeignKey(x => x.AdjustsUsageEventId)
+            entity.HasOne<UsageEvent>().WithMany()
+                .HasForeignKey(x => new { x.TenantId, x.AdjustsUsageEventId })
+                .HasPrincipalKey(x => new { x.TenantId, x.UsageEventId })
                 .OnDelete(DeleteBehavior.Restrict);
         });
 
@@ -46,6 +51,8 @@ public static class UsageMeteringModelConfiguration
             entity.Property(x => x.Unit).HasMaxLength(32).IsRequired();
             entity.Property(x => x.Quantity).HasPrecision(20, 6);
             entity.Property(x => x.CostAmount).HasPrecision(18, 6);
+            entity.Property(x => x.MinuteUtc).HasColumnType("timestamp with time zone");
+            entity.Property(x => x.RefreshedAtUtc).HasColumnType("timestamp with time zone");
             entity.HasIndex(x => new { x.TenantId, x.EventType, x.Unit, x.MinuteUtc }).IsUnique()
                 .HasDatabaseName("UX_UsageMinuteAggregates_Bucket");
         });
