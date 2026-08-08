@@ -410,11 +410,12 @@ namespace ERP_RFQ_Automation.Migrations
                     platform."TenantDataRecoveryEvidence",platform."TenantDeletionCertificates" FROM PUBLIC;
                 DO $roles$ BEGIN
                     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='nexora_pipeline_app') THEN
-                        GRANT SELECT,INSERT ON platform."UsageEvents",platform."TenantDataRecoveryEvidence",platform."TenantDeletionCertificates" TO nexora_pipeline_app;
+                        GRANT SELECT,INSERT,UPDATE ON platform."UsageEvents" TO nexora_pipeline_app;
+                        GRANT SELECT,INSERT ON platform."TenantDataRecoveryEvidence",platform."TenantDeletionCertificates" TO nexora_pipeline_app;
                         GRANT SELECT,INSERT,UPDATE ON platform."UsageMinuteAggregates",platform."AccountingOutbox" TO nexora_pipeline_app;
                         GRANT USAGE,SELECT ON SEQUENCE platform."UsageMinuteAggregates_Id_seq",platform."TenantDataRecoveryEvidence_Id_seq",platform."TenantDeletionCertificates_Id_seq" TO nexora_pipeline_app;
                         REVOKE DELETE,TRUNCATE ON platform."UsageEvents",platform."UsageMinuteAggregates",platform."AccountingOutbox",platform."TenantDataRecoveryEvidence",platform."TenantDeletionCertificates" FROM nexora_pipeline_app;
-                        REVOKE UPDATE ON platform."UsageEvents",platform."TenantDataRecoveryEvidence",platform."TenantDeletionCertificates" FROM nexora_pipeline_app;
+                        REVOKE UPDATE ON platform."TenantDataRecoveryEvidence",platform."TenantDeletionCertificates" FROM nexora_pipeline_app;
                     END IF;
                     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='nexora_tenant_app') THEN
                         REVOKE ALL ON platform."UsageEvents",platform."UsageMinuteAggregates",platform."AccountingOutbox",platform."TenantDataRecoveryEvidence",platform."TenantDeletionCertificates" FROM nexora_tenant_app;
