@@ -82,6 +82,8 @@ namespace ERP_RFQ_Automation.Controllers
 
         [HttpGet("export")]
         [RequireModulePermission("Suppliers", PermissionAction.View)]
+        [ERP_RFQ_Automation.Platform.Entitlements.RequiresEntitlement(
+            ERP_RFQ_Automation.Platform.Entitlements.TypedEntitlementCatalog.Exports)]
         public async Task<IActionResult> ExportData([FromQuery] long? businessUnitId = null)
         {
             try

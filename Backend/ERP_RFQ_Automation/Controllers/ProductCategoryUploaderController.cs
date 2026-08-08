@@ -81,6 +81,8 @@ namespace ERP_RFQ_Automation.Controllers
 
         [HttpGet("category/export")]
         [RequireModulePermission("Product Categories", PermissionAction.View)]
+        [ERP_RFQ_Automation.Platform.Entitlements.RequiresEntitlement(
+            ERP_RFQ_Automation.Platform.Entitlements.TypedEntitlementCatalog.Exports)]
         public async Task<IActionResult> ExportCategoryData([FromQuery] long? businessUnitId = null)
         {
             try
@@ -162,6 +164,8 @@ namespace ERP_RFQ_Automation.Controllers
 
         [HttpGet("sub-category/export")]
         [RequireModulePermission("Product Categories", PermissionAction.View)]
+        [ERP_RFQ_Automation.Platform.Entitlements.RequiresEntitlement(
+            ERP_RFQ_Automation.Platform.Entitlements.TypedEntitlementCatalog.Exports)]
         public async Task<IActionResult> ExportSubCategoryData([FromQuery] long? businessUnitId = null)
         {
             try

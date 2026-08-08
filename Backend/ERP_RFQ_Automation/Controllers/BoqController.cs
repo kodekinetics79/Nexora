@@ -136,6 +136,8 @@ namespace ERP_RFQ_Automation.Controllers
         /// <summary>GET /api/boq/{id}/export.csv — sections/items/rates/totals; TBD lines marked.</summary>
         [HttpGet("{id:long}/export.csv")]
         [RequireModulePermission("Quotations", PermissionAction.View)]
+        [ERP_RFQ_Automation.Platform.Entitlements.RequiresEntitlement(
+            ERP_RFQ_Automation.Platform.Entitlements.TypedEntitlementCatalog.Exports)]
         public async Task<IActionResult> ExportCsv(long id, CancellationToken ct)
         {
             var businessUnitId = GetBusinessUnitId();

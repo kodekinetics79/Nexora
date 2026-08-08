@@ -14,6 +14,7 @@ using Docnet.Core.Models;
 using ERP_RFQ_Automation.Services.DocumentIntelligence;
 using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.Security.DocumentInspection;
+using ERP_RFQ_Automation.Platform.Entitlements;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Logging;
 using OfficeOpenXml;
@@ -53,6 +54,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
     private readonly IEvidenceObjectStorage _evidenceStorage;
     private readonly Func<byte[], IReadOnlyList<string>>? _tiffFrameOcr;
     private readonly IFileInspectionService? _inspection;
+    private readonly IEntitlementService? _entitlements;
     private readonly NativeSpreadsheetParser _spreadsheetParser = new();
 
     // An image (one page by definition) that yields fewer than this many non-whitespace
@@ -124,17 +126,30 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
     {
     }
 
+    /// <summary>The production DI constructor: OCR authorization is evaluated in the worker scope.</summary>
+    public ProductionDocumentReader(
+        ILogger<ProductionDocumentReader> log,
+        IWebHostEnvironment env,
+        IEvidenceObjectStorage evidenceStorage,
+        IFileInspectionService inspection,
+        IEntitlementService entitlements)
+        : this(log, env, evidenceStorage, null, inspection, entitlements)
+    {
+    }
+
     internal ProductionDocumentReader(
         ILogger<ProductionDocumentReader> log,
         IWebHostEnvironment env,
         IEvidenceObjectStorage evidenceStorage,
         Func<byte[], IReadOnlyList<string>>? tiffFrameOcr,
-        IFileInspectionService? inspection = null)
+        IFileInspectionService? inspection = null,
+        IEntitlementService? entitlements = null)
     {
         _log = log;
         _evidenceStorage = evidenceStorage;
         _tiffFrameOcr = tiffFrameOcr;
         _inspection = inspection;
+        _entitlements = entitlements;
         _tessDataPath = Path.Combine(env.ContentRootPath, "tessdata");
         // EPPlus 7 requires a license context; the app sets this at startup, set it here too
         // so the reader is safe to use independently of startup ordering.
@@ -166,12 +181,21 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             throw new EvidenceIntegrityException(job.Id, "verified_read_failed", ex);
         }
 
+        // Evaluate once per claimed job before any OCR-capable branch. Native PDF text remains
+        // available when OCR is disabled; the decision is enforced only if a branch would invoke
+        // Tesseract/Docnet. Email containers carry the same decision into their attachments.
+        EntitlementDecision? ocrDecision = null;
+        if (_entitlements is not null && MayRequireOcr(ext))
+            ocrDecision = await _entitlements.CheckFeatureAsync(
+                job.BusinessUnitId, TypedEntitlementCatalog.Ocr, ct);
+
         // An EMAIL is an envelope, not a document: it has a body AND attachments, and the RFQ is
         // usually in the attachment. Handled before everything else because the answer is a
         // recursive read, not a text decode. Every attachment is re-inspected on the way out.
         if (bytes.Length > 0 && ext is "eml" or "msg")
         {
-            return Unstructured(job, name, await ReadEmailContainerAsync(bytes, ext, ct));
+            return Unstructured(job, name, await ReadEmailContainerAsync(
+                bytes, ext, job.BusinessUnitId, ocrDecision, ct));
         }
 
         if (bytes.Length > 0 && ext is "html" or "htm")
@@ -220,17 +244,30 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         // Unstructured formats -> extract raw text, then chunk over line-item regions.
         var read = ext switch
         {
-            "pdf" => ExtractTextFromPdf(bytes),
+            "pdf" => ExtractTextFromPdf(bytes, job.BusinessUnitId, ocrDecision),
             // Legacy Word 97-2003 binary (SEC folder door): shared OLE/piece-table
             // parser; falls back to the OpenXML reader for mislabeled .docx files.
             "doc" => Native(ExtractTextFromLegacyDoc(bytes)),
             "docx" => Native(ExtractTextFromDocx(bytes)),
-            "tiff" or "tif" => ExtractTextFromTiff(bytes),
-            "jpg" or "jpeg" or "png" or "bmp" or "gif" or "webp" => ExtractTextFromImage(bytes),
+            "tiff" or "tif" => ExtractTextFromTiff(bytes, job.BusinessUnitId, ocrDecision),
+            "jpg" or "jpeg" or "png" or "bmp" or "gif" or "webp" => ExtractTextFromImage(bytes, job.BusinessUnitId, ocrDecision),
             _ => Native(DecodeText(bytes))
         };
 
         return Unstructured(job, name, read);
+    }
+
+    private static bool MayRequireOcr(string ext) => ext is
+        "pdf" or "tiff" or "tif" or "jpg" or "jpeg" or "png" or "bmp" or "gif" or "webp" or "eml" or "msg";
+
+    private static void RequireOcrEntitlement(
+        long businessUnitId, EntitlementDecision? decision)
+    {
+        // Null is limited to direct legacy/test construction. Production DI always supplies the
+        // service through the five-argument constructor above.
+        if (decision is { Allowed: false })
+            throw new FeatureEntitlementDeniedException(
+                businessUnitId, TypedEntitlementCatalog.Ocr, decision);
     }
 
     // ---- input builders --------------------------------------------------
@@ -496,7 +533,8 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
     /// failure carrying those same reasons, never an empty success.
     /// </para>
     /// </summary>
-    private async Task<DocumentReadResult> ReadEmailContainerAsync(byte[] bytes, string ext, CancellationToken ct)
+    private async Task<DocumentReadResult> ReadEmailContainerAsync(
+        byte[] bytes, string ext, long businessUnitId, EntitlementDecision? ocrDecision, CancellationToken ct)
     {
         ParsedEmailMessage message;
         try
@@ -525,7 +563,8 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             message,
             _inspection,
             (fileName, attachmentExt, attachmentBytes, token) =>
-                Task.FromResult(ReadAttachmentText(fileName, attachmentExt, attachmentBytes)),
+                Task.FromResult(ReadAttachmentText(
+                    fileName, attachmentExt, attachmentBytes, businessUnitId, ocrDecision)),
             ct);
 
         if (_inspection is null)
@@ -581,7 +620,8 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
     /// a seam.
     /// </para>
     /// </summary>
-    private string ReadAttachmentText(string fileName, string ext, byte[] bytes)
+    private string ReadAttachmentText(
+        string fileName, string ext, byte[] bytes, long businessUnitId, EntitlementDecision? ocrDecision)
     {
         if (bytes.Length == 0) return string.Empty;
 
@@ -597,7 +637,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             case "csv":
                 return _spreadsheetParser.RenderCsvText(bytes);
             case "pdf":
-                return ExtractTextFromPdf(bytes).Text;
+                return ExtractTextFromPdf(bytes, businessUnitId, ocrDecision).Text;
             case "doc":
                 return ExtractTextFromLegacyDoc(bytes);
             case "docx":
@@ -607,14 +647,14 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
                 return ExtractTextFromHtml(bytes);
             case "tif":
             case "tiff":
-                return ExtractTextFromTiff(bytes).Text;
+                return ExtractTextFromTiff(bytes, businessUnitId, ocrDecision).Text;
             case "jpg":
             case "jpeg":
             case "png":
             case "bmp":
             case "gif":
             case "webp":
-                return ExtractTextFromImage(bytes).Text;
+                return ExtractTextFromImage(bytes, businessUnitId, ocrDecision).Text;
             default:
                 return DecodeText(bytes);
         }
@@ -622,7 +662,8 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
 
     // ---- PDF (text layer + OCR fallback) ---------------------------------
 
-    private DocumentReadResult ExtractTextFromPdf(byte[] bytes)
+    private DocumentReadResult ExtractTextFromPdf(
+        byte[] bytes, long businessUnitId = 0, EntitlementDecision? ocrDecision = null)
     {
         var pdfText = string.Empty;
         var pageCount = 0;
@@ -673,6 +714,8 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             "PDF text layer is too sparse to be the content ({Characters} characters over {Pages} page(s), "
             + "{Density:0.#} per page, below {PerPage} per page); attempting OCR.",
             nativeCharacters, pageCount, density, MinimumNativeCharactersPerPage);
+
+        RequireOcrEntitlement(businessUnitId, ocrDecision);
 
         var ocr = TryOcrScannedPdf(bytes);
         var ocrCharacters = CountNonWhitespace(ocr.Text);
@@ -786,8 +829,10 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
 
     // ---- images ----------------------------------------------------------
 
-    private DocumentReadResult ExtractTextFromImage(byte[] bytes)
+    private DocumentReadResult ExtractTextFromImage(
+        byte[] bytes, long businessUnitId = 0, EntitlementDecision? ocrDecision = null)
     {
+        RequireOcrEntitlement(businessUnitId, ocrDecision);
         try
         {
             lock (OcrLock)
@@ -808,8 +853,10 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         }
     }
 
-    private DocumentReadResult ExtractTextFromTiff(byte[] bytes)
+    private DocumentReadResult ExtractTextFromTiff(
+        byte[] bytes, long businessUnitId = 0, EntitlementDecision? ocrDecision = null)
     {
+        RequireOcrEntitlement(businessUnitId, ocrDecision);
         if (_tiffFrameOcr != null)
         {
             var frameTexts = _tiffFrameOcr(bytes);
