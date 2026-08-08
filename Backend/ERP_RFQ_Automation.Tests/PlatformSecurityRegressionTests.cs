@@ -175,7 +175,7 @@ public class PlatformSecurityRegressionTests
         Assert.False(await verification.Set<Tenant>().IgnoreQueryFilters()
             .AnyAsync(t => t.Slug == "stale-provisioning-state"));
         Assert.True(await verification.Set<Tenant>().IgnoreQueryFilters()
-            .AnyAsync(t => t.Slug == "fresh-provisioning-tenant" && t.Status == TenantStatus.Active));
+            .AnyAsync(t => t.Slug == "fresh-provisioning-tenant" && t.Status == TenantStatus.Provisioning));
         var tenant = await verification.Set<Tenant>().IgnoreQueryFilters()
             .SingleAsync(t => t.Slug == "fresh-provisioning-tenant");
         var policy = await verification.Set<AiProcessingPolicy>()
@@ -210,7 +210,7 @@ public class PlatformSecurityRegressionTests
         await using var verification = db.Context();
         var tenant = await verification.Set<Tenant>().IgnoreQueryFilters()
             .SingleAsync(t => t.Slug == "retried-provisioning-tenant");
-        Assert.Equal(TenantStatus.Active, tenant.Status);
+        Assert.Equal(TenantStatus.Provisioning, tenant.Status);
         Assert.NotNull(tenant.PrimaryBusinessUnitId);
         Assert.Equal(1, await verification.Set<PlatformAuditLog>()
             .CountAsync(a => a.Action == "tenant.provision" && a.ActAsTenantId == tenant.Id));
