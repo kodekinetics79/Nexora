@@ -40,6 +40,23 @@ public abstract class EntitlementDeniedException : Exception
     public string ProblemType { get; }
 }
 
+/// <summary>A product execution boundary denied because its typed feature is unavailable.</summary>
+public sealed class FeatureEntitlementDeniedException : EntitlementDeniedException
+{
+    public FeatureEntitlementDeniedException(long businessUnitId, string entitlement, EntitlementDecision decision)
+        : base(decision.Reason ?? $"Entitlement '{entitlement}' is not available for this organization.",
+            StatusCodes.Status403Forbidden, NexoraProblems.FeatureNotEntitled)
+    {
+        BusinessUnitId = businessUnitId;
+        Entitlement = TypedEntitlementCatalog.RequireKnown(entitlement);
+        Decision = decision;
+    }
+
+    public long BusinessUnitId { get; }
+    public string Entitlement { get; }
+    public EntitlementDecision Decision { get; }
+}
+
 /// <summary>Login / tenant-plane access denied because the owning platform Tenant is Suspended or Archived.</summary>
 public sealed class TenantAccessDeniedException : EntitlementDeniedException
 {

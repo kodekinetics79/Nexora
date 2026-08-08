@@ -33,6 +33,19 @@ public static class TypedEntitlementCatalog
         SupplierSearch, Integrations, Exports, Automation, Sso, Scim, DedicatedResources
     };
 
+    /// <summary>
+    /// Capabilities that have a production execution boundary today. A plan may retain a false
+    /// packaging flag for a future capability, but setting that flag true cannot make an
+    /// unimplemented product surface spring into existence: runtime authorization still denies.
+    /// </summary>
+    public static readonly IReadOnlySet<string> RuntimeAvailableKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        Rfq, Quotes, Orders, Procurement, Inventory, Ai, Ocr, EmailIntake,
+        SupplierSearch, Integrations, Exports
+    };
+
+    public static bool IsRuntimeAvailable(string key) => RuntimeAvailableKeys.Contains(key);
+
     public static string RequireKnown(string key)
         => Keys.Contains(key)
             ? key

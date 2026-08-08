@@ -44,6 +44,26 @@ public sealed class TypedEntitlementCatalogTests
             businessUnitId, TypedEntitlementCatalog.Exports)).Allowed);
     }
 
+    [Theory]
+    [InlineData(TypedEntitlementCatalog.Api)]
+    [InlineData(TypedEntitlementCatalog.Automation)]
+    [InlineData(TypedEntitlementCatalog.Sso)]
+    [InlineData(TypedEntitlementCatalog.Scim)]
+    [InlineData(TypedEntitlementCatalog.DedicatedResources)]
+    public async Task Unimplemented_runtime_capabilities_deny_even_when_plan_flag_is_true(string key)
+    {
+        var service = new EntitlementService(
+            new FixedAccess(new TenantAccessSnapshot(
+                44, 9, TenantStatus.Active,
+                new PlanSnapshot(2, "future", 1, 2, 100, 5, $"{{\"{key}\":true}}"))),
+            null!);
+
+        var decision = await service.CheckFeatureAsync(44, key);
+
+        Assert.False(decision.Allowed);
+        Assert.Contains("execution boundary is not implemented", decision.Reason);
+    }
+
     [Fact]
     public void Declarations_reject_unknown_keys_at_construction_time()
     {
@@ -83,11 +103,29 @@ public sealed class TypedEntitlementCatalogTests
                 .Cast<RequiresEntitlementAttribute>(),
             x => x.Key == TypedEntitlementCatalog.SupplierSearch);
 
-        Assert.Empty(EntitlementEnforcementCoverage.Enforced.Keys
-            .Intersect(EntitlementEnforcementCoverage.Missing.Keys));
+        var exports = new[]
+        {
+            typeof(ERP_RFQ_Automation.Controllers.CustomerUploaderController).GetMethod("ExportData")!,
+            typeof(ERP_RFQ_Automation.Controllers.SupplierUploaderController).GetMethod("ExportData")!,
+            typeof(ERP_RFQ_Automation.Controllers.ProductUploaderController).GetMethod("ExportProducts")!,
+            typeof(ERP_RFQ_Automation.Controllers.ProductCategoryUploaderController).GetMethod("ExportCategoryData")!,
+            typeof(ERP_RFQ_Automation.Controllers.ProductCategoryUploaderController).GetMethod("ExportSubCategoryData")!,
+            typeof(ERP_RFQ_Automation.Controllers.BoqController).GetMethod("ExportCsv")!
+        };
+        foreach (var export in exports)
+        {
+            Assert.Contains(export.GetCustomAttributes(typeof(RequiresEntitlementAttribute), true)
+                    .Cast<RequiresEntitlementAttribute>(),
+                x => x.Key == TypedEntitlementCatalog.Exports);
+        }
+
+        Assert.Empty(EntitlementEnforcementCoverage.Missing);
         Assert.Equal(TypedEntitlementCatalog.Keys.Order(),
-            EntitlementEnforcementCoverage.Enforced.Keys
-                .Concat(EntitlementEnforcementCoverage.Missing.Keys).Order());
+            EntitlementEnforcementCoverage.Enforced.Keys.Order());
+        Assert.Equal(TypedEntitlementCatalog.Keys.Order(),
+            TypedEntitlementCatalog.RuntimeAvailableKeys
+                .Concat(TypedEntitlementCatalog.Keys.Except(TypedEntitlementCatalog.RuntimeAvailableKeys))
+                .Order());
     }
 
     private sealed class FixedAccess(TenantAccessSnapshot snapshot) : ITenantAccessService

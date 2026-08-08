@@ -155,6 +155,10 @@ public sealed class EntitlementService : IEntitlementService
         if (!TypedEntitlementCatalog.Keys.Contains(entitlement))
             return EntitlementDecision.Deny(0, 0, $"Unknown entitlement '{entitlement}' is denied by default.");
 
+        if (!TypedEntitlementCatalog.IsRuntimeAvailable(entitlement))
+            return EntitlementDecision.Deny(0, 0,
+                $"Entitlement '{entitlement}' is not available because its server execution boundary is not implemented.");
+
         var access = await _tenantAccess.GetAccessAsync(businessUnitId, ct);
         if (!access.HasTenant)
             return EntitlementDecision.Deny(0, 0,

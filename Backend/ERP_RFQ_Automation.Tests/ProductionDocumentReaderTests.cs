@@ -6,6 +6,7 @@ using DocumentFormat.OpenXml.Wordprocessing;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging.Abstractions;
+using ERP_RFQ_Automation.Platform.Entitlements;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -135,6 +136,29 @@ public sealed class ProductionDocumentReaderTests
         Assert.Contains("ABC-100 quantity 25 second page", result.HeaderText);
     }
 
+    [Fact]
+    public async Task MultiPageTiff_DeniesBeforeOcr_WhenTenantPlanDoesNotEnableOcr()
+    {
+        var ocrInvoked = false;
+        var reader = new ProductionDocumentReader(
+            NullLogger<ProductionDocumentReader>.Instance,
+            new TestEnvironment(AppContext.BaseDirectory),
+            new MemoryStorage([0x49, 0x49, 0x2A, 0x00]),
+            _ =>
+            {
+                ocrInvoked = true;
+                return ["must not run"];
+            },
+            inspection: null,
+            entitlements: new FixedEntitlements(allowed: false));
+
+        var denial = await Assert.ThrowsAsync<FeatureEntitlementDeniedException>(() =>
+            reader.ReadAsync(CreateJob("rfq.tiff", "tiff")));
+
+        Assert.Equal(TypedEntitlementCatalog.Ocr, denial.Entitlement);
+        Assert.False(ocrInvoked);
+    }
+
     private static ProductionDocumentReader CreateReader(byte[] content) => new(
         NullLogger<ProductionDocumentReader>.Instance,
         new TestEnvironment(AppContext.BaseDirectory),
@@ -195,6 +219,22 @@ public sealed class ProductionDocumentReaderTests
         public Task<Stream> OpenVerifiedReadAsync(
             string storageUri, string expectedSha256, CancellationToken ct = default) =>
             Task.FromResult<Stream>(new MemoryStream(content, writable: false));
+    }
+
+    private sealed class FixedEntitlements(bool allowed) : IEntitlementService
+    {
+        public Task<EntitlementDecision> CheckFeatureAsync(
+            long businessUnitId, string entitlement, CancellationToken ct = default)
+            => Task.FromResult(allowed
+                ? EntitlementDecision.Permit(1, 1)
+                : EntitlementDecision.Deny(0, 0, "OCR is disabled by the tenant plan."));
+
+        public Task<EntitlementDecision> CheckSeatAvailabilityAsync(long businessUnitId, CancellationToken ct = default)
+            => Task.FromResult(EntitlementDecision.Unlimited);
+        public Task<EntitlementDecision> CheckDocumentQuotaAsync(long businessUnitId, CancellationToken ct = default)
+            => Task.FromResult(EntitlementDecision.Unlimited);
+        public Task<double> GetQueueWeightAsync(long businessUnitId, double fallbackWeight, CancellationToken ct = default)
+            => Task.FromResult(fallbackWeight);
     }
 
     private sealed class TestEnvironment(string? contentRootPath = null) : IWebHostEnvironment
