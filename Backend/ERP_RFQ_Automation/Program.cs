@@ -865,6 +865,13 @@ app.MapHealthChecks("/ready", new Microsoft.AspNetCore.Diagnostics.HealthChecks.
 {
     Predicate = registration => registration.Tags.Contains("ready")
 }).AllowAnonymous();
+// Deployment identity is deliberately public and narrowly bounded. Render supplies
+// RENDER_GIT_COMMIT; exposing that value lets operators prove which immutable revision is
+// answering before accepting a queue reconciliation or schema-sensitive rollout. Never add
+// configuration values, connection details, migration names, or tenant state to this response.
+app.MapGet("/build-identity", (IHostEnvironment environment) =>
+    Results.Ok(ERP_RFQ_Automation.Infrastructure.BuildIdentity.Current(environment)))
+    .AllowAnonymous();
 // Zero-dependency Prometheus scrape endpoint (Platform/Hardening). Self-disabling: the
 // call is a no-op unless ObservabilityExtensions.SelectExporter enabled it, which by
 // default happens exactly when no OTLP collector is configured — so the process can

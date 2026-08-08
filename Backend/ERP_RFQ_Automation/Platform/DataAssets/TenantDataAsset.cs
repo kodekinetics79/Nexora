@@ -3,16 +3,46 @@ namespace ERP_RFQ_Automation.Platform.DataAssets;
 public static class TenantDataAssetTypes
 {
     public const string PostgreSqlTenantScope = "PostgreSqlTenantScope";
+    public const string ObjectStorage = "ObjectStorage";
+    public const string SearchIndex = "SearchIndex";
+    public const string EmbeddingStore = "EmbeddingStore";
+    public const string Cache = "Cache";
+    public const string QueuePayload = "QueuePayload";
+    public const string GeneratedExport = "GeneratedExport";
+    public const string AiOcrProvider = "AiOcrProvider";
+    public const string Subprocessor = "Subprocessor";
+
+    public static readonly IReadOnlySet<string> All = new HashSet<string>(StringComparer.Ordinal)
+    {
+        PostgreSqlTenantScope, ObjectStorage, SearchIndex, EmbeddingStore, Cache, QueuePayload,
+        GeneratedExport, AiOcrProvider, Subprocessor
+    };
 }
 
 public static class TenantDataAssetClassifications
 {
     public const string CustomerData = "CustomerData";
+    public const string DerivedCustomerData = "DerivedCustomerData";
+    public const string OperatorEvidence = "OperatorEvidence";
+
+    public static readonly IReadOnlySet<string> All = new HashSet<string>(StringComparer.Ordinal)
+    {
+        CustomerData, DerivedCustomerData, OperatorEvidence
+    };
 }
 
 public static class TenantDataAssetDispositions
 {
     public const string BackupRetainedUntilExpiryThenDestroy = "BackupRetainedUntilExpiryThenDestroy";
+    public const string DestroyOnTenantPurge = "DestroyOnTenantPurge";
+    public const string ProviderDeletionRequired = "ProviderDeletionRequired";
+    public const string PreserveOperatorEvidence = "PreserveOperatorEvidence";
+
+    public static readonly IReadOnlySet<string> All = new HashSet<string>(StringComparer.Ordinal)
+    {
+        BackupRetainedUntilExpiryThenDestroy, DestroyOnTenantPurge, ProviderDeletionRequired,
+        PreserveOperatorEvidence
+    };
 }
 
 public static class TenantDataAssetStatuses

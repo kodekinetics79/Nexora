@@ -8,7 +8,8 @@ public sealed record RegisterTenantDataAssetRequest(
     string Disposition,
     string BackupPolicyReference,
     int BackupPolicyVersion,
-    string Reason);
+    string Reason,
+    string? AssetType = null);
 
 public sealed record VerifyTenantDataAssetRequest(
     long ExpectedVersion,

@@ -41,9 +41,12 @@ public sealed class TenantDataAssetRegistryService(
         ArgumentNullException.ThrowIfNull(request);
         var tenant = await RequireTenantAsync(tenantId, ct);
         var logicalKey = Required(request.LogicalKey, 80, "A logical asset key is required.").ToLowerInvariant();
-        if (!string.Equals(logicalKey, PostgreSqlLogicalKey, StringComparison.Ordinal))
+        var assetType = string.IsNullOrWhiteSpace(request.AssetType)
+            ? TenantDataAssetTypes.PostgreSqlTenantScope
+            : Required(request.AssetType, 64, "An asset type is required.");
+        if (!TenantDataAssetTypes.All.Contains(assetType))
             throw new TenantDataAssetValidationException(
-                $"The first data-readiness slice supports only logical key '{PostgreSqlLogicalKey}'.");
+                $"Unknown data asset type '{assetType}'.");
 
         var providerReference = OpaqueReference(request.OpaqueProviderReference, 256, "provider reference");
         var region = Required(request.Region, 64, "A data region is required.").ToLowerInvariant();
@@ -51,10 +54,20 @@ public sealed class TenantDataAssetRegistryService(
         var disposition = Required(request.Disposition, 96, "A data disposition is required.");
         var backupPolicy = OpaqueReference(request.BackupPolicyReference, 128, "backup policy reference");
         var reason = Required(request.Reason, 1000, "A registration reason is required.");
-        if (!string.Equals(classification, TenantDataAssetClassifications.CustomerData, StringComparison.Ordinal))
+        if (!TenantDataAssetClassifications.All.Contains(classification))
+            throw new TenantDataAssetValidationException($"Unknown data classification '{classification}'.");
+        if (!TenantDataAssetDispositions.All.Contains(disposition))
+            throw new TenantDataAssetValidationException($"Unknown data disposition '{disposition}'.");
+        if (string.Equals(assetType, TenantDataAssetTypes.PostgreSqlTenantScope, StringComparison.Ordinal)
+            && !string.Equals(logicalKey, PostgreSqlLogicalKey, StringComparison.Ordinal))
+            throw new TenantDataAssetValidationException(
+                $"The primary PostgreSQL asset must use logical key '{PostgreSqlLogicalKey}'.");
+        if (string.Equals(assetType, TenantDataAssetTypes.PostgreSqlTenantScope, StringComparison.Ordinal)
+            && !string.Equals(classification, TenantDataAssetClassifications.CustomerData, StringComparison.Ordinal))
             throw new TenantDataAssetValidationException(
                 $"PostgreSQL tenant scopes must be classified as '{TenantDataAssetClassifications.CustomerData}'.");
-        if (!string.Equals(disposition, TenantDataAssetDispositions.BackupRetainedUntilExpiryThenDestroy,
+        if (string.Equals(assetType, TenantDataAssetTypes.PostgreSqlTenantScope, StringComparison.Ordinal)
+            && !string.Equals(disposition, TenantDataAssetDispositions.BackupRetainedUntilExpiryThenDestroy,
                 StringComparison.Ordinal))
             throw new TenantDataAssetValidationException(
                 $"PostgreSQL tenant scopes must use disposition " +
@@ -75,7 +88,7 @@ public sealed class TenantDataAssetRegistryService(
                 x => x.TenantId == tenantId && x.LogicalKey == logicalKey, ct);
             if (existing is not null)
             {
-                if (SameRegistration(existing, providerReference, region, classification, disposition,
+                if (SameRegistration(existing, assetType, providerReference, region, classification, disposition,
                         backupPolicy, request.BackupPolicyVersion))
                     return ToDto(existing);
                 throw new TenantDataAssetConflictException(
@@ -87,7 +100,7 @@ public sealed class TenantDataAssetRegistryService(
             {
                 TenantId = tenantId,
                 LogicalKey = logicalKey,
-                AssetType = TenantDataAssetTypes.PostgreSqlTenantScope,
+                AssetType = assetType,
                 OpaqueProviderReference = providerReference,
                 Region = region,
                 Classification = classification,
@@ -277,9 +290,9 @@ public sealed class TenantDataAssetRegistryService(
         row.VerificationVersion, row.VerifiedOn, row.VerifiedBy, row.Version);
 
     private static bool SameRegistration(
-        TenantDataAsset row, string providerReference, string region, string classification,
+        TenantDataAsset row, string assetType, string providerReference, string region, string classification,
         string disposition, string backupPolicy, int backupPolicyVersion) =>
-        string.Equals(row.AssetType, TenantDataAssetTypes.PostgreSqlTenantScope, StringComparison.Ordinal)
+        string.Equals(row.AssetType, assetType, StringComparison.Ordinal)
         && string.Equals(row.OpaqueProviderReference, providerReference, StringComparison.Ordinal)
         && string.Equals(row.Region, region, StringComparison.OrdinalIgnoreCase)
         && string.Equals(row.Classification, classification, StringComparison.Ordinal)
