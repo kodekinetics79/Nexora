@@ -14,6 +14,7 @@ public sealed class UsageMeteringAndAccountingOutboxTests
     {
         using var database = new TestDb();
         await using var db = database.ContextFor(null);
+        await SeedTenantAsync(db, 91);
         var service = new UsageMeteringService(db);
         var occurred = new DateTime(2026, 8, 8, 12, 34, 45, DateTimeKind.Utc);
         var original = Request(Guid.NewGuid(), 91, "documents", 10, "document", occurred, "usage-1", allowance: 4, price: 2);
@@ -45,6 +46,7 @@ public sealed class UsageMeteringAndAccountingOutboxTests
     {
         using var database = new TestDb();
         await using var db = database.ContextFor(null);
+        await SeedTenantAsync(db, 92);
         var value = await new UsageMeteringService(db).RecordAsync(Request(
             Guid.NewGuid(), 92, meter, 3, unit, DateTime.UtcNow.AddMinutes(-1), $"uncertified-{meter}", price: 10));
         Assert.Equal(UsageRatingStatus.BlockedUncertifiedMeter, value.RatingStatus);
@@ -122,4 +124,17 @@ public sealed class UsageMeteringAndAccountingOutboxTests
         new(id, tenantId, type, quantity, unit, occurred, "rfq", "RFQ-1", "extraction-worker",
             null, null, null, "corr-1", key, 0.25m, "USD", new string('a', 64), adjusts,
             price is null ? null : 10, price is null ? null : 11, price is null ? null : 3, allowance, price);
+
+    private static async Task SeedTenantAsync(ERP_RFQ_Automation.Models.ErpRfqAutomationContext db, long id)
+    {
+        db.Add(new Tenant
+        {
+            Id = id,
+            Name = $"Usage tenant {id}",
+            LegalName = $"Usage Tenant {id} LLC",
+            Slug = $"usage-tenant-{id}",
+            BillingContactEmail = $"billing-{id}@example.test"
+        });
+        await db.SaveChangesAsync();
+    }
 }
