@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Platform.Models;
+using ERP_RFQ_Automation.Billing.Accounting;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 
@@ -15,7 +16,9 @@ public sealed record CreateSubscriptionInvoice(
     string SellerLegalName,
     string SellerTaxNumber);
 
-public sealed class SubscriptionInvoiceService(ErpRfqAutomationContext db)
+public sealed class SubscriptionInvoiceService(
+    ErpRfqAutomationContext db,
+    AccountingOutboxService? accountingOutbox = null)
 {
     public async Task<SubscriptionInvoice> CreateDraftAsync(
         CreateSubscriptionInvoice request, string actor, CancellationToken ct = default)
@@ -155,6 +158,8 @@ public sealed class SubscriptionInvoiceService(ErpRfqAutomationContext db)
         invoice.FinalizedBy = actor;
         invoice.FinalizedAtUtc = DateTime.UtcNow;
         invoice.Version++;
+        if (accountingOutbox is not null)
+            await accountingOutbox.EnqueueInvoiceExportAsync(invoice, ct);
         await db.SaveChangesAsync(ct);
         return invoice;
     }

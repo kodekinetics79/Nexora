@@ -1,5 +1,7 @@
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
+using ERP_RFQ_Automation.Billing.Accounting;
+using ERP_RFQ_Automation.Billing.Metering;
 
 namespace ERP_RFQ_Automation.Billing;
 
@@ -26,6 +28,8 @@ public static class BillingServiceExtensions
 
         services.AddScoped<IBillingStatementService, BillingStatementService>();
         services.AddScoped<SubscriptionInvoiceService>();
+        services.AddScoped<UsageMeteringService>();
+        services.AddScoped<AccountingOutboxService>();
         services.AddOptions<BillingRunOptions>()
             .Bind(configuration.GetSection(BillingRunOptions.SectionName))
             .ValidateOnStart();

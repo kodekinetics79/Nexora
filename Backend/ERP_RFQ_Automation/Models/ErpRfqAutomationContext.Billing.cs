@@ -1,4 +1,6 @@
 using ERP_RFQ_Automation.Billing;
+using ERP_RFQ_Automation.Billing.Accounting;
+using ERP_RFQ_Automation.Billing.Metering;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Models;
@@ -30,6 +32,8 @@ public static class BillingModelConfiguration
 {
     public static void Apply(ModelBuilder modelBuilder)
     {
+        UsageMeteringModelConfiguration.Apply(modelBuilder);
+        AccountingOutboxModelConfiguration.Apply(modelBuilder);
         // ==== platform.RateCards ====
         modelBuilder.Entity<RateCard>(e =>
         {
