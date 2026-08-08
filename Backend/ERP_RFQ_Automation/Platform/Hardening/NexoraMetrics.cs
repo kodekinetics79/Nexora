@@ -188,6 +188,38 @@ public sealed class NexoraMetrics : IDisposable
                 + "whose rows are waiting to be reclaimed by the next claim.");
 
         _meter.CreateObservableGauge(
+            "nexora.extraction.queue.invariant_blocked",
+            ObserveInvariantBlocked,
+            unit: "{job}",
+            description: "Extraction jobs quarantined for a durable-intake invariant violation, "
+                + "per tenant. Values come from stable redacted reason codes, never exception text.");
+
+        _meter.CreateObservableGauge(
+            "nexora.extraction.queue.oldest_invariant_blocked_age",
+            ObserveOldestInvariantBlockedAge,
+            unit: "s",
+            description: "Age of the oldest intake-invariant quarantine per affected tenant.");
+
+        _meter.CreateObservableGauge(
+            "nexora.extraction.queue.invariant_affected_tenants",
+            ObserveInvariantAffectedTenants,
+            unit: "{tenant}",
+            description: "Number of tenants with at least one governed intake-invariant quarantine.");
+
+        _meter.CreateObservableGauge(
+            "nexora.extraction.queue.retries",
+            ObserveRetries,
+            unit: "{job}",
+            description: "Jobs with more than one processing attempt, per tenant.");
+
+        _meter.CreateObservableGauge(
+            "nexora.extraction.queue.repeated_invariant_violations",
+            ObserveRepeatedInvariantViolations,
+            unit: "{job}",
+            description: "Legacy/backstop invariant quarantines that already accumulated attempts; "
+                + "new scheduler-classified poison rows should remain zero.");
+
+        _meter.CreateObservableGauge(
             "nexora.extraction.queue.snapshot_age",
             ObserveSnapshotAge,
             unit: "s",
@@ -348,6 +380,47 @@ public sealed class NexoraMetrics : IDisposable
         if (snapshot is null || !snapshot.IsFresh) yield break;
         foreach (var tenant in snapshot.Tenants)
             yield return new Measurement<long>(tenant.ExpiredLeases, Tenant(tenant.BusinessUnitId));
+    }
+
+    private IEnumerable<Measurement<long>> ObserveInvariantBlocked()
+    {
+        var snapshot = _queue?.Current;
+        if (snapshot is null || !snapshot.IsFresh) yield break;
+        foreach (var tenant in snapshot.Tenants)
+            yield return new Measurement<long>(tenant.InvariantBlocked, Tenant(tenant.BusinessUnitId));
+    }
+
+    private IEnumerable<Measurement<double>> ObserveOldestInvariantBlockedAge()
+    {
+        var snapshot = _queue?.Current;
+        if (snapshot is null || !snapshot.IsFresh) yield break;
+        foreach (var tenant in snapshot.Tenants.Where(x => x.InvariantBlocked > 0))
+            yield return new Measurement<double>(
+                tenant.OldestInvariantBlockedAgeSeconds, Tenant(tenant.BusinessUnitId));
+    }
+
+    private IEnumerable<Measurement<long>> ObserveInvariantAffectedTenants()
+    {
+        var snapshot = _queue?.Current;
+        if (snapshot is null || !snapshot.IsFresh) yield break;
+        yield return new Measurement<long>(snapshot.InvariantAffectedTenants);
+    }
+
+    private IEnumerable<Measurement<long>> ObserveRetries()
+    {
+        var snapshot = _queue?.Current;
+        if (snapshot is null || !snapshot.IsFresh) yield break;
+        foreach (var tenant in snapshot.Tenants)
+            yield return new Measurement<long>(tenant.Retried, Tenant(tenant.BusinessUnitId));
+    }
+
+    private IEnumerable<Measurement<long>> ObserveRepeatedInvariantViolations()
+    {
+        var snapshot = _queue?.Current;
+        if (snapshot is null || !snapshot.IsFresh) yield break;
+        foreach (var tenant in snapshot.Tenants.Where(x => x.RepeatedInvariantViolations > 0))
+            yield return new Measurement<long>(
+                tenant.RepeatedInvariantViolations, Tenant(tenant.BusinessUnitId));
     }
 
     private IEnumerable<Measurement<double>> ObserveSnapshotAge()

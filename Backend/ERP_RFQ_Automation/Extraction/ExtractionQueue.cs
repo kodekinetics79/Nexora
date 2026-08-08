@@ -34,11 +34,11 @@ namespace ERP_RFQ_Automation.Extraction;
 /// starved every tenant, forever. Two changes close that:
 ///   (1) the claim now selects only jobs the guard would accept, so a poisoned row never
 ///       blocks the rest of the queue; and
-///   (2) a poisoned row at the head of the queue is charged an attempt with a truthful
-///       <c>LastError</c> and dead-letters at <c>MaxAttempts</c>, so it becomes visible in
-///       the dead-letter queue and in operations readiness instead of being silently
-///       skipped. A savepoint around the claim keeps that record durable even when the
-///       trigger (or any future invariant) still refuses a job the CTE believed claimable.
+///   (2) a poisoned row at the head of the queue is classified once and moved directly to
+///       the governed dead-letter workflow. Retrying a structurally invalid row cannot make
+///       its durable lineage valid and only creates an invariant-violation loop. A savepoint
+///       around the claim keeps a backstop classification durable even when the trigger (or
+///       any future invariant) still refuses a job the CTE believed claimable.
 /// </summary>
 public sealed class ExtractionQueue : IExtractionQueue
 {
@@ -80,8 +80,8 @@ public sealed class ExtractionQueue : IExtractionQueue
 
     // The claim resolves inside a bounded head-of-line window taken in claim order. A job
     // that cannot be claimed only starves the queue while it sits AHEAD of claimable work,
-    // and every blocked row in the window is charged an attempt and backed off in the same
-    // statement, so it leaves the window immediately instead of holding it.
+    // and every blocked row in the window is quarantined in the same statement, so it leaves
+    // the runnable queue immediately instead of holding it.
     //
     // The window is what keeps the poll cost independent of queue depth: the occurrence is
     // probed for at most this many rows, not for every eligible job (measured on a 20k-job
@@ -147,12 +147,11 @@ inflight AS (
     // Migrations/20260725035352_Release01CTransactionalIntakeHardening.cs:173-188). When this
     // is false the trigger raises 23514 on the transition to 'Leased' and the whole claim
     // rolls back — so the scheduler must not pick such a row. j is the pre-update (OLD) row
-    // the trigger sees. Jobs with no occurrence link keep the legacy behaviour of being
-    // claimable; if the deployed guard refuses one anyway, the 23514 recorder below charges
-    // the attempt so it dead-letters visibly rather than looping.
+    // the trigger sees. A null occurrence link is invalid too: PostgreSQL's NOT EXISTS guard
+    // rejects it, so the scheduler must quarantine it before attempting the transition.
     private const string IntakeAllowsClaim = @"(
-            j.""SourceDocumentOccurrenceId"" IS NULL
-            OR EXISTS (
+            j.""SourceDocumentOccurrenceId"" IS NOT NULL
+            AND EXISTS (
                 SELECT 1
                 FROM source_document_occurrences o
                 WHERE o.business_unit_id = j.""BusinessUnitId""
@@ -165,11 +164,6 @@ inflight AS (
 
     private const string ClaimOrder =
         @"ORDER BY j.""Priority"" DESC, j.""SchedulerTag"" ASC, j.""CreatedOn"" ASC";
-
-    // Exponential backoff identical to FailAsync, so a refused claim is rescheduled on the
-    // same curve as a failed one instead of being retried on the 2s idle-poll cadence.
-    private const string BackoffFromAttempts =
-        @"@now + (LEAST(POWER(2, j.""Attempts"")::double precision, 3600) * INTERVAL '1 second')";
 
     // Bounded head-of-line window in claim order, tagged with claimability. Claimability is
     // projected (not filtered) so the occurrence is probed only for the rows that survive the
@@ -188,10 +182,9 @@ inflight AS (
     //
     // R-REL-01: the claim is resolved inside `head`, and `candidate` takes the best row the
     // intake guard would accept — so an unclaimable job can no longer head-of-line block
-    // every tenant. `struck` charges each unclaimable row in the window an attempt with a
-    // truthful reason in the SAME statement, so it dead-letters into the operator's
-    // dead-letter queue rather than being skipped in silence, and its backoff drops it out
-    // of the window meanwhile. The two sets are disjoint by construction (claimable vs not),
+    // every tenant. `quarantined` classifies each unclaimable row in the window with a
+    // stable reason in the SAME statement, so it enters the operator's governed dead-letter
+    // queue rather than being skipped in silence. The two sets are disjoint by construction (claimable vs not),
     // so they never contend for a row, and both use SKIP LOCKED so workers never wait.
     private static readonly string ClaimSql = $@"
 WITH {SchedulingCtes},
@@ -213,45 +206,45 @@ exhausted AS (
 {HeadCte},
 blocked AS (
     -- EVERY unclaimable row in the window, so a run of them cannot hold the window: each is
-    -- charged an attempt and backed off below, which drops it out of eligibility at once.
+    -- row-locked and leaves runnable eligibility through the quarantine update below.
     SELECT j.""Id""
     FROM ""ExtractionJobs"" j
     JOIN head h ON h.job_id = j.""Id"" AND NOT h.intake_allows_claim
     FOR UPDATE OF j SKIP LOCKED
 ),
-struck AS (
-    -- The job is NOT silently skipped: the refusal is charged to this attempt with the
-    -- reason an operator needs, and the job dead-letters once the attempts are spent.
-    -- Status is otherwise left alone — moving a blocked job to Pending would fire
-    -- trg_release01c_sync_intake_from_job and rewrite its intake occurrence to Retryable,
-    -- laundering the very state the guard is protecting.
+quarantined AS (
+    -- A structural lineage violation is not a transient extraction failure. Classify it
+    -- ONCE and move it immediately to the existing governed DLQ. The status predicate that
+    -- built `head`, plus this row lock, makes the transition idempotent across replicas.
     UPDATE ""ExtractionJobs"" j
-    SET ""Attempts"" = j.""Attempts"" + 1,
-        ""Status"" = CASE WHEN j.""Attempts"" + 1 >= j.""MaxAttempts""
-                        THEN 'DeadLetter' ELSE j.""Status"" END,
+    SET ""Status"" = 'DeadLetter',
         ""LeasedBy"" = NULL,
         ""LeaseExpiresAt"" = NULL,
         ""LastError"" = left(
-            'Extraction cannot start: ' || COALESCE(
-                (SELECT 'intake occurrence ' || o.id || ' is ' || o.intake_status
-                        || CASE WHEN o.extraction_job_id IS DISTINCT FROM j.""Id""
-                                THEN ' and is linked to extraction job '
-                                     || COALESCE(o.extraction_job_id::text, '(none)')
-                                ELSE '' END
-                 FROM source_document_occurrences o
-                 WHERE o.business_unit_id = j.""BusinessUnitId""
-                   AND o.id = j.""SourceDocumentOccurrenceId""),
-                'intake occurrence '
-                    || COALESCE(j.""SourceDocumentOccurrenceId""::text, '(none)')
-                    || ' does not exist')
-            || '. The durable intake occurrence must be Queued or Retryable before '
-            || 'extraction may start (refused attempt ' || (j.""Attempts"" + 1)
-            || ' of ' || j.""MaxAttempts"" || ').', 4000),
-        ""NextAttemptAt"" = {BackoffFromAttempts},
+            CASE
+              WHEN j.""SourceDocumentOccurrenceId"" IS NULL
+                THEN '[EXTRACTION_INTAKE_OCCURRENCE_MISSING] No durable intake occurrence is linked.'
+              WHEN NOT EXISTS (
+                SELECT 1 FROM source_document_occurrences o
+                WHERE o.business_unit_id = j.""BusinessUnitId""
+                  AND o.id = j.""SourceDocumentOccurrenceId"")
+                THEN '[EXTRACTION_INTAKE_OCCURRENCE_MISSING] The linked durable intake occurrence does not exist.'
+              WHEN EXISTS (
+                SELECT 1 FROM source_document_occurrences o
+                WHERE o.business_unit_id = j.""BusinessUnitId""
+                  AND o.id = j.""SourceDocumentOccurrenceId""
+                  AND o.extraction_job_id IS DISTINCT FROM j.""Id"")
+                THEN '[EXTRACTION_INTAKE_JOB_LINK_MISMATCH] The durable intake occurrence is linked to a different queue job.'
+              ELSE '[EXTRACTION_INTAKE_STATUS_NOT_QUEUE_ELIGIBLE] The durable intake occurrence is not Queued or Retryable.'
+            END
+            || ' QueueId=' || j.""Id""
+            || '; TenantId=' || j.""BusinessUnitId""
+            || '; OccurrenceId=' || COALESCE(j.""SourceDocumentOccurrenceId""::text, '(none)')
+            || '; CorrelationId=' || j.""BatchId""::text || '.', 4000),
         ""UpdatedOn"" = @now
     FROM blocked b
     WHERE j.""Id"" = b.""Id""
-    RETURNING j.""Id""
+    RETURNING j.""Id"", j.""BusinessUnitId"", j.""SourceDocumentOccurrenceId"", j.""BatchId""
 ),
 candidate AS (
     SELECT j.""Id""
@@ -269,12 +262,20 @@ SET ""Status"" = 'Leased',
     ""UpdatedOn"" = @now
 FROM candidate c
 WHERE j.""Id"" = c.""Id""
+  -- Re-check mutable eligibility on the tuple UPDATE actually locks. A candidate CTE can
+  -- be evaluated just before another short transaction commits its lease; without this
+  -- predicate PostgreSQL's EvalPlanQual may update that now-live lease a second time.
+  AND (j.""Status"" = 'Pending'
+       OR (j.""Status"" IN ('Leased','Extracting','Persisting')
+           AND (j.""LeaseExpiresAt"" IS NULL OR j.""LeaseExpiresAt"" <= @now)))
+  AND j.""NextAttemptAt"" <= @now
+  AND j.""Attempts"" < j.""MaxAttempts""
 RETURNING {ReturningColumns};";
 
     // Backstop for the case the head window cannot model: the database refused a claim the
     // scheduler believed legal (23514). Re-selects from the same window on the same
     // deterministic order — rows the sweep already doubts first, then the exact row the claim
-    // would have taken — and charges the refusal so it can exhaust. Runs only after a
+    // would have taken — and quarantines it once. Runs only after a
     // refusal, never on the hot path.
     private static readonly string RecordRefusedClaimSql = $@"
 WITH {SchedulingCtes},
@@ -289,12 +290,10 @@ target AS (
 )
 UPDATE ""ExtractionJobs"" j
 SET ""Attempts"" = j.""Attempts"" + 1,
-    ""Status"" = CASE WHEN j.""Attempts"" + 1 >= j.""MaxAttempts""
-                    THEN 'DeadLetter' ELSE j.""Status"" END,
+    ""Status"" = 'DeadLetter',
     ""LeasedBy"" = NULL,
     ""LeaseExpiresAt"" = NULL,
     ""LastError"" = left(@error, 4000),
-    ""NextAttemptAt"" = {BackoffFromAttempts},
     ""UpdatedOn"" = @now
 FROM target t
 WHERE j.""Id"" = t.""Id""
@@ -488,15 +487,14 @@ RETURNING j.""Id"", j.""BusinessUnitId"", j.""Status"", j.""Attempts"", j.""MaxA
             // the message names the offending job/occurrence and would be unbounded.
             _metrics?.ClaimRefused($"sqlstate_{refused.SqlState}", _tenantContext?.BusinessUnitId);
             var reason =
-                $"Extraction claim refused by a database invariant (SQLSTATE {refused.SqlState}): " +
-                $"{refused.MessageText} The refusal is recorded against this attempt so the job " +
-                "dead-letters visibly instead of blocking every tenant's queue.";
+                $"[EXTRACTION_INTAKE_GUARD_REFUSED] Database guard refused the claim " +
+                $"(SQLSTATE {refused.SqlState}); the job requires governed reconciliation.";
             var recorded = await RecordRefusedClaimAsync(conn, transaction, reason, now, perTenantCap, ct);
             await transaction.CommitAsync(ct);
             if (recorded is { } strike)
                 _log.LogError(refused,
                     "Extraction job {JobId} (tenant {BusinessUnitId}) could not be claimed: {SqlState}. " +
-                    "Refusal recorded as attempt {Attempts}/{MaxAttempts}; job is now {Status}.",
+                    "Refusal quarantined at attempt {Attempts}/{MaxAttempts}; job is now {Status}.",
                     strike.JobId, strike.BusinessUnitId, refused.SqlState,
                     strike.Attempts, strike.MaxAttempts, strike.Status);
             else

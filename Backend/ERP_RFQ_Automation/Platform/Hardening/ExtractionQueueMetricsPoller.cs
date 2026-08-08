@@ -160,7 +160,13 @@ public sealed class ExtractionQueueMetricsPoller : BackgroundService
                 j.BusinessUnitId,
                 j.Status,
                 Ready = j.NextAttemptAt <= nowUtc,
-                LeaseLapsed = j.LeaseExpiresAt == null || j.LeaseExpiresAt <= nowUtc
+                LeaseLapsed = j.LeaseExpiresAt == null || j.LeaseExpiresAt <= nowUtc,
+                InvariantBlocked = j.Status == ExtractionStatus.DeadLetter
+                    && j.LastError != null && j.LastError.StartsWith("[EXTRACTION_INTAKE_"),
+                Retry = j.Attempts > 1,
+                RepeatedInvariantViolation = j.Status == ExtractionStatus.DeadLetter
+                    && j.LastError != null && j.LastError.StartsWith("[EXTRACTION_INTAKE_")
+                    && j.Attempts > 0
             })
             .Select(g => new
             {
@@ -168,6 +174,9 @@ public sealed class ExtractionQueueMetricsPoller : BackgroundService
                 g.Key.Status,
                 g.Key.Ready,
                 g.Key.LeaseLapsed,
+                g.Key.InvariantBlocked,
+                g.Key.Retry,
+                g.Key.RepeatedInvariantViolation,
                 Count = g.LongCount(),
                 OldestCreatedOn = g.Min(x => x.CreatedOn)
             })
@@ -175,7 +184,8 @@ public sealed class ExtractionQueueMetricsPoller : BackgroundService
 
         return rows
             .Select(r => new ExtractionQueueGroup(
-                r.BusinessUnitId, r.Status.ToString(), r.Ready, r.LeaseLapsed, r.Count, r.OldestCreatedOn))
+                r.BusinessUnitId, r.Status.ToString(), r.Ready, r.LeaseLapsed, r.Count,
+                r.OldestCreatedOn, r.InvariantBlocked, r.Retry, r.RepeatedInvariantViolation))
             .ToList();
     }
 }

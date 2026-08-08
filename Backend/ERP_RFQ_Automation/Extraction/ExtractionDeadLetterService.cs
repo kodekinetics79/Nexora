@@ -500,6 +500,8 @@ public sealed class ExtractionDeadLetterService(
     internal static string ClassifyFailure(string? error)
     {
         if (string.IsNullOrWhiteSpace(error)) return "UNCLASSIFIED";
+        if (error.StartsWith("[EXTRACTION_INTAKE_", StringComparison.Ordinal))
+            return "INTAKE_INVARIANT";
         if (error.Contains("integrity", StringComparison.OrdinalIgnoreCase)) return "EVIDENCE_INTEGRITY";
         if (error.Contains("malware", StringComparison.OrdinalIgnoreCase)) return "MALWARE";
         if (error.Contains("unsupported", StringComparison.OrdinalIgnoreCase)) return "UNSUPPORTED_DOCUMENT";

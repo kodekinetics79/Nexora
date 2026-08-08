@@ -4,6 +4,7 @@ using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Platform.Hardening;
 using ERP_RFQ_Automation.Security.DocumentInspection;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
@@ -102,21 +103,31 @@ public sealed class ExtractionIntakeGuardClaimPostgreSqlTests : IAsyncLifetime
         Assert.True(await queue.CompleteAsync(healthyJobId, "worker-1", claimed.Attempts, 4_242));
         Assert.Equal(ExtractionStatus.Succeeded, (await JobAsync(context, healthyJobId)).Status);
 
-        // The poisoned job was skipped, but NOT silently: the refusal survived as an attempt
-        // with a reason, which is the only thing that lets it ever dead-letter.
+        // The poisoned job was skipped, but NOT silently or retried: structural lineage
+        // cannot heal through extraction retries, so it is quarantined once in governed DLQ.
         var poisoned = await JobAsync(context, poisonedJobId);
-        Assert.Equal(ExtractionStatus.Pending, poisoned.Status);
+        Assert.Equal(ExtractionStatus.DeadLetter, poisoned.Status);
         Assert.Null(poisoned.LeasedBy);
-        Assert.Equal(1, poisoned.Attempts);
+        Assert.Equal(0, poisoned.Attempts);
         Assert.NotNull(poisoned.LastError);
-        Assert.Contains("intake occurrence", poisoned.LastError);
-        Assert.Contains("Accepted", poisoned.LastError);
-        Assert.Contains("(none)", poisoned.LastError);
+        Assert.StartsWith("[EXTRACTION_INTAKE_JOB_LINK_MISMATCH]", poisoned.LastError);
+        Assert.Contains($"QueueId={poisonedJobId}", poisoned.LastError);
+        Assert.DoesNotContain("poisoned.pdf", poisoned.LastError);
+
+        // The real PostgreSQL observability query recognizes the stable code without
+        // loading or publishing document names, paths, or raw exception messages.
+        var groups = await ExtractionQueueMetricsPoller.QueryAsync(
+            context, DateTime.UtcNow, CancellationToken.None);
+        var snapshot = ExtractionQueueSnapshot.From(groups, DateTimeOffset.UtcNow);
+        var blockedGauge = Assert.Single(snapshot.Tenants,
+            x => x.BusinessUnitId == poisonedTenant);
+        Assert.Equal(1, blockedGauge.InvariantBlocked);
+        Assert.Equal(1, snapshot.InvariantAffectedTenants);
     }
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task UnclaimableJobExhaustsItsAttemptsAndBecomesVisibleToAnOperator()
+    public async Task UnclaimableJobIsClassifiedExactlyOnceAndVisibleToAnOperator()
     {
         const long tenant = 97_821;
         const int maxAttempts = 3;
@@ -126,28 +137,26 @@ public sealed class ExtractionIntakeGuardClaimPostgreSqlTests : IAsyncLifetime
         var poisonedJobId = await SeedJobAsync(
             context, queue, "starves-queue", tenant, maxAttempts, schedulerTag: 0, bindIntake: false);
 
-        // Before the fix this loop ran forever: Attempts never moved because the 23514
-        // rolled the increment back with the transaction.
-        for (var cycle = 0; cycle < maxAttempts; cycle++)
-        {
-            await ElapseBackoffAsync(context, poisonedJobId);
-            Assert.Null(await queue.ClaimAsync($"worker-{cycle}", TimeSpan.FromMinutes(5), 4));
-            Assert.Equal(cycle + 1, (await JobAsync(context, poisonedJobId)).Attempts);
-        }
+        Assert.Null(await queue.ClaimAsync("worker-first", TimeSpan.FromMinutes(5), 4));
+        var firstClassification = await JobAsync(context, poisonedJobId);
+        for (var cycle = 0; cycle < 8; cycle++)
+            Assert.Null(await queue.ClaimAsync($"worker-repeat-{cycle}", TimeSpan.FromMinutes(5), 4));
 
         var deadLettered = await JobAsync(context, poisonedJobId);
         Assert.Equal(ExtractionStatus.DeadLetter, deadLettered.Status);
-        Assert.Equal(maxAttempts, deadLettered.Attempts);
+        Assert.Equal(0, deadLettered.Attempts);
+        Assert.Equal(firstClassification.UpdatedOn, deadLettered.UpdatedOn);
+        Assert.Equal(firstClassification.LastError, deadLettered.LastError);
         Assert.Null(deadLettered.LeasedBy);
         Assert.NotNull(deadLettered.LastError);
-        Assert.Contains("Extraction cannot start", deadLettered.LastError);
-        Assert.Contains("intake occurrence", deadLettered.LastError);
-        Assert.Contains("Accepted", deadLettered.LastError);
-        Assert.Contains($"refused attempt {maxAttempts} of {maxAttempts}", deadLettered.LastError);
+        Assert.StartsWith("[EXTRACTION_INTAKE_JOB_LINK_MISMATCH]", deadLettered.LastError);
 
         // The intake occurrence itself is not laundered into a claimable state on the way out.
         var occurrence = await context.Set<SourceDocumentOccurrence>().AsNoTracking()
             .SingleAsync(x => x.BusinessUnitId == tenant);
+        // The occurrence is deliberately not laundered: the shared-occurrence trigger only
+        // follows a job it is actually bound to. The job is quarantined; Accepted remains
+        // truthful evidence of the producer's incomplete transaction.
         Assert.Equal(IntakeOccurrenceStatus.Accepted, occurrence.IntakeStatus);
         Assert.Null(occurrence.ExtractionJobId);
 
@@ -156,7 +165,8 @@ public sealed class ExtractionIntakeGuardClaimPostgreSqlTests : IAsyncLifetime
         var service = new ExtractionDeadLetterService(context, new UnusedStorage(), new UnusedScanner());
         var item = Assert.Single(await service.ListAsync(tenant, default));
         Assert.Equal(poisonedJobId, item.JobId);
-        Assert.Equal(maxAttempts, item.Attempts);
+        Assert.Equal(0, item.Attempts);
+        Assert.Equal("INTAKE_INVARIANT", item.FailureCategory);
         Assert.Equal("Open", item.Resolution);
         Assert.True(item.BlocksReadiness);
 
@@ -176,7 +186,7 @@ public sealed class ExtractionIntakeGuardClaimPostgreSqlTests : IAsyncLifetime
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task ClaimRefusedByTheDatabaseIsRecordedInsteadOfRetriedForever()
+    public async Task LegacyJobWithoutOccurrenceIsClassifiedWithoutHittingTheGuardLoop()
     {
         const long tenant = 97_841;
         const int maxAttempts = 2;
@@ -184,10 +194,7 @@ public sealed class ExtractionIntakeGuardClaimPostgreSqlTests : IAsyncLifetime
         await using var context = Context();
         var queue = NewQueue(context);
 
-        // A legacy job with no durable intake link. The scheduler cannot tell this shape
-        // apart from a claimable one — the deployed guard refuses it anyway. That is the
-        // drift case the savepoint exists for: the refusal must still be charged, or the
-        // job loops on every worker forever exactly as it did on 2026-08-05.
+        // A legacy job with no durable intake link is classified before the guarded update.
         var enqueued = await queue.EnqueueAsync(new EnqueueExtractionRequest
         {
             BusinessUnitId = tenant,
@@ -200,20 +207,14 @@ public sealed class ExtractionIntakeGuardClaimPostgreSqlTests : IAsyncLifetime
             MaxAttempts = maxAttempts
         });
 
-        for (var cycle = 0; cycle < maxAttempts; cycle++)
-        {
-            await ElapseBackoffAsync(context, enqueued.JobId);
-            Assert.Null(await queue.ClaimAsync($"worker-{cycle}", TimeSpan.FromMinutes(5), 4));
-            Assert.Equal(cycle + 1, (await JobAsync(context, enqueued.JobId)).Attempts);
-        }
+        Assert.Null(await queue.ClaimAsync("worker", TimeSpan.FromMinutes(5), 4));
 
         var refused = await JobAsync(context, enqueued.JobId);
         Assert.Equal(ExtractionStatus.DeadLetter, refused.Status);
-        Assert.Equal(maxAttempts, refused.Attempts);
+        Assert.Equal(0, refused.Attempts);
         Assert.Null(refused.LeasedBy);
         Assert.NotNull(refused.LastError);
-        Assert.Contains("SQLSTATE 23514", refused.LastError);
-        Assert.Contains("durable intake occurrence", refused.LastError);
+        Assert.StartsWith("[EXTRACTION_INTAKE_OCCURRENCE_MISSING]", refused.LastError);
     }
 
     [Fact]
@@ -260,12 +261,128 @@ public sealed class ExtractionIntakeGuardClaimPostgreSqlTests : IAsyncLifetime
         Assert.Equal("transient extraction failure", retried.LastError);
         Assert.Equal(IntakeOccurrenceStatus.Retryable, await IntakeStatusAsync(context, jobId));
 
-        // The poisoned neighbour never took a lease and never dead-lettered early.
+        // The poisoned neighbour never took a lease and was quarantined exactly once.
         var poisoned = await JobAsync(context, poisonedJobId);
-        Assert.Equal(ExtractionStatus.Pending, poisoned.Status);
+        Assert.Equal(ExtractionStatus.DeadLetter, poisoned.Status);
         Assert.Null(poisoned.LeasedBy);
         Assert.Null(poisoned.LeaseExpiresAt);
-        Assert.InRange(poisoned.Attempts, 1, 2);
+        Assert.Equal(0, poisoned.Attempts);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task ConcurrentWorkersQuarantineOneInvalidRowOnceAndClaimDisjointValidWork()
+    {
+        const long poisonedTenant = 97_851;
+        await using (var seed = Context())
+        {
+            var queue = NewQueue(seed);
+            await SeedJobAsync(seed, queue, "concurrent-poison", poisonedTenant, 5, 0, false);
+            for (var i = 0; i < 8; i++)
+                await SeedJobAsync(seed, queue, $"concurrent-valid-{i}", 97_860 + i, 5, i + 1, true);
+        }
+
+        var claims = await Task.WhenAll(Enumerable.Range(0, 8).Select(async i =>
+        {
+            await using var worker = Context();
+            var queue = NewQueue(worker);
+            for (var poll = 0; poll < 4; poll++)
+            {
+                var claim = await queue.ClaimAsync(
+                    $"concurrent-worker-{i}", TimeSpan.FromMinutes(5), 4);
+                if (claim is not null) return claim;
+            }
+            return null;
+        }));
+
+        Assert.All(claims, Assert.NotNull);
+        Assert.Equal(8, claims.Select(x => x!.Id).Distinct().Count());
+        await using var verify = Context();
+        var poisoned = await verify.Set<ExtractionJob>().AsNoTracking()
+            .SingleAsync(x => x.BusinessUnitId == poisonedTenant);
+        Assert.Equal(ExtractionStatus.DeadLetter, poisoned.Status);
+        Assert.Equal(0, poisoned.Attempts);
+        Assert.StartsWith("[EXTRACTION_INTAKE_JOB_LINK_MISMATCH]", poisoned.LastError);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task LegacyReconciliationIsBoundedAndIdempotent()
+    {
+        const long tenantBase = 98_000;
+        await using var context = Context();
+        var queue = NewQueue(context);
+        for (var i = 0; i < 40; i++)
+            await SeedJobAsync(context, queue, $"bounded-poison-{i}", tenantBase + i, 5, i, false);
+        var validId = await SeedJobAsync(context, queue, "bounded-valid", tenantBase + 100, 5, 100, true);
+
+        // One poll touches at most HeadOfLineLookahead (32) legacy rows.
+        Assert.Null(await queue.ClaimAsync("bounded-1", TimeSpan.FromMinutes(5), 4));
+        Assert.Equal(32, await context.Set<ExtractionJob>().AsNoTracking()
+            .CountAsync(x => x.Status == ExtractionStatus.DeadLetter));
+
+        var claim = await queue.ClaimAsync("bounded-2", TimeSpan.FromMinutes(5), 4);
+        Assert.Equal(validId, claim!.Id);
+        Assert.Equal(40, await context.Set<ExtractionJob>().AsNoTracking()
+            .CountAsync(x => x.Status == ExtractionStatus.DeadLetter));
+
+        // Repeated polls cannot reclassify or mutate quarantined rows.
+        var before = await context.Set<ExtractionJob>().AsNoTracking()
+            .Where(x => x.Status == ExtractionStatus.DeadLetter)
+            .Select(x => new { x.Id, x.Attempts, x.UpdatedOn, x.LastError }).OrderBy(x => x.Id).ToListAsync();
+        Assert.Null(await queue.ClaimAsync("bounded-3", TimeSpan.FromMinutes(5), 4));
+        var after = await context.Set<ExtractionJob>().AsNoTracking()
+            .Where(x => x.Status == ExtractionStatus.DeadLetter)
+            .Select(x => new { x.Id, x.Attempts, x.UpdatedOn, x.LastError }).OrderBy(x => x.Id).ToListAsync();
+        Assert.Equal(before, after);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task QueueCreationAndOccurrenceTransitionCommitAtomically()
+    {
+        const long tenant = 98_101;
+        await using var context = Context();
+        var (occurrence, hash) = await SeedOccurrenceAsync(context, "atomic-commit", tenant);
+        await using (var transaction = await context.Database.BeginTransactionAsync())
+        {
+            var enqueued = await NewQueue(context).EnqueueAsync(Request(tenant, occurrence.Id, hash, "atomic-commit"));
+            occurrence.BindExtractionJob(enqueued.JobId);
+            await context.SaveChangesAsync();
+            await transaction.CommitAsync();
+        }
+
+        var claim = await NewQueue(context).ClaimAsync("atomic-worker", TimeSpan.FromMinutes(5), 1);
+        Assert.NotNull(claim);
+        Assert.Equal(tenant, claim!.BusinessUnitId);
+        Assert.Equal(IntakeOccurrenceStatus.Processing, await IntakeStatusAsync(context, claim.Id));
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task ProducerRollbackLeavesNoQueueRowAndNoFalseQueuedOccurrence()
+    {
+        const long tenant = 98_102;
+        long occurrenceId;
+        await using (var context = Context())
+        {
+            var seeded = await SeedOccurrenceAsync(context, "atomic-rollback", tenant);
+            occurrenceId = seeded.Occurrence.Id;
+            await using var transaction = await context.Database.BeginTransactionAsync();
+            var enqueued = await NewQueue(context).EnqueueAsync(
+                Request(tenant, occurrenceId, seeded.Hash, "atomic-rollback"));
+            seeded.Occurrence.BindExtractionJob(enqueued.JobId);
+            await context.SaveChangesAsync();
+            await transaction.RollbackAsync();
+        }
+
+        await using var verify = Context();
+        Assert.Empty(await verify.Set<ExtractionJob>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == tenant).ToListAsync());
+        var occurrence = await verify.Set<SourceDocumentOccurrence>().AsNoTracking()
+            .SingleAsync(x => x.Id == occurrenceId && x.BusinessUnitId == tenant);
+        Assert.Equal(IntakeOccurrenceStatus.Accepted, occurrence.IntakeStatus);
+        Assert.Null(occurrence.ExtractionJobId);
     }
 
     // ---- helpers ---------------------------------------------------------
@@ -344,6 +461,38 @@ public sealed class ExtractionIntakeGuardClaimPostgreSqlTests : IAsyncLifetime
             .ExecuteUpdateAsync(update => update.SetProperty(job => job.SchedulerTag, schedulerTag));
         return enqueued.JobId;
     }
+
+    private static async Task<(SourceDocumentOccurrence Occurrence, string Hash)> SeedOccurrenceAsync(
+        ErpRfqAutomationContext context, string marker, long businessUnitId)
+    {
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(marker))).ToLowerInvariant();
+        var corpus = DocumentCorpus.Create(businessUnitId, Guid.NewGuid(), CorpusSourceType.ManualUpload);
+        context.Set<DocumentCorpus>().Add(corpus);
+        await context.SaveChangesAsync();
+        var source = SourceDocument.Create(businessUnitId, corpus.Id, hash, marker + ".pdf",
+            "application/pdf", "acceptance", marker, "v1", 1);
+        context.Set<SourceDocument>().Add(source);
+        await context.SaveChangesAsync();
+        var occurrence = SourceDocumentOccurrence.Create(
+            businessUnitId, source.Id, corpus.Id, "intake-guard:" + marker, "{}");
+        context.Set<SourceDocumentOccurrence>().Add(occurrence);
+        await context.SaveChangesAsync();
+        return (occurrence, hash);
+    }
+
+    private static EnqueueExtractionRequest Request(
+        long businessUnitId, long occurrenceId, string hash, string marker) => new()
+    {
+        BusinessUnitId = businessUnitId,
+        SourceDocumentOccurrenceId = occurrenceId,
+        SourceType = ExtractionSourceType.ManualUpload,
+        StoragePath = "test://" + marker,
+        ContentHash = hash,
+        FileName = marker + ".pdf",
+        FileType = "pdf",
+        Priority = int.MaxValue,
+        MaxAttempts = 5
+    };
 
     private async Task ExecuteAdminAsync(string sql)
     {
