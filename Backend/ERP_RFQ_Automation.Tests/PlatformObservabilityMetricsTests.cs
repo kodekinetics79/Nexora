@@ -151,6 +151,9 @@ public class PlatformObservabilityMetricsTests
             ExtractionDeadLetterService.ClassifyFailure("Evidence integrity failure: bad hash"));
         Assert.Equal("UNSUPPORTED_DOCUMENT",
             ExtractionDeadLetterService.ClassifyFailure("unsupported document format"));
+        Assert.Equal("INTAKE_INVARIANT",
+            ExtractionDeadLetterService.ClassifyFailure(
+                "[EXTRACTION_INTAKE_JOB_LINK_MISMATCH] redacted identifiers"));
         Assert.Equal("EXTRACTION_FAILURE",
             ExtractionDeadLetterService.ClassifyFailure("something else entirely"));
     }
@@ -293,6 +296,35 @@ public class PlatformObservabilityMetricsTests
         // Never polled -> no series at all. A zero here would be a lie an alert believes.
         Assert.Empty(harness.For("nexora.extraction.queue.oldest_pending_age"));
         Assert.Empty(harness.For("nexora.extraction.queue.depth"));
+    }
+
+    [Fact]
+    public void IntakeInvariantGaugesUseOnlyBoundedRedactedSnapshotFields()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var provider = new StubQueueSnapshotProvider();
+        provider.Publish(ExtractionQueueSnapshot.From(new[]
+        {
+            new ExtractionQueueGroup(4_243, "DeadLetter", true, true, 2,
+                now.UtcDateTime.AddMinutes(-12), InvariantBlocked: true),
+            new ExtractionQueueGroup(4_243, "DeadLetter", true, true, 1,
+                now.UtcDateTime.AddMinutes(-4), InvariantBlocked: true,
+                Retry: true, RepeatedInvariantViolation: true)
+        }, now));
+        using var harness = new MetricsHarness(provider);
+
+        harness.CollectObservable();
+
+        Assert.Equal(3, Assert.Single(harness.For(
+            "nexora.extraction.queue.invariant_blocked")).Value);
+        Assert.Equal(720, Assert.Single(harness.For(
+            "nexora.extraction.queue.oldest_invariant_blocked_age")).Value, precision: 0);
+        Assert.Equal(1, Assert.Single(harness.For(
+            "nexora.extraction.queue.invariant_affected_tenants")).Value);
+        Assert.Equal(1, Assert.Single(harness.For(
+            "nexora.extraction.queue.retries")).Value);
+        Assert.Equal(1, Assert.Single(harness.For(
+            "nexora.extraction.queue.repeated_invariant_violations")).Value);
     }
 
     // ------------------------------------------------------------ the poller

@@ -20,7 +20,10 @@ public readonly record struct ExtractionQueueGroup(
     bool Ready,
     bool LeaseLapsed,
     long Count,
-    DateTime? OldestCreatedOnUtc);
+    DateTime? OldestCreatedOnUtc,
+    bool InvariantBlocked = false,
+    bool Retry = false,
+    bool RepeatedInvariantViolation = false);
 
 /// <summary>
 /// One tenant's queue posture. <see cref="OldestPendingAgeSeconds"/> is the number that
@@ -35,7 +38,11 @@ public sealed record TenantQueueGauge(
     long PendingBackedOff,
     long InFlight,
     long ExpiredLeases,
-    long DeadLettered);
+    long DeadLettered,
+    long InvariantBlocked = 0,
+    double OldestInvariantBlockedAgeSeconds = 0,
+    long Retried = 0,
+    long RepeatedInvariantViolations = 0);
 
 /// <summary>
 /// Immutable, point-in-time answer to "what does the extraction queue look like right
@@ -48,7 +55,8 @@ public sealed record ExtractionQueueSnapshot(
     IReadOnlyList<TenantQueueGauge> Tenants,
     long UnreportedTenants,
     bool IsFresh,
-    string? Error)
+    string? Error,
+    long InvariantAffectedTenants = 0)
 {
     /// <summary>The "we have never successfully polled" value. Publishes no tenant series.</summary>
     public static readonly ExtractionQueueSnapshot Empty =
@@ -100,7 +108,18 @@ public sealed record ExtractionQueueSnapshot(
             else if (string.Equals(group.Status, "DeadLetter", StringComparison.Ordinal))
             {
                 accumulator.DeadLettered += group.Count;
+                if (group.InvariantBlocked)
+                {
+                    accumulator.InvariantBlocked += group.Count;
+                    if (group.OldestCreatedOnUtc is { } created
+                        && (accumulator.OldestInvariantBlockedUtc is null
+                            || created < accumulator.OldestInvariantBlockedUtc))
+                        accumulator.OldestInvariantBlockedUtc = created;
+                }
             }
+            if (group.Retry) accumulator.Retried += group.Count;
+            if (group.RepeatedInvariantViolation)
+                accumulator.RepeatedInvariantViolations += group.Count;
         }
 
         var tenants = accumulators
@@ -115,12 +134,20 @@ public sealed record ExtractionQueueSnapshot(
                 pair.Value.PendingBackedOff,
                 pair.Value.InFlight,
                 pair.Value.ExpiredLeases,
-                pair.Value.DeadLettered))
+                pair.Value.DeadLettered,
+                pair.Value.InvariantBlocked,
+                pair.Value.OldestInvariantBlockedUtc is { } blocked
+                    ? Math.Max(0d, (nowUtc - new DateTimeOffset(
+                        DateTime.SpecifyKind(blocked, DateTimeKind.Utc))).TotalSeconds)
+                    : 0d,
+                pair.Value.Retried,
+                pair.Value.RepeatedInvariantViolations))
             .OrderByDescending(x => x.OldestPendingAgeSeconds)
             .ThenByDescending(x => x.Pending)
             .ThenBy(x => x.BusinessUnitId)
             .ToList();
 
+        var invariantAffectedTenants = tenants.LongCount(x => x.InvariantBlocked > 0);
         var unreported = 0L;
         if (tenants.Count > maxTenants)
         {
@@ -128,7 +155,8 @@ public sealed record ExtractionQueueSnapshot(
             tenants = tenants.Take(maxTenants).ToList();
         }
 
-        return new ExtractionQueueSnapshot(nowUtc, tenants, unreported, IsFresh: true, Error: null);
+        return new ExtractionQueueSnapshot(nowUtc, tenants, unreported, IsFresh: true, Error: null,
+            InvariantAffectedTenants: invariantAffectedTenants);
     }
 
     private sealed class Accumulator
@@ -139,7 +167,11 @@ public sealed record ExtractionQueueSnapshot(
         public long InFlight;
         public long ExpiredLeases;
         public long DeadLettered;
+        public long InvariantBlocked;
+        public long Retried;
+        public long RepeatedInvariantViolations;
         public DateTime? OldestPendingUtc;
+        public DateTime? OldestInvariantBlockedUtc;
     }
 }
 

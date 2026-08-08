@@ -79,10 +79,10 @@ public interface IExtractionQueue
     /// <para>
     /// Poison-pill isolation (R-REL-01): a job whose durable intake occurrence forbids the
     /// transition to Leased is never selected, so it cannot head-of-line block other tenants'
-    /// work. It is not silently skipped either — the refusal is charged to the job's attempts
-    /// with a truthful <c>LastError</c>, and it dead-letters at MaxAttempts into the operator
-    /// dead-letter queue and the operations-readiness count. Recovering the job (which repairs
-    /// the intake link) returns it to Pending.
+    /// work. It is not silently skipped or retried either — a structural lineage violation is
+    /// classified once with a stable reason code and moved into the existing governed dead-letter
+    /// queue. Recovering the job through that workflow verifies the immutable source, repairs the
+    /// intake lineage, and only then returns it to Pending.
     /// </para>
     /// </summary>
     Task<ExtractionJob?> ClaimAsync(string workerId, TimeSpan leaseDuration, int perTenantCap, CancellationToken ct = default);

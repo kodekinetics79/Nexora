@@ -1,5 +1,6 @@
 using System.Text.Json;
 using ERP_RFQ_Automation.Extraction;
+using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Platform.Auth;
 using ERP_RFQ_Automation.Platform.Models;
@@ -22,7 +23,8 @@ public class PlatformOperationsController(
     [HttpGet("pipeline/queue")]
     public async Task<IActionResult> Queue(CancellationToken ct)
     {
-        var since = DateTime.UtcNow.AddHours(-24);
+        var now = DateTime.UtcNow;
+        var since = now.AddHours(-24);
         var jobs = context.Set<ExtractionJob>().IgnoreQueryFilters().AsNoTracking();
         var succeeded = await jobs.CountAsync(j => j.UpdatedOn >= since && j.Status == ExtractionStatus.Succeeded, ct);
         var failed = await jobs.CountAsync(j => j.UpdatedOn >= since &&
@@ -31,6 +33,33 @@ public class PlatformOperationsController(
             .Where(j => j.UpdatedOn >= since && j.Status == ExtractionStatus.Succeeded)
             .Select(j => new { j.CreatedOn, j.UpdatedOn })
             .ToListAsync(ct);
+        var invariantBlocked = jobs.Where(j => j.Status == ExtractionStatus.DeadLetter
+            && j.LastError != null && j.LastError.StartsWith("[EXTRACTION_INTAKE_"));
+        var blockedCount = await invariantBlocked.CountAsync(ct);
+        var oldestBlocked = await invariantBlocked.Select(j => (DateTime?)j.CreatedOn).MinAsync(ct);
+        var blockedTenants = await invariantBlocked.Select(j => j.BusinessUnitId).Distinct().CountAsync(ct);
+        var repeatedInvariantViolations = await invariantBlocked.CountAsync(j => j.Attempts > 0, ct);
+        var recent = jobs.Where(j => j.UpdatedOn >= since);
+        var recentCount = await recent.CountAsync(ct);
+        var retried = await recent.CountAsync(j => j.Attempts > 1, ct);
+        var occurrences = context.Set<SourceDocumentOccurrence>().IgnoreQueryFilters().AsNoTracking();
+        var invalidClaimCandidates = await jobs.CountAsync(j =>
+            (j.Status == ExtractionStatus.Pending
+                || ((j.Status == ExtractionStatus.Leased
+                        || j.Status == ExtractionStatus.Extracting
+                        || j.Status == ExtractionStatus.Persisting)
+                    && (j.LeaseExpiresAt == null || j.LeaseExpiresAt <= now)))
+            && (j.SourceDocumentOccurrenceId == null
+                || !occurrences.Any(o => o.BusinessUnitId == j.BusinessUnitId
+                    && o.Id == j.SourceDocumentOccurrenceId
+                    && o.ExtractionJobId == j.Id
+                    && (o.IntakeStatus == IntakeOccurrenceStatus.Queued
+                        || o.IntakeStatus == IntakeOccurrenceStatus.Retryable
+                        || (o.IntakeStatus == IntakeOccurrenceStatus.Processing
+                            && (j.Status == ExtractionStatus.Leased
+                                || j.Status == ExtractionStatus.Extracting
+                                || j.Status == ExtractionStatus.Persisting)
+                            && (j.LeaseExpiresAt == null || j.LeaseExpiresAt <= now))))), ct);
 
         return Ok(new
         {
@@ -40,7 +69,14 @@ public class PlatformOperationsController(
             deadLetter = await jobs.CountAsync(j => j.Status == ExtractionStatus.DeadLetter, ct),
             processedLast24h = succeeded,
             avgLatencyMs = latencies.Count == 0 ? 0 : (long)latencies.Average(j => (j.UpdatedOn - j.CreatedOn).TotalMilliseconds),
-            successRate = succeeded + failed == 0 ? 0d : (double)succeeded / (succeeded + failed)
+            successRate = succeeded + failed == 0 ? 0d : (double)succeeded / (succeeded + failed),
+            successfulClaimRate = succeeded + failed == 0 ? 0d : (double)succeeded / (succeeded + failed),
+            retryRate = recentCount == 0 ? 0d : (double)retried / recentCount,
+            invalidClaimCandidates,
+            reconciliationRequired = blockedCount,
+            oldestBlockedAt = oldestBlocked,
+            affectedTenantCount = blockedTenants,
+            repeatedInvariantViolations
         });
     }
 
