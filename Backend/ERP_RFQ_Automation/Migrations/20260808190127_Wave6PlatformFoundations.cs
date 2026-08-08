@@ -395,6 +395,16 @@ namespace ERP_RFQ_Automation.Migrations
                 ALTER TABLE platform."TenantDataRecoveryEvidence" FORCE ROW LEVEL SECURITY;
                 ALTER TABLE platform."TenantDeletionCertificates" ENABLE ROW LEVEL SECURITY;
                 ALTER TABLE platform."TenantDeletionCertificates" FORCE ROW LEVEL SECURITY;
+                CREATE POLICY usage_events_platform_fleet ON platform."UsageEvents"
+                    FOR ALL TO nexora_pipeline_app USING (true) WITH CHECK (true);
+                CREATE POLICY usage_minutes_platform_fleet ON platform."UsageMinuteAggregates"
+                    FOR ALL TO nexora_pipeline_app USING (true) WITH CHECK (true);
+                CREATE POLICY accounting_outbox_platform_fleet ON platform."AccountingOutbox"
+                    FOR ALL TO nexora_pipeline_app USING (true) WITH CHECK (true);
+                CREATE POLICY recovery_evidence_platform_fleet ON platform."TenantDataRecoveryEvidence"
+                    FOR ALL TO nexora_pipeline_app USING (true) WITH CHECK (true);
+                CREATE POLICY deletion_certificates_platform_fleet ON platform."TenantDeletionCertificates"
+                    FOR ALL TO nexora_pipeline_app USING (true) WITH CHECK (true);
 
                 REVOKE ALL ON TABLE platform."UsageEvents",platform."UsageMinuteAggregates",platform."AccountingOutbox",
                     platform."TenantDataRecoveryEvidence",platform."TenantDeletionCertificates" FROM PUBLIC;
