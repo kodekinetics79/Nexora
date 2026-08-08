@@ -3,6 +3,7 @@ using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.Platform.Controllers;
 using ERP_RFQ_Automation.Platform.Models;
+using ERP_RFQ_Automation.Platform.Lifecycle;
 using ERP_RFQ_Automation.Platform.Services;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.AspNetCore.Http;
@@ -92,6 +93,70 @@ public sealed class PlatformTenantLifecycleAdminTests
         Assert.Equal(nameof(TenantStatus.Suspended), dto.Status);
         await using var verification = db.ContextFor(null);
         Assert.Equal("tenant.restore", (await verification.Set<PlatformAuditLog>().SingleAsync()).Action);
+    }
+
+    [Fact]
+    public async Task Restore_atomically_cancels_a_scheduled_deletion()
+    {
+        using var db = new TestDb();
+        var tenantId = await SeedTenant(db, "archived-pending-deletion", TenantStatus.Archived);
+        await using (var seed = db.ContextFor(null))
+        {
+            seed.Set<TenantOffboarding>().Add(new TenantOffboarding
+            {
+                TenantId = tenantId,
+                Stage = TenantOffboardingStage.PendingDeletion,
+                RetentionDays = 30,
+                DeletionScheduledOn = DateTime.UtcNow.AddDays(-1),
+                PurgeEligibleOn = DateTime.UtcNow.AddDays(29),
+                DeletionReason = "Customer requested offboarding",
+                DeletionScheduledBy = "owner@example.test"
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = db.ContextFor(null);
+        var result = await Controller(context).Restore(tenantId,
+            new TenantStatusChangeRequest { Reason = "Customer returned" }, CancellationToken.None);
+
+        Assert.IsType<OkObjectResult>(result.Result);
+        await using var verification = db.ContextFor(null);
+        var record = await verification.Set<TenantOffboarding>().SingleAsync();
+        Assert.Equal(TenantOffboardingStage.NotScheduled, record.Stage);
+        Assert.Null(record.DeletionScheduledOn);
+        Assert.Null(record.PurgeEligibleOn);
+        Assert.Contains("\"deletionCancelled\":true",
+            (await verification.Set<PlatformAuditLog>().SingleAsync()).Metadata);
+    }
+
+    [Fact]
+    public async Task Restore_is_refused_after_a_purge_has_claimed_the_tenant()
+    {
+        using var db = new TestDb();
+        var tenantId = await SeedTenant(db, "archived-purge-started", TenantStatus.Archived);
+        await using (var seed = db.ContextFor(null))
+        {
+            seed.Set<TenantOffboarding>().Add(new TenantOffboarding
+            {
+                TenantId = tenantId,
+                Stage = TenantOffboardingStage.PendingDeletion,
+                PurgeStartedOn = DateTime.UtcNow,
+                DeletionScheduledOn = DateTime.UtcNow.AddDays(-31),
+                PurgeEligibleOn = DateTime.UtcNow.AddDays(-1)
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = db.ContextFor(null);
+        var result = await Controller(context).Restore(tenantId,
+            new TenantStatusChangeRequest { Reason = "Customer returned" }, CancellationToken.None);
+
+        var conflict = Assert.IsType<ConflictObjectResult>(result.Result);
+        Assert.Contains("purge is already in progress", conflict.Value!.ToString(), StringComparison.OrdinalIgnoreCase);
+        await using var verification = db.ContextFor(null);
+        Assert.Equal(TenantStatus.Archived,
+            (await verification.Set<Tenant>().IgnoreQueryFilters().SingleAsync(t => t.Id == tenantId)).Status);
+        Assert.Empty(await verification.Set<PlatformAuditLog>().ToListAsync());
     }
 
     [Theory]

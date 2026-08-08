@@ -112,32 +112,39 @@ public class TenantOperationsController(
         var oldest = await live.OrderBy(t => t.CreatedAtUtc)
             .Select(t => (DateTime?)t.CreatedAtUtc).FirstOrDefaultAsync(ct);
 
-        var recent = await context.Set<SupportTicket>().AsNoTracking()
-            .Where(t => t.TenantId == tenantId)
-            .OrderByDescending(t => t.UpdatedAtUtc).ThenByDescending(t => t.Id)
-            .Take(RecentTicketCount)
-            .Select(t => new SupportTicketSummaryDto
-            {
-                Id = t.Id,
-                TenantId = t.TenantId,
-                Subject = t.Subject,
-                Severity = t.Severity.ToString(),
-                Status = t.Status.ToString(),
-                Origin = t.Origin.ToString(),
-                AssignedToPlatformUserId = t.AssignedToPlatformUserId,
-                OpenedByPlatformUserId = t.OpenedByPlatformUserId,
-                RequesterEmail = t.RequesterEmail,
-                CreatedAtUtc = t.CreatedAtUtc,
-                UpdatedAtUtc = t.UpdatedAtUtc,
-                FirstRespondedAtUtc = t.FirstRespondedAtUtc,
-                ResolvedAtUtc = t.ResolvedAtUtc,
-                ClosedAtUtc = t.ClosedAtUtc,
-                NoteCount = t.Notes.Count,
-                LinkCount = t.Links.Count,
-                IsRedacted = t.RedactedAtUtc != null,
-                Version = t.Version
-            })
-            .ToListAsync(ct);
+        // Counts are operational telemetry; subjects and requester identities are customer
+        // content. Keep the former visible to ReadOnlyOps while applying the same TenantAdmin
+        // disclosure gate as the support desk to the latter.
+        var mayReadSupportContent = (await authorization.AuthorizeAsync(
+            User, null, PlatformPolicies.TenantAdmin)).Succeeded;
+        var recent = mayReadSupportContent
+            ? await context.Set<SupportTicket>().AsNoTracking()
+                .Where(t => t.TenantId == tenantId)
+                .OrderByDescending(t => t.UpdatedAtUtc).ThenByDescending(t => t.Id)
+                .Take(RecentTicketCount)
+                .Select(t => new SupportTicketSummaryDto
+                {
+                    Id = t.Id,
+                    TenantId = t.TenantId,
+                    Subject = t.Subject,
+                    Severity = t.Severity.ToString(),
+                    Status = t.Status.ToString(),
+                    Origin = t.Origin.ToString(),
+                    AssignedToPlatformUserId = t.AssignedToPlatformUserId,
+                    OpenedByPlatformUserId = t.OpenedByPlatformUserId,
+                    RequesterEmail = t.RequesterEmail,
+                    CreatedAtUtc = t.CreatedAtUtc,
+                    UpdatedAtUtc = t.UpdatedAtUtc,
+                    FirstRespondedAtUtc = t.FirstRespondedAtUtc,
+                    ResolvedAtUtc = t.ResolvedAtUtc,
+                    ClosedAtUtc = t.ClosedAtUtc,
+                    NoteCount = t.Notes.Count,
+                    LinkCount = t.Links.Count,
+                    IsRedacted = t.RedactedAtUtc != null,
+                    Version = t.Version
+                })
+                .ToListAsync(ct)
+            : [];
 
         var assigneeIds = recent.Where(t => t.AssignedToPlatformUserId != null)
             .Select(t => t.AssignedToPlatformUserId!.Value)

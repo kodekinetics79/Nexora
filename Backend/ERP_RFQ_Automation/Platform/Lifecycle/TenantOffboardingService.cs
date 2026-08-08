@@ -433,6 +433,9 @@ public sealed class TenantOffboardingService(
             var claimed = await context.Set<TenantOffboarding>()
                 .Where(r => r.TenantId == tenant.Id
                             && r.Stage == TenantOffboardingStage.PendingDeletion
+                            && context.Set<Tenant>().IgnoreQueryFilters().Any(t =>
+                                t.Id == r.TenantId
+                                && t.Status == TenantLifecycleGraph.DeletionRequiresStatus)
                             && (r.PurgeStartedOn == null || r.PurgeStartedOn <= now - PurgeLease))
                 .ExecuteUpdateAsync(setters => setters
                     .SetProperty(r => r.PurgeStartedOn, now)

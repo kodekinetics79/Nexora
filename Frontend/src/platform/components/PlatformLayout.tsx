@@ -45,16 +45,16 @@ import SkipLink, { MAIN_CONTENT_ID } from '../../components/layout/SkipLink';
 const PLATFORM_NAV_ID = 'platform-sidebar';
 
 const NAV = [
-  { to: '/platform/overview', label: 'Overview', icon: <OverviewIcon /> },
-  { to: '/platform/tenants', label: 'Tenants', icon: <TenantsIcon /> },
-  { to: '/platform/pipeline', label: 'Pipeline', icon: <PipelineIcon /> },
-  { to: '/platform/plans', label: 'Plans', icon: <PlansIcon /> },
-  { to: '/platform/users', label: 'Users', icon: <UsersIcon /> },
-  { to: '/platform/billing', label: 'Billing', icon: <BillingIcon /> },
-  { to: '/platform/support', label: 'Support', icon: <SupportIcon /> },
-  { to: '/platform/email', label: 'Email', icon: <EmailIcon /> },
-  { to: '/platform/security', label: 'Security', icon: <SecurityIcon /> },
-  { to: '/platform/audit', label: 'Audit Log', icon: <AuditIcon /> },
+  { to: '/platform/overview', label: 'Overview', icon: <OverviewIcon />, requiresTenantAdmin: false },
+  { to: '/platform/tenants', label: 'Tenants', icon: <TenantsIcon />, requiresTenantAdmin: false },
+  { to: '/platform/pipeline', label: 'Pipeline', icon: <PipelineIcon />, requiresTenantAdmin: false },
+  { to: '/platform/plans', label: 'Plans', icon: <PlansIcon />, requiresTenantAdmin: false },
+  { to: '/platform/users', label: 'Users', icon: <UsersIcon />, requiresTenantAdmin: false },
+  { to: '/platform/billing', label: 'Billing', icon: <BillingIcon />, requiresTenantAdmin: false },
+  { to: '/platform/support', label: 'Support', icon: <SupportIcon />, requiresTenantAdmin: true },
+  { to: '/platform/email', label: 'Email', icon: <EmailIcon />, requiresTenantAdmin: false },
+  { to: '/platform/security', label: 'Security', icon: <SecurityIcon />, requiresTenantAdmin: false },
+  { to: '/platform/audit', label: 'Audit Log', icon: <AuditIcon />, requiresTenantAdmin: false },
 ];
 
 const DRAWER_WIDTH = 264;
@@ -114,7 +114,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       </Box>
 
       <List sx={{ px: 1.5, flex: 1 }}>
-        {NAV.map((item) => (
+        {NAV.filter((item) => !item.requiresTenantAdmin || permissions.canAdministerTenants).map((item) => (
           <ListItemButton
             key={item.to}
             component={NavLink}

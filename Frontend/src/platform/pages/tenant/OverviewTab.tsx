@@ -42,6 +42,7 @@ interface Props {
   /** Read once by the page shell so the banners and the Lifecycle tab agree. */
   offboarding: TenantOffboardingStatus | undefined;
   onOpenTab: (tab: string) => void;
+  canViewSupport: boolean;
 }
 
 /**
@@ -51,7 +52,7 @@ interface Props {
  * each is money or data leaving the building unnoticed: a trial that has expired and is
  * still being served, commercial terms nobody set, and a deletion whose clock is running.</p>
  */
-export default function OverviewTab({ tenant, offboarding, onOpenTab }: Props) {
+export default function OverviewTab({ tenant, offboarding, onOpenTab, canViewSupport }: Props) {
   const navigate = useNavigate();
 
   const summaryQuery = useQuery({
@@ -179,13 +180,23 @@ export default function OverviewTab({ tenant, offboarding, onOpenTab }: Props) {
               <PageSection
                 title="Recent tickets"
                 actions={
-                  <Button size="small" onClick={() => onOpenTab('support')} sx={{ fontWeight: 700 }}>
-                    Open the desk
-                  </Button>
+                  canViewSupport ? (
+                    <Button size="small" onClick={() => onOpenTab('support')} sx={{ fontWeight: 700 }}>
+                      Open the desk
+                    </Button>
+                  ) : undefined
                 }
               >
                 {summary.support.recentTickets.length === 0 ? (
-                  <EmptyState title="No tickets" message="This customer has never raised one." minHeight={140} />
+                  summary.support.openTicketCount > 0 && !canViewSupport ? (
+                    <EmptyState
+                      title="Ticket details restricted"
+                      message="Your role can see ticket counts, but customer support content requires tenant administration access."
+                      minHeight={140}
+                    />
+                  ) : (
+                    <EmptyState title="No tickets" message="This customer has never raised one." minHeight={140} />
+                  )
                 ) : (
                   <Box sx={{ overflowX: 'auto' }}>
                     <Table size="small">

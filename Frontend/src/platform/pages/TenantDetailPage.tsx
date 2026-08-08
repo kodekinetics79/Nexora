@@ -31,14 +31,18 @@ export default function TenantDetailPage() {
   const { id = '' } = useParams();
   const navigate = useNavigate();
   const permissions = usePlatformPermissions();
+  const availableTabs = useMemo(
+    () => TABS.filter((entry) => entry.key !== 'support' || permissions.canAdministerTenants),
+    [permissions.canAdministerTenants],
+  );
   // The tab lives in the URL so a link to a customer's lifecycle screen is a link that
   // opens on it — which is what an operator pastes into a ticket.
   const [searchParams, setSearchParams] = useSearchParams();
 
   const tab = useMemo<TabKey>(() => {
     const requested = searchParams.get('tab');
-    return (TABS.find((entry) => entry.key === requested)?.key ?? 'overview') as TabKey;
-  }, [searchParams]);
+    return (availableTabs.find((entry) => entry.key === requested)?.key ?? 'overview') as TabKey;
+  }, [availableTabs, searchParams]);
 
   const openTab = (next: string) => {
     const params = new URLSearchParams(searchParams);
@@ -102,7 +106,7 @@ export default function TenantDetailPage() {
         aria-label="Tenant operations"
         sx={{ mb: 2.5, borderBottom: '1px solid', borderColor: 'divider' }}
       >
-        {TABS.map((entry) => (
+        {availableTabs.map((entry) => (
           <Tab
             key={entry.key}
             value={entry.key}
@@ -115,10 +119,15 @@ export default function TenantDetailPage() {
       </Tabs>
 
       {tab === 'overview' && (
-        <OverviewTab tenant={tenant} offboarding={offboardingQuery.data} onOpenTab={openTab} />
+        <OverviewTab
+          tenant={tenant}
+          offboarding={offboardingQuery.data}
+          onOpenTab={openTab}
+          canViewSupport={permissions.canAdministerTenants}
+        />
       )}
       {tab === 'commercial' && <CommercialTab tenant={tenant} />}
-      {tab === 'support' && <SupportTab tenant={tenant} />}
+      {tab === 'support' && permissions.canAdministerTenants && <SupportTab tenant={tenant} />}
       {tab === 'audit' && <AuditTab tenant={tenant} />}
       {tab === 'lifecycle' && <LifecycleTab tenant={tenant} />}
     </Box>

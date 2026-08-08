@@ -213,11 +213,10 @@ public sealed class PlatformAuditExplorerDisclosureTests
     // ---- surface 5: the per-ticket timeline --------------------------------
 
     [Fact]
-    public async Task A_ticket_timeline_withholds_transition_payloads_from_the_read_only_tier()
+    public async Task A_support_operator_reads_the_ticket_timeline_and_authorized_audit_payloads()
     {
-        // Support mutations are TenantAdmin-gated, so their payloads are too. The NOTES are not
-        // withheld: they are served by GET /tickets/{id} under PlatformScope already, so the rule
-        // "no more open than the writer" is satisfied by leaving them alone.
+        // The endpoint itself is TenantAdmin-gated because notes are customer content. Once that
+        // gate succeeds, the same policy authorizes the support transition payloads.
         using var db = new PlatformSupportTestDb();
         var tenantId = await SeedTenantAsync(db, "disclosure-ticket");
         var ticketId = await RaiseTicketAsync(db, tenantId);
@@ -233,29 +232,29 @@ public sealed class PlatformAuditExplorerDisclosureTests
                 Resolution = "Reissued"
             }, CancellationToken.None);
         }
+        await RaiseTicketAsync(db, tenantId); // remains open so redacted telemetry counts stay provable
 
         await using var context = db.ContextFor(null);
-        var readOnly = Assert.IsType<SupportTicketTimelineDto>(Assert.IsType<OkObjectResult>(
-            (await Tickets(context, Actor(role: PlatformRole.ReadOnlyOps))
-                .Timeline(ticketId, CancellationToken.None)).Result).Value);
-
-        var transition = Assert.Single(readOnly.Entries,
-            e => e.Action == PlatformSupportTicketsController.Actions.Transition);
-        Assert.False(transition.MetadataDisclosed);
-        Assert.Null(transition.Metadata);
-        Assert.Equal(PlatformPolicies.TenantAdmin, transition.MetadataPolicy);
-
-        var note = Assert.Single(readOnly.Entries, e => e.Kind == "note");
-        Assert.Equal("Certificate expired.", note.Body);
-
-        // The support tier that could have written it reads it in full.
         var asSupport = Assert.IsType<SupportTicketTimelineDto>(Assert.IsType<OkObjectResult>(
             (await Tickets(context, Actor(role: PlatformRole.SupportAdmin))
                 .Timeline(ticketId, CancellationToken.None)).Result).Value);
+        var note = Assert.Single(asSupport.Entries, e => e.Kind == "note");
+        Assert.Equal("Certificate expired.", note.Body);
         var disclosed = Assert.Single(asSupport.Entries,
             e => e.Action == PlatformSupportTicketsController.Actions.Transition);
         Assert.True(disclosed.MetadataDisclosed);
         Assert.Contains("Rotated the certificate", disclosed.Metadata!.Value.GetRawText(), StringComparison.Ordinal);
+
+        var readOnlyTimeline = Assert.IsType<List<TenantTimelineEntryDto>>(Assert.IsType<OkObjectResult>(
+            (await Explorer(context, Actor(role: PlatformRole.ReadOnlyOps))
+                .TenantTimeline(tenantId, null, null, 100, CancellationToken.None)).Result).Value);
+        Assert.DoesNotContain(readOnlyTimeline, entry => entry.Kind == "ticket");
+
+        var readOnlySummary = Assert.IsType<TenantOperationsSummaryDto>(Assert.IsType<OkObjectResult>(
+            (await Operations(context, Actor(role: PlatformRole.ReadOnlyOps))
+                .OperationsSummary(tenantId, CancellationToken.None)).Result).Value);
+        Assert.True(readOnlySummary.Support.OpenTicketCount > 0);
+        Assert.Empty(readOnlySummary.Support.RecentTickets);
     }
 
     // ---- the table itself ---------------------------------------------------

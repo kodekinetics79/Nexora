@@ -153,6 +153,21 @@ public sealed class PlatformSupportAuthorizationTests
     }
 
     [Fact]
+    public void Every_ticket_read_requires_the_tenant_admin_policy_because_it_contains_customer_content()
+    {
+        var reads = Actions(typeof(PlatformSupportTicketsController))
+            .Where(action => action.GetCustomAttributes<HttpMethodAttribute>()
+                .SelectMany(attribute => attribute.HttpMethods)
+                .All(verb => verb is "GET" or "HEAD"))
+            .ToList();
+
+        Assert.Equal(3, reads.Count);
+        foreach (var action in reads)
+            Assert.Equal(PlatformPolicies.TenantAdmin,
+                Assert.Single(action.GetCustomAttributes<AuthorizeAttribute>()).Policy);
+    }
+
+    [Fact]
     public void The_audit_explorer_and_the_tenant_summary_expose_no_way_to_write_anything()
     {
         // The audit log is append-only and that must not regress through a feature that reads it.

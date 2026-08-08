@@ -9,6 +9,7 @@ using Microsoft.EntityFrameworkCore;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.MultiTenancy;
+using ERP_RFQ_Automation.Platform.Lifecycle;
 
 namespace ERP_RFQ_Automation.Platform.Controllers;
 
@@ -871,6 +872,39 @@ public class TenantsController : ControllerBase
                     throw new InvalidTenantStatusTransitionException(
                         tenant.Status, requiredCurrent.ToString(), operationVerb);
 
+                var cancelsScheduledDeletion = action is "tenant.restore" or "tenant.resume";
+                var deletionCancelled = false;
+                if (cancelsScheduledDeletion)
+                {
+                    // Restore/resume and purge coordinate through the same offboarding row.
+                    // This conditional UPDATE takes that row's database lock. If restore wins,
+                    // purge's claim no longer sees PendingDeletion. If purge wins, this update
+                    // resumes after the claim commits, sees PurgeStartedOn, and refuses to bring
+                    // a tenant back while its data may already be disappearing.
+                    var now = DateTime.UtcNow;
+                    deletionCancelled = await _context.Set<TenantOffboarding>()
+                        .Where(r => r.TenantId == tenant.Id
+                                    && r.Stage == TenantOffboardingStage.PendingDeletion
+                                    && r.PurgeStartedOn == null)
+                        .ExecuteUpdateAsync(setters => setters
+                            .SetProperty(r => r.Stage, TenantOffboardingStage.NotScheduled)
+                            .SetProperty(r => r.RetentionDays, (int?)null)
+                            .SetProperty(r => r.DeletionScheduledOn, (DateTime?)null)
+                            .SetProperty(r => r.PurgeEligibleOn, (DateTime?)null)
+                            .SetProperty(r => r.DeletionReason, (string?)null)
+                            .SetProperty(r => r.DeletionScheduledBy, (string?)null)
+                            .SetProperty(r => r.ModifiedOn, now), ct) == 1;
+
+                    var purgeInProgress = await _context.Set<TenantOffboarding>().AsNoTracking()
+                        .AnyAsync(r => r.TenantId == tenant.Id
+                                       && r.Stage == TenantOffboardingStage.PendingDeletion
+                                       && r.PurgeStartedOn != null, ct);
+                    if (purgeInProgress)
+                        throw new InvalidTenantStatusTransitionException(
+                            tenant.Status, requiredCurrent.ToString(), operationVerb,
+                            "A purge is already in progress; restore or resume is blocked until it finishes.");
+                }
+
                 var previous = tenant.Status;
                 tenant.Status = target;
                 tenant.StatusReason = reason;
@@ -879,7 +913,7 @@ public class TenantsController : ControllerBase
                 await _context.SaveChangesAsync(ct);
 
                 await _audit.WriteAsync(User, action, nameof(Tenant), tenant.Id.ToString(),
-                    new { from = previous.ToString(), to = target.ToString(), reason },
+                    new { from = previous.ToString(), to = target.ToString(), reason, deletionCancelled },
                     actAsTenantId: tenant.Id, httpContext: HttpContext, ct: ct);
 
                 await tx.CommitAsync(ct);
@@ -915,8 +949,8 @@ public class TenantsController : ControllerBase
     private sealed class InvalidTenantStatusTransitionException : Exception
     {
         public InvalidTenantStatusTransitionException(
-            TenantStatus current, string required, string operation)
-            : base($"Only a {required} tenant can be {operation} (current: {current}).")
+            TenantStatus current, string required, string operation, string? detail = null)
+            : base(detail ?? $"Only a {required} tenant can be {operation} (current: {current}).")
         {
         }
     }

@@ -13,9 +13,10 @@ namespace ERP_RFQ_Automation.Platform.Support;
 /// The operator support desk: tickets raised and worked by platform staff against a tenant.
 ///
 /// <para><b>Authorization, and why it is these two policies.</b> The class gate is
-/// <see cref="PlatformPolicies.PlatformScope"/>, so every operator — including ReadOnlyOps, whose
-/// entire definition is cross-tenant read-only observability — can READ the desk. Every mutation
-/// carries <see cref="PlatformPolicies.TenantAdmin"/> (Owner | SupportAdmin), which is exactly the
+/// <see cref="PlatformPolicies.PlatformScope"/>, while every endpoint additionally carries
+/// <see cref="PlatformPolicies.TenantAdmin"/> (Owner | SupportAdmin). Ticket subjects, requester
+/// identities, bodies, and notes are customer content, not fleet telemetry, so BillingAdmin and
+/// ReadOnlyOps cannot read them. This is exactly the
 /// policy tenant suspension and read-only impersonation already use. Support ticketing is support
 /// work, so SupportAdmin must be able to do all of it without borrowing an Owner; and nothing here
 /// touches a plan, a rate card or a price, so the separation of duties recorded at
@@ -72,6 +73,7 @@ public class PlatformSupportTicketsController(
     /// an explicit <c>status</c> to widen it.
     /// </summary>
     [HttpGet]
+    [Authorize(Policy = PlatformPolicies.TenantAdmin)]
     public async Task<ActionResult<PagedResultDto<SupportTicketSummaryDto>>> List(
         [FromQuery] long? tenantId,
         [FromQuery] string[]? status,
@@ -144,6 +146,7 @@ public class PlatformSupportTicketsController(
 
     // GET /api/platform/support/tickets/{id}
     [HttpGet("{id:long}")]
+    [Authorize(Policy = PlatformPolicies.TenantAdmin)]
     public async Task<ActionResult<SupportTicketDetailDto>> Get(long id, CancellationToken ct)
     {
         var detail = await LoadDetailAsync(id, ct);
@@ -157,6 +160,7 @@ public class PlatformSupportTicketsController(
     /// this view and the audit explorer agree by construction instead of by convention.
     /// </summary>
     [HttpGet("{id:long}/timeline")]
+    [Authorize(Policy = PlatformPolicies.TenantAdmin)]
     public async Task<ActionResult<SupportTicketTimelineDto>> Timeline(long id, CancellationToken ct)
     {
         var ticket = await context.Set<SupportTicket>().AsNoTracking()

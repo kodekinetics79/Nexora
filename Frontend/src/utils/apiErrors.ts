@@ -82,7 +82,14 @@ const unwrapJsonStringLiteral = (value: string): string => {
 const collapseWhitespace = (value: string): string => value.replace(/\s+/g, ' ').trim();
 
 /** C0/C1 control characters (tab/newline/CR excluded — `collapseWhitespace` removes those). */
-const NON_PRINTABLE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/;
+const containsNonPrintable = (value: string): boolean => Array.from(value).some((character) => {
+  const codePoint = character.codePointAt(0) ?? 0;
+  return codePoint <= 0x08
+    || codePoint === 0x0b
+    || codePoint === 0x0c
+    || (codePoint >= 0x0e && codePoint <= 0x1f)
+    || (codePoint >= 0x7f && codePoint <= 0x9f);
+});
 
 /**
  * Status-line reason phrases and framework defaults ("Bad Request", ProblemDetails' stock titles)
@@ -140,7 +147,7 @@ export const looksLikeTechnicalNoise = (value: string): boolean =>
 const isPresentableServerText = (value: string): boolean =>
   value.length > 0 &&
   value.length <= MAX_MESSAGE_LENGTH &&
-  !NON_PRINTABLE.test(value) &&
+  !containsNonPrintable(value) &&
   !isGenericReasonPhrase(value) &&
   !looksLikeTechnicalNoise(value);
 

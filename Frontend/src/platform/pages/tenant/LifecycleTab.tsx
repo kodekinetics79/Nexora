@@ -61,7 +61,7 @@ const REVERSIBLE_COPY: Record<Reversible, { title: string; verb: string; body: s
   resume: {
     title: 'Resume tenant',
     verb: 'Resume',
-    body: 'Returns the tenant to Active and restores access for all of its users.',
+    body: 'Returns the tenant to Active and restores access for all of its users. Any unclaimed scheduled deletion is canceled atomically; resume is refused while a purge is active.',
   },
   archive: {
     title: 'Archive tenant',
@@ -71,7 +71,7 @@ const REVERSIBLE_COPY: Record<Reversible, { title: string; verb: string; body: s
   restore: {
     title: 'Restore tenant',
     verb: 'Restore',
-    body: 'Brings the tenant back from Archived to Suspended. Resume it separately to give access back.',
+    body: 'Brings the tenant back from Archived to Suspended and atomically cancels any unclaimed scheduled deletion. Restore is refused while a purge is active. Resume separately to give access back.',
   },
 };
 

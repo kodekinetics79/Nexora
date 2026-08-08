@@ -268,11 +268,16 @@ public class PlatformAuditExplorerController(
             .Take(bounded)
             .Select(s => new { s.Jti, s.ActorPlatformUserId, s.Reason, s.IssuedAtUtc, s.ExpiresAtUtc, s.RevokedAtUtc })
             .ToListAsync(ct);
-        var tickets = await ticketQuery
-            .OrderByDescending(t => t.CreatedAtUtc)
-            .Take(bounded)
-            .Select(t => new { t.Id, t.Subject, t.Severity, t.Status, t.CreatedAtUtc, t.OpenedByPlatformUserId })
-            .ToListAsync(ct);
+        var mayReadSupportContent = (await authorization.AuthorizeAsync(
+            User, null, PlatformPolicies.TenantAdmin)).Succeeded;
+        var tickets = mayReadSupportContent
+            ? await ticketQuery
+                .OrderByDescending(t => t.CreatedAtUtc)
+                .Take(bounded)
+                .Select(t => new TicketTimelineRow(
+                    t.Id, t.Subject, t.Severity, t.Status, t.CreatedAtUtc, t.OpenedByPlatformUserId))
+                .ToListAsync(ct)
+            : [];
 
         var actorIds = auditRows.Select(a => a.ActorPlatformUserId)
             .Concat(sessions.Select(s => s.ActorPlatformUserId))
@@ -485,4 +490,8 @@ public class PlatformAuditExplorerController(
     internal sealed record AuditRow(
         long Id, DateTime CreatedOn, long ActorPlatformUserId, long? ActAsTenantId, string Action,
         string? TargetType, string? TargetId, string? Ip, string Result, string? Metadata);
+
+    internal sealed record TicketTimelineRow(
+        long Id, string Subject, SupportTicketSeverity Severity, SupportTicketStatus Status,
+        DateTime CreatedAtUtc, long? OpenedByPlatformUserId);
 }
