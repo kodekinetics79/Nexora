@@ -262,17 +262,27 @@ def main():
                         "expected": ["an activation link"], "actual": "none returned",
                         "url": "provision response", "response": str(invited)[:300]})
 
-    # ---- 4. operator control over a live tenant ---------------------------------------------
-    subject = created.get(f"sim-minimal-{run}", {}).get("tenant", {}).get("id")
+    # ---- 4. authoritative activation gate ---------------------------------------------------
+    # Provisioning no longer self-activates. This simulator has no external tenant-MFA or
+    # storage-provider evidence source, so it must prove the block rather than fabricate
+    # attestations merely to reach the lifecycle buttons.
+    subject = created.get(f"sim-billable-{run}", {}).get("tenant", {}).get("id")
     if subject:
         base = f"{api}/api/platform/tenants/{subject}"
-        probe("lifecycle: suspend requires a reason", "POST", f"{base}/suspend", token, {}, expect=400)
-        probe("lifecycle: suspend", "POST", f"{base}/suspend", token,
-              {"reason": "Simulation: non-payment"}, expect=200)
-        probe("lifecycle: resume", "POST", f"{base}/resume", token,
-              {"reason": "Simulation: payment received"}, expect=200)
-        probe("lifecycle: archive from Active is refused", "POST", f"{base}/archive", token,
-              {"reason": "Simulation"}, expect=409)
+        _, decision = probe("activation: authoritative decision", "GET",
+                            f"{base}/activation/decision", token)
+        if isinstance(decision, dict) and decision.get("ready") is False \
+                and decision.get("blockingControls"):
+            PASSES.append("activation: missing external evidence is named")
+        else:
+            DEFECTS.append({"probe": "activation: missing external evidence is named",
+                            "severity": "critical", "expected": ["ready=false with blockers"],
+                            "actual": decision, "url": f"{base}/activation/decision",
+                            "response": decision})
+        probe("activation: unsafe activation is refused", "POST", f"{base}/activation",
+              token, {}, expect=409)
+        probe("lifecycle: provisioning tenant cannot be suspended", "POST", f"{base}/suspend",
+              token, {"reason": "Simulation must not bypass activation"}, expect=409)
         probe("ops: tenant operations summary", "GET", f"{base}/operations-summary", token)
         probe("ops: offboarding status", "GET", f"{base}/offboarding", token)
         probe("ops: purge with no scheduled deletion is refused", "POST",

@@ -68,12 +68,14 @@ public sealed partial class TenantDataRecoveryService(
         int? actualRecoverySeconds = null;
         if (request.EvidenceType == TenantDataRecoveryEvidenceTypes.RestoreDrillCompleted)
         {
-            if (started is null || recoveryPoint is null || request.ConfiguredRpoSeconds is null
+            if (backupSet is null || started is null || recoveryPoint is null || request.ConfiguredRpoSeconds is null
                 || request.ConfiguredRtoSeconds is null)
                 throw new TenantDataAssetValidationException(
-                    "Restore drill evidence requires recovery point, operation start, configured RPO, and configured RTO.");
+                    "Restore drill evidence requires a backup set, recovery point, operation start, configured RPO, and configured RTO.");
             if (completed < started)
                 throw new TenantDataAssetValidationException("Restore completion cannot precede its start.");
+            if (recoveryPoint > started)
+                throw new TenantDataAssetValidationException("Restore recovery point cannot be later than the operation start.");
             actualRecoverySeconds = checked((int)Math.Ceiling((completed - started.Value).TotalSeconds));
         }
         if (request.EvidenceType == TenantDataRecoveryEvidenceTypes.BackupSetObserved
@@ -205,6 +207,14 @@ public sealed partial class TenantDataRecoveryService(
 
         foreach (var asset in assets.Where(x => x.Disposition != TenantDataAssetDispositions.PreserveOperatorEvidence))
         {
+            var residency = evidence.LastOrDefault(x => x.ScopeKey == asset.LogicalKey
+                && x.EvidenceType == TenantDataRecoveryEvidenceTypes.ResidencyVerified
+                && x.OpaqueProviderReference == asset.OpaqueProviderReference);
+            if (residency is null)
+                blockers.Add($"Data boundary '{asset.LogicalKey}' has no residency-verification evidence.");
+            else
+                selected.Add(residency.Id);
+
             var requiredType = asset.AssetType is TenantDataAssetTypes.Subprocessor or TenantDataAssetTypes.AiOcrProvider
                 ? TenantDataRecoveryEvidenceTypes.SubprocessorDeletionConfirmed
                 : TenantDataRecoveryEvidenceTypes.BackupDestructionConfirmed;
@@ -218,8 +228,54 @@ public sealed partial class TenantDataRecoveryService(
                 selected.Add(proof.Id);
         }
 
+        var primary = assets.SingleOrDefault(x =>
+            x.AssetType == TenantDataAssetTypes.PostgreSqlTenantScope
+            && x.LogicalKey == TenantDataAssetRegistryService.PostgreSqlLogicalKey);
+        if (primary is not null && offboarding?.PurgedOn is DateTime purgedUtc)
+        {
+            var restore = evidence.LastOrDefault(x => x.ScopeKey == primary.LogicalKey
+                && x.EvidenceType == TenantDataRecoveryEvidenceTypes.RestoreDrillCompleted
+                && x.CompletedUtc >= purgedUtc && x.OperationStartedUtc is not null
+                && x.RecoveryPointUtc is not null && x.OpaqueBackupSetReference is not null
+                && x.ConfiguredRpoSeconds is > 0 && x.ConfiguredRtoSeconds is > 0
+                && x.ActualRecoverySeconds is not null
+                && x.ActualRecoverySeconds <= x.ConfiguredRtoSeconds
+                && x.RecoveryPointUtc <= x.OperationStartedUtc
+                && (x.OperationStartedUtc.Value - x.RecoveryPointUtc.Value).TotalSeconds <= x.ConfiguredRpoSeconds
+                && x.CustomerRowsObserved == 0);
+            if (restore is null)
+            {
+                blockers.Add("The primary PostgreSQL boundary has no post-purge restore drill within configured RPO/RTO with zero customer rows.");
+            }
+            else
+            {
+                var backup = evidence.LastOrDefault(x => x.ScopeKey == primary.LogicalKey
+                    && x.EvidenceType == TenantDataRecoveryEvidenceTypes.BackupSetObserved
+                    && x.OpaqueBackupSetReference == restore.OpaqueBackupSetReference
+                    && x.RecoveryPointUtc == restore.RecoveryPointUtc
+                    && x.CompletedUtc <= restore.OperationStartedUtc);
+                var tombstone = evidence.LastOrDefault(x => x.ScopeKey == primary.LogicalKey
+                    && x.EvidenceType == TenantDataRecoveryEvidenceTypes.TombstoneReapplied
+                    && x.OpaqueBackupSetReference == restore.OpaqueBackupSetReference
+                    && x.CorrelationId == restore.CorrelationId
+                    && x.CustomerRowsObserved == 0
+                    && x.CompletedUtc >= restore.OperationStartedUtc
+                    && x.CompletedUtc <= restore.CompletedUtc);
+                if (backup is null)
+                    blockers.Add("The post-purge restore drill is not linked to a previously observed backup set and recovery point.");
+                else
+                    selected.Add(backup.Id);
+                if (tombstone is null)
+                    blockers.Add("The post-purge restore drill has no in-window tombstone reapplication with zero customer rows.");
+                else
+                    selected.Add(tombstone.Id);
+                if (backup is not null && tombstone is not null)
+                    selected.Add(restore.Id);
+            }
+        }
+
         return new TenantDeletionCertificationDecisionDto(
-            tenant.Id, blockers.Count == 0, blockers, selected, evaluated, DecisionBoundary);
+            tenant.Id, blockers.Count == 0, blockers, selected.Distinct().Order().ToArray(), evaluated, DecisionBoundary);
     }
 
     public async Task<TenantDeletionCertificateDto> CertifyAsync(

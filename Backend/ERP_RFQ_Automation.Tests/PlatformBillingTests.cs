@@ -4,6 +4,7 @@ using System.Reflection;
 using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.Billing;
 using ERP_RFQ_Automation.Billing.Controllers;
+using ERP_RFQ_Automation.Billing.Metering;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Models;
@@ -97,6 +98,48 @@ public class PlatformBillingTests
         Assert.Equal(75_000m, Meter(usage, BillingMeterKeys.AiTokensExternal).Quantity);
         Assert.Equal(2m, Meter(usage, BillingMeterKeys.Seats).Quantity);
         Assert.Contains("ExtractionJobs", Meter(usage, BillingMeterKeys.Documents).SourceNote);
+    }
+
+    [Fact]
+    public async Task Canonical_usage_events_override_legacy_projection_and_adjust_into_statement_lineage()
+    {
+        using var db = new BillingTestDb();
+        var (tenantId, buId) = await SeedTenantAsync(db);
+        var originalId = Guid.NewGuid();
+        await using (var seed = db.Context(null))
+        {
+            seed.Add(NewJob(buId, InJuly)); // legacy projection intentionally disagrees
+            seed.Set<UsageEvent>().AddRange(
+                new UsageEvent
+                {
+                    UsageEventId = originalId, TenantId = tenantId, Kind = UsageEventKind.Consumption,
+                    EventType = "documents", Quantity = 3, Unit = "document", OccurredAtUtc = InJuly,
+                    ReceivedAtUtc = InJuly, SourceRecordType = "ExtractionJob", SourceRecordId = "canonical-1",
+                    SourceSystem = "test", CorrelationId = "canonical-1", IdempotencyKey = "canonical-1",
+                    CostAmount = 0, Currency = "USD", EvidenceSha256 = new string('a', 64),
+                    RatingStatus = UsageRatingStatus.Pending
+                },
+                new UsageEvent
+                {
+                    UsageEventId = Guid.NewGuid(), TenantId = tenantId, Kind = UsageEventKind.Adjustment,
+                    EventType = "documents", Quantity = -1, Unit = "document", OccurredAtUtc = InJuly.AddDays(1),
+                    ReceivedAtUtc = InJuly.AddDays(1), SourceRecordType = "UsageCorrection", SourceRecordId = "canonical-1-correction",
+                    SourceSystem = "test", CorrelationId = "canonical-1", IdempotencyKey = "canonical-1-correction",
+                    CostAmount = 0, Currency = "USD", EvidenceSha256 = new string('b', 64),
+                    RatingStatus = UsageRatingStatus.Pending, AdjustsUsageEventId = originalId
+                });
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = db.Context(null);
+        var usage = await Service(context).GetUsageAsync(tenantId, July);
+        var documents = Meter(usage, BillingMeterKeys.Documents);
+
+        Assert.Equal(2m, documents.Quantity);
+        Assert.Contains("UsageEvents canonical ledger", documents.SourceNote);
+        Assert.Contains("2 immutable event(s)", documents.SourceNote);
+        Assert.Matches("manifest sha256:[0-9a-f]{64}", documents.SourceNote);
+        Assert.DoesNotContain("ExtractionJobs", documents.SourceNote);
     }
 
     // -------------------------------------------------- allowance/overage math

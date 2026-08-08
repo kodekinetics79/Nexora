@@ -230,7 +230,7 @@ test.describe.serial('visible Google Chrome Platform Admin certification', () =>
     assertNoFailures();
   });
 
-  test('proves reversible offboarding and blocks purge before retention elapses', async ({ page }) => {
+  test('blocks lifecycle before authoritative activation and exports tenant data', async ({ page }) => {
     const assertNoFailures = observeBrowserAndApiFailures(page);
     await signInAsPlatformAdmin(page);
     await page.getByRole('link', { name: 'Tenants', exact: true }).click();
@@ -238,40 +238,14 @@ test.describe.serial('visible Google Chrome Platform Admin certification', () =>
     await page.getByRole('row').filter({ hasText: journeyTenant.name }).getByText(journeyTenant.name, { exact: true }).click();
     await page.getByRole('tab', { name: 'Lifecycle' }).click();
 
-    await page.getByRole('button', { name: 'Suspend tenant' }).click();
-    await confirmReason(page, 'Suspend tenant', 'Visible certification suspension', 'Suspend');
-    await expect(page.getByRole('button', { name: 'Resume tenant' })).toBeVisible();
-
-    await page.getByRole('button', { name: 'Resume tenant' }).click();
-    await confirmReason(page, 'Resume tenant', 'Visible certification recovery', 'Resume');
-    await expect(page.getByRole('button', { name: 'Suspend tenant' })).toBeVisible();
-
-    await page.getByRole('button', { name: 'Suspend tenant' }).click();
-    await confirmReason(page, 'Suspend tenant', 'Visible certification offboarding', 'Suspend');
-    await page.getByRole('button', { name: 'Archive tenant' }).click();
-    await confirmReason(page, 'Archive tenant', 'Visible certification archive decision', 'Archive');
-    await expect(page.getByRole('button', { name: 'Schedule deletion' })).toBeEnabled();
-
-    await page.getByRole('button', { name: 'Schedule deletion' }).click();
-    const schedule = page.getByRole('dialog', { name: 'Schedule deletion' });
-    await schedule.getByLabel('Retention window (days)').fill('7');
-    await fillVisible(schedule.getByLabel('Why is this customer being deleted?'), 'Visible certification retention test');
-    await schedule.getByRole('button', { name: 'Start the retention clock' }).click();
-    await expect(page.getByText(/Deletion scheduled — purge allowed from/)).toBeVisible();
+    await expect(page.getByText('Provisioning', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Suspend tenant' })).toHaveCount(0);
+    await expect(page.getByText('NotScheduled', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Schedule deletion' })).toBeDisabled();
     await expect(page.getByRole('button', { name: 'Purge tenant records' })).toBeDisabled();
 
-    // Restore is the customer-safe recovery path. It must cancel the pending deletion
-    // atomically before access can be resumed.
-    await page.getByRole('button', { name: 'Restore to suspended' }).click();
-    await confirmReason(page, 'Restore tenant', 'Customer cancellation received', 'Restore');
-    await expect(page.getByText('NotScheduled', { exact: true })).toBeVisible();
-    await page.getByRole('button', { name: 'Resume tenant' }).click();
-    await confirmReason(page, 'Resume tenant', 'Customer access restored safely', 'Resume');
-    await expect(page.getByRole('button', { name: 'Suspend tenant' })).toBeVisible();
-
-    // Export is deliberately last so a contract failure does not hide the retention and
-    // recovery evidence above. A 4xx here is still a failed certification, never an
-    // expected denial for an Owner.
+    // A governed export remains available while activation is blocked so the operator can
+    // return the submitted tenant data without first enabling customer access.
     const exportResponse = page.waitForResponse((response) =>
       response.url().includes('/offboarding/export') && response.request().method() === 'POST');
     const download = page.waitForEvent('download');
@@ -336,14 +310,14 @@ test.describe.serial('visible Google Chrome Platform Admin certification', () =>
     await expect(page.getByText('Decision boundary')).toBeVisible();
     await expect(page.getByText(/does not activate the tenant/i)).toBeVisible();
     await expect(page.getByText('Recovery and non-resurrection evidence')).toBeVisible();
-    await expect(page.getByText('Deletion certification')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Deletion certification', exact: true })).toBeVisible();
     await expect(page.getByText('Certification boundary')).toBeVisible();
     await expect(page.getByText(/unknown.*blocker|registered boundaries.*known to Nexora/i)).toBeVisible();
     await expect(page.getByText(/console never claims it performed a backup or restore/i)).toBeVisible();
     assertNoFailures();
   });
 
-  test('places a legal hold, proves destructive denial, and releases it', async ({ page }) => {
+  test('places and releases a legal hold while destructive actions remain unavailable', async ({ page }) => {
     const assertNoFailures = observeBrowserAndApiFailures(page);
     await signInAsPlatformAdmin(page);
     await page.getByRole('link', { name: 'Tenants', exact: true }).click();
@@ -368,8 +342,6 @@ test.describe.serial('visible Google Chrome Platform Admin certification', () =>
 
     const holdAlert = page.getByRole('alert').filter({ hasText: 'Legal hold active' });
     await expect(holdAlert).toContainText(`CASE-${journeyId}`);
-    await page.getByRole('button', { name: 'Suspend tenant' }).click();
-    await confirmReason(page, 'Suspend tenant', 'Suspend for governed erasure review', 'Suspend');
     await expect(page.getByRole('button', { name: 'Erase personal data' })).toBeDisabled();
 
     // The UI fails closed, while this browser-context call proves the server independently
@@ -386,8 +358,8 @@ test.describe.serial('visible Google Chrome Platform Admin certification', () =>
         },
       },
     );
-    expect(denial.status(), 'Active legal hold must produce an explicit conflict.').toBe(409);
-    expect(await denial.text()).toMatch(/blocked by an active legal hold/i);
+    expect(denial.status(), 'The server must independently refuse erasure.').toBe(409);
+    expect(await denial.text()).toMatch(/cannot be erased while the tenant is Provisioning/i);
 
     await holdAlert.getByRole('button', { name: 'Release hold' }).click();
     const releaseResponse = page.waitForResponse((response) =>
@@ -413,9 +385,7 @@ test.describe.serial('visible Google Chrome Platform Admin certification', () =>
       expect.objectContaining({ evidenceReference: `CASE-${journeyId}`, isActive: false }),
     ]));
 
-    await page.getByRole('button', { name: 'Resume tenant' }).click();
-    await confirmReason(page, 'Resume tenant', 'Legal-hold certification completed safely', 'Resume');
-    await expect(page.getByRole('button', { name: 'Suspend tenant' })).toBeVisible();
+    await expect(page.getByText('Provisioning', { exact: true })).toBeVisible();
     assertNoFailures();
   });
 

@@ -1,5 +1,8 @@
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using ERP_RFQ_Automation.AI;
+using ERP_RFQ_Automation.Billing.Metering;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Models;
@@ -538,11 +541,45 @@ public class BillingStatementService : IBillingStatementService
                 : StorageCoverageNote
         });
 
+        // Wave 6 canonical bridge: where immutable UsageEvents exist for a contractual
+        // meter they are authoritative over the legacy operational projection above.
+        // Adjustment rows participate in the same SUM, so corrections flow through to a
+        // recomputed Draft without mutating source usage. A deterministic manifest hash of
+        // the contributing event ids is frozen into BillingStatementLine.SourceNote and then
+        // into the invoice source snapshot, providing event -> statement -> invoice lineage.
+        var canonicalEvents = await _context.Set<UsageEvent>().IgnoreQueryFilters().AsNoTracking()
+            .Where(x => x.TenantId == tenantId
+                        && x.OccurredAtUtc >= meterFrom && x.OccurredAtUtc < period.EndUtc
+                        && x.RatingStatus != UsageRatingStatus.BlockedUncertifiedMeter)
+            .Select(x => new { x.UsageEventId, x.EventType, x.Unit, x.Quantity })
+            .ToListAsync(ct);
+        foreach (var group in canonicalEvents
+                     .Where(x => x.EventType != "base.subscription")
+                     .GroupBy(x => new { MeterKey = CanonicalMeterKey(x.EventType), x.Unit }))
+        {
+            var ids = group.Select(x => x.UsageEventId).Order().Select(x => x.ToString("N"));
+            var manifest = Convert.ToHexString(SHA256.HashData(
+                Encoding.UTF8.GetBytes(string.Join("\n", ids)))).ToLowerInvariant();
+            var reading = new MeterReading(group.Key.MeterKey, group.Sum(x => x.Quantity), group.Key.Unit,
+                $"UsageEvents canonical ledger {period.Key}; {group.Count()} immutable event(s); manifest sha256:{manifest} (tenant {tenantId})");
+            var existingIndex = meters.FindIndex(x => x.MeterKey == group.Key.MeterKey);
+            if (existingIndex >= 0) meters[existingIndex] = reading;
+            else meters.Add(reading);
+        }
+
         return new TenantUsageReadout(tenantId, businessUnitId, period.Key, period.StartUtc, period.EndUtc, meters)
         {
             MeteredFromUtc = meterFrom
         };
     }
+
+    private static string CanonicalMeterKey(string eventType) => eventType switch
+    {
+        "ai.tokens" => BillingMeterKeys.AiTokensExternal,
+        "storage.gb-hours" => BillingMeterKeys.StorageGb,
+        "users" => BillingMeterKeys.Seats,
+        _ => eventType
+    };
 
     public async Task<BillingStatement> ComputeStatementAsync(
         long tenantId, BillingPeriod period, long? rateCardId = null, CancellationToken ct = default,

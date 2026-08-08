@@ -27,7 +27,8 @@ public sealed class TenantDataRecoveryTests
         Assert.False(blocked.Ready);
         Assert.Contains(blocked.Blockers, x => x.Contains("no post-purge", StringComparison.Ordinal));
 
-        TenantDataRecoveryEvidenceDto? evidence = null;
+        TenantDataRecoveryEvidenceDto? destructionEvidence = null;
+        TenantDataAsset? primary = null;
         foreach (var asset in await context.Set<TenantDataAsset>().OrderBy(x => x.Id).ToListAsync())
         {
             var evidenceType = asset.AssetType is TenantDataAssetTypes.Subprocessor or TenantDataAssetTypes.AiOcrProvider
@@ -42,18 +43,71 @@ public sealed class TenantDataRecoveryTests
                 IdempotencyKey = $"destroy:{asset.LogicalKey}",
                 EvidenceReference = $"evidence:{asset.LogicalKey}"
             }, Actor(), null, default);
-            if (asset.AssetType == TenantDataAssetTypes.PostgreSqlTenantScope) evidence = recorded;
+            if (asset.AssetType == TenantDataAssetTypes.PostgreSqlTenantScope)
+            {
+                destructionEvidence = recorded;
+                primary = asset;
+            }
         }
+        var destructionOnly = await service.DecisionAsync(41, default);
+        Assert.False(destructionOnly.Ready);
+        Assert.Contains(destructionOnly.Blockers, x => x.Contains("restore drill", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(destructionOnly.Blockers, x => x.Contains("residency", StringComparison.OrdinalIgnoreCase));
+
+        foreach (var asset in await context.Set<TenantDataAsset>().OrderBy(x => x.Id).ToListAsync())
+            await service.RecordAsync(41, Evidence(TenantDataRecoveryEvidenceTypes.ResidencyVerified) with
+            {
+                TenantDataAssetId = asset.Id,
+                ScopeKey = asset.LogicalKey,
+                OpaqueProviderReference = asset.OpaqueProviderReference,
+                OpaqueBackupSetReference = null,
+                CorrelationId = $"residency:{asset.LogicalKey}",
+                IdempotencyKey = $"residency:{asset.LogicalKey}",
+                EvidenceReference = $"residency-evidence:{asset.LogicalKey}"
+            }, Actor(), null, default);
+
+        var recoveryPoint = Now.AddHours(-2);
+        const string restoreCorrelation = "restore:postgresql:post-purge";
+        await service.RecordAsync(41, Evidence(TenantDataRecoveryEvidenceTypes.BackupSetObserved) with
+        {
+            TenantDataAssetId = primary!.Id,
+            RecoveryPointUtc = recoveryPoint,
+            CompletedUtc = Now.AddMinutes(-40),
+            RetainUntilUtc = Now.AddDays(7),
+            CorrelationId = restoreCorrelation,
+            IdempotencyKey = "backup:postgresql:post-purge"
+        }, Actor(), null, default);
+        await service.RecordAsync(41, Evidence(TenantDataRecoveryEvidenceTypes.TombstoneReapplied) with
+        {
+            TenantDataAssetId = primary.Id,
+            CompletedUtc = Now.AddMinutes(-15),
+            CustomerRowsObserved = 0,
+            CorrelationId = restoreCorrelation,
+            IdempotencyKey = "tombstone:postgresql:post-purge"
+        }, Actor(), null, default);
+        await service.RecordAsync(41, Evidence(TenantDataRecoveryEvidenceTypes.RestoreDrillCompleted) with
+        {
+            TenantDataAssetId = primary.Id,
+            RecoveryPointUtc = recoveryPoint,
+            OperationStartedUtc = Now.AddMinutes(-20),
+            CompletedUtc = Now.AddMinutes(-10),
+            ConfiguredRpoSeconds = 10_800,
+            ConfiguredRtoSeconds = 900,
+            CustomerRowsObserved = 0,
+            CorrelationId = restoreCorrelation,
+            IdempotencyKey = "restore:postgresql:post-purge"
+        }, Actor(), null, default);
         var ready = await service.DecisionAsync(41, default);
         var certificate = await service.CertifyAsync(41,
             new CreateTenantDeletionCertificateRequest("All registered deletion evidence was independently reviewed."),
             Actor(), null, default);
 
         Assert.True(ready.Ready);
-        Assert.Contains(evidence!.Id, ready.EvidenceIds);
+        Assert.Contains(destructionEvidence!.Id, ready.EvidenceIds);
         Assert.Equal(64, certificate.EvidenceManifestSha256.Length);
-        Assert.Contains(evidence.Id, certificate.EvidenceIds);
-        Assert.Equal(TenantDataAssetTypes.All.Count + 1, await context.Set<PlatformAuditLog>().CountAsync());
+        Assert.Contains(destructionEvidence.Id, certificate.EvidenceIds);
+        Assert.Equal(TenantDataAssetTypes.All.Count * 2 + 4,
+            await context.Set<PlatformAuditLog>().CountAsync());
     }
 
     [Fact]
@@ -107,6 +161,29 @@ public sealed class TenantDataRecoveryTests
 
         Assert.Equal(480, completed.ActualRecoverySeconds);
         Assert.Equal(Now.AddHours(-2), completed.RecoveryPointUtc);
+    }
+
+    [Fact]
+    public async Task Restore_drill_rejects_a_recovery_point_after_the_operation_started()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(null);
+        await SeedPurgedAsync(context);
+
+        var error = await Assert.ThrowsAsync<TenantDataAssetValidationException>(() => Service(context).RecordAsync(
+            41, Evidence(TenantDataRecoveryEvidenceTypes.RestoreDrillCompleted) with
+            {
+                RecoveryPointUtc = Now.AddMinutes(-5),
+                OperationStartedUtc = Now.AddMinutes(-10),
+                CompletedUtc = Now.AddMinutes(-2),
+                ConfiguredRpoSeconds = 600,
+                ConfiguredRtoSeconds = 900,
+                CustomerRowsObserved = 0,
+                IdempotencyKey = "restore:41:future-recovery-point"
+            }, Actor(), null, default));
+
+        Assert.Contains("recovery point", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(await context.Set<TenantDataRecoveryEvidence>().ToListAsync());
     }
 
     [Fact]
