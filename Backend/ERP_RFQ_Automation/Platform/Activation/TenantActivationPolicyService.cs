@@ -27,6 +27,7 @@ public sealed class TenantActivationPolicyService(
     IPlatformAuditService audit,
     ITenantAccessService tenantAccess) : ITenantActivationPolicyService
 {
+    private const long ActivationAdvisorySalt = unchecked((long)0x4E45584F52414143UL); // NEXORAAC
     public async Task<TenantActivationDecision?> EvaluateAsync(long tenantId, CancellationToken ct = default)
     {
         var now = DateTime.UtcNow;
@@ -52,15 +53,18 @@ public sealed class TenantActivationPolicyService(
              && Has(tenant.BillingAddress) && tenant.PaymentTermsDays is > 0,
             "Billing recipient, billing address and positive payment terms must be recorded.", $"tenant:{tenant.Id}:billing");
 
-        Add("billing.currency-tax", Has(tenant.BaseCurrencyCode)
+        Add("billing.currency-tax", string.Equals(tenant.BaseCurrencyCode, "USD", StringComparison.OrdinalIgnoreCase)
              && (Has(tenant.TaxNumber) || tenant.BillingMode is TenantBillingMode.Internal or TenantBillingMode.Partner),
-            "ISO currency and tax identity or an explicit non-billable treatment must be recorded.", $"tenant:{tenant.Id}:tax");
+            "The supported USD billing currency and tax identity or an explicit non-billable treatment must be recorded.",
+            $"tenant:{tenant.Id}:tax");
 
         RateCard? card = null;
         if (tenant.RateCardId is long cardId)
             card = await db.Set<RateCard>().AsNoTracking().Include(x => x.Lines)
                 .SingleOrDefaultAsync(x => x.Id == cardId, ct);
-        Add("commercial.rate-card", card is { IsActive: true } && card.EffectiveFromUtc <= now
+        Add("commercial.rate-card", card is { IsActive: true }
+             && string.Equals(card.Currency, tenant.BaseCurrencyCode, StringComparison.OrdinalIgnoreCase)
+             && card.EffectiveFromUtc <= now
              && (card.EffectiveToUtc is null || card.EffectiveToUtc > now) && card.Lines.Count > 0,
             "A pinned, effective rate card with at least one priced meter is required.",
             card is null ? null : $"rate-card:{card.Id}:v{card.Version}");
@@ -136,6 +140,9 @@ public sealed class TenantActivationPolicyService(
         {
             db.ChangeTracker.Clear();
             await using var tx = await db.Database.BeginTransactionAsync(ct);
+            if (db.Database.IsNpgsql())
+                await db.Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock({tenantId ^ ActivationAdvisorySalt});", ct);
             var tenant = await db.Set<Tenant>().IgnoreQueryFilters().SingleOrDefaultAsync(x => x.Id == tenantId, ct)
                 ?? throw new KeyNotFoundException($"Tenant {tenantId} was not found.");
             if (tenant.Status != TenantStatus.Provisioning)
@@ -167,7 +174,7 @@ public sealed class TenantActivationPolicyService(
         if (disposition is not ("approved" or "deferred")
             || controlCode == "security.privileged-mfa-policy" && disposition != "approved")
             throw new ArgumentException("Disposition is not permitted for this activation control.");
-        if (!Uri.TryCreate(request.EvidenceReference, UriKind.Absolute, out _)
+        if (!SafeEvidenceReference(request.EvidenceReference)
             || request.EvidenceSha256.Length != 64 || request.EvidenceSha256.Any(c => !Uri.IsHexDigit(c))
             || request.EffectiveFromUtc.Kind != DateTimeKind.Utc
             || request.EffectiveToUtc is { Kind: not DateTimeKind.Utc }
@@ -207,6 +214,16 @@ public sealed class TenantActivationPolicyService(
         DateTime EffectiveFromUtc, DateTime? EffectiveToUtc);
 
     private static bool Has(string? value) => !string.IsNullOrWhiteSpace(value);
+    private static bool SafeEvidenceReference(string? value)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)
+            || uri.Scheme is not ("https" or "urn")
+            || !string.IsNullOrEmpty(uri.UserInfo)
+            || !string.IsNullOrEmpty(uri.Query)
+            || !string.IsNullOrEmpty(uri.Fragment))
+            return false;
+        return uri.Scheme == "urn" || !string.IsNullOrWhiteSpace(uri.Host);
+    }
     private static string CommercialState(Tenant t) => t.Status == TenantStatus.Archived ? "TERMINATED" :
         t.BillingMode == TenantBillingMode.Trial ? "TRIAL" : t.Status == TenantStatus.Active ? "ACTIVE" : "PROSPECT";
     private static string AccessState(Tenant t) => t.Status switch

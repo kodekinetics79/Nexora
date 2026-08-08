@@ -76,6 +76,33 @@ public sealed class TenantActivationPolicyTests
         Assert.Equal(TenantStatus.Provisioning, db.Set<Tenant>().Single(x => x.Id == 995).Status);
     }
 
+    [Fact]
+    public async Task Control_evidence_rejects_secret_bearing_references()
+    {
+        using var database = new TestDb();
+        await using var db = database.ContextFor(null);
+        db.Set<Tenant>().Add(new Tenant
+        {
+            Id = 996, Name = "Evidence", Slug = "evidence", Status = TenantStatus.Provisioning,
+            CreatedOn = DateTime.UtcNow
+        });
+        await db.SaveChangesAsync();
+        var service = new TenantActivationPolicyService(db, new NoopAudit(),
+            new TenantAccessService(db, new MemoryCache(new MemoryCacheOptions()),
+                NullLogger<TenantAccessService>.Instance));
+        var request = new RecordActivationControlEvidenceRequest(
+            "approved", "https://operator:secret@example.test/evidence?token=secret", new string('a', 64),
+            DateTime.UtcNow.AddMinutes(-1), DateTime.UtcNow.AddDays(1), "Reviewed security controls.");
+
+        await Assert.ThrowsAsync<ArgumentException>(() => service.RecordControlEvidenceAsync(
+            996, "security.privileged-mfa-policy", request, new ClaimsPrincipal(), new DefaultHttpContext()));
+        var accepted = await service.RecordControlEvidenceAsync(996, "security.privileged-mfa-policy",
+            request with { EvidenceReference = "urn:nexora:evidence:security:996:v1" },
+            new ClaimsPrincipal(), new DefaultHttpContext());
+
+        Assert.Equal("urn:nexora:evidence:security:996:v1", accepted.EvidenceReference);
+    }
+
     private sealed class NoopAudit : IPlatformAuditService
     {
         public Task WriteAsync(ClaimsPrincipal actor, string action, string? targetType = null,
