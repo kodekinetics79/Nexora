@@ -53,8 +53,13 @@ import type {
   SubscriptionInvoice,
   SubscriptionPayment,
   TenantActivationDataDecision,
+  TenantActivationDecision,
+  ActivationControlEvidenceReceipt,
   Tenant,
   TenantDataAsset,
+  TenantDataRecoveryEvidence,
+  TenantDeletionCertificationDecision,
+  TenantDeletionCertificate,
   TenantBillingProfile,
   TenantCostReport,
   TenantErasureResult,
@@ -73,6 +78,8 @@ import type {
   UpdateTenantAiPolicyInput,
   RegisterTenantDataAssetInput,
   VerifyTenantDataAssetInput,
+  RecordActivationControlEvidenceInput,
+  RecordTenantDataRecoveryEvidenceInput,
   UpsertPlanInput,
 } from '../types';
 
@@ -140,6 +147,20 @@ export interface PlatformApi {
     assetId: string,
     input: VerifyTenantDataAssetInput,
   ): Promise<TenantDataAsset>;
+  getTenantActivationDecision(tenantId: string): Promise<TenantActivationDecision>;
+  activateTenant(tenantId: string): Promise<TenantActivationDecision>;
+  recordTenantActivationEvidence(
+    tenantId: string,
+    controlCode: string,
+    input: RecordActivationControlEvidenceInput,
+  ): Promise<ActivationControlEvidenceReceipt>;
+  listTenantRecoveryEvidence(tenantId: string): Promise<TenantDataRecoveryEvidence[]>;
+  recordTenantRecoveryEvidence(
+    tenantId: string,
+    input: RecordTenantDataRecoveryEvidenceInput,
+  ): Promise<TenantDataRecoveryEvidence>;
+  getTenantDeletionCertificationDecision(tenantId: string): Promise<TenantDeletionCertificationDecision>;
+  certifyTenantDeletion(tenantId: string, reason: string): Promise<TenantDeletionCertificate>;
   provisionTenant(input: ProvisionTenantInput): Promise<ProvisionTenantResult>;
   suspendTenant(id: string, reason: string): Promise<Tenant>;
   resumeTenant(id: string, reason: string): Promise<Tenant>;
@@ -582,6 +603,38 @@ const normalizeTenantActivationDataDecision = (wire: WireRecord): TenantActivati
     : null,
 });
 
+const normalizeTenantActivationDecision = (wire: WireRecord): TenantActivationDecision => ({
+  ...(wire as unknown as TenantActivationDecision),
+  tenantId: asId(wire.tenantId as string | number),
+  controls: ((wire.controls as WireRecord[]) ?? []).map((control) => ({
+    ...(control as unknown as TenantActivationDecision['controls'][number]),
+    evidenceReferences: (control.evidenceReferences as string[]) ?? [],
+  })),
+  blockingControls: (wire.blockingControls as string[]) ?? [],
+  warnings: (wire.warnings as string[]) ?? [],
+});
+
+const normalizeRecoveryEvidence = (wire: WireRecord): TenantDataRecoveryEvidence => ({
+  ...(wire as unknown as TenantDataRecoveryEvidence),
+  id: asId(wire.id as string | number),
+  tenantId: asId(wire.tenantId as string | number),
+  tenantDataAssetId: asIdOrNull(wire.tenantDataAssetId as string | number | null),
+});
+
+const normalizeDeletionDecision = (wire: WireRecord): TenantDeletionCertificationDecision => ({
+  ...(wire as unknown as TenantDeletionCertificationDecision),
+  tenantId: asId(wire.tenantId as string | number),
+  blockers: (wire.blockers as string[]) ?? [],
+  evidenceIds: ((wire.evidenceIds as Array<string | number>) ?? []).map(asId),
+});
+
+const normalizeDeletionCertificate = (wire: WireRecord): TenantDeletionCertificate => ({
+  ...(wire as unknown as TenantDeletionCertificate),
+  id: asId(wire.id as string | number),
+  tenantId: asId(wire.tenantId as string | number),
+  evidenceIds: ((wire.evidenceIds as Array<string | number>) ?? []).map(asId),
+});
+
 const normalizeExecution = (wire: WireRecord): ProvisioningExecution => ({
   id: asId(wire.id as string | number),
   state: wire.state as ProvisioningExecution['state'],
@@ -795,6 +848,38 @@ const httpPlatformApi: PlatformApi = {
       (await platformHttp.post<WireRecord>(
         `/api/platform/tenants/${tenantId}/data-assets/${assetId}/verify`,
         { ...input, observedBusinessUnitId: Number(input.observedBusinessUnitId) },
+      )).data,
+    ),
+  getTenantActivationDecision: async (tenantId) =>
+    normalizeTenantActivationDecision(
+      (await platformHttp.get<WireRecord>(`/api/platform/tenants/${tenantId}/activation/decision`)).data,
+    ),
+  activateTenant: async (tenantId) =>
+    normalizeTenantActivationDecision(
+      (await platformHttp.post<WireRecord>(`/api/platform/tenants/${tenantId}/activation`)).data,
+    ),
+  recordTenantActivationEvidence: async (tenantId, controlCode, input) =>
+    (await platformHttp.post<ActivationControlEvidenceReceipt>(
+      `/api/platform/tenants/${tenantId}/activation/controls/${encodeURIComponent(controlCode)}/evidence`,
+      input,
+    )).data,
+  listTenantRecoveryEvidence: async (tenantId) =>
+    (await platformHttp.get<WireRecord[]>(`/api/platform/tenants/${tenantId}/data-recovery/evidence`))
+      .data.map(normalizeRecoveryEvidence),
+  recordTenantRecoveryEvidence: async (tenantId, input) =>
+    normalizeRecoveryEvidence(
+      (await platformHttp.post<WireRecord>(`/api/platform/tenants/${tenantId}/data-recovery/evidence`, input)).data,
+    ),
+  getTenantDeletionCertificationDecision: async (tenantId) =>
+    normalizeDeletionDecision(
+      (await platformHttp.get<WireRecord>(
+        `/api/platform/tenants/${tenantId}/data-recovery/deletion-certification`,
+      )).data,
+    ),
+  certifyTenantDeletion: async (tenantId, reason) =>
+    normalizeDeletionCertificate(
+      (await platformHttp.post<WireRecord>(
+        `/api/platform/tenants/${tenantId}/data-recovery/deletion-certification`, { reason },
       )).data,
     ),
   provisionTenant: async (input) => {

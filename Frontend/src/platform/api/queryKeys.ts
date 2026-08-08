@@ -45,6 +45,12 @@ export const platformKeys = {
   tenantDataAssets: (tenantId: string) => [...platformKeys.all, 'data-assets', tenantId] as const,
   tenantActivationDataDecision: (tenantId: string) =>
     [...platformKeys.all, 'data-assets', tenantId, 'activation-decision'] as const,
+  tenantActivationDecision: (tenantId: string) =>
+    [...platformKeys.all, 'tenant', tenantId, 'activation-policy'] as const,
+  tenantRecoveryEvidence: (tenantId: string) =>
+    [...platformKeys.all, 'tenant', tenantId, 'recovery-evidence'] as const,
+  tenantDeletionCertification: (tenantId: string) =>
+    [...platformKeys.all, 'tenant', tenantId, 'deletion-certification'] as const,
   platformMfa: () => [...platformKeys.all, 'auth', 'mfa'] as const,
 
   supportTickets: (filter?: unknown) => [...platformKeys.all, 'support', 'tickets', filter ?? null] as const,

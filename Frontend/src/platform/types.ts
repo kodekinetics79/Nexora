@@ -142,12 +142,16 @@ export interface Tenant extends TenantCompanyProfile, TenantCommercialTerms {
 export interface TenantDataAsset {
   id: string;
   tenantId: string;
-  logicalKey: 'postgresql.primary';
-  assetType: 'PostgreSqlTenantScope';
+  logicalKey: string;
+  assetType:
+    | 'PostgreSqlTenantScope' | 'ObjectStorage' | 'SearchIndex' | 'EmbeddingStore'
+    | 'Cache' | 'QueuePayload' | 'GeneratedExport' | 'AiOcrProvider' | 'Subprocessor';
   opaqueProviderReference: string;
   region: string;
-  classification: 'CustomerData';
-  disposition: 'BackupRetainedUntilExpiryThenDestroy';
+  classification: 'CustomerData' | 'DerivedCustomerData' | 'OperatorEvidence';
+  disposition:
+    | 'BackupRetainedUntilExpiryThenDestroy' | 'DestroyOnTenantPurge'
+    | 'ProviderDeletionRequired' | 'PreserveOperatorEvidence';
   backupPolicyReference: string;
   backupPolicyVersion: number;
   status: 'Registered' | 'Verified';
@@ -186,6 +190,120 @@ export interface VerifyTenantDataAssetInput {
   observedRegion: string;
   evidenceReference: string;
   evidenceSha256: string;
+  reason: string;
+}
+
+export interface ActivationControlDecision {
+  code: string;
+  satisfied: boolean;
+  detail: string;
+  evidenceReferences: string[];
+}
+
+export interface TenantActivationDecision {
+  tenantId: string;
+  ready: boolean;
+  commercialState: string;
+  accessState: string;
+  dataState: string;
+  legalHoldState: string;
+  controls: ActivationControlDecision[];
+  blockingControls: string[];
+  warnings: string[];
+  policyVersion: string;
+  evaluatedAtUtc: string;
+}
+
+export interface RecordActivationControlEvidenceInput {
+  disposition: 'approved' | 'deferred';
+  evidenceReference: string;
+  evidenceSha256: string;
+  effectiveFromUtc: string;
+  effectiveToUtc: string | null;
+  reason: string;
+}
+
+export interface ActivationControlEvidenceReceipt {
+  tenantId: string;
+  controlCode: string;
+  disposition: 'approved' | 'deferred';
+  evidenceReference: string;
+  effectiveFromUtc: string;
+  effectiveToUtc: string | null;
+  policyVersion: string;
+}
+
+export type TenantDataRecoveryEvidenceType =
+  | 'BackupSetObserved'
+  | 'RestoreDrillCompleted'
+  | 'TombstoneReapplied'
+  | 'BackupDestructionConfirmed'
+  | 'SubprocessorDeletionRequested'
+  | 'SubprocessorDeletionConfirmed'
+  | 'ResidencyVerified';
+
+export interface TenantDataRecoveryEvidence {
+  id: string;
+  tenantId: string;
+  tenantDataAssetId: string | null;
+  scopeKey: string;
+  evidenceType: TenantDataRecoveryEvidenceType;
+  opaqueProviderReference: string;
+  opaqueBackupSetReference: string | null;
+  recoveryPointUtc: string | null;
+  operationStartedUtc: string | null;
+  completedUtc: string;
+  configuredRpoSeconds: number | null;
+  configuredRtoSeconds: number | null;
+  actualRecoverySeconds: number | null;
+  retainUntilUtc: string | null;
+  customerRowsObserved: number | null;
+  evidenceReference: string;
+  evidenceSha256: string;
+  correlationId: string;
+  actorEmail: string;
+  reason: string;
+  recordedUtc: string;
+}
+
+export interface RecordTenantDataRecoveryEvidenceInput {
+  tenantDataAssetId: number | null;
+  scopeKey: string;
+  evidenceType: TenantDataRecoveryEvidenceType;
+  opaqueProviderReference: string;
+  opaqueBackupSetReference: string | null;
+  recoveryPointUtc: string | null;
+  operationStartedUtc: string | null;
+  completedUtc: string;
+  configuredRpoSeconds: number | null;
+  configuredRtoSeconds: number | null;
+  retainUntilUtc: string | null;
+  customerRowsObserved: number | null;
+  evidenceReference: string;
+  evidenceSha256: string;
+  correlationId: string;
+  idempotencyKey: string;
+  reason: string;
+}
+
+export interface TenantDeletionCertificationDecision {
+  tenantId: string;
+  ready: boolean;
+  blockers: string[];
+  evidenceIds: string[];
+  evaluatedUtc: string;
+  boundary: string;
+}
+
+export interface TenantDeletionCertificate {
+  id: string;
+  tenantId: string;
+  tenantSlug: string;
+  purgedUtc: string;
+  certifiedUtc: string;
+  actorEmail: string;
+  evidenceManifestSha256: string;
+  evidenceIds: string[];
   reason: string;
 }
 

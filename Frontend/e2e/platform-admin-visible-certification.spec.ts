@@ -305,7 +305,7 @@ test.describe.serial('visible Google Chrome Platform Admin certification', () =>
     assertNoFailures();
   });
 
-  test('reads the tenant PostgreSQL data gate and its decision boundary without fabricating assets', async ({ page }) => {
+  test('reads activation, PostgreSQL, recovery, and deletion decisions without fabricating evidence', async ({ page }) => {
     const assertNoFailures = observeBrowserAndApiFailures(page);
     await signInAsPlatformAdmin(page);
     await page.getByRole('link', { name: 'Tenants', exact: true }).click();
@@ -316,13 +316,30 @@ test.describe.serial('visible Google Chrome Platform Admin certification', () =>
       response.url().endsWith('/data-assets') && response.request().method() === 'GET');
     const decisionResponse = page.waitForResponse((response) =>
       response.url().endsWith('/data-assets/activation-data-decision') && response.request().method() === 'GET');
+    const activationResponse = page.waitForResponse((response) =>
+      response.url().endsWith('/activation/decision') && response.request().method() === 'GET');
+    const recoveryResponse = page.waitForResponse((response) =>
+      response.url().endsWith('/data-recovery/evidence') && response.request().method() === 'GET');
+    const deletionResponse = page.waitForResponse((response) =>
+      response.url().endsWith('/data-recovery/deletion-certification') && response.request().method() === 'GET');
     await page.getByRole('tab', { name: 'Data & storage' }).click();
 
     expect((await assetsResponse).ok(), 'The Owner-only tenant data-asset registry must be readable.').toBeTruthy();
     expect((await decisionResponse).ok(), 'The activation data decision must be readable.').toBeTruthy();
+    expect((await activationResponse).ok(), 'The authoritative tenant activation decision must be readable.').toBeTruthy();
+    expect((await recoveryResponse).ok(), 'The immutable recovery evidence list must be readable.').toBeTruthy();
+    expect((await deletionResponse).ok(), 'The deletion-certification decision must be readable.').toBeTruthy();
+    await expect(page.getByText('Authoritative tenant activation')).toBeVisible();
+    await expect(page.getByText(/tenant-activation\/2026-08-08\.v1/)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Activate tenant' })).toBeVisible();
     await expect(page.getByText('Activation data decision')).toBeVisible();
     await expect(page.getByText('Decision boundary')).toBeVisible();
     await expect(page.getByText(/does not activate the tenant/i)).toBeVisible();
+    await expect(page.getByText('Recovery and non-resurrection evidence')).toBeVisible();
+    await expect(page.getByText('Deletion certification')).toBeVisible();
+    await expect(page.getByText('Certification boundary')).toBeVisible();
+    await expect(page.getByText(/unknown.*blocker|registered boundaries.*known to Nexora/i)).toBeVisible();
+    await expect(page.getByText(/console never claims it performed a backup or restore/i)).toBeVisible();
     assertNoFailures();
   });
 

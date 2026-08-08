@@ -13,6 +13,8 @@ import { platformApi } from '../../api/client';
 import { platformErrorMessage } from '../../api/apiError';
 import { platformKeys } from '../../api/queryKeys';
 import type { RegisterTenantDataAssetInput, Tenant, TenantDataAsset, VerifyTenantDataAssetInput } from '../../types';
+import ActivationPolicyPanel from './ActivationPolicyPanel';
+import DataRecoveryPanel from './DataRecoveryPanel';
 
 const LOGICAL_KEY = 'postgresql.primary' as const;
 const ASSET_TYPE = 'PostgreSqlTenantScope' as const;
@@ -81,13 +83,11 @@ export default function DataStorageTab({ tenant }: { tenant: Tenant }) {
     );
   }
 
-  const unsupported = assetsQuery.data.filter(
-    (asset) => asset.logicalKey !== LOGICAL_KEY || asset.assetType !== ASSET_TYPE,
-  );
   const primary = assetsQuery.data.find(
     (asset) => asset.logicalKey === LOGICAL_KEY && asset.assetType === ASSET_TYPE,
   ) ?? null;
-  const inconsistent = unsupported.length > 0 || assetsQuery.data.filter((asset) => asset.logicalKey === LOGICAL_KEY).length > 1;
+  const otherAssets = assetsQuery.data.filter((asset) => asset.id !== primary?.id);
+  const inconsistent = assetsQuery.data.filter((asset) => asset.logicalKey === LOGICAL_KEY).length > 1;
   const decision = decisionQuery.data;
   const registerValid = Boolean(register
     && opaque(register.opaqueProviderReference)
@@ -106,6 +106,8 @@ export default function DataStorageTab({ tenant }: { tenant: Tenant }) {
 
   return (
     <Stack spacing={2.5}>
+      <ActivationPolicyPanel tenant={tenant} />
+
       <Paper sx={{ p: 3, borderRadius: 3 }}>
         <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={2}>
           <Box>
@@ -124,8 +126,8 @@ export default function DataStorageTab({ tenant }: { tenant: Tenant }) {
       </Paper>
 
       {inconsistent && (
-        <Alert severity="error"><AlertTitle sx={{ fontWeight: 800 }}>Unsupported registry state</AlertTitle>
-          The server returned data assets outside the single primary PostgreSQL tenant-scope contract. Mutations are disabled; investigate the registry directly.
+        <Alert severity="error"><AlertTitle sx={{ fontWeight: 800 }}>Conflicting primary boundary</AlertTitle>
+          The server returned more than one asset for the primary PostgreSQL key. Mutations are disabled; investigate the registry directly.
         </Alert>
       )}
 
@@ -155,6 +157,22 @@ export default function DataStorageTab({ tenant }: { tenant: Tenant }) {
           </Stack>
         )}
       </Paper>
+
+      {otherAssets.length > 0 && <Paper sx={{ p: 3, borderRadius: 3 }}>
+        <Typography variant="h6" sx={{ fontWeight: 800 }}>Other registered data boundaries</Typography>
+        <Typography variant="body2" color="text.secondary">
+          External and derived-data boundaries participate independently in recovery and deletion certification.
+        </Typography>
+        <Stack spacing={1.25} sx={{ mt: 2 }}>{otherAssets.map((asset) => <Paper variant="outlined" sx={{ p: 2 }} key={asset.id}>
+          <Row label={asset.logicalKey}><SoftChip label={asset.status} tone={asset.status === 'Verified' ? 'success' : 'warning'} /></Row>
+          <Row label="Type / classification">{asset.assetType} · {asset.classification}</Row>
+          <Row label="Provider / region"><code>{asset.opaqueProviderReference}</code> · {asset.region}</Row>
+          <Row label="Disposition">{asset.disposition}</Row>
+          <Row label="Backup policy"><code>{asset.backupPolicyReference}</code> · version {asset.backupPolicyVersion}</Row>
+        </Paper>)}</Stack>
+      </Paper>}
+
+      <DataRecoveryPanel tenant={tenant} assets={assetsQuery.data} />
 
       <Dialog open={Boolean(register)} onClose={() => setRegister(null)} fullWidth maxWidth="sm">
         <DialogTitle sx={{ fontWeight: 800 }}>Register PostgreSQL tenant scope</DialogTitle>
