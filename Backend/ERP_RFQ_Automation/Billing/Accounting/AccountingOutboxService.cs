@@ -64,11 +64,20 @@ public sealed class AccountingOutboxService(ErpRfqAutomationContext db)
 
         if (db.Database.IsNpgsql())
         {
+            await db.Database.ExecuteSqlInterpolatedAsync($$"""
+                UPDATE platform."AccountingOutbox"
+                SET "Status" = 'Poison', "ReconciliationStatus" = 'Exception',
+                    "LeaseExpiresAtUtc" = NULL, "LeaseToken" = NULL, "WorkerId" = NULL,
+                    "LastFailureCode" = COALESCE("LastFailureCode", 'LEASE_EXHAUSTED')
+                WHERE "Status" = 'InFlight' AND "LeaseExpiresAtUtc" <= {{now}}
+                  AND "AttemptCount" >= "MaxAttempts"
+                """, ct);
             return await db.Set<AccountingOutboxMessage>().FromSqlInterpolated($$"""
                 WITH candidates AS (
                     SELECT "Id" FROM platform."AccountingOutbox"
                     WHERE (("Status" IN ('Pending', 'RetryScheduled') AND "AvailableAtUtc" <= {{now}})
-                       OR ("Status" = 'InFlight' AND "LeaseExpiresAtUtc" <= {{now}}))
+                       OR ("Status" = 'InFlight' AND "LeaseExpiresAtUtc" <= {{now}}
+                           AND "AttemptCount" < "MaxAttempts"))
                     ORDER BY "CreatedAtUtc", "Id"
                     FOR UPDATE SKIP LOCKED
                     LIMIT {{maximum}}
@@ -130,6 +139,7 @@ public sealed class AccountingOutboxService(ErpRfqAutomationContext db)
         message.AcknowledgedBy = actor.Trim();
         message.LeaseExpiresAtUtc = null;
         message.LeaseToken = null;
+        message.WorkerId = null;
         await db.SaveChangesAsync(ct);
     }
 
