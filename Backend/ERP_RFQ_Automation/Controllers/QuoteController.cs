@@ -19,6 +19,7 @@ namespace ERP_RFQ_Automation.Controllers
     [Authorize]
     [Route("api/[controller]")]
     [ApiController]
+    [ERP_RFQ_Automation.Platform.Entitlements.RequiresEntitlement(ERP_RFQ_Automation.Platform.Entitlements.TypedEntitlementCatalog.Quotes)]
     public class QuoteController : ControllerBase
     {
         private readonly IQuoteRepository _repository;

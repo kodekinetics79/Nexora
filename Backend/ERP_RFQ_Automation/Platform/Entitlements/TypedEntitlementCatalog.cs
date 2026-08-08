@@ -33,6 +33,12 @@ public static class TypedEntitlementCatalog
         SupplierSearch, Integrations, Exports, Automation, Sso, Scim, DedicatedResources
     };
 
+    public static string RequireKnown(string key)
+        => Keys.Contains(key)
+            ? key
+            : throw new ArgumentOutOfRangeException(nameof(key), key,
+                "Entitlement declarations must use the closed server catalogue.");
+
     public static bool TryParse(
         string? json,
         out IReadOnlyDictionary<string, bool> values,

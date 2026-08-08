@@ -32,6 +32,7 @@ namespace ERP_RFQ_Automation.Controllers;
 [Route("api/[controller]")]
 [ApiController]
 [Authorize]
+[ERP_RFQ_Automation.Platform.Entitlements.RequiresEntitlement(ERP_RFQ_Automation.Platform.Entitlements.TypedEntitlementCatalog.EmailIntake)]
 public sealed class MailboxController(
     ErpRfqAutomationContext context,
     IMailConnectionTester tester,

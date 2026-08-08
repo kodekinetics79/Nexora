@@ -157,7 +157,8 @@ public sealed class EntitlementService : IEntitlementService
 
         var access = await _tenantAccess.GetAccessAsync(businessUnitId, ct);
         if (!access.HasTenant)
-            return EntitlementDecision.Unlimited; // legacy BU compatibility boundary
+            return EntitlementDecision.Deny(0, 0,
+                $"Entitlement '{entitlement}' is unavailable because no governed platform tenant owns this business unit.");
 
         if (access.Plan is null)
             return EntitlementDecision.Deny(0, 0,

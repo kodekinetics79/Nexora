@@ -53,7 +53,7 @@ public sealed class ProvisioningExecutionTests
         // badge over an empty workspace.
         var tenant = await db.Set<Tenant>().IgnoreQueryFilters()
             .SingleAsync(t => t.Id == execution.TenantId);
-        Assert.Equal(TenantStatus.Active, tenant.Status);
+        Assert.Equal(TenantStatus.Provisioning, tenant.Status); // activation authority is a separate gate
         Assert.Equal(execution.ProvisionedBusinessUnitId, tenant.PrimaryBusinessUnitId);
 
         var businessUnit = await db.Set<BusinessUnit>()

@@ -12,6 +12,7 @@ namespace ERP_RFQ_Automation.Controllers
     [Route("api/[controller]")]
     [ApiController]
     [Authorize] // SEC-03: was anonymous; every action resolves BU from the JWT claim (claim wins over any client-supplied businessUnitId)
+    [ERP_RFQ_Automation.Platform.Entitlements.RequiresEntitlement(ERP_RFQ_Automation.Platform.Entitlements.TypedEntitlementCatalog.Orders)]
     public class OrderController : ControllerBase
     {
         private readonly IOrderService _orderService;

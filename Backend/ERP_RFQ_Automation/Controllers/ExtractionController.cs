@@ -26,6 +26,7 @@ namespace ERP_RFQ_Automation.Controllers
     [ApiController]
     [Route("api/[controller]")]
     [Authorize]
+    [ERP_RFQ_Automation.Platform.Entitlements.RequiresEntitlement(ERP_RFQ_Automation.Platform.Entitlements.TypedEntitlementCatalog.Rfq)]
     public class ExtractionController : ControllerBase
     {
         private readonly IDocumentIngestion _ingestion;

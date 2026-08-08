@@ -11,6 +11,7 @@ namespace ERP_RFQ_Automation.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/inventory-intelligence")]
+[ERP_RFQ_Automation.Platform.Entitlements.RequiresEntitlement(ERP_RFQ_Automation.Platform.Entitlements.TypedEntitlementCatalog.Inventory)]
 public sealed class InventoryIntelligenceController(
     ErpRfqAutomationContext db,
     ICommercialLineResolutionApplicationService lineResolution,
