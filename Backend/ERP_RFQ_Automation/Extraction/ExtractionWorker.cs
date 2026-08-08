@@ -18,6 +18,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using ERP_RFQ_Automation.HealthChecks;
+using ERP_RFQ_Automation.Billing.Metering;
 
 namespace ERP_RFQ_Automation.Extraction;
 
@@ -869,6 +870,7 @@ public sealed class LeadPersister : ILeadPersister
     private readonly ERP_RFQ_Automation.CommercialRouting.ICommercialRoutingApplicationService? _routing;
     private readonly ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService? _leadIdentity;
     private readonly ERP_RFQ_Automation.CustomerResolution.ILeadCustomerResolutionService? _customerResolution;
+    private readonly UsageMeteringService? _usageMetering;
 
     // The detector is optional so persistence keeps working before (and without)
     // the Deduplication DI registration (see Deduplication/DEDUP-WIRING.md).
@@ -878,7 +880,8 @@ public sealed class LeadPersister : ILeadPersister
         ERP_RFQ_Automation.Deduplication.ILeadDuplicateDetector? duplicateDetector = null,
         ERP_RFQ_Automation.CommercialRouting.ICommercialRoutingApplicationService? routing = null,
         ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService? leadIdentity = null,
-        ERP_RFQ_Automation.CustomerResolution.ILeadCustomerResolutionService? customerResolution = null)
+        ERP_RFQ_Automation.CustomerResolution.ILeadCustomerResolutionService? customerResolution = null,
+        UsageMeteringService? usageMetering = null)
     {
         _context = context;
         _log = log;
@@ -886,6 +889,7 @@ public sealed class LeadPersister : ILeadPersister
         _routing = routing;
         _leadIdentity = leadIdentity;
         _customerResolution = customerResolution;
+        _usageMetering = usageMetering;
     }
 
     public Task<long> PersistAsync(
@@ -1194,6 +1198,30 @@ public sealed class LeadPersister : ILeadPersister
             .Select(entry => entry.Entity)
             .DistinctBy(lead => lead.Id)
             .ToArray();
+
+        // The canonical document meter is committed in the same transaction as both the
+        // business result and the fenced queue completion. A retry therefore cannot charge
+        // twice, and a rollback leaves neither a successful job nor a usage occurrence.
+        if (_usageMetering is not null)
+        {
+            var platformTenant = await _context.Set<ERP_RFQ_Automation.Platform.Models.Tenant>()
+                .AsNoTracking()
+                .Where(x => x.PrimaryBusinessUnitId == job.BusinessUnitId)
+                .Select(x => new { x.Id, x.RateCardId })
+                .SingleOrDefaultAsync(ct);
+            if (platformTenant is not null)
+            {
+                var currency = platformTenant.RateCardId is long rateCardId
+                    ? await _context.Set<ERP_RFQ_Automation.Billing.RateCard>().AsNoTracking()
+                        .Where(x => x.Id == rateCardId).Select(x => x.Currency).SingleOrDefaultAsync(ct)
+                    : null;
+                await _usageMetering.RecordAsync(new RecordUsageEvent(
+                    Guid.NewGuid(), platformTenant.Id, "documents", 1m, "document",
+                    DateTime.SpecifyKind(job.CreatedOn, DateTimeKind.Utc), "ExtractionJob", job.Id.ToString(CultureInfo.InvariantCulture),
+                    "ExtractionWorker", workerId, null, null, job.BatchId.ToString("N"),
+                    $"extraction-job:{job.Id}:succeeded", 0m, currency ?? "USD", job.ContentHash), ct);
+            }
+        }
         if (!await queue.CompleteAsync(job.Id, workerId, leaseAttempt, leadId > 0 ? leadId : null, ct))
             throw new InvalidOperationException($"Fenced completion failed for extraction job {job.Id}.");
 

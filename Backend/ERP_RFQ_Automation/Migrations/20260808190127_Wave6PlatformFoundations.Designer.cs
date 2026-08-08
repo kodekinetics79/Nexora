@@ -12,7 +12,7 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace ERP_RFQ_Automation.Migrations
 {
     [DbContext(typeof(ErpRfqAutomationContext))]
-    [Migration("20260808185402_Wave6PlatformFoundations")]
+    [Migration("20260808190127_Wave6PlatformFoundations")]
     partial class Wave6PlatformFoundations
     {
         /// <inheritdoc />
@@ -15973,6 +15973,8 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("TenantId", "IdempotencyKey")
                         .IsUnique();
 
+                    b.HasIndex("TenantId", "TenantDataAssetId");
+
                     b.HasIndex("TenantId", "ScopeKey", "EvidenceType", "CompletedUtc");
 
                     b.ToTable("TenantDataRecoveryEvidence", "platform", t =>
@@ -20251,11 +20253,26 @@ namespace ERP_RFQ_Automation.Migrations
 
             modelBuilder.Entity("ERP_RFQ_Automation.Billing.Metering.UsageEvent", b =>
                 {
+                    b.HasOne("ERP_RFQ_Automation.Platform.Models.Tenant", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
                     b.HasOne("ERP_RFQ_Automation.Billing.Metering.UsageEvent", null)
                         .WithMany()
                         .HasForeignKey("TenantId", "AdjustsUsageEventId")
                         .HasPrincipalKey("TenantId", "UsageEventId")
                         .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Billing.Metering.UsageMinuteAggregate", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Platform.Models.Tenant", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Billing.RateCardLine", b =>
@@ -23139,6 +23156,30 @@ namespace ERP_RFQ_Automation.Migrations
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Platform.DataAssets.TenantDataAsset", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Platform.Models.Tenant", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Platform.DataAssets.TenantDataRecoveryEvidence", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Platform.Models.Tenant", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Platform.DataAssets.TenantDataAsset", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId", "TenantDataAssetId")
+                        .HasPrincipalKey("TenantId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Platform.DataAssets.TenantDeletionCertificate", b =>
                 {
                     b.HasOne("ERP_RFQ_Automation.Platform.Models.Tenant", null)
                         .WithMany()

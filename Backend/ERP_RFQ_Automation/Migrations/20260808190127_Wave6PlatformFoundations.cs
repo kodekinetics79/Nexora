@@ -13,6 +13,12 @@ namespace ERP_RFQ_Automation.Migrations
         protected override void Up(MigrationBuilder migrationBuilder)
         {
             migrationBuilder.AddUniqueConstraint(
+                name: "AK_TenantDataAssets_TenantId_Id",
+                schema: "platform",
+                table: "TenantDataAssets",
+                columns: new[] { "TenantId", "Id" });
+
+            migrationBuilder.AddUniqueConstraint(
                 name: "AK_SubscriptionInvoices_TenantId_Id",
                 schema: "platform",
                 table: "SubscriptionInvoices",
@@ -97,6 +103,20 @@ namespace ERP_RFQ_Automation.Migrations
                     table.CheckConstraint("CK_TenantDataRecoveryEvidence_Rows", "\"CustomerRowsObserved\" IS NULL OR \"CustomerRowsObserved\" >= 0");
                     table.CheckConstraint("CK_TenantDataRecoveryEvidence_Rpo", "\"ConfiguredRpoSeconds\" IS NULL OR \"ConfiguredRpoSeconds\" > 0");
                     table.CheckConstraint("CK_TenantDataRecoveryEvidence_Rto", "\"ConfiguredRtoSeconds\" IS NULL OR \"ConfiguredRtoSeconds\" > 0");
+                    table.ForeignKey(
+                        name: "FK_TenantDataRecoveryEvidence_TenantDataAssets_TenantId_Tenant~",
+                        columns: x => new { x.TenantId, x.TenantDataAssetId },
+                        principalSchema: "platform",
+                        principalTable: "TenantDataAssets",
+                        principalColumns: new[] { "TenantId", "Id" },
+                        onDelete: ReferentialAction.Restrict);
+                    table.ForeignKey(
+                        name: "FK_TenantDataRecoveryEvidence_Tenants_TenantId",
+                        column: x => x.TenantId,
+                        principalSchema: "platform",
+                        principalTable: "Tenants",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Restrict);
                 });
 
             migrationBuilder.CreateTable(
@@ -119,6 +139,13 @@ namespace ERP_RFQ_Automation.Migrations
                 constraints: table =>
                 {
                     table.PrimaryKey("PK_TenantDeletionCertificates", x => x.Id);
+                    table.ForeignKey(
+                        name: "FK_TenantDeletionCertificates_Tenants_TenantId",
+                        column: x => x.TenantId,
+                        principalSchema: "platform",
+                        principalTable: "Tenants",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Restrict);
                 });
 
             migrationBuilder.CreateTable(
@@ -160,6 +187,13 @@ namespace ERP_RFQ_Automation.Migrations
                     table.PrimaryKey("PK_UsageEvents", x => x.UsageEventId);
                     table.UniqueConstraint("AK_UsageEvents_TenantId_UsageEventId", x => new { x.TenantId, x.UsageEventId });
                     table.ForeignKey(
+                        name: "FK_UsageEvents_Tenants_TenantId",
+                        column: x => x.TenantId,
+                        principalSchema: "platform",
+                        principalTable: "Tenants",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Restrict);
+                    table.ForeignKey(
                         name: "FK_UsageEvents_UsageEvents_TenantId_AdjustsUsageEventId",
                         columns: x => new { x.TenantId, x.AdjustsUsageEventId },
                         principalSchema: "platform",
@@ -187,6 +221,13 @@ namespace ERP_RFQ_Automation.Migrations
                 constraints: table =>
                 {
                     table.PrimaryKey("PK_UsageMinuteAggregates", x => x.Id);
+                    table.ForeignKey(
+                        name: "FK_UsageMinuteAggregates_Tenants_TenantId",
+                        column: x => x.TenantId,
+                        principalSchema: "platform",
+                        principalTable: "Tenants",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Restrict);
                 });
 
             migrationBuilder.CreateIndex(
@@ -229,6 +270,12 @@ namespace ERP_RFQ_Automation.Migrations
                 columns: new[] { "TenantId", "ScopeKey", "EvidenceType", "CompletedUtc" });
 
             migrationBuilder.CreateIndex(
+                name: "IX_TenantDataRecoveryEvidence_TenantId_TenantDataAssetId",
+                schema: "platform",
+                table: "TenantDataRecoveryEvidence",
+                columns: new[] { "TenantId", "TenantDataAssetId" });
+
+            migrationBuilder.CreateIndex(
                 name: "IX_TenantDeletionCertificates_TenantId",
                 schema: "platform",
                 table: "TenantDeletionCertificates",
@@ -269,106 +316,101 @@ namespace ERP_RFQ_Automation.Migrations
 
             migrationBuilder.Sql("""
                 ALTER TABLE platform."UsageEvents"
-                    ADD CONSTRAINT "CK_UsageEvents_Kind" CHECK ("Kind" IN ('Consumption', 'Adjustment')),
-                    ADD CONSTRAINT "CK_UsageEvents_RatingStatus" CHECK ("RatingStatus" IN ('Pending', 'Ready', 'BlockedUncertifiedMeter', 'Rated')),
+                    ADD CONSTRAINT "CK_UsageEvents_Kind" CHECK ("Kind" IN ('Consumption','Adjustment')),
+                    ADD CONSTRAINT "CK_UsageEvents_RatingStatus" CHECK ("RatingStatus" IN ('Pending','Ready','BlockedUncertifiedMeter','Rated')),
                     ADD CONSTRAINT "CK_UsageEvents_Currency" CHECK ("Currency" ~ '^[A-Z]{3}$'),
                     ADD CONSTRAINT "CK_UsageEvents_EvidenceHash" CHECK ("EvidenceSha256" ~ '^[0-9a-f]{64}$'),
                     ADD CONSTRAINT "CK_UsageEvents_Quantity" CHECK (
-                        ("Kind" = 'Consumption' AND "AdjustsUsageEventId" IS NULL AND "Quantity" > 0 AND "CostAmount" >= 0)
-                        OR ("Kind" = 'Adjustment' AND "AdjustsUsageEventId" IS NOT NULL AND "Quantity" <> 0)),
-                    ADD CONSTRAINT "CK_UsageEvents_Rating" CHECK (
-                        "AllowanceApplied" >= 0 AND "AllowanceApplied" <= GREATEST("Quantity", 0)
-                        AND ("UnitPrice" IS NULL OR "UnitPrice" >= 0)),
-                    ADD CONSTRAINT "CK_UsageEvents_Meter" CHECK (("EventType", "Unit") IN (
-                        ('processing.minutes','minute'), ('documents','document'), ('pages.processed','page'),
-                        ('rfqs','rfq'), ('quotes','quote'), ('orders','order'), ('emails','email'),
-                        ('pages.ocr','page'), ('ai.tokens','token'), ('api.calls','call'),
-                        ('storage.gb-hours','gb-hour'), ('supplier.searches','search'), ('automation.runs','run'),
-                        ('base.subscription','subscription'), ('users','user'), ('dedicated.infrastructure','instance')));
-
+                        ("Kind"='Consumption' AND "AdjustsUsageEventId" IS NULL AND "Quantity">0 AND "CostAmount">=0)
+                        OR ("Kind"='Adjustment' AND "AdjustsUsageEventId" IS NOT NULL AND "Quantity"<>0)),
+                    ADD CONSTRAINT "CK_UsageEvents_Rating" CHECK ("AllowanceApplied">=0 AND "AllowanceApplied"<=GREATEST("Quantity",0) AND ("UnitPrice" IS NULL OR "UnitPrice">=0)),
+                    ADD CONSTRAINT "CK_UsageEvents_Meter" CHECK (("EventType","Unit") IN (
+                        ('processing.minutes','minute'),('documents','document'),('pages.processed','page'),
+                        ('rfqs','rfq'),('quotes','quote'),('orders','order'),('emails','email'),
+                        ('pages.ocr','page'),('ai.tokens','token'),('api.calls','call'),
+                        ('storage.gb-hours','gb-hour'),('supplier.searches','search'),('automation.runs','run'),
+                        ('base.subscription','subscription'),('users','user'),('dedicated.infrastructure','instance')));
                 ALTER TABLE platform."TenantDataRecoveryEvidence"
                     ADD CONSTRAINT "CK_TenantDataRecoveryEvidence_Type" CHECK ("EvidenceType" IN (
                         'BackupObserved','RestoreDrill','TombstoneReapplied','BackupDestroyed',
                         'SubprocessorDeletionRequested','SubprocessorDeletionConfirmed','ResidencyVerified')),
                     ADD CONSTRAINT "CK_TenantDataRecoveryEvidence_Hash" CHECK ("EvidenceSha256" ~ '^[0-9a-f]{64}$'),
-                    ADD CONSTRAINT "CK_TenantDataRecoveryEvidence_ActualRecovery" CHECK ("ActualRecoverySeconds" IS NULL OR "ActualRecoverySeconds" >= 0);
-
+                    ADD CONSTRAINT "CK_TenantDataRecoveryEvidence_ActualRecovery" CHECK ("ActualRecoverySeconds" IS NULL OR "ActualRecoverySeconds">=0);
                 ALTER TABLE platform."TenantDeletionCertificates"
                     ADD CONSTRAINT "CK_TenantDeletionCertificates_Hash" CHECK ("EvidenceManifestSha256" ~ '^[0-9a-f]{64}$');
-
                 ALTER TABLE platform."AccountingOutbox"
                     ADD CONSTRAINT "CK_AccountingOutbox_Status" CHECK ("Status" IN ('Pending','InFlight','RetryScheduled','Acknowledged','Poison')),
                     ADD CONSTRAINT "CK_AccountingOutbox_Reconciliation" CHECK ("ReconciliationStatus" IN ('NotSent','AwaitingAcknowledgement','Reconciled','Exception')),
-                    ADD CONSTRAINT "CK_AccountingOutbox_Attempts" CHECK ("MaxAttempts" > 0 AND "AttemptCount" >= 0 AND "AttemptCount" <= "MaxAttempts"),
+                    ADD CONSTRAINT "CK_AccountingOutbox_Attempts" CHECK ("MaxAttempts">0 AND "AttemptCount">=0 AND "AttemptCount"<="MaxAttempts"),
                     ADD CONSTRAINT "CK_AccountingOutbox_PayloadHash" CHECK ("PayloadSha256" ~ '^[0-9a-f]{64}$'),
                     ADD CONSTRAINT "CK_AccountingOutbox_ReceiptHash" CHECK ("ExternalReceiptSha256" IS NULL OR "ExternalReceiptSha256" ~ '^[0-9a-f]{64}$'),
                     ADD CONSTRAINT "CK_AccountingOutbox_Lease" CHECK (
-                        ("Status" = 'InFlight' AND "LeaseToken" IS NOT NULL AND "LeaseExpiresAtUtc" IS NOT NULL AND "WorkerId" IS NOT NULL)
-                        OR ("Status" <> 'InFlight' AND "LeaseToken" IS NULL AND "LeaseExpiresAtUtc" IS NULL AND "WorkerId" IS NULL)),
+                        ("Status"='InFlight' AND "LeaseToken" IS NOT NULL AND "LeaseExpiresAtUtc" IS NOT NULL AND "WorkerId" IS NOT NULL)
+                        OR ("Status"<>'InFlight' AND "LeaseToken" IS NULL AND "LeaseExpiresAtUtc" IS NULL AND "WorkerId" IS NULL)),
                     ADD CONSTRAINT "CK_AccountingOutbox_Acknowledgement" CHECK (
-                        ("Status" = 'Acknowledged' AND "AcknowledgedAtUtc" IS NOT NULL AND "ExternalReference" IS NOT NULL AND "ExternalReceiptSha256" IS NOT NULL AND "ReconciliationStatus" = 'Reconciled')
-                        OR "Status" <> 'Acknowledged');
+                        ("Status"='Acknowledged' AND "AcknowledgedAtUtc" IS NOT NULL AND "ExternalReference" IS NOT NULL
+                         AND "ExternalReceiptSha256" IS NOT NULL AND "ReconciliationStatus"='Reconciled') OR "Status"<>'Acknowledged');
 
-                CREATE TRIGGER usage_events_immutable
-                    BEFORE UPDATE OR DELETE ON platform."UsageEvents"
+                CREATE TRIGGER usage_events_immutable BEFORE UPDATE OR DELETE ON platform."UsageEvents"
                     FOR EACH ROW EXECUTE FUNCTION platform.nexora_guard_append_only_record();
                 ALTER TABLE platform."UsageEvents" ENABLE ALWAYS TRIGGER usage_events_immutable;
-                CREATE TRIGGER tenant_data_recovery_evidence_immutable
-                    BEFORE UPDATE OR DELETE ON platform."TenantDataRecoveryEvidence"
+                CREATE TRIGGER tenant_data_recovery_evidence_immutable BEFORE UPDATE OR DELETE ON platform."TenantDataRecoveryEvidence"
                     FOR EACH ROW EXECUTE FUNCTION platform.nexora_guard_append_only_record();
                 ALTER TABLE platform."TenantDataRecoveryEvidence" ENABLE ALWAYS TRIGGER tenant_data_recovery_evidence_immutable;
-                CREATE TRIGGER tenant_deletion_certificates_immutable
-                    BEFORE UPDATE OR DELETE ON platform."TenantDeletionCertificates"
+                CREATE TRIGGER tenant_deletion_certificates_immutable BEFORE UPDATE OR DELETE ON platform."TenantDeletionCertificates"
                     FOR EACH ROW EXECUTE FUNCTION platform.nexora_guard_append_only_record();
                 ALTER TABLE platform."TenantDeletionCertificates" ENABLE ALWAYS TRIGGER tenant_deletion_certificates_immutable;
 
-                CREATE OR REPLACE FUNCTION platform.nexora_guard_accounting_outbox()
-                RETURNS trigger LANGUAGE plpgsql AS $guard$
+                CREATE OR REPLACE FUNCTION platform.nexora_guard_accounting_outbox() RETURNS trigger LANGUAGE plpgsql AS $guard$
                 BEGIN
-                    IF TG_OP = 'DELETE' THEN
-                        RAISE EXCEPTION 'accounting outbox records are immutable';
-                    END IF;
-                    IF NEW."Id" IS DISTINCT FROM OLD."Id"
-                       OR NEW."TenantId" IS DISTINCT FROM OLD."TenantId"
+                    IF TG_OP='DELETE' THEN RAISE EXCEPTION 'accounting outbox records are immutable'; END IF;
+                    IF NEW."Id" IS DISTINCT FROM OLD."Id" OR NEW."TenantId" IS DISTINCT FROM OLD."TenantId"
                        OR NEW."SubscriptionInvoiceId" IS DISTINCT FROM OLD."SubscriptionInvoiceId"
-                       OR NEW."MessageType" IS DISTINCT FROM OLD."MessageType"
-                       OR NEW."IdempotencyKey" IS DISTINCT FROM OLD."IdempotencyKey"
-                       OR NEW."PayloadJson" IS DISTINCT FROM OLD."PayloadJson"
-                       OR NEW."PayloadSha256" IS DISTINCT FROM OLD."PayloadSha256"
-                       OR NEW."CreatedAtUtc" IS DISTINCT FROM OLD."CreatedAtUtc"
-                       OR NEW."MaxAttempts" IS DISTINCT FROM OLD."MaxAttempts" THEN
-                        RAISE EXCEPTION 'accounting outbox identity and payload are immutable';
-                    END IF;
-                    IF NOT ((OLD."Status" IN ('Pending','RetryScheduled') AND NEW."Status" = 'InFlight')
-                            OR (OLD."Status" = 'InFlight' AND NEW."Status" IN ('InFlight','Acknowledged','RetryScheduled','Poison'))
-                            OR (OLD."Status" = 'Poison' AND NEW."Status" = 'Pending')) THEN
-                        RAISE EXCEPTION 'invalid accounting outbox transition % -> %', OLD."Status", NEW."Status";
-                    END IF;
+                       OR NEW."MessageType" IS DISTINCT FROM OLD."MessageType" OR NEW."IdempotencyKey" IS DISTINCT FROM OLD."IdempotencyKey"
+                       OR NEW."PayloadJson" IS DISTINCT FROM OLD."PayloadJson" OR NEW."PayloadSha256" IS DISTINCT FROM OLD."PayloadSha256"
+                       OR NEW."CreatedAtUtc" IS DISTINCT FROM OLD."CreatedAtUtc" OR NEW."MaxAttempts" IS DISTINCT FROM OLD."MaxAttempts"
+                    THEN RAISE EXCEPTION 'accounting outbox identity and payload are immutable'; END IF;
+                    IF NOT ((OLD."Status" IN ('Pending','RetryScheduled') AND NEW."Status"='InFlight')
+                        OR (OLD."Status"='InFlight' AND NEW."Status" IN ('InFlight','Acknowledged','RetryScheduled','Poison'))
+                        OR (OLD."Status"='Poison' AND NEW."Status"='Pending'))
+                    THEN RAISE EXCEPTION 'invalid accounting outbox transition % -> %',OLD."Status",NEW."Status"; END IF;
                     RETURN NEW;
                 END $guard$;
                 REVOKE ALL ON FUNCTION platform.nexora_guard_accounting_outbox() FROM PUBLIC;
-                CREATE TRIGGER accounting_outbox_guard
-                    BEFORE UPDATE OR DELETE ON platform."AccountingOutbox"
+                CREATE TRIGGER accounting_outbox_guard BEFORE UPDATE OR DELETE ON platform."AccountingOutbox"
                     FOR EACH ROW EXECUTE FUNCTION platform.nexora_guard_accounting_outbox();
                 ALTER TABLE platform."AccountingOutbox" ENABLE ALWAYS TRIGGER accounting_outbox_guard;
 
-                REVOKE ALL ON TABLE platform."UsageEvents", platform."UsageMinuteAggregates",
-                    platform."AccountingOutbox", platform."TenantDataRecoveryEvidence",
-                    platform."TenantDeletionCertificates" FROM PUBLIC;
-                DO $roles$
-                BEGIN
-                    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexora_pipeline_app') THEN
-                        GRANT SELECT, INSERT ON platform."UsageEvents", platform."TenantDataRecoveryEvidence", platform."TenantDeletionCertificates" TO nexora_pipeline_app;
-                        GRANT SELECT, INSERT, UPDATE ON platform."UsageMinuteAggregates", platform."AccountingOutbox" TO nexora_pipeline_app;
-                        GRANT USAGE, SELECT ON SEQUENCE platform."UsageMinuteAggregates_Id_seq", platform."TenantDataRecoveryEvidence_Id_seq", platform."TenantDeletionCertificates_Id_seq" TO nexora_pipeline_app;
-                        REVOKE DELETE, TRUNCATE ON platform."UsageEvents", platform."UsageMinuteAggregates", platform."AccountingOutbox", platform."TenantDataRecoveryEvidence", platform."TenantDeletionCertificates" FROM nexora_pipeline_app;
-                        REVOKE UPDATE ON platform."UsageEvents", platform."TenantDataRecoveryEvidence", platform."TenantDeletionCertificates" FROM nexora_pipeline_app;
+                -- These ledgers are platform-plane and intentionally have no tenant EF query filter:
+                -- fleet operators/workers must reconcile across tenants. PostgreSQL nevertheless
+                -- defaults every non-BYPASSRLS role to no rows, while explicit grants below remain
+                -- the write boundary. nexora_pipeline_app is the audited fleet execution role.
+                ALTER TABLE platform."UsageEvents" ENABLE ROW LEVEL SECURITY;
+                ALTER TABLE platform."UsageEvents" FORCE ROW LEVEL SECURITY;
+                ALTER TABLE platform."UsageMinuteAggregates" ENABLE ROW LEVEL SECURITY;
+                ALTER TABLE platform."UsageMinuteAggregates" FORCE ROW LEVEL SECURITY;
+                ALTER TABLE platform."AccountingOutbox" ENABLE ROW LEVEL SECURITY;
+                ALTER TABLE platform."AccountingOutbox" FORCE ROW LEVEL SECURITY;
+                ALTER TABLE platform."TenantDataRecoveryEvidence" ENABLE ROW LEVEL SECURITY;
+                ALTER TABLE platform."TenantDataRecoveryEvidence" FORCE ROW LEVEL SECURITY;
+                ALTER TABLE platform."TenantDeletionCertificates" ENABLE ROW LEVEL SECURITY;
+                ALTER TABLE platform."TenantDeletionCertificates" FORCE ROW LEVEL SECURITY;
+
+                REVOKE ALL ON TABLE platform."UsageEvents",platform."UsageMinuteAggregates",platform."AccountingOutbox",
+                    platform."TenantDataRecoveryEvidence",platform."TenantDeletionCertificates" FROM PUBLIC;
+                DO $roles$ BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='nexora_pipeline_app') THEN
+                        GRANT SELECT,INSERT ON platform."UsageEvents",platform."TenantDataRecoveryEvidence",platform."TenantDeletionCertificates" TO nexora_pipeline_app;
+                        GRANT SELECT,INSERT,UPDATE ON platform."UsageMinuteAggregates",platform."AccountingOutbox" TO nexora_pipeline_app;
+                        GRANT USAGE,SELECT ON SEQUENCE platform."UsageMinuteAggregates_Id_seq",platform."TenantDataRecoveryEvidence_Id_seq",platform."TenantDeletionCertificates_Id_seq" TO nexora_pipeline_app;
+                        REVOKE DELETE,TRUNCATE ON platform."UsageEvents",platform."UsageMinuteAggregates",platform."AccountingOutbox",platform."TenantDataRecoveryEvidence",platform."TenantDeletionCertificates" FROM nexora_pipeline_app;
+                        REVOKE UPDATE ON platform."UsageEvents",platform."TenantDataRecoveryEvidence",platform."TenantDeletionCertificates" FROM nexora_pipeline_app;
                     END IF;
-                    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexora_tenant_app') THEN
-                        REVOKE ALL ON platform."UsageEvents", platform."UsageMinuteAggregates", platform."AccountingOutbox", platform."TenantDataRecoveryEvidence", platform."TenantDeletionCertificates" FROM nexora_tenant_app;
+                    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='nexora_tenant_app') THEN
+                        REVOKE ALL ON platform."UsageEvents",platform."UsageMinuteAggregates",platform."AccountingOutbox",platform."TenantDataRecoveryEvidence",platform."TenantDeletionCertificates" FROM nexora_tenant_app;
                     END IF;
-                    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexora_identity_app') THEN
-                        REVOKE ALL ON platform."UsageEvents", platform."UsageMinuteAggregates", platform."AccountingOutbox", platform."TenantDataRecoveryEvidence", platform."TenantDeletionCertificates" FROM nexora_identity_app;
+                    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='nexora_identity_app') THEN
+                        REVOKE ALL ON platform."UsageEvents",platform."UsageMinuteAggregates",platform."AccountingOutbox",platform."TenantDataRecoveryEvidence",platform."TenantDeletionCertificates" FROM nexora_identity_app;
                     END IF;
                 END $roles$;
                 """);
@@ -377,8 +419,6 @@ namespace ERP_RFQ_Automation.Migrations
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.Sql("DROP FUNCTION IF EXISTS platform.nexora_guard_accounting_outbox();");
-
             migrationBuilder.DropTable(
                 name: "AccountingOutbox",
                 schema: "platform");
@@ -398,6 +438,13 @@ namespace ERP_RFQ_Automation.Migrations
             migrationBuilder.DropTable(
                 name: "UsageMinuteAggregates",
                 schema: "platform");
+
+            migrationBuilder.Sql("DROP FUNCTION IF EXISTS platform.nexora_guard_accounting_outbox();");
+
+            migrationBuilder.DropUniqueConstraint(
+                name: "AK_TenantDataAssets_TenantId_Id",
+                schema: "platform",
+                table: "TenantDataAssets");
 
             migrationBuilder.DropUniqueConstraint(
                 name: "AK_SubscriptionInvoices_TenantId_Id",

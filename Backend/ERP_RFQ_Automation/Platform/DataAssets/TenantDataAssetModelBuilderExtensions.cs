@@ -30,6 +30,7 @@ public static class TenantDataAssetModelBuilderExtensions
             entity.Property(x => x.ModifiedBy).HasMaxLength(256);
             entity.Property(x => x.Version).IsConcurrencyToken();
             entity.HasIndex(x => new { x.TenantId, x.LogicalKey }).IsUnique();
+            entity.HasAlternateKey(x => new { x.TenantId, x.Id });
             entity.HasOne<Models.Tenant>().WithMany().HasForeignKey(x => x.TenantId)
                 .OnDelete(DeleteBehavior.Restrict);
         });
@@ -60,6 +61,12 @@ public static class TenantDataAssetModelBuilderExtensions
             entity.Property(x => x.RecordedUtc).HasColumnType("timestamp with time zone");
             entity.HasIndex(x => new { x.TenantId, x.IdempotencyKey }).IsUnique();
             entity.HasIndex(x => new { x.TenantId, x.ScopeKey, x.EvidenceType, x.CompletedUtc });
+            entity.HasOne<Models.Tenant>().WithMany().HasForeignKey(x => x.TenantId)
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<TenantDataAsset>().WithMany()
+                .HasForeignKey(x => new { x.TenantId, x.TenantDataAssetId })
+                .HasPrincipalKey(x => new { x.TenantId, x.Id })
+                .OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<TenantDeletionCertificate>(entity =>
@@ -74,6 +81,8 @@ public static class TenantDataAssetModelBuilderExtensions
             entity.Property(x => x.PurgedUtc).HasColumnType("timestamp with time zone");
             entity.Property(x => x.CertifiedUtc).HasColumnType("timestamp with time zone");
             entity.HasIndex(x => x.TenantId).IsUnique();
+            entity.HasOne<Models.Tenant>().WithMany().HasForeignKey(x => x.TenantId)
+                .OnDelete(DeleteBehavior.Restrict);
         });
 
         return modelBuilder;

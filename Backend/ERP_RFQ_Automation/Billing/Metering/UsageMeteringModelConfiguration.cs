@@ -41,6 +41,8 @@ public static class UsageMeteringModelConfiguration
                 .HasForeignKey(x => new { x.TenantId, x.AdjustsUsageEventId })
                 .HasPrincipalKey(x => new { x.TenantId, x.UsageEventId })
                 .OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<ERP_RFQ_Automation.Platform.Models.Tenant>().WithMany()
+                .HasForeignKey(x => x.TenantId).OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<UsageMinuteAggregate>(entity =>
@@ -55,6 +57,8 @@ public static class UsageMeteringModelConfiguration
             entity.Property(x => x.RefreshedAtUtc).HasColumnType("timestamp with time zone");
             entity.HasIndex(x => new { x.TenantId, x.EventType, x.Unit, x.MinuteUtc }).IsUnique()
                 .HasDatabaseName("UX_UsageMinuteAggregates_Bucket");
+            entity.HasOne<ERP_RFQ_Automation.Platform.Models.Tenant>().WithMany()
+                .HasForeignKey(x => x.TenantId).OnDelete(DeleteBehavior.Restrict);
         });
     }
 }
