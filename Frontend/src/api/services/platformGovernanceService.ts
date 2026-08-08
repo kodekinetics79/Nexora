@@ -446,18 +446,6 @@ export const platformGovernanceService = {
     const { data } = await axiosInstance.get<AiTrustCenterView>('/api/platform-governance/ai-trust');
     return data;
   },
-  updateAiTrustPolicy: async (policy: AiTrustPolicy, reason: string) => {
-    const { data } = await axiosInstance.put('/api/platform-governance/ai-trust/policy',
-      { ...policy, expectedVersion: policy.version, reason },
-      { headers: { 'Idempotency-Key': key() } });
-    return data;
-  },
-  rollbackAiTrustPolicy: async (policy: AiTrustPolicy, auditEventId: number, reason: string) => {
-    const { data } = await axiosInstance.post('/api/platform-governance/ai-trust/policy/rollback',
-      { expectedVersion: policy.version, auditEventId, reason },
-      { headers: { 'Idempotency-Key': key() } });
-    return data;
-  },
   searchArchive: async (params: { search?: string; documentType?: string; status?: string; sort?: string }) => {
     const { data } = await axiosInstance.get<ArchiveSearchResult>('/api/platform-governance/archive',
       { params: { ...params, page: 1, pageSize: 100 } });

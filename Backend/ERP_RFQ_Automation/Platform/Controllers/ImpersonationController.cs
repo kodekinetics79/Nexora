@@ -107,6 +107,7 @@ public class ImpersonationController : ControllerBase
 
     // GET /api/platform/impersonation/sessions — active + recent (last 7 days)
     [HttpGet("impersonation/sessions")]
+    [Authorize(Policy = PlatformPolicies.Impersonate)]
     public async Task<ActionResult<IEnumerable<ImpersonationSessionDto>>> Sessions(CancellationToken ct)
     {
         var now = DateTime.UtcNow;

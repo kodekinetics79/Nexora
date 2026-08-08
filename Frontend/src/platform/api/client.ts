@@ -4,6 +4,9 @@ import { BILLING_MODES } from '../types';
 import type { EmailProviderCapability, MailConnectionTestResult } from '../../email/types';
 import type {
   AuditEntry,
+  AiProviderAuthorization,
+  AiProviderTrustView,
+  AuthorizeAiProviderInput,
   BillingMode,
   BillingStatement,
   BillingStatementSummary,
@@ -51,6 +54,8 @@ import type {
   TenantErasureResult,
   TenantExportDownload,
   TenantOffboardingStatus,
+  TenantLegalHold,
+  TenantAiPolicy,
   TenantOperationsSummary,
   TenantPurgePreview,
   TenantPurgeResult,
@@ -59,6 +64,7 @@ import type {
   TenantUsageReadout,
   TestOutboundEmailResult,
   UpdateRateCardInput,
+  UpdateTenantAiPolicyInput,
   UpsertPlanInput,
 } from '../types';
 
@@ -174,7 +180,10 @@ export interface PlatformApi {
   getOffboarding(tenantId: string): Promise<TenantOffboardingStatus>;
   listPendingDeletions(): Promise<PendingTenantDeletion[]>;
   getPurgePreview(tenantId: string): Promise<TenantPurgePreview>;
-  exportTenantData(tenantId: string, reason: string): Promise<TenantExportDownload>;
+  exportTenantData(
+    tenantId: string,
+    body: { reason: string; confirmation: string },
+  ): Promise<TenantExportDownload>;
   scheduleTenantDeletion(
     tenantId: string,
     body: { reason: string; retentionDays?: number | null },
@@ -185,6 +194,17 @@ export interface PlatformApi {
     tenantId: string,
     body: { reason: string; confirmation: string },
   ): Promise<TenantErasureResult>;
+  listTenantLegalHolds(tenantId: string): Promise<TenantLegalHold[]>;
+  placeTenantLegalHold(
+    tenantId: string,
+    body: { scope: string; authority: string; reason: string; evidenceReference: string },
+  ): Promise<TenantLegalHold>;
+  releaseTenantLegalHold(tenantId: string, holdId: string, reason: string): Promise<TenantLegalHold>;
+  getTenantAiPolicy(tenantId: string): Promise<TenantAiPolicy>;
+  updateTenantAiPolicy(tenantId: string, body: UpdateTenantAiPolicyInput): Promise<TenantAiPolicy>;
+  getTenantAiProviders(tenantId: string): Promise<AiProviderTrustView>;
+  authorizeTenantAiProvider(tenantId: string, body: AuthorizeAiProviderInput): Promise<AiProviderAuthorization>;
+  revokeTenantAiProvider(tenantId: string, authorizationId: string, reason: string): Promise<AiProviderAuthorization>;
 
   // --- billing console ---
   getRevenueRisk(query?: RevenueRiskQuery): Promise<RevenueRiskReport>;
@@ -897,13 +917,13 @@ const httpPlatformApi: PlatformApi = {
       preserved: (wire.preserved as string[]) ?? [],
     };
   },
-  exportTenantData: async (tenantId, reason) => {
+  exportTenantData: async (tenantId, body) => {
     // The export is a file, not JSON: it is handed to the customer, and the receipt hash
     // in the response headers is what proves the bytes they received are the bytes we sent.
     const response = await platformHttp
       .post<Blob>(
         `/api/platform/tenants/${tenantId}/offboarding/export`,
-        { reason },
+        body,
         { responseType: 'blob' },
       )
       .catch(async (error: unknown) => {
@@ -965,6 +985,56 @@ const httpPlatformApi: PlatformApi = {
       targets: (wire.targets as TenantErasureResult['targets']) ?? [],
       disclosures: (wire.disclosures as string[]) ?? [],
     };
+  },
+  listTenantLegalHolds: async (tenantId) =>
+    (await platformHttp.get<TenantLegalHold[]>(`/api/platform/tenants/${tenantId}/legal-holds`)).data.map(
+      (hold) => ({ ...hold, id: String(hold.id), tenantId: String(hold.tenantId) }),
+    ),
+  placeTenantLegalHold: async (tenantId, body) => {
+    const hold = (await platformHttp.post<TenantLegalHold>(
+      `/api/platform/tenants/${tenantId}/legal-holds`, body,
+    )).data;
+    return { ...hold, id: String(hold.id), tenantId: String(hold.tenantId) };
+  },
+  releaseTenantLegalHold: async (tenantId, holdId, reason) => {
+    const hold = (await platformHttp.post<TenantLegalHold>(
+      `/api/platform/tenants/${tenantId}/legal-holds/${holdId}/release`, { reason },
+    )).data;
+    return { ...hold, id: String(hold.id), tenantId: String(hold.tenantId) };
+  },
+  getTenantAiPolicy: async (tenantId) => {
+    const policy = (await platformHttp.get<TenantAiPolicy>(`/api/platform/tenants/${tenantId}/ai-policy`)).data;
+    return { ...policy, businessUnitId: String(policy.businessUnitId) };
+  },
+  updateTenantAiPolicy: async (tenantId, body) => {
+    const policy = (await platformHttp.put<TenantAiPolicy>(`/api/platform/tenants/${tenantId}/ai-policy`, body)).data;
+    return { ...policy, businessUnitId: String(policy.businessUnitId) };
+  },
+  getTenantAiProviders: async (tenantId) => {
+    const view = (await platformHttp.get<AiProviderTrustView>(`/api/platform/tenants/${tenantId}/ai-providers`)).data;
+    return {
+      ...view,
+      authorizations: view.authorizations.map((item) => ({
+        ...item,
+        id: String(item.id),
+        authorizedByUserId: String(item.authorizedByUserId),
+      })),
+    };
+  },
+  authorizeTenantAiProvider: async (tenantId, body) => {
+    const result = (await platformHttp.post<{ authorization: AiProviderAuthorization }>(
+      `/api/platform/tenants/${tenantId}/ai-providers`, body,
+      { headers: { 'Idempotency-Key': crypto.randomUUID() } },
+    )).data.authorization;
+    return { ...result, id: String(result.id), authorizedByUserId: String(result.authorizedByUserId) };
+  },
+  revokeTenantAiProvider: async (tenantId, authorizationId, reason) => {
+    const result = (await platformHttp.post<{ authorization: AiProviderAuthorization }>(
+      `/api/platform/tenants/${tenantId}/ai-providers/${authorizationId}/revoke`,
+      { authorizationId: Number(authorizationId), reason },
+      { headers: { 'Idempotency-Key': crypto.randomUUID() } },
+    )).data.authorization;
+    return { ...result, id: String(result.id), authorizedByUserId: String(result.authorizedByUserId) };
   },
 
   // --- billing console ------------------------------------------------------

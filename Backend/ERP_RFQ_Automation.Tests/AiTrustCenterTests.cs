@@ -1,6 +1,13 @@
+using System.Reflection;
 using ERP_RFQ_Automation.AI;
+using ERP_RFQ_Automation.Controllers;
+using ERP_RFQ_Automation.Platform.Auth;
+using ERP_RFQ_Automation.Platform.Controllers;
 using ERP_RFQ_Automation.PlatformGovernance;
 using ERP_RFQ_Automation.Tests.Support;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Routing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 
@@ -9,58 +16,59 @@ namespace ERP_RFQ_Automation.Tests;
 public sealed class AiTrustCenterTests
 {
     [Fact]
-    public async Task Policy_update_is_versioned_idempotent_and_rollback_restores_prior_controls()
+    public void Tenant_trust_center_is_read_only_at_both_endpoint_and_service_boundaries()
     {
-        using var database = new TestDb();
-        await using var context = database.ContextFor(62_001);
-        Seed.BusinessUnit(context, 62_001);
-        context.AiProcessingPolicies.Add(Policy(62_001));
-        await context.SaveChangesAsync();
-        var service = new AiTrustCenterService(context, Resolver());
-        var command = Command(1) with
-        {
-            ExternalProcessingAllowed = true,
-            AllowedProvider = "approved-provider",
-            AllowedModel = "approved-model",
-            ExternalDependencyCeilingPercent = 7.5m,
-            Reason = "Approve redacted fallback for classified RFQs"
-        };
+        var controllerActions = typeof(PlatformGovernanceController).GetMethods(
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly);
+        var trustRead = Assert.Single(controllerActions, method => method.Name == nameof(
+            PlatformGovernanceController.GetAiTrust));
+        Assert.Equal("ai-trust", Assert.Single(trustRead.GetCustomAttributes<HttpGetAttribute>()).Template);
+        var providerRead = Assert.Single(controllerActions, method => method.Name == nameof(
+            PlatformGovernanceController.GetExternalProviders));
+        Assert.Equal("ai-trust/external-providers",
+            Assert.Single(providerRead.GetCustomAttributes<HttpGetAttribute>()).Template);
 
-        var updated = await service.UpdateAsync(62_001, 51, "ai-policy-update", command, default);
-        var replay = await service.UpdateAsync(62_001, 51, "ai-policy-update", command, default);
-        var eventId = await context.TenantGovernanceAuditEvents
-            .Where(x => x.Action == "POLICY_UPDATED").Select(x => x.Id).SingleAsync();
-        var rolledBack = await service.RollbackAsync(62_001, 51, "ai-policy-rollback",
-            new(updated.Policy.Version, eventId, "External fallback window closed"), default);
+        var tenantPolicyMutationRoutes = controllerActions
+            .SelectMany(method => method.GetCustomAttributes<HttpMethodAttribute>())
+            .Where(route => route.HttpMethods.Any(verb => verb is "PUT" or "POST")
+                && route.Template?.StartsWith("ai-trust", StringComparison.OrdinalIgnoreCase) == true);
+        Assert.Empty(tenantPolicyMutationRoutes);
 
-        Assert.True(replay.IdempotentReplay);
-        Assert.True(updated.Policy.ExternalProcessingAllowed);
-        Assert.Equal(7.5m, updated.Policy.ExternalDependencyCeilingPercent);
-        Assert.False(rolledBack.Policy.ExternalProcessingAllowed);
-        Assert.Equal(10m, rolledBack.Policy.ExternalDependencyCeilingPercent);
-        Assert.Equal(2, await context.TenantGovernanceAuditEvents.CountAsync());
+        var serviceSurface = typeof(AiTrustCenterService).GetMethods(
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly);
+        Assert.Collection(serviceSurface, method => Assert.Equal(nameof(AiTrustCenterService.GetAsync), method.Name));
+
+        var providerTrustSurface = typeof(IAiExternalProviderTrust).GetMethods();
+        Assert.DoesNotContain(providerTrustSurface, method => method.Name is "AuthorizeAsync" or "RevokeAsync");
+        var providerServiceSurface = typeof(AiExternalProviderTrustService).GetMethods(
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly);
+        Assert.DoesNotContain(providerServiceSurface, method => method.Name is "AuthorizeAsync" or "RevokeAsync");
     }
 
     [Fact]
-    public async Task External_policy_cannot_bypass_redaction_privacy_or_dependency_ceiling()
+    public void Platform_Owner_routes_are_the_only_AI_governance_mutation_surface()
     {
-        using var database = new TestDb();
-        await using var context = database.ContextFor(62_011);
-        Seed.BusinessUnit(context, 62_011);
-        context.AiProcessingPolicies.Add(Policy(62_011));
-        await context.SaveChangesAsync();
-        var service = new AiTrustCenterService(context, Resolver());
+        var platformMutation = typeof(TenantsController).GetMethod(nameof(TenantsController.UpdateAiPolicy))!;
+        Assert.Equal("{id:long}/ai-policy",
+            Assert.Single(platformMutation.GetCustomAttributes<HttpPutAttribute>()).Template);
+        Assert.Equal(PlatformPolicies.Owner,
+            Assert.Single(platformMutation.GetCustomAttributes<AuthorizeAttribute>()).Policy);
+        foreach (var actionName in new[]
+                 {
+                     nameof(TenantsController.AuthorizeAiProvider),
+                     nameof(TenantsController.RevokeAiProvider)
+                 })
+        {
+            var providerMutation = typeof(TenantsController).GetMethod(actionName)!;
+            Assert.Equal(PlatformPolicies.Owner,
+                Assert.Single(providerMutation.GetCustomAttributes<AuthorizeAttribute>()).Policy);
+            Assert.NotEmpty(providerMutation.GetCustomAttributes<HttpPostAttribute>());
+        }
 
-        await Assert.ThrowsAsync<PlatformGovernanceValidationException>(() => service.UpdateAsync(
-            62_011, 52, "unsafe-egress", Command(1) with
-            {
-                ExternalProcessingAllowed = true,
-                RedactionRequired = false,
-                PrivacyReviewRequired = false,
-                ExternalDependencyCeilingPercent = 11,
-                AllowedProvider = "provider",
-                AllowedModel = "model"
-            }, default));
+        var tenantActions = typeof(PlatformGovernanceController).GetMethods(
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly);
+        Assert.DoesNotContain(tenantActions, method => method.Name.Contains("AiTrustPolicy",
+            StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -119,11 +127,6 @@ public sealed class AiTrustCenterTests
         RetentionDays = 30, PrivacyReviewRequired = true, Version = 1,
         UpdatedOn = DateTime.UtcNow, UpdatedBy = "test"
     };
-
-    private static UpdateAiTrustPolicyCommand Command(long version) => new(version, true, false,
-        "RfqExtraction,BoqDraft", null, null, 50_000, 100_000, 10_000,
-        null, null, null, null, 10, true, "Public,Internal", "RedactedFieldsOnly",
-        "TenantApprovedRegion", 30, false, true, null, null, null, "Test update");
 
     private static AiRequest Request(long tenantId, AiProviderClass providerClass, decimal? cost) => new()
     {

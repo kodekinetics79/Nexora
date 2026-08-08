@@ -243,7 +243,8 @@ public sealed class PlatformPlansAndOverviewTests
     // ---- Helpers ------------------------------------------------------------
 
     private static PlatformOperationsController OperationsController(ErpRfqAutomationContext context) => new(
-        context, new PlatformAuditService(context, NullLogger<PlatformAuditService>.Instance))
+        context, new PlatformAuditService(context, NullLogger<PlatformAuditService>.Instance),
+        PlatformSupportFixture.Authorization())
     {
         ControllerContext = new ControllerContext
         {

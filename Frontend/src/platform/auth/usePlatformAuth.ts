@@ -32,7 +32,7 @@ export interface PlatformAuth {
   /** Authenticate against the platform IdP and store the platform token. */
   platformLogin: (email: string, password: string) => Promise<void>;
   /** Drop the platform session (returns the console to the login screen). */
-  platformLogout: () => void;
+  platformLogout: () => Promise<void>;
 }
 
 export const usePlatformAuth = (): PlatformAuth => {
@@ -60,8 +60,12 @@ export const usePlatformAuth = (): PlatformAuth => {
     setPlatformSession(token, userFromLogin(data, token, email));
   }, []);
 
-  const platformLogout = useCallback(() => {
-    clearPlatformSession();
+  const platformLogout = useCallback(async () => {
+    try {
+      await platformHttp.post('/api/platform/auth/logout');
+    } finally {
+      clearPlatformSession();
+    }
   }, []);
 
   return { isPlatformAuthed, platformUser, platformLogin, platformLogout };

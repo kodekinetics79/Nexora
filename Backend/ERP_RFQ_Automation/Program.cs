@@ -425,7 +425,9 @@ builder.Services.AddSingleton<IAiProviderEndpointResolver, AiProviderEndpointRes
 // Per-tenant allow-list of external inference endpoints (AI/AiExternalProviderTrustService.cs).
 // Scoped: it reads the tenant-filtered ErpRfqAutomationContext. Its ABSENCE is a refusal,
 // so a missing registration degrades to today's fail-closed behaviour, never to open egress.
-builder.Services.AddScoped<IAiExternalProviderTrust, AiExternalProviderTrustService>();
+builder.Services.AddScoped<AiExternalProviderTrustService>();
+builder.Services.AddScoped<IAiExternalProviderTrust>(services =>
+    services.GetRequiredService<AiExternalProviderTrustService>());
 builder.Services.AddSingleton<IAiReservationReconciler, AiReservationReconciler>();
 builder.Services.AddHostedService<AiReservationReconciliationWorker>();
 builder.Services.AddHttpClient<OllamaLlmService>(client =>

@@ -184,9 +184,8 @@ public sealed record AiExternalProviderMutationResult(
     AiExternalProviderAuthorizationView Authorization, bool IdempotentReplay);
 
 /// <summary>
-/// The allow-list. <see cref="EvaluateAsync"/> is the enforcement point; the remaining
-/// members are the attributed, audited administration surface behind
-/// <c>api/platform-governance/ai-trust/external-providers</c>.
+/// The allow-list read/enforcement contract. Mutation is deliberately excluded so a
+/// tenant-plane consumer cannot acquire egress authority through dependency injection.
 /// </summary>
 public interface IAiExternalProviderTrust
 {
@@ -202,12 +201,4 @@ public interface IAiExternalProviderTrust
         bool unstructuredPayload, CancellationToken ct);
 
     Task<AiExternalProviderTrustView> GetAsync(long businessUnitId, CancellationToken ct);
-
-    Task<AiExternalProviderMutationResult> AuthorizeAsync(
-        long businessUnitId, long actorUserId, string idempotencyKey,
-        AuthorizeAiExternalProviderCommand command, CancellationToken ct);
-
-    Task<AiExternalProviderMutationResult> RevokeAsync(
-        long businessUnitId, long actorUserId, string idempotencyKey,
-        RevokeAiExternalProviderCommand command, CancellationToken ct);
 }

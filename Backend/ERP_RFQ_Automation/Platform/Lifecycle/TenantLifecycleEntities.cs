@@ -55,6 +55,24 @@ public sealed class TenantOffboarding
     /// </summary>
     public DateTime? PurgeStartedOn { get; set; }
 
+    /// <summary>
+    /// Fencing token for the currently claimed destructive attempt. The owner-connection sweep
+    /// locks this row and must observe this exact token before deleting anything.
+    /// </summary>
+    public Guid? PurgeAttemptId { get; set; }
+
+    /// <summary>
+    /// Written by the owner-connection transaction together with the deletes. If the web process
+    /// dies before writing the audit completion, a retry finalizes this durable outcome instead
+    /// of executing a second sweep and reporting zero rows.
+    /// </summary>
+    public DateTime? PurgeExecutedOn { get; set; }
+
+    public long? PurgeExecutedRowCount { get; set; }
+
+    /// <summary>JSON snapshot of table-level delete counts from the fenced attempt.</summary>
+    public string? PurgeExecutionDetail { get; set; }
+
     public DateTime? PurgedOn { get; set; }
 
     public string? PurgedBy { get; set; }
@@ -195,6 +213,28 @@ public sealed class TenantExportReceipt
 }
 
 /// <summary>
+/// An operator-owned preservation order. Core placement fields never change; release is an
+/// attributable second transition on the same record. Database guards reject deletion, changes
+/// to placement evidence, and a second release.
+/// </summary>
+public sealed class TenantLegalHold
+{
+    public long Id { get; set; }
+    public long TenantId { get; set; }
+    public string Scope { get; set; } = null!;
+    public string Authority { get; set; } = null!;
+    public string Reason { get; set; } = null!;
+    public string EvidenceReference { get; set; } = null!;
+    public DateTime PlacedOn { get; set; } = DateTime.UtcNow;
+    public long PlacedByPlatformUserId { get; set; }
+    public string PlacedBy { get; set; } = null!;
+    public DateTime? ReleasedOn { get; set; }
+    public long? ReleasedByPlatformUserId { get; set; }
+    public string? ReleasedBy { get; set; }
+    public string? ReleaseReason { get; set; }
+}
+
+/// <summary>
 /// EF configuration for the offboarding tables, kept in the owning module so the context needs
 /// exactly one delegating call — the same splice discipline
 /// <c>ApplyTenantOnboardingModel</c> / <c>ConfigureCommercialFinance</c> use.
@@ -230,6 +270,7 @@ public static class TenantLifecycleModelBuilderExtensions
             entity.Property(x => x.DeletionScheduledBy).HasMaxLength(256);
             entity.Property(x => x.PurgedBy).HasMaxLength(256);
             entity.Property(x => x.PurgeReason).HasMaxLength(1000);
+            entity.Property(x => x.PurgeExecutionDetail).HasColumnType("jsonb");
             entity.Property(x => x.PersonalDataErasedBy).HasMaxLength(256);
             entity.Property(x => x.PersonalDataErasureReason).HasMaxLength(1000);
             entity.Property(x => x.LastExportedBy).HasMaxLength(256);
@@ -285,6 +326,25 @@ public static class TenantLifecycleModelBuilderExtensions
 
             entity.HasIndex(x => new { x.TenantId, x.CompletedOn })
                 .HasDatabaseName("IX_TenantExportReceipts_TenantId_CompletedOn");
+        });
+
+        modelBuilder.Entity<TenantLegalHold>(entity =>
+        {
+            entity.ToTable("TenantLegalHolds", "platform");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Scope).IsRequired().HasMaxLength(64);
+            entity.Property(x => x.Authority).IsRequired().HasMaxLength(128);
+            entity.Property(x => x.Reason).IsRequired().HasMaxLength(1000);
+            entity.Property(x => x.EvidenceReference).IsRequired().HasMaxLength(512);
+            entity.Property(x => x.PlacedBy).IsRequired().HasMaxLength(320);
+            entity.Property(x => x.ReleasedBy).HasMaxLength(320);
+            entity.Property(x => x.ReleaseReason).HasMaxLength(1000);
+            entity.HasIndex(x => new { x.TenantId, x.ReleasedOn })
+                .HasDatabaseName("IX_TenantLegalHolds_TenantId_ReleasedOn");
+            entity.HasIndex(x => new { x.TenantId, x.Scope })
+                .HasFilter("\"ReleasedOn\" IS NULL")
+                .IsUnique()
+                .HasDatabaseName("UX_TenantLegalHolds_ActiveScope");
         });
 
         return modelBuilder;

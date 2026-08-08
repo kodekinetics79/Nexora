@@ -3,9 +3,11 @@ using System.Text.Json;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Platform.Lifecycle;
 using ERP_RFQ_Automation.Platform.Models;
+using ERP_RFQ_Automation.Platform.Services;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -249,6 +251,91 @@ public sealed class TenantLifecyclePostgreSqlTests
 
         Assert.Equal(409, refusal.SuggestedStatusCode);
         Assert.Contains("already purged", refusal.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Active_legal_hold_blocks_purge_until_governed_release()
+    {
+        var tenant = await SchedulePurgeableAsync(88_107, "purge-legal-hold");
+        var actor = TenantLifecycleHarness.Operator("legal@nexora.test", 17);
+        long holdId;
+        await using (var db = Context())
+        {
+            var holds = new TenantLegalHoldService(
+                db, new PlatformAuditService(db, NullLogger<PlatformAuditService>.Instance));
+            var hold = await holds.PlaceAsync(tenant.Id, new PlaceTenantLegalHoldRequest
+            {
+                Scope = "AllTenantData",
+                Authority = "Litigation counsel",
+                Reason = "Preserve all tenant records for active litigation.",
+                EvidenceReference = "case://NEX-2026-88-107"
+            }, actor, null, CancellationToken.None);
+            holdId = hold.Id;
+        }
+
+        await using (var blocked = Context())
+        {
+            var refusal = await Assert.ThrowsAsync<TenantOffboardingRefusedException>(() =>
+                Service(blocked).PurgeAsync(tenant.Id, new ConfirmTenantDestructionRequest
+                {
+                    Reason = OffboardingReason,
+                    Confirmation = tenant.Name
+                }, actor, null, CancellationToken.None));
+            Assert.Contains("legal hold", refusal.Message, StringComparison.OrdinalIgnoreCase);
+        }
+
+        await using (var release = Context())
+        {
+            var holds = new TenantLegalHoldService(
+                release, new PlatformAuditService(release, NullLogger<PlatformAuditService>.Instance));
+            await holds.ReleaseAsync(tenant.Id, holdId, new ReleaseTenantLegalHoldRequest
+            {
+                Reason = "Counsel confirmed the preservation obligation has ended."
+            }, actor, null, CancellationToken.None);
+        }
+
+        await using var purgeDb = Context();
+        var result = await Service(purgeDb).PurgeAsync(tenant.Id, new ConfirmTenantDestructionRequest
+        {
+            Reason = OffboardingReason,
+            Confirmation = tenant.Name
+        }, actor, null, CancellationToken.None);
+        Assert.True(result.RowsDeleted > 0);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Legal_hold_placement_evidence_is_database_immutable()
+    {
+        var tenant = await SeedTenantAsync(88_108, "legal-hold-immutable");
+        await using (var db = Context())
+        {
+            var holds = new TenantLegalHoldService(
+                db, new PlatformAuditService(db, NullLogger<PlatformAuditService>.Instance));
+            await holds.PlaceAsync(tenant.Id, new PlaceTenantLegalHoldRequest
+            {
+                Scope = "AllTenantData",
+                Authority = "Regulatory order",
+                Reason = "Preserve all records under the regulator's written order.",
+                EvidenceReference = "regulator://order-88-108"
+            }, TenantLifecycleHarness.Operator(), null, CancellationToken.None);
+        }
+
+        await using var connection = new NpgsqlConnection(_database.ConnectionString);
+        await connection.OpenAsync();
+        await using var rewrite = new NpgsqlCommand(
+            """UPDATE platform."TenantLegalHolds" SET "Reason" = 'rewritten' WHERE "TenantId" = @tenant;""",
+            connection);
+        rewrite.Parameters.AddWithValue("tenant", tenant.Id);
+        var rewriteFailure = await Assert.ThrowsAsync<PostgresException>(() => rewrite.ExecuteNonQueryAsync());
+        Assert.Equal("55000", rewriteFailure.SqlState);
+
+        await using var deletion = new NpgsqlCommand(
+            """DELETE FROM platform."TenantLegalHolds" WHERE "TenantId" = @tenant;""", connection);
+        deletion.Parameters.AddWithValue("tenant", tenant.Id);
+        var deleteFailure = await Assert.ThrowsAsync<PostgresException>(() => deletion.ExecuteNonQueryAsync());
+        Assert.Equal("55000", deleteFailure.SqlState);
     }
 
     [Fact]

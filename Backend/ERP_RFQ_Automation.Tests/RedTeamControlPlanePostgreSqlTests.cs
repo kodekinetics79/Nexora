@@ -30,7 +30,7 @@ public sealed class RedTeamControlPlanePostgreSqlTests
         "ProvisioningExecutions", "ProvisioningSteps", "ProvisioningDrafts",
         "TenantOffboardings", "TenantLifecycleEvents", "TenantExportReceipts",
         "SupportTickets", "SupportTicketNotes", "SupportTicketLinks",
-        "TenantAdminInvitations"
+        "TenantAdminInvitations", "PlatformSessions", "TenantLegalHolds"
     ];
 
     // ================================================================== grants on the new tables
@@ -53,6 +53,8 @@ public sealed class RedTeamControlPlanePostgreSqlTests
     [InlineData("TenantLifecycleEvents", "SELECT,INSERT")]
     [InlineData("TenantExportReceipts", "SELECT,INSERT")]
     [InlineData("TenantAdminInvitations", "SELECT,INSERT,UPDATE,DELETE")]
+    [InlineData("PlatformSessions", "SELECT,INSERT,UPDATE")]
+    [InlineData("TenantLegalHolds", "SELECT,INSERT,UPDATE")]
     public async Task The_pipeline_role_holds_exactly_the_privileges_each_new_table_needs(
         string table, string expected)
     {
@@ -101,7 +103,7 @@ public sealed class RedTeamControlPlanePostgreSqlTests
     }
 
     /// <summary>
-    /// Column-scoped UPDATE on Users is what stops a defect in the anonymous redemption path from
+    /// Column-scoped UPDATE on Users is what stops a defect in the identity path from
     /// becoming a privilege escalation. Written against the MAPPED column names, because
     /// <c>User.PasswordHash</c> is <c>"Password_Hash"</c> and <c>RoleId</c> is <c>"RoleID"</c> —
     /// a grant written against the CLR name parses and fails with 42703 only on PostgreSQL.
@@ -113,6 +115,8 @@ public sealed class RedTeamControlPlanePostgreSqlTests
     [InlineData("DeactivatedAtUtc", true)]
     [InlineData("ModifiedBy", true)]
     [InlineData("ModifiedOn", true)]
+    // Successful tenant login may stamp activity, but cannot change identity or authority.
+    [InlineData("LastLogin", true)]
     // The three columns that decide what an account IS and whose tenant it belongs to.
     [InlineData("RoleID", false)]
     [InlineData("BUID", false)]
@@ -124,7 +128,7 @@ public sealed class RedTeamControlPlanePostgreSqlTests
     // parses and fails with 42703 only on PostgreSQL, which is why this asserts the mapped name
     // above and the CLR name's ABSENCE is asserted by the schema itself (it does not exist).
     [InlineData("ManagerID", false)]
-    public async Task The_activation_role_can_only_update_the_five_columns_redemption_needs(
+    public async Task The_identity_role_can_only_update_activation_and_login_activity_columns(
         string column, bool expected)
     {
         await using var connection = await _database.OpenConnectionAsync();
@@ -455,7 +459,7 @@ public sealed class RedTeamControlPlanePostgreSqlTests
             await SeedProvisioningStepAsync(connection, executionId, "redteam-steps");
 
             await TenantLifecycleHarness.PurgeExecutor(_database.ConnectionString)
-                .ExecuteAsync(scope.TenantId, scope.BusinessUnitId, CancellationToken.None);
+                .ExecuteAsync(scope.TenantId, scope.BusinessUnitId, scope.PurgeAttemptId, CancellationToken.None);
 
             Assert.Equal(0, await CountAsync(connection,
                 """SELECT count(*)::int FROM platform."ProvisioningExecutions" WHERE "TenantId" = @id;""",
@@ -513,7 +517,7 @@ public sealed class RedTeamControlPlanePostgreSqlTests
             }
 
             await TenantLifecycleHarness.PurgeExecutor(_database.ConnectionString)
-                .ExecuteAsync(scope.TenantId, scope.BusinessUnitId, CancellationToken.None);
+                .ExecuteAsync(scope.TenantId, scope.BusinessUnitId, scope.PurgeAttemptId, CancellationToken.None);
 
             await using var probe = new NpgsqlCommand(
                 """SELECT count(*)::int FROM platform."ProvisioningDrafts" WHERE "Id" = @id;""",
@@ -575,7 +579,7 @@ public sealed class RedTeamControlPlanePostgreSqlTests
             await SeedImpersonationLinkAsync(connection, ticketId, jti);
 
             await TenantLifecycleHarness.PurgeExecutor(_database.ConnectionString)
-                .ExecuteAsync(scope.TenantId, scope.BusinessUnitId, CancellationToken.None);
+                .ExecuteAsync(scope.TenantId, scope.BusinessUnitId, scope.PurgeAttemptId, CancellationToken.None);
 
             // The ticket and its link survive by design. The thing they point at must too.
             Assert.Equal(1, await CountAsync(connection,
@@ -623,7 +627,7 @@ public sealed class RedTeamControlPlanePostgreSqlTests
             Assert.NotEmpty(before);
 
             await TenantLifecycleHarness.PurgeExecutor(_database.ConnectionString)
-                .ExecuteAsync(doomed.TenantId, doomed.BusinessUnitId, CancellationToken.None);
+                .ExecuteAsync(doomed.TenantId, doomed.BusinessUnitId, doomed.PurgeAttemptId, CancellationToken.None);
 
             Assert.Equal(0, await CountAsync(connection,
                 """SELECT count(*)::int FROM platform."ProvisioningExecutions" WHERE "TenantId" = @id;""",
@@ -642,7 +646,8 @@ public sealed class RedTeamControlPlanePostgreSqlTests
 
     // ================================================================================== helpers
 
-    private readonly record struct PurgeScope(long TenantId, long BusinessUnitId, string Slug);
+    private readonly record struct PurgeScope(
+        long TenantId, long BusinessUnitId, string Slug, Guid PurgeAttemptId);
 
     private static async Task<List<string>> PrivilegesAsync(
         NpgsqlConnection connection, string role, string table)
@@ -736,7 +741,20 @@ public sealed class RedTeamControlPlanePostgreSqlTests
             tenantId = (long)(await command.ExecuteScalarAsync())!;
         }
 
-        return new PurgeScope(tenantId, businessUnitId, unique);
+        var purgeAttemptId = Guid.NewGuid();
+        await using (var command = new NpgsqlCommand(
+            """
+            INSERT INTO platform."TenantOffboardings"
+                ("TenantId", "Stage", "PurgeStartedOn", "PurgeAttemptId", "CreatedOn")
+            VALUES (@tenant, 'PendingDeletion', now(), @attempt, now());
+            """, connection))
+        {
+            command.Parameters.AddWithValue("tenant", tenantId);
+            command.Parameters.AddWithValue("attempt", purgeAttemptId);
+            await command.ExecuteNonQueryAsync();
+        }
+
+        return new PurgeScope(tenantId, businessUnitId, unique, purgeAttemptId);
     }
 
     private static async Task<long> SeedSupportTicketAsync(NpgsqlConnection connection, PurgeScope scope)
@@ -814,9 +832,7 @@ public sealed class RedTeamControlPlanePostgreSqlTests
                 RETURNING "Id";
                 """,
             "TenantOffboardings" => """
-                INSERT INTO platform."TenantOffboardings" ("TenantId", "Stage", "CreatedOn")
-                VALUES (@tenantId, 'NotScheduled', now())
-                RETURNING "Id";
+                SELECT "Id" FROM platform."TenantOffboardings" WHERE "TenantId" = @tenantId;
                 """,
             _ => throw new ArgumentOutOfRangeException(nameof(table), table, "No seeder for this table.")
         };

@@ -46,6 +46,7 @@ public class TenantAdminInvitationsController : ControllerBase
 
     // GET /api/platform/tenants/{tenantId}/admin-invitations
     [HttpGet]
+    [Authorize(Policy = PlatformPolicies.TenantAdmin)]
     public async Task<ActionResult<IEnumerable<TenantAdminInvitationSummary>>> List(
         long tenantId, CancellationToken ct)
     {

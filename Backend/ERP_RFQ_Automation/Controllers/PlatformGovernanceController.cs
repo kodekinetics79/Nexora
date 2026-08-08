@@ -92,18 +92,6 @@ public sealed class PlatformGovernanceController(
     [RequireModulePermission("Users", PermissionAction.View)]
     public Task<AiTrustCenterView> GetAiTrust(CancellationToken ct) => aiTrust.GetAsync(TenantId(), ct);
 
-    [HttpPut("ai-trust/policy")]
-    [RequireModulePermission("Users", PermissionAction.Edit)]
-    public Task<ActionResult<AiTrustPolicyMutationResult>> UpdateAiTrustPolicy(
-        [FromBody] UpdateAiTrustPolicyCommand command, CancellationToken ct) =>
-        Execute(() => aiTrust.UpdateAsync(TenantId(), ActorUserId(), IdempotencyKey(), command, ct));
-
-    [HttpPost("ai-trust/policy/rollback")]
-    [RequireModulePermission("Users", PermissionAction.Edit)]
-    public Task<ActionResult<AiTrustPolicyMutationResult>> RollbackAiTrustPolicy(
-        [FromBody] RollbackAiTrustPolicyCommand command, CancellationToken ct) =>
-        Execute(() => aiTrust.RollbackAsync(TenantId(), ActorUserId(), IdempotencyKey(), command, ct));
-
     /// <summary>
     /// The tenant's external AI provider allow-list, together with the endpoint this
     /// deployment is actually configured to call and whether that endpoint is currently
@@ -114,26 +102,6 @@ public sealed class PlatformGovernanceController(
     [RequireModulePermission("Users", PermissionAction.View)]
     public Task<AiExternalProviderTrustView> GetExternalProviders(CancellationToken ct) =>
         externalProviderTrust.GetAsync(TenantId(), ct);
-
-    /// <summary>
-    /// Authorize ONE external inference endpoint for this tenant. Opt-in only: no tenant
-    /// has an authorization until a named user creates one here with a written
-    /// justification, and <c>unstructuredDocumentsAllowed</c> defaults to false.
-    /// </summary>
-    [HttpPost("ai-trust/external-providers")]
-    [RequireModulePermission("Users", PermissionAction.Edit)]
-    public Task<ActionResult<AiExternalProviderMutationResult>> AuthorizeExternalProvider(
-        [FromBody] AuthorizeAiExternalProviderCommand command, CancellationToken ct) =>
-        Execute(() => externalProviderTrust.AuthorizeAsync(
-            TenantId(), ActorUserId(), IdempotencyKey(), command, ct));
-
-    /// <summary>Revoke an authorization. Takes effect on the next extraction, no restart.</summary>
-    [HttpPost("ai-trust/external-providers/revoke")]
-    [RequireModulePermission("Users", PermissionAction.Edit)]
-    public Task<ActionResult<AiExternalProviderMutationResult>> RevokeExternalProvider(
-        [FromBody] RevokeAiExternalProviderCommand command, CancellationToken ct) =>
-        Execute(() => externalProviderTrust.RevokeAsync(
-            TenantId(), ActorUserId(), IdempotencyKey(), command, ct));
 
     [HttpGet("archive")]
     [RequireModulePermission("Users", PermissionAction.View)]

@@ -142,6 +142,30 @@ public sealed class PlatformAuditIntegrityTests
         Assert.Equal("needle-tenant", match.GetProperty("targetId").GetString());
     }
 
+    [Fact]
+    public async Task Legacy_audit_route_withholds_billing_payload_from_read_only_ops()
+    {
+        using var db = new TestDb();
+        await using (var seed = db.ContextFor(null))
+        {
+            var row = Row("billing.tenant.commercial-terms", PlatformAuditResults.Success, 7);
+            row.Metadata = "{\"billingModeReason\":\"confidential concession\"}";
+            seed.Set<PlatformAuditLog>().Add(row);
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = db.ContextFor(null);
+        var controller = OperationsController(context);
+        controller.HttpContext.User = PlatformSupportFixture.Actor(
+            role: PlatformRole.ReadOnlyOps, email: "readonly@example.test");
+
+        var rows = await Rows(controller.Audit(null, null, null, null, CancellationToken.None));
+        var result = Assert.Single(rows);
+        Assert.Equal(JsonValueKind.Null, result.GetProperty("detail").ValueKind);
+        Assert.False(result.GetProperty("metadataDisclosed").GetBoolean());
+        Assert.Equal(PlatformPolicies.Billing, result.GetProperty("requiredPolicy").GetString());
+    }
+
     // ---- Platform login auditing -------------------------------------------
 
     [Fact]
@@ -221,7 +245,8 @@ public sealed class PlatformAuditIntegrityTests
     };
 
     private static PlatformOperationsController OperationsController(ErpRfqAutomationContext context) => new(
-        context, new PlatformAuditService(context, NullLogger<PlatformAuditService>.Instance))
+        context, new PlatformAuditService(context, NullLogger<PlatformAuditService>.Instance),
+        PlatformSupportFixture.Authorization())
     {
         ControllerContext = new ControllerContext
         {

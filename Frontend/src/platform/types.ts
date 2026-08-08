@@ -212,6 +212,8 @@ export interface AuditEntry {
   ipAddress: string;
   result: AuditResult;
   detail?: string;
+  metadataDisclosed?: boolean;
+  requiredPolicy?: string;
 }
 
 // --- Overview / system health ----------------------------------------------
@@ -359,6 +361,7 @@ export interface BillingStatement {
   status: string;
   totalAmount: number;
   computedAtUtc: string;
+  computedBy: string;
   finalizedAtUtc: string | null;
   finalizedBy: string | null;
   lines: BillingStatementLine[];
@@ -678,6 +681,99 @@ export interface TenantExportReceipt {
   sections: string;
 }
 
+export interface TenantLegalHold {
+  id: string;
+  tenantId: string;
+  scope: string;
+  authority: string;
+  reason: string;
+  evidenceReference: string;
+  placedOn: string;
+  placedBy: string;
+  isActive: boolean;
+  releasedOn: string | null;
+  releasedBy: string | null;
+  releaseReason: string | null;
+}
+
+export interface TenantAiPolicy {
+  businessUnitId: string;
+  isEnabled: boolean;
+  externalProcessingAllowed: boolean;
+  allowedPurposes: string[];
+  allowedProvider: string | null;
+  allowedModel: string | null;
+  monthlySoftTokenLimit: number | null;
+  monthlyHardTokenLimit: number | null;
+  maxTokensPerDocument: number | null;
+  externalInputCostPerMillionTokens: number | null;
+  externalOutputCostPerMillionTokens: number | null;
+  externalCostCurrency: string | null;
+  externalPricingVersion: string | null;
+  externalDependencyCeilingPercent: number;
+  redactionRequired: boolean;
+  allowedDataClassifications: string;
+  egressPolicy: string;
+  dataResidency: string;
+  retentionDays: number;
+  inputOutputAuditAllowed: boolean;
+  privacyReviewRequired: boolean;
+  localComputeCostPerHour: number | null;
+  ocrCostPerPage: number | null;
+  localCostCurrency: string | null;
+  version: number;
+  updatedOn: string;
+  updatedBy: string;
+}
+
+export type UpdateTenantAiPolicyInput = Omit<TenantAiPolicy, 'businessUnitId' | 'updatedOn' | 'updatedBy'> & {
+  reason: string;
+};
+
+export interface AiProviderAuthorization {
+  id: string;
+  provider: string;
+  endpoint: string;
+  model: string;
+  allowedPurposes: string;
+  unstructuredDocumentsAllowed: boolean;
+  justification: string;
+  authorizedByUserId: string;
+  authorizedBy: string;
+  authorizedOn: string;
+  expiresOn: string | null;
+  revokedOn: string | null;
+  revokedBy: string | null;
+  revocationReason: string | null;
+  isActive: boolean;
+  version: number;
+  updatedOn: string;
+}
+
+export interface AiProviderTrustView {
+  resolvedProvider: {
+    provider: string;
+    endpoint: string;
+    model: string;
+    providerClass: string;
+    classificationReason: string;
+    isResolved: boolean;
+  };
+  resolvedProviderIsAuthorizedForUnstructured: boolean;
+  resolvedProviderDecisionReason: string;
+  authorizations: AiProviderAuthorization[];
+}
+
+export interface AuthorizeAiProviderInput {
+  provider: string;
+  endpoint: string;
+  model: string | null;
+  allowedPurposes: string;
+  unstructuredDocumentsAllowed: boolean;
+  justification: string;
+  expiresOn: string | null;
+}
+
 export interface TenantOffboardingStatus {
   tenantId: string;
   tenantName: string;
@@ -843,6 +939,7 @@ export interface BillingStatementSummary {
   status: string;
   totalAmount: number;
   computedAtUtc: string;
+  computedBy: string;
   finalizedAtUtc: string | null;
   finalizedBy: string | null;
 }

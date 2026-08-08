@@ -384,6 +384,17 @@ public sealed class TenantOffboardingService(
                 + "day(s) from now). Cancel the deletion if the decision has changed; the window "
                 + "cannot be shortened.");
 
+        var activeHold = await context.Set<TenantLegalHold>().AsNoTracking()
+            .Where(h => h.TenantId == tenant.Id && h.ReleasedOn == null)
+            .OrderBy(h => h.PlacedOn)
+            .Select(h => new { h.Id, h.Scope, h.Authority })
+            .FirstOrDefaultAsync(ct);
+        if (activeHold is not null)
+            throw TenantOffboardingRefusedException.Conflict(
+                $"Purge is blocked by active legal hold {activeHold.Id} "
+                + $"('{activeHold.Scope}', authority: {activeHold.Authority}). Release the hold "
+                + "through its governed workflow before retrying.");
+
         // A retention window is a promise about a tenant that was ARCHIVED for its whole duration.
         // Restore and resume are reachable throughout it — they live on TenantsController and know
         // nothing about a scheduled deletion — so a tenant can be brought back to life on day two,
@@ -413,9 +424,32 @@ public sealed class TenantOffboardingService(
                     + "window and records the decision.");
         }
 
-        // ---- 1. intent, committed before anything is destroyed -------------------------------
-        await InTransactionAsync(async () =>
+        var purgeAttemptId = Guid.NewGuid();
+        TenantPurgeOutcome? outcome = null;
+
+        // A previous process may have committed the destructive owner transaction and died before
+        // it could write the platform audit completion. That outcome is part of the same commit as
+        // the deletes, so it is authoritative and safe to finalize without sweeping again.
+        if (record.PurgeExecutedOn is not null)
         {
+            if (record.PurgeAttemptId is null || record.PurgeExecutedRowCount is null)
+                throw TenantOffboardingRefusedException.Conflict(
+                    "The purge execution record is incomplete and cannot be finalized safely. "
+                    + "Escalate for lifecycle recovery; do not start another destructive attempt.");
+
+            purgeAttemptId = record.PurgeAttemptId.Value;
+            var deleted = string.IsNullOrWhiteSpace(record.PurgeExecutionDetail)
+                ? []
+                : JsonSerializer.Deserialize<List<TenantPurgeTableCount>>(record.PurgeExecutionDetail) ?? [];
+            outcome = new TenantPurgeOutcome(
+                tenant.Id, businessUnitId, record.PurgeExecutedRowCount.Value, deleted);
+        }
+
+        // ---- 1. intent, committed before anything is destroyed -------------------------------
+        if (outcome is null)
+        {
+            await InTransactionAsync(async () =>
+            {
             // The CLAIM, and it is a compare-and-set rather than a read-then-write.
             //
             // Every guard above this line is a read: two Owners hitting purge at the same instant
@@ -436,9 +470,13 @@ public sealed class TenantOffboardingService(
                             && context.Set<Tenant>().IgnoreQueryFilters().Any(t =>
                                 t.Id == r.TenantId
                                 && t.Status == TenantLifecycleGraph.DeletionRequiresStatus)
+                            && !context.Set<TenantLegalHold>().Any(h =>
+                                h.TenantId == r.TenantId && h.ReleasedOn == null)
+                            && r.PurgeExecutedOn == null
                             && (r.PurgeStartedOn == null || r.PurgeStartedOn <= now - PurgeLease))
                 .ExecuteUpdateAsync(setters => setters
                     .SetProperty(r => r.PurgeStartedOn, now)
+                    .SetProperty(r => r.PurgeAttemptId, purgeAttemptId)
                     .SetProperty(r => r.PurgeReason, reason)
                     .SetProperty(r => r.ModifiedOn, now), ct);
 
@@ -454,27 +492,31 @@ public sealed class TenantOffboardingService(
             // writes different columns, and a reload here would discard nothing but cost a query.
             context.Entry(record).Property(r => r.PurgeStartedOn).CurrentValue = now;
             context.Entry(record).Property(r => r.PurgeStartedOn).IsModified = false;
+            context.Entry(record).Property(r => r.PurgeAttemptId).CurrentValue = purgeAttemptId;
+            context.Entry(record).Property(r => r.PurgeAttemptId).IsModified = false;
             context.Entry(record).Property(r => r.PurgeReason).CurrentValue = reason;
             context.Entry(record).Property(r => r.PurgeReason).IsModified = false;
 
             await WriteLifecycleEventAsync(tenant, record.Stage, record.Stage,
                 TenantLifecycleActions.PurgeStarted, reason, actor,
-                new { businessUnitId, eligibleOn }, ct);
+                new { businessUnitId, eligibleOn, purgeAttemptId }, ct);
 
             await audit.WriteAsync(actor, TenantLifecycleActions.PurgeStarted, nameof(Tenant),
                 tenant.Id.ToString(),
-                new { reason, businessUnitId, purgeEligibleOn = eligibleOn },
+                new { reason, businessUnitId, purgeEligibleOn = eligibleOn, purgeAttemptId },
                 actAsTenantId: tenant.Id, httpContext: httpContext, ct: ct);
-        }, ct);
+            }, ct);
+        }
 
         // ---- 2. the destruction itself, on the owner connection ------------------------------
-        TenantPurgeOutcome outcome;
-        try
         {
-            outcome = await purge.ExecuteAsync(tenant.Id, businessUnitId, ct);
-        }
-        catch (Exception exception)
-        {
+            if (outcome is null)
+            try
+            {
+                outcome = await purge.ExecuteAsync(tenant.Id, businessUnitId, purgeAttemptId, ct);
+            }
+            catch (Exception exception)
+            {
             logger.LogError(exception,
                 "Purge FAILED for tenant {TenantId} (business unit {BusinessUnitId}) after intent was "
                 + "recorded. The tenant remains PendingDeletion and the purge can be re-run.",
@@ -487,64 +529,85 @@ public sealed class TenantOffboardingService(
                 // nobody is left to tell us. The PurgeFailed event below is the durable record
                 // that it was tried.
                 await context.Set<TenantOffboarding>()
-                    .Where(r => r.TenantId == tenant.Id && r.Stage == TenantOffboardingStage.PendingDeletion)
+                    .Where(r => r.TenantId == tenant.Id
+                                && r.Stage == TenantOffboardingStage.PendingDeletion
+                                && r.PurgeAttemptId == purgeAttemptId
+                                && r.PurgeExecutedOn == null)
                     .ExecuteUpdateAsync(setters => setters
-                        .SetProperty(r => r.PurgeStartedOn, (DateTime?)null), ct);
+                        .SetProperty(r => r.PurgeStartedOn, (DateTime?)null)
+                        .SetProperty(r => r.PurgeAttemptId, (Guid?)null), ct);
                 context.Entry(record).Property(r => r.PurgeStartedOn).CurrentValue = null;
                 context.Entry(record).Property(r => r.PurgeStartedOn).IsModified = false;
+                context.Entry(record).Property(r => r.PurgeAttemptId).CurrentValue = null;
+                context.Entry(record).Property(r => r.PurgeAttemptId).IsModified = false;
 
                 await WriteLifecycleEventAsync(tenant, record.Stage, record.Stage,
                     TenantLifecycleActions.PurgeFailed, reason, actor,
-                    new { businessUnitId, error = exception.Message }, ct);
+                    new { businessUnitId, purgeAttemptId, error = exception.Message }, ct);
 
                 await audit.WriteAsync(actor, TenantLifecycleActions.PurgeFailed, nameof(Tenant),
-                    tenant.Id.ToString(), new { reason, businessUnitId, error = exception.Message },
+                    tenant.Id.ToString(), new { reason, businessUnitId, purgeAttemptId, error = exception.Message },
                     actAsTenantId: tenant.Id, httpContext: httpContext,
                     result: PlatformAuditResults.Failure, ct: ct);
             }, ct);
-            throw;
+                throw;
+            }
         }
+
+        // The branch above either restored a committed execution or executed one now.
+        var completedOutcome = outcome
+            ?? throw new InvalidOperationException("The fenced purge produced no durable outcome.");
 
         // ---- 3. completion -------------------------------------------------------------------
         var completedOn = DateTime.UtcNow;
         Support.SupportTicketRedactionResult support = new(0, 0);
         await InTransactionAsync(async () =>
         {
+            var previous = record.Stage;
+            var finalized = await context.Set<TenantOffboarding>()
+                .Where(r => r.TenantId == tenant.Id
+                            && r.Stage == TenantOffboardingStage.PendingDeletion
+                            && r.PurgeAttemptId == purgeAttemptId
+                            && r.PurgeExecutedOn != null)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(r => r.Stage, TenantOffboardingStage.Purged)
+                    .SetProperty(r => r.PurgedOn, completedOn)
+                    .SetProperty(r => r.PurgedBy, ActorEmail(actor))
+                    .SetProperty(r => r.PurgedRowCount, completedOutcome.RowsDeleted)
+                    .SetProperty(r => r.ModifiedOn, completedOn), ct);
+            if (finalized != 1)
+                throw TenantOffboardingRefusedException.Conflict(
+                    $"Purge attempt {purgeAttemptId} is no longer the active completed attempt. "
+                    + "It was fenced and cannot write completion evidence.");
+
             // Support tickets are the OPERATOR's record of what was promised and escalated, so
-            // they survive the purge — but the customer's words inside them do not. The ticket
-            // module owns that distinction and exposes this hook for it; the purge only decides
-            // WHEN it runs. Optional so a deployment without the support module still purges, and
-            // idempotent (it selects on RedactedAtUtc IS NULL) so a re-run after a failed
-            // completion neither double-counts nor re-erases.
+            // they survive the purge — but the customer's words inside them do not. This occurs
+            // after the token-conditional finalize inside the same transaction: a fenced attempt
+            // cannot redact support content, and a later failure rolls both changes back.
             if (supportRedaction is not null)
                 support = await supportRedaction.RedactForPurgedTenantAsync(actor, tenant.Id, reason, ct);
 
-            var previous = record.Stage;
-            record.Stage = TenantOffboardingStage.Purged;
-            record.PurgedOn = completedOn;
-            record.PurgedBy = ActorEmail(actor);
-            record.PurgedRowCount = outcome.RowsDeleted;
-            record.ModifiedOn = completedOn;
-            await context.SaveChangesAsync(ct);
+            context.Entry(record).State = EntityState.Detached;
 
-            await WriteLifecycleEventAsync(tenant, previous, record.Stage, TenantLifecycleActions.Purged,
+            await WriteLifecycleEventAsync(tenant, previous, TenantOffboardingStage.Purged, TenantLifecycleActions.Purged,
                 reason, actor,
                 new
                 {
                     businessUnitId,
-                    outcome.RowsDeleted,
+                    purgeAttemptId,
+                    completedOutcome.RowsDeleted,
                     support.TicketsRedacted,
                     support.NotesErased,
-                    tables = outcome.Deleted.Select(d => new { d.Table, d.Rows })
+                    tables = completedOutcome.Deleted.Select(d => new { d.Table, d.Rows })
                 }, ct);
 
             await audit.WriteAsync(actor, TenantLifecycleActions.Purged, nameof(Tenant), tenant.Id.ToString(),
                 new
                 {
-                    reason, businessUnitId, outcome.RowsDeleted,
+                    reason, businessUnitId, purgeAttemptId, completedOutcome.RowsDeleted,
                     supportTicketsRedacted = support.TicketsRedacted,
                     supportNotesErased = support.NotesErased,
-                    tables = outcome.Deleted.Select(d => new { d.Table, d.Rows })
+                    tables = completedOutcome.Deleted.Select(d => new { d.Table, d.Rows })
                 },
                 actAsTenantId: tenant.Id, httpContext: httpContext, ct: ct);
         }, ct);
@@ -560,9 +623,9 @@ public sealed class TenantOffboardingService(
             .CountAsync(a => a.ActAsTenantId == tenant.Id, ct);
 
         return new TenantPurgeResultDto(
-            tenant.Id, tenant.Slug, outcome.RowsDeleted, outcome.Deleted.Count, outcome.Deleted,
+            tenant.Id, tenant.Slug, completedOutcome.RowsDeleted, completedOutcome.Deleted.Count, completedOutcome.Deleted,
             lifecycleEvents, auditRecords, support.TicketsRedacted, support.NotesErased,
-            $"Destroyed {outcome.RowsDeleted:N0} row(s) across {outcome.Deleted.Count} table(s) for "
+            $"Destroyed {completedOutcome.RowsDeleted:N0} row(s) across {completedOutcome.Deleted.Count} table(s) for "
             + $"tenant '{tenant.Slug}'. {lifecycleEvents:N0} lifecycle event(s) and {auditRecords:N0} "
             + "platform audit record(s) were retained.",
             [TenantOffboardingDisclosure.Irreversible, TenantOffboardingDisclosure.Survives,
@@ -594,6 +657,16 @@ public sealed class TenantOffboardingService(
         await InTransactionAsync(async () =>
         {
             var record = await LoadOrCreateRecordAsync(tenant.Id, ct);
+            // This UPDATE takes the same row lock as legal-hold placement and the owner purge
+            // transaction. The hold predicate is therefore stable until erasure commits.
+            await context.Set<TenantOffboarding>().Where(r => r.TenantId == tenant.Id)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(r => r.ModifiedOn, DateTime.UtcNow), ct);
+            await context.Entry(record).ReloadAsync(ct);
+            if (await context.Set<TenantLegalHold>().AnyAsync(
+                    h => h.TenantId == tenant.Id && h.ReleasedOn == null, ct))
+                throw TenantOffboardingRefusedException.Conflict(
+                    "Personal-data erasure is blocked by an active legal hold. Release the hold "
+                    + "through its governed workflow before retrying.");
             if (!TenantLifecycleGraph.CanErase(record.Stage))
                 throw TenantOffboardingRefusedException.Conflict(
                     "This tenant has been purged. Its personal data went with its records; there is "

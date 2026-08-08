@@ -144,10 +144,16 @@ public sealed class RedTeamAuditDisclosureTests
         var changePlanGate = Assert.Single(typeof(TenantsController)
             .GetMethod(nameof(TenantsController.ChangePlan))!
             .GetCustomAttributes<AuthorizeAttribute>().Select(a => a.Policy));
+        var finalizeGate = Assert.Single(typeof(PlatformBillingController)
+            .GetMethod(nameof(PlatformBillingController.FinalizeStatement))!
+            .GetCustomAttributes<AuthorizeAttribute>().Select(a => a.Policy));
+        var aiPolicyGate = Assert.Single(typeof(TenantsController)
+            .GetMethod(nameof(TenantsController.UpdateAiPolicy))!
+            .GetCustomAttributes<AuthorizeAttribute>().Select(a => a.Policy));
 
         Assert.Equal(billingGate, PlatformAuditDisclosure.RequiredPolicyFor("billing.tenant.commercial-terms"));
         Assert.Equal(billingGate, PlatformAuditDisclosure.RequiredPolicyFor("billing.tenant.rate-card"));
-        Assert.Equal(billingGate, PlatformAuditDisclosure.RequiredPolicyFor("billing.statement.finalize"));
+        Assert.Equal(finalizeGate, PlatformAuditDisclosure.RequiredPolicyFor("billing.statement.finalize"));
         Assert.Equal(billingGate, PlatformAuditDisclosure.RequiredPolicyFor("billing.ratecard.create"));
         Assert.Equal(billingGate, PlatformAuditDisclosure.RequiredPolicyFor("billing.ratecard.update"));
         Assert.Equal(billingGate, PlatformAuditDisclosure.RequiredPolicyFor("billing.statement.compute"));
@@ -155,6 +161,7 @@ public sealed class RedTeamAuditDisclosureTests
         // Sec9: plan assignment is a BILLING operation even though it lives on the tenants
         // controller. Its payload inherits that, not the class gate around it.
         Assert.Equal(changePlanGate, PlatformAuditDisclosure.RequiredPolicyFor("tenant.plan.change"));
+        Assert.Equal(aiPolicyGate, PlatformAuditDisclosure.RequiredPolicyFor("tenant.ai-policy.update"));
 
         Assert.Equal(platformUserGate, PlatformAuditDisclosure.RequiredPolicyFor("platform-user.role.change"));
         Assert.Equal(platformUserGate, PlatformAuditDisclosure.RequiredPolicyFor("platform-user.password.reset"));

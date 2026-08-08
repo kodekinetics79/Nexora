@@ -25,6 +25,7 @@ import {
   PlayCircleOutlined as ResumeIcon,
   RestorePageOutlined as RestoreIcon,
   UndoOutlined as CancelDeletionIcon,
+  GavelOutlined as HoldIcon,
 } from '@mui/icons-material';
 import { useSnackbar } from 'notistack';
 import Stack from '../../components/Flex';
@@ -94,12 +95,24 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
   const [purgeOpen, setPurgeOpen] = useState(false);
   const [eraseOpen, setEraseOpen] = useState(false);
   const [exportNotice, setExportNotice] = useState<string | null>(null);
+  const [holdOpen, setHoldOpen] = useState(false);
+  const [releaseHoldId, setReleaseHoldId] = useState<string | null>(null);
+  const [holdScope, setHoldScope] = useState('AllTenantData');
+  const [holdAuthority, setHoldAuthority] = useState('Legal counsel instruction');
+  const [holdEvidence, setHoldEvidence] = useState('');
 
   const offboarding = useQuery({
     queryKey: platformKeys.offboarding(tenant.id),
     queryFn: () => platformApi.getOffboarding(tenant.id),
   });
   const status: TenantOffboardingStatus | undefined = offboarding.data;
+  const legalHolds = useQuery({
+    queryKey: platformKeys.legalHolds(tenant.id),
+    queryFn: () => platformApi.listTenantLegalHolds(tenant.id),
+    enabled: permissions.isOwner,
+  });
+  const activeHolds = (legalHolds.data ?? []).filter((hold) => hold.isActive);
+  const destructiveHoldGuard = legalHolds.isLoading || legalHolds.isError || activeHolds.length > 0;
 
   // The preview is Owner-gated server-side, so it is not even requested for anyone else —
   // a query that is certain to 403 is a red line in the network tab and nothing more.
@@ -114,6 +127,7 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
     queryClient.invalidateQueries({ queryKey: platformKeys.tenant(tenant.id) });
     queryClient.invalidateQueries({ queryKey: platformKeys.tenantOperations(tenant.id) });
     queryClient.invalidateQueries({ queryKey: platformKeys.tenants() });
+    queryClient.invalidateQueries({ queryKey: platformKeys.legalHolds(tenant.id) });
   };
 
   const fail = (fallback: string) => (error: unknown) =>
@@ -135,7 +149,8 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
   });
 
   const exportMutation = useMutation({
-    mutationFn: (reason: string) => platformApi.exportTenantData(tenant.id, reason),
+    mutationFn: (body: { reason: string; confirmation: string }) =>
+      platformApi.exportTenantData(tenant.id, body),
     onSuccess: (download) => {
       // Saved through a synthetic anchor: the response is a one-shot stream the server
       // deliberately does not store, so there is no URL to send the operator to instead.
@@ -201,6 +216,34 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
       invalidate();
     },
     onError: fail('The erasure was refused'),
+  });
+
+  const placeHoldMutation = useMutation({
+    mutationFn: (reason: string) => platformApi.placeTenantLegalHold(tenant.id, {
+      scope: holdScope,
+      authority: holdAuthority,
+      evidenceReference: holdEvidence,
+      reason,
+    }),
+    onSuccess: () => {
+      enqueueSnackbar('Legal hold placed — purge and erasure are blocked', { variant: 'warning' });
+      setHoldOpen(false);
+      setHoldEvidence('');
+      invalidate();
+    },
+    onError: fail('The legal hold was refused'),
+  });
+
+  const releaseHoldMutation = useMutation({
+    mutationFn: (reason: string) => platformApi.releaseTenantLegalHold(
+      tenant.id, releaseHoldId as string, reason,
+    ),
+    onSuccess: () => {
+      enqueueSnackbar('Legal hold released', { variant: 'success' });
+      setReleaseHoldId(null);
+      invalidate();
+    },
+    onError: fail('The legal-hold release was refused'),
   });
 
   if (offboarding.isLoading) return <LoadingState label="Reading the offboarding record…" />;
@@ -275,6 +318,45 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
           {status.erasedIdentityCount == null ? '' : ` — ${fmtNumber(status.erasedIdentityCount)} identities`}. The
           commercial records were deliberately kept.
         </Alert>
+      )}
+
+      {activeHolds.length > 0 && (
+        <Alert severity="error" icon={<HoldIcon />} sx={{ borderRadius: 2 }}>
+          <AlertTitle sx={{ fontWeight: 800 }}>
+            Legal hold active — purge and personal-data erasure are blocked
+          </AlertTitle>
+          {activeHolds.map((hold) => (
+            <Box key={hold.id} sx={{ mt: 1 }}>
+              <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                {hold.scope}: {hold.authority}
+              </Typography>
+              <Typography variant="caption">
+                {hold.reason} Evidence: {hold.evidenceReference}. Placed {fmtDateTime(hold.placedOn)} by {hold.placedBy}.
+              </Typography>
+              <Button size="small" color="inherit" onClick={() => setReleaseHoldId(hold.id)} sx={{ ml: 1 }}>
+                Release hold
+              </Button>
+            </Box>
+          ))}
+        </Alert>
+      )}
+
+      {permissions.isOwner && legalHolds.isError && (
+        <Alert severity="error" sx={{ borderRadius: 2 }}>
+          <AlertTitle sx={{ fontWeight: 800 }}>Legal-hold status could not be verified</AlertTitle>
+          Purge and personal-data erasure remain unavailable until the legal-hold record can be read.
+          <Button size="small" color="inherit" onClick={() => legalHolds.refetch()} sx={{ ml: 1 }}>
+            Retry
+          </Button>
+        </Alert>
+      )}
+
+      {permissions.isOwner && (
+        <Box>
+          <Button variant="outlined" color="warning" startIcon={<HoldIcon />} onClick={() => setHoldOpen(true)}>
+            Place legal hold
+          </Button>
+        </Box>
       )}
 
       <Grid container spacing={2.5}>
@@ -374,7 +456,7 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
             subtitle="Hand the data back, start the clock, then destroy. Each button is enabled by the server, not by this screen."
           >
             <Stack spacing={1.5}>
-              <RoleGate allowed={permissions.canAdministerTenants} requirement={REQUIRED_ROLE_COPY.tenantAdmin}>
+              <RoleGate allowed={permissions.isOwner} requirement={REQUIRED_ROLE_COPY.owner}>
                 {(disabled) => (
                   <Button
                     variant="outlined"
@@ -423,7 +505,7 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
                     variant="contained"
                     color="error"
                     startIcon={<PurgeIcon />}
-                    disabled={disabled || !status.canPurge}
+                    disabled={disabled || destructiveHoldGuard || !status.canPurge}
                     onClick={() => setPurgeOpen(true)}
                   >
                     Purge tenant records
@@ -437,7 +519,7 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
                     variant="outlined"
                     color="error"
                     startIcon={<EraseIcon />}
-                    disabled={disabled || !status.canErasePersonalData}
+                    disabled={disabled || destructiveHoldGuard || !status.canErasePersonalData}
                     onClick={() => setEraseOpen(true)}
                   >
                     Erase personal data
@@ -562,6 +644,49 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
       {/* --- dialogs --- */}
 
       <ReasonDialog
+        open={holdOpen}
+        title="Place legal hold"
+        confirmLabel="Place hold"
+        confirmColor="warning"
+        minReasonLength={15}
+        reasonLabel="Preservation reason"
+        description="Creates an immutable preservation order. Purge and personal-data erasure will fail closed until a separately attributable release."
+        extra={
+          <Stack spacing={2}>
+            <TextField label="Scope" value={holdScope} onChange={(event) => setHoldScope(event.target.value)} />
+            <TextField label="Authority" value={holdAuthority} onChange={(event) => setHoldAuthority(event.target.value)} />
+            <TextField
+              label="Evidence reference"
+              value={holdEvidence}
+              onChange={(event) => setHoldEvidence(event.target.value)}
+              helperText="Case, order, contract, or evidence-system reference; do not paste secret contents."
+            />
+          </Stack>
+        }
+        extraProblem={
+          holdScope.trim().length < 3 || holdAuthority.trim().length < 3 || holdEvidence.trim().length < 3
+            ? 'Scope, authority, and evidence reference must each contain at least 3 characters.'
+            : null
+        }
+        busy={placeHoldMutation.isPending}
+        onClose={() => setHoldOpen(false)}
+        onConfirm={(reason) => placeHoldMutation.mutate(reason)}
+      />
+
+      <ReasonDialog
+        open={releaseHoldId !== null}
+        title="Release legal hold"
+        confirmLabel="Release hold"
+        confirmColor="warning"
+        minReasonLength={15}
+        reasonLabel="Why has the preservation duty ended?"
+        description="The placement evidence remains immutable. This adds an attributable release and allows governed erasure or purge to proceed again."
+        busy={releaseHoldMutation.isPending}
+        onClose={() => setReleaseHoldId(null)}
+        onConfirm={(reason) => releaseHoldMutation.mutate(reason)}
+      />
+
+      <ReasonDialog
         open={reversible !== null}
         title={reversible ? REVERSIBLE_COPY[reversible].title : ''}
         confirmLabel={reversible ? REVERSIBLE_COPY[reversible].verb : ''}
@@ -576,9 +701,10 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
         onConfirm={(reason) => reversible && reversibleMutation.mutate({ kind: reversible, reason })}
       />
 
-      <ReasonDialog
+      <DestructiveConfirmDialog
         open={exportOpen}
         title="Export this tenant's data"
+        confirmationRequired={status.confirmationRequired}
         confirmLabel="Generate export"
         description={
           <>
@@ -586,11 +712,13 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
             platform — only a receipt with its SHA-256 hash, so what was handed back can be proved later.
           </>
         }
-        minReasonLength={1}
-        reasonLabel="Why is this export being produced?"
+        disclosures={[
+          'This download contains the tenant’s full commercial history. Handle it as restricted customer data.',
+          'The platform retains only a receipt and SHA-256 fingerprint, not a copy of the export.',
+        ]}
         busy={exportMutation.isPending}
         onClose={() => setExportOpen(false)}
-        onConfirm={(reason) => exportMutation.mutate(reason)}
+        onConfirm={(body) => exportMutation.mutate(body)}
       />
 
       <ReasonDialog

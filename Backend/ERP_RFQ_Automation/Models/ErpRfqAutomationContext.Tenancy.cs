@@ -552,7 +552,20 @@ public partial class ErpRfqAutomationContext
             e.Property(x => x.Email).IsRequired().HasMaxLength(256);
             e.Property(x => x.PasswordHash).IsRequired();
             e.Property(x => x.PlatformRole).HasConversion<string>().HasMaxLength(32);
+            e.Property(x => x.SessionGeneration).HasDefaultValue(1L).IsConcurrencyToken();
             e.Property(x => x.DisplayName).HasMaxLength(200);
+        });
+        modelBuilder.Entity<ERP_RFQ_Automation.Platform.Models.PlatformSession>(e =>
+        {
+            e.ToTable("PlatformSessions", "platform");
+            e.HasKey(x => x.Id);
+            e.HasIndex(x => x.Jti).IsUnique();
+            e.HasIndex(x => new { x.PlatformUserId, x.RevokedAtUtc, x.ExpiresAtUtc });
+            e.Property(x => x.Jti).IsRequired().HasMaxLength(64);
+            e.Property(x => x.RevokedBy).HasMaxLength(256);
+            e.Property(x => x.RevocationReason).HasMaxLength(256);
+            e.HasOne(x => x.PlatformUser).WithMany()
+                .HasForeignKey(x => x.PlatformUserId).OnDelete(DeleteBehavior.Restrict);
         });
         modelBuilder.Entity<ERP_RFQ_Automation.Platform.Models.Plan>(e =>
         {

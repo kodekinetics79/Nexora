@@ -1,4 +1,6 @@
+using System.Text.Json;
 using Npgsql;
+using NpgsqlTypes;
 
 namespace ERP_RFQ_Automation.Platform.Lifecycle;
 
@@ -148,10 +150,36 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
     /// restored, and cannot be reasoned about.
     /// </summary>
     public async Task<TenantPurgeOutcome> ExecuteAsync(
-        long tenantId, long businessUnitId, CancellationToken cancellationToken)
+        long tenantId, long businessUnitId, Guid purgeAttemptId, CancellationToken cancellationToken)
     {
         await using var connection = await OpenOwnerConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        // This row lock is the liveness proof for the destructive executor. A stale claimant,
+        // restore, legal-hold placement, or another purge must wait for this transaction. The
+        // token check fences an executor that was paused before it entered the transaction and
+        // whose lease was legitimately taken over in the meantime.
+        await using (var fence = new NpgsqlCommand(
+            """
+            SELECT 1
+            FROM platform."TenantOffboardings"
+            WHERE "TenantId" = @tenant
+              AND "Stage" = 'PendingDeletion'
+              AND "PurgeAttemptId" = @attempt
+              AND "PurgeStartedOn" IS NOT NULL
+              AND "PurgeExecutedOn" IS NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM platform."TenantLegalHolds" h
+                  WHERE h."TenantId" = @tenant AND h."ReleasedOn" IS NULL)
+            FOR UPDATE;
+            """, connection, transaction))
+        {
+            fence.Parameters.AddWithValue("tenant", tenantId);
+            fence.Parameters.AddWithValue("attempt", purgeAttemptId);
+            if (await fence.ExecuteScalarAsync(cancellationToken) is null)
+                throw new InvalidOperationException(
+                    $"Purge attempt {purgeAttemptId} for tenant {tenantId} was fenced before execution.");
+        }
 
         // Suspends the append-only guards AND the foreign-key triggers for this session only,
         // scoped to the transaction so a failure anywhere rolls back with the guards intact.
@@ -195,9 +223,34 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
             if (rows > 0) deleted.Add(new TenantPurgeTableCount(BusinessUnitTable, keyColumn, rows));
         }
 
+        var total = deleted.Sum(d => d.Rows);
+        var executedOn = DateTime.UtcNow;
+        var detail = JsonSerializer.Serialize(deleted.OrderByDescending(d => d.Rows));
+        await using (var outcome = new NpgsqlCommand(
+            """
+            UPDATE platform."TenantOffboardings"
+            SET "PurgeExecutedOn" = @executed,
+                "PurgeExecutedRowCount" = @rows,
+                "PurgeExecutionDetail" = @detail,
+                "ModifiedOn" = @executed
+            WHERE "TenantId" = @tenant
+              AND "Stage" = 'PendingDeletion'
+              AND "PurgeAttemptId" = @attempt
+              AND "PurgeExecutedOn" IS NULL;
+            """, connection, transaction))
+        {
+            outcome.Parameters.AddWithValue("executed", executedOn);
+            outcome.Parameters.AddWithValue("rows", total);
+            outcome.Parameters.Add("detail", NpgsqlDbType.Jsonb).Value = detail;
+            outcome.Parameters.AddWithValue("tenant", tenantId);
+            outcome.Parameters.AddWithValue("attempt", purgeAttemptId);
+            if (await outcome.ExecuteNonQueryAsync(cancellationToken) != 1)
+                throw new InvalidOperationException(
+                    $"Purge attempt {purgeAttemptId} for tenant {tenantId} lost its fence before commit.");
+        }
+
         await transaction.CommitAsync(cancellationToken);
 
-        var total = deleted.Sum(d => d.Rows);
         logger.LogWarning(
             "TENANT PURGE complete for tenant {TenantId} (business unit {BusinessUnitId}): "
             + "{Rows} row(s) destroyed across {Tables} table(s).",

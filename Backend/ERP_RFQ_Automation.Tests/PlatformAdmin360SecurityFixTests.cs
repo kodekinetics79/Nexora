@@ -31,6 +31,16 @@ namespace ERP_RFQ_Automation.Tests;
 /// </summary>
 public sealed class PlatformAdmin360SecurityFixTests
 {
+    [Fact]
+    public void Impersonation_session_content_requires_impersonation_authority()
+    {
+        var attribute = typeof(ImpersonationController).GetMethod(nameof(ImpersonationController.Sessions))!
+            .GetCustomAttribute<AuthorizeAttribute>();
+
+        Assert.NotNull(attribute);
+        Assert.Equal(PlatformPolicies.Impersonate, attribute!.Policy);
+    }
+
     // ---- Sec9 -------------------------------------------------------------
 
     [Fact]
@@ -202,7 +212,8 @@ public sealed class PlatformAdmin360SecurityFixTests
     {
         using var db = new TestDb();
         await using var context = db.ContextFor(null);
-        var controller = WithActor(new PlatformOperationsController(context, new ThrowingAudit()));
+        var controller = WithActor(new PlatformOperationsController(
+            context, new ThrowingAudit(), PlatformSupportFixture.Authorization()));
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => controller.CreatePlan(
             new UpsertPlanRequest

@@ -242,10 +242,17 @@ public class PlatformBillingController : ControllerBase
         if (!BillingPeriod.TryParse(request.Period, out var period))
             return BadRequest(new { error = "'period' is required in YYYY-MM format." });
 
+        // Supplying a card is a one-run pricing override for an unpinned tenant.
+        // BillingAdmin may calculate the ordinary server-selected price, but only
+        // Owner may choose a different commercial input for that calculation.
+        if (request.RateCardId is not null && !HoldsOwnerAuthority())
+            return Forbid();
+
         BillingStatement statement;
         try
         {
-            statement = await _billing.ComputeStatementAsync(request.TenantId, period, request.RateCardId, ct);
+            statement = await _billing.ComputeStatementAsync(
+                request.TenantId, period, request.RateCardId, ct, Actor());
         }
         catch (BillingNotFoundException ex)
         {
@@ -291,6 +298,7 @@ public class PlatformBillingController : ControllerBase
 
     // POST /api/platform/billing/statements/{id}/finalize
     [HttpPost("statements/{id:long}/finalize")]
+    [Authorize(Policy = PlatformPolicies.Owner)]
     public async Task<ActionResult<BillingStatementDto>> FinalizeStatement(long id, CancellationToken ct)
     {
         BillingStatement statement;
@@ -439,7 +447,8 @@ public class PlatformBillingController : ControllerBase
                 s.Id,
                 s.PeriodStartUtc.ToString("yyyy-MM", System.Globalization.CultureInfo.InvariantCulture),
                 s.PeriodStartUtc, s.PeriodEndUtc, s.RateCardId, s.Currency,
-                s.Status.ToString(), s.TotalAmount, s.ComputedAtUtc, s.FinalizedAtUtc, s.FinalizedBy))
+                s.Status.ToString(), s.TotalAmount, s.ComputedAtUtc, s.ComputedBy,
+                s.FinalizedAtUtc, s.FinalizedBy))
                 .ToList()));
     }
 
@@ -478,6 +487,13 @@ public class PlatformBillingController : ControllerBase
                 {
                     error = $"Rate card {card.Id} ('{card.Code}') is denominated in '{card.Currency}'; v1 billing is " +
                             "USD-only and a tenant pinned to it could never produce a statement."
+                });
+            var now = DateTime.UtcNow;
+            if (!card.IsActive || card.EffectiveFromUtc > now || card.EffectiveToUtc is { } end && end <= now)
+                return BadRequest(new
+                {
+                    error = $"Rate card {card.Id} ('{card.Code}') is not active and effective now. " +
+                            "Activate the governed card before assigning it; future commercial changes require a scheduled approval workflow."
                 });
         }
 
@@ -669,6 +685,9 @@ public class PlatformBillingController : ControllerBase
            ?? User.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value
            ?? "platform";
 
+    private bool HoldsOwnerAuthority() =>
+        User.HasClaim(PlatformAuthConstants.PlatformRoleClaim, nameof(PlatformRole.Owner));
+
     private static string? ValidateRateCardShape(string? currency, IReadOnlyList<RateCardLineRequest>? lines)
     {
         if (string.IsNullOrWhiteSpace(currency) || currency.Trim().Length != 3)
@@ -710,7 +729,7 @@ public class PlatformBillingController : ControllerBase
     private static BillingStatementDto ToDto(BillingStatement statement) => new(
         statement.Id, statement.TenantId, statement.PeriodStartUtc, statement.PeriodEndUtc,
         statement.RateCardId, statement.Currency, statement.Status.ToString(), statement.TotalAmount,
-        statement.ComputedAtUtc, statement.FinalizedAtUtc, statement.FinalizedBy,
+        statement.ComputedAtUtc, statement.ComputedBy, statement.FinalizedAtUtc, statement.FinalizedBy,
         statement.Lines.OrderBy(l => l.MeterKey, StringComparer.Ordinal)
             .Select(l => new BillingStatementLineDto(
                 l.MeterKey, l.Description, l.MeteredQuantity, l.IncludedQuantity,
@@ -754,7 +773,7 @@ public sealed record BillingStatementLineDto(
 public sealed record BillingStatementDto(
     long Id, long TenantId, DateTime PeriodStartUtc, DateTime PeriodEndUtc,
     long RateCardId, string Currency, string Status, decimal TotalAmount,
-    DateTime ComputedAtUtc, DateTime? FinalizedAtUtc, string? FinalizedBy,
+    DateTime ComputedAtUtc, string ComputedBy, DateTime? FinalizedAtUtc, string? FinalizedBy,
     IReadOnlyList<BillingStatementLineDto> Lines);
 
 /// <summary>
@@ -782,7 +801,7 @@ public sealed record RevenueRiskReportDto(
 public sealed record BillingStatementSummaryDto(
     long Id, string Period, DateTime PeriodStartUtc, DateTime PeriodEndUtc, long RateCardId,
     string Currency, string Status, decimal TotalAmount, DateTime ComputedAtUtc,
-    DateTime? FinalizedAtUtc, string? FinalizedBy);
+    string ComputedBy, DateTime? FinalizedAtUtc, string? FinalizedBy);
 
 /// <summary>
 /// Everything the console's tenant billing tab renders. <paramref name="PinnedRateCardMissing"/>

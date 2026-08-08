@@ -22,6 +22,7 @@ public static class TenantLifecycleServiceCollectionExtensions
         services.AddScoped<TenantPersonalDataEraser>();
         services.AddScoped<TenantDataExportService>();
         services.AddScoped<TenantOffboardingService>();
+        services.AddScoped<TenantLegalHoldService>();
 
         // The background-path half of suspension enforcement. Scoped because it reads through the
         // scoped ITenantAccessService; the ~60s cache behind that is the process-wide singleton,

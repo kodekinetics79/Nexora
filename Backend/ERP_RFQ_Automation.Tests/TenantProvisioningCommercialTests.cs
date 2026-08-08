@@ -328,5 +328,36 @@ public sealed class TenantProvisioningCommercialTests
         onRetiredCard.PlanId = live.Id;
         onRetiredCard.RateCardId = expiredCard.Id;
         Assert.Contains("not active", ErrorOf(await controller.Provision(onRetiredCard, CancellationToken.None)));
+
+        var futureCard = new ERP_RFQ_Automation.Billing.RateCard
+        {
+            Code = "future-card", Currency = "USD", EffectiveFromUtc = DateTime.UtcNow.AddDays(30),
+            IsActive = true
+        };
+        var endedCard = new ERP_RFQ_Automation.Billing.RateCard
+        {
+            Code = "ended-card", Currency = "USD", EffectiveFromUtc = DateTime.UtcNow.AddYears(-2),
+            EffectiveToUtc = DateTime.UtcNow.AddDays(-1), IsActive = true
+        };
+        var eurCard = new ERP_RFQ_Automation.Billing.RateCard
+        {
+            Code = "eur-card", Currency = "EUR", EffectiveFromUtc = DateTime.UtcNow.AddYears(-1),
+            IsActive = true
+        };
+        context.AddRange(futureCard, endedCard, eurCard);
+        await context.SaveChangesAsync();
+
+        foreach (var (card, expected) in new[]
+                 {
+                     (futureCard, "not effective now"),
+                     (endedCard, "not effective now"),
+                     (eurCard, "USD-only")
+                 })
+        {
+            var invalid = Request($"invalid-card-{card.Code}");
+            invalid.PlanId = live.Id;
+            invalid.RateCardId = card.Id;
+            Assert.Contains(expected, ErrorOf(await controller.Provision(invalid, CancellationToken.None)));
+        }
     }
 }

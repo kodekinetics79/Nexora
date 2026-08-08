@@ -10,6 +10,7 @@ using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.Platform.Lifecycle;
+using ERP_RFQ_Automation.PlatformGovernance;
 
 namespace ERP_RFQ_Automation.Platform.Controllers;
 
@@ -147,8 +148,9 @@ public class TenantsController : ControllerBase
                 return BadRequest(new { error = $"Plan '{plan.Code}' is not active and cannot be assigned." });
         }
 
-        // The pinned price list is verified to EXIST before the tenant is written, so a typo in the
-        // rate-card id degrades into the active-card fallback silently rather than loudly.
+        // A pin is an immediate commercial assignment, not a future schedule. Validate the
+        // same authority boundary as later assignment and statement calculation so a newly
+        // provisioned billable tenant cannot be born with a billing run that is guaranteed to fail.
         string? rateCardCode = null;
         if (request.RateCardId is long rateCardId)
         {
@@ -158,6 +160,11 @@ public class TenantsController : ControllerBase
                 return BadRequest(new { error = $"Rate card {rateCardId} does not exist." });
             if (!card.IsActive)
                 return BadRequest(new { error = $"Rate card '{card.Code}' is not active and cannot be pinned." });
+            var now = DateTime.UtcNow;
+            if (card.EffectiveFromUtc > now || card.EffectiveToUtc is { } end && end <= now)
+                return BadRequest(new { error = $"Rate card '{card.Code}' is not effective now and cannot be pinned." });
+            if (!string.Equals(card.Currency, "USD", StringComparison.OrdinalIgnoreCase))
+                return BadRequest(new { error = $"Rate card '{card.Code}' is denominated in '{card.Currency}'; v1 billing is USD-only." });
             rateCardCode = card.Code;
         }
 
@@ -693,7 +700,7 @@ public class TenantsController : ControllerBase
     }
 
     [HttpPut("{id:long}/ai-policy")]
-    [Authorize(Policy = PlatformPolicies.TenantAdmin)]
+    [Authorize(Policy = PlatformPolicies.Owner)]
     public async Task<ActionResult<TenantAiPolicyDto>> UpdateAiPolicy(
         long id, [FromBody] UpdateTenantAiPolicyRequest request, CancellationToken ct)
     {
@@ -702,6 +709,25 @@ public class TenantsController : ControllerBase
         if (request.MonthlySoftTokenLimit is < 0 || request.MonthlyHardTokenLimit is < 0
             || request.MonthlySoftTokenLimit is { } soft && request.MonthlyHardTokenLimit is { } hard && soft > hard)
             return BadRequest(new { error = "Token limits must be non-negative and soft cannot exceed hard." });
+        if (request.MaxTokensPerDocument is <= 0 || request.ExternalDependencyCeilingPercent is < 0 or > 10
+            || request.RetentionDays is < 1 or > 3650
+            || string.IsNullOrWhiteSpace(request.AllowedDataClassifications)
+            || string.IsNullOrWhiteSpace(request.EgressPolicy)
+            || string.IsNullOrWhiteSpace(request.DataResidency))
+            return BadRequest(new { error = "AI privacy, residency, retention and budget controls are invalid." });
+        if (request.ExternalProcessingAllowed && (!request.RedactionRequired || !request.PrivacyReviewRequired
+            || string.IsNullOrWhiteSpace(request.AllowedProvider) || string.IsNullOrWhiteSpace(request.AllowedModel)))
+            return BadRequest(new { error = "External processing requires redaction, privacy review, provider and model." });
+        if ((request.ExternalInputCostPerMillionTokens.HasValue || request.ExternalOutputCostPerMillionTokens.HasValue)
+            && (request.ExternalInputCostPerMillionTokens is null or < 0
+                || request.ExternalOutputCostPerMillionTokens is null or < 0
+                || string.IsNullOrWhiteSpace(request.ExternalCostCurrency)
+                || string.IsNullOrWhiteSpace(request.ExternalPricingVersion)))
+            return BadRequest(new { error = "External rates require input/output rates, currency and pricing version." });
+        if ((request.LocalComputeCostPerHour.HasValue || request.OcrCostPerPage.HasValue)
+            && (request.LocalComputeCostPerHour is null or < 0 || request.OcrCostPerPage is null or < 0
+                || string.IsNullOrWhiteSpace(request.LocalCostCurrency)))
+            return BadRequest(new { error = "Local rates require compute/OCR rates and currency." });
 
         var allowedPurposeSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             { AiPurposes.RfqExtraction, AiPurposes.BoqDraft, AiPurposes.Agent };
@@ -717,7 +743,11 @@ public class TenantsController : ControllerBase
             .FirstOrDefaultAsync(t => t.Id == id, ct);
         if (tenant?.PrimaryBusinessUnitId is not long businessUnitId)
             return NotFound();
-        using var tenantScope = _tenantScope.Push(businessUnitId);
+        // This Owner mutation remains on the platform execution role and predicates every
+        // tenant-owned read by the business unit derived from the authenticated route
+        // mapping. An ambient tenant scope would downgrade the connection to
+        // nexora_tenant_app, which cannot forge PlatformAudit rows and therefore cannot
+        // atomically perform this control-plane operation.
         using var scope = _scopeFactory.CreateScope();
         var tenantDb = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
         var policy = await tenantDb.AiProcessingPolicies
@@ -735,6 +765,22 @@ public class TenantsController : ControllerBase
         policy.AllowedModel = Normalize(request.AllowedModel);
         policy.MonthlySoftTokenLimit = request.MonthlySoftTokenLimit;
         policy.MonthlyHardTokenLimit = request.MonthlyHardTokenLimit;
+        policy.MaxTokensPerDocument = request.MaxTokensPerDocument;
+        policy.ExternalInputCostPerMillionTokens = request.ExternalInputCostPerMillionTokens;
+        policy.ExternalOutputCostPerMillionTokens = request.ExternalOutputCostPerMillionTokens;
+        policy.ExternalCostCurrency = Normalize(request.ExternalCostCurrency)?.ToUpperInvariant();
+        policy.ExternalPricingVersion = Normalize(request.ExternalPricingVersion);
+        policy.ExternalDependencyCeilingPercent = request.ExternalDependencyCeilingPercent;
+        policy.RedactionRequired = request.RedactionRequired;
+        policy.AllowedDataClassifications = request.AllowedDataClassifications.Trim();
+        policy.EgressPolicy = request.EgressPolicy.Trim();
+        policy.DataResidency = request.DataResidency.Trim();
+        policy.RetentionDays = request.RetentionDays;
+        policy.InputOutputAuditAllowed = request.InputOutputAuditAllowed;
+        policy.PrivacyReviewRequired = request.PrivacyReviewRequired;
+        policy.LocalComputeCostPerHour = request.LocalComputeCostPerHour;
+        policy.OcrCostPerPage = request.OcrCostPerPage;
+        policy.LocalCostCurrency = Normalize(request.LocalCostCurrency)?.ToUpperInvariant();
         policy.Version++;
         policy.UpdatedOn = DateTime.UtcNow;
         policy.UpdatedBy = User.FindFirst("email")?.Value ?? "platform";
@@ -750,6 +796,69 @@ public class TenantsController : ControllerBase
             businessUnitId.ToString(), new { before, after, reason = request.Reason.Trim() },
             actAsTenantId: id, httpContext: HttpContext, ct: ct);
         return Ok(after);
+    }
+
+    [HttpGet("{id:long}/ai-providers")]
+    [Authorize(Policy = PlatformPolicies.Owner)]
+    public async Task<ActionResult<AiExternalProviderTrustView>> GetAiProviders(long id, CancellationToken ct)
+    {
+        var businessUnitId = await PrimaryBusinessUnitIdAsync(id, ct);
+        if (businessUnitId is null) return NotFound();
+        using var tenantScope = _tenantScope.Push(businessUnitId.Value);
+        using var scope = _scopeFactory.CreateScope();
+        return Ok(await scope.ServiceProvider.GetRequiredService<AiExternalProviderTrustService>()
+            .GetAsync(businessUnitId.Value, ct));
+    }
+
+    [HttpPost("{id:long}/ai-providers")]
+    [Authorize(Policy = PlatformPolicies.Owner)]
+    public async Task<ActionResult<AiExternalProviderMutationResult>> AuthorizeAiProvider(
+        long id, [FromBody] AuthorizeAiExternalProviderCommand request, CancellationToken ct)
+    {
+        var businessUnitId = await PrimaryBusinessUnitIdAsync(id, ct);
+        if (businessUnitId is null) return NotFound();
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var scopedAudit = scope.ServiceProvider.GetRequiredService<IPlatformAuditService>();
+            var trust = scope.ServiceProvider.GetRequiredService<AiExternalProviderTrustService>();
+            var result = await trust
+                .AuthorizeAsync(businessUnitId.Value, CurrentPlatformActorId(), IdempotencyKey(), request, ct,
+                    (authorization, innerCt) => scopedAudit.WriteAsync(User,
+                        "tenant.ai-provider.authorize", nameof(AiExternalProviderAuthorization),
+                        authorization.Id.ToString(), new { tenantId = id, authorization.Provider,
+                            authorization.Endpoint, authorization.Model, request.Justification },
+                        actAsTenantId: id, httpContext: HttpContext, ct: innerCt));
+            return Ok(result);
+        }
+        catch (PlatformGovernanceValidationException ex) { return BadRequest(new { error = ex.Message }); }
+        catch (PlatformGovernanceConflictException ex) { return Conflict(new { error = ex.Message }); }
+    }
+
+    [HttpPost("{id:long}/ai-providers/{authorizationId:long}/revoke")]
+    [Authorize(Policy = PlatformPolicies.Owner)]
+    public async Task<ActionResult<AiExternalProviderMutationResult>> RevokeAiProvider(
+        long id, long authorizationId, [FromBody] RevokeAiExternalProviderCommand request, CancellationToken ct)
+    {
+        if (authorizationId != request.AuthorizationId)
+            return BadRequest(new { error = "The route and request authorization ids must match." });
+        var businessUnitId = await PrimaryBusinessUnitIdAsync(id, ct);
+        if (businessUnitId is null) return NotFound();
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var scopedAudit = scope.ServiceProvider.GetRequiredService<IPlatformAuditService>();
+            var trust = scope.ServiceProvider.GetRequiredService<AiExternalProviderTrustService>();
+            var result = await trust
+                .RevokeAsync(businessUnitId.Value, CurrentPlatformActorId(), IdempotencyKey(), request, ct,
+                    (authorization, innerCt) => scopedAudit.WriteAsync(User,
+                        "tenant.ai-provider.revoke", nameof(AiExternalProviderAuthorization),
+                        authorization.Id.ToString(), new { tenantId = id, request.Reason },
+                        actAsTenantId: id, httpContext: HttpContext, ct: innerCt));
+            return Ok(result);
+        }
+        catch (PlatformGovernanceValidationException ex) { return BadRequest(new { error = ex.Message }); }
+        catch (PlatformGovernanceNotFoundException ex) { return NotFound(new { error = ex.Message }); }
     }
 
     // POST /api/platform/tenants/{id}/suspend
@@ -882,12 +991,17 @@ public class TenantsController : ControllerBase
                     // resumes after the claim commits, sees PurgeStartedOn, and refuses to bring
                     // a tenant back while its data may already be disappearing.
                     var now = DateTime.UtcNow;
+                    var stalePurgeCutoff = now - TenantOffboardingService.PurgeLease;
                     deletionCancelled = await _context.Set<TenantOffboarding>()
                         .Where(r => r.TenantId == tenant.Id
                                     && r.Stage == TenantOffboardingStage.PendingDeletion
-                                    && r.PurgeStartedOn == null)
+                                    && r.PurgeExecutedOn == null
+                                    && (r.PurgeStartedOn == null || r.PurgeStartedOn <= stalePurgeCutoff))
                         .ExecuteUpdateAsync(setters => setters
                             .SetProperty(r => r.Stage, TenantOffboardingStage.NotScheduled)
+                            .SetProperty(r => r.PurgeStartedOn, (DateTime?)null)
+                            .SetProperty(r => r.PurgeAttemptId, (Guid?)null)
+                            .SetProperty(r => r.PurgeReason, (string?)null)
                             .SetProperty(r => r.RetentionDays, (int?)null)
                             .SetProperty(r => r.DeletionScheduledOn, (DateTime?)null)
                             .SetProperty(r => r.PurgeEligibleOn, (DateTime?)null)
@@ -1012,6 +1126,22 @@ public class TenantsController : ControllerBase
         AllowedModel = p.AllowedModel,
         MonthlySoftTokenLimit = p.MonthlySoftTokenLimit,
         MonthlyHardTokenLimit = p.MonthlyHardTokenLimit,
+        MaxTokensPerDocument = p.MaxTokensPerDocument,
+        ExternalInputCostPerMillionTokens = p.ExternalInputCostPerMillionTokens,
+        ExternalOutputCostPerMillionTokens = p.ExternalOutputCostPerMillionTokens,
+        ExternalCostCurrency = p.ExternalCostCurrency,
+        ExternalPricingVersion = p.ExternalPricingVersion,
+        ExternalDependencyCeilingPercent = p.ExternalDependencyCeilingPercent,
+        RedactionRequired = p.RedactionRequired,
+        AllowedDataClassifications = p.AllowedDataClassifications,
+        EgressPolicy = p.EgressPolicy,
+        DataResidency = p.DataResidency,
+        RetentionDays = p.RetentionDays,
+        InputOutputAuditAllowed = p.InputOutputAuditAllowed,
+        PrivacyReviewRequired = p.PrivacyReviewRequired,
+        LocalComputeCostPerHour = p.LocalComputeCostPerHour,
+        OcrCostPerPage = p.OcrCostPerPage,
+        LocalCostCurrency = p.LocalCostCurrency,
         Version = p.Version,
         UpdatedOn = p.UpdatedOn,
         UpdatedBy = p.UpdatedBy
@@ -1019,6 +1149,24 @@ public class TenantsController : ControllerBase
 
     private static string? Normalize(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    private async Task<long?> PrimaryBusinessUnitIdAsync(long tenantId, CancellationToken ct) =>
+        await _context.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
+            .Where(tenant => tenant.Id == tenantId)
+            .Select(tenant => tenant.PrimaryBusinessUnitId)
+            .SingleOrDefaultAsync(ct);
+
+    private long CurrentPlatformActorId() =>
+        long.TryParse(User.FindFirst("sub")?.Value
+                      ?? User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value,
+            out var actorId) && actorId > 0
+            ? actorId
+            : throw new UnauthorizedAccessException("A positive platform actor id is required.");
+
+    private string IdempotencyKey() =>
+        Request.Headers.TryGetValue("Idempotency-Key", out var value)
+            ? value.ToString()
+            : string.Empty;
 
     private static string Slugify(string input)
     {

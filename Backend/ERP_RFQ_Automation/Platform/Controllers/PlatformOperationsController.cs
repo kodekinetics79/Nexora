@@ -4,6 +4,7 @@ using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Platform.Auth;
 using ERP_RFQ_Automation.Platform.Models;
 using ERP_RFQ_Automation.Platform.Services;
+using ERP_RFQ_Automation.Platform.Support;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -14,7 +15,9 @@ namespace ERP_RFQ_Automation.Platform.Controllers;
 [Route("api/platform")]
 [Authorize(Policy = PlatformPolicies.PlatformScope)]
 public class PlatformOperationsController(
-    ErpRfqAutomationContext context, IPlatformAuditService audit) : ControllerBase
+    ErpRfqAutomationContext context,
+    IPlatformAuditService audit,
+    IAuthorizationService authorization) : ControllerBase
 {
     [HttpGet("pipeline/queue")]
     public async Task<IActionResult> Queue(CancellationToken ct)
@@ -272,6 +275,8 @@ public class PlatformOperationsController(
             .ToDictionaryAsync(u => u.Id, ct);
         var tenants = await context.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
             .Where(t => tenantIds.Contains(t.Id)).ToDictionaryAsync(t => t.Id, ct);
+        var disclosure = await PlatformAuditDisclosure.ResolveAsync(
+            authorization, User, rows.Select(r => r.Action), ct);
 
         return Ok(rows.Select(row =>
         {
@@ -292,7 +297,9 @@ public class PlatformOperationsController(
                 tenantName = tenant?.Name,
                 ipAddress = row.Ip ?? string.Empty,
                 result = row.Result,
-                detail = row.Metadata
+                detail = disclosure.MayDisclose(row.Action) ? row.Metadata : null,
+                metadataDisclosed = disclosure.MayDisclose(row.Action),
+                requiredPolicy = AuditDisclosureGate.RequiredPolicyFor(row.Action)
             };
         }));
     }

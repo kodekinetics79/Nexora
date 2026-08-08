@@ -277,6 +277,112 @@ public sealed class PlatformTenantLifecycleAdminTests
         Assert.IsType<NotFoundResult>(result.Result);
     }
 
+    [Fact]
+    public async Task Legal_hold_is_attributable_unique_while_active_and_releasable()
+    {
+        using var db = new TestDb();
+        var tenantId = await SeedTenant(db, "legal-hold-tenant", TenantStatus.Archived);
+        await using var context = db.ContextFor(null);
+        var service = LegalHolds(context);
+        var actor = PlatformActor();
+
+        var hold = await service.PlaceAsync(tenantId, new PlaceTenantLegalHoldRequest
+        {
+            Scope = "AllTenantData",
+            Authority = "Litigation counsel",
+            Reason = "Preserve all records for pending litigation.",
+            EvidenceReference = "case://NEX-2026-1042"
+        }, actor, null, CancellationToken.None);
+
+        Assert.True(hold.IsActive);
+        Assert.Equal("operator@example.test", hold.PlacedBy);
+        await Assert.ThrowsAsync<TenantOffboardingRefusedException>(() =>
+            service.PlaceAsync(tenantId, new PlaceTenantLegalHoldRequest
+            {
+                Scope = "AllTenantData",
+                Authority = "Litigation counsel",
+                Reason = "A duplicate active hold must be refused.",
+                EvidenceReference = "case://NEX-2026-1043"
+            }, actor, null, CancellationToken.None));
+
+        var released = await service.ReleaseAsync(tenantId, hold.Id,
+            new ReleaseTenantLegalHoldRequest
+            {
+                Reason = "Counsel confirmed the preservation duty has ended."
+            }, actor, null, CancellationToken.None);
+
+        Assert.False(released.IsActive);
+        Assert.NotNull(released.ReleasedOn);
+        await using var verify = db.ContextFor(null);
+        Assert.Equal(2, await verify.Set<PlatformAuditLog>().CountAsync());
+    }
+
+    [Fact]
+    public async Task Legal_hold_is_refused_after_destructive_execution_committed()
+    {
+        using var db = new TestDb();
+        var tenantId = await SeedTenant(db, "legal-hold-too-late", TenantStatus.Archived);
+        await using (var seed = db.ContextFor(null))
+        {
+            seed.Set<TenantOffboarding>().Add(new TenantOffboarding
+            {
+                TenantId = tenantId,
+                Stage = TenantOffboardingStage.PendingDeletion,
+                PurgeStartedOn = DateTime.UtcNow.AddMinutes(-1),
+                PurgeAttemptId = Guid.NewGuid(),
+                PurgeExecutedOn = DateTime.UtcNow,
+                PurgeExecutedRowCount = 12,
+                PurgeExecutionDetail = "[]"
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = db.ContextFor(null);
+        var refusal = await Assert.ThrowsAsync<TenantOffboardingRefusedException>(() =>
+            LegalHolds(context).PlaceAsync(tenantId, new PlaceTenantLegalHoldRequest
+            {
+                Scope = "AllTenantData",
+                Authority = "Regulatory order",
+                Reason = "Preserve all records under regulator instruction.",
+                EvidenceReference = "regulator://order-77"
+            }, PlatformActor(), null, CancellationToken.None));
+
+        Assert.Equal(409, refusal.SuggestedStatusCode);
+        Assert.Contains("destructive execution", refusal.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Legal_hold_is_refused_after_personal_data_erasure_committed()
+    {
+        using var db = new TestDb();
+        var tenantId = await SeedTenant(db, "legal-hold-after-erasure", TenantStatus.Archived);
+        await using (var seed = db.ContextFor(null))
+        {
+            seed.Set<TenantOffboarding>().Add(new TenantOffboarding
+            {
+                TenantId = tenantId,
+                Stage = TenantOffboardingStage.PendingDeletion,
+                PersonalDataErasedOn = DateTime.UtcNow,
+                PersonalDataErasedBy = "privacy@nexora.test"
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = db.ContextFor(null);
+        var refusal = await Assert.ThrowsAsync<TenantOffboardingRefusedException>(() =>
+            LegalHolds(context).PlaceAsync(tenantId, new PlaceTenantLegalHoldRequest
+            {
+                Scope = "AllTenantData",
+                Authority = "Regulatory order",
+                Reason = "Preserve all records under regulator instruction.",
+                EvidenceReference = "regulator://order-after-erasure"
+            }, PlatformActor(), null, CancellationToken.None));
+
+        Assert.Equal(409, refusal.SuggestedStatusCode);
+        Assert.Contains("destructive execution", refusal.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(await context.Set<TenantLegalHold>().ToListAsync());
+    }
+
     private static TenantsController Controller(ErpRfqAutomationContext context)
     {
         var services = new ServiceCollection().BuildServiceProvider();
@@ -295,6 +401,9 @@ public sealed class PlatformTenantLifecycleAdminTests
             }
         };
     }
+
+    private static TenantLegalHoldService LegalHolds(ErpRfqAutomationContext context) =>
+        new(context, new PlatformAuditService(context, NullLogger<PlatformAuditService>.Instance));
 
     private static ClaimsPrincipal PlatformActor() => new(new ClaimsIdentity(
     [

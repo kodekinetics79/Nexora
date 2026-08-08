@@ -6,6 +6,7 @@ using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Platform.Lifecycle;
 using ERP_RFQ_Automation.PlatformGovernance;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -269,13 +270,30 @@ public sealed class EvidenceRetentionService(
         // longer exist, which nothing could repair.
         await RecordIntentAsync(tenantId, actorUserId, policy, reason, candidate, ct);
 
-        // --- Phase B: delete bytes. Deliberately outside any transaction: a filesystem or
-        // S3 delete cannot be rolled back, so enrolling it in one would only create the
-        // illusion that it could.
+        return await DeleteAndConfirmUnderLegalHoldFenceAsync(
+            tenantId, actorUserId, policy.PolicyCode, PolicyEvidence(policy), reason, candidate, ct);
+    }
+
+    private static string PurgeReasonFor(long freed) => freed > 0
+        ? EvidenceRetentionEligibility.ReasonRetentionElapsed
+        : EvidenceRetentionEligibility.ReasonBytesAlreadyAbsent;
+
+    /// <summary>
+    /// Linearizes irreversible byte deletion with tenant legal-hold placement. The database
+    /// session lock spans the non-transactional storage delete: hold-first makes this recheck fail;
+    /// deletion-first makes hold placement wait until the deletion and its tombstone are complete.
+    /// </summary>
+    private async Task<DocumentPurgeOutcome> DeleteAndConfirmUnderLegalHoldFenceAsync(
+        long tenantId, long actorUserId, string policyCode, object policyEvidence,
+        string reason, PurgeCandidate candidate, CancellationToken ct)
+    {
+        await using var holdFence = await AcquireLegalHoldDeletionFenceAsync(tenantId, ct);
+
+        // Storage deletion remains outside a database transaction because it cannot roll back.
+        // The session-level legal-hold fence, unlike a transaction, is intentionally held across it.
         var (freed, objects, legacy) = await DeleteBytesAsync(tenantId, candidate, ct);
 
-        // --- Phase C: confirm what actually happened.
-        await ConfirmAsync(tenantId, actorUserId, policy.PolicyCode, PolicyEvidence(policy),
+        await ConfirmAsync(tenantId, actorUserId, policyCode, policyEvidence,
             reason, candidate, freed, PurgeReasonFor(freed), objects, legacy, ct);
 
         return new DocumentPurgeOutcome(freed,
@@ -283,9 +301,29 @@ public sealed class EvidenceRetentionService(
             legacy.Unresolved);
     }
 
-    private static string PurgeReasonFor(long freed) => freed > 0
-        ? EvidenceRetentionEligibility.ReasonRetentionElapsed
-        : EvidenceRetentionEligibility.ReasonBytesAlreadyAbsent;
+    internal async Task<IAsyncDisposable> AcquireLegalHoldDeletionFenceAsync(
+        long businessUnitId, CancellationToken ct)
+    {
+        var platformTenantId = await TenantLegalHoldFence.ResolvePlatformTenantIdAsync(db, businessUnitId, ct)
+            ?? throw new PlatformGovernanceConflictException(
+                $"Evidence deletion is blocked because business unit {businessUnitId} cannot be resolved "
+                + "to a platform tenant for legal-hold verification.");
+
+        var holdFence = await TenantLegalHoldFence.AcquireSessionAsync(db, platformTenantId, ct);
+        try
+        {
+            if (await TenantLegalHoldFence.HasActiveAsync(db, platformTenantId, ct))
+                throw new PlatformGovernanceConflictException(
+                    "Evidence deletion is blocked by an active tenant legal hold. Release the hold "
+                    + "through the governed platform workflow before retrying.");
+            return holdFence;
+        }
+        catch
+        {
+            await holdFence.DisposeAsync();
+            throw;
+        }
+    }
 
     /// <summary>
     /// Deletes both content-addressed zone objects and every resolvable legacy copy, and
@@ -428,16 +466,13 @@ public sealed class EvidenceRetentionService(
 
         foreach (var candidate in stalled)
         {
-            var (freed, objects, legacy) = await DeleteBytesAsync(tenantId, candidate, ct);
-
             // The tombstone cites the policy the purge was STARTED under — read off the row
             // where phase A stamped it — not whatever the tenant's policy happens to say now.
             // "Under which rule was this destroyed?" must not be re-answerable after the fact.
             var policyCode = candidate.RecordedPolicyCode ?? "retention/unrecorded";
-            await ConfirmAsync(tenantId, actorUserId, policyCode,
+            await DeleteAndConfirmUnderLegalHoldFenceAsync(tenantId, actorUserId, policyCode,
                 new { code = policyCode, mode = "RESUMED_AFTER_INTERRUPTION" },
-                "Completing a purge interrupted before its bytes were confirmed.",
-                candidate, freed, PurgeReasonFor(freed), objects, legacy, ct);
+                "Completing a purge interrupted before its bytes were confirmed.", candidate, ct);
         }
     }
 
@@ -510,6 +545,9 @@ public sealed class EvidenceRetentionService(
     private async Task<List<PurgeCandidate>> EligibleAsync(
         long tenantId, EvidenceRetentionPolicy policy, DateTime now, CancellationToken ct)
     {
+        if (await TenantHoldBlocksAsync(tenantId, ct))
+            return [];
+
         var blockedByGovernance = await BlockedDocumentIdsAsync(tenantId, ct);
         var blockedByHumanAction = await OpenHumanActionDocumentIdsAsync(tenantId, ct);
         var statutoryTypes = EvidenceRetentionEligibility.StatutoryDocumentTypes.ToArray();
@@ -658,6 +696,7 @@ public sealed class EvidenceRetentionService(
             return [];
 
         var ids = excluded.Select(x => x.Id).ToArray();
+        var tenantHoldActive = await TenantHoldBlocksAsync(tenantId, ct);
         var governance = await GovernanceBlocksAsync(tenantId, ct);
         var held = governance.LegalHold.ToHashSet();
         var pendingDeletion = governance.DeletionRequested.ToHashSet();
@@ -688,7 +727,7 @@ public sealed class EvidenceRetentionService(
         return excluded.Select(document => new EvidenceRetentionSkip(
             document.Id,
             document.OriginalFileName,
-            held.Contains(document.Id) ? EvidenceRetentionEligibility.Skip.LegalHold
+            tenantHoldActive || held.Contains(document.Id) ? EvidenceRetentionEligibility.Skip.LegalHold
             : pendingDeletion.Contains(document.Id) ? EvidenceRetentionEligibility.Skip.DeletionNotApproved
             : statutory.Contains(document.Id) ? EvidenceRetentionEligibility.Skip.StatutoryDocumentType
             : openIntake.Contains(document.Id) ? EvidenceRetentionEligibility.Skip.OpenIntake
@@ -697,6 +736,15 @@ public sealed class EvidenceRetentionService(
             : openInquiryCorpora.Contains(document.CorpusId) ? EvidenceRetentionEligibility.Skip.OpenInquiry
             : EvidenceRetentionEligibility.Skip.ExtractionNotSucceeded))
             .ToList();
+    }
+
+    private async Task<bool> TenantHoldBlocksAsync(long businessUnitId, CancellationToken ct)
+    {
+        var platformTenantId = await TenantLegalHoldFence.ResolvePlatformTenantIdAsync(db, businessUnitId, ct);
+        // An unresolvable identity cannot prove the absence of a hold. Selection therefore returns
+        // no destructive candidates; the execution path raises an explicit conflict.
+        return platformTenantId is null
+               || await TenantLegalHoldFence.HasActiveAsync(db, platformTenantId.Value, ct);
     }
 
     // ---------------------------------------------------------------- plumbing

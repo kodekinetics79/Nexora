@@ -21,6 +21,7 @@ public static class PlatformAuthConstants
     // Claim types
     public const string ScopeClaim = "scope";
     public const string PlatformRoleClaim = "platformRole";
+    public const string SessionGenerationClaim = "platformSessionGeneration";
 
     // Impersonation stamps (carried on the short-lived TENANT token that is minted)
     public const string ActSubClaim = "act_sub";           // acting platform user id

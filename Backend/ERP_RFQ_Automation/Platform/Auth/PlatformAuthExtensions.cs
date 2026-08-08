@@ -3,6 +3,7 @@ using ERP_RFQ_Automation.Platform.Models;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.IdentityModel.Tokens;
 
 namespace ERP_RFQ_Automation.Platform.Auth;
@@ -25,6 +26,8 @@ public static class PlatformAuthExtensions
     public static AuthenticationBuilder AddPlatformJwtBearer(
         this AuthenticationBuilder builder, IConfiguration config)
     {
+        builder.Services.AddScoped<IPlatformSessionValidator, PlatformSessionValidator>();
+
         var environment = config["ASPNETCORE_ENVIRONMENT"]
                           ?? config["DOTNET_ENVIRONMENT"]
                           ?? config[HostDefaults.EnvironmentKey]
@@ -68,6 +71,31 @@ public static class PlatformAuthExtensions
                 ValidIssuer = issuer,
                 ValidAudience = audience,
                 IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(signingKey))
+            };
+            options.Events = new JwtBearerEvents
+            {
+                OnTokenValidated = async context =>
+                {
+                    try
+                    {
+                        var validator = context.HttpContext.RequestServices
+                            .GetRequiredService<IPlatformSessionValidator>();
+                        if (context.Principal is null
+                            || !await validator.IsCurrentAsync(
+                                context.Principal, context.HttpContext.RequestAborted))
+                            context.Fail("Platform session is no longer valid.");
+                    }
+                    catch (OperationCanceledException) when (context.HttpContext.RequestAborted.IsCancellationRequested)
+                    {
+                        context.Fail("Platform session validation was cancelled.");
+                    }
+                    catch
+                    {
+                        // The platform plane fails closed if its revocation ledger cannot
+                        // be consulted. JwtBearer will return an authentication failure.
+                        context.Fail("Platform session validation failed.");
+                    }
+                }
             };
         });
     }

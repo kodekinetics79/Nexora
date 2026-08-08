@@ -19,6 +19,65 @@ public sealed class TenantLifecycleReanimationPostgreSqlTests(PostgreSqlTestData
 {
     [Fact]
     [Trait("Category", "PostgreSQL")]
+    public async Task Restore_reclaims_a_stale_claim_and_fences_its_late_executor()
+    {
+        var businessUnitId = 9_000_000L + Random.Shared.Next(1, 900_000);
+        var staleAttempt = Guid.NewGuid();
+        long tenantId;
+        await using (var seed = database.ContextFor(null))
+        {
+            Seed.BusinessUnit(seed, businessUnitId);
+            var tenant = new Tenant
+            {
+                Name = "Stale purge fencing tenant",
+                Slug = $"stale-purge-fence-{Guid.NewGuid():N}",
+                Status = TenantStatus.Archived,
+                PrimaryBusinessUnitId = businessUnitId,
+                CreatedBy = "test",
+                CreatedOn = DateTime.UtcNow
+            };
+            seed.Set<Tenant>().Add(tenant);
+            await seed.SaveChangesAsync();
+            tenantId = tenant.Id;
+            seed.Set<TenantOffboarding>().Add(new TenantOffboarding
+            {
+                TenantId = tenantId,
+                Stage = TenantOffboardingStage.PendingDeletion,
+                DeletionScheduledOn = DateTime.UtcNow.AddDays(-31),
+                PurgeEligibleOn = DateTime.UtcNow.AddDays(-1),
+                PurgeStartedOn = DateTime.UtcNow - TenantOffboardingService.PurgeLease - TimeSpan.FromMinutes(1),
+                PurgeAttemptId = staleAttempt,
+                PurgeReason = "Executor paused before entering its owner transaction."
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await using (var restoreContext = database.ContextFor(null))
+        {
+            var restored = await Controller(restoreContext).Restore(tenantId,
+                new TenantStatusChangeRequest
+                {
+                    Reason = "Customer returned after the abandoned purge lease expired."
+                }, CancellationToken.None);
+            Assert.IsType<OkObjectResult>(restored.Result);
+        }
+
+        var executor = TenantLifecycleHarness.PurgeExecutor(database.ConnectionString);
+        var fenced = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            executor.ExecuteAsync(tenantId, businessUnitId, staleAttempt, CancellationToken.None));
+        Assert.Contains("fenced", fenced.Message, StringComparison.OrdinalIgnoreCase);
+
+        await using var verify = database.ContextFor(null);
+        var tenantAfter = await verify.Set<Tenant>().IgnoreQueryFilters().SingleAsync(t => t.Id == tenantId);
+        var offboarding = await verify.Set<TenantOffboarding>().SingleAsync(r => r.TenantId == tenantId);
+        Assert.Equal(TenantStatus.Suspended, tenantAfter.Status);
+        Assert.Equal(TenantOffboardingStage.NotScheduled, offboarding.Stage);
+        Assert.Null(offboarding.PurgeAttemptId);
+        Assert.NotNull(await verify.BusinessUnits.SingleOrDefaultAsync(b => b.Id == businessUnitId));
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
     public async Task Restore_waits_for_the_purge_claim_and_then_fails_closed()
     {
         long tenantId;

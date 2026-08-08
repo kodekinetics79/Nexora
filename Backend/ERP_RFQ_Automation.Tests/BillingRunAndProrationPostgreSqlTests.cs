@@ -4,6 +4,7 @@ using ERP_RFQ_Automation.Billing.Controllers;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.MultiTenancy;
+using ERP_RFQ_Automation.Platform.Auth;
 using ERP_RFQ_Automation.Platform.Models;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.AspNetCore.Mvc;
@@ -146,6 +147,37 @@ public sealed class BillingRunAndProrationPostgreSqlTests
             var lineCount = await verification.Set<BillingStatementLine>().AsNoTracking()
                 .CountAsync(l => l.BillingStatementId == currentStatement.Id);
             Assert.Equal(2, lineCount); // base subscription + the one priced meter
+        }
+        finally
+        {
+            await CleanupAsync();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task BillingAdmin_calculation_and_Owner_override_racing_leave_one_draft()
+    {
+        await SeedAsync(documentCount: 4);
+        await SetRateCardPinAsync(null);
+        var period = BillingPeriod.Containing(DateTime.UtcNow);
+        try
+        {
+            await using var billingContext = _database.ContextFor(null);
+            await using var ownerContext = _database.ContextFor(null);
+            var ordinary = Controller(billingContext, PlatformRole.BillingAdmin).ComputeStatement(
+                new ComputeStatementRequest(TenantId, period.Key, null), CancellationToken.None);
+            var approvedOverride = Controller(ownerContext, PlatformRole.Owner).ComputeStatement(
+                new ComputeStatementRequest(TenantId, period.Key, RateCardId), CancellationToken.None);
+
+            var results = await Task.WhenAll(ordinary, approvedOverride);
+            Assert.All(results, result => Assert.IsType<OkObjectResult>(result.Result));
+
+            await using var verification = _database.ContextFor(null);
+            Assert.Single(await verification.Set<BillingStatement>().AsNoTracking()
+                .Where(statement => statement.TenantId == TenantId
+                                    && statement.PeriodStartUtc == period.StartUtc)
+                .ToListAsync());
         }
         finally
         {
@@ -466,7 +498,8 @@ public sealed class BillingRunAndProrationPostgreSqlTests
 
     // =================================================================== support
 
-    private PlatformBillingController Controller(ErpRfqAutomationContext context)
+    private PlatformBillingController Controller(
+        ErpRfqAutomationContext context, PlatformRole role = PlatformRole.Owner)
         => new(context,
             new BillingStatementService(context, NullLogger<BillingStatementService>.Instance),
             new ERP_RFQ_Automation.Platform.Services.PlatformAuditService(
@@ -480,7 +513,11 @@ public sealed class BillingRunAndProrationPostgreSqlTests
                     User = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(
                     [
                         new System.Security.Claims.Claim("sub", "7"),
-                        new System.Security.Claims.Claim("email", "billing@nexora.test")
+                        new System.Security.Claims.Claim("email", "billing@nexora.test"),
+                        new System.Security.Claims.Claim(
+                            PlatformAuthConstants.ScopeClaim, PlatformAuthConstants.PlatformScopeValue),
+                        new System.Security.Claims.Claim(
+                            PlatformAuthConstants.PlatformRoleClaim, role.ToString())
                     ], "Platform"))
                 }
             }

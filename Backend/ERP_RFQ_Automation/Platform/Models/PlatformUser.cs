@@ -20,6 +20,13 @@ public class PlatformUser
 
     public bool IsActive { get; set; } = true;
 
+    /// <summary>
+    /// Security-stamp style fence for normal platform sessions. Credential,
+    /// activation, and authority changes increment it so a token issued by a
+    /// racing login is rejected even if its session row was inserted late.
+    /// </summary>
+    public long SessionGeneration { get; set; } = 1;
+
     public string? DisplayName { get; set; }
 
     public DateTime? LastLogin { get; set; }

@@ -11,6 +11,7 @@ namespace ERP_RFQ_Automation.Platform.Auth;
 public interface IPlatformAuthService
 {
     Task<PlatformLoginResponse> LoginAsync(PlatformLoginRequest request);
+    Task<bool> RevokeSessionAsync(string jti, string revokedBy, CancellationToken ct = default);
 
     /// <summary>
     /// Mint the short-lived, read-only TENANT token used for support impersonation.
@@ -70,21 +71,32 @@ public class PlatformAuthService : IPlatformAuthService
             throw new UnauthorizedAccessException("Platform account is not active.");
         }
 
-        // Best-effort LastLogin bump (tracked update on a fresh entity).
+        var issuedAt = DateTime.UtcNow;
+        var (token, expires, jti) = GeneratePlatformToken(user, issuedAt);
+
+        // Session persistence is mandatory: a token that is not represented in
+        // the revocation ledger must never be returned to the caller.
+        _context.Set<PlatformSession>().Add(new PlatformSession
+        {
+            Jti = jti,
+            PlatformUserId = user.Id,
+            SessionGeneration = user.SessionGeneration,
+            IssuedAtUtc = issuedAt,
+            ExpiresAtUtc = expires
+        });
+        await _context.SaveChangesAsync();
+
+        // LastLogin is display metadata, not part of the security decision.
         try
         {
-            var tracked = new PlatformUser { Id = user.Id };
-            _context.Set<PlatformUser>().Attach(tracked);
-            tracked.LastLogin = DateTime.UtcNow;
-            _context.Entry(tracked).Property(u => u.LastLogin).IsModified = true;
-            await _context.SaveChangesAsync();
+            await _context.Set<PlatformUser>().Where(u => u.Id == user.Id)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(u => u.LastLogin, issuedAt));
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Platform login: could not update LastLogin for {Email}", request.Email);
         }
 
-        var (token, expires) = GeneratePlatformToken(user);
         _logger.LogInformation("Platform login successful for {Email} ({Role})", user.Email, user.PlatformRole);
 
         return new PlatformLoginResponse
@@ -97,7 +109,21 @@ public class PlatformAuthService : IPlatformAuthService
         };
     }
 
-    private (string Token, DateTime ExpiresAtUtc) GeneratePlatformToken(PlatformUser user)
+    public async Task<bool> RevokeSessionAsync(
+        string jti, string revokedBy, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(jti)) return false;
+        var now = DateTime.UtcNow;
+        return await _context.Set<PlatformSession>()
+            .Where(session => session.Jti == jti && session.RevokedAtUtc == null)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(session => session.RevokedAtUtc, now)
+                .SetProperty(session => session.RevokedBy, revokedBy)
+                .SetProperty(session => session.RevocationReason, "platform-logout"), ct) == 1;
+    }
+
+    private (string Token, DateTime ExpiresAtUtc, string Jti) GeneratePlatformToken(
+        PlatformUser user, DateTime issuedAtUtc)
     {
         var signingKey = _config["Jwt:PlatformKey"];
         if (string.IsNullOrWhiteSpace(signingKey))
@@ -109,23 +135,25 @@ public class PlatformAuthService : IPlatformAuthService
 
         // NOTE: deliberately NO businessUnitId / tenantId / roleId claim — a platform
         // token must never satisfy the tenant scope or tenant RBAC handlers.
+        var jti = Guid.NewGuid().ToString();
         var claims = new[]
         {
             new Claim(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
             new Claim(JwtRegisteredClaimNames.Email, user.Email),
             new Claim(PlatformAuthConstants.ScopeClaim, PlatformAuthConstants.PlatformScopeValue),
             new Claim(PlatformAuthConstants.PlatformRoleClaim, user.PlatformRole.ToString()),
-            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
+            new Claim(PlatformAuthConstants.SessionGenerationClaim, user.SessionGeneration.ToString()),
+            new Claim(JwtRegisteredClaimNames.Jti, jti)
         };
 
         var creds = new SigningCredentials(
             new SymmetricSecurityKey(Encoding.UTF8.GetBytes(signingKey!)), SecurityAlgorithms.HmacSha256);
-        var expires = DateTime.UtcNow.AddMinutes(minutes);
+        var expires = issuedAtUtc.AddMinutes(minutes);
 
         var token = new JwtSecurityToken(
             issuer: issuer, audience: audience, claims: claims, expires: expires, signingCredentials: creds);
 
-        return (new JwtSecurityTokenHandler().WriteToken(token), expires);
+        return (new JwtSecurityTokenHandler().WriteToken(token), expires, jti);
     }
 
     /// <summary>Inclusive bounds for the impersonation-token lifetime, in minutes.</summary>

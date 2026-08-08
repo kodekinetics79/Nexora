@@ -5,6 +5,7 @@ using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Notifications;
 using ERP_RFQ_Automation.Platform.Auth;
+using ERP_RFQ_Automation.Platform.Controllers;
 using ERP_RFQ_Automation.Platform.Models;
 using ERP_RFQ_Automation.Platform.Onboarding;
 using ERP_RFQ_Automation.Security;
@@ -147,11 +148,18 @@ public sealed class TenantActivationEndpointTests
     {
         // Program.cs makes authentication the default twice over: an authorization
         // FallbackPolicy plus MapControllers().RequireAuthorization(). [AllowAnonymous] on the
-        // controller is what overrides both, exactly as AuthController and PlatformAuthController
-        // do it. Losing this attribute would 401 every invitee — a failure that is invisible in
+        // controller is what overrides both, exactly as AuthController does it. Losing this
+        // attribute would 401 every invitee — a failure that is invisible in
         // unit tests of the service and total in production.
         Assert.NotNull(typeof(TenantActivationController)
             .GetCustomAttribute<AllowAnonymousAttribute>(inherit: true));
+        Assert.Null(typeof(PlatformAuthController)
+            .GetCustomAttribute<AllowAnonymousAttribute>(inherit: true));
+        Assert.NotNull(typeof(PlatformAuthController).GetMethod(nameof(PlatformAuthController.Login))!
+            .GetCustomAttribute<AllowAnonymousAttribute>(inherit: true));
+        Assert.Equal(PlatformPolicies.PlatformScope,
+            typeof(PlatformAuthController).GetMethod(nameof(PlatformAuthController.Logout))!
+                .GetCustomAttribute<AuthorizeAttribute>(inherit: true)!.Policy);
 
         // The operator half must NOT be anonymous, and must sit behind the same gates the
         // tenant mutations on TenantsController use.
@@ -161,7 +169,7 @@ public sealed class TenantActivationEndpointTests
             typeof(TenantAdminInvitationsController)
                 .GetCustomAttribute<AuthorizeAttribute>(inherit: true)!.Policy);
 
-        foreach (var mutation in new[] { "Resend", "Revoke" })
+        foreach (var mutation in new[] { "List", "Resend", "Revoke" })
             Assert.Equal(PlatformPolicies.TenantAdmin,
                 typeof(TenantAdminInvitationsController).GetMethod(mutation)!
                     .GetCustomAttribute<AuthorizeAttribute>(inherit: true)!.Policy);

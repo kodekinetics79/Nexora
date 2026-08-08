@@ -69,6 +69,7 @@ public static class BillingModelConfiguration
             e.Property(x => x.Currency).IsRequired().HasMaxLength(3);
             e.Property(x => x.Status).HasConversion<string>().HasMaxLength(16).IsRequired();
             e.Property(x => x.TotalAmount).HasPrecision(14, 2);
+            e.Property(x => x.ComputedBy).IsRequired().HasMaxLength(256);
             e.Property(x => x.FinalizedBy).HasMaxLength(256);
             e.Property(x => x.Version).HasDefaultValue(1L).IsConcurrencyToken();
             // THE duplicate-charge guard: one statement per tenant per period.

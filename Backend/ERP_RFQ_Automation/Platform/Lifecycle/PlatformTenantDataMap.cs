@@ -144,6 +144,11 @@ public static class PlatformTenantDataMap
             + "compliant offboarding into an unevidenced one.",
             TenantColumn: "TenantId"),
 
+        new("TenantLegalHolds", TenantDataClass.OperatorRecord,
+            "The legal authority and evidence that prevented deletion. A purge must preserve the "
+            + "record proving why it was refused and who later released it.",
+            TenantColumn: "TenantId"),
+
         // ==== the customer's record — destroyed ==============================================
 
         new("TenantAdminInvitations", TenantDataClass.CustomerRecord,

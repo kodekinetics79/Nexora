@@ -16,6 +16,7 @@ import CommercialTab from './tenant/CommercialTab';
 import SupportTab from './tenant/SupportTab';
 import AuditTab from './tenant/AuditTab';
 import LifecycleTab from './tenant/LifecycleTab';
+import AiGovernanceTab from './tenant/AiGovernanceTab';
 
 const TABS = [
   { key: 'overview', label: 'Overview' },
@@ -23,6 +24,7 @@ const TABS = [
   { key: 'support', label: 'Support' },
   { key: 'audit', label: 'Audit' },
   { key: 'lifecycle', label: 'Lifecycle' },
+  { key: 'ai-governance', label: 'AI governance' },
 ] as const;
 
 type TabKey = (typeof TABS)[number]['key'];
@@ -32,8 +34,10 @@ export default function TenantDetailPage() {
   const navigate = useNavigate();
   const permissions = usePlatformPermissions();
   const availableTabs = useMemo(
-    () => TABS.filter((entry) => entry.key !== 'support' || permissions.canAdministerTenants),
-    [permissions.canAdministerTenants],
+    () => TABS.filter((entry) =>
+      (entry.key !== 'support' || permissions.canAdministerTenants)
+      && (entry.key !== 'ai-governance' || permissions.isOwner)),
+    [permissions.canAdministerTenants, permissions.isOwner],
   );
   // The tab lives in the URL so a link to a customer's lifecycle screen is a link that
   // opens on it — which is what an operator pastes into a ticket.
@@ -130,6 +134,7 @@ export default function TenantDetailPage() {
       {tab === 'support' && permissions.canAdministerTenants && <SupportTab tenant={tenant} />}
       {tab === 'audit' && <AuditTab tenant={tenant} />}
       {tab === 'lifecycle' && <LifecycleTab tenant={tenant} />}
+      {tab === 'ai-governance' && permissions.isOwner && <AiGovernanceTab tenant={tenant} />}
     </Box>
   );
 }

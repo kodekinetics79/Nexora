@@ -297,6 +297,34 @@ public class PlatformBillingTests
         Assert.Equal(1, await verification.Set<BillingStatement>().CountAsync());
     }
 
+    [Fact]
+    public async Task Finalize_requires_an_owner_distinct_from_the_last_calculating_actor()
+    {
+        using var db = new BillingTestDb();
+        var (tenantId, buId) = await SeedTenantAsync(db);
+        var rateCardId = await SeedRateCardAsync(db);
+        await SeedStandardJulyUsageAsync(db, buId);
+
+        await using var context = db.Context(null);
+        var service = Service(context);
+        var draft = await service.ComputeStatementAsync(
+            tenantId, July, rateCardId, computedBy: "owner-one@nexora.test");
+
+        var conflict = await Assert.ThrowsAsync<BillingConflictException>(
+            () => service.FinalizeAsync(draft.Id, "OWNER-ONE@nexora.test"));
+        Assert.Contains("different Platform Owner", conflict.Message, StringComparison.Ordinal);
+
+        context.ChangeTracker.Clear();
+        var stillDraft = await context.Set<BillingStatement>().SingleAsync(s => s.Id == draft.Id);
+        Assert.Equal(BillingStatementStatus.Draft, stillDraft.Status);
+        Assert.Null(stillDraft.FinalizedAtUtc);
+
+        var finalized = await service.FinalizeAsync(draft.Id, "owner-two@nexora.test");
+        Assert.Equal(BillingStatementStatus.Final, finalized.Status);
+        Assert.Equal("owner-one@nexora.test", finalized.ComputedBy);
+        Assert.Equal("owner-two@nexora.test", finalized.FinalizedBy);
+    }
+
     // ------------------------------ F2: no finalizing an open / settling period
 
     [Fact]
@@ -445,6 +473,95 @@ public class PlatformBillingTests
         // and only statement slot.
         await using var verification = db.Context(null);
         Assert.Equal(0, await verification.Set<BillingStatement>().CountAsync());
+    }
+
+    [Fact]
+    public async Task BillingAdmin_can_calculate_the_server_selected_card_but_cannot_supply_an_override()
+    {
+        using var db = new BillingTestDb();
+        var (tenantId, buId) = await SeedTenantAsync(db);
+        var rateCardId = await SeedRateCardAsync(db);
+        await SeedStandardJulyUsageAsync(db, buId);
+
+        await using var context = db.Context(null);
+        var controller = Controller(context, Service(context), role: PlatformRole.BillingAdmin);
+
+        var forbidden = await controller.ComputeStatement(
+            new ComputeStatementRequest(tenantId, July.Key, rateCardId), CancellationToken.None);
+        Assert.IsType<ForbidResult>(forbidden.Result);
+        Assert.Equal(0, await context.Set<BillingStatement>().CountAsync());
+
+        var calculated = await controller.ComputeStatement(
+            new ComputeStatementRequest(tenantId, July.Key, null), CancellationToken.None);
+        Assert.IsType<OkObjectResult>(calculated.Result);
+        Assert.Single(await context.Set<BillingStatement>().ToListAsync());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Owner_override_cannot_bypass_rate_card_effective_dates(bool startsAfterPeriod)
+    {
+        using var db = new BillingTestDb();
+        var (tenantId, _) = await SeedTenantAsync(db);
+        var rateCardId = await SeedRateCardAsync(db);
+        await using (var seed = db.Context(null))
+        {
+            var card = await seed.Set<RateCard>().SingleAsync(c => c.Id == rateCardId);
+            if (startsAfterPeriod)
+                card.EffectiveFromUtc = July.EndUtc;
+            else
+                card.EffectiveToUtc = July.StartUtc;
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = db.Context(null);
+        var rejected = await Controller(context, Service(context)).ComputeStatement(
+            new ComputeStatementRequest(tenantId, July.Key, rateCardId), CancellationToken.None);
+
+        var conflict = Assert.IsType<ConflictObjectResult>(rejected.Result);
+        Assert.Contains("not active and effective", conflict.Value!.ToString());
+        Assert.Equal(0, await context.Set<BillingStatement>().CountAsync());
+    }
+
+    [Fact]
+    public async Task Tenant_pinned_rate_card_must_still_be_active()
+    {
+        using var db = new BillingTestDb();
+        var (tenantId, _) = await SeedTenantAsync(db);
+        var rateCardId = await SeedRateCardAsync(db);
+        await using (var seed = db.Context(null))
+        {
+            var tenant = await seed.Set<Tenant>().SingleAsync(t => t.Id == tenantId);
+            tenant.RateCardId = rateCardId;
+            var card = await seed.Set<RateCard>().SingleAsync(c => c.Id == rateCardId);
+            card.IsActive = false;
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = db.Context(null);
+        var rejected = await Assert.ThrowsAsync<BillingConflictException>(() =>
+            Service(context).ComputeStatementAsync(tenantId, July));
+
+        Assert.Contains("not active and effective", rejected.Message);
+        Assert.Equal(0, await context.Set<BillingStatement>().CountAsync());
+    }
+
+    [Fact]
+    public void Finalization_is_Owner_only_while_ordinary_calculation_retains_the_Billing_gate()
+    {
+        var controllerGate = Assert.Single(typeof(PlatformBillingController)
+            .GetCustomAttributes<AuthorizeAttribute>());
+        Assert.Equal(PlatformPolicies.Billing, controllerGate.Policy);
+
+        var finalizeGate = Assert.Single(typeof(PlatformBillingController)
+            .GetMethod(nameof(PlatformBillingController.FinalizeStatement))!
+            .GetCustomAttributes<AuthorizeAttribute>());
+        Assert.Equal(PlatformPolicies.Owner, finalizeGate.Policy);
+
+        Assert.Empty(typeof(PlatformBillingController)
+            .GetMethod(nameof(PlatformBillingController.ComputeStatement))!
+            .GetCustomAttributes<AuthorizeAttribute>());
     }
 
     [Fact]
@@ -1367,8 +1484,11 @@ public class PlatformBillingTests
             Assert.False(action.GetCustomAttributes<AllowAnonymousAttribute>().Any(),
                 $"{action.Name} must not opt out of the Platform.Billing policy.");
             var overriding = action.GetCustomAttributes<AuthorizeAttribute>().ToList();
-            Assert.True(overriding.Count == 0 || overriding.All(a => a.Policy == PlatformPolicies.Billing),
-                $"{action.Name} must not weaken the class-level Platform.Billing policy.");
+            if (action.Name == nameof(PlatformBillingController.FinalizeStatement))
+                Assert.All(overriding, gate => Assert.Equal(PlatformPolicies.Owner, gate.Policy));
+            else
+                Assert.True(overriding.Count == 0 || overriding.All(a => a.Policy == PlatformPolicies.Billing),
+                    $"{action.Name} must not weaken the class-level Platform.Billing policy.");
         }
     }
 
@@ -1400,7 +1520,8 @@ public class PlatformBillingTests
 
     private static PlatformBillingController Controller(
         ErpRfqAutomationContext context, IBillingStatementService service,
-        ERP_RFQ_Automation.Platform.Services.IPlatformAuditService? audit = null)
+        ERP_RFQ_Automation.Platform.Services.IPlatformAuditService? audit = null,
+        PlatformRole role = PlatformRole.Owner)
         => new(context, service,
             audit ?? new ERP_RFQ_Automation.Platform.Services.PlatformAuditService(
                 context, NullLogger<ERP_RFQ_Automation.Platform.Services.PlatformAuditService>.Instance),
@@ -1413,7 +1534,11 @@ public class PlatformBillingTests
                     User = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(
                     [
                         new System.Security.Claims.Claim("sub", "7"),
-                        new System.Security.Claims.Claim("email", "billing@nexora.test")
+                        new System.Security.Claims.Claim("email", "billing@nexora.test"),
+                        new System.Security.Claims.Claim(
+                            PlatformAuthConstants.ScopeClaim, PlatformAuthConstants.PlatformScopeValue),
+                        new System.Security.Claims.Claim(
+                            PlatformAuthConstants.PlatformRoleClaim, role.ToString())
                     ], "Platform"))
                 }
             }
@@ -1834,8 +1959,8 @@ public class PlatformBillingTests
                 rival.CommandText = """
                     INSERT INTO "BillingStatements"
                         ("TenantId", "PeriodStartUtc", "PeriodEndUtc", "RateCardId", "Currency",
-                         "Status", "TotalAmount", "ComputedAtUtc", "Version")
-                    VALUES ($tenant, $start, $end, $card, 'USD', 'Draft', '999.99', $computed, 1)
+                         "Status", "TotalAmount", "ComputedAtUtc", "ComputedBy", "Version")
+                    VALUES ($tenant, $start, $end, $card, 'USD', 'Draft', '999.99', $computed, 'system:rival', 1)
                     """;
                 rival.Parameters.AddWithValue("$tenant", _tenantId);
                 rival.Parameters.AddWithValue("$start", _periodStartUtc.ToString("yyyy-MM-dd HH:mm:ss"));

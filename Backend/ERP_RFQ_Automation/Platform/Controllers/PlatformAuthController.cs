@@ -17,7 +17,6 @@ namespace ERP_RFQ_Automation.Platform.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/platform/auth")]
-[AllowAnonymous]
 public class PlatformAuthController : ControllerBase
 {
     private readonly IPlatformAuthService _authService;
@@ -33,6 +32,7 @@ public class PlatformAuthController : ControllerBase
     }
 
     [HttpPost("login")]
+    [AllowAnonymous]
     public async Task<ActionResult<PlatformLoginResponse>> Login([FromBody] PlatformLoginRequest request)
     {
         // SEC-H6: same durable progressive lockout as the tenant login, but under the
@@ -105,5 +105,21 @@ public class PlatformAuthController : ControllerBase
 
             return Unauthorized(new { error = ex.Message });
         }
+    }
+
+    [HttpPost("logout")]
+    [Authorize(Policy = PlatformPolicies.PlatformScope)]
+    public async Task<IActionResult> Logout(CancellationToken ct)
+    {
+        var jti = User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Jti)?.Value;
+        if (string.IsNullOrWhiteSpace(jti)) return Unauthorized();
+
+        var actorEmail = User.FindFirst("email")?.Value ?? "platform";
+        if (await _authService.RevokeSessionAsync(jti, actorEmail, ct))
+            await _audit.WriteAsync(User, "platform.logout", nameof(PlatformSession), jti,
+                new { reason = "operator-logout" }, httpContext: HttpContext, ct: ct);
+
+        // Idempotent: an already-revoked session is still logged out.
+        return NoContent();
     }
 }

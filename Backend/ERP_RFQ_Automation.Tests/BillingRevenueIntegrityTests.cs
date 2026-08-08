@@ -110,7 +110,7 @@ public sealed class BillingRevenueIntegrityTests
     public async Task Pinned_rate_card_beats_the_active_card_so_a_negotiated_tenant_is_never_silently_repriced()
     {
         using var db = new RevenueTestDb();
-        var negotiatedCardId = SeedRateCard(db, code: "negotiated", documentPrice: 0.50m, active: false);
+        var negotiatedCardId = SeedRateCard(db, code: "negotiated", documentPrice: 0.50m, active: true);
         SeedRateCard(db, code: "list-2027", documentPrice: 9.99m, active: true,
             effectiveFrom: new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc));
         SeedTenant(db, planPrice: 100m, withPlan: true, rateCardId: negotiatedCardId);
@@ -127,7 +127,7 @@ public sealed class BillingRevenueIntegrityTests
     }
 
     [Fact]
-    public async Task An_explicitly_named_rate_card_outranks_the_tenant_pin_for_that_one_run()
+    public async Task An_explicitly_named_rate_card_cannot_override_the_tenant_pin()
     {
         using var db = new RevenueTestDb();
         var pinnedId = SeedRateCard(db, code: "pinned", documentPrice: 0.50m);
@@ -136,10 +136,11 @@ public sealed class BillingRevenueIntegrityTests
         SeedUsage(db);
 
         using var ctx = db.ContextFor(null);
-        var statement = await Service(ctx).ComputeStatementAsync(TenantId, July, overrideId);
+        var refusal = await Assert.ThrowsAsync<BillingConflictException>(() =>
+            Service(ctx).ComputeStatementAsync(TenantId, July, overrideId));
 
-        Assert.Equal(overrideId, statement.RateCardId);
-        Assert.Equal(6.00m, Line(statement, BillingMeterKeys.Documents).Amount); // 3 x 2.00
+        Assert.Contains("pinned", refusal.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("cannot substitute", refusal.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -1037,7 +1038,7 @@ public sealed class BillingRevenueIntegrityTests
     {
         using var db = new RevenueTestDb();
         var listCardId = SeedRateCard(db, code: "list", documentPrice: 9.99m, active: true);
-        var negotiatedId = SeedRateCard(db, code: "negotiated", documentPrice: 0.50m, active: false);
+        var negotiatedId = SeedRateCard(db, code: "negotiated", documentPrice: 0.50m, active: true);
         SeedTenant(db, planPrice: 100m, withPlan: true, rateCardId: null);
         SeedUsage(db);
 
@@ -1057,6 +1058,25 @@ public sealed class BillingRevenueIntegrityTests
         Assert.Equal(negotiatedId, statement.RateCardId);
         Assert.Equal(1.50m, Line(statement, BillingMeterKeys.Documents).Amount); // 3 x 0.50, not 3 x 9.99
         Assert.NotEqual(listCardId, statement.RateCardId);
+    }
+
+    [Fact]
+    public async Task Console_refuses_an_inactive_rate_card_before_it_can_break_the_next_billing_run()
+    {
+        using var db = new RevenueTestDb();
+        var inactiveId = SeedRateCard(db, code: "retired", documentPrice: 0.50m, active: false);
+        SeedTenant(db, planPrice: 100m, withPlan: true, rateCardId: null);
+
+        using var ctx = db.ContextFor(null);
+        var controller = Controller(ctx, Service(ctx));
+        var result = await controller.SetTenantRateCard(
+            TenantId,
+            new SetTenantRateCardRequest(inactiveId, "Attempted retired commercial assignment."),
+            CancellationToken.None);
+
+        var rejected = Assert.IsType<BadRequestObjectResult>(result.Result);
+        Assert.Contains("not active and effective now", rejected.Value!.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Null((await ctx.Set<Tenant>().SingleAsync(t => t.Id == TenantId)).RateCardId);
     }
 
     [Fact]
@@ -1294,8 +1314,11 @@ public sealed class BillingRevenueIntegrityTests
         {
             Assert.Empty(action.GetCustomAttributes<AllowAnonymousAttribute>());
             var overriding = action.GetCustomAttributes<AuthorizeAttribute>().ToList();
-            Assert.True(overriding.Count == 0 || overriding.All(a => a.Policy == PlatformPolicies.Billing),
-                $"{action.Name} must not weaken the class-level Platform.Billing policy.");
+            if (action.Name == nameof(PlatformBillingController.FinalizeStatement))
+                Assert.All(overriding, gate => Assert.Equal(PlatformPolicies.Owner, gate.Policy));
+            else
+                Assert.True(overriding.Count == 0 || overriding.All(a => a.Policy == PlatformPolicies.Billing),
+                    $"{action.Name} must not weaken the class-level Platform.Billing policy.");
         }
     }
 
@@ -1385,7 +1408,11 @@ public sealed class BillingRevenueIntegrityTests
                     User = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(
                         [
                             new System.Security.Claims.Claim("sub", "7"),
-                            new System.Security.Claims.Claim("email", "billing@nexora.test")
+                            new System.Security.Claims.Claim("email", "billing@nexora.test"),
+                            new System.Security.Claims.Claim(
+                                PlatformAuthConstants.ScopeClaim, PlatformAuthConstants.PlatformScopeValue),
+                            new System.Security.Claims.Claim(
+                                PlatformAuthConstants.PlatformRoleClaim, PlatformRole.Owner.ToString())
                         ], "Platform"))
                 }
             }

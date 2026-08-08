@@ -623,6 +623,7 @@ export default function CommercialTab({ tenant }: { tenant: Tenant }) {
               <Row label="Period">{finalizeTarget.period}</Row>
               <Row label="Total">{fmtMoney(finalizeTarget.totalAmount, finalizeTarget.currency)}</Row>
               <Row label="Computed">{fmtDateTime(finalizeTarget.computedAtUtc)}</Row>
+              <Row label="Calculated by">{finalizeTarget.computedBy}</Row>
             </Stack>
           )}
         </DialogContent>

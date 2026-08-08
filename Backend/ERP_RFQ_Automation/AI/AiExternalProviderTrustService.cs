@@ -159,9 +159,10 @@ public sealed class AiExternalProviderTrustService : IAiExternalProviderTrust
             rows.Select(x => Map(x, now)).ToList());
     }
 
-    public async Task<AiExternalProviderMutationResult> AuthorizeAsync(
+    internal async Task<AiExternalProviderMutationResult> AuthorizeAsync(
         long businessUnitId, long actorUserId, string idempotencyKey,
-        AuthorizeAiExternalProviderCommand command, CancellationToken ct)
+        AuthorizeAiExternalProviderCommand command, CancellationToken ct,
+        Func<AiExternalProviderAuthorization, CancellationToken, Task>? onAuthorized = null)
     {
         PlatformGovernanceService.EnsureActor(businessUnitId, actorUserId);
         idempotencyKey = PlatformGovernanceService.Required(idempotencyKey, 160, "Idempotency-Key is required.");
@@ -228,6 +229,8 @@ public sealed class AiExternalProviderTrustService : IAiExternalProviderTrust
             await _db.SaveChangesAsync(ct);
             AddAudit(businessUnitId, actorUserId, idempotencyKey, AuthorizedAction, justification, row, now);
             await _db.SaveChangesAsync(ct);
+            if (onAuthorized is not null)
+                await onAuthorized(row, ct);
             await tx.CommitAsync(ct);
 
             _log.LogWarning(
@@ -240,9 +243,10 @@ public sealed class AiExternalProviderTrustService : IAiExternalProviderTrust
         });
     }
 
-    public async Task<AiExternalProviderMutationResult> RevokeAsync(
+    internal async Task<AiExternalProviderMutationResult> RevokeAsync(
         long businessUnitId, long actorUserId, string idempotencyKey,
-        RevokeAiExternalProviderCommand command, CancellationToken ct)
+        RevokeAiExternalProviderCommand command, CancellationToken ct,
+        Func<AiExternalProviderAuthorization, CancellationToken, Task>? onRevoked = null)
     {
         PlatformGovernanceService.EnsureActor(businessUnitId, actorUserId);
         idempotencyKey = PlatformGovernanceService.Required(idempotencyKey, 160, "Idempotency-Key is required.");
@@ -270,6 +274,8 @@ public sealed class AiExternalProviderTrustService : IAiExternalProviderTrust
 
             AddAudit(businessUnitId, actorUserId, idempotencyKey, RevokedAction, reason, row, now);
             await _db.SaveChangesAsync(ct);
+            if (onRevoked is not null)
+                await onRevoked(row, ct);
             await tx.CommitAsync(ct);
 
             _log.LogWarning(

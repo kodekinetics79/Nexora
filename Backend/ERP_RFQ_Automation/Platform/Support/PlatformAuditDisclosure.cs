@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using System.Text.Json;
 using ERP_RFQ_Automation.Platform.Auth;
+using ERP_RFQ_Automation.Platform.Lifecycle;
 using Microsoft.AspNetCore.Authorization;
 
 namespace ERP_RFQ_Automation.Platform.Support;
@@ -75,13 +76,13 @@ public static class PlatformAuditDisclosure
     private static readonly IReadOnlyDictionary<string, string> ByAction =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            // Billing/Controllers/PlatformBillingController — class gate Platform.Billing. These
-            // payloads carry prices, rate-card lines, statement totals and the commercial-terms
-            // commentary that started this finding.
+            // Billing/Controllers/PlatformBillingController — class gate Platform.Billing, with
+            // finalization elevated to Owner. These payloads carry prices, rate-card lines,
+            // statement totals and the commercial-terms commentary that started this finding.
             ["billing.ratecard.create"] = PlatformPolicies.Billing,
             ["billing.ratecard.update"] = PlatformPolicies.Billing,
             ["billing.statement.compute"] = PlatformPolicies.Billing,
-            ["billing.statement.finalize"] = PlatformPolicies.Billing,
+            ["billing.statement.finalize"] = PlatformPolicies.Owner,
             ["billing.tenant.rate-card"] = PlatformPolicies.Billing,
             ["billing.tenant.commercial-terms"] = PlatformPolicies.Billing,
 
@@ -116,17 +117,20 @@ public static class PlatformAuditDisclosure
             ["tenant.offboarding.purge.completed"] = PlatformPolicies.Owner,
             ["tenant.offboarding.purge.failed"] = PlatformPolicies.Owner,
             ["tenant.offboarding.erase-personal-data"] = PlatformPolicies.Owner,
-            // Export is the one offboarding verb gated on TenantAdmin rather than Owner.
-            ["tenant.offboarding.export"] = PlatformPolicies.TenantAdmin,
+            [TenantLegalHoldService.PlaceAction] = PlatformPolicies.Owner,
+            [TenantLegalHoldService.ReleaseAction] = PlatformPolicies.Owner,
+            ["tenant.offboarding.export"] = PlatformPolicies.Owner,
 
-            // Platform/Controllers/TenantsController — tenant lifecycle, TenantAdmin. The payload is
-            // the operator's internal status reason, which is why it is not simply PlatformScope.
+            // Platform/Controllers/TenantsController — tenant lifecycle is TenantAdmin; AI policy
+            // mutation is Owner. Payload authority follows the writing method, not the class gate.
             ["tenant.provision"] = PlatformPolicies.TenantAdmin,
             ["tenant.suspend"] = PlatformPolicies.TenantAdmin,
             ["tenant.resume"] = PlatformPolicies.TenantAdmin,
             ["tenant.archive"] = PlatformPolicies.TenantAdmin,
             ["tenant.restore"] = PlatformPolicies.TenantAdmin,
-            ["tenant.ai-policy.update"] = PlatformPolicies.TenantAdmin,
+            ["tenant.ai-policy.update"] = PlatformPolicies.Owner,
+            ["tenant.ai-provider.authorize"] = PlatformPolicies.Owner,
+            ["tenant.ai-provider.revoke"] = PlatformPolicies.Owner,
 
             // Platform/Onboarding/TenantAdminInvitationsController — TenantAdmin.
             ["tenant.admin-invitation.resend"] = PlatformPolicies.TenantAdmin,

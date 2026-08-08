@@ -347,6 +347,9 @@ public class BillingStatement
 
     public DateTime ComputedAtUtc { get; set; }
 
+    /// <summary>The operator or governed worker that last calculated this Draft.</summary>
+    public string ComputedBy { get; set; } = "system:billing-run";
+
     public DateTime? FinalizedAtUtc { get; set; }
 
     public string? FinalizedBy { get; set; }

@@ -21,6 +21,9 @@ namespace ERP_RFQ_Automation.Platform.Controllers;
 [Authorize(Policy = PlatformPolicies.Owner)]
 public class PlatformUsersController : ControllerBase
 {
+    internal const int OwnerMutationLockNamespace = 1313167439;
+    internal const int OwnerMutationLockKey = 1463897166;
+
     private readonly ErpRfqAutomationContext _context;
     private readonly IPlatformAuditService _audit;
 
@@ -116,15 +119,31 @@ public class PlatformUsersController : ControllerBase
             return Conflict(new { error = "The last active platform Owner cannot be demoted." });
 
         var previous = user.PlatformRole;
-        await ExecuteAuditedAsync(async () =>
+        try
         {
-            user.PlatformRole = role;
-            _context.Set<PlatformUser>().Update(user);
-            await _context.SaveChangesAsync(ct);
+            await ExecuteAuditedAsync(async () =>
+            {
+                await AcquireOwnerMutationLockAsync(ct);
+                var current = await _context.Set<PlatformUser>().SingleAsync(u => u.Id == id, ct);
+                if (current.PlatformRole == PlatformRole.Owner && role != PlatformRole.Owner
+                    && current.IsActive && !await AnotherActiveOwnerExistsAsync(current.Id, ct))
+                    throw new LastActiveOwnerException("The last active platform Owner cannot be demoted.");
 
-            await _audit.WriteAsync(User, "platform-user.role.change", nameof(PlatformUser), user.Id.ToString(),
-                new { user.Email, from = previous.ToString(), to = role.ToString() }, httpContext: HttpContext, ct: ct);
-        }, ct);
+                previous = current.PlatformRole;
+                current.PlatformRole = role;
+                RotateSessionGeneration(current);
+                await _context.SaveChangesAsync(ct);
+                await RevokeAllSessionsAsync(current.Id, "platform-role-change", ct);
+
+                await _audit.WriteAsync(User, "platform-user.role.change", nameof(PlatformUser), current.Id.ToString(),
+                    new { current.Email, from = previous.ToString(), to = role.ToString() }, httpContext: HttpContext, ct: ct);
+                user = current;
+            }, ct);
+        }
+        catch (LastActiveOwnerException ex)
+        {
+            return Conflict(new { error = ex.Message });
+        }
 
         return Ok(ToDto(user));
     }
@@ -147,14 +166,29 @@ public class PlatformUsersController : ControllerBase
 
         if (user.IsActive)
         {
-            await ExecuteAuditedAsync(async () =>
+            try
             {
-                user.IsActive = false;
-                _context.Set<PlatformUser>().Update(user);
-                await _context.SaveChangesAsync(ct);
-                await _audit.WriteAsync(User, "platform-user.deactivate", nameof(PlatformUser), user.Id.ToString(),
-                    new { user.Email }, httpContext: HttpContext, ct: ct);
-            }, ct);
+                await ExecuteAuditedAsync(async () =>
+                {
+                    await AcquireOwnerMutationLockAsync(ct);
+                    var current = await _context.Set<PlatformUser>().SingleAsync(u => u.Id == id, ct);
+                    if (current.IsActive && current.PlatformRole == PlatformRole.Owner
+                        && !await AnotherActiveOwnerExistsAsync(current.Id, ct))
+                        throw new LastActiveOwnerException("The last active platform Owner cannot be deactivated.");
+
+                    current.IsActive = false;
+                    RotateSessionGeneration(current);
+                    await _context.SaveChangesAsync(ct);
+                    await RevokeAllSessionsAsync(current.Id, "platform-user-deactivated", ct);
+                    await _audit.WriteAsync(User, "platform-user.deactivate", nameof(PlatformUser), current.Id.ToString(),
+                        new { current.Email }, httpContext: HttpContext, ct: ct);
+                    user = current;
+                }, ct);
+            }
+            catch (LastActiveOwnerException ex)
+            {
+                return Conflict(new { error = ex.Message });
+            }
         }
 
         return Ok(ToDto(user));
@@ -172,11 +206,14 @@ public class PlatformUsersController : ControllerBase
         {
             await ExecuteAuditedAsync(async () =>
             {
-                user.IsActive = true;
-                _context.Set<PlatformUser>().Update(user);
+                var current = await _context.Set<PlatformUser>().SingleAsync(u => u.Id == id, ct);
+                current.IsActive = true;
+                RotateSessionGeneration(current);
                 await _context.SaveChangesAsync(ct);
-                await _audit.WriteAsync(User, "platform-user.reactivate", nameof(PlatformUser), user.Id.ToString(),
-                    new { user.Email }, httpContext: HttpContext, ct: ct);
+                await RevokeAllSessionsAsync(current.Id, "platform-user-reactivated", ct);
+                await _audit.WriteAsync(User, "platform-user.reactivate", nameof(PlatformUser), current.Id.ToString(),
+                    new { current.Email }, httpContext: HttpContext, ct: ct);
+                user = current;
             }, ct);
         }
 
@@ -195,15 +232,19 @@ public class PlatformUsersController : ControllerBase
         if (user is null)
             return NotFound();
 
+        var passwordHash = BCrypt.Net.BCrypt.HashPassword(request.NewPassword);
         await ExecuteAuditedAsync(async () =>
         {
-            user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.NewPassword);
-            _context.Set<PlatformUser>().Update(user);
+            var current = await _context.Set<PlatformUser>().SingleAsync(u => u.Id == id, ct);
+            current.PasswordHash = passwordHash;
+            RotateSessionGeneration(current);
             await _context.SaveChangesAsync(ct);
+            await RevokeAllSessionsAsync(current.Id, "platform-password-reset", ct);
 
             // Metadata deliberately excludes the password and its hash.
-            await _audit.WriteAsync(User, "platform-user.password.reset", nameof(PlatformUser), user.Id.ToString(),
-                new { user.Email }, httpContext: HttpContext, ct: ct);
+            await _audit.WriteAsync(User, "platform-user.password.reset", nameof(PlatformUser), current.Id.ToString(),
+                new { current.Email }, httpContext: HttpContext, ct: ct);
+            user = current;
         }, ct);
 
         return Ok(ToDto(user));
@@ -219,6 +260,35 @@ public class PlatformUsersController : ControllerBase
     private Task<bool> AnotherActiveOwnerExistsAsync(long excludingId, CancellationToken ct) =>
         _context.Set<PlatformUser>().AnyAsync(u =>
             u.Id != excludingId && u.IsActive && u.PlatformRole == PlatformRole.Owner, ct);
+
+    /// <summary>
+    /// PostgreSQL advisory transaction lock serializing every mutation that can
+    /// remove an active Owner. The invariant is re-read only after this lock is
+    /// held, closing the two-owner write-skew race without a sentinel table.
+    /// SQLite tests are single-writer and need no provider-specific statement.
+    /// </summary>
+    private Task AcquireOwnerMutationLockAsync(CancellationToken ct) =>
+        _context.Database.IsNpgsql()
+            ? _context.Database.ExecuteSqlRawAsync(
+                $"SELECT pg_advisory_xact_lock({OwnerMutationLockNamespace}, {OwnerMutationLockKey});", ct)
+            : Task.CompletedTask;
+
+    private sealed class LastActiveOwnerException(string message) : Exception(message);
+
+    private static void RotateSessionGeneration(PlatformUser user) =>
+        user.SessionGeneration = checked(user.SessionGeneration + 1);
+
+    private Task<int> RevokeAllSessionsAsync(long platformUserId, string reason, CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+        var actor = User.FindFirst("email")?.Value ?? "platform";
+        return _context.Set<PlatformSession>()
+            .Where(session => session.PlatformUserId == platformUserId && session.RevokedAtUtc == null)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(session => session.RevokedAtUtc, now)
+                .SetProperty(session => session.RevokedBy, actor)
+                .SetProperty(session => session.RevocationReason, reason), ct);
+    }
 
     private static PlatformUserDto ToDto(PlatformUser u) => new()
     {

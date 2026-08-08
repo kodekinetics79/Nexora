@@ -98,6 +98,23 @@ public sealed class AiExternalProviderAllowListTests
         Assert.Equal(AiExternalProviderTrustReasons.Revoked, decision.Reason);
     }
 
+    [Fact]
+    public async Task Platform_audit_failure_rolls_back_the_effective_provider_grant()
+    {
+        using var fixture = new Fixture();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            fixture.Trust.AuthorizeAsync(fixture.TenantId, 4242, Guid.NewGuid().ToString("N"),
+                new AuthorizeAiExternalProviderCommand(
+                    "Ollama", AuthorizedEndpoint, AuthorizedModel, AiPurposes.RfqExtraction,
+                    true, "DPA-2026-14 signed; approved by the data protection officer.", null),
+                default,
+                (_, _) => throw new InvalidOperationException("platform audit unavailable")));
+
+        var view = await fixture.Trust.GetAsync(fixture.TenantId, default);
+        Assert.Empty(view.Authorizations);
+    }
+
     // ---- 2. an unauthorized external endpoint is still refused -----------
 
     [Fact]
@@ -396,7 +413,7 @@ public sealed class AiExternalProviderAllowListTests
 
         public TestDb Database { get; }
         public long TenantId { get; }
-        public IAiExternalProviderTrust Trust { get; }
+        public AiExternalProviderTrustService Trust { get; }
         public IAiGovernanceService Governance { get; }
         public AiProviderDescriptor Descriptor { get; }
 

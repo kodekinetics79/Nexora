@@ -6,10 +6,14 @@ using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Platform.Lifecycle;
+using ERP_RFQ_Automation.Platform.Models;
+using ERP_RFQ_Automation.Platform.Services;
 using ERP_RFQ_Automation.PlatformGovernance;
 using ERP_RFQ_Automation.Retention;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 
 namespace ERP_RFQ_Automation.Tests;
@@ -559,13 +563,114 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
         finally { Directory.Delete(root, recursive: true); }
     }
 
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Active_tenant_legal_hold_removes_evidence_from_eligibility_and_preserves_bytes()
+    {
+        var tenantId = NewTenantId();
+        var root = NewRoot();
+        try
+        {
+            await using var db = database.ContextFor(null);
+            await SeedAsync(db, tenantId, enabled: true);
+            var files = new LocalFileStorage(root, root);
+            var document = await SeedPurgeableDocumentAsync(db, tenantId, files, "rfq-held.pdf");
+            var platformTenant = await db.Set<Tenant>().IgnoreQueryFilters()
+                .SingleAsync(t => t.PrimaryBusinessUnitId == tenantId);
+            db.Set<TenantLegalHold>().Add(new TenantLegalHold
+            {
+                TenantId = platformTenant.Id,
+                Scope = "AllTenantData",
+                Authority = "Litigation counsel",
+                Reason = "Preserve all tenant evidence for the active litigation matter.",
+                EvidenceReference = "case://retention-hold",
+                PlacedOn = DateTime.UtcNow,
+                PlacedByPlatformUserId = 17,
+                PlacedBy = "legal@nexora.test"
+            });
+            await db.SaveChangesAsync();
+
+            var result = await NewService(db, files).RunPurgeAsync(tenantId, 9, "held-run",
+                new EvidenceRetentionPurgeCommand(false, "Attempt retention while held."), default);
+
+            Assert.Equal(0, result.Eligible);
+            Assert.Equal(0, result.Purged);
+            Assert.Contains(result.Skipped,
+                skip => skip.DocumentId == document.Id
+                        && skip.Reason == EvidenceRetentionEligibility.Skip.LegalHold);
+            Assert.True(File.Exists(files.ResolvePath(document.ClearedKey)));
+            Assert.True(File.Exists(files.ResolvePath(document.QuarantineKey)));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Legal_hold_placement_waits_for_in_flight_retention_deletion_to_finish()
+    {
+        var tenantId = NewTenantId();
+        var root = NewRoot();
+        var storage = default(BlockingDeleteEvidenceStorage);
+        try
+        {
+            long platformTenantId;
+            await using (var seedDb = database.ContextFor(null))
+            {
+                await SeedAsync(seedDb, tenantId, enabled: true);
+                var files = new LocalFileStorage(root, root);
+                await SeedPurgeableDocumentAsync(seedDb, tenantId, files, "rfq-racing-hold.pdf");
+                platformTenantId = await seedDb.Set<Tenant>().IgnoreQueryFilters()
+                    .Where(t => t.PrimaryBusinessUnitId == tenantId)
+                    .Select(t => t.Id)
+                    .SingleAsync();
+            }
+
+            var raceFiles = new LocalFileStorage(root, root);
+            storage = new BlockingDeleteEvidenceStorage(new LocalEvidenceObjectStorage(raceFiles));
+            await using var purgeDb = database.ContextFor(null);
+            var purgeService = NewService(purgeDb, raceFiles, storage);
+            var purgeTask = purgeService.RunPurgeAsync(tenantId, 9, "deletion-wins-race",
+                new EvidenceRetentionPurgeCommand(false, "Exercise legal-hold deletion fencing."), default);
+
+            await storage.DeleteEntered.WaitAsync(TimeSpan.FromSeconds(10));
+
+            await using var holdDb = database.ContextFor(null);
+            var holdService = new TenantLegalHoldService(holdDb,
+                new PlatformAuditService(holdDb, NullLogger<PlatformAuditService>.Instance));
+            var holdTask = holdService.PlaceAsync(platformTenantId, new PlaceTenantLegalHoldRequest
+            {
+                Scope = "AllTenantData",
+                Authority = "Litigation counsel",
+                Reason = "Preserve all tenant records for the newly received litigation order.",
+                EvidenceReference = "case://retention-race"
+            }, TenantLifecycleHarness.Operator("legal@nexora.test", 17), null, default);
+
+            await Task.Delay(200);
+            Assert.False(holdTask.IsCompleted,
+                "Hold placement must wait while irreversible evidence deletion owns the shared fence.");
+
+            storage.AllowDelete();
+            var purge = await purgeTask.WaitAsync(TimeSpan.FromSeconds(10));
+            var hold = await holdTask.WaitAsync(TimeSpan.FromSeconds(10));
+
+            Assert.Equal(1, purge.Purged);
+            Assert.True(hold.IsActive);
+        }
+        finally
+        {
+            storage?.AllowDelete();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private sealed record SeededDocument(long Id, string Hash, long ByteSize, string ClearedKey,
         string QuarantineKey, long LeadId);
 
-    private static EvidenceRetentionService NewService(ErpRfqAutomationContext db, IFileStorage files) =>
-        new(db, new LocalEvidenceObjectStorage(files),
+    private static EvidenceRetentionService NewService(
+        ErpRfqAutomationContext db, IFileStorage files, IEvidenceObjectStorage? evidenceStorage = null) =>
+        new(db, evidenceStorage ?? new LocalEvidenceObjectStorage(files),
             new LegacyAttachmentPurgeResolver(db, files),
             new CommercialDocumentArchiveService(db),
             new NoopLogger<EvidenceRetentionService>());
@@ -575,6 +680,20 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
     {
         Seed.EnsureBusinessUnit(db, tenantId);
         await db.SaveChangesAsync();
+        if (!await db.Set<Tenant>().IgnoreQueryFilters()
+                .AnyAsync(t => t.PrimaryBusinessUnitId == tenantId))
+        {
+            db.Set<Tenant>().Add(new Tenant
+            {
+                Name = $"Retention tenant {tenantId}",
+                Slug = $"retention-{tenantId}",
+                Status = TenantStatus.Active,
+                PrimaryBusinessUnitId = tenantId,
+                CreatedBy = "retention-test",
+                CreatedOn = DateTime.UtcNow
+            });
+            await db.SaveChangesAsync();
+        }
         if (!createPolicy)
             return;
         db.EvidenceRetentionPolicies.Add(new EvidenceRetentionPolicy
@@ -588,6 +707,42 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
             CreatedOn = DateTime.UtcNow
         });
         await db.SaveChangesAsync();
+    }
+
+    private sealed class BlockingDeleteEvidenceStorage(IEvidenceObjectStorage inner)
+        : IEvidenceObjectStorage
+    {
+        private readonly TaskCompletionSource _deleteEntered =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _allowDelete =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _blocked;
+
+        public Task DeleteEntered => _deleteEntered.Task;
+        public bool IsDurable => inner.IsDurable;
+        public void AllowDelete() => _allowDelete.TrySetResult();
+        public Task ProbeAsync(CancellationToken ct = default) => inner.ProbeAsync(ct);
+
+        public Task<EvidenceObject> WriteImmutableAsync(long businessUnitId, string zone,
+            string sha256, string extension, ReadOnlyMemory<byte> content, CancellationToken ct = default) =>
+            inner.WriteImmutableAsync(businessUnitId, zone, sha256, extension, content, ct);
+
+        public Task<Stream> OpenVerifiedReadAsync(string storageUri, string expectedSha256,
+            CancellationToken ct = default) => inner.OpenVerifiedReadAsync(storageUri, expectedSha256, ct);
+
+        public async Task<EvidenceObjectPurgeResult> TryDeletePurgedObjectAsync(
+            string bucket, string key, string version, CancellationToken ct = default)
+        {
+            if (Interlocked.Exchange(ref _blocked, 1) == 0)
+            {
+                _deleteEntered.TrySetResult();
+                await _allowDelete.Task.WaitAsync(ct);
+            }
+            return await inner.TryDeletePurgedObjectAsync(bucket, key, version, ct);
+        }
+
+        public Task<long?> TryMeasureObjectAsync(string bucket, string key, string version,
+            CancellationToken ct = default) => inner.TryMeasureObjectAsync(bucket, key, version, ct);
     }
 
     /// <summary>

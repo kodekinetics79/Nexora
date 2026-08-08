@@ -37,6 +37,9 @@ export const platformKeys = {
   offboarding: (tenantId: string) => [...platformKeys.all, 'offboarding', tenantId] as const,
   offboardingPending: () => [...platformKeys.all, 'offboarding', 'pending'] as const,
   purgePreview: (tenantId: string) => [...platformKeys.all, 'offboarding', tenantId, 'purge-preview'] as const,
+  legalHolds: (tenantId: string) => [...platformKeys.all, 'legal-holds', tenantId] as const,
+  tenantAiPolicy: (tenantId: string) => [...platformKeys.all, 'ai-policy', tenantId] as const,
+  tenantAiProviders: (tenantId: string) => [...platformKeys.all, 'ai-providers', tenantId] as const,
 
   supportTickets: (filter?: unknown) => [...platformKeys.all, 'support', 'tickets', filter ?? null] as const,
   supportTicket: (id: string) => [...platformKeys.all, 'support', 'ticket', id] as const,

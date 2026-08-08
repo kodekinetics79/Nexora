@@ -136,7 +136,8 @@ public interface IBillingStatementService
     /// not started yet throws <see cref="BillingConflictException"/> (409).
     /// </summary>
     Task<BillingStatement> ComputeStatementAsync(
-        long tenantId, BillingPeriod period, long? rateCardId = null, CancellationToken ct = default);
+        long tenantId, BillingPeriod period, long? rateCardId = null, CancellationToken ct = default,
+        string computedBy = "system:billing-run");
 
     /// <summary>
     /// Draft → Final (immutable). Already-Final statements return unchanged.
@@ -544,8 +545,14 @@ public class BillingStatementService : IBillingStatementService
     }
 
     public async Task<BillingStatement> ComputeStatementAsync(
-        long tenantId, BillingPeriod period, long? rateCardId = null, CancellationToken ct = default)
+        long tenantId, BillingPeriod period, long? rateCardId = null, CancellationToken ct = default,
+        string computedBy = "system:billing-run")
     {
+        computedBy = string.IsNullOrWhiteSpace(computedBy)
+            ? throw new ArgumentException("A calculating actor is required.", nameof(computedBy))
+            : computedBy.Trim();
+        if (computedBy.Length > 256)
+            throw new ArgumentException("The calculating actor cannot exceed 256 characters.", nameof(computedBy));
         // P0: a period that has not STARTED has no usage to meter — computing it
         // would persist a fabricated all-zero Draft that the unique index then
         // makes the one statement for that period. The CURRENT period is
@@ -634,7 +641,8 @@ public class BillingStatementService : IBillingStatementService
                         Currency = rateCard.Currency,
                         Status = BillingStatementStatus.Draft,
                         TotalAmount = total,
-                        ComputedAtUtc = DateTime.UtcNow
+                        ComputedAtUtc = DateTime.UtcNow,
+                        ComputedBy = computedBy
                     };
                     foreach (var line in lines)
                         statement.Lines.Add(line);
@@ -654,6 +662,7 @@ public class BillingStatementService : IBillingStatementService
                     statement.PeriodEndUtc = period.EndUtc;
                     statement.TotalAmount = total;
                     statement.ComputedAtUtc = DateTime.UtcNow;
+                    statement.ComputedBy = computedBy;
                     statement.Version++;
                 }
 
@@ -710,6 +719,15 @@ public class BillingStatementService : IBillingStatementService
 
             if (statement.Status == BillingStatementStatus.Final)
                 return statement; // idempotent — a Final statement is immutable (no audit callback: nothing changed).
+
+            // Revenue-control maker/checker: the operator who last calculated the
+            // mutable Draft cannot also perform its irreversible final approval.
+            // Legacy rows are backfilled as system:legacy by the migration, so an
+            // Owner may governably approve them without being misidentified as maker.
+            if (string.Equals(statement.ComputedBy, actor?.Trim(), StringComparison.OrdinalIgnoreCase))
+                throw new BillingConflictException(
+                    $"Billing statement {statementId} was calculated by '{statement.ComputedBy}'. " +
+                    "A different Platform Owner must review and finalize it.");
 
             // P0: refuse to freeze a period that is still open (or still settling).
             // Checked AFTER the already-Final fast path so re-finalizing an
@@ -941,15 +959,37 @@ public class BillingStatementService : IBillingStatementService
         long? rateCardId, Tenant tenant, BillingPeriod period, CancellationToken ct)
     {
         if (rateCardId is long explicitId)
-            return (await LoadRateCardAsync(explicitId, ct)
-                    ?? throw new BillingNotFoundException($"Rate card {explicitId} does not exist."),
-                RateCardSource.Explicit);
+        {
+            if (tenant.RateCardId is long agreedId && agreedId != explicitId)
+                throw new BillingConflictException(
+                    $"Tenant {tenant.Id} is pinned to agreed rate card {agreedId}. Statement compute "
+                    + $"cannot substitute rate card {explicitId}; change the tenant's commercial "
+                    + "assignment through its audited workflow first.");
+
+            var explicitCard = await LoadRateCardAsync(explicitId, ct)
+                ?? throw new BillingNotFoundException($"Rate card {explicitId} does not exist.");
+            if (!explicitCard.IsActive
+                || explicitCard.EffectiveFromUtc > period.StartUtc
+                || (explicitCard.EffectiveToUtc is DateTime ends && ends <= period.StartUtc))
+                throw new BillingConflictException(
+                    $"Rate card {explicitId} is not active and effective for period {period.Key}. "
+                    + "An explicit identifier cannot bypass commercial validity dates.");
+            return (explicitCard, RateCardSource.Explicit);
+        }
 
         if (tenant.RateCardId is long pinnedId)
         {
             var pinned = await LoadRateCardAsync(pinnedId, ct);
             if (pinned is not null)
+            {
+                if (!pinned.IsActive
+                    || pinned.EffectiveFromUtc > period.StartUtc
+                    || (pinned.EffectiveToUtc is DateTime ends && ends <= period.StartUtc))
+                    throw new BillingConflictException(
+                        $"Tenant {tenant.Id}'s pinned rate card {pinnedId} is not active and effective for "
+                        + $"period {period.Key}. Correct the commercial assignment before computing.");
                 return (pinned, RateCardSource.TenantPin);
+            }
 
             _logger.LogError(
                 "Tenant {TenantId} is pinned to rate card {RateCardId}, which does not exist. "
@@ -958,7 +998,7 @@ public class BillingStatementService : IBillingStatementService
             throw new BillingConflictException(
                 $"Tenant {tenant.Id} is pinned to rate card {pinnedId}, which does not exist. " +
                 "Billing will not fall back to the active card, because that would charge this tenant on a price list " +
-                "nobody agreed to. Repair the tenant's RateCardId, or pass rateCardId explicitly for this run.");
+                "nobody agreed to. Repair the tenant's RateCardId through the audited commercial workflow.");
         }
 
         var fallback = await _context.Set<RateCard>().AsNoTracking().Include(c => c.Lines)
@@ -968,7 +1008,7 @@ public class BillingStatementService : IBillingStatementService
                            .OrderByDescending(c => c.EffectiveFromUtc).ThenByDescending(c => c.Id)
                            .FirstOrDefaultAsync(ct)
                        ?? throw new BillingConflictException(
-                           $"No active rate card is effective for period {period.Key}; pass rateCardId explicitly or activate one.");
+                           $"No active rate card is effective for period {period.Key}; activate and assign one.");
 
         if (tenant.BillingMode == TenantBillingMode.Billable)
             _logger.LogWarning(
@@ -1223,4 +1263,3 @@ internal static class BillingMath
     /// <summary>Money rounding used everywhere in billing: 2dp, away-from-zero.</summary>
     public static decimal Round2(decimal value) => Math.Round(value, 2, MidpointRounding.AwayFromZero);
 }
-
