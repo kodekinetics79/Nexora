@@ -36,6 +36,9 @@ public sealed class UsageMeteringAndAccountingOutboxTests
         Assert.Equal(2, bucket.EventCount);
         Assert.Equal(2, await db.Set<UsageEvent>().CountAsync());
         await Assert.ThrowsAsync<UsageMeteringException>(() => service.RecordAsync(original with { Quantity = 11 }));
+        await Assert.ThrowsAsync<UsageMeteringException>(() => service.RecordAsync(Request(
+            Guid.NewGuid(), 91, "documents", -9, "document", occurred,
+            "usage-over-correction", adjusts: first.UsageEventId, price: 2)));
     }
 
     [Theory]
@@ -127,14 +130,25 @@ public sealed class UsageMeteringAndAccountingOutboxTests
 
     private static async Task SeedTenantAsync(ERP_RFQ_Automation.Models.ErpRfqAutomationContext db, long id)
     {
-        db.Add(new Tenant
+        var tenant = new Tenant
         {
             Id = id,
             Name = $"Usage tenant {id}",
             LegalName = $"Usage Tenant {id} LLC",
             Slug = $"usage-tenant-{id}",
-            BillingContactEmail = $"billing-{id}@example.test"
-        });
+            BillingContactEmail = $"billing-{id}@example.test",
+            RateCardId = id == 91 ? 10 : null
+        };
+        db.Add(tenant);
+        if (id == 91)
+        {
+            db.Add(new RateCard
+            {
+                Id = 10, Code = "usage-test", Currency = "USD", Version = 3,
+                EffectiveFromUtc = new DateTime(2026, 1, 1), IsActive = true,
+                Lines = [new RateCardLine { Id = 11, MeterKey = "documents", Unit = "document", IncludedQuantity = 4, UnitPrice = 2 }]
+            });
+        }
         await db.SaveChangesAsync();
     }
 }

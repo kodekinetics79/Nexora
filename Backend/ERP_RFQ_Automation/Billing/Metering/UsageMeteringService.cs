@@ -44,6 +44,11 @@ public sealed class UsageMeteringService(ErpRfqAutomationContext db)
         UsageEvent? adjusted = null;
         if (request.AdjustsUsageEventId is Guid adjustedId)
         {
+            if (db.Database.IsNpgsql())
+            {
+                var adjustmentLock = StableLockKey(request.TenantId, $"adjustment|{adjustedId:N}");
+                await db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock({adjustmentLock})", ct);
+            }
             adjusted = await db.Set<UsageEvent>().AsNoTracking()
                 .SingleOrDefaultAsync(x => x.UsageEventId == adjustedId, ct)
                 ?? throw new UsageMeteringException("The adjusted usage event does not exist.");
@@ -51,13 +56,61 @@ public sealed class UsageMeteringService(ErpRfqAutomationContext db)
                 throw new UsageMeteringException("Adjustments must reference an original event in the same tenant.");
             if (adjusted.EventType != request.EventType || adjusted.Unit != request.Unit)
                 throw new UsageMeteringException("An adjustment must use the original event type and unit.");
+            if (!string.Equals(adjusted.Currency, request.Currency.Trim(), StringComparison.OrdinalIgnoreCase))
+                throw new UsageMeteringException("An adjustment must use the original currency.");
+            var prior = await db.Set<UsageEvent>().AsNoTracking()
+                .Where(x => x.TenantId == request.TenantId && x.AdjustsUsageEventId == adjustedId)
+                .GroupBy(_ => 1).Select(group => new
+                {
+                    Quantity = group.Sum(x => x.Quantity),
+                    Cost = group.Sum(x => x.CostAmount),
+                    Rated = group.Sum(x => x.RatedAmount ?? 0m)
+                }).SingleOrDefaultAsync(ct);
+            if (adjusted.Quantity + (prior?.Quantity ?? 0m) + request.Quantity < 0
+                || adjusted.CostAmount + (prior?.Cost ?? 0m) + request.CostAmount < 0)
+                throw new UsageMeteringException("Cumulative adjustments cannot reverse more quantity or cost than the original usage.");
         }
 
         var certified = UsageMeterCatalog.IsBillingCertified(request.EventType);
+        long? effectiveRateCardId = adjusted?.RateCardId ?? request.RateCardId;
+        long? effectiveRateCardLineId = adjusted?.RateCardLineId ?? request.RateCardLineId;
+        long? effectiveRateCardVersion = adjusted?.RateCardVersion ?? request.RateCardVersion;
+        decimal? effectivePrice = adjusted?.UnitPrice ?? request.UnitPrice;
+        if (adjusted is null && !certified)
+        {
+            effectiveRateCardId = null;
+            effectiveRateCardLineId = null;
+            effectiveRateCardVersion = null;
+            effectivePrice = null;
+        }
+        if (adjusted is null && certified && request.UnitPrice is not null)
+        {
+            var tenantRateCardId = await db.Set<ERP_RFQ_Automation.Platform.Models.Tenant>().AsNoTracking()
+                .Where(x => x.Id == request.TenantId).Select(x => x.RateCardId).SingleOrDefaultAsync(ct);
+            if (tenantRateCardId is null || tenantRateCardId != request.RateCardId)
+                throw new UsageMeteringException("Rated usage must use the tenant's pinned rate card.");
+            var rating = await (from card in db.Set<ERP_RFQ_Automation.Billing.RateCard>().AsNoTracking()
+                                join line in db.Set<ERP_RFQ_Automation.Billing.RateCardLine>().AsNoTracking()
+                                    on card.Id equals line.RateCardId
+                                where card.Id == request.RateCardId && line.Id == request.RateCardLineId
+                                select new { Card = card, Line = line }).SingleOrDefaultAsync(ct)
+                ?? throw new UsageMeteringException("The supplied rate-card line does not exist.");
+            if (!rating.Card.IsActive || rating.Card.Version != request.RateCardVersion
+                || rating.Card.EffectiveFromUtc > request.OccurredAtUtc
+                || rating.Card.EffectiveToUtc is DateTime until && until <= request.OccurredAtUtc
+                || !string.Equals(rating.Card.Currency, request.Currency.Trim(), StringComparison.OrdinalIgnoreCase)
+                || rating.Line.MeterKey != RateMeterKey(request.EventType)
+                || rating.Line.UnitPrice != request.UnitPrice || request.AllowanceApplied > rating.Line.IncludedQuantity)
+                throw new UsageMeteringException("Rated usage does not match the effective tenant rate-card line.");
+            effectiveRateCardId = rating.Card.Id;
+            effectiveRateCardLineId = rating.Line.Id;
+            effectiveRateCardVersion = rating.Card.Version;
+            effectivePrice = rating.Line.UnitPrice;
+        }
         var overage = adjusted is null
             ? Math.Max(0, request.Quantity - request.AllowanceApplied)
             : request.Quantity;
-        decimal? ratedAmount = certified && request.UnitPrice is decimal price
+        decimal? ratedAmount = certified && effectivePrice is decimal price
             ? decimal.Round(overage * price, 6, MidpointRounding.AwayFromZero)
             : null;
         var usage = new UsageEvent
@@ -84,12 +137,12 @@ public sealed class UsageMeteringService(ErpRfqAutomationContext db)
             RatingStatus = !certified ? UsageRatingStatus.BlockedUncertifiedMeter
                 : ratedAmount is null ? UsageRatingStatus.Pending : UsageRatingStatus.Rated,
             AdjustsUsageEventId = request.AdjustsUsageEventId,
-            RateCardId = request.RateCardId,
-            RateCardLineId = request.RateCardLineId,
-            RateCardVersion = request.RateCardVersion,
-            AllowanceApplied = request.AllowanceApplied,
+            RateCardId = effectiveRateCardId,
+            RateCardLineId = effectiveRateCardLineId,
+            RateCardVersion = effectiveRateCardVersion,
+            AllowanceApplied = adjusted is null ? request.AllowanceApplied : 0,
             OverageQuantity = overage,
-            UnitPrice = request.UnitPrice,
+            UnitPrice = effectivePrice,
             RatedAmount = ratedAmount
         };
         db.Add(usage);
@@ -184,9 +237,10 @@ public sealed class UsageMeteringService(ErpRfqAutomationContext db)
         && stored.Currency == value.Currency.Trim().ToUpperInvariant()
         && stored.EvidenceSha256 == value.EvidenceSha256.Trim().ToLowerInvariant()
         && stored.AdjustsUsageEventId == value.AdjustsUsageEventId
-        && stored.RateCardId == value.RateCardId && stored.RateCardLineId == value.RateCardLineId
-        && stored.RateCardVersion == value.RateCardVersion && stored.AllowanceApplied == value.AllowanceApplied
-        && stored.UnitPrice == value.UnitPrice;
+        && (stored.AdjustsUsageEventId is not null || stored.RatingStatus == UsageRatingStatus.BlockedUncertifiedMeter ||
+            stored.RateCardId == value.RateCardId && stored.RateCardLineId == value.RateCardLineId
+            && stored.RateCardVersion == value.RateCardVersion && stored.AllowanceApplied == value.AllowanceApplied
+            && stored.UnitPrice == value.UnitPrice);
 
     private static void Required(string? value, int maximum, string name)
     {
@@ -212,4 +266,11 @@ public sealed class UsageMeteringService(ErpRfqAutomationContext db)
     private static DateTime CanonicalUtc(DateTime value) => value.Kind == DateTimeKind.Unspecified
         ? DateTime.SpecifyKind(value, DateTimeKind.Utc)
         : value.ToUniversalTime();
+
+    private static string RateMeterKey(string eventType) => eventType switch
+    {
+        "ai.tokens" => ERP_RFQ_Automation.Billing.BillingMeterKeys.AiTokensExternal,
+        "storage.gb-hours" => ERP_RFQ_Automation.Billing.BillingMeterKeys.StorageGb,
+        _ => eventType
+    };
 }

@@ -43,6 +43,10 @@ public static class UsageMeteringModelConfiguration
                 .OnDelete(DeleteBehavior.Restrict);
             entity.HasOne<ERP_RFQ_Automation.Platform.Models.Tenant>().WithMany()
                 .HasForeignKey(x => x.TenantId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<ERP_RFQ_Automation.Billing.RateCard>().WithMany()
+                .HasForeignKey(x => x.RateCardId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<ERP_RFQ_Automation.Billing.RateCardLine>().WithMany()
+                .HasForeignKey(x => x.RateCardLineId).OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<UsageMinuteAggregate>(entity =>

@@ -35,7 +35,7 @@ public sealed class UsageMeteringAccountingPostgreSqlTests : IAsyncLifetime
         var occurred = DateTime.UtcNow.AddMinutes(-2);
         var request = new RecordUsageEvent(id, tenantId, "documents", 7, "document", occurred,
             "extraction-job", "job-1", "extraction-worker", null, null, null, key, key,
-            0.1m, "USD", new string('a', 64), null, 1, 2, 3, 2, 1.5m);
+            0.1m, "USD", new string('a', 64), null, null, null, null, 2, null);
 
         var ids = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => RecordAsync(request)));
         Assert.All(ids, value => Assert.Equal(id, value));
