@@ -200,11 +200,13 @@ PY
   unset MFA_SECRET MFA_CODE RECOVERY_CODE CHALLENGE_ID
 fi
 
+PLAN_FEATURES='{\"module.rfq\":true,\"module.quotes\":true,\"module.orders\":true,\"module.procurement\":true,\"module.inventory\":true,\"capability.ai\":true,\"capability.ocr\":true,\"capability.api\":false,\"capability.email-intake\":true,\"capability.supplier-search\":true,\"capability.integrations\":true,\"capability.exports\":true,\"capability.automation\":false,\"capability.sso\":false,\"capability.scim\":false,\"capability.dedicated-resources\":false}'
 create_plan() {  # code name weight concurrent docs seats priceUsd
   if curl -fsS -o /dev/null -X POST "$BACKEND_URL/api/platform/plans" \
     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
     -d "{\"code\":\"$1\",\"name\":\"$2\",\"weight\":$3,\"maxConcurrentExtractionJobs\":$4,
-         \"maxDocsPerMonth\":$5,\"maxSeats\":$6,\"monthlyPriceUsd\":$7,\"isActive\":true}"
+         \"maxDocsPerMonth\":$5,\"maxSeats\":$6,\"monthlyPriceUsd\":$7,
+         \"features\":\"$PLAN_FEATURES\",\"isActive\":true}"
   then
     log "  plan: $2 (\$$7/month)"
   else
