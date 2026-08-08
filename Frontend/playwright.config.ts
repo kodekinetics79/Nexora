@@ -21,7 +21,10 @@ const authDir = 'node_modules/.cache/nexora-e2e';
 
 if (!fixtureMode || process.env.E2E_ACCEPTANCE_MODE === 'true') {
   const required = (visibleGoogleChromeRequested
-    ? ['E2E_BASE_URL', 'E2E_API_URL', 'E2E_PLATFORM_ADMIN_EMAIL', 'E2E_PLATFORM_ADMIN_PASSWORD']
+    ? [
+        'E2E_BASE_URL', 'E2E_API_URL', 'E2E_PLATFORM_ADMIN_EMAIL', 'E2E_PLATFORM_ADMIN_PASSWORD',
+        'E2E_PLATFORM_ADMIN_TOTP_SECRET',
+      ]
     : [
         'E2E_BASE_URL',
         'E2E_MANAGER_EMAIL', 'E2E_MANAGER_PASSWORD', 'E2E_MANAGER_BUSINESS_UNIT_ID',
@@ -131,6 +134,7 @@ export default defineConfig({
     ...(visibleGoogleChromeRequested ? [{
         name: 'visible-google-chrome',
         testMatch: /platform-admin-visible-certification\.spec\.ts/,
+        timeout: 120_000,
         use: {
           ...devices['Desktop Chrome'],
           channel: 'chrome',

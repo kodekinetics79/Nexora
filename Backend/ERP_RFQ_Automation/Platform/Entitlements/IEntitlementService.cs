@@ -31,6 +31,13 @@ public interface IEntitlementService
     /// </summary>
     Task<EntitlementDecision> CheckDocumentQuotaAsync(long businessUnitId, CancellationToken ct = default);
 
+    /// <summary>
+    /// Checks one key from <see cref="TypedEntitlementCatalog"/>. Known capabilities are denied
+    /// unless the effective plan explicitly enables them; unknown keys are always denied.
+    /// </summary>
+    Task<EntitlementDecision> CheckFeatureAsync(
+        long businessUnitId, string entitlement, CancellationToken ct = default);
+
     // NOTE (P2-A6): GetConcurrencyCapAsync was removed as dead code — the per-tenant
     // concurrency cap is enforced atomically inside ExtractionQueue.ClaimSql
     // (platform.Tenants → platform.Plans join), never through this service.

@@ -62,6 +62,10 @@ public static class PlatformAuthExtensions
 
         return builder.AddJwtBearer(PlatformAuthConstants.Scheme, options =>
         {
+            // Preserve JWT claim names such as `sub` and `amr`. The default inbound map rewrites
+            // `amr` to a WS-* URI, causing a correctly MFA-authenticated session to pass the
+            // database validator but fail every privileged authorization policy.
+            options.MapInboundClaims = false;
             options.TokenValidationParameters = new TokenValidationParameters
             {
                 ValidateIssuer = true,
@@ -117,27 +121,42 @@ public static class PlatformAuthExtensions
             .AddAuthenticationSchemes(PlatformAuthConstants.Scheme)
             .RequireAuthenticatedUser()
             .RequireClaim(PlatformAuthConstants.ScopeClaim, PlatformAuthConstants.PlatformScopeValue)
-            .RequireClaim(PlatformAuthConstants.PlatformRoleClaim, nameof(PlatformRole.Owner)));
+            .RequireClaim(PlatformAuthConstants.PlatformRoleClaim, nameof(PlatformRole.Owner))
+            .RequireClaim(PlatformAuthConstants.AuthenticationMethodClaim,
+                PlatformAuthConstants.MfaAuthenticationMethod));
 
         options.AddPolicy(PlatformPolicies.TenantAdmin, p => p
             .AddAuthenticationSchemes(PlatformAuthConstants.Scheme)
             .RequireAuthenticatedUser()
             .RequireClaim(PlatformAuthConstants.ScopeClaim, PlatformAuthConstants.PlatformScopeValue)
             .RequireClaim(PlatformAuthConstants.PlatformRoleClaim,
-                nameof(PlatformRole.Owner), nameof(PlatformRole.SupportAdmin)));
+                nameof(PlatformRole.Owner), nameof(PlatformRole.SupportAdmin))
+            .RequireClaim(PlatformAuthConstants.AuthenticationMethodClaim,
+                PlatformAuthConstants.MfaAuthenticationMethod));
 
         options.AddPolicy(PlatformPolicies.Billing, p => p
             .AddAuthenticationSchemes(PlatformAuthConstants.Scheme)
             .RequireAuthenticatedUser()
             .RequireClaim(PlatformAuthConstants.ScopeClaim, PlatformAuthConstants.PlatformScopeValue)
             .RequireClaim(PlatformAuthConstants.PlatformRoleClaim,
-                nameof(PlatformRole.Owner), nameof(PlatformRole.BillingAdmin)));
+                nameof(PlatformRole.Owner), nameof(PlatformRole.BillingAdmin))
+            .RequireClaim(PlatformAuthConstants.AuthenticationMethodClaim,
+                PlatformAuthConstants.MfaAuthenticationMethod));
 
         options.AddPolicy(PlatformPolicies.Impersonate, p => p
             .AddAuthenticationSchemes(PlatformAuthConstants.Scheme)
             .RequireAuthenticatedUser()
             .RequireClaim(PlatformAuthConstants.ScopeClaim, PlatformAuthConstants.PlatformScopeValue)
             .RequireClaim(PlatformAuthConstants.PlatformRoleClaim,
-                nameof(PlatformRole.Owner), nameof(PlatformRole.SupportAdmin)));
+                nameof(PlatformRole.Owner), nameof(PlatformRole.SupportAdmin))
+            .RequireClaim(PlatformAuthConstants.AuthenticationMethodClaim,
+                PlatformAuthConstants.MfaAuthenticationMethod));
+
+        options.AddPolicy(PlatformPolicies.Mfa, p => p
+            .AddAuthenticationSchemes(PlatformAuthConstants.Scheme)
+            .RequireAuthenticatedUser()
+            .RequireClaim(PlatformAuthConstants.ScopeClaim, PlatformAuthConstants.PlatformScopeValue)
+            .RequireClaim(PlatformAuthConstants.AuthenticationMethodClaim,
+                PlatformAuthConstants.MfaAuthenticationMethod));
     }
 }

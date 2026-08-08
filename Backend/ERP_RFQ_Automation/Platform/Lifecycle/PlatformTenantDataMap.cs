@@ -129,6 +129,18 @@ public static class PlatformTenantDataMap
             "The detail behind a statement. Kept for the same reason and by the same obligation.",
             ReachedThrough: new PlatformTenantParent("BillingStatementId", "BillingStatements", "Id")),
 
+        new("SubscriptionInvoices", TenantDataClass.OperatorRecord,
+            "Nexora subscription invoices are immutable operator revenue and tax evidence retained "
+            + "for the applicable statutory period.", TenantColumn: "TenantId"),
+
+        new("SubscriptionCreditNotes", TenantDataClass.OperatorRecord,
+            "Governed corrections to preserved subscription invoices.",
+            ReachedThrough: new PlatformTenantParent("SubscriptionInvoiceId", "SubscriptionInvoices", "Id")),
+
+        new("SubscriptionPayments", TenantDataClass.OperatorRecord,
+            "External payment and collection evidence for preserved subscription invoices.",
+            ReachedThrough: new PlatformTenantParent("SubscriptionInvoiceId", "SubscriptionInvoices", "Id")),
+
         new("TenantOffboardings", TenantDataClass.OperatorRecord,
             "The record that the purge completed, written after it runs. It cannot be destroyed "
             + "by the operation it records.",
@@ -147,6 +159,12 @@ public static class PlatformTenantDataMap
         new("TenantLegalHolds", TenantDataClass.OperatorRecord,
             "The legal authority and evidence that prevented deletion. A purge must preserve the "
             + "record proving why it was refused and who later released it.",
+            TenantColumn: "TenantId"),
+
+        new("TenantDataAssets", TenantDataClass.OperatorRecord,
+            "The non-secret inventory and verification evidence for the customer's data boundary. "
+            + "It must survive to prove where data lived, which backup policy governed it and why "
+            + "the activation data gate passed; live data and credentials are never stored here.",
             TenantColumn: "TenantId"),
 
         // ==== the customer's record — destroyed ==============================================

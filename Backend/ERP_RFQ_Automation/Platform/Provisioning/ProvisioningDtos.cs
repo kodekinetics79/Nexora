@@ -1,5 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 using ERP_RFQ_Automation.Platform.Models;
+using Microsoft.AspNetCore.Mvc.ModelBinding.Validation;
 
 namespace ERP_RFQ_Automation.Platform.Provisioning;
 
@@ -200,7 +201,11 @@ public sealed class SaveProvisioningDraftRequest
 
     /// <summary>The partially completed request. Every field is optional at this stage — that is
     /// what makes it a draft.</summary>
-    [Required]
+    // ProvisionTenantRequest is also the final-submit contract and therefore has required
+    // founding-admin fields. MVC recursively applying those rules here made an intentionally
+    // partial draft impossible to save. The draft service still rejects a null payload and any
+    // credential; final submission continues to validate the complete request normally.
+    [Required, ValidateNever]
     public ProvisionTenantRequest Payload { get; set; } = null!;
 
     /// <summary>

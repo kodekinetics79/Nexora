@@ -22,6 +22,9 @@ public static class PlatformAuthConstants
     public const string ScopeClaim = "scope";
     public const string PlatformRoleClaim = "platformRole";
     public const string SessionGenerationClaim = "platformSessionGeneration";
+    public const string AuthenticationMethodClaim = "amr";
+    public const string MfaAuthenticationMethod = "mfa";
+    public const string MfaAuthenticatedAtClaim = "mfa_auth_time";
 
     // Impersonation stamps (carried on the short-lived TENANT token that is minted)
     public const string ActSubClaim = "act_sub";           // acting platform user id
@@ -42,4 +45,5 @@ public static class PlatformPolicies
     public const string TenantAdmin = "Platform.TenantAdmin";   // Owner or SupportAdmin
     public const string Billing = "Platform.Billing";           // Owner or BillingAdmin
     public const string Impersonate = "Platform.Impersonate";   // Owner or SupportAdmin
+    public const string Mfa = "Platform.Mfa";
 }

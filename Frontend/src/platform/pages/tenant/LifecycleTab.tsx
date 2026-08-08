@@ -141,7 +141,11 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
       return platformApi.restoreTenant(tenant.id, reason);
     },
     onSuccess: (_updated, { kind }) => {
-      enqueueSnackbar(`${tenant.name} ${kind}d`, { variant: 'success' });
+      const outcome = kind === 'suspend' ? 'suspended'
+        : kind === 'resume' ? 'resumed'
+          : kind === 'archive' ? 'archived'
+            : 'restored';
+      enqueueSnackbar(`${tenant.name} ${outcome}`, { variant: 'success' });
       setReversible(null);
       invalidate();
     },

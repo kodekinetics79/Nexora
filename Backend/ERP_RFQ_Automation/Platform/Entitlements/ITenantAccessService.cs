@@ -20,7 +20,8 @@ public sealed record PlanSnapshot(
     int Weight,
     int MaxConcurrentExtractionJobs,
     int MaxDocsPerMonth,
-    int MaxSeats);
+    int MaxSeats,
+    string Features = "{}");
 
 /// <summary>
 /// The resolved platform-plane view of one BusinessUnit: the owning

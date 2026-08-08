@@ -159,6 +159,47 @@ TOKEN="$(curl -fsS -X POST "$BACKEND_URL/api/platform/auth/login" \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')" \
   || die "Platform owner login failed — check Platform:BootstrapOwner* in $RUN_DIR/backend.log"
 
+# Privileged platform policies require a server-bound MFA session. A fresh local database has
+# a bootstrap Owner but no enrolled authenticator, so complete the real enrollment contract
+# before using Owner-only catalogue endpoints. The Base32 seed is written only to the ignored
+# run directory with owner-only permissions so the watched Chrome lane can derive a current TOTP;
+# it is never printed or placed in Playwright artifacts.
+MFA_ENABLED="$(curl -fsS "$BACKEND_URL/api/platform/auth/mfa" \
+  -H "Authorization: Bearer $TOKEN" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["enabled"]).lower())')"
+if [[ "$MFA_ENABLED" != "true" ]]; then
+  log "Enrolling the disposable local Owner in privileged MFA."
+  MFA_SECRET="$(curl -fsS -X POST "$BACKEND_URL/api/platform/auth/mfa/enrollment" \
+    -H "Authorization: Bearer $TOKEN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["secret"])')"
+  umask 077
+  printf '%s' "$MFA_SECRET" >"$RUN_DIR/platform-owner-mfa-secret"
+  chmod 600 "$RUN_DIR/platform-owner-mfa-secret"
+  MFA_CODE="$(python3 - "$MFA_SECRET" <<'PY'
+import base64, hashlib, hmac, struct, sys, time
+secret = base64.b32decode(sys.argv[1] + '=' * ((8 - len(sys.argv[1]) % 8) % 8))
+step = int(time.time()) // 30
+digest = hmac.new(secret, struct.pack('>Q', step), hashlib.sha1).digest()
+offset = digest[-1] & 15
+value = (struct.unpack('>I', digest[offset:offset + 4])[0] & 0x7fffffff) % 1000000
+print(f'{value:06d}')
+PY
+)"
+  RECOVERY_CODE="$(curl -fsS -X POST "$BACKEND_URL/api/platform/auth/mfa/enrollment/confirm" \
+    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d "{\"totpCode\":\"$MFA_CODE\"}" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["recoveryCodes"][0])')" \
+    || die "Platform Owner MFA enrollment failed — see $RUN_DIR/backend.log"
+  CHALLENGE_ID="$(curl -fsS -X POST "$BACKEND_URL/api/platform/auth/login" \
+    -H 'Content-Type: application/json' \
+    -d "{\"email\":\"$OWNER_EMAIL\",\"password\":\"$OWNER_PASSWORD\"}" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["mfaChallengeId"])')"
+  TOKEN="$(curl -fsS -X POST "$BACKEND_URL/api/platform/auth/mfa/challenge" \
+    -H 'Content-Type: application/json' \
+    -d "{\"challengeId\":\"$CHALLENGE_ID\",\"recoveryCode\":\"$RECOVERY_CODE\"}" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')" \
+    || die "Platform Owner MFA challenge failed — see $RUN_DIR/backend.log"
+  unset MFA_SECRET MFA_CODE RECOVERY_CODE CHALLENGE_ID
+fi
+
 create_plan() {  # code name weight concurrent docs seats priceUsd
   if curl -fsS -o /dev/null -X POST "$BACKEND_URL/api/platform/plans" \
     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
@@ -217,6 +258,7 @@ cat <<BANNER
    Operator console   ${FRONTEND_URL}/platform/tenants
    Email              ${OWNER_EMAIL}
    Password           ${OWNER_PASSWORD}
+   MFA seed file      ${RUN_DIR}/platform-owner-mfa-secret (mode 600; never printed)
   ────────────────────────────────────────────────────────────────
 
    Click "Provision Tenant" for the four-step wizard.

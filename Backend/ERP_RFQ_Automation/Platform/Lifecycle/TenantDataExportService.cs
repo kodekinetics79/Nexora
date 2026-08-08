@@ -214,11 +214,8 @@ public sealed class TenantDataExportService(
     /// Puts the connection inside the tenant's row-level-security scope, exactly as
     /// <c>TenantRlsCommandInterceptor</c> does on the request path.
     ///
-    /// <para>Returns false when the execution roles are absent — a bare development database that
-    /// never ran <c>ConfigureDatabaseExecutionRoles</c>. The export still runs, because refusing
-    /// would make the capability untestable on such a database, but the manifest and the log say
-    /// plainly that only the explicit predicates were enforcing the scope. Silently degrading
-    /// would leave a reader believing in a guarantee that was not applied.</para>
+    /// <para>The role is mandatory. A contractual export is a bulk disclosure and must not fall
+    /// back to application predicates when the database isolation boundary is unavailable.</para>
     /// </summary>
     private async Task<bool> ApplyTenantScopeAsync(
         NpgsqlConnection connection, NpgsqlTransaction transaction, long businessUnitId,
@@ -230,12 +227,9 @@ public sealed class TenantDataExportService(
             probe.Parameters.AddWithValue("role", MultiTenancy.TenantRlsCommandInterceptor.TenantRole);
             if (await probe.ExecuteScalarAsync(cancellationToken) is not true)
             {
-                logger.LogWarning(
-                    "Tenant export for business unit {BusinessUnitId} is running WITHOUT the "
-                    + "row-level-security role: {Role} does not exist on this database, so scoping "
-                    + "rests entirely on the explicit tenant predicates.",
-                    businessUnitId, MultiTenancy.TenantRlsCommandInterceptor.TenantRole);
-                return false;
+                throw new InvalidOperationException(
+                    $"Tenant export refused because the required row-level-security role " +
+                    $"'{MultiTenancy.TenantRlsCommandInterceptor.TenantRole}' is unavailable.");
             }
         }
 

@@ -516,6 +516,25 @@ public sealed class ProvisioningExecutionTests
         Assert.False(await drafts.DeleteAsync(created.Draft.Id, "owner@nexora.app"));
     }
 
+    [Fact]
+    public async Task A_draft_can_be_saved_after_only_the_first_company_field()
+    {
+        using var harness = new ProvisioningHarness();
+        using var scope = harness.Scope();
+        var drafts = scope.ServiceProvider.GetRequiredService<IProvisioningDraftService>();
+
+        var created = await drafts.CreateAsync(new SaveProvisioningDraftRequest
+        {
+            Payload = new ProvisionTenantRequest { Name = "First field only" }
+        }, "owner@nexora.app", 7);
+
+        Assert.Equal(ProvisioningDraftOutcome.Saved, created.Outcome);
+        var loaded = await drafts.GetAsync(created.Draft!.Id, "owner@nexora.app");
+        var payload = ProvisioningRequestCanonicalizer.Rehydrate(loaded!.Payload);
+        Assert.Equal("First field only", payload.Name);
+        Assert.Null(payload.AdminEmail);
+    }
+
     // ---- helpers -----------------------------------------------------------------------------
 
     /// <summary>

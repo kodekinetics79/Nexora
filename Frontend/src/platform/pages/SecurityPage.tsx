@@ -29,6 +29,7 @@ import { REQUIRED_ROLE_COPY } from '../auth/permissions';
 import { SoftChip } from '../components/StatusChip';
 import { EmptyState, ErrorState, LoadingState } from '../components/States';
 import { fmtDateTime } from '../components/format';
+import PlatformMfaPanel from '../components/PlatformMfaPanel';
 
 const SESSION_TONE: Record<ImpersonationSession['status'], 'success' | 'neutral' | 'error'> = {
   active: 'success',
@@ -78,6 +79,8 @@ export default function SecurityPage() {
         title="Security"
         subtitle="Impersonation sessions and platform-plane failure evidence."
       />
+
+      <PlatformMfaPanel />
 
       {/* Impersonation sessions */}
       <Paper sx={{ p: 3, borderRadius: 3, mb: 2.5 }}>

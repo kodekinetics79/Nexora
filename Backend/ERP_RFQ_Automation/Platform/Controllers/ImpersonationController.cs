@@ -140,7 +140,7 @@ public class ImpersonationController : ControllerBase
         if (string.IsNullOrWhiteSpace(jti))
             return BadRequest(new { error = "A session jti is required." });
 
-        var session = await _context.Set<ImpersonationSession>()
+        var session = await _context.Set<ImpersonationSession>().AsNoTracking()
             .FirstOrDefaultAsync(s => s.Jti == jti, ct);
         if (session is null)
             return NotFound();
@@ -148,13 +148,25 @@ public class ImpersonationController : ControllerBase
         var now = DateTime.UtcNow;
         if (session.RevokedAtUtc is null)
         {
-            session.RevokedAtUtc = now;
-            session.RevokedBy = User.FindFirst("email")?.Value ?? "platform";
-            await _context.SaveChangesAsync(ct);
-
-            await _audit.WriteAsync(User, "impersonate.revoke", nameof(ImpersonationSession), session.Jti,
-                new { session.TenantId, session.ActorPlatformUserId, revokedAtUtc = session.RevokedAtUtc },
-                actAsTenantId: session.TenantId, httpContext: HttpContext, ct: ct);
+            var strategy = _context.Database.CreateExecutionStrategy();
+            session = await strategy.ExecuteAsync(async () =>
+            {
+                _context.ChangeTracker.Clear();
+                await using var transaction = await _context.Database.BeginTransactionAsync(ct);
+                var current = await _context.Set<ImpersonationSession>()
+                    .SingleAsync(value => value.Jti == jti, ct);
+                if (current.RevokedAtUtc is null)
+                {
+                    current.RevokedAtUtc = now;
+                    current.RevokedBy = User.FindFirst("email")?.Value ?? "platform";
+                    await _context.SaveChangesAsync(ct);
+                    await _audit.WriteAsync(User, "impersonate.revoke", nameof(ImpersonationSession), current.Jti,
+                        new { current.TenantId, current.ActorPlatformUserId, revokedAtUtc = current.RevokedAtUtc },
+                        actAsTenantId: current.TenantId, httpContext: HttpContext, ct: ct);
+                }
+                await transaction.CommitAsync(ct);
+                return current;
+            });
 
             // P2-A12: evict the middleware's cached validity decision so revocation is
             // IMMEDIATE on this node; other instances converge within the 30s TTL.

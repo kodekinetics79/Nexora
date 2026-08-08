@@ -19,6 +19,9 @@ public sealed class PlatformSession
 
     public DateTime ExpiresAtUtc { get; set; }
 
+    /// <summary>Server-side proof backing the token's <c>amr=mfa</c> claim.</summary>
+    public DateTime? MfaAuthenticatedAtUtc { get; set; }
+
     public DateTime? RevokedAtUtc { get; set; }
 
     public string? RevokedBy { get; set; }

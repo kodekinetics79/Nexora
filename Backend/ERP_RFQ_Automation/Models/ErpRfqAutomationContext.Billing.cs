@@ -114,5 +114,62 @@ public static class BillingModelConfiguration
                 .HasForeignKey(x => x.BillingStatementId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
+
+        modelBuilder.Entity<SubscriptionInvoice>(e =>
+        {
+            e.ToTable("SubscriptionInvoices", "platform");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.InvoiceNumber).HasMaxLength(64).IsRequired();
+            e.Property(x => x.Status).HasConversion<string>().HasMaxLength(24).IsRequired();
+            e.Property(x => x.Currency).HasMaxLength(3).IsRequired();
+            e.Property(x => x.Subtotal).HasPrecision(14, 2);
+            e.Property(x => x.TaxRatePercent).HasPrecision(7, 4);
+            e.Property(x => x.TaxAmount).HasPrecision(14, 2);
+            e.Property(x => x.TotalAmount).HasPrecision(14, 2);
+            e.Property(x => x.CreditedAmount).HasPrecision(14, 2);
+            e.Property(x => x.PaidAmount).HasPrecision(14, 2);
+            e.Property(x => x.SellerSnapshotJson).HasColumnType("jsonb").IsRequired();
+            e.Property(x => x.BuyerSnapshotJson).HasColumnType("jsonb").IsRequired();
+            e.Property(x => x.TaxTreatment).HasMaxLength(128).IsRequired();
+            e.Property(x => x.SourceEvidenceJson).HasColumnType("jsonb").IsRequired();
+            e.Property(x => x.SourceEvidenceSha256).HasMaxLength(64).IsFixedLength().IsRequired();
+            e.Property(x => x.CreatedBy).HasMaxLength(256).IsRequired();
+            e.Property(x => x.FinalizedBy).HasMaxLength(256);
+            e.Property(x => x.Version).HasDefaultValue(1L).IsConcurrencyToken();
+            e.HasIndex(x => x.InvoiceNumber).IsUnique();
+            e.HasIndex(x => x.BillingStatementId).IsUnique();
+            e.HasIndex(x => new { x.TenantId, x.Status, x.DueAtUtc });
+            e.HasOne<BillingStatement>().WithMany().HasForeignKey(x => x.BillingStatementId)
+                .OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<ERP_RFQ_Automation.Platform.Models.Tenant>().WithMany().HasForeignKey(x => x.TenantId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<SubscriptionCreditNote>(e =>
+        {
+            e.ToTable("SubscriptionCreditNotes", "platform");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.CreditNumber).HasMaxLength(64).IsRequired();
+            e.Property(x => x.IdempotencyKey).HasMaxLength(128).IsRequired();
+            e.Property(x => x.Amount).HasPrecision(14, 2);
+            e.Property(x => x.Reason).HasMaxLength(1000).IsRequired();
+            e.Property(x => x.CreatedBy).HasMaxLength(256).IsRequired();
+            e.HasIndex(x => x.CreditNumber).IsUnique();
+            e.HasIndex(x => x.IdempotencyKey).IsUnique();
+            e.HasOne(x => x.Invoice).WithMany(x => x.Credits)
+                .HasForeignKey(x => x.SubscriptionInvoiceId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<SubscriptionPayment>(e =>
+        {
+            e.ToTable("SubscriptionPayments", "platform");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.ExternalReference).HasMaxLength(128).IsRequired();
+            e.Property(x => x.Amount).HasPrecision(14, 2);
+            e.Property(x => x.RecordedBy).HasMaxLength(256).IsRequired();
+            e.HasIndex(x => x.ExternalReference).IsUnique();
+            e.HasOne(x => x.Invoice).WithMany(x => x.Payments)
+                .HasForeignKey(x => x.SubscriptionInvoiceId).OnDelete(DeleteBehavior.Restrict);
+        });
     }
 }

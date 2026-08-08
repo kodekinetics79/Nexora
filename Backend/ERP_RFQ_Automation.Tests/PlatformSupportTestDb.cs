@@ -120,7 +120,9 @@ public static class PlatformSupportFixture
             new Claim("sub", id.ToString()),
             new Claim("email", email),
             new Claim(PlatformAuthConstants.ScopeClaim, PlatformAuthConstants.PlatformScopeValue),
-            new Claim(PlatformAuthConstants.PlatformRoleClaim, role.ToString())
+            new Claim(PlatformAuthConstants.PlatformRoleClaim, role.ToString()),
+            new Claim(PlatformAuthConstants.AuthenticationMethodClaim,
+                PlatformAuthConstants.MfaAuthenticationMethod)
         ], PlatformAuthConstants.Scheme));
 
     /// <summary>

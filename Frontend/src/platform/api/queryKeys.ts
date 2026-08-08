@@ -23,6 +23,8 @@ export const platformKeys = {
   statement: (id: string) => [...platformKeys.all, 'billing', 'statement', id] as const,
   revenueRisk: (filter?: unknown) => [...platformKeys.all, 'billing', 'revenue-risk', filter ?? null] as const,
   tenantBilling: (tenantId: string) => [...platformKeys.all, 'billing', 'tenant', tenantId] as const,
+  subscriptionInvoices: (tenantId: string) =>
+    [...platformKeys.all, 'billing', 'invoices', tenantId] as const,
 
   // Durable provisioning. The execution key is polled, so it is per-id rather than a list.
   provisioningExecution: (id: string) => [...platformKeys.all, 'provisioning', 'execution', id] as const,
@@ -40,6 +42,10 @@ export const platformKeys = {
   legalHolds: (tenantId: string) => [...platformKeys.all, 'legal-holds', tenantId] as const,
   tenantAiPolicy: (tenantId: string) => [...platformKeys.all, 'ai-policy', tenantId] as const,
   tenantAiProviders: (tenantId: string) => [...platformKeys.all, 'ai-providers', tenantId] as const,
+  tenantDataAssets: (tenantId: string) => [...platformKeys.all, 'data-assets', tenantId] as const,
+  tenantActivationDataDecision: (tenantId: string) =>
+    [...platformKeys.all, 'data-assets', tenantId, 'activation-decision'] as const,
+  platformMfa: () => [...platformKeys.all, 'auth', 'mfa'] as const,
 
   supportTickets: (filter?: unknown) => [...platformKeys.all, 'support', 'tickets', filter ?? null] as const,
   supportTicket: (id: string) => [...platformKeys.all, 'support', 'ticket', id] as const,

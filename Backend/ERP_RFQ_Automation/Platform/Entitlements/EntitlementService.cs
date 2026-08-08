@@ -149,6 +149,26 @@ public sealed class EntitlementService : IEntitlementService
             : EntitlementDecision.Permit(plan.MaxDocsPerMonth, docsThisMonth);
     }
 
+    public async Task<EntitlementDecision> CheckFeatureAsync(
+        long businessUnitId, string entitlement, CancellationToken ct = default)
+    {
+        if (!TypedEntitlementCatalog.Keys.Contains(entitlement))
+            return EntitlementDecision.Deny(0, 0, $"Unknown entitlement '{entitlement}' is denied by default.");
+
+        var access = await _tenantAccess.GetAccessAsync(businessUnitId, ct);
+        if (!access.HasTenant)
+            return EntitlementDecision.Unlimited; // legacy BU compatibility boundary
+
+        if (access.Plan is null)
+            return EntitlementDecision.Deny(0, 0,
+                $"Entitlement '{entitlement}' is unavailable because this tenant has no assigned plan.");
+
+        return TypedEntitlementCatalog.IsEnabled(access.Plan.Features, entitlement)
+            ? EntitlementDecision.Permit(1, 1)
+            : EntitlementDecision.Deny(0, 0,
+                $"The '{access.Plan.Code}' plan does not enable entitlement '{entitlement}'.");
+    }
+
     public async Task<double> GetQueueWeightAsync(long businessUnitId, double fallbackWeight, CancellationToken ct = default)
     {
         var access = await _tenantAccess.GetAccessAsync(businessUnitId, ct);

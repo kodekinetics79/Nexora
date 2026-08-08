@@ -3,7 +3,10 @@ import Stack from '../components/Flex';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Box,
+  Alert,
+  AlertTitle,
   Button,
+  Checkbox,
   Chip,
   Dialog,
   DialogActions,
@@ -35,6 +38,12 @@ import { REQUIRED_ROLE_COPY } from '../auth/permissions';
 import { PlanChip } from '../components/StatusChip';
 import { ErrorState, LoadingState } from '../components/States';
 import { fmtCurrency, fmtNumber } from '../components/format';
+import {
+  ENTITLEMENT_CATALOG,
+  serializeEntitlements,
+  splitPlanEntitlements,
+  type EntitlementKey,
+} from '../entitlements';
 
 const PLAN_ACCENT: Record<string, string> = {
   free: '#64748b',
@@ -51,7 +60,8 @@ interface PlanForm {
   maxConcurrentExtractionJobs: string;
   maxDocsPerMonth: string;
   maxSeats: string;
-  features: string;
+  entitlements: EntitlementKey[];
+  unknownEntitlements: string[];
   isActive: boolean;
 }
 
@@ -63,7 +73,8 @@ const emptyForm: PlanForm = {
   maxConcurrentExtractionJobs: '2',
   maxDocsPerMonth: '1000',
   maxSeats: '5',
-  features: '{}',
+  entitlements: [],
+  unknownEntitlements: [],
   isActive: true,
 };
 
@@ -71,7 +82,7 @@ const emptyForm: PlanForm = {
  * The GET response exposes the plan's ENABLED feature keys; rebuild the
  * features JSON object from them for editing.
  */
-const formFromPlan = (plan: Plan): PlanForm => ({
+export const formFromPlan = (plan: Plan): PlanForm => ({
   code: plan.code,
   name: plan.name,
   monthlyPriceUsd: plan.priceMonthlyUsd == null ? '' : String(plan.priceMonthlyUsd),
@@ -79,21 +90,10 @@ const formFromPlan = (plan: Plan): PlanForm => ({
   maxConcurrentExtractionJobs: String(plan.concurrencyCap),
   maxDocsPerMonth: plan.monthlyDocQuota == null ? '0' : String(plan.monthlyDocQuota),
   maxSeats: plan.seatQuota == null ? '0' : String(plan.seatQuota),
-  features: JSON.stringify(Object.fromEntries(plan.entitlements.map((key) => [key, true])), null, 2),
+  entitlements: splitPlanEntitlements(plan.entitlements).selected,
+  unknownEntitlements: splitPlanEntitlements(plan.entitlements).unknown,
   isActive: plan.isActive,
 });
-
-const featuresError = (raw: string): string | null => {
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return 'Features must be a JSON object.';
-    }
-    return null;
-  } catch {
-    return 'Features must be valid JSON.';
-  }
-};
 
 export default function PlansFlagsPage() {
   const queryClient = useQueryClient();
@@ -119,7 +119,7 @@ export default function PlansFlagsPage() {
         maxDocsPerMonth: Number(form.maxDocsPerMonth),
         maxSeats: Number(form.maxSeats),
         monthlyPriceUsd: form.monthlyPriceUsd.trim() === '' ? null : Number(form.monthlyPriceUsd),
-        features: form.features.trim() || '{}',
+        features: serializeEntitlements(form.entitlements),
         isActive: form.isActive,
       };
       return dialog?.mode === 'edit'
@@ -152,12 +152,11 @@ export default function PlansFlagsPage() {
   const formatPrice = (plan: Plan) =>
     plan.priceMonthlyUsd == null ? 'Not priced' : plan.priceMonthlyUsd === 0 ? 'Free' : `${fmtCurrency(plan.priceMonthlyUsd)}/mo`;
 
-  const featuresProblem = featuresError(form.features.trim() || '{}');
   const numbersValid =
     [form.weight, form.maxConcurrentExtractionJobs].every((v) => Number.isInteger(Number(v)) && Number(v) >= 1) &&
     [form.maxDocsPerMonth, form.maxSeats].every((v) => Number.isInteger(Number(v)) && Number(v) >= 0) &&
     (form.monthlyPriceUsd.trim() === '' || (Number.isFinite(Number(form.monthlyPriceUsd)) && Number(form.monthlyPriceUsd) >= 0));
-  const formValid = form.code.trim().length > 0 && form.name.trim().length > 0 && !featuresProblem && numbersValid;
+  const formValid = form.code.trim().length > 0 && form.name.trim().length > 0 && numbersValid;
 
   return (
     <Box>
@@ -182,6 +181,14 @@ export default function PlansFlagsPage() {
       />
 
       <Grid container spacing={2.5} sx={{ mb: 3 }}>
+        {plans.length === 0 && (
+          <Grid size={{ xs: 12 }}>
+            <Alert severity="warning">
+              <AlertTitle>No plans configured</AlertTitle>
+              Create the first plan before provisioning or assigning billable tenants. No entitlement defaults are inferred.
+            </Alert>
+          </Grid>
+        )}
         {plans.map((plan) => {
           const accent = accentFor(plan.code);
           return (
@@ -229,7 +236,7 @@ export default function PlansFlagsPage() {
         })}
       </Grid>
 
-      <Paper sx={{ p: 3, borderRadius: 2, overflowX: 'auto' }}>
+      {plans.length > 0 && <Paper sx={{ p: 3, borderRadius: 2, overflowX: 'auto' }}>
         <Typography variant="h6" sx={{ fontWeight: 800, mb: 2 }}>Quota Matrix</Typography>
         <Table size="small">
           <TableHead>
@@ -254,7 +261,7 @@ export default function PlansFlagsPage() {
             ))}
           </TableBody>
         </Table>
-      </Paper>
+      </Paper>}
 
       {/* Create / edit dialog */}
       <Dialog open={!!dialog} onClose={() => setDialog(null)} fullWidth maxWidth="sm">
@@ -316,21 +323,54 @@ export default function PlansFlagsPage() {
                 fullWidth
               />
             </Stack>
-            <TextField
-              label="Features (JSON object)"
-              value={form.features}
-              onChange={(e) => setForm({ ...form, features: e.target.value })}
-              error={!!featuresProblem}
-              helperText={featuresProblem ?? 'Feature entitlement keys with boolean values, e.g. {"copilot": true}'}
-              multiline
-              minRows={3}
-              fullWidth
-              slotProps={{ input: { sx: { fontFamily: 'monospace', fontSize: 13 } } }}
-            />
+            <Box>
+              <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 0.5 }}>Feature entitlements</Typography>
+              <Typography variant="caption" color="text.secondary">
+                Closed server-owned catalogue. Unselected features are explicitly written as false.
+              </Typography>
+              {(['Modules', 'Capabilities'] as const).map((group) => (
+                <Box key={group} sx={{ mt: 1.5 }}>
+                  <Typography variant="overline" color="text.secondary" sx={{ fontWeight: 700 }}>{group}</Typography>
+                  <Grid container spacing={0.5}>
+                    {ENTITLEMENT_CATALOG.filter((entry) => entry.group === group).map((entry) => (
+                      <Grid key={entry.key} size={{ xs: 12, sm: 6 }}>
+                        <FormControlLabel
+                          control={<Checkbox checked={form.entitlements.includes(entry.key)} onChange={(_, checked) => setForm({
+                            ...form,
+                            entitlements: checked
+                              ? [...form.entitlements, entry.key]
+                              : form.entitlements.filter((key) => key !== entry.key),
+                          })} />}
+                          label={<Box><Typography variant="body2">{entry.label}</Typography><Typography variant="caption" color="text.secondary">{entry.key}</Typography></Box>}
+                        />
+                      </Grid>
+                    ))}
+                  </Grid>
+                </Box>
+              ))}
+              {form.entitlements.length === 0 && (
+                <Alert severity="warning" sx={{ mt: 1.5 }}>
+                  <AlertTitle>No product features enabled</AlertTitle>
+                  This plan will grant quotas but deny every closed-catalogue module and capability.
+                </Alert>
+              )}
+              {form.unknownEntitlements.length > 0 && (
+                <Alert severity="error" sx={{ mt: 1.5 }}>
+                  <AlertTitle>Unsupported entitlement keys were returned</AlertTitle>
+                  {form.unknownEntitlements.join(', ')} cannot be saved by the closed catalogue. Saving this plan removes them.
+                </Alert>
+              )}
+            </Box>
             <FormControlLabel
               control={<Switch checked={form.isActive} onChange={(e) => setForm({ ...form, isActive: e.target.checked })} />}
               label="Active (inactive plans are hidden from the catalog and cannot be assigned)"
             />
+            {!form.isActive && (
+              <Alert severity="warning">
+                <AlertTitle>Plan inactive</AlertTitle>
+                Existing assignments remain visible, but this plan cannot be assigned to another tenant.
+              </Alert>
+            )}
           </Stack>
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>

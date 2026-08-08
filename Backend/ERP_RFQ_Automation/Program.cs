@@ -51,6 +51,7 @@ using System.Text.Json.Serialization;
 using Npgsql;
 using ERP_RFQ_Automation.Platform.Entitlements;
 using ERP_RFQ_Automation.Platform.Services;
+using ERP_RFQ_Automation.Platform.DataAssets;
 using ERP_RFQ_Automation.Billing;
 
 // PostgreSQL migration: restore pre-6.0 Npgsql timestamp semantics so the
@@ -196,6 +197,7 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Support.ISupportTicketRed
 // purge, and the separate personal-data erasure. Registered next to provisioning because it is
 // the other end of the same lifecycle — creation is one line here and so is everything after it.
 builder.Services.AddTenantLifecycle(builder.Configuration);
+builder.Services.AddTenantDataAssetRegistry();
 
 // Readiness/liveness health checks (DATA-05)
 builder.Services.AddSingleton<ERP_RFQ_Automation.HealthChecks.IExtractionWorkerHeartbeat,

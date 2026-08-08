@@ -1,0 +1,193 @@
+import { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  Alert, AlertTitle, Box, Button, Dialog, DialogActions, DialogContent, DialogTitle,
+  Paper, TextField, Typography,
+} from '@mui/material';
+import { useSnackbar } from 'notistack';
+import Stack from '../../components/Flex';
+import { ErrorState, LoadingState } from '../../components/States';
+import { SoftChip } from '../../components/StatusChip';
+import { fmtDateTime } from '../../components/format';
+import { platformApi } from '../../api/client';
+import { platformErrorMessage } from '../../api/apiError';
+import { platformKeys } from '../../api/queryKeys';
+import type { RegisterTenantDataAssetInput, Tenant, TenantDataAsset, VerifyTenantDataAssetInput } from '../../types';
+
+const LOGICAL_KEY = 'postgresql.primary' as const;
+const ASSET_TYPE = 'PostgreSqlTenantScope' as const;
+const CLASSIFICATION = 'CustomerData' as const;
+const DISPOSITION = 'BackupRetainedUntilExpiryThenDestroy' as const;
+const opaque = (value: string) => value.trim().length > 0 && !/[\s@=?]|:\/\//.test(value);
+
+const blankRegister = (tenant: Tenant): RegisterTenantDataAssetInput => ({
+  logicalKey: LOGICAL_KEY,
+  opaqueProviderReference: '',
+  region: tenant.dataRegion ?? '',
+  classification: CLASSIFICATION,
+  disposition: DISPOSITION,
+  backupPolicyReference: '',
+  backupPolicyVersion: 1,
+  reason: '',
+});
+
+const blankVerify = (asset: TenantDataAsset): VerifyTenantDataAssetInput => ({
+  expectedVersion: asset.version,
+  observedBusinessUnitId: '',
+  observedRegion: asset.region,
+  evidenceReference: '',
+  evidenceSha256: '',
+  reason: '',
+});
+
+export default function DataStorageTab({ tenant }: { tenant: Tenant }) {
+  const queryClient = useQueryClient();
+  const { enqueueSnackbar } = useSnackbar();
+  const [register, setRegister] = useState<RegisterTenantDataAssetInput | null>(null);
+  const [verify, setVerify] = useState<{ asset: TenantDataAsset; input: VerifyTenantDataAssetInput } | null>(null);
+  const assetsQuery = useQuery({
+    queryKey: platformKeys.tenantDataAssets(tenant.id),
+    queryFn: () => platformApi.listTenantDataAssets(tenant.id),
+  });
+  const decisionQuery = useQuery({
+    queryKey: platformKeys.tenantActivationDataDecision(tenant.id),
+    queryFn: () => platformApi.getTenantActivationDataDecision(tenant.id),
+  });
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: platformKeys.tenantDataAssets(tenant.id) });
+    queryClient.invalidateQueries({ queryKey: platformKeys.tenantActivationDataDecision(tenant.id) });
+  };
+  const onError = (fallback: string) => (error: unknown) =>
+    enqueueSnackbar(platformErrorMessage(error, fallback), { variant: 'error' });
+  const registerMutation = useMutation({
+    mutationFn: (input: RegisterTenantDataAssetInput) => platformApi.registerTenantDataAsset(tenant.id, input),
+    onSuccess: () => { setRegister(null); invalidate(); enqueueSnackbar('PostgreSQL tenant scope registered', { variant: 'success' }); },
+    onError: onError('Registration was refused'),
+  });
+  const verifyMutation = useMutation({
+    mutationFn: ({ asset, input }: NonNullable<typeof verify>) => platformApi.verifyTenantDataAsset(tenant.id, asset.id, input),
+    onSuccess: () => { setVerify(null); invalidate(); enqueueSnackbar('PostgreSQL tenant scope verified', { variant: 'success' }); },
+    onError: onError('Verification was refused'),
+  });
+
+  if (assetsQuery.isLoading || decisionQuery.isLoading) return <LoadingState label="Reading the tenant data boundary…" />;
+  if (assetsQuery.isError || decisionQuery.isError || !assetsQuery.data || !decisionQuery.data) {
+    const error = assetsQuery.error ?? decisionQuery.error;
+    return (
+      <ErrorState
+        message={platformErrorMessage(error, 'The data boundary could not be established. No data-asset action is available.')}
+        onRetry={() => { assetsQuery.refetch(); decisionQuery.refetch(); }}
+      />
+    );
+  }
+
+  const unsupported = assetsQuery.data.filter(
+    (asset) => asset.logicalKey !== LOGICAL_KEY || asset.assetType !== ASSET_TYPE,
+  );
+  const primary = assetsQuery.data.find(
+    (asset) => asset.logicalKey === LOGICAL_KEY && asset.assetType === ASSET_TYPE,
+  ) ?? null;
+  const inconsistent = unsupported.length > 0 || assetsQuery.data.filter((asset) => asset.logicalKey === LOGICAL_KEY).length > 1;
+  const decision = decisionQuery.data;
+  const registerValid = Boolean(register
+    && opaque(register.opaqueProviderReference)
+    && register.region.trim()
+    && opaque(register.backupPolicyReference)
+    && Number.isInteger(register.backupPolicyVersion)
+    && register.backupPolicyVersion > 0
+    && register.reason.trim());
+  const verifyValid = Boolean(verify
+    && /^\d+$/.test(verify.input.observedBusinessUnitId)
+    && Number(verify.input.observedBusinessUnitId) > 0
+    && verify.input.observedRegion.trim()
+    && opaque(verify.input.evidenceReference)
+    && /^[a-fA-F0-9]{64}$/.test(verify.input.evidenceSha256)
+    && verify.input.reason.trim());
+
+  return (
+    <Stack spacing={2.5}>
+      <Paper sx={{ p: 3, borderRadius: 3 }}>
+        <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={2}>
+          <Box>
+            <Typography variant="h6" sx={{ fontWeight: 800 }}>Activation data decision</Typography>
+            <Typography variant="body2" color="text.secondary">Server-authoritative readiness for this tenant’s primary data boundary.</Typography>
+          </Box>
+          <SoftChip label={decision.decision} tone={decision.dataGateReady ? 'success' : 'error'} dot={false} />
+        </Stack>
+        <Alert severity={decision.dataGateReady ? 'success' : 'warning'} sx={{ mt: 2 }}>
+          <AlertTitle sx={{ fontWeight: 800 }}>{decision.dataGateReady ? 'Data gate ready' : 'Activation blocked'}</AlertTitle>
+          {decision.blockers.length === 0 ? 'No data-gate blockers were returned.' : (
+            <Box component="ul" sx={{ m: 0, pl: 2.5 }}>{decision.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</Box>
+          )}
+        </Alert>
+        <Alert severity="info" sx={{ mt: 2 }}><AlertTitle sx={{ fontWeight: 800 }}>Decision boundary</AlertTitle>{decision.boundary}</Alert>
+      </Paper>
+
+      {inconsistent && (
+        <Alert severity="error"><AlertTitle sx={{ fontWeight: 800 }}>Unsupported registry state</AlertTitle>
+          The server returned data assets outside the single primary PostgreSQL tenant-scope contract. Mutations are disabled; investigate the registry directly.
+        </Alert>
+      )}
+
+      <Paper sx={{ p: 3, borderRadius: 3 }}>
+        <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={2}>
+          <Box>
+            <Typography variant="h6" sx={{ fontWeight: 800 }}>Primary PostgreSQL tenant scope</Typography>
+            <Typography variant="body2" color="text.secondary">Logical key {LOGICAL_KEY}. This inventory stores opaque references, never credentials.</Typography>
+          </Box>
+          {!primary ? (
+            <Button variant="contained" disabled={inconsistent} onClick={() => setRegister(blankRegister(tenant))}>Register boundary</Button>
+          ) : primary.status !== 'Verified' ? (
+            <Button variant="contained" disabled={inconsistent} onClick={() => setVerify({ asset: primary, input: blankVerify(primary) })}>Verify boundary</Button>
+          ) : null}
+        </Stack>
+        {!primary ? <Alert severity="warning" sx={{ mt: 2 }}>No primary PostgreSQL tenant-scope asset is registered.</Alert> : (
+          <Stack spacing={1.25} sx={{ mt: 2 }}>
+            <Row label="Status"><SoftChip label={primary.status} tone={primary.status === 'Verified' ? 'success' : 'warning'} /></Row>
+            <Row label="Provider reference"><code>{primary.opaqueProviderReference}</code></Row>
+            <Row label="Region">{primary.region}</Row>
+            <Row label="Classification / disposition">{primary.classification} · {primary.disposition}</Row>
+            <Row label="Backup policy"><code>{primary.backupPolicyReference}</code> · version {primary.backupPolicyVersion}</Row>
+            <Row label="Verified scope">{primary.verifiedBusinessUnitId ?? 'Not verified'}</Row>
+            <Row label="Verification evidence">{primary.verificationEvidenceReference ?? 'Not verified'}</Row>
+            <Row label="Evidence SHA-256"><code>{primary.verificationEvidenceSha256 ?? 'Not verified'}</code></Row>
+            <Row label="Verified by">{primary.verifiedOn ? `${primary.verifiedBy ?? 'Unknown'} · ${fmtDateTime(primary.verifiedOn)}` : 'Not verified'}</Row>
+          </Stack>
+        )}
+      </Paper>
+
+      <Dialog open={Boolean(register)} onClose={() => setRegister(null)} fullWidth maxWidth="sm">
+        <DialogTitle sx={{ fontWeight: 800 }}>Register PostgreSQL tenant scope</DialogTitle>
+        <DialogContent dividers>{register && <Stack spacing={2}>
+          <Alert severity="info">Fixed contract: {ASSET_TYPE} · {CLASSIFICATION} · {DISPOSITION}.</Alert>
+          <TextField required label="Opaque provider reference" value={register.opaqueProviderReference} helperText="Identifier only—no URL, connection string, credential, whitespace, @, =, or ?." onChange={(e) => setRegister({ ...register, opaqueProviderReference: e.target.value })} error={Boolean(register.opaqueProviderReference && !opaque(register.opaqueProviderReference))} />
+          <TextField required label="Data region" value={register.region} onChange={(e) => setRegister({ ...register, region: e.target.value })} helperText={tenant.dataRegion ? `Must match contractual region ${tenant.dataRegion}.` : 'The contractual tenant region must also exist server-side.'} />
+          <TextField required label="Opaque backup policy reference" value={register.backupPolicyReference} onChange={(e) => setRegister({ ...register, backupPolicyReference: e.target.value })} error={Boolean(register.backupPolicyReference && !opaque(register.backupPolicyReference))} />
+          <TextField required type="number" label="Backup policy version" value={register.backupPolicyVersion} slotProps={{ htmlInput: { min: 1, step: 1 } }} onChange={(e) => setRegister({ ...register, backupPolicyVersion: Number(e.target.value) })} />
+          <TextField required multiline minRows={2} label="Registration reason" value={register.reason} onChange={(e) => setRegister({ ...register, reason: e.target.value })} />
+        </Stack>}</DialogContent>
+        <DialogActions><Button color="inherit" onClick={() => setRegister(null)}>Cancel</Button><Button variant="contained" disabled={!registerValid || registerMutation.isPending} onClick={() => register && registerMutation.mutate(register)}>Register</Button></DialogActions>
+      </Dialog>
+
+      <Dialog open={Boolean(verify)} onClose={() => setVerify(null)} fullWidth maxWidth="sm">
+        <DialogTitle sx={{ fontWeight: 800 }}>Verify PostgreSQL tenant scope</DialogTitle>
+        <DialogContent dividers>{verify && <Stack spacing={2}>
+          <Alert severity="warning">Record only evidence from a completed external probe. This form does not connect to PostgreSQL or grant access.</Alert>
+          <TextField required label="Observed business-unit ID" value={verify.input.observedBusinessUnitId} onChange={(e) => setVerify({ ...verify, input: { ...verify.input, observedBusinessUnitId: e.target.value.replace(/\D/g, '') } })} />
+          <TextField required label="Observed region" value={verify.input.observedRegion} onChange={(e) => setVerify({ ...verify, input: { ...verify.input, observedRegion: e.target.value } })} helperText={`Must match registered region ${verify.asset.region}.`} />
+          <TextField required label="Opaque evidence reference" value={verify.input.evidenceReference} error={Boolean(verify.input.evidenceReference && !opaque(verify.input.evidenceReference))} onChange={(e) => setVerify({ ...verify, input: { ...verify.input, evidenceReference: e.target.value } })} />
+          <TextField required label="Evidence SHA-256" value={verify.input.evidenceSha256} error={Boolean(verify.input.evidenceSha256 && !/^[a-fA-F0-9]{64}$/.test(verify.input.evidenceSha256))} onChange={(e) => setVerify({ ...verify, input: { ...verify.input, evidenceSha256: e.target.value.trim() } })} helperText="Exactly 64 hexadecimal characters." />
+          <TextField required multiline minRows={2} label="Verification reason" value={verify.input.reason} onChange={(e) => setVerify({ ...verify, input: { ...verify.input, reason: e.target.value } })} />
+        </Stack>}</DialogContent>
+        <DialogActions><Button color="inherit" onClick={() => setVerify(null)}>Cancel</Button><Button variant="contained" disabled={!verifyValid || verifyMutation.isPending} onClick={() => verify && verifyMutation.mutate(verify)}>Verify evidence</Button></DialogActions>
+      </Dialog>
+    </Stack>
+  );
+}
+
+function Row({ label, children }: { label: string; children: React.ReactNode }) {
+  return <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" spacing={1}>
+    <Typography variant="body2" color="text.secondary">{label}</Typography>
+    <Box sx={{ fontWeight: 700, fontSize: 14, textAlign: { sm: 'right' }, overflowWrap: 'anywhere', maxWidth: 650 }}>{children}</Box>
+  </Stack>;
+}

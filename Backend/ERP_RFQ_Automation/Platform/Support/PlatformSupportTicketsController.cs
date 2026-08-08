@@ -282,9 +282,10 @@ public class PlatformSupportTicketsController(
                 await audit.WriteAsync(User, Actions.Create, AuditTargetType, ticket.Id.ToString(),
                     new
                     {
-                        ticket.TenantId, ticket.Subject, severity = severity.ToString(),
+                        ticket.TenantId, severity = severity.ToString(),
                         origin = origin.ToString(), assignedTo = ticket.AssignedToPlatformUserId,
-                        requesterEmail = ticket.RequesterEmail
+                        hasRequesterIdentity = ticket.RequesterEmail is not null
+                                               || ticket.RequesterTenantUserId is not null
                     },
                     actAsTenantId: ticket.TenantId, httpContext: HttpContext, ct: ct2);
             }, ct);

@@ -85,6 +85,8 @@ public class PlatformOperationsController(
         }
 
         var rows = await query.OrderByDescending(j => j.UpdatedOn).Take(500).ToListAsync(ct);
+        var mayReadCustomerContent = (await authorization.AuthorizeAsync(
+            User, PlatformPolicies.TenantAdmin)).Succeeded;
         return Ok(rows.Select(job =>
         {
             tenants.TryGetValue(job.BusinessUnitId, out var tenant);
@@ -93,7 +95,9 @@ public class PlatformOperationsController(
                 id = job.Id.ToString(),
                 tenantId = tenant?.Id.ToString() ?? string.Empty,
                 tenantName = tenant?.Name ?? $"Business unit {job.BusinessUnitId}",
-                documentName = job.FileName ?? "Unnamed document",
+                documentName = mayReadCustomerContent
+                    ? job.FileName ?? "Unnamed document"
+                    : "Restricted document",
                 status = MapStatus(job.Status),
                 job.Attempts,
                 job.MaxAttempts,
@@ -102,7 +106,14 @@ public class PlatformOperationsController(
                 latencyMs = job.Status == ExtractionStatus.Succeeded
                     ? (long?)(job.UpdatedOn - job.CreatedOn).TotalMilliseconds
                     : null,
-                error = job.LastError
+                // Exception messages can contain provider diagnostics, document fragments or
+                // infrastructure details. Broad fleet roles get a truthful classified state;
+                // only the narrower support/Owner policy may read the diagnostic text.
+                error = job.LastError is null
+                    ? null
+                    : mayReadCustomerContent
+                        ? job.LastError
+                        : "Processing failed; diagnostic details are restricted."
             };
         }));
     }
@@ -336,16 +347,8 @@ public class PlatformOperationsController(
             return "Plan code must be between 1 and 64 characters.";
         if (string.IsNullOrWhiteSpace(request.Name))
             return "Plan name is required.";
-        try
-        {
-            using var document = JsonDocument.Parse(features);
-            if (document.RootElement.ValueKind != JsonValueKind.Object)
-                return "Features must be a JSON object.";
-        }
-        catch (JsonException)
-        {
-            return "Features must be valid JSON.";
-        }
+        if (!Entitlements.TypedEntitlementCatalog.TryParse(features, out _, out var entitlementError))
+            return entitlementError;
         return null;
     }
 
@@ -357,19 +360,7 @@ public class PlatformOperationsController(
         => string.IsNullOrWhiteSpace(code) ? "none" : code.Trim().ToLowerInvariant();
 
     private static string[] ReadEnabledFeatures(string json)
-    {
-        try
-        {
-            using var document = JsonDocument.Parse(json);
-            return document.RootElement.ValueKind == JsonValueKind.Object
-                ? document.RootElement.EnumerateObject()
-                    .Where(item => item.Value.ValueKind == JsonValueKind.True)
-                    .Select(item => item.Name).OrderBy(item => item).ToArray()
-                : [];
-        }
-        catch (JsonException)
-        {
-            return [];
-        }
-    }
+        => Entitlements.TypedEntitlementCatalog.TryParse(json, out var values, out _)
+            ? values.Where(item => item.Value).Select(item => item.Key).Order().ToArray()
+            : [];
 }

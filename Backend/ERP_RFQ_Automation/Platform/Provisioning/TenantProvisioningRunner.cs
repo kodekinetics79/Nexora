@@ -490,8 +490,9 @@ public sealed class TenantProvisioningRunner : ITenantProvisioningRunner
         var audit = new PlatformAuditService(
             db, scope.ServiceProvider.GetRequiredService<ILogger<PlatformAuditService>>());
 
-        // The administrator's EMAIL is audited; the password never is, generated or not, and
-        // neither is the activation token. The step journal is summarised rather than repeated —
+        // The tenant administrator's email is deliberately NOT copied into append-only platform
+        // audit metadata: the provisioning execution owns that customer identity and can erase it.
+        // The password and activation token are never audited. The step journal is summarised —
         // the full detail lives on platform."ProvisioningSteps" and is joinable by execution id.
         await audit.WriteAsync(principal, action, nameof(Tenant),
             execution.TenantId?.ToString() ?? execution.Id.ToString(),
@@ -503,7 +504,6 @@ public sealed class TenantProvisioningRunner : ITenantProvisioningRunner
                 execution.Name,
                 execution.TenantId,
                 execution.ProvisionedBusinessUnitId,
-                adminEmail = execution.AdminEmail,
                 adminUserId = execution.FoundingUserId,
                 adminActivation = execution.AdminActivation,
                 // The invitation's EXISTENCE is auditable; its token is not, and neither is the

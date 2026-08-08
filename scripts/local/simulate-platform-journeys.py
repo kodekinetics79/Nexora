@@ -18,7 +18,12 @@ that returns a plausible-looking payload is the failure mode this codebase actua
 """
 
 import argparse
+import base64
+import hashlib
+import hmac
 import json
+from pathlib import Path
+import struct
 import sys
 import time
 import urllib.error
@@ -100,16 +105,38 @@ def tenant_body(slug, **overrides):
     return body
 
 
+def totp(secret: str, now: float) -> str:
+    normalized = secret.strip().upper()
+    key = base64.b32decode(normalized + "=" * ((8 - len(normalized) % 8) % 8))
+    digest = hmac.new(key, struct.pack(">Q", int(now) // 30), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    value = (struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF) % 1_000_000
+    return f"{value:06d}"
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--api", default="http://127.0.0.1:5192")
     parser.add_argument("--email", default="owner@nexora.local")
     parser.add_argument("--password", default="LocalOwner!2026")
+    parser.add_argument("--totp-secret-file", default=".local-run/platform-owner-mfa-secret")
     args = parser.parse_args()
     api = args.api.rstrip("/")
 
     status, login = call("POST", f"{api}/api/platform/auth/login",
                          body={"email": args.email, "password": args.password})
+    if status == 200 and isinstance(login, dict) and login.get("mfaRequired"):
+        secret_path = Path(args.totp_secret_file)
+        if not secret_path.is_file():
+            print(f"FATAL: MFA is required and the local seed file is absent: {secret_path}")
+            return 2
+        # A watched browser may just have consumed this step. Wait for a genuinely new step;
+        # never weaken the server replay fence and never print the seed.
+        time.sleep(30 - (time.time() % 30) + 0.5)
+        status, login = call("POST", f"{api}/api/platform/auth/mfa/challenge", body={
+            "challengeId": login.get("mfaChallengeId"),
+            "totpCode": totp(secret_path.read_text(encoding="utf-8"), time.time()),
+        })
     if status != 200 or not isinstance(login, dict) or "token" not in login:
         print(f"FATAL: platform login failed ({status}): {login}")
         return 2

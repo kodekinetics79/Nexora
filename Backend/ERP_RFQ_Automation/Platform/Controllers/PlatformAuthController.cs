@@ -68,6 +68,11 @@ public class PlatformAuthController : ControllerBase
         try
         {
             var response = await _authService.LoginAsync(request);
+            // Password verification is only the first factor for enrolled users.
+            // Do not record platform.login until the MFA challenge actually succeeds.
+            if (response.MfaRequired)
+                return Ok(response);
+
             await _loginThrottle.RegisterSuccessAsync(
                 LoginPlane.Platform, request?.Email, HttpContext.RequestAborted);
             await _loginThrottle.RegisterSuccessAsync(
@@ -107,6 +112,85 @@ public class PlatformAuthController : ControllerBase
         }
     }
 
+    [HttpPost("mfa/challenge")]
+    [AllowAnonymous]
+    public async Task<ActionResult<PlatformLoginResponse>> CompleteMfaChallenge(
+        [FromBody] PlatformMfaChallengeRequest request, CancellationToken ct)
+    {
+        var remoteIp = HttpContext.Connection?.RemoteIpAddress?.ToString();
+        var ipLockout = await _loginThrottle.CheckAsync(LoginPlane.PlatformIp, remoteIp, ct);
+        if (ipLockout.IsLockedOut)
+        {
+            Response.Headers.RetryAfter = ((int)Math.Ceiling(ipLockout.RetryAfter.TotalSeconds)).ToString();
+            return StatusCode(StatusCodes.Status429TooManyRequests, new
+            {
+                error = "Too many failed sign-in attempts. Please try again later."
+            });
+        }
+
+        try
+        {
+            var response = await _authService.CompleteMfaChallengeAsync(request, ct);
+            await _loginThrottle.RegisterSuccessAsync(LoginPlane.Platform, response.Email, ct);
+            await _loginThrottle.RegisterSuccessAsync(LoginPlane.PlatformIp, remoteIp, ct);
+            var actor = new ClaimsPrincipal(new ClaimsIdentity(
+            [
+                new Claim("sub", response.Id.ToString()),
+                new Claim("email", response.Email)
+            ], PlatformAuthConstants.Scheme));
+            await _audit.WriteAsync(actor, "platform.login", nameof(PlatformUser),
+                response.Id.ToString(), new { mfa = true, response.RecoveryCodeUsed },
+                httpContext: HttpContext, ct: ct);
+            return Ok(response);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            await _loginThrottle.RegisterFailureAsync(
+                LoginPlane.PlatformIp, remoteIp, ct);
+            await _audit.WriteAsync(new ClaimsPrincipal(new ClaimsIdentity()),
+                "platform.login.mfa.failed", nameof(PlatformUser), null, null, null,
+                result: PlatformAuditResults.Failure,
+                httpContext: HttpContext, ct: ct);
+            return Unauthorized(new { error = ex.Message });
+        }
+    }
+
+    [HttpGet("mfa")]
+    [Authorize(Policy = PlatformPolicies.PlatformScope)]
+    public Task<PlatformMfaStatusResponse> GetMfaStatus(CancellationToken ct) =>
+        _authService.GetMfaStatusAsync(ActorId(), ct);
+
+    [HttpPost("mfa/enrollment")]
+    [Authorize(Policy = PlatformPolicies.PlatformScope)]
+    public async Task<ActionResult<PlatformMfaEnrollmentStartResponse>> BeginMfaEnrollment(CancellationToken ct)
+    {
+        try
+        {
+            var result = await _authService.BeginMfaEnrollmentAsync(ActorId(), ct);
+            await _audit.WriteAsync(User, "platform.mfa.enrollment.started", nameof(PlatformUser),
+                ActorId().ToString(), httpContext: HttpContext, ct: ct);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex) { return Conflict(new { error = ex.Message }); }
+    }
+
+    [HttpPost("mfa/enrollment/confirm")]
+    [Authorize(Policy = PlatformPolicies.PlatformScope)]
+    public async Task<ActionResult<PlatformMfaEnrollmentConfirmResponse>> ConfirmMfaEnrollment(
+        [FromBody] PlatformMfaEnrollmentConfirmRequest request, CancellationToken ct)
+    {
+        try
+        {
+            var result = await _authService.ConfirmMfaEnrollmentAsync(ActorId(), request, ct);
+            await _audit.WriteAsync(User, "platform.mfa.enrollment.confirmed", nameof(PlatformUser),
+                ActorId().ToString(), new { recoveryCodeCount = result.RecoveryCodes.Count },
+                httpContext: HttpContext, ct: ct);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex) { return Conflict(new { error = ex.Message }); }
+        catch (UnauthorizedAccessException ex) { return Unauthorized(new { error = ex.Message }); }
+    }
+
     [HttpPost("logout")]
     [Authorize(Policy = PlatformPolicies.PlatformScope)]
     public async Task<IActionResult> Logout(CancellationToken ct)
@@ -121,5 +205,14 @@ public class PlatformAuthController : ControllerBase
 
         // Idempotent: an already-revoked session is still logged out.
         return NoContent();
+    }
+
+    private long ActorId()
+    {
+        var value = User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value
+                    ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        return long.TryParse(value, out var id) && id > 0
+            ? id
+            : throw new UnauthorizedAccessException("A valid platform actor is required.");
     }
 }

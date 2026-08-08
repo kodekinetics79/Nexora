@@ -2,6 +2,7 @@ using System.Security.Claims;
 using System.Text.Json;
 using ERP_RFQ_Automation.Platform.Auth;
 using ERP_RFQ_Automation.Platform.Lifecycle;
+using ERP_RFQ_Automation.Platform.DataAssets;
 using Microsoft.AspNetCore.Authorization;
 
 namespace ERP_RFQ_Automation.Platform.Support;
@@ -83,6 +84,10 @@ public static class PlatformAuditDisclosure
             ["billing.ratecard.update"] = PlatformPolicies.Billing,
             ["billing.statement.compute"] = PlatformPolicies.Billing,
             ["billing.statement.finalize"] = PlatformPolicies.Owner,
+            ["billing.invoice.create"] = PlatformPolicies.Billing,
+            ["billing.invoice.finalize"] = PlatformPolicies.Owner,
+            ["billing.invoice.credit"] = PlatformPolicies.Owner,
+            ["billing.invoice.payment"] = PlatformPolicies.Billing,
             ["billing.tenant.rate-card"] = PlatformPolicies.Billing,
             ["billing.tenant.commercial-terms"] = PlatformPolicies.Billing,
 
@@ -120,6 +125,8 @@ public static class PlatformAuditDisclosure
             [TenantLegalHoldService.PlaceAction] = PlatformPolicies.Owner,
             [TenantLegalHoldService.ReleaseAction] = PlatformPolicies.Owner,
             ["tenant.offboarding.export"] = PlatformPolicies.Owner,
+            [TenantDataAssetRegistryService.RegisterAction] = PlatformPolicies.Owner,
+            [TenantDataAssetRegistryService.VerifyAction] = PlatformPolicies.Owner,
 
             // Platform/Controllers/TenantsController — tenant lifecycle is TenantAdmin; AI policy
             // mutation is Owner. Payload authority follows the writing method, not the class gate.

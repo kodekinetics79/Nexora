@@ -11,6 +11,7 @@ import type {
   BillingStatement,
   BillingStatementSummary,
   CreatePlatformOperatorInput,
+  CreateSubscriptionInvoiceInput,
   CreateRateCardInput,
   CandidatePlatformEmailSettings,
   CreateSupportTicketInput,
@@ -48,7 +49,12 @@ import type {
   SupportTicketSeverity,
   SupportTicketSummary,
   SupportTicketTimeline,
+  SubscriptionCreditNote,
+  SubscriptionInvoice,
+  SubscriptionPayment,
+  TenantActivationDataDecision,
   Tenant,
+  TenantDataAsset,
   TenantBillingProfile,
   TenantCostReport,
   TenantErasureResult,
@@ -65,6 +71,8 @@ import type {
   TestOutboundEmailResult,
   UpdateRateCardInput,
   UpdateTenantAiPolicyInput,
+  RegisterTenantDataAssetInput,
+  VerifyTenantDataAssetInput,
   UpsertPlanInput,
 } from '../types';
 
@@ -124,6 +132,14 @@ export interface PlatformApi {
   getOverview(): Promise<OverviewMetrics>;
   listTenants(): Promise<Tenant[]>;
   getTenant(id: string): Promise<Tenant>;
+  listTenantDataAssets(tenantId: string): Promise<TenantDataAsset[]>;
+  getTenantActivationDataDecision(tenantId: string): Promise<TenantActivationDataDecision>;
+  registerTenantDataAsset(tenantId: string, input: RegisterTenantDataAssetInput): Promise<TenantDataAsset>;
+  verifyTenantDataAsset(
+    tenantId: string,
+    assetId: string,
+    input: VerifyTenantDataAssetInput,
+  ): Promise<TenantDataAsset>;
   provisionTenant(input: ProvisionTenantInput): Promise<ProvisionTenantResult>;
   suspendTenant(id: string, reason: string): Promise<Tenant>;
   resumeTenant(id: string, reason: string): Promise<Tenant>;
@@ -209,6 +225,16 @@ export interface PlatformApi {
   // --- billing console ---
   getRevenueRisk(query?: RevenueRiskQuery): Promise<RevenueRiskReport>;
   getTenantBillingProfile(tenantId: string): Promise<TenantBillingProfile>;
+  listSubscriptionInvoices(tenantId: string): Promise<SubscriptionInvoice[]>;
+  createSubscriptionInvoice(input: CreateSubscriptionInvoiceInput): Promise<SubscriptionInvoice>;
+  finalizeSubscriptionInvoice(id: string): Promise<SubscriptionInvoice>;
+  creditSubscriptionInvoice(id: string, amount: number, reason: string): Promise<SubscriptionCreditNote>;
+  recordSubscriptionPayment(
+    id: string,
+    amount: number,
+    externalReference: string,
+    receivedAtUtc: string,
+  ): Promise<SubscriptionPayment>;
   setTenantRateCard(
     tenantId: string,
     body: { rateCardId: string | null; reason: string },
@@ -540,6 +566,22 @@ type WireRecord = Record<string, unknown>;
 
 const num = (value: unknown): number => (typeof value === 'number' ? value : Number(value ?? 0));
 
+const normalizeTenantDataAsset = (wire: WireRecord): TenantDataAsset => ({
+  ...(wire as unknown as TenantDataAsset),
+  id: asId(wire.id as string | number),
+  tenantId: asId(wire.tenantId as string | number),
+  verifiedBusinessUnitId: asIdOrNull(wire.verifiedBusinessUnitId as string | number | null),
+});
+
+const normalizeTenantActivationDataDecision = (wire: WireRecord): TenantActivationDataDecision => ({
+  ...(wire as unknown as TenantActivationDataDecision),
+  tenantId: asId(wire.tenantId as string | number),
+  blockers: (wire.blockers as string[]) ?? [],
+  postgreSqlTenantScope: wire.postgreSqlTenantScope
+    ? normalizeTenantDataAsset(wire.postgreSqlTenantScope as WireRecord)
+    : null,
+});
+
 const normalizeExecution = (wire: WireRecord): ProvisioningExecution => ({
   id: asId(wire.id as string | number),
   state: wire.state as ProvisioningExecution['state'],
@@ -627,6 +669,21 @@ const normalizeBillingProfile = (wire: WireRecord): TenantBillingProfile => ({
   pinnedRateCardId: asIdOrNull(wire.pinnedRateCardId as string | number | null),
   revenueRisk: normalizeRevenueRisk(wire.revenueRisk as WireRecord),
   statements: ((wire.statements as WireRecord[]) ?? []).map(normalizeStatementSummary),
+});
+
+const normalizeSubscriptionInvoice = (wire: WireRecord): SubscriptionInvoice => ({
+  ...(wire as unknown as SubscriptionInvoice),
+  id: asId(wire.id as string | number),
+  tenantId: asId(wire.tenantId as string | number),
+  statementId: asId(wire.statementId as string | number),
+  credits: ((wire.credits as WireRecord[]) ?? []).map((credit) => ({
+    ...(credit as unknown as SubscriptionCreditNote),
+    id: asId(credit.id as string | number),
+  })),
+  payments: ((wire.payments as WireRecord[]) ?? []).map((payment) => ({
+    ...(payment as unknown as SubscriptionPayment),
+    id: asId(payment.id as string | number),
+  })),
 });
 
 const normalizeTicketSummary = (wire: WireRecord): SupportTicketSummary => ({
@@ -720,6 +777,26 @@ const httpPlatformApi: PlatformApi = {
     (await platformHttp.get<BackendTenant[]>('/api/platform/tenants')).data.map(normalizeTenant),
   getTenant: async (id) =>
     normalizeTenant((await platformHttp.get<BackendTenant>(`/api/platform/tenants/${id}`)).data),
+  listTenantDataAssets: async (tenantId) =>
+    (await platformHttp.get<WireRecord[]>(`/api/platform/tenants/${tenantId}/data-assets`))
+      .data.map(normalizeTenantDataAsset),
+  getTenantActivationDataDecision: async (tenantId) =>
+    normalizeTenantActivationDataDecision(
+      (await platformHttp.get<WireRecord>(
+        `/api/platform/tenants/${tenantId}/data-assets/activation-data-decision`,
+      )).data,
+    ),
+  registerTenantDataAsset: async (tenantId, input) =>
+    normalizeTenantDataAsset(
+      (await platformHttp.post<WireRecord>(`/api/platform/tenants/${tenantId}/data-assets`, input)).data,
+    ),
+  verifyTenantDataAsset: async (tenantId, assetId, input) =>
+    normalizeTenantDataAsset(
+      (await platformHttp.post<WireRecord>(
+        `/api/platform/tenants/${tenantId}/data-assets/${assetId}/verify`,
+        { ...input, observedBusinessUnitId: Number(input.observedBusinessUnitId) },
+      )).data,
+    ),
   provisionTenant: async (input) => {
     // The response is ProvisionTenantResponse, not a bare tenant: it carries the founding
     // admin and, when the server generated it, a one-time credential that exists in this
@@ -1051,6 +1128,35 @@ const httpPlatformApi: PlatformApi = {
     normalizeBillingProfile(
       (await platformHttp.get<WireRecord>(`/api/platform/billing/tenants/${tenantId}`)).data,
     ),
+  listSubscriptionInvoices: async (tenantId) =>
+    (await platformHttp.get<WireRecord[]>('/api/platform/billing/invoices', { params: { tenantId } }))
+      .data.map(normalizeSubscriptionInvoice),
+  createSubscriptionInvoice: async (input) =>
+    normalizeSubscriptionInvoice(
+      (await platformHttp.post<WireRecord>('/api/platform/billing/invoices', {
+        ...input,
+        statementId: Number(input.statementId),
+      })).data,
+    ),
+  finalizeSubscriptionInvoice: async (id) =>
+    normalizeSubscriptionInvoice(
+      (await platformHttp.post<WireRecord>(`/api/platform/billing/invoices/${id}/finalize`)).data,
+    ),
+  creditSubscriptionInvoice: async (id, amount, reason) => {
+    const credit = (await platformHttp.post<WireRecord>(`/api/platform/billing/invoices/${id}/credits`, {
+      amount,
+      reason,
+    }, { headers: { 'Idempotency-Key': crypto.randomUUID() } })).data;
+    return { ...(credit as unknown as SubscriptionCreditNote), id: asId(credit.id as string | number) };
+  },
+  recordSubscriptionPayment: async (id, amount, externalReference, receivedAtUtc) => {
+    const payment = (await platformHttp.post<WireRecord>(`/api/platform/billing/invoices/${id}/payments`, {
+      amount,
+      externalReference,
+      receivedAtUtc,
+    })).data;
+    return { ...(payment as unknown as SubscriptionPayment), id: asId(payment.id as string | number) };
+  },
   setTenantRateCard: async (tenantId, body) =>
     normalizeBillingProfile(
       (await platformHttp.put<WireRecord>(`/api/platform/billing/tenants/${tenantId}/rate-card`, {

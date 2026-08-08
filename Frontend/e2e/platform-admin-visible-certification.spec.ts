@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { createHmac } from 'node:crypto';
 import { requireEnv } from './support/environment';
 
 const apiURL = process.env.E2E_API_URL ?? '';
@@ -22,11 +23,47 @@ const platformTabs = [
   { name: 'Audit Log', path: '/platform/audit', heading: 'Audit Log' },
 ] as const;
 
+const decodeBase32 = (value: string): Buffer => {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  const bits = value.toUpperCase().replace(/[^A-Z2-7]/g, '')
+    .split('').map((character) => alphabet.indexOf(character).toString(2).padStart(5, '0')).join('');
+  return Buffer.from((bits.match(/.{8}/g) ?? []).map((byte) => Number.parseInt(byte, 2)));
+};
+
+const currentTotp = (secret: string, now = Date.now()): string => {
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(Math.floor(now / 30_000)));
+  const digest = createHmac('sha1', decodeBase32(secret)).update(counter).digest();
+  const offset = digest[digest.length - 1] & 0x0f;
+  const value = (digest.readUInt32BE(offset) & 0x7fffffff) % 1_000_000;
+  return value.toString().padStart(6, '0');
+};
+
+// Treat the process-start step as already spent: a prior interrupted certification process may
+// have submitted it, and the server correctly remembers that replay fence.
+let lastSubmittedTotpStep = Math.floor(Date.now() / 30_000);
+
+const nextUnusedTotp = async (page: Page, secret: string): Promise<string> => {
+  let now = Date.now();
+  let step = Math.floor(now / 30_000);
+  if (step <= lastSubmittedTotpStep) {
+    // The server intentionally fences replay of a TOTP time step across sessions. Serial
+    // Playwright tests create fresh browser contexts faster than the 30-second window, so wait
+    // visibly for the next genuine code instead of weakening the replay control or using mocks.
+    await page.waitForTimeout(((lastSubmittedTotpStep + 1) * 30_000) - now + 500);
+    now = Date.now();
+    step = Math.floor(now / 30_000);
+  }
+  lastSubmittedTotpStep = step;
+  return currentTotp(secret, now);
+};
+
 async function signInAsPlatformAdmin(page: Page): Promise<void> {
   const credentials = requireEnv(
     'Visible Google Chrome Platform Admin certification',
     'E2E_PLATFORM_ADMIN_EMAIL',
     'E2E_PLATFORM_ADMIN_PASSWORD',
+    'E2E_PLATFORM_ADMIN_TOTP_SECRET',
   );
 
   await page.goto('/platform/login');
@@ -42,7 +79,15 @@ async function signInAsPlatformAdmin(page: Page): Promise<void> {
   await password.pressSequentially(credentials.E2E_PLATFORM_ADMIN_PASSWORD);
   await page.getByRole('button', { name: 'Enter Control Plane' }).click();
 
-  await expect(page.getByRole('heading', { name: 'Platform Overview' })).toBeVisible({ timeout: 20_000 });
+  const verification = page.getByLabel('6-digit authenticator code');
+  const overview = page.getByRole('heading', { name: 'Platform Overview' });
+  await expect(verification.or(overview)).toBeVisible({ timeout: 20_000 });
+  if (await verification.isVisible()) {
+    await verification.fill(await nextUnusedTotp(page, credentials.E2E_PLATFORM_ADMIN_TOTP_SECRET));
+    await page.getByRole('button', { name: 'Verify and enter' }).click();
+  }
+
+  await expect(overview).toBeVisible({ timeout: 20_000 });
   await expect(page.getByText(/scope=platform/i).first()).toBeVisible();
 }
 
@@ -103,6 +148,41 @@ test.describe.serial('visible Google Chrome Platform Admin certification', () =>
       await expect(page.getByRole('heading', { name: tab.heading, exact: true })).toBeVisible();
     }
 
+    assertNoFailures();
+  });
+
+  test('saves, resumes, edits, and reloads a first-field provisioning draft', async ({ page }) => {
+    const assertNoFailures = observeBrowserAndApiFailures(page);
+    const draftName = `Visible Draft ${journeyId}`;
+    await signInAsPlatformAdmin(page);
+    await page.getByRole('link', { name: 'Tenants', exact: true }).click();
+    await page.getByRole('button', { name: 'Create Company' }).click();
+
+    let wizard = page.getByRole('dialog', { name: 'Create a company workspace' });
+    await fillVisible(wizard.getByLabel('Organization name'), draftName);
+    await wizard.getByRole('button', { name: 'Save draft' }).click();
+    await expect(page.getByText(new RegExp(`Draft .*${draftName}.* saved`))).toBeVisible();
+    await wizard.getByRole('button', { name: 'Cancel', exact: true }).click();
+
+    await page.reload();
+    await page.getByRole('button', { name: 'Create Company' }).click();
+    wizard = page.getByRole('dialog', { name: 'Create a company workspace' });
+    await wizard.getByRole('button', { name: 'Resume one' }).click();
+    const draftRow = wizard.getByText(draftName, { exact: true }).locator('..').locator('..');
+    await draftRow.getByRole('button', { name: 'Resume', exact: true }).click();
+    await expect(wizard.getByLabel('Organization name')).toHaveValue(draftName);
+    await fillVisible(wizard.getByLabel('Industry'), 'Aerospace');
+    await wizard.getByRole('button', { name: 'Update draft' }).click();
+    await expect(page.getByText(new RegExp(`Draft .*${draftName}.* saved`))).toBeVisible();
+    await wizard.getByRole('button', { name: 'Cancel', exact: true }).click();
+
+    await page.reload();
+    await page.getByRole('button', { name: 'Create Company' }).click();
+    wizard = page.getByRole('dialog', { name: 'Create a company workspace' });
+    await wizard.getByRole('button', { name: 'Resume one' }).click();
+    await wizard.getByText(draftName, { exact: true }).locator('..').locator('..')
+      .getByRole('button', { name: 'Resume', exact: true }).click();
+    await expect(wizard.getByLabel('Industry')).toHaveValue('Aerospace');
     assertNoFailures();
   });
 
@@ -205,6 +285,44 @@ test.describe.serial('visible Google Chrome Platform Admin certification', () =>
     await expect(page.getByText(/Export downloaded/)).toBeVisible();
     await expect(page.getByRole('columnheader', { name: 'SHA-256' })).toBeVisible();
 
+    assertNoFailures();
+  });
+
+  test('shows the selected tenant plan entitlements from the real catalogue', async ({ page }) => {
+    const assertNoFailures = observeBrowserAndApiFailures(page);
+    await signInAsPlatformAdmin(page);
+    await page.getByRole('link', { name: 'Tenants', exact: true }).click();
+    await fillVisible(page.getByLabel('Search tenants'), journeyTenant.name);
+    await page.getByRole('row').filter({ hasText: journeyTenant.name }).getByText(journeyTenant.name, { exact: true }).click();
+    const plansResponse = page.waitForResponse((response) =>
+      response.url().endsWith('/api/platform/plans') && response.request().method() === 'GET');
+    await page.getByRole('tab', { name: 'Entitlements' }).click();
+    expect((await plansResponse).ok(), 'The real plan catalogue must be readable.').toBeTruthy();
+    await expect(page.getByText('Concurrent extractions')).toBeVisible();
+    await expect(page.getByText('Documents per month')).toBeVisible();
+    await expect(page.getByText('Seats', { exact: true })).toBeVisible();
+    await expect(page.getByText(/contracted plan capacity, not live consumption/i)).toBeVisible();
+    assertNoFailures();
+  });
+
+  test('reads the tenant PostgreSQL data gate and its decision boundary without fabricating assets', async ({ page }) => {
+    const assertNoFailures = observeBrowserAndApiFailures(page);
+    await signInAsPlatformAdmin(page);
+    await page.getByRole('link', { name: 'Tenants', exact: true }).click();
+    await fillVisible(page.getByLabel('Search tenants'), journeyTenant.name);
+    await page.getByRole('row').filter({ hasText: journeyTenant.name }).getByText(journeyTenant.name, { exact: true }).click();
+
+    const assetsResponse = page.waitForResponse((response) =>
+      response.url().endsWith('/data-assets') && response.request().method() === 'GET');
+    const decisionResponse = page.waitForResponse((response) =>
+      response.url().endsWith('/data-assets/activation-data-decision') && response.request().method() === 'GET');
+    await page.getByRole('tab', { name: 'Data & storage' }).click();
+
+    expect((await assetsResponse).ok(), 'The Owner-only tenant data-asset registry must be readable.').toBeTruthy();
+    expect((await decisionResponse).ok(), 'The activation data decision must be readable.').toBeTruthy();
+    await expect(page.getByText('Activation data decision')).toBeVisible();
+    await expect(page.getByText('Decision boundary')).toBeVisible();
+    await expect(page.getByText(/does not activate the tenant/i)).toBeVisible();
     assertNoFailures();
   });
 

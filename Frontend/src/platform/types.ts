@@ -139,6 +139,56 @@ export interface Tenant extends TenantCompanyProfile, TenantCommercialTerms {
   createdAt: string | null; // ISO
 }
 
+export interface TenantDataAsset {
+  id: string;
+  tenantId: string;
+  logicalKey: 'postgresql.primary';
+  assetType: 'PostgreSqlTenantScope';
+  opaqueProviderReference: string;
+  region: string;
+  classification: 'CustomerData';
+  disposition: 'BackupRetainedUntilExpiryThenDestroy';
+  backupPolicyReference: string;
+  backupPolicyVersion: number;
+  status: 'Registered' | 'Verified';
+  verifiedBusinessUnitId: string | null;
+  verificationEvidenceReference: string | null;
+  verificationEvidenceSha256: string | null;
+  verificationVersion: number;
+  verifiedOn: string | null;
+  verifiedBy: string | null;
+  version: number;
+}
+
+export interface TenantActivationDataDecision {
+  tenantId: string;
+  dataGateReady: boolean;
+  decision: 'DataGateReady' | 'Blocked';
+  blockers: string[];
+  postgreSqlTenantScope: TenantDataAsset | null;
+  boundary: string;
+}
+
+export interface RegisterTenantDataAssetInput {
+  logicalKey: 'postgresql.primary';
+  opaqueProviderReference: string;
+  region: string;
+  classification: 'CustomerData';
+  disposition: 'BackupRetainedUntilExpiryThenDestroy';
+  backupPolicyReference: string;
+  backupPolicyVersion: number;
+  reason: string;
+}
+
+export interface VerifyTenantDataAssetInput {
+  expectedVersion: number;
+  observedBusinessUnitId: string;
+  observedRegion: string;
+  evidenceReference: string;
+  evidenceSha256: string;
+  reason: string;
+}
+
 // --- Platform operators (control-plane accounts) ----------------------------
 
 export type PlatformOperatorRole =
@@ -694,6 +744,66 @@ export interface TenantLegalHold {
   releasedOn: string | null;
   releasedBy: string | null;
   releaseReason: string | null;
+}
+
+export type SubscriptionInvoiceStatus =
+  | 'Draft'
+  | 'Finalized'
+  | 'PartiallyPaid'
+  | 'Paid'
+  | 'Void'
+  | 'Corrected';
+
+export interface SubscriptionCreditNote {
+  id: string;
+  creditNumber: string;
+  amount: number;
+  reason: string;
+  createdBy: string;
+  createdAtUtc: string;
+}
+
+export interface SubscriptionPayment {
+  id: string;
+  externalReference: string;
+  amount: number;
+  receivedAtUtc: string;
+  recordedBy: string;
+}
+
+export interface SubscriptionInvoice {
+  id: string;
+  tenantId: string;
+  statementId: string;
+  invoiceNumber: string;
+  status: SubscriptionInvoiceStatus;
+  currency: string;
+  subtotal: number;
+  taxRatePercent: number;
+  taxAmount: number;
+  totalAmount: number;
+  creditedAmount: number;
+  paidAmount: number;
+  outstandingAmount: number;
+  issuedAtUtc: string;
+  dueAtUtc: string;
+  taxTreatment: string;
+  sourceEvidenceSha256: string;
+  createdBy: string;
+  createdAtUtc: string;
+  finalizedBy: string | null;
+  finalizedAtUtc: string | null;
+  version: number;
+  credits: SubscriptionCreditNote[];
+  payments: SubscriptionPayment[];
+}
+
+export interface CreateSubscriptionInvoiceInput {
+  statementId: string;
+  taxRatePercent: number;
+  taxTreatment: string;
+  sellerLegalName: string;
+  sellerTaxNumber: string;
 }
 
 export interface TenantAiPolicy {

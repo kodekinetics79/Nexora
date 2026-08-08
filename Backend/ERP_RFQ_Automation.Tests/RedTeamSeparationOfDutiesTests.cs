@@ -284,6 +284,8 @@ public sealed class RedTeamSeparationOfDutiesTests
         [
             new Claim("sub", "7"),
             new Claim(PlatformAuthConstants.ScopeClaim, PlatformAuthConstants.PlatformScopeValue),
-            new Claim(PlatformAuthConstants.PlatformRoleClaim, role.ToString())
+            new Claim(PlatformAuthConstants.PlatformRoleClaim, role.ToString()),
+            new Claim(PlatformAuthConstants.AuthenticationMethodClaim,
+                PlatformAuthConstants.MfaAuthenticationMethod)
         ], PlatformAuthConstants.Scheme));
 }

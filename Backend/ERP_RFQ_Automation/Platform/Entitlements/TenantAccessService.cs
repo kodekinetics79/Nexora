@@ -338,7 +338,8 @@ public sealed class TenantAccessService : ITenantAccessService
                         t.Plan.Weight,
                         t.Plan.MaxConcurrentExtractionJobs,
                         t.Plan.MaxDocsPerMonth,
-                        t.Plan.MaxSeats)));
+                        t.Plan.MaxSeats,
+                        t.Plan.Features)));
 
     internal static bool IsInsufficientPrivilege(Exception exception)
     {

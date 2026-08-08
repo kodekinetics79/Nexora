@@ -4,6 +4,7 @@ using ERP_RFQ_Automation.Platform.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 namespace ERP_RFQ_Automation.Platform.Controllers;
 
@@ -109,9 +110,14 @@ public class ObservabilityController : ControllerBase
                 .FirstAsync(ct);
             return new { available = true, total };
         }
-        catch (Exception)
+        catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.UndefinedTable)
         {
-            return new { available = false, note = "ExtractionJobs table not present in current schema." };
+            return new
+            {
+                available = false,
+                reason = "migration_required",
+                note = "ExtractionJobs is absent; the database migration level is incomplete."
+            };
         }
     }
 }

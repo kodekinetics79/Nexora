@@ -29,6 +29,8 @@ public sealed class PlatformSessionValidator : IPlatformSessionValidator
         var jti = principal.FindFirst(JwtRegisteredClaimNames.Jti)?.Value;
         var role = principal.FindFirst(PlatformAuthConstants.PlatformRoleClaim)?.Value;
         var generationValue = principal.FindFirst(PlatformAuthConstants.SessionGenerationClaim)?.Value;
+        var mfaMethod = principal.FindFirst(PlatformAuthConstants.AuthenticationMethodClaim)?.Value;
+        var mfaTimeValue = principal.FindFirst(PlatformAuthConstants.MfaAuthenticatedAtClaim)?.Value;
 
         if (!long.TryParse(sub, out var platformUserId) || platformUserId <= 0
             || string.IsNullOrWhiteSpace(jti) || string.IsNullOrWhiteSpace(role)
@@ -46,13 +48,21 @@ public sealed class PlatformSessionValidator : IPlatformSessionValidator
             {
                 session.PlatformUser.IsActive,
                 session.PlatformUser.PlatformRole,
-                session.PlatformUser.SessionGeneration
+                session.PlatformUser.SessionGeneration,
+                session.MfaAuthenticatedAtUtc
             })
             .SingleOrDefaultAsync(ct);
 
-        return state is not null
-               && state.IsActive
-               && state.SessionGeneration == generation
-               && string.Equals(state.PlatformRole.ToString(), role, StringComparison.Ordinal);
+        if (state is null || !state.IsActive || state.SessionGeneration != generation
+            || !string.Equals(state.PlatformRole.ToString(), role, StringComparison.Ordinal))
+            return false;
+
+        if (!string.Equals(mfaMethod, PlatformAuthConstants.MfaAuthenticationMethod, StringComparison.Ordinal))
+            return state.MfaAuthenticatedAtUtc is null && string.IsNullOrWhiteSpace(mfaTimeValue);
+        if (state.MfaAuthenticatedAtUtc is not DateTime serverMfaAt
+            || !long.TryParse(mfaTimeValue, out var mfaEpoch))
+            return false;
+        var claimedMfaAt = DateTimeOffset.FromUnixTimeSeconds(mfaEpoch).UtcDateTime;
+        return Math.Abs((serverMfaAt - claimedMfaAt).TotalSeconds) < 1;
     }
 }

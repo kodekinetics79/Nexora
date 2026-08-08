@@ -17,14 +17,18 @@ import SupportTab from './tenant/SupportTab';
 import AuditTab from './tenant/AuditTab';
 import LifecycleTab from './tenant/LifecycleTab';
 import AiGovernanceTab from './tenant/AiGovernanceTab';
+import EntitlementsTab from './tenant/EntitlementsTab';
+import DataStorageTab from './tenant/DataStorageTab';
 
 const TABS = [
   { key: 'overview', label: 'Overview' },
   { key: 'commercial', label: 'Commercial' },
+  { key: 'entitlements', label: 'Entitlements' },
   { key: 'support', label: 'Support' },
   { key: 'audit', label: 'Audit' },
   { key: 'lifecycle', label: 'Lifecycle' },
   { key: 'ai-governance', label: 'AI governance' },
+  { key: 'data-storage', label: 'Data & storage' },
 ] as const;
 
 type TabKey = (typeof TABS)[number]['key'];
@@ -36,7 +40,8 @@ export default function TenantDetailPage() {
   const availableTabs = useMemo(
     () => TABS.filter((entry) =>
       (entry.key !== 'support' || permissions.canAdministerTenants)
-      && (entry.key !== 'ai-governance' || permissions.isOwner)),
+      && (entry.key !== 'ai-governance' || permissions.isOwner)
+      && (entry.key !== 'data-storage' || permissions.isOwner)),
     [permissions.canAdministerTenants, permissions.isOwner],
   );
   // The tab lives in the URL so a link to a customer's lifecycle screen is a link that
@@ -131,10 +136,12 @@ export default function TenantDetailPage() {
         />
       )}
       {tab === 'commercial' && <CommercialTab tenant={tenant} />}
+      {tab === 'entitlements' && <EntitlementsTab tenant={tenant} />}
       {tab === 'support' && permissions.canAdministerTenants && <SupportTab tenant={tenant} />}
       {tab === 'audit' && <AuditTab tenant={tenant} />}
       {tab === 'lifecycle' && <LifecycleTab tenant={tenant} />}
       {tab === 'ai-governance' && permissions.isOwner && <AiGovernanceTab tenant={tenant} />}
+      {tab === 'data-storage' && permissions.isOwner && <DataStorageTab tenant={tenant} />}
     </Box>
   );
 }

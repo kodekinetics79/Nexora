@@ -18,9 +18,34 @@ public class PlatformLoginResponse
     public long Id { get; set; }
     public string Email { get; set; } = null!;
     public string PlatformRole { get; set; } = null!;
-    public string Token { get; set; } = null!;
-    public DateTime ExpiresAtUtc { get; set; }
+    public string? Token { get; set; }
+    public DateTime? ExpiresAtUtc { get; set; }
+    public bool MfaRequired { get; set; }
+    public Guid? MfaChallengeId { get; set; }
+    public DateTime? MfaChallengeExpiresAtUtc { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool RecoveryCodeUsed { get; set; }
 }
+
+public sealed class PlatformMfaChallengeRequest
+{
+    [Required]
+    public Guid ChallengeId { get; set; }
+    public string? TotpCode { get; set; }
+    public string? RecoveryCode { get; set; }
+}
+
+public sealed record PlatformMfaStatusResponse(bool Enabled, DateTime? EnabledAtUtc, int RecoveryCodesRemaining);
+public sealed record PlatformMfaEnrollmentStartResponse(string Secret, string OtpAuthUri);
+
+public sealed class PlatformMfaEnrollmentConfirmRequest
+{
+    [Required, RegularExpression("^[0-9]{6}$")]
+    public string TotpCode { get; set; } = null!;
+}
+
+public sealed record PlatformMfaEnrollmentConfirmResponse(
+    DateTime EnabledAtUtc, IReadOnlyList<string> RecoveryCodes);
 
 // ---- Tenants -------------------------------------------------------------
 
@@ -440,7 +465,7 @@ public class UpdateTenantAiPolicyRequest
 
 public class ImpersonationRequest
 {
-    [Required]
+    [Required, StringLength(1000, MinimumLength = 1)]
     public string Reason { get; set; } = null!;
 }
 

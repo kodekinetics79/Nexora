@@ -50,6 +50,7 @@ import {
 } from '../../components/commercialTermsValidation';
 import { BILLING_MODES } from '../../types';
 import type { BillingMode, Tenant, TenantBillingProfile } from '../../types';
+import SubscriptionInvoicesSection from './SubscriptionInvoicesSection';
 
 const fmtMoney = (amount: number, currency: string) =>
   new Intl.NumberFormat('en-US', { style: 'currency', currency, maximumFractionDigits: 2 }).format(amount);
@@ -496,6 +497,8 @@ export default function CommercialTab({ tenant }: { tenant: Tenant }) {
           </Box>
         )}
       </PageSection>
+
+      <SubscriptionInvoicesSection tenant={tenant} statements={profile.statements} />
 
       {/* Statement review — the lines an operator has to read BEFORE finalize, because
           after finalize there is nothing to do about them. */}

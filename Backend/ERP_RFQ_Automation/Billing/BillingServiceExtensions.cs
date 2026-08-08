@@ -25,6 +25,7 @@ public static class BillingServiceExtensions
         ArgumentNullException.ThrowIfNull(configuration);
 
         services.AddScoped<IBillingStatementService, BillingStatementService>();
+        services.AddScoped<SubscriptionInvoiceService>();
         services.AddOptions<BillingRunOptions>()
             .Bind(configuration.GetSection(BillingRunOptions.SectionName))
             .ValidateOnStart();

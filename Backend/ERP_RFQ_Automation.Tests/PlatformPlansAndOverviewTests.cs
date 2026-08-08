@@ -240,6 +240,31 @@ public sealed class PlatformPlansAndOverviewTests
         Assert.Equal("First", job.GetProperty("tenantName").GetString());
     }
 
+    [Fact]
+    public async Task Broad_platform_roles_do_not_receive_document_names_or_raw_failures()
+    {
+        using var db = new TestDb();
+        await using (var seed = db.ContextFor(null))
+        {
+            seed.Set<ExtractionJob>().Add(new ExtractionJob
+            {
+                BatchId = Guid.NewGuid(), BusinessUnitId = 42, ContentHash = "hash",
+                StoragePath = "path", FileName = "customer-secret-rfq.pdf",
+                LastError = "provider leaked customer@example.test from parsed row",
+                Status = ExtractionStatus.Failed, CreatedOn = DateTime.UtcNow, UpdatedOn = DateTime.UtcNow
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = db.ContextFor(null);
+        var row = Assert.Single(await Rows(OperationsController(context).Jobs(null, null, default)));
+
+        Assert.Equal("Restricted document", row.GetProperty("documentName").GetString());
+        Assert.Equal("Processing failed; diagnostic details are restricted.",
+            row.GetProperty("error").GetString());
+        Assert.DoesNotContain("customer@example.test", row.GetRawText());
+    }
+
     // ---- Helpers ------------------------------------------------------------
 
     private static PlatformOperationsController OperationsController(ErpRfqAutomationContext context) => new(

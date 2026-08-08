@@ -19,6 +19,8 @@ import {
   VisibilityOff,
 } from '@mui/icons-material';
 import { usePlatformAuth } from '../auth/usePlatformAuth';
+import type { PlatformMfaChallenge } from '../auth/usePlatformAuth';
+import { platformErrorMessage } from '../api/apiError';
 
 /**
  * The platform-owner sign-in screen. Rendered in place by `PlatformGuard` when
@@ -26,19 +28,23 @@ import { usePlatformAuth } from '../auth/usePlatformAuth';
  * token; the guard then re-renders the console (the session store drives it).
  */
 export default function PlatformLoginScreen() {
-  const { platformLogin } = usePlatformAuth();
+  const { platformLogin, platformCompleteMfa } = usePlatformAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [challenge, setChallenge] = useState<PlatformMfaChallenge | null>(null);
+  const [useRecoveryCode, setUseRecoveryCode] = useState(false);
+  const [verificationCode, setVerificationCode] = useState('');
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError(null);
     try {
-      await platformLogin(email.trim(), password);
+      const result = await platformLogin(email.trim(), password);
+      if (result.mfaRequired) setChallenge(result.challenge);
       // No navigation needed — PlatformGuard re-renders on the session change.
     } catch (err: unknown) {
       const status =
@@ -50,6 +56,23 @@ export default function PlatformLoginScreen() {
           ? 'Invalid platform credentials, or this account lacks platform scope.'
           : 'Unable to reach the platform control plane. Please try again.',
       );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleMfaSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!challenge) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await platformCompleteMfa(
+        challenge,
+        useRecoveryCode ? { recoveryCode: verificationCode.trim() } : { totpCode: verificationCode.trim() },
+      );
+    } catch (err: unknown) {
+      setError(platformErrorMessage(err, 'The verification code was refused. Try again before the challenge expires.'));
     } finally {
       setLoading(false);
     }
@@ -112,6 +135,58 @@ export default function PlatformLoginScreen() {
           </Typography>
         </Stack>
 
+        {challenge ? (
+          <form onSubmit={handleMfaSubmit}>
+            <Stack spacing={2.5}>
+              <Alert severity="info" sx={{ borderRadius: 2 }}>
+                Password accepted. Complete multi-factor verification before{' '}
+                {new Date(challenge.expiresAtUtc).toLocaleTimeString()}.
+              </Alert>
+              <TextField
+                label={useRecoveryCode ? 'Recovery code' : '6-digit authenticator code'}
+                value={verificationCode}
+                onChange={(event) => setVerificationCode(event.target.value)}
+                required
+                fullWidth
+                autoFocus
+                autoComplete="one-time-code"
+                slotProps={{ htmlInput: useRecoveryCode ? {} : { inputMode: 'numeric', pattern: '[0-9]{6}', maxLength: 6 } }}
+              />
+              <Button
+                type="button"
+                color="inherit"
+                onClick={() => {
+                  setUseRecoveryCode((current) => !current);
+                  setVerificationCode('');
+                  setError(null);
+                }}
+              >
+                {useRecoveryCode ? 'Use authenticator code instead' : 'Use a recovery code'}
+              </Button>
+              {error && <Alert severity="error">{error}</Alert>}
+              <Button
+                type="submit"
+                variant="contained"
+                size="large"
+                disabled={loading || (!useRecoveryCode && !/^\d{6}$/.test(verificationCode)) || (useRecoveryCode && !verificationCode.trim())}
+                sx={{ py: 1.5, fontWeight: 700 }}
+              >
+                {loading ? <CircularProgress size={22} color="inherit" /> : 'Verify and enter'}
+              </Button>
+              <Button
+                color="inherit"
+                onClick={() => {
+                  setChallenge(null);
+                  setPassword('');
+                  setVerificationCode('');
+                  setError(null);
+                }}
+              >
+                Back to password sign-in
+              </Button>
+            </Stack>
+          </form>
+        ) : (
         <form onSubmit={handleSubmit}>
           <Stack spacing={2.5}>
             <TextField
@@ -176,6 +251,7 @@ export default function PlatformLoginScreen() {
             </Button>
           </Stack>
         </form>
+        )}
       </Paper>
     </Box>
   );

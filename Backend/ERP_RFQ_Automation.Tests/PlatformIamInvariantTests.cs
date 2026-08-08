@@ -93,7 +93,9 @@ public sealed class PlatformIamInvariantTests
         var principal = new ClaimsPrincipal(new ClaimsIdentity(
         [
             new Claim(PlatformAuthConstants.ScopeClaim, PlatformAuthConstants.PlatformScopeValue),
-            new Claim(PlatformAuthConstants.PlatformRoleClaim, role.ToString())
+            new Claim(PlatformAuthConstants.PlatformRoleClaim, role.ToString()),
+            new Claim(PlatformAuthConstants.AuthenticationMethodClaim,
+                PlatformAuthConstants.MfaAuthenticationMethod)
         ], PlatformAuthConstants.Scheme));
         return (await services.GetRequiredService<IAuthorizationService>()
             .AuthorizeAsync(principal, null, policy!)).Succeeded;

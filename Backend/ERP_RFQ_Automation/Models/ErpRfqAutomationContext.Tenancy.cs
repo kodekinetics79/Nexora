@@ -21,6 +21,7 @@ using ERP_RFQ_Automation.Platform.Provisioning;
 using ERP_RFQ_Automation.Platform.Lifecycle;
 using ERP_RFQ_Automation.Platform.Support;
 using ERP_RFQ_Automation.Platform.Notifications;
+using ERP_RFQ_Automation.Platform.DataAssets;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Models;
@@ -567,6 +568,40 @@ public partial class ErpRfqAutomationContext
             e.HasOne(x => x.PlatformUser).WithMany()
                 .HasForeignKey(x => x.PlatformUserId).OnDelete(DeleteBehavior.Restrict);
         });
+        modelBuilder.Entity<ERP_RFQ_Automation.Platform.Models.PlatformMfaCredential>(e =>
+        {
+            e.ToTable("PlatformMfaCredentials", "platform");
+            e.HasKey(x => x.PlatformUserId);
+            e.Property(x => x.TotpSecret)
+                .HasColumnName("TotpSecretProtected")
+                .HasMaxLength(ERP_RFQ_Automation.Security.ProtectedSecretConverter.ProtectedColumnMaxLength)
+                .HasConversion(new ERP_RFQ_Automation.Security.ProtectedSecretConverter())
+                .IsRequired();
+            e.Property(x => x.LastAcceptedTotpStep).IsConcurrencyToken();
+            e.HasOne(x => x.PlatformUser).WithOne()
+                .HasForeignKey<ERP_RFQ_Automation.Platform.Models.PlatformMfaCredential>(x => x.PlatformUserId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+        modelBuilder.Entity<ERP_RFQ_Automation.Platform.Models.PlatformMfaRecoveryCode>(e =>
+        {
+            e.ToTable("PlatformMfaRecoveryCodes", "platform");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.CodeHash).HasMaxLength(64).IsFixedLength().IsRequired();
+            e.Property(x => x.UsedAtUtc).IsConcurrencyToken();
+            e.HasIndex(x => new { x.PlatformUserId, x.CodeHash }).IsUnique();
+            e.HasOne(x => x.PlatformUser).WithMany()
+                .HasForeignKey(x => x.PlatformUserId).OnDelete(DeleteBehavior.Restrict);
+        });
+        modelBuilder.Entity<ERP_RFQ_Automation.Platform.Models.PlatformMfaChallenge>(e =>
+        {
+            e.ToTable("PlatformMfaChallenges", "platform");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.FailedAttempts).IsConcurrencyToken();
+            e.Property(x => x.ConsumedAtUtc).IsConcurrencyToken();
+            e.HasIndex(x => new { x.PlatformUserId, x.ExpiresAtUtc, x.ConsumedAtUtc });
+            e.HasOne(x => x.PlatformUser).WithMany()
+                .HasForeignKey(x => x.PlatformUserId).OnDelete(DeleteBehavior.Restrict);
+        });
         modelBuilder.Entity<ERP_RFQ_Automation.Platform.Models.Plan>(e =>
         {
             e.ToTable("Plans", "platform");
@@ -689,6 +724,9 @@ public partial class ErpRfqAutomationContext
 
         // ==== Platform outbound email identity (Platform/Notifications/) ====
         modelBuilder.ApplyPlatformEmailModel();
+
+        // ==== Platform-owned tenant data-boundary inventory (Platform/DataAssets/) ====
+        modelBuilder.ApplyTenantDataAssetModel();
     }
 
     /// <summary>
