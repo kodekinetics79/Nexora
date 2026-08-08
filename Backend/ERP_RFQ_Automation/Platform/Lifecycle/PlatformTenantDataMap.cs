@@ -167,6 +167,33 @@ public static class PlatformTenantDataMap
             + "the activation data gate passed; live data and credentials are never stored here.",
             TenantColumn: "TenantId"),
 
+        new("UsageEvents", TenantDataClass.OperatorRecord,
+            "Immutable subscription usage and rating evidence. It is part of Nexora's revenue "
+            + "record, including correction lineage, and must survive to reconcile preserved "
+            + "statements and invoices. Customer payloads are never stored in this ledger.",
+            TenantColumn: "TenantId"),
+
+        new("UsageMinuteAggregates", TenantDataClass.OperatorRecord,
+            "The operator's near-real-time projection of the immutable usage ledger. It is kept "
+            + "with the source usage events so historical statements remain reconcilable.",
+            TenantColumn: "TenantId"),
+
+        new("AccountingOutbox", TenantDataClass.OperatorRecord,
+            "Delivery, acknowledgement and external reconciliation evidence for preserved "
+            + "subscription invoices. Purging it would erase whether revenue records reached "
+            + "the accounting boundary.",
+            TenantColumn: "TenantId"),
+
+        new("TenantDataRecoveryEvidence", TenantDataClass.OperatorRecord,
+            "Immutable evidence of backup observations, restore drills and destruction receipts. "
+            + "It must outlive the customer to prove recovery and non-resurrection controls.",
+            TenantColumn: "TenantId"),
+
+        new("TenantDeletionCertificates", TenantDataClass.OperatorRecord,
+            "The final operator certificate that every registered boundary was accounted for. "
+            + "Deleting it would remove the evidence that the tenant purge completed.",
+            TenantColumn: "TenantId"),
+
         // ==== the customer's record — destroyed ==============================================
 
         new("TenantAdminInvitations", TenantDataClass.CustomerRecord,

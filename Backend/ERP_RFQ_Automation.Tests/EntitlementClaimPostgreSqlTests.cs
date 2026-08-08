@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using System.Text;
+using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Platform.Models;
@@ -72,20 +75,12 @@ public sealed class EntitlementClaimPostgreSqlTests : IAsyncLifetime
         });
         await ctx.SaveChangesAsync();
 
-        foreach (var (bu, hash) in new[]
+        foreach (var (bu, marker) in new[]
         {
             (PlannedBu, "cap-a1"), (PlannedBu, "cap-a2"),
             (LegacyBu, "cap-b1"), (LegacyBu, "cap-b2")
         })
-            await queue.EnqueueAsync(new EnqueueExtractionRequest
-            {
-                BusinessUnitId = bu,
-                SourceType = ExtractionSourceType.ManualUpload,
-                StoragePath = $"blob://{hash}",
-                FileName = $"{hash}.pdf",
-                FileType = "pdf",
-                ContentHash = hash
-            });
+            await EnqueueClaimableAsync(ctx, queue, bu, marker);
 
         var lease = TimeSpan.FromMinutes(5);
 
@@ -109,5 +104,37 @@ public sealed class EntitlementClaimPostgreSqlTests : IAsyncLifetime
 
         // Only the planned tenant's second job remains, and its tenant is capped.
         Assert.Null(await queue.ClaimAsync("w-4", lease, FallbackCap));
+    }
+
+    private static async Task EnqueueClaimableAsync(
+        ErpRfqAutomationContext context, ExtractionQueue queue, long businessUnitId, string marker)
+    {
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(marker))).ToLowerInvariant();
+        var corpus = DocumentCorpus.Create(businessUnitId, Guid.NewGuid(), CorpusSourceType.ManualUpload);
+        context.Set<DocumentCorpus>().Add(corpus);
+        await context.SaveChangesAsync();
+
+        var source = SourceDocument.Create(businessUnitId, corpus.Id, hash, $"{marker}.pdf",
+            "application/pdf", "entitlement-claim", marker, "v1", 1);
+        context.Set<SourceDocument>().Add(source);
+        await context.SaveChangesAsync();
+
+        var occurrence = SourceDocumentOccurrence.Create(
+            businessUnitId, source.Id, corpus.Id, $"entitlement-claim:{marker}", "{}");
+        context.Set<SourceDocumentOccurrence>().Add(occurrence);
+        await context.SaveChangesAsync();
+
+        var enqueued = await queue.EnqueueAsync(new EnqueueExtractionRequest
+        {
+            BusinessUnitId = businessUnitId,
+            SourceDocumentOccurrenceId = occurrence.Id,
+            SourceType = ExtractionSourceType.ManualUpload,
+            StoragePath = $"blob://{hash}",
+            FileName = $"{marker}.pdf",
+            FileType = "pdf",
+            ContentHash = hash
+        });
+        occurrence.BindExtractionJob(enqueued.JobId);
+        await context.SaveChangesAsync();
     }
 }

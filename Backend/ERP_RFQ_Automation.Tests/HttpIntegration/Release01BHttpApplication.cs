@@ -2,6 +2,7 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Cryptography;
 using System.Security.Claims;
 using System.Text;
+using System.Text.Json;
 using ERP_RFQ_Automation.Agent.Models;
 using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.CommercialIntelligence.Sales;
@@ -10,6 +11,8 @@ using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Platform.Entitlements;
+using ERP_RFQ_Automation.Platform.Models;
 using ERP_RFQ_Automation.Procurement;
 using ERP_RFQ_Automation.Security.DocumentInspection;
 using ERP_RFQ_Automation.SupplierQuotes;
@@ -272,6 +275,35 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
     private async Task SeedAsync(ErpRfqAutomationContext db)
     {
         var now = DateTimeOffset.UtcNow;
+        var enabledFeatures = JsonSerializer.Serialize(TypedEntitlementCatalog.Keys
+            .ToDictionary(key => key, TypedEntitlementCatalog.IsRuntimeAvailable));
+        var plan = new Plan
+        {
+            Id = 89_900,
+            Code = "release-01b-http",
+            Name = "Release 01B HTTP",
+            Features = enabledFeatures,
+            IsActive = true,
+            Weight = 1,
+            MaxConcurrentExtractionJobs = 4,
+            MaxDocsPerMonth = 10_000,
+            MaxSeats = 100,
+            CreatedOn = now.UtcDateTime
+        };
+        db.Set<Plan>().Add(plan);
+        db.Set<Tenant>().AddRange(
+            new Tenant
+            {
+                Id = 89_901, Name = "HTTP Tenant A", Slug = "http-tenant-a",
+                Status = TenantStatus.Active, Plan = plan, PrimaryBusinessUnitId = TenantA,
+                CreatedOn = now.UtcDateTime, CreatedBy = "release-01b-tests"
+            },
+            new Tenant
+            {
+                Id = 89_902, Name = "HTTP Tenant B", Slug = "http-tenant-b",
+                Status = TenantStatus.Active, Plan = plan, PrimaryBusinessUnitId = TenantB,
+                CreatedOn = now.UtcDateTime, CreatedBy = "release-01b-tests"
+            });
         db.BusinessUnits.AddRange(
             BusinessUnit(TenantA, "HTTP-A"),
             BusinessUnit(TenantB, "HTTP-B"));
