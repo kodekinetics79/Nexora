@@ -29,6 +29,15 @@ public sealed class RfqSpreadsheetRow
     public string? ManufacturerPartNumber { get; set; }
     public string? LeadTimeDays { get; set; }
 
+    /// <summary>FR-RFQ-04. Saudi region or city for delivery, in the buyer's own wording.</summary>
+    public string? DeliveryLocation { get; set; }
+
+    /// <summary>FR-RFQ-04. The delivery date the buyer is asking for — never a supplier lead time.</summary>
+    public string? RequiredDeliveryDate { get; set; }
+
+    /// <summary>FR-RFQ-03. Standing agreement / frame contract this inquiry calls off against.</summary>
+    public string? AgreementReference { get; set; }
+
     /// <summary>
     /// The buyer's own note against the line ("OEM only", "Urgent requirement", "Equivalent
     /// accepted"). Commercially load-bearing — it changes what may be quoted — and was
@@ -62,6 +71,9 @@ public static class RfqSpreadsheetFields
     public const string ManufacturerPartNumber = nameof(RfqSpreadsheetRow.ManufacturerPartNumber);
     public const string LeadTimeDays = nameof(RfqSpreadsheetRow.LeadTimeDays);
     public const string ItemText = nameof(RfqSpreadsheetRow.ItemText);
+    public const string DeliveryLocation = nameof(RfqSpreadsheetRow.DeliveryLocation);
+    public const string RequiredDeliveryDate = nameof(RfqSpreadsheetRow.RequiredDeliveryDate);
+    public const string AgreementReference = nameof(RfqSpreadsheetRow.AgreementReference);
 }
 
 public sealed class CanonicalRfqImportResult

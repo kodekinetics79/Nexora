@@ -794,7 +794,16 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             null, 0,
             null, 0,
             overall,
-            items);
+            items,
+            // Everything between `items` and the intake block below is a trailing optional
+            // parameter, so these are passed by name rather than padding a dozen nulls.
+            DeliveryLocation: doc.DeliveryLocation.Value,
+            DeliveryLocationConfidence: (double)doc.DeliveryLocation.Confidence,
+            RequiredDeliveryDate: doc.RequiredDeliveryDate.Kind == CanonicalValueKind.Normalized
+                ? FormatDate(doc.RequiredDeliveryDate.Value) : null,
+            RequiredDeliveryDateConfidence: (double)doc.RequiredDeliveryDate.Confidence,
+            AgreementReference: doc.AgreementReference.Value,
+            AgreementReferenceConfidence: (double)doc.AgreementReference.Confidence);
 
     private static LeadItemData MapCanonicalItem(CanonicalRfqLineItem line)
         => new(

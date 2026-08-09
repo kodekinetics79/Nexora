@@ -1441,6 +1441,12 @@ public sealed class LeadPersister : ILeadPersister
             // date stays authoritative for every comparison and deadline calculation, and this
             // is the rendering a Saudi government buyer actually published against.
             BidClosingDateHijri = RfqDateParser.ToHijri(bidClosingDate),
+            // FR-RFQ-04 / FR-RFQ-03. Read from the document where it states them; null where it
+            // does not. Nothing here is inferred — an unstated delivery location is unknown, and
+            // an unknown delivery location is not the buyer's head office.
+            DeliveryLocation = Truncate(ai.DeliveryLocation, 500),
+            RequiredDeliveryDate = SanitizeDate(ParseDate(ai.RequiredDeliveryDate)),
+            AgreementReference = Truncate(ai.AgreementReference, 100),
             BiddingDecision = Truncate(ai.BiddingDecision, 100),
             AcknowledgmentDate = SanitizeDate(ParseDate(ai.AcknowledgmentDate)),
             SubDate = SanitizeDate(ParseDate(ai.SubDate)),

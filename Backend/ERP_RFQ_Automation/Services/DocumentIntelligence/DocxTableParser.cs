@@ -33,20 +33,15 @@ public sealed class DocxTableParser
         [RfqSpreadsheetFields.BuyerName] = new[] { "customer", "customername", "buyer", "buyername", "client", "clientname", "company" },
         [RfqSpreadsheetFields.ReceivedDate] = new[] { "rfqdate", "date", "datereceived", "receiveddate", "enquirydate" },
         [RfqSpreadsheetFields.BidClosingDate] = new[] { "closingdate", "bidclosingdate", "duedate", "deadline", "submissiondate", "quotationdue", "responseby" },
-        // Recognised so it TERMINATES the preceding value, but deliberately not stored.
-        //
-        // These documents run every label together on one line — "…RFQ Date: 2026-05-26Requested
-        // Delivery: 9 weeks" — so a label that is not recognised is not a boundary either, and
-        // the date silently swallows the rest of the line. It is not mapped to LeadTimeDays
-        // because that is what a SUPPLIER offers, not what the buyer is asking for, and it is
-        // written as prose ("9 weeks"); mapping it there invalidated every line and wrote a lead
-        // time of zero — "deliver immediately". It needs a requested-delivery field of its own;
-        // until that exists it is read as a boundary and stored nowhere, rather than stored wrong.
-        [BoundaryOnlyField] = new[] { "requesteddelivery", "deliveryrequired", "requireddelivery", "deliveryby" },
+        // "Requested Delivery" now has a correct home. It is what the BUYER is asking for, so it
+        // maps to RequiredDeliveryDate and never to a supplier lead time — that conflation put a
+        // lead time of zero, meaning "deliver immediately", on every line of every document.
+        // It is frequently prose ("9 weeks") rather than a date; an optional date that cannot be
+        // parsed now yields NeedsReview and a null value, so an unreadable one costs nothing.
+        [RfqSpreadsheetFields.RequiredDeliveryDate] = new[] { "requesteddelivery", "deliveryrequired", "requireddelivery", "deliveryby", "requiredby", "neededby" },
+        [RfqSpreadsheetFields.DeliveryLocation] = new[] { "deliverylocation", "deliveryto", "shipto", "destination", "deliveryaddress", "site" },
+        [RfqSpreadsheetFields.AgreementReference] = new[] { "agreementreference", "agreementno", "contractno", "contractreference", "framecontract" },
     };
-
-    /// <summary>Not a real field — marks labels that exist only to end the value before them.</summary>
-    private const string BoundaryOnlyField = "__boundary_only__";
 
     private readonly NativeSpreadsheetParser _grid;
 
@@ -101,7 +96,9 @@ public sealed class DocxTableParser
         row.BuyerName ??= Value(block, RfqSpreadsheetFields.BuyerName);
         row.ReceivedDate ??= Value(block, RfqSpreadsheetFields.ReceivedDate);
         row.BidClosingDate ??= Value(block, RfqSpreadsheetFields.BidClosingDate);
-        row.LeadTimeDays ??= Value(block, RfqSpreadsheetFields.LeadTimeDays);
+        row.RequiredDeliveryDate ??= Value(block, RfqSpreadsheetFields.RequiredDeliveryDate);
+        row.DeliveryLocation ??= Value(block, RfqSpreadsheetFields.DeliveryLocation);
+        row.AgreementReference ??= Value(block, RfqSpreadsheetFields.AgreementReference);
     }
 
     private static string? Value(IReadOnlyDictionary<string, string> block, string field)

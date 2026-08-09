@@ -292,7 +292,10 @@ public sealed class NativeSpreadsheetParser
             ManufacturerName = cell(RfqSpreadsheetFields.ManufacturerName),
             ManufacturerPartNumber = cell(RfqSpreadsheetFields.ManufacturerPartNumber),
             LeadTimeDays = cell(RfqSpreadsheetFields.LeadTimeDays),
-            ItemText = cell(RfqSpreadsheetFields.ItemText)
+            ItemText = cell(RfqSpreadsheetFields.ItemText),
+            DeliveryLocation = cell(RfqSpreadsheetFields.DeliveryLocation),
+            RequiredDeliveryDate = cell(RfqSpreadsheetFields.RequiredDeliveryDate),
+            AgreementReference = cell(RfqSpreadsheetFields.AgreementReference)
         };
     }
 
@@ -414,6 +417,9 @@ public sealed class NativeSpreadsheetParser
         [RfqSpreadsheetFields.ManufacturerPartNumber] = new[] { "manufacturerpartnumber", "mpn", "partnumber", "partno", "partcode", "modelno", "modelnumber", "materialcode", "itemcode" },
         [RfqSpreadsheetFields.LeadTimeDays] = new[] { "leadtimedays", "leadtime", "delivery", "deliverytime", "deliveryperiod" },
         [RfqSpreadsheetFields.ItemText] = new[] { "notes", "note", "remarks", "remark", "comments", "comment", "itemtext", "specification", "spec" },
+        [RfqSpreadsheetFields.DeliveryLocation] = new[] { "deliverylocation", "deliveryto", "shipto", "destination", "deliveryaddress", "deliverypoint", "site", "plant" },
+        [RfqSpreadsheetFields.RequiredDeliveryDate] = new[] { "requireddeliverydate", "requesteddeliverydate", "deliverydate", "requiredby", "neededby", "wanteddate" },
+        [RfqSpreadsheetFields.AgreementReference] = new[] { "agreementreference", "agreementno", "contractno", "contractreference", "framecontract", "agreement" },
     };
 
     private static Dictionary<string, int> BuildFieldColumnMap(IReadOnlyDictionary<int, string> headers)

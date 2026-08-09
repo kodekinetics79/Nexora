@@ -74,6 +74,15 @@ public sealed class CanonicalRfqDocument
     public CanonicalValue<string> BuyerName { get; set; } = new();
     public CanonicalValue<DateTime> ReceivedDate { get; set; } = new();
     public CanonicalValue<DateTime> BidClosingDate { get; set; } = new();
+
+    /// <summary>FR-RFQ-04. Saudi region or city for delivery, in the buyer's own wording.</summary>
+    public CanonicalValue<string> DeliveryLocation { get; set; } = new();
+
+    /// <summary>FR-RFQ-04. The delivery date the buyer asked for. Optional — never invalidates.</summary>
+    public CanonicalValue<DateTime> RequiredDeliveryDate { get; set; } = new();
+
+    /// <summary>FR-RFQ-03. Standing agreement or frame contract reference.</summary>
+    public CanonicalValue<string> AgreementReference { get; set; } = new();
     public List<CanonicalRfqLineItem> LineItems { get; set; } = new();
     public List<CanonicalValidationIssue> Issues { get; set; } = new();
     public ValidationStatus ValidationStatus { get; set; } = ValidationStatus.Unvalidated;

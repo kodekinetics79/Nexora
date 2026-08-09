@@ -88,6 +88,21 @@ public sealed class DocxTableParserTests
     }
 
     [Fact]
+    public void The_requested_delivery_is_read_as_the_buyers_requirement_not_a_supplier_lead_time()
+    {
+        // The sample set writes "Requested Delivery: 9 weeks" — prose, not a date. It must land
+        // on the buyer's requested-delivery field and never on a supplier lead time, where an
+        // unparsed value once became a lead time of zero, meaning "deliver immediately".
+        var rows = Parse("rfq-table.docx");
+
+        Assert.All(rows, row =>
+        {
+            Assert.Equal("9 weeks", row.RequiredDeliveryDate);
+            Assert.Null(row.LeadTimeDays);
+        });
+    }
+
+    [Fact]
     public void A_document_with_no_table_yields_no_rows_and_falls_through()
     {
         var bytes = BuildDocx("Dear supplier,", "Please quote for two centrifugal pumps.", "Regards");

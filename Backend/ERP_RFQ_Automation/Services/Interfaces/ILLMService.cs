@@ -130,7 +130,24 @@ namespace ERP_RFQ_Automation.Services.Interfaces
         double? SupplierNameOnDocumentConfidence = null,
         // OUR vendor code AT the customer (e.g. 2004414). Identifies us, never them.
         string? SupplierAccountRefOnDocument = null,
-        double? SupplierAccountRefOnDocumentConfidence = null);
+        double? SupplierAccountRefOnDocumentConfidence = null,
+
+        // ── FR-RFQ-03 / FR-RFQ-04 INTAKE FIELDS ─────────────────────────────────────
+        // Header-level, trailing and optional for the same reason as the block above:
+        // every existing positional construction site keeps compiling unchanged.
+
+        // Saudi region or city the buyer wants delivery to, in the buyer's own wording.
+        // Normalising it against the city master is a separate, reviewable step.
+        string? DeliveryLocation = null,
+        double? DeliveryLocationConfidence = null,
+        // The delivery date the BUYER is asking for. Not a supplier lead time, and never
+        // written into one — that conflation put a lead time of zero on every line once.
+        string? RequiredDeliveryDate = null,
+        double? RequiredDeliveryDateConfidence = null,
+        // Reference of a standing agreement or frame contract this inquiry calls off
+        // against, kept distinct from the inquiry's own RFQ number.
+        string? AgreementReference = null,
+        double? AgreementReferenceConfidence = null);
     /// <summary>
     /// One extracted line item.
     ///

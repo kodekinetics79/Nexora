@@ -35,7 +35,10 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
                 RfqNo = RequiredText(first.RfqNo, first, RfqSpreadsheetFields.RfqNo, "RFQ_NO", "RFQ number is required."),
                 BuyerName = RequiredText(first.BuyerName, first, RfqSpreadsheetFields.BuyerName, "BUYER_NAME", "Buyer name is required."),
                 ReceivedDate = DateValue(first.ReceivedDate, first, RfqSpreadsheetFields.ReceivedDate, false, "RECEIVED_DATE"),
-                BidClosingDate = DateValue(first.BidClosingDate, first, RfqSpreadsheetFields.BidClosingDate, true, "BID_CLOSING_DATE")
+                BidClosingDate = DateValue(first.BidClosingDate, first, RfqSpreadsheetFields.BidClosingDate, true, "BID_CLOSING_DATE"),
+                DeliveryLocation = TextValue(first.DeliveryLocation, first, RfqSpreadsheetFields.DeliveryLocation),
+                RequiredDeliveryDate = DateValue(first.RequiredDeliveryDate, first, RfqSpreadsheetFields.RequiredDeliveryDate, true, "REQUIRED_DELIVERY_DATE"),
+                AgreementReference = TextValue(first.AgreementReference, first, RfqSpreadsheetFields.AgreementReference)
             };
 
             var lineOrdinal = 0;
@@ -304,6 +307,9 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
         RfqSpreadsheetFields.ManufacturerPartNumber => "J",
         RfqSpreadsheetFields.LeadTimeDays => "K",
         RfqSpreadsheetFields.ItemText => "L",
+        RfqSpreadsheetFields.DeliveryLocation => "M",
+        RfqSpreadsheetFields.RequiredDeliveryDate => "N",
+        RfqSpreadsheetFields.AgreementReference => "O",
         _ => "row"
     };
 
