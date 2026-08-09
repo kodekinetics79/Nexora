@@ -1,0 +1,105 @@
+# Nexora — single-box deployment.
+#
+# This is the shape the client install takes, and it is deliberately the same shape we demo on.
+# Demoing on the cloud stack while shipping this one would mean proving a different product than
+# the one delivered: different model, different latency, different failure modes.
+#
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# WHY THE BACKEND USES HOST NETWORKING — do not "tidy" this into a bridge network.
+#
+# Nexora classifies an AI provider as Local ONLY when the configured endpoint is a loopback
+# address (AI/AiProviderEndpoint.cs — `uri.IsLoopback`). Anything else is External and is refused
+# unless a per-tenant authorization exists, which is the whole reason unstructured extraction is
+# currently dead in the cloud deployment.
+#
+# A normal Compose service name — http://ollama:11434 — is NOT loopback. It resolves to a
+# container IP, so it would be classified External and blocked, silently reproducing the exact
+# problem this deployment exists to solve.
+#
+# Host networking means the backend genuinely reaches Ollama over 127.0.0.1. That is not a
+# loophole: the model runs on this machine, no document text leaves the box, and the Local
+# classification is truthful. It also lets Ollama run natively on the host, which is far less
+# painful for GPU access than containerised GPU passthrough.
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+#
+# Prerequisites on the host (see INSTALL.md):
+#   - Ollama installed natively, listening on 127.0.0.1:11434, with the chosen model pulled
+#   - Docker with the compose plugin
+#   - Linux (host networking behaves differently on Docker Desktop for Mac/Windows)
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    # Bound to loopback only. Nothing outside this machine may reach the database.
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  clamav:
+    # Real malware scanning. The built-in inspector is structural only and detects no actual
+    # malware — it logs a reduced-security-posture warning on every boot. For a product whose
+    # primary input is customer documents, running this is not optional.
+    image: clamav/clamav:stable
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3310:3310"
+    volumes:
+      - clamav-db:/var/lib/clamav
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --ping 1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
+
+  backend:
+    build:
+      context: ../../Backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # See the note at the top of this file. This is load bearing.
+    network_mode: host
+    env_file: .env
+    environment:
+      ASPNETCORE_URLS: http://127.0.0.1:8080
+      # Loopback — this is what makes the provider Local and removes the authorization gate.
+      Ollama__BaseUrl: http://127.0.0.1:11434
+    volumes:
+      - ${EVIDENCE_PATH}:/var/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clamav:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  web:
+    # Serves the built frontend and proxies the API. The backend does not serve the SPA.
+    image: nginx:alpine
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${FRONTEND_DIST_PATH}:/usr/share/nginx/html:ro
+    depends_on:
+      - backend
+
+volumes:
+  postgres-data:
+  clamav-db:
