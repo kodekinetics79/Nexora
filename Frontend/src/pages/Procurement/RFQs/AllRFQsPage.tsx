@@ -61,10 +61,14 @@ const AllRFQsPage: React.FC = () => {
       field: 'nexoraSerial',
       headerName: 'Nexora Serial',
       width: 180,
-      valueGetter: (_value, row) => row.nexoraSerial || row.commercialCaseReference || '',
+      // No fallback through the lead or RFQ. The API used to substitute the parent's case when
+      // this document carried none, so a document outside the commercial case displayed one
+      // anyway. A blank here is real, and "Not linked" says so rather than reading as a
+      // still-loading cell.
+      valueGetter: (_value, row) => row.nexoraSerial || '',
       renderCell: (p) => (
-        <Typography sx={{ fontWeight: 800, fontFamily: 'monospace', fontSize: '0.8rem', color: p.value ? 'primary.main' : 'text.disabled' }}>
-          {p.value || 'Unassigned'}
+        <Typography sx={{ fontWeight: 800, fontFamily: 'monospace', fontSize: '0.8rem', color: p.value ? 'primary.main' : 'warning.main' }}>
+          {p.value || 'Not linked'}
         </Typography>
       ),
     },

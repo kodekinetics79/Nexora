@@ -53,6 +53,16 @@ namespace ERP_RFQ_Automation.Services
             if (dto.Items == null || dto.Items.Count == 0)
                 throw new ArgumentException("An order must contain at least one line item.");
 
+            // FR-COM-07. The originating document is resolved BEFORE any money is computed, so a
+            // request that cannot name its case is rejected outright rather than half-built.
+            //
+            // There is deliberately no "allocate a new case here" branch. A commercial case is a
+            // one-to-one principal of a Lead (UX_Leads_CommercialCaseID), so minting one for a
+            // counter sale would have to manufacture a phantom lead, and Phase 1 (BRD v3.0 §2)
+            // starts the spine at an inquiry — there is no walk-in/counter-sale requirement to
+            // serve. An order with no preceding inquiry is refused, not silently unlinked.
+            var origin = await ResolveOrderOriginAsync(dto, businessUnitId);
+
             // FIN-12: reject non-positive quantity/price and negative tax/discount before any math.
             foreach (var it in dto.Items)
             {
@@ -163,6 +173,7 @@ namespace ERP_RFQ_Automation.Services
                 CreatedOn = DateTime.Now,
                 IsActive = true
             };
+            origin.ApplyTo(order);
 
             // Attach the server-computed line items (see recompute above).
             foreach (var computedItem in computedItems)
@@ -175,6 +186,59 @@ namespace ERP_RFQ_Automation.Services
             return MapToDto(createdOrder);
         }
 
+        /// <summary>
+        /// The document a manually raised order inherits its commercial case from.
+        ///
+        /// <para>Resolution is strongest-link-first — RFQ, then lead — and every candidate is
+        /// re-read inside this tenant, so a client cannot name another tenant's document to borrow
+        /// its case. A request naming no originating document, or naming one that itself has no
+        /// case, is refused: those are the two ways an order used to escape the spine.</para>
+        /// </summary>
+        private async Task<OrderOrigin> ResolveOrderOriginAsync(CreateOrderDto dto, long businessUnitId)
+        {
+            if (dto.RfqId is > 0)
+            {
+                var rfq = await _context.Rfqs
+                    .FirstOrDefaultAsync(r => r.Id == dto.RfqId.Value && r.BusinessUnitId == businessUnitId)
+                    ?? throw new InvalidOperationException(
+                        $"RFQ {dto.RfqId.Value} was not found in this business unit.");
+                if (!rfq.CommercialCaseId.HasValue)
+                    throw new InvalidOperationException(
+                        $"RFQ {rfq.Rfqno} carries no commercial case, so an order cannot inherit one from it.");
+                return new OrderOrigin(rfq, null);
+            }
+
+            if (dto.LeadId is > 0)
+            {
+                var lead = await _context.Leads
+                    .FirstOrDefaultAsync(l => l.Id == dto.LeadId.Value && l.BusinessUnitId == businessUnitId)
+                    ?? throw new InvalidOperationException(
+                        $"Lead {dto.LeadId.Value} was not found in this business unit.");
+                if (lead.CommercialCaseId <= 0)
+                    throw new InvalidOperationException(
+                        $"Lead {lead.Rfqno} carries no commercial case, so an order cannot inherit one from it.");
+                return new OrderOrigin(null, lead);
+            }
+
+            throw new InvalidOperationException(
+                "An order must originate from an inquiry. Supply the RFQ or lead it fulfils — " +
+                "a sales order cannot be created outside a commercial case.");
+        }
+
+        private sealed record OrderOrigin(Rfq? Rfq, Lead? Lead)
+        {
+            public void ApplyTo(Order order)
+            {
+                if (Rfq is not null) order.InheritCommercialIdentity(Rfq);
+                else if (Lead is not null) order.InheritCommercialIdentity(Lead);
+                else throw new InvalidOperationException("An order must originate from an inquiry.");
+
+                if (!order.HasCommercialIdentity)
+                    throw new InvalidOperationException(
+                        "The originating document did not yield a commercial case for this order.");
+            }
+        }
+
         public async Task<OrderDto> CreateOrderFromRfqAsync(long rfqId, long businessUnitId)
         {
             var rfq = await _context.Rfqs
@@ -182,6 +246,9 @@ namespace ERP_RFQ_Automation.Services
                 .FirstOrDefaultAsync(r => r.Id == rfqId && r.BusinessUnitId == businessUnitId);
 
             if (rfq == null) throw new Exception("RFQ not found");
+            if (!rfq.CommercialCaseId.HasValue)
+                throw new InvalidOperationException(
+                    $"RFQ {rfq.Rfqno} carries no commercial case, so an order cannot inherit one from it.");
 
             // Fetch Default Statuses
             var draftStatus = await _context.SetupMasters
@@ -209,9 +276,6 @@ namespace ERP_RFQ_Automation.Services
                 Rfqid = rfq.Id,
                 LeadId = rfq.LeadId,
                 CustomerId = rfq.CustomerId ?? 0,
-                CommercialCaseId = rfq.CommercialCaseId,
-                NexoraSerial = rfq.NexoraSerial,
-                ContactId = rfq.ContactId,
                 BusinessUnitId = businessUnitId,
                 StatusId = draftStatus.SetupId,
                 PaymentStatusId = unpaidStatus?.SetupId,
@@ -223,6 +287,7 @@ namespace ERP_RFQ_Automation.Services
                 CreatedOn = DateTime.Now,
                 IsActive = true
             };
+            order.InheritCommercialIdentity(rfq);
 
             // Map RFQ Items to Order Items
             foreach (var rfqItem in rfq.Rfqitems)
@@ -303,9 +368,6 @@ namespace ERP_RFQ_Automation.Services
                 LeadId = quote.Rfq?.LeadId,
                 Rfqid = quote.Rfqid,
                 CustomerId = quote.CustomerId.Value,
-                CommercialCaseId = quote.CommercialCaseId,
-                NexoraSerial = quote.NexoraSerial,
-                ContactId = quote.ContactId,
                 BusinessUnitId = businessUnitId,
                 StatusId = draftStatus.SetupId,
                 PaymentStatusId = unpaidStatus?.SetupId,
@@ -320,6 +382,7 @@ namespace ERP_RFQ_Automation.Services
                 CreatedOn = DateTime.Now,
                 IsActive = true
             };
+            order.InheritCommercialIdentity(quote);
 
             // Map Quote Items to Order Items
             foreach (var qItem in quote.QuoteItems)

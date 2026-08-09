@@ -238,7 +238,13 @@ const CreateQuotePage: React.FC = () => {
                   label="Customer from RFQ"
                   value={selectedRfq?.customerName || 'Customer unresolved'}
                   disabled
-                  helperText={(selectedRfq?.nexoraSerial || selectedRfq?.commercialCaseReference) ? `Nexora Serial: ${selectedRfq.nexoraSerial || selectedRfq.commercialCaseReference}` : 'Select an RFQ to preserve commercial identity'}
+                  // Three distinct states, because "no RFQ chosen yet" and "the chosen RFQ has no
+                  // commercial case" are different problems and only the second blocks the quote.
+                  helperText={selectedRfq?.nexoraSerial
+                    ? `Nexora Serial: ${selectedRfq.nexoraSerial}`
+                    : selectedRfq
+                      ? 'This RFQ is not linked to a commercial case, so a quotation cannot inherit one from it.'
+                      : 'Select an RFQ to preserve commercial identity'}
                 />
               </Grid>
               <Grid size={{ xs: 12, md: 4 }}>

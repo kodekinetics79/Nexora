@@ -845,9 +845,6 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
                 LeadId = award.Quote.Rfq?.LeadId,
                 Rfqid = award.Quote.Rfqid,
                 CustomerId = award.CustomerId,
-                CommercialCaseId = award.Quote.CommercialCaseId,
-                NexoraSerial = award.Quote.NexoraSerial,
-                ContactId = award.Quote.ContactId,
                 BusinessUnitId = businessUnitId,
                 StatusId = draftStatus.SetupId,
                 PaymentStatusId = unpaidStatus?.SetupId,
@@ -859,6 +856,10 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
                 CreatedOn = now,
                 IsActive = true
             };
+            // FR-COM-07. The award's quote owns the case; the order takes it rather than being
+            // handed it field by field, so an award whose quote lost its case fails here instead of
+            // producing a priced sales order outside the spine.
+            order.InheritCommercialIdentity(award.Quote);
             foreach (var allocation in award.LineAllocations.OrderBy(x => x.Id))
             {
                 var poLine = award.PurchaseOrder.Lines.Single(x => x.Id == allocation.CustomerPurchaseOrderLineId);

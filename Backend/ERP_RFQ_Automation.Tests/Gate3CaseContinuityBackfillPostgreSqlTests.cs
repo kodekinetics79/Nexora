@@ -126,13 +126,12 @@ public sealed class Gate3CaseContinuityBackfillPostgreSqlTests(PostgreSqlTestDat
         rfq.LeadId = LeadId;
         rfq.InheritCommercialIdentity(lead);
         context.Set<Order>().AddRange(
-            new Order
+            Seed.StampCommercialCase(new Order
             {
                 Id = OrderId, OrderNo = "SO-CONTINUITY", CustomerId = CustomerId, BusinessUnitId = Tenant,
                 StatusId = OrderStatusId, SourceType = OrderSourceTypes.Manual, TotalAmount = 40m,
-                PaidAmount = 0m, OrderDate = now, CreatedBy = "qa", CreatedOn = now, IsActive = true,
-                CommercialCaseId = caseId, NexoraSerial = serial
-            },
+                PaidAmount = 0m, OrderDate = now, CreatedBy = "qa", CreatedOn = now, IsActive = true
+            }, caseId, serial),
             new Order
             {
                 Id = OrphanOrderId, OrderNo = "SO-CONTINUITY-ORPHAN", CustomerId = CustomerId,

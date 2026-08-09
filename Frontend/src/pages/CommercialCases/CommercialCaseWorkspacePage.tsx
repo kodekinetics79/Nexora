@@ -50,6 +50,7 @@ import {
 import commercialCaseService, {
   type CommercialCaseDetail,
   type CommercialCaseDocument,
+  type CommercialCaseTraceabilityGap,
 } from '../../api/services/commercialCaseService';
 import SearchField from '../../components/common/SearchField';
 import { formatDateSafe } from '../../utils/dates';
@@ -66,6 +67,43 @@ const DOC_ORDER: CommercialCaseDocument['documentType'][] = [
   'Lead', 'RFQ', 'SourcingCase', 'SupplierRFQ', 'SupplierQuote',
   'Quote', 'ClientPO', 'Order', 'SupplierPO', 'ProcurementHandoff', 'Shipment',
 ];
+
+const GAP_HEADLINE: Record<CommercialCaseTraceabilityGap['gapKind'], string> = {
+  UnlinkedDocument: 'States no commercial case',
+  ConflictingCase: 'States a different commercial case',
+  ChainBroken: 'Document chain no longer reaches it',
+};
+
+/**
+ * Traceability gaps are shown, never hidden. The timeline is assembled from what each document
+ * DECLARES, so a record that is reachable through the old foreign-key chain but carries no case
+ * — or the wrong one — is genuinely not part of this case. Omitting it silently would make an
+ * incomplete spine look complete, which is the failure this panel exists to prevent.
+ */
+const TraceabilityGapPanel: React.FC<{ gaps: CommercialCaseTraceabilityGap[] }> = ({ gaps }) => {
+  if (gaps.length === 0) return null;
+  return (
+    <Alert severity="warning" sx={{ borderRadius: 2 }}>
+      <Typography sx={{ fontWeight: 900, mb: 0.5 }}>
+        {gaps.length} traceability {gaps.length === 1 ? 'gap' : 'gaps'}
+      </Typography>
+      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+        This case is assembled from the documents that name it. The records below were reached by
+        following the old document chain and disagree with what they state.
+      </Typography>
+      <Stack spacing={1}>
+        {gaps.map(gap => (
+          <Box key={`${gap.gapKind}-${gap.documentType}-${gap.documentId}`}>
+            <Typography variant="body2" sx={{ fontWeight: 800 }}>
+              {gap.documentType} {gap.reference} — {GAP_HEADLINE[gap.gapKind] ?? gap.gapKind}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">{gap.detail}</Typography>
+          </Box>
+        ))}
+      </Stack>
+    </Alert>
+  );
+};
 
 const DataField: React.FC<{ label: string; value: React.ReactNode }> = ({ label, value }) => (
   <Box>
@@ -322,12 +360,14 @@ const CommercialCaseWorkspacePage: React.FC = () => {
             <Tab label={`Overview (${current.documents.length})`} />
             <Tab label={`Documents (${current.documents.length})`} />
             <Tab label={`Activity (${current.statusHistory.length})`} />
+            <Tab label={`Traceability (${current.traceabilityGaps.length})`} />
           </Tabs>
         </Box>
       </Paper>
 
       {tab === 0 && (
         <Stack spacing={2}>
+        <TraceabilityGapPanel gaps={current.traceabilityGaps} />
         <Paper sx={{ p: 3, borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
           <Grid container spacing={2.5}>
             <Grid size={{ xs: 12, md: 4 }}>
@@ -508,7 +548,18 @@ const CommercialCaseWorkspacePage: React.FC = () => {
                       }}
                     >
                       <Box>
-                        <Typography sx={{ fontWeight: 800 }}>{doc.reference}</Typography>
+                        <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+                          <Typography sx={{ fontWeight: 800 }}>{doc.reference}</Typography>
+                          {doc.linkState === 'ChainBroken' && (
+                            <Chip
+                              label="Chain broken"
+                              size="small"
+                              color="warning"
+                              variant="outlined"
+                              sx={{ height: 20, fontWeight: 800 }}
+                            />
+                          )}
+                        </Stack>
                         <Typography variant="caption" color="text.secondary">
                           {doc.status ?? 'Open'}
                           {doc.occurredOn ? ` · ${formatDateSafe(doc.occurredOn)}` : ''}
@@ -568,6 +619,19 @@ const CommercialCaseWorkspacePage: React.FC = () => {
               </Stack>
             </Paper>
           ))}
+        </Stack>
+      )}
+
+      {tab === 3 && (
+        <Stack spacing={1.5}>
+          {current.traceabilityGaps.length === 0 ? (
+            <Alert severity="success" sx={{ borderRadius: 2 }}>
+              Every document reachable from this case states this case, and every document that
+              states it is reachable. The declared spine and the document chain agree.
+            </Alert>
+          ) : (
+            <TraceabilityGapPanel gaps={current.traceabilityGaps} />
+          )}
         </Stack>
       )}
 

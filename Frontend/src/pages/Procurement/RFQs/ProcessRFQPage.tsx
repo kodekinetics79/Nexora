@@ -1197,14 +1197,16 @@ const ProcessRFQPage: React.FC = () => {
     mutationFn: (payload: RfqCreatePayload) => rfqService.create(payload),
     onSuccess: (createdRfq: RfqResponseDTO) => {
       // The backend guarantees commercial-case lineage (the chosen lead, or a governed shell lead
-      // when none was sent); name the case when the response carries it.
+      // when none was sent), and the response now reports the RFQ's OWN case rather than falling
+      // back to its lead's. A lead id is therefore no longer evidence of a case: claiming one on
+      // that basis is exactly the substitution that was removed from the API.
       const caseRef = createdRfq?.commercialCaseReference?.trim();
       if (caseRef) {
         toast.success(`Draft RFQ created — linked to commercial case ${caseRef}.`);
-      } else if (createdRfq?.commercialCaseId != null || createdRfq?.leadId != null) {
+      } else if (createdRfq?.commercialCaseId != null) {
         toast.success('Draft RFQ created — linked to its commercial case.');
       } else {
-        toast.success('Draft RFQ created successfully');
+        toast.error('Draft RFQ created, but it is not linked to a commercial case and cannot be traced to delivery.');
       }
       const createdId = Number(createdRfq?.id ?? 0);
       navigate(createdId > 0 ? `/procurement/rfqs/${createdId}/sourcing` : '/procurement/rfqs/draft');

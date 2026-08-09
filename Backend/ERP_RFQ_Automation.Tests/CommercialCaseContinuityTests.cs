@@ -132,7 +132,8 @@ public sealed class CommercialCaseContinuityTests
     public void A_shipment_refuses_an_order_from_another_business_unit()
     {
         var shipment = new Shipment { BusinessUnitId = 96_301, OrderId = 96_310 };
-        var order = new Order { Id = 96_310, BusinessUnitId = 96_302, CommercialCaseId = 96_320 };
+        var order = Seed.StampCommercialCase(
+            new Order { Id = 96_310, BusinessUnitId = 96_302 }, 96_320, "NXR-QA-96302-96330");
 
         var failure = Assert.Throws<InvalidOperationException>(() =>
             shipment.InheritCommercialIdentity(order));
@@ -195,14 +196,15 @@ public sealed class CommercialCaseContinuityTests
                 commercialCase.AssignIdentity(1, Serial);
                 seed.CommercialCases.Add(commercialCase);
             }
-            seed.Set<Order>().Add(new Order
+            var order = new Order
             {
                 Id = OrderId, OrderNo = "SO-96310", CustomerId = Tenant, BusinessUnitId = Tenant,
                 StatusId = OpenStatusId, TotalAmount = 40m, OrderDate = Now, CreatedBy = "qa",
-                CreatedOn = Now, IsActive = true,
-                CommercialCaseId = allocateCase ? CommercialCaseId : null,
-                NexoraSerial = allocateCase ? Serial : null
-            });
+                CreatedOn = Now, IsActive = true
+            };
+            if (allocateCase)
+                Seed.StampCommercialCase(order, CommercialCaseId, Serial);
+            seed.Set<Order>().Add(order);
             seed.Set<OrderItem>().Add(new OrderItem
             {
                 Id = OrderItemId, OrderId = OrderId, ProductId = ProductId, WarehouseId = WarehouseId,

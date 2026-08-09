@@ -328,8 +328,6 @@ public sealed class CommercialExceptionApplicationServiceTests
             CustomerId = customer.Id,
             BusinessUnitId = TenantId,
             StatusId = status.SetupId,
-            CommercialCaseId = lead.CommercialCaseId,
-            NexoraSerial = lead.CommercialCaseReference,
             OrderDate = DateTime.UtcNow.AddDays(-1),
             TotalAmount = 100m,
             PaidAmount = 0m,
@@ -337,6 +335,7 @@ public sealed class CommercialExceptionApplicationServiceTests
             CreatedOn = DateTime.UtcNow.AddDays(-1),
             IsActive = true
         };
+        order.InheritCommercialIdentity(lead);
         context.Orders.Add(order);
         context.FollowUpTasks.Add(new FollowUpTask
         {

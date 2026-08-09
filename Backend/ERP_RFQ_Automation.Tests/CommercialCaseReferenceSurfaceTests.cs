@@ -47,6 +47,12 @@ public sealed class CommercialCaseReferenceSurfaceTests
         await using var context = db.ContextFor(null);
 
         var lead = Seed.Lead(context, 702, 72);
+        // Saved first, because the commercial case is allocated during SaveChanges and the RFQ has
+        // to inherit a real one — the order RfqRepository uses in production. The fixture used to
+        // skip the inheritance entirely and still pass, because the DTO reader substituted the
+        // lead's case for the RFQ's missing one; it was testing the fallback, not the surface.
+        await context.SaveChangesAsync();
+
         var rfq = new Rfq
         {
             Id = 7702,
@@ -58,6 +64,7 @@ public sealed class CommercialCaseReferenceSurfaceTests
             CreatedBy = "seed",
             CreatedDate = new DateTime(2026, 7, 14, 0, 0, 0, DateTimeKind.Utc)
         };
+        rfq.InheritCommercialIdentity(lead);
         context.Rfqs.Add(rfq);
         await context.SaveChangesAsync();
 
@@ -66,6 +73,10 @@ public sealed class CommercialCaseReferenceSurfaceTests
 
         Assert.Equal(persistedLead.CommercialCaseId, dto.CommercialCaseId);
         Assert.Equal(persistedLead.CommercialCaseReference, dto.CommercialCaseReference);
+        // The surface reports the RFQ's OWN stored identity, not one re-derived from the lead.
+        var persistedRfq = await context.Rfqs.AsNoTracking().SingleAsync(r => r.Id == rfq.Id);
+        Assert.Equal(persistedRfq.CommercialCaseId, dto.CommercialCaseId);
+        Assert.Equal(persistedRfq.NexoraSerial, dto.CommercialCaseReference);
     }
 
     [Fact]

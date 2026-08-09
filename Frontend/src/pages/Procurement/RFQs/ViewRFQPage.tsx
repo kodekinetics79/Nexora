@@ -222,12 +222,22 @@ const ViewRFQPage: React.FC = () => {
             <Typography variant="h4" sx={{ fontWeight: 950, color: 'text.primary', letterSpacing: 0 }}>
               {rfq.rfqno}
             </Typography>
-            {(rfq.nexoraSerial || rfq.commercialCaseReference) && (
+            {rfq.nexoraSerial ? (
               <Chip
-                label={`Nexora Serial: ${rfq.nexoraSerial || rfq.commercialCaseReference}`}
+                label={`Nexora Serial: ${rfq.nexoraSerial}`}
                 size="small"
                 variant="outlined"
                 sx={{ fontWeight: 900, fontFamily: 'monospace' }}
+              />
+            ) : (
+              // The API no longer borrows the lead's case for an RFQ that carries none, so this
+              // state is now reachable and is stated plainly instead of leaving a blank header.
+              <Chip
+                label="Not linked to a case"
+                size="small"
+                color="warning"
+                variant="outlined"
+                sx={{ fontWeight: 900 }}
               />
             )}
             <Chip 

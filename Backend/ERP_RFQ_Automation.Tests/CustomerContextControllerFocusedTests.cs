@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using ERP_RFQ_Automation.Controllers;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -131,13 +132,12 @@ public sealed class CustomerContextControllerFocusedTests
             CreatedBy = "tests",
             CreatedDate = DateTime.UtcNow
         });
-        fixture.Context.Orders.Add(new Order
+        fixture.Context.Orders.Add(Seed.StampContact(new Order
         {
             Id = 881_103,
             OrderNo = "CTX-EUR-O",
             BusinessUnitId = fixture.BusinessUnitId,
             CustomerId = customerId,
-            ContactId = contact.Id,
             CurrencyId = eur.Id,
             StatusId = awardedOrder.StatusId,
             OrderDate = soldOn.AddDays(-10),
@@ -147,7 +147,7 @@ public sealed class CustomerContextControllerFocusedTests
             SourceType = OrderSourceTypes.Manual,
             CreatedBy = "tests",
             CreatedOn = DateTime.UtcNow
-        });
+        }, contact.Id));
         await fixture.Context.SaveChangesAsync();
 
         var action = await Controller(fixture.Context, fixture.BusinessUnitId).GetContext(customerId, default);

@@ -46,6 +46,12 @@ namespace ERP_RFQ_Automation.Services
                 .Select(p => p.ProductName)
                 .ToListAsync();
 
+            var sampleRfqNumber = await _context.Rfqs
+                .Where(r => r.BusinessUnitId == businessUnitId && r.CommercialCaseId != null)
+                .OrderByDescending(r => r.Id)
+                .Select(r => r.Rfqno)
+                .FirstOrDefaultAsync();
+
             // 2. Add Data Sheet (Hidden)
             var dataWs = package.Workbook.Worksheets.Add("Data");
             dataWs.Hidden = eWorkSheetHidden.VeryHidden;
@@ -62,11 +68,18 @@ namespace ERP_RFQ_Automation.Services
 
             // The two line-reference columns are appended (12, 13) so templates downloaded
             // before they existed still import: their cells simply read as empty.
+            //
+            // Column 14 is appended in the same position-stable way but is MANDATORY, and that is
+            // deliberate: a quotation inherits its Nexora Serial from the RFQ it answers, so a
+            // quote uploaded against no RFQ would carry no commercial case and could never be
+            // traced from inquiry to delivery. An upload from a template downloaded before this
+            // column existed is refused with a message that says to download the current one,
+            // rather than silently importing quotations outside the spine.
             string[] headers = {
                 "Quote No", "Customer Name*", "Quote Date (YYYY-MM-DD)*", "Valid Until (YYYY-MM-DD)",
                 "Currency Code*", "Product Name*", "Quantity*", "Unit Price*",
                 "Tax Amount", "Discount Amount", "Header Remarks",
-                "Unit of Measure", "Customer Line Ref"
+                "Unit of Measure", "Customer Line Ref", "Customer RFQ No*"
             };
 
             for (int i = 0; i < headers.Length; i++)
@@ -127,6 +140,10 @@ namespace ERP_RFQ_Automation.Services
             ws.Cells[2, 11].Value = "Initial quotation for Q2 project.";
             ws.Cells[2, 12].Value = "EA";
             ws.Cells[2, 13].Value = "00010";
+            // The sample RFQ number is a real one from this tenant when it has any. Left blank
+            // otherwise — an invented reference would be refused on upload anyway, and printing
+            // one that does not exist would read as a working example.
+            ws.Cells[2, 14].Value = sampleRfqNumber;
 
             ws.Cells.AutoFitColumns();
             return await package.GetAsByteArrayAsync();
@@ -144,7 +161,7 @@ namespace ERP_RFQ_Automation.Services
             using var transaction = await _context.Database.BeginTransactionAsync();
             try
             {
-                var groupedQuotes = new Dictionary<string, (Quote Quote, List<QuoteItem> Items)>();
+                var groupedQuotes = new Dictionary<string, (Quote Quote, List<QuoteItem> Items, string CustomerRfqNo)>();
 
                 for (int row = 2; row <= rowCount; row++)
                 {
@@ -163,6 +180,21 @@ namespace ERP_RFQ_Automation.Services
                     string quoteKey = string.IsNullOrEmpty(quoteNo)
                         ? $"AUTO_{row}_{customerName}".ToLowerInvariant()
                         : $"{quoteNo}_{customerName}".ToLowerInvariant();
+
+                    // FR-COM-07. The originating RFQ is mandatory and is resolved BEFORE anything
+                    // is built, so a spreadsheet that cannot name its inquiry is refused outright
+                    // rather than producing priced quotations outside the commercial case.
+                    //
+                    // There is deliberately no "allocate a case here" branch. A commercial case is
+                    // the one-to-one principal of a Lead, so minting one for a spreadsheet row
+                    // would manufacture a phantom inquiry and corrupt the spine to preserve a
+                    // convenience.
+                    var customerRfqNo = ws.Cells[row, 14].Text?.Trim();
+                    if (string.IsNullOrEmpty(customerRfqNo))
+                        return ServiceResult<string>.CreateFailure(
+                            $"Row {row}: 'Customer RFQ No' is required. A quotation takes its Nexora Serial " +
+                            "from the RFQ it answers, and one uploaded against no RFQ could never be traced " +
+                            "from inquiry to delivery. Download the current template, which has that column.");
 
                     if (!groupedQuotes.ContainsKey(quoteKey))
                     {
@@ -190,6 +222,34 @@ namespace ERP_RFQ_Automation.Services
                             return ServiceResult<string>.CreateFailure($"Currency '{currencyCode}' not found.");
                         }
 
+                        // Re-read inside the caller's tenant: a spreadsheet must not be able to
+                        // name another business unit's RFQ and borrow its commercial case.
+                        var normalizedRfqNo = customerRfqNo.ToLower();
+                        var rfqMatches = await _context.Rfqs
+                            .Include(r => r.Lead)
+                            .Where(r => r.BusinessUnitId == businessUnitId && r.Rfqno.ToLower().Trim() == normalizedRfqNo)
+                            .OrderBy(r => r.Id)
+                            .ToListAsync();
+                        if (rfqMatches.Count == 0)
+                            return ServiceResult<string>.CreateFailure(
+                                $"Row {row}: RFQ '{customerRfqNo}' was not found in this business unit.");
+                        // Rfqno carries no uniqueness constraint, so an ambiguous reference is a
+                        // question for a human, not a coin toss between two commercial cases.
+                        if (rfqMatches.Count > 1)
+                            return ServiceResult<string>.CreateFailure(
+                                $"Row {row}: RFQ '{customerRfqNo}' matches {rfqMatches.Count} RFQs " +
+                                $"(IDs {string.Join(", ", rfqMatches.Select(r => r.Id))}). Resolve the duplicate " +
+                                "before importing, so the quotation cannot be attached to the wrong case.");
+                        var rfq = rfqMatches[0];
+                        if (!rfq.CommercialCaseId.HasValue)
+                            return ServiceResult<string>.CreateFailure(
+                                $"Row {row}: RFQ '{rfq.Rfqno}' carries no commercial case, so a quotation " +
+                                "cannot inherit one from it.");
+                        if (rfq.CustomerId.HasValue && rfq.CustomerId.Value != customer.Id)
+                            return ServiceResult<string>.CreateFailure(
+                                $"Row {row}: RFQ '{rfq.Rfqno}' belongs to a different customer than '{customerName}'. " +
+                                "A quotation must answer its own customer's inquiry.");
+
                         var quoteDateStr = ws.Cells[row, 3].Text?.Trim();
                         var validUntilStr = ws.Cells[row, 4].Text?.Trim();
                         var quoteDate = ParseDate(quoteDateStr) ?? DateTime.UtcNow;
@@ -198,6 +258,7 @@ namespace ERP_RFQ_Automation.Services
                         var quote = new Quote
                         {
                             QuoteNo = quoteNo,
+                            Rfqid = rfq.Id,
                             CustomerId = customer.Id,
                             BusinessUnitId = businessUnitId,
                             QuoteDate = quoteDate,
@@ -210,7 +271,18 @@ namespace ERP_RFQ_Automation.Services
                             CreatedDate = DateTime.UtcNow,
                             TotalAmount = 0 // Will be calculated
                         };
-                        groupedQuotes[quoteKey] = (quote, new List<QuoteItem>());
+                        quote.InheritCommercialIdentity(rfq);
+                        groupedQuotes[quoteKey] = (quote, new List<QuoteItem>(), customerRfqNo);
+                    }
+                    else if (!string.Equals(groupedQuotes[quoteKey].CustomerRfqNo, customerRfqNo,
+                                 StringComparison.OrdinalIgnoreCase))
+                    {
+                        // One quotation answers one inquiry. Rows that group under the same quote
+                        // number but name different RFQs would otherwise silently take the first
+                        // row's commercial case.
+                        return ServiceResult<string>.CreateFailure(
+                            $"Row {row}: quote '{quoteNo}' is already being imported against RFQ " +
+                            $"'{groupedQuotes[quoteKey].CustomerRfqNo}'. A quotation cannot answer two RFQs.");
                     }
 
                     var qty = decimal.TryParse(ws.Cells[row, 7].Text, out var q) ? q : 0;

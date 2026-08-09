@@ -16,6 +16,18 @@ export interface CommercialCaseSearchResult {
   matchReason: string;
 }
 
+/**
+ * How a listed document relates to the case it appears under.
+ *
+ * Membership is decided by what the document DECLARES (its CommercialCaseId, or its Nexora
+ * Serial where the surrogate key does not exist yet). `Reconciled` means the legacy foreign-key
+ * chain agrees; `ChainBroken` means the document states this case but the chain no longer reaches
+ * it — the declaration wins, and the broken link is reported as a gap.
+ */
+export type CommercialCaseLinkState = 'Reconciled' | 'ChainBroken' | 'DeclaredOnly';
+
+export type CommercialCaseGapKind = 'UnlinkedDocument' | 'ConflictingCase' | 'ChainBroken';
+
 export interface CommercialCaseDocument {
   documentType: 'Lead' | 'RFQ' | 'Quote' | 'Order' | 'Shipment' | string;
   documentId: number;
@@ -23,6 +35,21 @@ export interface CommercialCaseDocument {
   status?: string | null;
   occurredOn?: string | null;
   parentDocumentId?: number | null;
+  linkState: CommercialCaseLinkState;
+}
+
+/**
+ * A disagreement between what a document declares and what the document chain says. Surfaced
+ * rather than swallowed: a timeline that silently drops an unlinked document makes an incomplete
+ * spine look complete.
+ */
+export interface CommercialCaseTraceabilityGap {
+  documentType: string;
+  documentId: number;
+  reference: string;
+  gapKind: CommercialCaseGapKind;
+  declaredCommercialCaseId?: number | null;
+  detail: string;
 }
 
 export interface CommercialCaseStatusEvent {
@@ -55,6 +82,7 @@ export interface CommercialCaseDetail {
   currentStatus?: string | null;
   documents: CommercialCaseDocument[];
   statusHistory: CommercialCaseStatusEvent[];
+  traceabilityGaps: CommercialCaseTraceabilityGap[];
 }
 
 const commercialCaseService = {

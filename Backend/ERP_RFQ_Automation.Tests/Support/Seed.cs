@@ -171,6 +171,34 @@ public static class Seed
         return lead;
     }
 
+    /// <summary>
+    /// Stamps a sales order's commercial identity for tests that seed a document graph directly
+    /// instead of going through a creation service.
+    ///
+    /// <para>Private setters, deliberately, exactly as on <see cref="HistoricalLead"/>: an Order
+    /// takes its case from the document it came from and nothing else may assign it. A test is not
+    /// allowed to be the exception that reopens the setter, so the fixture reaches through
+    /// reflection and the production surface stays closed.</para>
+    /// </summary>
+    public static Models.Order StampCommercialCase(
+        Models.Order order, long commercialCaseId, string nexoraSerial, long? contactId = null)
+    {
+        typeof(Models.Order).GetProperty(nameof(Models.Order.CommercialCaseId))!
+            .SetValue(order, (long?)commercialCaseId);
+        typeof(Models.Order).GetProperty(nameof(Models.Order.NexoraSerial))!
+            .SetValue(order, nexoraSerial);
+        if (contactId.HasValue)
+            typeof(Models.Order).GetProperty(nameof(Models.Order.ContactId))!.SetValue(order, contactId);
+        return order;
+    }
+
+    /// <summary>Sets only the contact, for fixtures that predate the commercial case entirely.</summary>
+    public static Models.Order StampContact(Models.Order order, long? contactId)
+    {
+        typeof(Models.Order).GetProperty(nameof(Models.Order.ContactId))!.SetValue(order, contactId);
+        return order;
+    }
+
     public static LeadItem LeadItem(long id, string? lineItemNo, int quantity, string? productName = "Widget")
         => new()
         {

@@ -152,9 +152,15 @@ namespace ERP_RFQ_Automation.Repositories
                 LeadId = q.Rfq?.LeadId,
                 SourceLeadRevision = q.SourceLeadRevision,
                 SourceRfqRevision = q.SourceRfqRevision,
-                CommercialCaseId = q.CommercialCaseId ?? q.Rfq?.CommercialCaseId ?? q.Rfq?.Lead?.CommercialCaseId,
-                NexoraSerial = q.NexoraSerial ?? q.Rfq?.NexoraSerial ?? q.Rfq?.Lead?.CommercialCaseReference,
-                ContactId = q.ContactId ?? q.Rfq?.ContactId,
+                // The quote's OWN commercial identity, never one re-derived through its RFQ or
+                // lead. The `?? q.Rfq?... ?? q.Rfq?.Lead?...` chain that used to be here invented a
+                // case for a quote that carries none — a spreadsheet-uploaded quotation, for
+                // instance — and so hid exactly the documents the case workspace exists to surface.
+                // Production sets all three through Quote.InheritCommercialIdentity; a null means
+                // that never happened, and the UI says so.
+                CommercialCaseId = q.CommercialCaseId,
+                NexoraSerial = q.NexoraSerial,
+                ContactId = q.ContactId,
                 LifecycleVersion = q.LifecycleVersion,
                 Version = q.RevisionNo,
                 CustomerId = q.CustomerId,
@@ -175,6 +181,8 @@ namespace ERP_RFQ_Automation.Repositories
                 OutcomeNote = q.OutcomeNote,
                 IsStale = ERP_RFQ_Automation.Sla.SlaComputed.IsStale(q.Status?.SetupCode, q.SentOn, q.RespondedOn, staleQuoteDays),
                 DaysSinceSent = ERP_RFQ_Automation.Sla.SlaComputed.DaysSinceSent(q.SentOn),
+                ValidityExtendedOn = q.ValidityExtendedOn,
+                CanExtendValidity = QuoteService.IsValidityExtendable(q.Status?.SetupCode, q.Status?.SetupValue, q.OutcomeOn),
                 CurrencyId = q.CurrencyId,
                 CurrencyCode = q.Currency?.Code,
                 TotalAmount = q.TotalAmount,
