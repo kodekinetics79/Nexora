@@ -148,6 +148,7 @@ public sealed class QuoteDraftHandoffTests
             });
 
         var service = new QuoteService(context, null!, new NullQuoteConfigurationRepository());
+        await Attest(context, quoteId, 9405);
         var pdf = await service.GenerateQuotePdfAsync(quoteId, 9405);
 
         var text = PdfText(pdf);
@@ -180,6 +181,7 @@ public sealed class QuoteDraftHandoffTests
             });
 
         var service = new QuoteService(context, null!, new NullQuoteConfigurationRepository());
+        await Attest(context, quoteId, 9406);
         var pdf = await service.GenerateQuotePdfAsync(quoteId, 9406);
 
         Assert.NotEmpty(pdf);
@@ -189,6 +191,18 @@ public sealed class QuoteDraftHandoffTests
         // No buyer reference exists, so no customer RFQ header line is invented.
         Assert.DoesNotContain("Your RFQ Reference", text);
     }
+
+    /// <summary>
+    /// R5: the PDF is the commercial document, so rendering one now requires a recorded
+    /// price-provenance attestation covering the quote's current prices — the same gate the
+    /// send path has always had. These tests are about what the document PRINTS, not about
+    /// the gate, so they satisfy it explicitly. QuotePriceAttestationTests owns the gate.
+    /// </summary>
+    private static Task Attest(ErpRfqAutomationContext context, long quoteId, long tenant) =>
+        new ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationService(context).AttestAsync(
+            quoteId, tenant,
+            ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationSources.SupplierQuote,
+            "SQ-TEST", null, "tests", default);
 
     /// <summary>A complete, priced, non-draft quote (optionally RFQ-linked) that passes
     /// every PDF export gate; returns the quote id.</summary>

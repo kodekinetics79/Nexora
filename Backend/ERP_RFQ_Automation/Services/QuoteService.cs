@@ -22,7 +22,23 @@ namespace ERP_RFQ_Automation.Services
 {
     public interface IQuoteService
     {
-        Task<byte[]> GenerateQuotePdfAsync(long quoteId, long businessUnitId);
+        /// <summary>
+        /// Renders the customer-facing quotation PDF.
+        ///
+        /// <para>R5 GATE. The PDF <i>is</i> the commercial document — once it exists it can be
+        /// downloaded, forwarded and relied on — so it is produced only when the quote's CURRENT
+        /// prices are covered by a recorded price attestation. Fails closed with
+        /// <see cref="ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationRequiredException"/>
+        /// otherwise; the message is the rep-facing reason and is safe to show verbatim.</para>
+        /// </summary>
+        /// <param name="boundAttestationFingerprint">
+        /// When supplied (the quote-delivery path), the price fingerprint this render was
+        /// AUTHORISED for. The document is refused unless the quote's prices still hash to it —
+        /// closing the time-of-check/time-of-use window between queueing an email and sending it.
+        /// Null means "no earlier authorisation to bind to"; the attestation must still be valid.
+        /// </param>
+        Task<byte[]> GenerateQuotePdfAsync(long quoteId, long businessUnitId,
+            string? boundAttestationFingerprint = null, CancellationToken ct = default);
 
         /// <summary>
         /// Transactionally queues durable PDF delivery — unless a line is priced
@@ -49,6 +65,29 @@ namespace ERP_RFQ_Automation.Services
 
         /// <summary>Revision-chain facts for one quote (chip + Revise button state).</summary>
         Task<QuoteRevisionInfoDTO> GetRevisionInfoAsync(long quoteId, long businessUnitId);
+
+        /// <summary>
+        /// R7: moves an already-issued quote's validity date out, with a mandatory reason that is
+        /// recorded as an auditable row (<c>QuoteValidityExtensions</c>), NOT as a log line.
+        ///
+        /// <para>The commercial offer is unchanged, so the revision number is deliberately not
+        /// touched: a buyer who asks "can you hold your price two more weeks" must not receive
+        /// something that reads as a new offer. Prices, currency, lines and status are untouched
+        /// too — only the expiry moves.</para>
+        ///
+        /// <para>Replay-safe on <paramref name="idempotencyKey"/> and serialised per quote with
+        /// the same advisory-lock + row-lock pattern <see cref="ReviseQuoteAsync"/> uses.</para>
+        /// </summary>
+        /// <exception cref="KeyNotFoundException">Quote not found in this tenant.</exception>
+        /// <exception cref="ArgumentException">Blank/over-long reason, or a date that is not an extension.</exception>
+        /// <exception cref="InvalidOperationException">Quote is a draft, superseded, or already closed (→ 409).</exception>
+        Task<QuoteValidityExtensionResultDTO> ExtendQuoteValidityAsync(
+            long quoteId, long businessUnitId, DateTime newValidUntil, string reason,
+            string actor, long? actorUserId, string idempotencyKey, CancellationToken ct = default);
+
+        /// <summary>Every recorded validity move on one quote, newest first (R7 "visible").</summary>
+        Task<IReadOnlyList<QuoteValidityExtensionDTO>> GetValidityExtensionsAsync(
+            long quoteId, long businessUnitId, CancellationToken ct = default);
         Task ResolveRevisionImpactAsync(long quoteId, long businessUnitId, string actor,
             string idempotencyKey, CancellationToken ct = default);
     }
@@ -386,6 +425,21 @@ namespace ERP_RFQ_Automation.Services
                     "stored totals from the quotation already issued to the customer. Create a new revision instead.");
             }
 
+            // R5, prevention half. "Send" only ENQUEUES: the quote stays DRAFT — and therefore
+            // editable by the check above — until the worker has actually emailed it. That window
+            // is a time-of-check/time-of-use hole: a price edited inside it would be attested
+            // under one set of numbers and delivered under another. The dispatcher detects that
+            // and fails closed, but detection alone means the customer's quote silently never
+            // arrives; refusing the edit keeps the rep in control of the outcome.
+            var deliveryInFlight = await _context.QuoteDeliveryRequests.AsNoTracking().IgnoreQueryFilters()
+                .AnyAsync(x => x.BusinessUnitId == quote.BusinessUnitId && x.QuoteId == quote.Id
+                    && x.CompletedOn == null && x.DeadLetteredOn == null);
+            if (deliveryInFlight)
+                throw new InvalidOperationException(
+                    $"Quote '{quote.QuoteNo}' is queued for delivery to the customer and its prices are locked " +
+                    "to the price source you confirmed. Wait for the delivery to complete, then create a new " +
+                    "revision if the figures still need to change.");
+
             quote.QuoteNo = request.QuoteNo;
             quote.CustomerId = request.CustomerId;
             quote.QuoteDate = request.QuoteDate;
@@ -568,6 +622,16 @@ namespace ERP_RFQ_Automation.Services
             .ThenBy(i => i.Id)
             .ToList();
 
+        /// <summary>
+        /// R7: whether a quote's lifecycle state admits an extend-validity command. Shared by
+        /// every read surface so the list, the detail page and the service cannot disagree about
+        /// when the control is offered. The superseded-by-revision condition is checked only in
+        /// <see cref="ExtendQuoteValidityAsync"/> — see QuoteResponseDTO.CanExtendValidity.
+        /// </summary>
+        internal static bool IsValidityExtendable(string? statusCode, string? statusValue, DateTime? outcomeOn) =>
+            !outcomeOn.HasValue
+            && LifecyclePolicy.Canonicalize("Quote", statusCode, statusValue) == "SENT";
+
         // FIN-12: server-side guard rejecting non-positive quantities/prices and negative tax.
         private static void ValidateQuoteItemFinancials(decimal quantity, decimal unitPrice, decimal? taxAmount)
         {
@@ -672,6 +736,8 @@ namespace ERP_RFQ_Automation.Services
                 OutcomeNote = quote.OutcomeNote,
                 IsStale = ERP_RFQ_Automation.Sla.SlaComputed.IsStale(quote.Status?.SetupCode, quote.SentOn, quote.RespondedOn, staleQuoteDays),
                 DaysSinceSent = ERP_RFQ_Automation.Sla.SlaComputed.DaysSinceSent(quote.SentOn),
+                ValidityExtendedOn = quote.ValidityExtendedOn,
+                CanExtendValidity = IsValidityExtendable(quote.Status?.SetupCode, quote.Status?.SetupValue, quote.OutcomeOn),
                 CurrencyId = quote.CurrencyId,
                 CurrencyCode = quote.Currency?.Code,
                 TotalAmount = quote.TotalAmount,
@@ -716,7 +782,50 @@ namespace ERP_RFQ_Automation.Services
             };
         }
 
-        public async Task<byte[]> GenerateQuotePdfAsync(long quoteId, long businessUnitId)
+        /// <summary>
+        /// R5 enforcement point for every priced document that leaves the building.
+        ///
+        /// <para>Recording an attestation only proves what the prices WERE when the rep confirmed
+        /// them; this is where a reader proves what they still ARE — the same record-at-capture /
+        /// verify-at-serve shape <c>FileController.ServeVerifiedAttachmentAsync</c> applies to
+        /// attachment bytes, for the same reason: a document cannot be un-issued.</para>
+        ///
+        /// <para>Two independent conditions, both fail-closed:</para>
+        /// <list type="number">
+        /// <item>A recorded attestation must cover the quote's CURRENT prices. This is what the
+        /// PDF endpoint was missing entirely — the commercial document could be pulled and
+        /// forwarded with nobody having attested to a single price on it.</item>
+        /// <item>When the caller carries a binding (the delivery worker), the current prices must
+        /// still hash to the fingerprint the send was AUTHORISED for. Without this, the window
+        /// between "send" enqueueing and the worker draining it — during which the quote is still
+        /// DRAFT and still editable — lets an edited price reach the customer under an
+        /// attestation that was made against different numbers.</item>
+        /// </list>
+        /// </summary>
+        private async Task EnsureAttestedPricesAsync(
+            long quoteId, long businessUnitId, string quoteNo,
+            string? boundAttestationFingerprint, CancellationToken ct)
+        {
+            var state = await new ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationService(_context)
+                .EvaluateAsync(quoteId, businessUnitId, ct);
+
+            if (!state.Satisfied)
+                throw new ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationRequiredException(
+                    $"Quote '{quoteNo}' cannot be issued as a document yet. {state.Reason}");
+
+            if (boundAttestationFingerprint is null) return;
+
+            if (!ERP_RFQ_Automation.Intelligence.Pricing.PriceFingerprint.Matches(
+                    state.CurrentFingerprint, boundAttestationFingerprint))
+                throw new ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationRequiredException(
+                    $"Quote '{quoteNo}' was not sent: its prices changed after this send was authorised, " +
+                    "so the confirmation on file does not cover what would have gone out. Nothing was " +
+                    "emailed to the customer. Confirm the price source again and send the quote again.")
+                { BindingBroken = true };
+        }
+
+        public async Task<byte[]> GenerateQuotePdfAsync(long quoteId, long businessUnitId,
+            string? boundAttestationFingerprint = null, CancellationToken ct = default)
         {
             var quote = await _context.Quotes
                 .Include(q => q.QuoteItems)
@@ -738,6 +847,12 @@ namespace ERP_RFQ_Automation.Services
                 || quote.QuoteItems.Count == 0 || quote.QuoteItems.Any(item => item.UnitPrice <= 0)))
                 throw new InvalidOperationException(
                     "Commercial Review Required: pricing, currency, validity, and every line price must be complete before PDF export.");
+
+            // R5: the completeness check above proves the document CAN be rendered; this one
+            // proves it MAY be. Runs second so an incomplete draft gets the more specific and
+            // more actionable message rather than being told to confirm prices that do not
+            // exist yet.
+            await EnsureAttestedPricesAsync(quoteId, businessUnitId, quote.QuoteNo, boundAttestationFingerprint, ct);
 
             // Fetch dynamic configurations from the new QuoteConfiguration table
             var config = await _quoteConfigRepository.GetByBusinessUnitIdAsync(quote.BusinessUnitId);
@@ -1044,8 +1159,8 @@ namespace ERP_RFQ_Automation.Services
             // Deliberately NOT bypassable through QuoteSendOptions: BypassFloorHold releases
             // the below-floor hold only. Constructed directly (the FxConversionService
             // precedent in BelowFloorGuard) so no constructor overload can omit the gate.
-            var attestation = await new ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationService(_context)
-                .EvaluateAsync(quoteId, businessUnitId, CancellationToken.None);
+            var attestations = new ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationService(_context);
+            var attestation = await attestations.EvaluateAsync(quoteId, businessUnitId, CancellationToken.None);
             if (!attestation.Satisfied)
                 return QuoteSendResult.AwaitingPriceAttestation(attestation.Reason!);
 
@@ -1093,6 +1208,14 @@ namespace ERP_RFQ_Automation.Services
                     if (_context.Database.IsNpgsql())
                         await _context.Database.ExecuteSqlInterpolatedAsync(
                             $"SELECT pg_advisory_xact_lock(hashtextextended({$"quote-delivery:{quote.BusinessUnitId}:{quote.Id}"}, 0))");
+                    // R5 CONTENT BINDING. Re-read the fingerprint HERE, inside the serializable
+                    // transaction that also inserts the delivery row and under the same advisory
+                    // lock, so the value recorded is the priced content as it stands at the
+                    // instant the send is authorised — not as it stood when the gate above ran.
+                    // QuoteDeliverySender verifies against this before rendering the PDF.
+                    var boundFingerprint = (await attestations
+                        .EvaluateAsync(quoteId, businessUnitId, CancellationToken.None)).CurrentFingerprint;
+
                     var existingDelivery = await _context.QuoteDeliveryRequests.AsNoTracking()
                         .SingleOrDefaultAsync(x => x.BusinessUnitId == quote.BusinessUnitId && x.IdempotencyKey == deliveryKey);
                     if (existingDelivery is not null)
@@ -1100,6 +1223,18 @@ namespace ERP_RFQ_Automation.Services
                         if (!string.Equals(existingDelivery.RecipientEmail, recipientEmail.Trim(), StringComparison.OrdinalIgnoreCase)
                             || existingDelivery.Subject != subject || existingDelivery.Body != body)
                             throw new InvalidOperationException("The quote delivery key was already used with different content.");
+                        // Same key, still in flight, but the PRICES moved since that send was
+                        // authorised. Reporting "queued" here would be untrue: the dispatcher
+                        // will refuse it and the customer will receive nothing. Say so now,
+                        // while the rep is still looking at the screen.
+                        if (existingDelivery.CompletedOn is null && existingDelivery.DeadLetteredOn is null
+                            && existingDelivery.AttestedPriceFingerprint is not null
+                            && !ERP_RFQ_Automation.Intelligence.Pricing.PriceFingerprint.Matches(
+                                boundFingerprint, existingDelivery.AttestedPriceFingerprint))
+                            throw new InvalidOperationException(
+                                $"Quote '{quote.QuoteNo}' is already queued for delivery, but its prices have changed " +
+                                "since that send was authorised. The queued email will be refused and nothing will be " +
+                                "sent to the customer. Issue the changed prices as a new revision instead.");
                         if (transaction is not null) await transaction.CommitAsync();
                         if (existingDelivery.DeadLetteredOn.HasValue)
                             return QuoteSendResult.Failed(existingDelivery.LastErrorCode ?? "Delivery failed permanently.");
@@ -1115,6 +1250,7 @@ namespace ERP_RFQ_Automation.Services
                         Body = body,
                         FromEmail = quote.Rfq?.Lead?.Clientemail,
                         AttachmentFileName = $"Quote_{quote.QuoteNo}.pdf",
+                        AttestedPriceFingerprint = boundFingerprint,
                         RequestedOn = DateTime.UtcNow,
                         AvailableOn = DateTime.UtcNow,
                         Version = 1
@@ -1316,6 +1452,198 @@ namespace ERP_RFQ_Automation.Services
                 CanRevise = !isDraft && successor == null && !chainLocked
             };
         }
+
+        // ==================================================================
+        // Reasoned quote-validity extension (Decision Register R7)
+        // ==================================================================
+
+        /// <summary>Bound on the recorded reason — the same 500 chars as Quote.OutcomeNote.</summary>
+        private const int MaxValidityReasonLength = 500;
+
+        /// <summary>
+        /// Sentinel guard shared with <c>SlaSweepWorker</c>: the extraction pipeline represents an
+        /// unknown date as year 0001/1900, so anything before 2000 is not a date a human chose.
+        /// </summary>
+        private static readonly DateTime EarliestCommercialValidity = new(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        public async Task<QuoteValidityExtensionResultDTO> ExtendQuoteValidityAsync(
+            long quoteId, long businessUnitId, DateTime newValidUntil, string reason,
+            string actor, long? actorUserId, string idempotencyKey, CancellationToken ct = default)
+        {
+            if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
+            if (string.IsNullOrWhiteSpace(actor))
+                throw new ArgumentException("Authenticated actor is required.", nameof(actor));
+            if (string.IsNullOrWhiteSpace(idempotencyKey))
+                throw new ArgumentException("An idempotency key is required.", nameof(idempotencyKey));
+
+            // R7: "a reason nobody can read later is not a reason". Trimmed and bounded here,
+            // and refused by a CHECK constraint in the database as well.
+            var trimmedReason = (reason ?? string.Empty).Trim();
+            if (trimmedReason.Length == 0)
+                throw new ArgumentException(
+                    "Enter why the validity is being extended — for example \"buyer requested a two-week hold " +
+                    "while the technical evaluation completes\". The reason is recorded against the quote.",
+                    nameof(reason));
+            if (trimmedReason.Length > MaxValidityReasonLength)
+                throw new ArgumentException(
+                    $"The reason cannot be longer than {MaxValidityReasonLength} characters.", nameof(reason));
+
+            var key = idempotencyKey.Trim();
+            if (key.Length > 160) key = key[..160];
+
+            var now = DateTime.UtcNow;
+            var requested = newValidUntil.Kind == DateTimeKind.Unspecified
+                ? DateTime.SpecifyKind(newValidUntil, DateTimeKind.Utc)
+                : newValidUntil.ToUniversalTime();
+            if (requested < EarliestCommercialValidity)
+                throw new ArgumentException(
+                    "Enter a real validity date. The date supplied is not one a person chose.", nameof(newValidUntil));
+            if (requested <= now)
+                throw new ArgumentException(
+                    "The new validity date must be in the future — a date that has already passed would be " +
+                    "expired by the next sweep, which is not an extension.", nameof(newValidUntil));
+
+            // Same concurrency shape as ReviseQuoteAsync: a per-tenant advisory lock plus a row
+            // lock on the quote, so two reps extending the same bid at once serialise rather than
+            // racing each other's ValidUntil write.
+            var isolation = _context.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
+            await using var transaction = await _context.Database.BeginTransactionAsync(isolation, ct);
+            if (_context.Database.IsNpgsql())
+            {
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock(hashtextextended({$"quote-validity:{businessUnitId}:{quoteId}"}, 0))", ct);
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT 1 FROM \"Quotes\" WHERE \"BusinessUnitID\" = {businessUnitId} AND \"ID\" = {quoteId} FOR UPDATE", ct);
+            }
+
+            var quote = await _context.Quotes
+                .Include(q => q.Status)
+                .FirstOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId, ct)
+                ?? throw new KeyNotFoundException($"Quote with ID {quoteId} not found.");
+
+            // Replay: the same command arriving twice records one extension, not two.
+            var replay = await _context.QuoteValidityExtensions.AsNoTracking()
+                .FirstOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.IdempotencyKey == key, ct);
+            if (replay is not null)
+            {
+                if (replay.QuoteId != quoteId)
+                    throw new InvalidOperationException(
+                        "That idempotency key was already used to extend a different quote.");
+                await transaction.CommitAsync(ct);
+                return Result(quote, replay, replayed: true);
+            }
+
+            if (await IsQuoteInDraftAsync(quote))
+                throw new InvalidOperationException(
+                    $"Quote '{quote.QuoteNo}' has not been issued to the customer yet. Set its validity date " +
+                    "directly on the draft — there is nothing to extend until the quote has been sent.");
+
+            var statusCode = LifecyclePolicy.Canonicalize("Quote", quote.Status?.SetupCode, quote.Status?.SetupValue);
+            if (quote.OutcomeOn.HasValue || statusCode is not "SENT")
+                throw new InvalidOperationException(
+                    $"Quote '{quote.QuoteNo}' is no longer live ({FriendlyState(statusCode, quote.OutcomeOn)}). " +
+                    "Validity can only be extended on a quote that has been sent and is still awaiting " +
+                    "the customer's decision.");
+
+            var successor = await _context.Quotes.AsNoTracking()
+                .Where(q => q.RevisionOfQuoteId == quoteId && q.BusinessUnitId == businessUnitId)
+                .Select(q => new { q.QuoteNo, q.RevisionNo })
+                .FirstOrDefaultAsync(ct);
+            if (successor is not null)
+                throw new InvalidOperationException(
+                    $"Quote '{quote.QuoteNo}' has been superseded by revision '{successor.QuoteNo}' " +
+                    $"(Rev {successor.RevisionNo}). Extend the validity of the latest revision instead.");
+
+            // "Extend" means later. Silently accepting an earlier date under a control the rep
+            // pressed to hold the price open would shorten the offer they meant to lengthen.
+            if (quote.ValidUntil.HasValue
+                && quote.ValidUntil.Value >= EarliestCommercialValidity
+                && requested <= quote.ValidUntil.Value)
+                throw new InvalidOperationException(
+                    $"Quote '{quote.QuoteNo}' is already valid until {quote.ValidUntil.Value:dd MMM yyyy}. " +
+                    "Choose a later date to extend it.");
+
+            var extension = new QuoteValidityExtension
+            {
+                BusinessUnitId = businessUnitId,
+                QuoteId = quoteId,
+                PreviousValidUntil = quote.ValidUntil,
+                NewValidUntil = requested,
+                Reason = trimmedReason,
+                ExtendedByUserId = actorUserId,
+                ExtendedBy = actor.Trim().Length <= 255 ? actor.Trim() : actor.Trim()[..255],
+                ExtendedOn = now,
+                IdempotencyKey = key
+            };
+            _context.QuoteValidityExtensions.Add(extension);
+
+            quote.ValidUntil = requested;
+            quote.ValidityExtendedOn = now;
+            quote.ModifiedBy = extension.ExtendedBy;
+            quote.ModifiedDate = now;
+            // RevisionNo, RevisionOfQuoteId, StatusId, CurrencyId, TotalAmount and every line are
+            // deliberately untouched. The commercial offer did not change — only its expiry did —
+            // and a bumped revision number reads to the customer as a brand-new offer.
+
+            await _context.SaveChangesAsync(ct);
+            await transaction.CommitAsync(ct);
+
+            return Result(quote, extension, replayed: false);
+
+            static string FriendlyState(string statusCode, DateTime? outcomeOn) => statusCode switch
+            {
+                "ACCEPTED" or "ORDERED" => "it has been won",
+                "REJECTED" => "it has been closed as lost or cancelled",
+                "EXPIRED" => "it has expired",
+                _ when outcomeOn.HasValue => "a final outcome has been recorded",
+                _ => $"its status is {statusCode}"
+            };
+
+            static QuoteValidityExtensionResultDTO Result(Quote quote, QuoteValidityExtension row, bool replayed) => new()
+            {
+                QuoteId = quote.Id,
+                QuoteNo = quote.QuoteNo,
+                ValidUntil = quote.ValidUntil,
+                ValidityExtendedOn = quote.ValidityExtendedOn,
+                RevisionNo = quote.RevisionNo,
+                Replayed = replayed,
+                Extension = Map(row)
+            };
+        }
+
+        public async Task<IReadOnlyList<QuoteValidityExtensionDTO>> GetValidityExtensionsAsync(
+            long quoteId, long businessUnitId, CancellationToken ct = default)
+        {
+            if (!await _context.Quotes.AsNoTracking()
+                    .AnyAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId, ct))
+                throw new KeyNotFoundException($"Quote with ID {quoteId} not found.");
+
+            return await _context.QuoteValidityExtensions.AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.QuoteId == quoteId)
+                .OrderByDescending(x => x.ExtendedOn).ThenByDescending(x => x.Id)
+                .Select(x => new QuoteValidityExtensionDTO
+                {
+                    Id = x.Id,
+                    QuoteId = x.QuoteId,
+                    PreviousValidUntil = x.PreviousValidUntil,
+                    NewValidUntil = x.NewValidUntil,
+                    Reason = x.Reason,
+                    ExtendedBy = x.ExtendedBy,
+                    ExtendedOn = x.ExtendedOn
+                })
+                .ToListAsync(ct);
+        }
+
+        private static QuoteValidityExtensionDTO Map(QuoteValidityExtension row) => new()
+        {
+            Id = row.Id,
+            QuoteId = row.QuoteId,
+            PreviousValidUntil = row.PreviousValidUntil,
+            NewValidUntil = row.NewValidUntil,
+            Reason = row.Reason,
+            ExtendedBy = row.ExtendedBy,
+            ExtendedOn = row.ExtendedOn
+        };
 
         private sealed record RevisionChainMember(long Id, string QuoteNo, DateTime? OutcomeOn, long? RevisionOfQuoteId);
 

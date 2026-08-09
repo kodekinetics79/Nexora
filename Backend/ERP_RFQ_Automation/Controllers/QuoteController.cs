@@ -227,6 +227,16 @@ namespace ERP_RFQ_Automation.Controllers
             }
         }
 
+        /// <summary>
+        /// The customer-facing quotation document.
+        ///
+        /// <para>R5: this route had no price-attestation check at all, which made it the widest
+        /// hole in the gate — the PDF is the commercial offer, and anyone with View could pull it
+        /// and forward it with nobody having attested to a single price on it. The check lives in
+        /// <see cref="IQuoteService.GenerateQuotePdfAsync"/> so the quote-delivery worker is
+        /// covered by the same code, and it fails closed: 409 with the rep-facing reason, no
+        /// bytes.</para>
+        /// </summary>
         [HttpGet("{id}/pdf")]
         [RequireModulePermission("Quotations", PermissionAction.View)]
         public async Task<IActionResult> DownloadPdf(long id)
@@ -235,17 +245,79 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
                 if (businessUnitId <= 0) return Forbid();
-                var bytes = await _quoteService.GenerateQuotePdfAsync(id, businessUnitId);
+                var bytes = await _quoteService.GenerateQuotePdfAsync(
+                    id, businessUnitId, ct: HttpContext.RequestAborted);
                 return File(bytes, "application/pdf", $"Quote_{id}.pdf");
             }
             catch (KeyNotFoundException)
             {
                 return NotFound();
             }
+            catch (ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationRequiredException ex)
+            {
+                // priceAttestationRequired mirrors the SendEmail contract, so the client can
+                // re-open the same confirm-price dialog instead of showing a dead end.
+                return Conflict(new { priceAttestationRequired = true, message = ex.Message });
+            }
             catch (InvalidOperationException ex)
             {
                 return Conflict(new { message = ex.Message });
             }
+        }
+
+        // -------- POST /api/Quote/{id}/extend-validity (R7) --------
+
+        /// <summary>
+        /// Holds an already-issued quote's price open until a later date, with a mandatory reason
+        /// that is recorded as an auditable row (Decision Register R7).
+        ///
+        /// <para>Deliberately NOT a revision: the commercial offer is unchanged, so the revision
+        /// number does not move. Authorization is the same Quotations:Edit permission that governs
+        /// every other commercial action on a quote (send, outcome, price attestation) — extending
+        /// validity is a commercial act on the quote, not a new kind of privilege.</para>
+        /// </summary>
+        [HttpPost("{id}/extend-validity")]
+        [RequireModulePermission("Quotations", PermissionAction.Edit)]
+        public async Task<ActionResult<QuoteValidityExtensionResultDTO>> ExtendValidity(
+            long id,
+            [FromBody] QuoteExtendValidityRequestDTO request,
+            [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey)
+        {
+            if (!ModelState.IsValid) return BadRequest(ModelState);
+            if (request?.ValidUntil is null)
+                return BadRequest(new { message = "Choose the new date the quote stays valid until." });
+
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId <= 0) return BadRequest(new { message = "Business Unit ID is required." });
+
+            try
+            {
+                var result = await _quoteService.ExtendQuoteValidityAsync(
+                    id, businessUnitId, request.ValidUntil.Value, request.Reason,
+                    ActorEmail(), ActorUserId(),
+                    string.IsNullOrWhiteSpace(idempotencyKey) ? Guid.NewGuid().ToString("N") : idempotencyKey,
+                    HttpContext.RequestAborted);
+                return Ok(result);
+            }
+            catch (KeyNotFoundException) { return NotFound(); }
+            catch (ArgumentException ex) { return BadRequest(new { message = ex.Message }); }
+            catch (InvalidOperationException ex) { return Conflict(new { message = ex.Message }); }
+            catch (Exception ex) { return Unexpected(ex, "extend-validity"); }
+        }
+
+        // -------- GET /api/Quote/{id}/validity-extensions (R7: the reason must be readable) --------
+        [HttpGet("{id}/validity-extensions")]
+        [RequireModulePermission("Quotations", PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<QuoteValidityExtensionDTO>>> GetValidityExtensions(long id)
+        {
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId <= 0) return BadRequest(new { message = "Business Unit ID is required." });
+            try
+            {
+                return Ok(await _quoteService.GetValidityExtensionsAsync(id, businessUnitId, HttpContext.RequestAborted));
+            }
+            catch (KeyNotFoundException) { return NotFound(); }
+            catch (Exception ex) { return Unexpected(ex, "validity-extensions"); }
         }
 
         [HttpPost("{id}/revision-impact/resolve")]

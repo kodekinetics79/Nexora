@@ -48,6 +48,11 @@ export interface QuoteDTO {
   outcomeNote?: string | null;
   isStale?: boolean;
   daysSinceSent?: number | null;
+  // Reasoned validity extensions (R7)
+  /** When the validity date was last moved by an explicit, reasoned extend command. */
+  validityExtendedOn?: string | null;
+  /** Lifecycle permits extending: sent to the customer, no outcome recorded yet. */
+  canExtendValidity?: boolean;
 }
 
 export interface OutcomeReasonDTO {
@@ -114,6 +119,30 @@ export interface QuoteRevisionInfoDTO {
   canRevise: boolean;
 }
 
+// ==== Reasoned quote-validity extensions (Decision Register R7) ====
+
+/** One recorded move of a quote's validity date, with the reason that justified it. */
+export interface QuoteValidityExtensionDTO {
+  id: number;
+  quoteId: number;
+  previousValidUntil?: string | null;
+  newValidUntil: string;
+  reason: string;
+  extendedBy: string;
+  extendedOn: string;
+}
+
+export interface QuoteValidityExtensionResult {
+  quoteId: number;
+  quoteNo: string;
+  validUntil?: string | null;
+  validityExtendedOn?: string | null;
+  /** Unchanged by extending — the commercial offer is the same offer. */
+  revisionNo: number;
+  replayed: boolean;
+  extension?: QuoteValidityExtensionDTO | null;
+}
+
 export type QuoteOutcome = 'won' | 'lost' | 'expired';
 
 export interface PaginatedQuotes {
@@ -156,9 +185,30 @@ const quoteService = {
     await axiosInstance.delete(`/api/Quote/${id}`, { params });
   },
   
+  /**
+   * The commercial document itself. R5: the server refuses to render it unless the quote's
+   * current prices are covered by a recorded price attestation (409, `priceAttestationRequired`).
+   *
+   * Because the request asks for a Blob, axios hands the ERROR body back as a Blob too, so the
+   * refusal reason would otherwise be unreadable and every caller would fall back to a generic
+   * "download failed". The body is decoded back to JSON here so the rep sees what to do next.
+   */
   downloadPdf: async (id: number): Promise<Blob> => {
-    const { data } = await axiosInstance.get(`/api/Quote/${id}/pdf`, { responseType: 'blob' });
-    return data;
+    try {
+      const { data } = await axiosInstance.get(`/api/Quote/${id}/pdf`, { responseType: 'blob' });
+      return data;
+    } catch (error: any) {
+      const body = error?.response?.data;
+      if (body instanceof Blob) {
+        try {
+          error.response.data = JSON.parse(await body.text());
+        } catch {
+          // Not JSON (a proxy error page, an empty body). Leave it alone rather than
+          // inventing a reason — the caller's fallback message is the honest answer.
+        }
+      }
+      throw error;
+    }
   },
 
   /**
@@ -226,6 +276,36 @@ const quoteService = {
     await axiosInstance.post(`/api/Quote/${id}/revision-impact/resolve`, null, {
       headers: { 'Idempotency-Key': crypto.randomUUID() },
     });
+  },
+
+  // ==== Reasoned validity extensions (R7) ====
+
+  /**
+   * Holds an already-sent quote's price open until a later date. The reason is mandatory and
+   * is recorded against the quote, not merely logged. Does NOT create a revision — the buyer
+   * is still looking at the same commercial offer.
+   *
+   * 400 = the date or reason is unusable; 409 = the quote's lifecycle does not allow it
+   * (still a draft, already won/lost/expired, or superseded by a newer revision). Both carry
+   * a message that says what to do instead.
+   */
+  extendValidity: async (
+    id: number,
+    validUntil: string,
+    reason: string,
+  ): Promise<QuoteValidityExtensionResult> => {
+    const { data } = await axiosInstance.post(
+      `/api/Quote/${id}/extend-validity`,
+      { validUntil, reason },
+      { headers: { 'Idempotency-Key': crypto.randomUUID() } },
+    );
+    return data;
+  },
+
+  /** Every recorded validity move on this quote, newest first (R7: the reason must be readable). */
+  getValidityExtensions: async (id: number): Promise<QuoteValidityExtensionDTO[]> => {
+    const { data } = await axiosInstance.get(`/api/Quote/${id}/validity-extensions`);
+    return data;
   },
 
   transitionStatus: async (id: number, status: string, expectedVersion: number): Promise<unknown> => {

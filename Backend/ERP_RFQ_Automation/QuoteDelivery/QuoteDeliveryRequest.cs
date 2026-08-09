@@ -23,4 +23,22 @@ public sealed class QuoteDeliveryRequest
     public DateTime? DeadLetteredOn { get; set; }
     public string? LastErrorCode { get; set; }
     public long Version { get; set; }
+
+    /// <summary>
+    /// R5 content binding. The price fingerprint (currency + every line's unit price) that was
+    /// attested at the moment this send was authorised — the exact priced content the rep
+    /// committed to putting in front of the customer.
+    ///
+    /// <para>Enqueueing is not sending: the quote stays DRAFT and therefore editable until the
+    /// worker drains this row, so "attested" at queue time proves nothing about what the PDF
+    /// will contain at dispatch time. The dispatcher recomputes the fingerprint immediately
+    /// before rendering and refuses to send when it no longer matches this value, which is the
+    /// same record-at-capture / verify-at-serve shape <c>FileController</c> uses for attachment
+    /// bytes.</para>
+    ///
+    /// <para>Nullable only for rows written before this column existed. Absent is UNKNOWN, not
+    /// verified — the dispatcher still requires a currently-valid attestation for those, it
+    /// simply has no earlier value to compare against.</para>
+    /// </summary>
+    public string? AttestedPriceFingerprint { get; set; }
 }

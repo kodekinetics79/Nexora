@@ -55,6 +55,25 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         /// <summary>Days since the quote was sent (null when never sent).</summary>
         public int? DaysSinceSent { get; set; }
 
+        /// <summary>
+        /// R7: when the validity date was last moved by an explicit, reasoned extend command.
+        /// Null when the validity is still the one set on the draft. Drives the "validity
+        /// extended" chip and tells the SLA sweep this quote is being held open deliberately.
+        /// </summary>
+        public DateTime? ValidityExtendedOn { get; set; }
+
+        /// <summary>
+        /// R7: true when this quote's LIFECYCLE allows an extend-validity command — it has been
+        /// issued to the customer (SENT) and no final outcome has been recorded. The UI uses it
+        /// to enable the control instead of guessing from the status string.
+        ///
+        /// <para>Deliberately does NOT include the "not superseded by a newer revision" condition:
+        /// establishing that costs a query per row and would make the list view N+1. The service
+        /// checks it authoritatively and refuses with a 409 naming the successor, and the detail
+        /// page already holds that fact in <c>GET {id}/revisions</c>.</para>
+        /// </summary>
+        public bool CanExtendValidity { get; set; }
+
         public List<QuoteItemResponseDTO> QuoteItems { get; set; } = new List<QuoteItemResponseDTO>();
     }
 

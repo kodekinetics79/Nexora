@@ -13,7 +13,16 @@ public interface IQuoteDeliverySender
 }
 
 public sealed class QuoteDeliveryPreSendException(string errorCode, Exception innerException)
-    : Exception(errorCode, innerException);
+    : Exception(errorCode, innerException)
+{
+    /// <summary>
+    /// true when retrying can never succeed, so the row must be dead-lettered on this attempt
+    /// instead of consuming the retry budget. Set for the R5 price-binding refusal: a price
+    /// that changed after it was attested has still changed on the eighth attempt, and every
+    /// extra attempt keeps an unauthorised send alive in the outbox.
+    /// </summary>
+    public bool Permanent { get; init; }
+}
 
 public sealed class QuoteDeliverySender(IQuoteService quotes, IEmailService email) : IQuoteDeliverySender
 {
@@ -22,7 +31,16 @@ public sealed class QuoteDeliverySender(IQuoteService quotes, IEmailService emai
         byte[] pdf;
         try
         {
-            pdf = await quotes.GenerateQuotePdfAsync(request.QuoteId, request.BusinessUnitId);
+            // The fingerprint bound when this send was AUTHORISED is handed to the renderer,
+            // which refuses to produce the document unless the quote's prices still hash to
+            // it AND a current attestation still covers them. Fail closed, before any bytes
+            // exist: an email cannot be un-sent.
+            pdf = await quotes.GenerateQuotePdfAsync(
+                request.QuoteId, request.BusinessUnitId, request.AttestedPriceFingerprint, ct);
+        }
+        catch (ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationRequiredException exception)
+        {
+            throw new QuoteDeliveryPreSendException(exception.GetType().Name, exception) { Permanent = true };
         }
         catch (Exception exception)
         {
@@ -157,9 +175,21 @@ public sealed class QuoteDeliveryDispatcher(
             catch (QuoteDeliveryPreSendException exception)
             {
                 var errorCode = exception.Message;
-                await store.FailAsync(request.Id, _workerId, request.LeaseToken, errorCode, 8, ct);
-                logger.LogWarning("Quote delivery {DeliveryId} failed before external send with {ErrorCode} on attempt {AttemptCount}.",
-                    request.Id, errorCode, request.AttemptCount);
+                // maxAttempts 1 dead-letters on THIS attempt (QuoteDeliveryStore.MutateLeaseAsync
+                // dead-letters once AttemptCount >= maxAttempts, and the claim already incremented
+                // it). A permanent pre-send refusal must not sit in the outbox waiting to be
+                // retried against content nobody attested to.
+                await store.FailAsync(request.Id, _workerId, request.LeaseToken, errorCode,
+                    exception.Permanent ? 1 : 8, ct);
+                if (exception.Permanent)
+                    logger.LogError(exception.InnerException,
+                        "Quote delivery {DeliveryId} for quote {QuoteId} was refused permanently with {ErrorCode}: "
+                        + "the quote's prices no longer match what was attested when the send was authorised. "
+                        + "Nothing was emailed.",
+                        request.Id, request.QuoteId, errorCode);
+                else
+                    logger.LogWarning("Quote delivery {DeliveryId} failed before external send with {ErrorCode} on attempt {AttemptCount}.",
+                        request.Id, errorCode, request.AttemptCount);
                 continue;
             }
             catch (Exception exception)

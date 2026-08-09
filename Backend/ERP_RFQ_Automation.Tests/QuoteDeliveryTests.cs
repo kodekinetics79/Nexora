@@ -224,6 +224,50 @@ public sealed class QuoteDeliveryTests
     }
 
     /// <summary>
+    /// R5: a broken price binding is dead-lettered on the spot, not retried. The quote's prices
+    /// changed after the send was authorised, and no number of retries will make them match
+    /// again — every extra attempt would just keep an unauthorised send alive in the outbox with
+    /// a lease that another instance could pick up. maxAttempts 1 ends it on this attempt.
+    /// </summary>
+    [Fact]
+    public async Task Dispatcher_DeadLettersAPermanentPreSendRefusalInsteadOfRetryingIt()
+    {
+        var envelope = new QuoteDeliveryEnvelope(
+            1, Tenant, 95_011, "buyer@nexora.invalid", "Quote", "Body",
+            null, "quote.pdf", 1, Guid.NewGuid(), "not-the-fingerprint-that-was-attested");
+        var store = new RecordingDeliveryStore(envelope);
+        using var host = new TenantScopedHost(services => services
+            .AddSingleton<IQuoteDeliveryStore>(store)
+            .AddSingleton<IQuoteDeliverySender>(new PriceBindingRefusingSender()));
+        store.TenantScope = host.TenantScope;
+        await using (var seed = host.ContextFor(null))
+        {
+            SeedQuote(seed);
+            seed.QuoteDeliveryRequests.Add(NewDelivery());
+            await seed.SaveChangesAsync();
+        }
+        var dispatcher = new QuoteDeliveryDispatcher(
+            host.ScopeFactory, NullLogger<QuoteDeliveryDispatcher>.Instance, host.TenantScope);
+
+        Assert.Equal(1, await dispatcher.DispatchOnceAsync(default));
+
+        Assert.Equal(1, store.RetriableFailureCount);
+        Assert.Equal(0, store.UncertainFailureCount);
+        Assert.Equal(nameof(ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationRequiredException), store.LastErrorCode);
+        Assert.Equal(1, store.LastMaxAttempts);   // 1 == dead-letter now, not 8 == keep trying
+    }
+
+    private sealed class PriceBindingRefusingSender : IQuoteDeliverySender
+    {
+        public Task SendAsync(QuoteDeliveryEnvelope request, CancellationToken ct) =>
+            throw new QuoteDeliveryPreSendException(
+                nameof(ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationRequiredException),
+                new ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationRequiredException("prices moved")
+                    { BindingBroken = true })
+            { Permanent = true };
+    }
+
+    /// <summary>
     /// R5: every send now requires a recorded price-provenance attestation covering the
     /// quote's current prices. These delivery tests are about the delivery ledger, not the
     /// gate, so they satisfy it explicitly. QuotePriceAttestationTests owns the gate itself.
@@ -305,6 +349,9 @@ public sealed class QuoteDeliveryTests
         public int UncertainFailureCount { get; private set; }
         public string? LastErrorCode { get; private set; }
 
+        /// <summary>The retry budget the dispatcher chose: 1 means "dead-letter now".</summary>
+        public int LastMaxAttempts { get; private set; }
+
         /// <summary>The tenant in scope at each ClaimAsync — null means the claim ran unscoped.</summary>
         public List<long?> ClaimTenants { get; } = [];
 
@@ -327,6 +374,7 @@ public sealed class QuoteDeliveryTests
         {
             RetriableFailureCount++;
             LastErrorCode = errorCode;
+            LastMaxAttempts = maxAttempts;
             return Task.CompletedTask;
         }
 

@@ -144,6 +144,62 @@ public sealed class SlaQuoteExpiryTests
         Assert.Equal(new long[] { 1 }, await CandidateIdsAsync(db, policy));
     }
 
+    // ------------------------------- R7: a reasoned extension holds the 90-day rule off
+
+    [Fact]
+    public async Task An_explicitly_extended_validity_suppresses_the_ninety_day_silence_rule()
+    {
+        // The tender case R7 was written for. The buyer set bid validity at 120 days and the rep
+        // recorded the extension with a reason. Without this clause the sweep would still expire
+        // the bid on day 90 — while the evaluation was running — and the live Etimad pipeline
+        // would disappear from the dashboard.
+        using var db = new TestDb();
+        await SeedAsync(db,
+            Extended(Quote(1, validUntil: Now.AddDays(30), sentOn: Now.AddDays(-95))),
+            // Same silence, same future validity, but NOBODY extended it: the draft-time date is
+            // not a deliberate hold, so the 90-day rule keeps its original reach.
+            Quote(2, validUntil: Now.AddDays(30), sentOn: Now.AddDays(-95)));
+
+        Assert.Equal(new long[] { 2 }, await CandidateIdsAsync(db, SlaPolicy.Default(Bu)));
+    }
+
+    [Fact]
+    public async Task An_extension_defers_expiry_it_does_not_cancel_it()
+    {
+        // Nothing becomes immortal: the moment the EXTENDED date passes, trigger 1 expires the
+        // quote exactly as it would any other lapsed validity.
+        using var db = new TestDb();
+        await SeedAsync(db, Extended(Quote(1, validUntil: Now.AddMinutes(-1), sentOn: Now.AddDays(-95))));
+
+        Assert.Equal(new long[] { 1 }, await CandidateIdsAsync(db, SlaPolicy.Default(Bu)));
+    }
+
+    [Fact]
+    public async Task An_extension_is_ignored_when_it_left_no_usable_validity_date()
+    {
+        // Fail closed on nonsense: an extension marker with no date, or a sentinel date, must not
+        // become a way to keep a silent quote alive forever.
+        using var db = new TestDb();
+        await SeedAsync(db,
+            Extended(Quote(1, validUntil: null, sentOn: Now.AddDays(-95))),
+            Extended(Quote(2, validUntil: new DateTime(1, 1, 1, 0, 0, 0, DateTimeKind.Utc), sentOn: Now.AddDays(-95))));
+
+        Assert.Equal(new long[] { 1, 2 }, await CandidateIdsAsync(db, SlaPolicy.Default(Bu)));
+    }
+
+    [Fact]
+    public async Task The_sweep_leaves_an_extended_bid_alone_end_to_end()
+    {
+        var outcomes = new RecordingOutcomes();
+        using var host = NewHost(outcomes);
+        await SeedAsync(host.ContextFor(null), Extended(Quote(1,
+            validUntil: DateTime.UtcNow.AddDays(30), sentOn: DateTime.UtcNow.AddDays(-95))));
+
+        await NewWorker(host).SweepOnceAsync(default);
+
+        Assert.Empty(outcomes.Calls);
+    }
+
     [Fact]
     public async Task Only_quotes_still_in_SENT_are_candidates()
     {
@@ -249,6 +305,15 @@ public sealed class SlaQuoteExpiryTests
             CreatedBy = "tests",
             CreatedDate = sentOn
         };
+
+    /// <summary>Marks a quote as having had its validity moved by an explicit, reasoned
+    /// extend command (R7). Only the marker matters to the sweep; the reason row itself is
+    /// covered by <see cref="QuoteValidityExtensionTests"/>.</summary>
+    private static Quote Extended(Quote quote)
+    {
+        quote.ValidityExtendedOn = Now.AddDays(-1);
+        return quote;
+    }
 
     private static Task SeedAsync(TestDb db, params Quote[] quotes) => SeedAsync(db.ContextFor(null), quotes);
 
