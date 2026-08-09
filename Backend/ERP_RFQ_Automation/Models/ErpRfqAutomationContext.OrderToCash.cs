@@ -11,4 +11,5 @@ public partial class ErpRfqAutomationContext
     public virtual DbSet<CustomerAwardLineAllocation> CustomerAwardLineAllocations { get; set; }
     public virtual DbSet<OrderToCashAuditEvent> OrderToCashAuditEvents { get; set; }
     public virtual DbSet<OrderToCashDocumentCounter> OrderToCashDocumentCounters { get; set; }
+    public virtual DbSet<CommercialMatchingPolicy> CommercialMatchingPolicies { get; set; }
 }

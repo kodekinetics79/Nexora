@@ -120,11 +120,44 @@ public static class ProcurementOutboxStatuses
     public const string DeadLettered = "DEAD_LETTERED";
 }
 
+/// <summary>Why a supplier purchase order exists — the discriminator R4 turns on.</summary>
+public static class SupplierPurchaseOrderDemandSources
+{
+    /// <summary>Replenishment. Has no customer behind it, and legitimately carries no customer keys.</summary>
+    public const string Stock = "STOCK";
+
+    /// <summary>Bought against a specific customer award. Must carry the customer chain below.</summary>
+    public const string CustomerDemand = "CUSTOMER_DEMAND";
+}
+
 public sealed class SupplierPurchaseOrder
 {
     public long Id { get; set; }
     public long BusinessUnitId { get; set; }
     public long RfqId { get; set; }
+
+    /// <summary>
+    /// R4 / FR-SPO-05 / FR-COM-07. Why this order exists, and the customer chain behind it when
+    /// there is one.
+    ///
+    /// <para>The order previously carried only <see cref="RfqId"/>, so every downstream trace —
+    /// delivery, invoice, where-used — had to re-join through the RFQ, and the Sales Order was
+    /// connected to procurement by nothing at all. In practice that made the RFQ the de-facto
+    /// spine, the inverse of what FR-COM-07 requires.</para>
+    ///
+    /// <para>The discriminator is why these are nullable rather than required. A stock
+    /// replenishment order genuinely has no customer, and modelling that as "missing data" would
+    /// force either a fake customer or a nullable column nobody can reason about. With the
+    /// discriminator, absent keys on a STOCK order are correct and absent keys on a
+    /// CUSTOMER_DEMAND order are a defect.</para>
+    /// </summary>
+    public string DemandSource { get; set; } = SupplierPurchaseOrderDemandSources.CustomerDemand;
+
+    public long? CustomerPurchaseOrderId { get; set; }
+
+    public long? CustomerOrderId { get; set; }
+
+    public long? QuoteId { get; set; }
     public long SupplierId { get; set; }
     public long CurrencyId { get; set; }
     public string PurchaseOrderNumber { get; set; } = null!;
