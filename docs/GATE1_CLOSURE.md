@@ -8,18 +8,42 @@ real rendered-browser path. Anything short of that is reported short, with the m
 |---|---|---|---|
 | FR-RFQ-01 · three intake channels | PARTIAL | **PARTIAL** | Watched-folder screen built; folder *state* (files waiting, last sweep) has no endpoint because nothing persists it. SFTP/SharePoint descoped by the client-hosted decision |
 | FR-RFQ-02 · nine intake formats | VERIFIED | **VERIFIED** | — DOCX now also read structurally |
-| FR-RFQ-03 · ID format + agreement reference | CONFLICTING | **PARTIAL** | Column added and deviation approved; nothing populates it yet |
-| FR-RFQ-04 · bilingual OCR + eleven fields | PARTIAL | **PARTIAL** | Hijri and closing time done; delivery location and required delivery date have columns but no extraction; Arabic deferred by approved deviation |
-| FR-RFQ-05 · amendment versions the RFQ | PARTIAL | **PARTIAL** | A closing-date-only amendment still goes to human review rather than auto-versioning |
+| FR-RFQ-03 · ID format + agreement reference | CONFLICTING | **CLOSED** | `NXR-` numbering ratified as an approved deviation; agreement reference now captured |
+| FR-RFQ-04 · bilingual OCR + eleven fields | PARTIAL | **CLOSED** | Hijri, closing time, delivery location and required delivery date all captured; Arabic deferred by approved deviation |
+| FR-RFQ-05 · amendment versions the RFQ | PARTIAL | **CLOSED** | A closing-date amendment now versions the existing inquiry in either direction |
 | FR-RFQ-06 · duplicates held before creation | CONFLICTING | **CLOSED** | — |
-| FR-RFQ-07 · routing rules in master data | PARTIAL | **PARTIAL** | Admin screen built; Territory and Key-account-team scopes are dormant in the engine, so "region rules" is only partly satisfied |
-| FR-RFQ-08 · immutable, auditable source | PARTIAL | **PARTIAL** | Digest now recorded; verification-on-read not built |
+| FR-RFQ-07 · routing rules in master data | PARTIAL | **CLOSED** | Admin screen built and Territory (region) rules now derive and fire. Key-account-team stays underivable and says so on every decision — no customer→team link exists to derive it from |
+| FR-RFQ-08 · immutable, auditable source | PARTIAL | **CLOSED** | Digest recorded at capture and verified on every read, failing closed and audited on mismatch |
 
-**Gate 1 is not closed.** One of eight requirements is fully closed, one was already verified, and
-six advanced materially. Declaring it closed would be exactly the kind of claim this audit exists
-to prevent.
+**Seven of eight requirements are now closed**, one (FR-RFQ-01) stays partial, and the GATE
+itself remains open — because three of its completion criteria are environmental and cannot be
+satisfied from a development machine at any level of effort.
+
+FR-RFQ-01 is the honest holdout: all three intake channels exist and run, but "monitored
+continuously" is a claim only a live mailbox can substantiate, and that is one of the three
+environmental criteria below.
 
 ## What closed, and why it counts
+
+**FR-RFQ-03 / FR-RFQ-04.** The four intake fields that previously had nowhere to live are now
+captured end to end: delivery location, the buyer's required delivery date, the Hijri closing date
+rendered alongside the Gregorian one, and the standing-agreement reference. "Requested Delivery:
+9 weeks" now lands on the buyer's requirement rather than being forced into a supplier lead time —
+the conflation that once wrote "deliver immediately" onto every line.
+
+**FR-RFQ-05.** A closing-date amendment versions the existing inquiry instead of queueing for a
+human, in either direction, gated on the same similarity bar as the neighbouring arm so a genuine
+second inquiry is never swallowed.
+
+**FR-RFQ-07.** Territory — the requirement's "region rules" — now derives from the delivery
+location, falling back to the customer's region and resolving city wording against the tenant's
+own state and city masters. Key-account-team remains **underivable and says so on every routing
+decision**: no customer-to-team link exists anywhere in the schema, and the only available path
+would use the ownership rows to choose between the ownership rows.
+
+**FR-RFQ-08.** The digest is recorded at capture and verified on every read. A mismatch fails
+closed with an audited security event, leaking neither the storage path nor either digest, and
+verification hashes the same handle it serves so there is no window between checking and serving.
 
 **FR-RFQ-06.** The duplicate rule — same buyer, same item, overlapping dates — now runs *before*
 a record is created, in the authoritative pre-persistence engine, feeding the existing review
