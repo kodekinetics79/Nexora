@@ -468,7 +468,12 @@ builder.Services.AddCors(options =>
 {
     options.AddPolicy("DefaultCors", policy =>
     {
-        policy.WithOrigins(corsOrigins).AllowAnyMethod().AllowAnyHeader();
+        // FR-RFQ-08: the attachment download states whether the bytes were proved to match the
+        // digest recorded at capture. The frontend is a different origin, so without an explicit
+        // expose-list the browser hides that header and "unverified" would silently read as
+        // "fine" — the exact ambiguity the header exists to remove.
+        policy.WithOrigins(corsOrigins).AllowAnyMethod().AllowAnyHeader()
+            .WithExposedHeaders(ERP_RFQ_Automation.Controllers.FileController.IntegrityHeader);
     });
 });
 // Configure JWT Authentication
