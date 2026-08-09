@@ -1089,7 +1089,12 @@ namespace ERP_RFQ_Automation.Services
                     DateTime? bidClosingDate = ParseDate(ai.BidClosingDate);
                     DateTime? acknowledgmentDate = ParseDate(ai.AcknowledgmentDate);
                     DateTime? subDate = ParseDate(ai.SubDate);
-                    var items = ai.Items.Where(x => x.Quantity > 0).ToList();
+                    // Every extracted line is kept. Filtering on Quantity > 0 silently discarded any line
+                    // whose quantity the document did not state — the extractor is instructed to return
+                    // null in exactly that case — and the line count was taken from the filtered list, so
+                    // the loss was self-consistent and invisible. A line a reviewer can see and correct is
+                    // always better than a line that never existed.
+                    var items = ai.Items.ToList();
                     // Create lead record
                     var lead = new Lead
                     {
@@ -1652,18 +1657,10 @@ namespace ERP_RFQ_Automation.Services
             if (string.IsNullOrEmpty(value)) return null;
             return value.Length <= maxLength ? value : value.Substring(0, maxLength - 3) + "...";
         }
-        private DateTime? ParseDate(string? s)
-        {
-            if (string.IsNullOrWhiteSpace(s)) return null;
-            var formats = new[]
-            {
-                "yyyy-MM-dd", "dd/MM/yyyy", "MM/dd/yyyy",
-                "dd-MM-yyyy", "d/M/yyyy", "yyyy/MM/dd"
-            };
-            return DateTime.TryParseExact(s.Trim(), formats,
-                System.Globalization.CultureInfo.InvariantCulture,
-                System.Globalization.DateTimeStyles.None, out var d) ? d : null;
-        }
+        // Shared with every other ingestion door — see RfqDateParser for why this is no longer
+        // a per-service copy. This path previously had no sentinel-year guard, so an extracted
+        // "0001-01-01" reached the database as a real closing date.
+        private DateTime? ParseDate(string? s) => Extraction.RfqDateParser.Parse(s);
         private string GetEmailBody(MimeMessage message)
         {
             var body = message.GetTextBody(TextFormat.Plain);

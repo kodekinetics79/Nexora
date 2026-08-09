@@ -323,7 +323,12 @@ namespace ERP_RFQ_Automation.Services
                     DateTime? acknowledgmentDate = ParseDate(ai.AcknowledgmentDate);
                     DateTime? subDate = ParseDate(ai.SubDate);
 
-                    var items = ai.Items.Where(x => x.Quantity > 0).ToList();
+                    // Every extracted line is kept. Filtering on Quantity > 0 silently discarded any line
+                    // whose quantity the document did not state — the extractor is instructed to return
+                    // null in exactly that case — and the line count was taken from the filtered list, so
+                    // the loss was self-consistent and invisible. A line a reviewer can see and correct is
+                    // always better than a line that never existed.
+                    var items = ai.Items.ToList();
 
                     var lead = new Lead
                     {
@@ -945,17 +950,10 @@ namespace ERP_RFQ_Automation.Services
             return value.Length <= maxLength ? value : value.Substring(0, maxLength - 3) + "...";
         }
 
-        private DateTime? ParseDate(string? s)
-        {
-            if (string.IsNullOrWhiteSpace(s)) return null;
-            var formats = new[] { "yyyy-MM-dd", "dd/MM/yyyy", "MM/dd/yyyy", "dd-MM-yyyy", "d/M/yyyy" };
-            if (!DateTime.TryParseExact(s.Trim(), formats, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var d))
-                return null;
-            // Sentinel guard: extracted placeholders like 0001-01-01 parse "successfully"
-            // but are not real dates — treat anything before 2000 as unknown so the UI
-            // never renders "01 Jan 1". (Same rule as the extraction persister.)
-            return d.Year < 2000 ? null : d;
-        }
+        // Shared with every other ingestion door — see RfqDateParser. The sentinel guard this
+        // method used to own now applies uniformly, and this path no longer silently rejects
+        // the yyyy/MM/dd form that the email and folder doors accepted.
+        private DateTime? ParseDate(string? s) => Extraction.RfqDateParser.Parse(s);
 
         private string SanitizeFileName(string fileName)
         {

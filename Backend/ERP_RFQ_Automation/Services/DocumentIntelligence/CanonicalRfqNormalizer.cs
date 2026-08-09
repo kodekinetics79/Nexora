@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using ERP_RFQ_Automation.DTOs.DocumentIntelligence;
+using ERP_RFQ_Automation.Extraction;
 
 namespace ERP_RFQ_Automation.Services.DocumentIntelligence;
 
@@ -13,16 +14,6 @@ public interface ICanonicalRfqNormalizer
 
 public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
 {
-    private static readonly string[] DateFormats =
-    {
-        "yyyy-MM-dd",
-        "dd/MM/yyyy",
-        "MM/dd/yyyy",
-        "dd-MM-yyyy",
-        "d/M/yyyy",
-        "yyyy/MM/dd"
-    };
-
     public CanonicalRfqImportResult NormalizeSpreadsheetRows(IEnumerable<RfqSpreadsheetRow> rows, long businessUnitId)
     {
         var result = new CanonicalRfqImportResult();
@@ -47,18 +38,25 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
                 BidClosingDate = DateValue(first.BidClosingDate, first, RfqSpreadsheetFields.BidClosingDate, true, "BID_CLOSING_DATE")
             };
 
+            var lineOrdinal = 0;
             foreach (var row in group)
             {
+                // The line's own number, not its physical row. A Word or Excel table puts its
+                // header on a real row, so numbering by row started every document's first line
+                // at 2. The source ADDRESS still points at the physical cell for evidence.
+                lineOrdinal++;
                 var line = new CanonicalRfqLineItem
                 {
-                    LineItemNo = TextValue(row.RowNumber.ToString(CultureInfo.InvariantCulture), row, "row", CanonicalValueKind.Derived, 1.0m),
+                    LineItemNo = TextValue(lineOrdinal.ToString(CultureInfo.InvariantCulture), row, "row", CanonicalValueKind.Derived, 1.0m),
                     ProductName = RequiredText(row.ProductName, row, RfqSpreadsheetFields.ProductName, "PRODUCT_NAME", "Product name is required."),
                     Quantity = IntValue(row.Quantity, row, RfqSpreadsheetFields.Quantity, false, "QUANTITY"),
+                    UnitOfMeasure = TextValue(row.UnitOfMeasure, row, RfqSpreadsheetFields.UnitOfMeasure),
                     UnitPrice = DecimalValue(row.UnitPrice, row, RfqSpreadsheetFields.UnitPrice, true, "UNIT_PRICE"),
                     Currency = TextValue(row.Currency, row, RfqSpreadsheetFields.Currency),
                     ManufacturerName = TextValue(row.ManufacturerName, row, RfqSpreadsheetFields.ManufacturerName),
                     ManufacturerPartNumber = TextValue(row.ManufacturerPartNumber, row, RfqSpreadsheetFields.ManufacturerPartNumber),
-                    LeadTimeDays = IntValue(row.LeadTimeDays, row, RfqSpreadsheetFields.LeadTimeDays, true, "LEAD_TIME_DAYS")
+                    LeadTimeDays = IntValue(row.LeadTimeDays, row, RfqSpreadsheetFields.LeadTimeDays, true, "LEAD_TIME_DAYS"),
+                    ItemText = TextValue(row.ItemText, row, RfqSpreadsheetFields.ItemText)
                 };
 
                 var lineKey = BuildLineKey(row);
@@ -182,7 +180,15 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
             return value;
         }
 
-        if (DateTime.TryParseExact(raw.Trim(), DateFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed))
+        // Shared with every ingestion door (see RfqDateParser). This method used to carry a
+        // seventh private format list that omitted ISO 8601 with a 'T' — and the legacy .xls
+        // reader renders a genuine Excel date cell as exactly that round-trip form, so a real
+        // date cell was reported as "unsupported date format" and came out Invalid.
+        //
+        // The .Date truncation below is deliberately retained for now: capturing a stated
+        // closing TIME also requires deciding which time zone it is in, which is an open
+        // product decision. Parsing is fixed here; time capture is a separate change.
+        if (RfqDateParser.Parse(raw) is { } parsed)
         {
             value.Value = DateTime.SpecifyKind(parsed.Date, DateTimeKind.Utc);
             value.Kind = CanonicalValueKind.Normalized;
@@ -228,7 +234,12 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
 
         value.Kind = CanonicalValueKind.Extracted;
         value.Confidence = 0.2m;
-        value.ValidationStatus = ValidationStatus.Invalid;
+        // An OPTIONAL field that cannot be parsed is a value to review, never a reason to
+        // invalidate the line. A buyer writing "Requested Delivery: 9 weeks" has told us
+        // something useful and entirely legitimate; treating it as Invalid condemned every line
+        // of the document — and, because the unparsed value still defaulted to 0, wrote a lead
+        // time of "deliver immediately" onto every item. A required field still invalidates.
+        value.ValidationStatus = optional ? ValidationStatus.NeedsReview : ValidationStatus.Invalid;
         value.Transformations.Add(optional ? $"{fieldName}: not a non-negative integer" : $"{fieldName}: not a positive integer");
         return value;
     }
@@ -286,11 +297,13 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
         RfqSpreadsheetFields.BidClosingDate => "D",
         RfqSpreadsheetFields.ProductName => "E",
         RfqSpreadsheetFields.Quantity => "F",
+        RfqSpreadsheetFields.UnitOfMeasure => "F1",
         RfqSpreadsheetFields.UnitPrice => "G",
         RfqSpreadsheetFields.Currency => "H",
         RfqSpreadsheetFields.ManufacturerName => "I",
         RfqSpreadsheetFields.ManufacturerPartNumber => "J",
         RfqSpreadsheetFields.LeadTimeDays => "K",
+        RfqSpreadsheetFields.ItemText => "L",
         _ => "row"
     };
 

@@ -395,7 +395,12 @@ namespace ERP_RFQ_Automation.Services
                         DateTime? acknowledgmentDate = ParseDate(extractionResult.AcknowledgmentDate);
                         DateTime? subDate = ParseDate(extractionResult.SubDate);
 
-                        var items = extractionResult.Items.Where(x => x.Quantity > 0).ToList();
+                        // Every extracted line is kept. Filtering on Quantity > 0 silently discarded any line
+                        // whose quantity the document did not state — the extractor is instructed to return
+                        // null in exactly that case — and the line count was taken from the filtered list, so
+                        // the loss was self-consistent and invisible. A line a reviewer can see and correct is
+                        // always better than a line that never existed.
+                        var items = extractionResult.Items.ToList();
 
                         var lead = new Lead
                         {
@@ -760,7 +765,12 @@ namespace ERP_RFQ_Automation.Services
                         DateTime? acknowledgmentDate = ParseDate(ai.AcknowledgmentDate);
                         DateTime? subDate           = ParseDate(ai.SubDate);
 
-                        var items = ai.Items.Where(x => x.Quantity > 0).ToList();
+                        // Every extracted line is kept. Filtering on Quantity > 0 silently discarded any line
+                        // whose quantity the document did not state — the extractor is instructed to return
+                        // null in exactly that case — and the line count was taken from the filtered list, so
+                        // the loss was self-consistent and invisible. A line a reviewer can see and correct is
+                        // always better than a line that never existed.
+                        var items = ai.Items.ToList();
 
                         var lead = new Lead
                         {
@@ -932,20 +942,10 @@ namespace ERP_RFQ_Automation.Services
             return value.Length <= maxLength ? value : value.Substring(0, maxLength - 3) + "...";
         }
 
-        private DateTime? ParseDate(string? s)
-        {
-            if (string.IsNullOrWhiteSpace(s)) return null;
-            var dateMatch = Regex.Match(s, @"(\d{1,2}/\d{1,2}/\d{4})");
-            if (dateMatch.Success) s = dateMatch.Groups[1].Value;
-            var formats = new[]
-            {
-                "yyyy-MM-dd", "dd/MM/yyyy", "MM/dd/yyyy", "M/d/yyyy",
-                "M/dd/yyyy", "MM/d/yyyy", "dd-MM-yyyy", "d/M/yyyy",
-                "yyyy/MM/dd", "dd MMM yyyy", "d MMM yyyy", "MMM d, yyyy"
-            };
-            return DateTime.TryParseExact(s.Trim(), formats,
-                CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) ? d : null;
-        }
+        // Shared with every other ingestion door — see RfqDateParser. The embedded-date search
+        // this method used to do inline is now part of the shared parser, so the spelled-month
+        // forms it accepted are available to the email and upload doors too.
+        private DateTime? ParseDate(string? s) => Extraction.RfqDateParser.Parse(s);
 
         private LeadExtractionResult BuildExtraction(string text)
         {

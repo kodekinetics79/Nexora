@@ -247,11 +247,7 @@ namespace ERP_RFQ_Automation.Services
             }
         }
 
-        private DateTime? ParseDate(string s)
-        {
-            if (string.IsNullOrWhiteSpace(s)) return null;
-            var formats = new[] { "yyyy-MM-dd", "dd/MM/yyyy", "MM/dd/yyyy", "dd-MM-yyyy", "d/M/yyyy", "yyyy/MM/dd" };
-            return DateTime.TryParseExact(s.Trim(), formats, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var d) ? d : null;
-        }
+        // Shared with every other ingestion door — see RfqDateParser.
+        private DateTime? ParseDate(string s) => Extraction.RfqDateParser.Parse(s);
     }
 }

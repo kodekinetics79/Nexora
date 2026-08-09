@@ -809,8 +809,11 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             Alternative: null, AlternativeConfidence: 0,
             ProductShortDescription: null, ProductShortDescriptionConfidence: 0,
             Currency: line.Currency.Value, CurrencyConfidence: (double)line.Currency.Confidence,
-            UnitOfMeasure: null, UnitOfMeasureConfidence: 0,
-            UnitPrice: line.UnitPrice.Value == 0 && line.UnitPrice.Confidence == 0 ? null : line.UnitPrice.Value,
+            UnitOfMeasure: line.UnitOfMeasure.Value, UnitOfMeasureConfidence: (double)line.UnitOfMeasure.Confidence,
+            // Only a value the normalizer actually PARSED is emitted. Testing "zero with zero
+            // confidence" let an UNPARSEABLE value through as a real 0, because a failed parse
+            // still leaves the struct at its default while carrying a non-zero confidence.
+            UnitPrice: line.UnitPrice.Kind == CanonicalValueKind.Normalized ? line.UnitPrice.Value : null,
             UnitPriceConfidence: (double)line.UnitPrice.Confidence,
             Quantity: line.Quantity.Value, QuantityConfidence: (double)line.Quantity.Confidence,
             StorageLocation: null, StorageLocationConfidence: 0,
@@ -818,10 +821,12 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             ManufacturerPartNumber: line.ManufacturerPartNumber.Value, ManufacturerPartNumberConfidence: (double)line.ManufacturerPartNumber.Confidence,
             AlternateProductName: null, AlternateProductNameConfidence: 0,
             AlternatePartNumber: null, AlternatePartNumberConfidence: 0,
-            ItemText: null, ItemTextConfidence: 0,
+            ItemText: line.ItemText.Value, ItemTextConfidence: (double)line.ItemText.Confidence,
             MaterialPotext: null, MaterialPotextConfidence: 0,
-            LeadTime: line.LeadTimeDays.Value == 0 && line.LeadTimeDays.Confidence == 0
-                ? null : line.LeadTimeDays.Value.ToString(CultureInfo.InvariantCulture),
+            // Same rule as UnitPrice. A lead time of 0 means "deliver immediately"; emitting it
+            // for a value we could not read is a false commercial fact, not a harmless default.
+            LeadTime: line.LeadTimeDays.Kind == CanonicalValueKind.Normalized
+                ? line.LeadTimeDays.Value.ToString(CultureInfo.InvariantCulture) : null,
             LeadTimeConfidence: (double)line.LeadTimeDays.Confidence,
             ReceivedDate: null, ReceivedDateConfidence: 0,
             BidClosingDateLine: null, BidClosingDateLineConfidence: 0,

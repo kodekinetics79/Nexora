@@ -51,11 +51,18 @@ public sealed class CanonicalRfqLineItem
     public CanonicalValue<string> LineItemNo { get; set; } = new();
     public CanonicalValue<string> ProductName { get; set; } = new();
     public CanonicalValue<int> Quantity { get; set; } = new();
+
+    /// <summary>The buyer's own unit word, verbatim. Canonicalised later; never defaulted here.</summary>
+    public CanonicalValue<string> UnitOfMeasure { get; set; } = new();
+
     public CanonicalValue<decimal> UnitPrice { get; set; } = new();
     public CanonicalValue<string> Currency { get; set; } = new();
     public CanonicalValue<string> ManufacturerName { get; set; } = new();
     public CanonicalValue<string> ManufacturerPartNumber { get; set; } = new();
     public CanonicalValue<int> LeadTimeDays { get; set; } = new();
+
+    /// <summary>The buyer's note against the line. Never validated — a note cannot be "wrong".</summary>
+    public CanonicalValue<string> ItemText { get; set; } = new();
     public ValidationStatus ValidationStatus { get; set; } = ValidationStatus.Unvalidated;
 }
 

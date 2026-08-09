@@ -57,6 +57,11 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
     private readonly IEntitlementService? _entitlements;
     private readonly NativeSpreadsheetParser _spreadsheetParser = new();
 
+    // A Word RFQ usually states its lines in a table, which is structured data and should not be
+    // flattened to prose and sent to a model. Shares the spreadsheet column-alias and
+    // header-location rules, so one set of buyer spellings serves both formats.
+    private readonly DocxTableParser _docxTableParser;
+
     // An image (one page by definition) that yields fewer than this many non-whitespace
     // characters is treated as having produced nothing.
     private const int NearEmptyThreshold = 20;
@@ -150,6 +155,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         _tiffFrameOcr = tiffFrameOcr;
         _inspection = inspection;
         _entitlements = entitlements;
+        _docxTableParser = new DocxTableParser(_spreadsheetParser);
         _tessDataPath = Path.Combine(env.ContentRootPath, "tessdata");
         // EPPlus 7 requires a license context; the app sets this at startup, set it here too
         // so the reader is safe to use independently of startup ordering.
@@ -239,6 +245,37 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             return ReadSpreadsheet(job, name, "CSV",
                 () => _spreadsheetParser.ParseCsv(bytes, name),
                 () => _spreadsheetParser.RenderCsvText(bytes));
+        }
+
+        // A Word RFQ that states its lines in a table is structured data. Reading the table
+        // deterministically costs nothing, cannot hallucinate, and — decisive in the current
+        // deployment — does not depend on an AI provider the tenant may not be authorized to
+        // use. A .docx with no mappable table falls through to the text path exactly as before.
+        if (bytes.Length > 0 && ext == "docx")
+        {
+            IReadOnlyList<RfqSpreadsheetRow> tableRows;
+            try
+            {
+                tableRows = _docxTableParser.Parse(bytes, name);
+            }
+            catch (Exception ex)
+            {
+                // A file that is not a readable Word document must still produce the typed,
+                // honest parse failure the text path raises — not whatever OpenXML threw here.
+                _log.LogDebug(ex, "DOCX table pre-parse failed for {Name}; using the text path.", name);
+                tableRows = Array.Empty<RfqSpreadsheetRow>();
+            }
+
+            if (tableRows.Count > 0)
+            {
+                _log.LogInformation(
+                    "DOCX {Name} was read deterministically from its table: {Rows} line(s), no model involved.",
+                    name, tableRows.Count);
+                return Structured(job, name, tableRows.ToList());
+            }
+            // No mappable table — an ordinary prose document. Falls through to the text path
+            // below, byte for byte as before: a prose RFQ is not a "layout not recognized"
+            // spreadsheet and must not be given that banner or that reviewer note.
         }
 
         // Unstructured formats -> extract raw text, then chunk over line-item regions.
@@ -1014,8 +1051,8 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             "document is held for review instead.";
 
         return Unstructured(job, name,
-            Native("[SPREADSHEET LAYOUT NOT RECOGNIZED - the workbook was read successfully but the " +
-                   "deterministic column mapping found no known RFQ headers; tab-separated sheet text follows]\n"
+            Native("[SPREADSHEET LAYOUT NOT RECOGNIZED - the workbook was read successfully but the "
+                   + "deterministic column mapping found no known RFQ headers; tab-separated sheet text follows]\n"
                    + rendered),
             fallbackNote);
     }

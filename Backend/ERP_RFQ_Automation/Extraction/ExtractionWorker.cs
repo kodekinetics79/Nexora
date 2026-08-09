@@ -1426,6 +1426,7 @@ public sealed class LeadPersister : ILeadPersister
         string remarksPrefix)
     {
         var items = ai.Items ?? new List<LeadItemData>();
+        var bidClosingDate = SanitizeDate(ParseDate(ai.BidClosingDate));
         var lead = new Lead
         {
             // Data hygiene at write time: junk RFQ numbers and placeholder buyer
@@ -1435,7 +1436,11 @@ public sealed class LeadPersister : ILeadPersister
             Rfqno = IsPlausibleRfqNumber(ai.Rfqno) ? Truncate(ai.Rfqno!.Trim(), 100) : null,
             BuyersName = SanitizeBuyerName(Truncate(ai.BuyersName, 510)),
             RecDate = SanitizeDate(ParseDate(ai.RecDate)) ?? now,
-            BidClosingDate = SanitizeDate(ParseDate(ai.BidClosingDate)),
+            BidClosingDate = bidClosingDate,
+            // FR-RFQ-04. Kept ALONGSIDE the Gregorian value, never instead of it: the Gregorian
+            // date stays authoritative for every comparison and deadline calculation, and this
+            // is the rendering a Saudi government buyer actually published against.
+            BidClosingDateHijri = RfqDateParser.ToHijri(bidClosingDate),
             BiddingDecision = Truncate(ai.BiddingDecision, 100),
             AcknowledgmentDate = SanitizeDate(ParseDate(ai.AcknowledgmentDate)),
             SubDate = SanitizeDate(ParseDate(ai.SubDate)),
@@ -1509,6 +1514,11 @@ public sealed class LeadPersister : ILeadPersister
                     MimeType = MimeTypeFor(ext),
                     FileSize = size,
                     ContentType = MimeTypeFor(ext)?.Split('/')[0],
+                    // FR-RFQ-08. The digest the governed intake computed when these bytes were
+                    // captured — not a second one taken later, which would only prove the file
+                    // matches itself now. Recording it here is what makes "immutable" checkable
+                    // rather than merely intended.
+                    ContentSha256 = job.ContentHash,
                     CreatedOn = now,
                     UploadedDate = now
                 });
@@ -1552,15 +1562,7 @@ public sealed class LeadPersister : ILeadPersister
         return t is "product" or "service" or "mixed" ? t : null;
     }
 
-    private static readonly string[] DateFormats =
-        { "yyyy-MM-dd", "dd/MM/yyyy", "MM/dd/yyyy", "dd-MM-yyyy", "d/M/yyyy", "yyyy/MM/dd" };
-
-    private static DateTime? ParseDate(string? s)
-        => string.IsNullOrWhiteSpace(s)
-            ? null
-            : DateTime.TryParseExact(s.Trim(), DateFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)
-                ? d
-                : null;
+    private static DateTime? ParseDate(string? s) => RfqDateParser.Parse(s);
 
     private static string? Truncate(string? value, int max)
         => string.IsNullOrEmpty(value) ? null : (value.Length <= max ? value : value[..max]);

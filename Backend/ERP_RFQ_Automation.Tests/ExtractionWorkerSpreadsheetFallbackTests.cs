@@ -24,8 +24,12 @@ public sealed class ExtractionWorkerSpreadsheetFallbackTests
     [Fact]
     public async Task UnrecognizedXls_UnauthorizedExternalProvider_IsHeldRetryable_NeverDeadLettered()
     {
-        var fixture = ReadFixture("unrecognized-layout-rfq.xls");
-        var queue = new RecordingQueue(CreateJob(801, "C001046140.xls"));
+        // Headers with no commercial meaning, so the deterministic parser genuinely maps no
+        // column. Ordinary RFQ spellings — and title blocks above the header — are now read
+        // structurally, so this path needs a document that really is unreadable to reach the
+        // external-provider gate.
+        var fixture = UnrecognizableWorkbook();
+        var queue = new RecordingQueue(CreateJob(801, "enquiry.xlsx", "xlsx"));
         var llm = new StubLlm(AiProviderClass.External, Ext.Result(Ext.Items(3, 0.9), 0.9));
         using var services = BuildServices(queue, fixture, llm, new RecordingPersister());
         var worker = CreateWorker(services);
@@ -40,7 +44,7 @@ public sealed class ExtractionWorkerSpreadsheetFallbackTests
 
             // The recorded reason is honest and specific: the spreadsheet was read, the
             // layout was not recognized, and the fail-closed hold explains what is next.
-            Assert.Contains("The XLS spreadsheet was read successfully", recordedError);
+            Assert.Contains("The XLSX spreadsheet was read successfully", recordedError);
             Assert.Contains("column layout was not recognized", recordedError);
             Assert.Contains("blocked for unstructured documents", recordedError);
             Assert.Contains("human review", recordedError);
@@ -173,10 +177,84 @@ public sealed class ExtractionWorkerSpreadsheetFallbackTests
 
     // ---- harness ----------------------------------------------------------
 
+    /// <summary>
+    /// The journey the demo depends on: a real Word RFQ from the 120-document sample set goes
+    /// through the worker end to end, produces every line, and never touches a model. If this
+    /// test ever needs an authorized AI provider to pass, the deterministic path has regressed
+    /// and every one of those documents is back to dead-lettering.
+    /// </summary>
+    [Fact]
+    public async Task WordTableRfq_CompletesDeterministically_WithEveryLineIntact()
+    {
+        var fixture = ReadFixture("rfq-table.docx");
+        var queue = new RecordingQueue(CreateJob(804, "RFQ-260011_Omega_Oil.docx", "docx"));
+        // External provider on purpose: any model call at all would be refused and fail the run.
+        var llm = new StubLlm(AiProviderClass.External);
+        var persister = new RecordingPersister();
+        using var services = BuildServices(queue, fixture, llm, persister);
+        var worker = CreateWorker(services);
+
+        await worker.StartAsync(CancellationToken.None);
+        try
+        {
+            var outcome = await persister.Persisted.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+            Assert.Equal(0, llm.CallCount);
+            Assert.Equal(ExtractionProcessingPath.DeterministicRules, outcome.ProcessingPath);
+            Assert.NotEqual(ExtractionOutcomeStatus.Failed, outcome.Status);
+            Assert.False(queue.RetryableFailure.Task.IsCompleted);
+            Assert.False(queue.PermanentFailure.Task.IsCompleted);
+
+            var document = Assert.Single(outcome.CanonicalImport!.Documents);
+            Assert.Equal("RFQ-260011", document.RfqNo.Value);
+            Assert.Equal("Omega Oil", document.BuyerName.Value);
+            Assert.Equal(8, document.LineItems.Count);
+
+            // An optional field that could not be parsed must never condemn the document.
+            Assert.NotEqual(
+                ERP_RFQ_Automation.DTOs.DocumentIntelligence.ValidationStatus.Invalid,
+                document.ValidationStatus);
+
+            var first = document.LineItems[0];
+            Assert.Equal("1", first.LineItemNo.Value);              // not the header's row number
+            Assert.Equal("SKU-2244", first.ManufacturerPartNumber.Value);
+            Assert.Equal("Safety Relay", first.ProductName.Value);
+            Assert.Equal(57, first.Quantity.Value);
+            Assert.Equal("Urgent requirement", first.ItemText.Value);
+
+            // A lead time we never read must stay unset — 0 would mean "deliver immediately".
+            Assert.All(document.LineItems, line => Assert.NotEqual(
+                ERP_RFQ_Automation.DTOs.DocumentIntelligence.CanonicalValueKind.Normalized,
+                line.LeadTimeDays.Kind));
+
+            Assert.Equal(8, outcome.ExtractedItemCount);
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+            worker.Dispose();
+        }
+    }
+
+    /// <summary>A workbook the deterministic parser cannot map a single column of.</summary>
+    private static byte[] UnrecognizableWorkbook()
+    {
+        OfficeOpenXml.ExcelPackage.LicenseContext = OfficeOpenXml.LicenseContext.NonCommercial;
+        using var package = new OfficeOpenXml.ExcelPackage();
+        var worksheet = package.Workbook.Worksheets.Add("Enquiry");
+        worksheet.Cells[1, 1].Value = "Section";
+        worksheet.Cells[1, 2].Value = "Narrative";
+        worksheet.Cells[1, 3].Value = "Owner";
+        worksheet.Cells[2, 1].Value = "MAT-88001";
+        worksheet.Cells[2, 2].Value = "Ball valve DN50 PN16 stainless";
+        worksheet.Cells[2, 3].Value = "Jubail Plant";
+        return package.GetAsByteArray();
+    }
+
     private static byte[] ReadFixture(string name)
         => File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", name));
 
-    private static ExtractionJob CreateJob(long id, string fileName) => new()
+    private static ExtractionJob CreateJob(long id, string fileName, string fileType = "xls") => new()
     {
         Id = id,
         BusinessUnitId = 7,
@@ -185,7 +263,7 @@ public sealed class ExtractionWorkerSpreadsheetFallbackTests
         ContentHash = new string('e', 64),
         StoragePath = "memory://evidence/object",
         FileName = fileName,
-        FileType = "xls",
+        FileType = fileType,
         Status = ExtractionStatus.Leased,
         Attempts = 1,
         MaxAttempts = 5,
