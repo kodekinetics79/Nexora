@@ -1,5 +1,6 @@
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Inventory;
+using ERP_RFQ_Automation.OrderToCash;
 using ERP_RFQ_Automation.Procurement;
 using ERP_RFQ_Automation.SupplierQuotes;
 using Microsoft.EntityFrameworkCore;
@@ -566,7 +567,8 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
             readiness, decision, slaRisk, clarification, next, lineResults,
             BuildDigitalTwin(lineResults, requiredDates,
                 offers, suppliers, revisions, quoteStates, pricingDecisions, predictivePricing, evidence,
-                currencyCodes));
+                currencyCodes,
+                await context.ResolveSupplierInputTaxRecoverableAsync(businessUnitId, cancellationToken)));
     }
 
     public async Task<LearningStudioSummary> GetStudioAsync(long businessUnitId,
@@ -747,7 +749,8 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
         IReadOnlyCollection<CustomerQuoteSourcingDecision> pricingDecisions,
         IReadOnlyCollection<PredictivePriceLine> predictivePricing,
         IReadOnlyCollection<CommercialEvidenceLink> rfqEvidence,
-        IReadOnlyDictionary<long, string> currencyCodes)
+        IReadOnlyDictionary<long, string> currencyCodes,
+        bool supplierInputTaxRecoverable)
     {
         var scenarios = new List<OpportunityScenario>();
         var stockOnly = lines.Count > 0 && lines.All(x => x.StockQuantity >= x.RequestedQuantity);
@@ -851,7 +854,17 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
                     .Concat(selected.Where(x => x.StockQuantity > 0m).Select(x => new ScenarioCostSource(
                         "INTERNAL_STOCK", "Internal inventory cost", null, null, "EVIDENCE_REQUIRED", null))).ToArray(),
                 [preserveStock ? "Uses current ATP first and sources only the shortage." : "Sources the full requested quantity.",
-                    "Freight, duty and other captured costs are included in landed cost."],
+                    // This caveat used to assert flatly that "freight, duty and other captured costs
+                    // are included in landed cost". Duty and other are zero on every offer projected
+                    // from a canonical Supplier Quote (decision R8: the quoted price is stated, so
+                    // duty is already inside it), so the sentence promised an accounting the numbers
+                    // did not contain. It now reports what these offers actually carry.
+                    selected.Any(x => x.Offer.DutyCost > 0m || x.Offer.OtherCost > 0m)
+                        ? "Landed cost includes freight and the duty and other charges captured on these offers."
+                        : "Landed cost includes freight; no duty or other charge is captured on these offers.",
+                    supplierInputTaxRecoverable
+                        ? "Recoverable Supplier input tax is excluded from landed cost; output VAT is added on the Customer Quote."
+                        : "Supplier input tax is not recoverable for this business unit, so it is included in landed cost."],
                 margin.HasValue ? ["Authorized margin exists; final Quote approval policy still applies."] :
                     ["Select and approve the final fulfilment route.", "Confirm margin before Customer Quote approval."],
                 selected.Select(x => new CommercialEvidenceLink("SupplierQuotedItem", x.Offer.Id,
@@ -898,15 +911,23 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
                         decision.CurrencyId, "Target bridge withheld until the selected offer is current, canonical, currency-matched and valid.", evidence);
                 var maximumLanded = decimal.Round(decision.CustomerUnitPrice *
                     (1m - decision.TargetMarginPercent / 100m), 6);
+                // This term must contain exactly what landed cost contains, or the bridge stops
+                // reconciling. Recoverable input tax is not in landed cost (LandedCostFormula), so
+                // it is not deducted here either — deducting it would understate the maximum
+                // supplier price the target can bear by the whole VAT amount.
                 var adjustments = decimal.Round(
-                    (offer!.FreightCost + offer.DutyCost + offer.OtherCost + (offer.TaxAmount ?? 0m) -
+                    (offer!.FreightCost + offer.DutyCost + offer.OtherCost +
+                        LandedCostFormula.CostBearingTax(offer.TaxAmount ?? 0m, supplierInputTaxRecoverable) -
                         (offer.DiscountAmount ?? 0m)) / offer.Quantity, 6);
                 var maximumSupplier = decimal.Round(maximumLanded - adjustments, 6);
                 return new CustomerTargetBridge(decision.RfqItemId,
                     maximumSupplier > 0m ? "VERIFIED_SOURCING_DECISION" : "TARGET_INFEASIBLE",
                     decision.CustomerUnitPrice, decision.TargetMarginPercent, maximumLanded, adjustments,
                     maximumSupplier, decision.CurrencyId,
-                    "max landed = target price x (1 - gross margin); max supplier = max landed - per-unit freight, duty, tax and other captured cost, plus discount",
+                    "max landed = target price x (1 - gross margin); max supplier = max landed - per-unit freight, " +
+                    "duty and other captured cost, plus discount" + (supplierInputTaxRecoverable
+                        ? "; recoverable Supplier input tax is not a cost and is excluded"
+                        : "; Supplier input tax is not recoverable here, so it is deducted as a cost"),
                     evidence);
             }).ToArray();
         var holdouts = predictivePricing.Where(x => x.BacktestHoldoutCount > 0 &&

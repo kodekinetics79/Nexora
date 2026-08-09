@@ -304,8 +304,12 @@ public sealed class MultiCurrencyRemediationTests
 
         Assert.Equal(300m, eaFreight);  // 3,000 / 4,000 of the freight
         Assert.Equal(100m, lotFreight); // 1,000 / 4,000 of the freight
-        Assert.Equal(110m, LandedCostFormula.UnitCost(100m, 30m, eaFreight, 0m));
-        Assert.Equal(1_100m, LandedCostFormula.UnitCost(1_000m, 1m, lotFreight, 0m));
+        // Numbers unchanged by the input-tax fix: these lines carry no tax, and freight is a real
+        // non-recoverable cost that stays in landed cost regardless of the policy switch.
+        Assert.Equal(110m, LandedCostFormula.UnitCost(100m, 30m, eaFreight, 0m,
+            supplierInputTaxRecoverable: true));
+        Assert.Equal(1_100m, LandedCostFormula.UnitCost(1_000m, 1m, lotFreight, 0m,
+            supplierInputTaxRecoverable: true));
     }
 
     [Fact]
@@ -313,7 +317,7 @@ public sealed class MultiCurrencyRemediationTests
     {
         // Both of these threw DivideByZeroException in the quantity-weighted projection code.
         Assert.Equal(0m, LandedCostFormula.AllocateByValue(500m, 0m, 0m));
-        Assert.Equal(42m, LandedCostFormula.UnitCost(42m, 0m, 0m, 0m));
+        Assert.Equal(42m, LandedCostFormula.UnitCost(42m, 0m, 0m, 0m, supplierInputTaxRecoverable: true));
     }
 
     [Fact]
@@ -331,8 +335,10 @@ public sealed class MultiCurrencyRemediationTests
             var lineValue = LandedCostFormula.LineValue(unitPrice, quantity);
             var freight = LandedCostFormula.AllocateByValue(400m, lineValue, total);
             var tax = LandedCostFormula.AllocateByValue(80m, lineValue, total);
-            var projected = LandedCostFormula.UnitCost(unitPrice, quantity, freight, tax);
-            var recomputed = LandedCostFormula.UnitCost(unitPrice, quantity, freight, tax);
+            var projected = LandedCostFormula.UnitCost(unitPrice, quantity, freight, tax,
+                supplierInputTaxRecoverable: true);
+            var recomputed = LandedCostFormula.UnitCost(unitPrice, quantity, freight, tax,
+                supplierInputTaxRecoverable: true);
             Assert.Equal(projected, recomputed);
             Assert.True(Math.Abs(projected - recomputed) <= projected * 0.02m);
         }

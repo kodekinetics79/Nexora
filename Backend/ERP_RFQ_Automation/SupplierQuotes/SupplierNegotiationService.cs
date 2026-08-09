@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using ERP_RFQ_Automation.Agent.Models;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.OrderToCash;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 
@@ -291,7 +292,8 @@ public sealed class SupplierNegotiationService(ErpRfqAutomationContext context)
             .Select(x => x.Code).SingleOrDefaultAsync(cancellationToken)
             ?? $"Currency {effectiveCurrencyId}";
         return new NegotiationInput(quote, currentRevision, supplier, competitors, selectedSnapshots,
-            decisions, currencyCode, now, decisionTotal);
+            decisions, currencyCode, now, decisionTotal,
+            await context.ResolveSupplierInputTaxRecoverableAsync(businessUnitId, cancellationToken));
     }
 
     internal static SupplierNegotiationWorkspace BuildWorkspace(NegotiationInput input)
@@ -672,7 +674,7 @@ public sealed class SupplierNegotiationService(ErpRfqAutomationContext context)
                 .Select(x => CommercialPrice(x)!.Value).OrderBy(x => x).ToArray();
             if (cohort.Length < 2) continue;
             var median = Median(cohort);
-            var current = CurrentLandedUnitCost(input.CurrentRevision, line);
+            var current = CurrentLandedUnitCost(input.CurrentRevision, line, input.SupplierInputTaxRecoverable);
             if (median > 0 && (current > median * 1.25m || current < median * .75m))
                 yield return $"Line {line.LineNumber}: current {current:F4}; cohort median {median:F4}; n={cohort.Length}";
         }
@@ -687,7 +689,7 @@ public sealed class SupplierNegotiationService(ErpRfqAutomationContext context)
                 .Select(x => CommercialPrice(x)!.Value).OrderBy(x => x).ToArray();
             if (cohort.Length < 2) continue;
             var median = Median(cohort);
-            var current = CurrentLandedUnitCost(input.CurrentRevision, line);
+            var current = CurrentLandedUnitCost(input.CurrentRevision, line, input.SupplierInputTaxRecoverable);
             if (median > 0 && current > median * 1.25m)
                 yield return $"Line {line.LineNumber}: current {current:F4}; cohort median {median:F4}; n={cohort.Length}";
         }
@@ -741,7 +743,7 @@ public sealed class SupplierNegotiationService(ErpRfqAutomationContext context)
         foreach (var selected in input.SelectedOffers.Where(x => x.RfqItemId == line.RfqItemId &&
                      x.CurrencyId == input.CurrentRevision.CurrencyId && x.LandedUnitCost > 0))
         {
-            var current = CurrentLandedUnitCost(input.CurrentRevision, line);
+            var current = CurrentLandedUnitCost(input.CurrentRevision, line, input.SupplierInputTaxRecoverable);
             if (current > selected.LandedUnitCost * 1.02m)
                 yield return $"Line {line.LineNumber}: current landed {current:F4}; selected snapshot {selected.LandedUnitCost:F4}";
         }
@@ -832,14 +834,16 @@ public sealed class SupplierNegotiationService(ErpRfqAutomationContext context)
     /// BLOCKING flag. When the two sides used different allocation bases the flag fired on
     /// arithmetic rather than on anything the supplier did.
     /// </summary>
-    private static decimal CurrentLandedUnitCost(SupplierQuoteRevision revision, SupplierQuoteLine line)
+    private static decimal CurrentLandedUnitCost(SupplierQuoteRevision revision, SupplierQuoteLine line,
+        bool supplierInputTaxRecoverable)
     {
         var totalLineValue = LandedCostFormula.TotalLineValue(
             revision.Lines.Select(x => (x.UnitPrice, x.Quantity)));
         var lineValue = LandedCostFormula.LineValue(line.UnitPrice, line.Quantity);
         var freight = LandedCostFormula.AllocateByValue(revision.FreightAmount, lineValue, totalLineValue);
         var tax = LandedCostFormula.AllocateByValue(revision.TaxAmount, lineValue, totalLineValue);
-        return LandedCostFormula.UnitCost(line.UnitPrice, line.Quantity, freight, tax);
+        return LandedCostFormula.UnitCost(line.UnitPrice, line.Quantity, freight, tax,
+            supplierInputTaxRecoverable);
     }
     private static decimal Median(IReadOnlyList<decimal> values) => values.Count % 2 == 1
         ? values[values.Count / 2]
@@ -917,7 +921,12 @@ internal sealed record NegotiationInput(
     IReadOnlyCollection<SupplierNegotiationDecisionView> PriorDecisions,
     string CurrencyCode,
     DateTime NowUtc,
-    int PriorDecisionTotal = 0);
+    int PriorDecisionTotal = 0,
+    // The tenant's CommercialMatchingPolicy.SupplierInputTaxRecoverable, carried in because the
+    // evidence builders are static and pure but must reach the same landed-cost number the
+    // projection persisted — otherwise the >2% gap that raises a blocking CRITICAL
+    // POST_SELECTION_PRICE_INCREASE reopens, this time on the tax term.
+    bool SupplierInputTaxRecoverable = true);
 
 internal sealed record NegotiationProjection(
     long Id,

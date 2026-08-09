@@ -67,6 +67,9 @@ public static class OrderToCashModelBuilderExtensions
             // One policy per tenant. The unique index is what makes "create on demand" safe under
             // concurrency: two requests racing to create the first row leaves one winner.
             entity.HasIndex(x => x.BusinessUnitId).IsUnique();
+            // KSA default: a VAT-registered tenant reclaims supplier input tax, so it is not a cost
+            // and never enters landed cost. See CommercialMatchingPolicy.SupplierInputTaxRecoverable.
+            entity.Property(x => x.SupplierInputTaxRecoverable).HasDefaultValue(true);
             entity.Property(x => x.PriceTolerancePercent).HasPrecision(9, 4).HasDefaultValue(2.0m);
             entity.Property(x => x.PriceToleranceMinimumAmount).HasPrecision(18, 6).HasDefaultValue(0m);
             entity.Property(x => x.QuantityTolerancePercent).HasPrecision(9, 4).HasDefaultValue(0m);

@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using ERP_RFQ_Automation.Agent.Models;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.OrderToCash;
 using ERP_RFQ_Automation.Procurement;
 using Microsoft.EntityFrameworkCore;
 
@@ -35,6 +36,11 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
             if (quote.InboxStatus != SupplierQuoteInboxStatuses.ReadyForComparison)
                 throw new SupplierQuoteValidationException("Complete critical field review before comparison.");
 
+            // Whether the supplier's tax is a cost at all is a tenant fact, not a line fact:
+            // CommercialMatchingPolicy.SupplierInputTaxRecoverable. Read once per projection so
+            // every line of the round is costed on one answer.
+            var inputTaxRecoverable = await context.ResolveSupplierInputTaxRecoverableAsync(
+                command.BusinessUnitId, cancellationToken);
             var revision = quote.Revisions.Single(x => x.RevisionNumber == quote.CurrentRevisionNumber);
             var correctedByEvidence = revision.ReviewDecisions
                 .GroupBy(x => x.SupplierQuoteFieldEvidenceId)
@@ -120,7 +126,8 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                     row.AvailableQuantity = EffectiveNullableDecimal(line, "AvailableQuantity", line.AvailableQuantity);
                     row.FreightCost = freight;
                     row.TaxAmount = tax;
-                    row.LandedUnitCost = LandedCostFormula.UnitCost(unitPrice, quantity, freight, tax);
+                    row.LandedUnitCost = LandedCostFormula.UnitCost(unitPrice, quantity, freight, tax,
+                        inputTaxRecoverable);
                     row.ValidUntil = effectiveValidUntil;
                     row.RequestHash = Hash(new { RevisionId = revision.Id, LineId = line.Id,
                         CorrectionReviewedOn = latestCorrection.Value });
@@ -178,7 +185,8 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                 var lineValue = LandedCostFormula.LineValue(unitPrice, quantity);
                 var freight = LandedCostFormula.AllocateByValue(revision.FreightAmount, lineValue, totalLineValue);
                 var tax = LandedCostFormula.AllocateByValue(revision.TaxAmount, lineValue, totalLineValue);
-                var landed = LandedCostFormula.UnitCost(unitPrice, quantity, freight, tax);
+                var landed = LandedCostFormula.UnitCost(unitPrice, quantity, freight, tax,
+                    inputTaxRecoverable);
                 var rfqLine = rfqLines[line.RfqItemId];
                 return new SupplierQuotedItem
                 {
@@ -202,6 +210,11 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                     LeadTimeDays = leadTime,
                     AvailableQuantity = available,
                     FreightCost = freight,
+                    // The supplier's tax is still recorded — it is real evidence, it is what we owe
+                    // the supplier, and it is the input VAT the tenant reclaims. It is simply not a
+                    // cost of the goods, so LandedUnitCost above excludes it under the default
+                    // policy. Duty and other stay zero per decision R8: the quoted price is stated,
+                    // not derived, so duty is already inside it.
                     TaxAmount = tax,
                     DutyCost = 0,
                     OtherCost = 0,
