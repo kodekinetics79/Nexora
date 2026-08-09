@@ -147,10 +147,11 @@ public sealed class LifecycleApplicationServiceTests
         Seed.Lead(context, 106, 76);
         Status(context, 507, 76, "LeadStatus", "CANCELLED", "Cancelled");
         Status(context, 508, 76, "LeadStatus", "UNDER_REVIEW", "Under Review");
+        OutcomeReason(context, 5076, 76, "CUSTOMER_CANCELLED", "Customer cancelled");
         await context.SaveChangesAsync();
         var service = Service(context);
         await service.TransitionLeadAsync(76, 106, Actor(),
-            Command("CANCELLED", 1, "lead-106-cancel", "CUSTOMER_WITHDREW"), false, default);
+            Command("CANCELLED", 1, "lead-106-cancel", "CUSTOMER_CANCELLED"), false, default);
 
         var reopened = await service.TransitionLeadAsync(76, 106, Actor(),
             Command("UNDER_REVIEW", 2, "lead-106-reopen", "NEW_INFORMATION"), true, default);
@@ -159,7 +160,7 @@ public sealed class LifecycleApplicationServiceTests
         Assert.Equal(3, reopened.Version);
         var events = await context.CommercialLifecycleEvents.OrderBy(x => x.Id).ToArrayAsync();
         Assert.Equal(2, events.Length);
-        Assert.Equal("CUSTOMER_WITHDREW", events[0].ReasonCode);
+        Assert.Equal("CUSTOMER_CANCELLED", events[0].ReasonCode);
         Assert.Equal("NEW_INFORMATION", events[1].ReasonCode);
     }
 
@@ -417,6 +418,11 @@ public sealed class LifecycleApplicationServiceTests
 
     private static LifecycleTransitionCommand Command(string target, int version, string key, string? reasonCode = null)
         => new(target, version, reasonCode, reasonCode == null ? null : "reviewed notes", "Api", "corr-1", "req-1", key);
+
+    /// <summary>A row of the governed outcome-reason picklist shared with the quote outcome path.</summary>
+    private static SetupMaster OutcomeReason(
+        ErpRfqAutomationContext context, long id, long businessUnitId, string code, string label)
+        => Status(context, id, businessUnitId, "QuoteOutcomeReason", code, label);
 
     private static SetupMaster Status(
         ErpRfqAutomationContext context, long id, long businessUnitId, string type, string code, string label)

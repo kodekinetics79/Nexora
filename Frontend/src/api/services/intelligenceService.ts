@@ -217,14 +217,30 @@ export interface CustomerContextCompletenessDTO {
   demandLinesTruncated: boolean;
 }
 
+/** A loss recorded on the inquiry itself, before any quotation existed. */
+export interface CustomerLeadLossSummaryDTO {
+  leadId: number;
+  commercialCaseReference: string | null;
+  rfqNo: string | null;
+  lostOn: string | null;
+  /** From the same governed picklist a quote outcome reason comes from. */
+  outcomeReasonName: string | null;
+  outcomeNote: string | null;
+}
+
 export interface CustomerContextDTO {
   customerId: number;
   customerName: string | null;
   totalQuotes: number;
   wonQuotes: number;
   lostQuotes: number;
-  /** 0–100; null while nothing has been decided yet. */
+  /** 0–100; null while no QUOTE has been decided yet. */
   winRatePct: number | null;
+  /** Inquiries lost or abandoned before a quotation existed, each with a governed reason. */
+  leadStageLosses: number;
+  /** 0–100 over every decided inquiry — quotes won and lost, plus lead-stage losses. */
+  inquiryWinRatePct: number | null;
+  recentLeadLosses: CustomerLeadLossSummaryDTO[];
   ordersLast24Months: number;
   orderValueLast24Months: number | null;
   orderValueStatus: string;

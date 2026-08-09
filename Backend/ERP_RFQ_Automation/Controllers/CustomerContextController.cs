@@ -24,6 +24,7 @@ namespace ERP_RFQ_Automation.Controllers
         private const int OrderLookbackMonths = 24;
         private const int DemandLookbackMonths = 24;
         private const int RecentQuotesCount = 10;
+        private const int RecentLeadLossesCount = 10;
         private const int RecentRfqsCount = 10;
         private const int RecentOrdersCount = 10;
         private const int KeyLinesPerQuote = 3;
@@ -81,6 +82,29 @@ namespace ERP_RFQ_Automation.Controllers
                     && o.SourceType == OrderSourceTypes.CustomerAward
                     && o.QuoteId == q.Id), ct);
             var decided = won + lost;
+
+            // Losses that happened BEFORE a quotation existed. Without these the win rate only ever
+            // sees inquiries that got far enough to be quoted, and every "we are not bidding this"
+            // decision is silently absent from win/loss reporting.
+            var leadLossQuery = _db.Leads.AsNoTracking()
+                .Where(l => l.BusinessUnitId == businessUnitId
+                    && l.CustomerId == customer.Id
+                    && l.OutcomeOn.HasValue);
+            var leadStageLosses = await leadLossQuery.CountAsync(ct);
+            var leadLossRows = await leadLossQuery
+                .OrderByDescending(l => l.OutcomeOn)
+                .ThenByDescending(l => l.Id)
+                .Take(RecentLeadLossesCount)
+                .Select(l => new
+                {
+                    l.Id,
+                    l.CommercialCaseReference,
+                    l.Rfqno,
+                    l.OutcomeOn,
+                    l.OutcomeReasonId,
+                    l.OutcomeNote
+                })
+                .ToListAsync(ct);
 
             var quoteCurrencyRows = await quoteQuery
                 .Where(q => q.TotalAmount.HasValue)
@@ -202,8 +226,13 @@ namespace ERP_RFQ_Automation.Controllers
                 .Select(q => q.Id)
                 .ToHashSet();
 
+            // One resolution pass: a lead loss reason and a quote loss reason are rows from the same
+            // governed picklist, so they are named the same way.
             var reasonIds = recentQuoteRows.Where(q => q.OutcomeReasonId.HasValue)
-                .Select(q => q.OutcomeReasonId!.Value).Distinct().ToList();
+                .Select(q => q.OutcomeReasonId!.Value)
+                .Concat(leadLossRows.Where(l => l.OutcomeReasonId.HasValue)
+                    .Select(l => l.OutcomeReasonId!.Value))
+                .Distinct().ToList();
             var reasonNames = reasonIds.Count == 0
                 ? new Dictionary<long, string>()
                 : await _db.SetupMasters.AsNoTracking()
@@ -288,6 +317,19 @@ namespace ERP_RFQ_Automation.Controllers
                         UnitPrice = item.UnitPrice
                     })
                     .ToList()
+            }).ToList();
+
+            var recentLeadLosses = leadLossRows.Select(l => new CustomerLeadLossSummaryDTO
+            {
+                LeadId = l.Id,
+                CommercialCaseReference = l.CommercialCaseReference,
+                RfqNo = l.Rfqno,
+                LostOn = l.OutcomeOn,
+                OutcomeReasonName = l.OutcomeReasonId.HasValue
+                    && reasonNames.TryGetValue(l.OutcomeReasonId.Value, out var leadReasonName)
+                        ? leadReasonName
+                        : null,
+                OutcomeNote = l.OutcomeNote
             }).ToList();
 
             // The sale date and currency are authoritative customer-award order
@@ -401,6 +443,11 @@ namespace ERP_RFQ_Automation.Controllers
                 WinRatePct = decided > 0
                     ? Math.Round(100m * won / decided, 1, MidpointRounding.AwayFromZero)
                     : null,
+                LeadStageLosses = leadStageLosses,
+                RecentLeadLosses = recentLeadLosses,
+                InquiryWinRatePct = decided + leadStageLosses > 0
+                    ? Math.Round(100m * won / (decided + leadStageLosses), 1, MidpointRounding.AwayFromZero)
+                    : null,
                 OrdersLast24Months = orderCount,
                 OrderValueLast24Months = SingleCurrencyValue(orderValueGroups, group => group.TotalAmount),
                 OrderValueStatus = CurrencyAggregateStatus(orderValueGroups),
@@ -495,6 +542,20 @@ namespace ERP_RFQ_Automation.Controllers
         /// <summary>Won divided by won plus lost; null while no quote is decided.</summary>
         public decimal? WinRatePct { get; set; }
 
+        /// <summary>
+        /// Inquiries this customer sent that were lost or abandoned BEFORE a quotation existed,
+        /// each carrying a governed outcome reason. These never reach <see cref="LostQuotes"/>.
+        /// </summary>
+        public int LeadStageLosses { get; set; }
+
+        /// <summary>
+        /// Won divided by every decided inquiry — quotes won, quotes lost, AND lead-stage losses.
+        /// The honest denominator; <see cref="WinRatePct"/> only ever sees quoted work.
+        /// </summary>
+        public decimal? InquiryWinRatePct { get; set; }
+
+        public List<CustomerLeadLossSummaryDTO> RecentLeadLosses { get; set; } = new();
+
         public int OrdersLast24Months { get; set; }
         public decimal? OrderValueLast24Months { get; set; }
         public string OrderValueStatus { get; set; } = "no_data";
@@ -558,6 +619,20 @@ namespace ERP_RFQ_Automation.Controllers
         public string Outcome { get; set; } = "open";
         public string? OutcomeReasonName { get; set; }
         public List<CustomerKeyLineDTO> KeyLines { get; set; } = new();
+    }
+
+    /// <summary>A loss recorded on the inquiry itself, before any quotation existed.</summary>
+    public sealed class CustomerLeadLossSummaryDTO
+    {
+        public long LeadId { get; set; }
+        public string? CommercialCaseReference { get; set; }
+        public string? RfqNo { get; set; }
+        public DateTime? LostOn { get; set; }
+
+        /// <summary>From the same governed picklist a quote outcome reason comes from.</summary>
+        public string? OutcomeReasonName { get; set; }
+
+        public string? OutcomeNote { get; set; }
     }
 
     public sealed class CustomerKeyLineDTO

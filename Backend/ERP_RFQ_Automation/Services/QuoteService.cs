@@ -258,9 +258,19 @@ namespace ERP_RFQ_Automation.Services
                 if (invalidLines.Length > 0)
                     throw new InvalidOperationException($"Review required request data for {string.Join(", ", invalidLines)} before preparing a Quote Draft.");
 
+                // The LATEST quote on this RFQ, not the only one.
+                //
+                // A revision is a new Quote row carrying the SAME Rfqid (see CreateRevisionAsync),
+                // which FR-QTM-08 requires. This read used SingleOrDefaultAsync on that column, so
+                // the first revision made preparing a draft for that RFQ throw "Sequence contains
+                // more than one element" — permanently, for the life of the inquiry. The revision
+                // feature and this read could not both work.
                 var existing = await _context.Quotes
                     .Include(item => item.Status)
-                    .SingleOrDefaultAsync(item => item.Rfqid == rfqId && item.BusinessUnitId == businessUnitId, ct);
+                    .Where(item => item.Rfqid == rfqId && item.BusinessUnitId == businessUnitId)
+                    .OrderByDescending(item => item.RevisionNo)
+                    .ThenByDescending(item => item.Id)
+                    .FirstOrDefaultAsync(ct);
                 if (existing != null)
                 {
                     var existingCode = LifecyclePolicy.Canonicalize("Quote", existing.Status?.SetupCode, existing.Status?.SetupValue);

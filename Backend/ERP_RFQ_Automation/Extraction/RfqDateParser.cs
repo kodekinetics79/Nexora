@@ -141,10 +141,57 @@ public static class RfqDateParser
         return RfqDateReading.None;
     }
 
+    /// <summary>Hijri years a real tender could plausibly carry. 1400 AH ≈ 1979, 1500 AH ≈ 2076.</summary>
+    private const int MinimumPlausibleHijriYear = 1400;
+    private const int MaximumPlausibleHijriYear = 1500;
+
     private static RfqDateReading Sanitized(DateTime value, string rawToken, bool hasTime, bool ambiguous)
-        => value.Year is >= MinimumPlausibleYear and <= MaximumPlausibleYear
-            ? new RfqDateReading(value, rawToken, hasTime, ambiguous)
-            : RfqDateReading.None;
+    {
+        if (value.Year is >= MinimumPlausibleYear and <= MaximumPlausibleYear)
+            return new RfqDateReading(value, rawToken, hasTime, ambiguous);
+
+        // A Saudi government tender routinely states its closing date in Hijri — "15/03/1447".
+        // Every component parses, so the token reaches here looking like a Gregorian date in the
+        // year 1447, where the plausible-year guard discards it and the deadline is lost in
+        // silence. That is the single most damaging way to misread an Etimad pack: the bid closes
+        // and nobody knew there was a bid.
+        //
+        // A year in the Hijri band cannot be a Gregorian tender date — 1447 CE is not a date any
+        // buyer means — so the reading is unambiguous, and the value is converted rather than
+        // rejected. The stored value stays Gregorian: one calendar is authoritative everywhere,
+        // and ToHijri renders the buyer's own form beside it.
+        if (value.Year is >= MinimumPlausibleHijriYear and <= MaximumPlausibleHijriYear
+            && FromHijri(value.Year, value.Month, value.Day) is { } gregorian)
+        {
+            var withTime = gregorian.Add(value.TimeOfDay);
+            return withTime.Year is >= MinimumPlausibleYear and <= MaximumPlausibleYear
+                ? new RfqDateReading(withTime, rawToken, hasTime, IsDayMonthAmbiguous: false)
+                : RfqDateReading.None;
+        }
+
+        return RfqDateReading.None;
+    }
+
+    /// <summary>
+    /// Converts an Umm al-Qura date to its Gregorian equivalent, or null when the components are
+    /// not a real Hijri date (month 13, day 31, or outside the calendar's supported range).
+    /// </summary>
+    public static DateTime? FromHijri(int year, int month, int day)
+    {
+        var calendar = new UmAlQuraCalendar();
+        if (month is < 1 or > 12 || day < 1) return null;
+
+        try
+        {
+            if (day > calendar.GetDaysInMonth(year, month)) return null;
+            return calendar.ToDateTime(year, month, day, 0, 0, 0, 0);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            // Outside Umm al-Qura's supported range. Unreadable is the honest answer.
+            return null;
+        }
+    }
 
     /// <summary>
     /// True when a numeric token's first two components are both 12 or lower and differ, so

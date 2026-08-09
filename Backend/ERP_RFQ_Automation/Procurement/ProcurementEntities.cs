@@ -158,6 +158,19 @@ public sealed class SupplierPurchaseOrder
     public long? CustomerOrderId { get; set; }
 
     public long? QuoteId { get; set; }
+
+    /// <summary>
+    /// The commercial case this order belongs to, carried rather than joined.
+    ///
+    /// <para>It is reachable through the customer chain above, but a supplier purchase order that
+    /// cannot state its own master reference forces a multi-table join to print the one identifier
+    /// a buyer, a supplier and an auditor all quote back at us. Null on a STOCK order, which has
+    /// no case behind it.</para>
+    /// </summary>
+    public long? CommercialCaseId { get; set; }
+
+    public string? NexoraSerial { get; set; }
+
     public long SupplierId { get; set; }
     public long CurrencyId { get; set; }
     public string PurchaseOrderNumber { get; set; } = null!;
@@ -172,6 +185,34 @@ public sealed class SupplierPurchaseOrder
     public DateTime? ModifiedOn { get; set; }
     public string? ModifiedBy { get; set; }
     public ICollection<SupplierPurchaseOrderLine> Lines { get; set; } = new List<SupplierPurchaseOrderLine>();
+
+    /// <summary>
+    /// Carries a resolved commercial case onto this order at the moment it is created.
+    ///
+    /// <para>The caller resolves the case from a tenant-scoped read of the document that owns it —
+    /// the RFQ, or one of the customer keys above. The tenant of that read is passed back in so the
+    /// copy itself is checked: a case id is a tenant-owned key, and a supplier purchase order that
+    /// quoted another business unit's master reference would leak one tenant's commercial identity
+    /// into another's paperwork.</para>
+    ///
+    /// <para>A STOCK order is left untouched. Replenishment has no customer and therefore no case,
+    /// so a null here is the correct answer rather than missing data — see
+    /// <see cref="DemandSource"/>.</para>
+    /// </summary>
+    public void InheritCommercialIdentity(long sourceBusinessUnitId, long? commercialCaseId, string? nexoraSerial)
+    {
+        if (sourceBusinessUnitId != BusinessUnitId)
+            throw new InvalidOperationException(
+                "A commercial case cannot be carried across business units.");
+        if (DemandSource == SupplierPurchaseOrderDemandSources.Stock)
+            return;
+        if (CommercialCaseId.HasValue && CommercialCaseId != commercialCaseId)
+            throw new InvalidOperationException(
+                "A supplier purchase order commercial identity cannot be replaced.");
+
+        CommercialCaseId = commercialCaseId;
+        NexoraSerial = nexoraSerial;
+    }
 }
 
 public sealed class SupplierPurchaseOrderLine

@@ -69,6 +69,14 @@ public static partial class LifecyclePolicy
         Edge("ACCEPTED", "ORDERED"));
 
     private static readonly IReadOnlySet<string> LeadTerminal = Set("DISQUALIFIED", "LOST", "CANCELLED", "COMPLETED", "DUPLICATED");
+
+    /// <summary>
+    /// The lead terminals that mean "this inquiry was lost or abandoned". These are the states a
+    /// case can reach BEFORE a quotation exists, so they are the ones that must carry a governed
+    /// outcome reason — otherwise the loss leaves the pipeline unexplained and drops out of
+    /// win/loss reporting. COMPLETED (won through) and DUPLICATED (merged, never a loss) do not.
+    /// </summary>
+    private static readonly IReadOnlySet<string> LeadLossTerminal = Set("DISQUALIFIED", "LOST", "CANCELLED");
     private static readonly IReadOnlySet<string> RfqTerminal = Set("AWARDED", "LOST", "EXPIRED", "CANCELLED", "COMPLETED");
     private static readonly IReadOnlySet<string> QuoteTerminal = Set("REJECTED", "EXPIRED", "ORDERED");
     private static readonly IReadOnlySet<string> LeadReopenable = Set("DISQUALIFIED", "LOST", "CANCELLED");
@@ -134,6 +142,14 @@ public static partial class LifecyclePolicy
 
     public static bool RequiresReason(string aggregateType, string targetCode, bool reopen)
         => reopen || IsTerminal(aggregateType, targetCode) || targetCode is "AWARDED" or "PARTIALLY_AWARDED";
+
+    /// <summary>
+    /// True when the transition records a lead-stage loss, i.e. the inquiry ends without a
+    /// quotation ever deciding it. Such a transition must name a reason from the governed
+    /// outcome-reason picklist — the same one a quote outcome uses.
+    /// </summary>
+    public static bool RecordsLeadLoss(string aggregateType, string targetCode)
+        => aggregateType == "Lead" && LeadLossTerminal.Contains(targetCode);
 
     private static IReadOnlyDictionary<string, IReadOnlySet<string>> Graph(params (string From, string[] To)[] rows)
         => rows.ToDictionary(row => row.From, row => (IReadOnlySet<string>)Set(row.To), StringComparer.Ordinal);

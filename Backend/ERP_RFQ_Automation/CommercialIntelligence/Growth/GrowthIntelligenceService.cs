@@ -195,6 +195,12 @@ public sealed class GrowthIntelligenceService(ErpRfqAutomationContext context)
         var assignments = await context.Set<LeadAssignment>().AsNoTracking().Where(x =>
             x.BusinessUnitId == businessUnitId && leadIds.Contains(x.LeadId) && x.EffectiveFrom <= asOfUtc)
             .OrderByDescending(x => x.EffectiveFrom).Take(MaxRowsPerSource).ToArrayAsync(cancellationToken);
+        // Inquiries this customer sent that ended before a quotation existed. They are decided
+        // commercial outcomes and belong in the conversion denominator alongside decided quotes.
+        var leadStageLosses = await context.Leads.AsNoTracking().CountAsync(x =>
+            x.BusinessUnitId == businessUnitId && x.CustomerId == customerId &&
+            x.OutcomeOn.HasValue && x.OutcomeOn >= periodFromUtc && x.OutcomeOn < periodToUtc,
+            cancellationToken);
 
         var currentRfqs = rfqs.Where(x => x.RecDate >= periodFromUtc && x.RecDate < periodToUtc).ToArray();
         var previousRfqs = rfqs.Where(x => x.RecDate >= previousFrom && x.RecDate < periodFromUtc).ToArray();
@@ -240,6 +246,8 @@ public sealed class GrowthIntelligenceService(ErpRfqAutomationContext context)
         var lastActivity = commercialDates.Length == 0 ? (DateTime?)null : commercialDates.Max();
         var quoteCoverage = GrowthIntelligenceRules.Percent(quotedRfqIds.Count, eligibleRfqIds.Count);
         var conversion = GrowthIntelligenceRules.Percent(won.Length, decided.Length);
+        var decidedInquiries = decided.Length + leadStageLosses;
+        var inquiryConversion = GrowthIntelligenceRules.Percent(won.Length, decidedInquiries);
         var opportunities = currentRfqs.Where(x =>
                 (!latestRfqState.TryGetValue(x.Id, out var state) ||
                     !GrowthIntelligenceRules.IsTerminalRfqStatus(state.NewStatusCode)) &&
@@ -251,7 +259,7 @@ public sealed class GrowthIntelligenceService(ErpRfqAutomationContext context)
                 GrowthIntelligenceRules.Route("Rfq", x.Id)))
             .OrderBy(x => x.DecisionDeadlineUtc ?? DateTime.MaxValue).Take(50).ToArray();
         var assessment = GrowthIntelligenceRules.AssessCustomerHealth(asOfUtc, lastActivity, followUpHealth,
-            quoteCoverage, conversion, decided.Length);
+            quoteCoverage, inquiryConversion, decidedInquiries);
         var nextAction = GrowthIntelligenceRules.SelectNextCustomerAction(customerId, opportunities, followUps,
             asOfUtc);
         var quoteRevisionCount = quotes.Count(x => x.RevisionNo > 1);
@@ -267,7 +275,7 @@ public sealed class GrowthIntelligenceService(ErpRfqAutomationContext context)
             new TrendMetric(currentRfqs.Length, previousRfqs.Length,
                 GrowthIntelligenceRules.TrendPercent(currentRfqs.Length, previousRfqs.Length)),
             new QuoteFunnelMetric(eligibleRfqIds.Count, quotedRfqIds.Count, quoteCoverage, decided.Length,
-                won.Length, conversion), acceptedPrices,
+                won.Length, conversion, leadStageLosses, inquiryConversion), acceptedPrices,
             new MarginAvailability("unavailable", null, 0,
                 "No immutable quote-time landed-cost evidence is linked to accepted customer quote lines."),
             new RevisionBurden(leadRevisionCount, fieldDifferences?.Changed ?? 0, fieldDifferences?.Compared ?? 0,

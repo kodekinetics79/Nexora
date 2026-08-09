@@ -923,6 +923,30 @@ internal sealed class ProcurementScenario : IDisposable
             Issue(draft.Id, $"{key}-issue")));
     }
 
+    /// <summary>
+    /// Gives the seeded RFQ the commercial case a converted lead would have handed it, so a
+    /// purchase order raised from its awards has a real master reference to carry forward.
+    /// </summary>
+    public async Task<(long CaseId, string Serial)> AllocateCommercialCaseAsync()
+    {
+        await using var context = Context();
+        var rfq = await context.Rfqs.SingleAsync(x => x.Id == RfqId);
+        var serial = context.Entry(rfq).Property(x => x.NexoraSerial).CurrentValue!;
+        var commercialCase = new CommercialCase
+        {
+            Id = ProcurementTestData.CommercialCase,
+            BusinessUnitId = BusinessUnitId,
+            CreatedBy = "qa",
+            CreatedOn = DateTime.UtcNow
+        };
+        commercialCase.AssignIdentity(1, serial);
+        context.CommercialCases.Add(commercialCase);
+        await context.SaveChangesAsync();
+        context.Entry(rfq).Property(x => x.CommercialCaseId).CurrentValue = commercialCase.Id;
+        await context.SaveChangesAsync();
+        return (commercialCase.Id, serial);
+    }
+
     public async Task<long> PurchaseOrderLineIdAsync(long purchaseOrderId)
     {
         await using var context = Context();
@@ -985,6 +1009,7 @@ internal static class ProcurementTestData
     public const long Supplier = 96_050;
     public const long Rfq = 96_060;
     public const long RfqItem = 96_070;
+    public const long CommercialCase = 96_080;
     public const decimal InitialOnHand = 2m;
     private static readonly DateTime Now = new(2026, 7, 26, 12, 0, 0, DateTimeKind.Utc);
 

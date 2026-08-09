@@ -123,6 +123,12 @@ namespace ERP_RFQ_Automation.Controllers
                 {
                     await using var transaction = await _context.Database.BeginTransactionAsync();
 
+                    // Read inside the transaction, and inside the tenant predicate, so the master
+                    // reference stamped on the despatch note is the one the order held when the
+                    // goods were issued — and can only ever be this tenant's.
+                    var order = await _context.Orders.AsNoTracking()
+                        .SingleAsync(o => o.Id == dto.OrderId && o.BusinessUnitId == targetBUId);
+
                     var shipment = new Shipment
                     {
                         ShipmentNo = await _repository.GetNextShipmentNumberAsync(targetBUId),
@@ -143,6 +149,10 @@ namespace ERP_RFQ_Automation.Controllers
                         CreatedOn = DateTime.Now,
                         IsActive = true
                     };
+
+                    // FR-DLM-01: the delivery note carries the case rather than re-deriving it.
+                    // Set before the row is written, so a shipment cannot exist without it.
+                    shipment.InheritCommercialIdentity(order);
 
                     foreach (var itemDto in dto.Items)
                     {

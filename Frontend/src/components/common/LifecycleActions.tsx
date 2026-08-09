@@ -3,13 +3,16 @@ import { Button, CircularProgress, Menu, MenuItem, Tooltip } from '@mui/material
 import { AccountTree as LifecycleIcon } from '@mui/icons-material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSnackbar } from 'notistack';
-import lifecycleService, { type LifecycleAggregate, type LifecycleTransitionOption } from '../../api/services/commercialLifecycleService';
+import lifecycleService, { isLeadLoss, type LifecycleAggregate, type LifecycleTransitionOption } from '../../api/services/commercialLifecycleService';
+import LeadOutcomeDialog, { type LeadOutcomeCapture } from './LeadOutcomeDialog';
 import { presentableErrorMessage } from '../../utils/apiErrors';
 
 interface Props { aggregate: LifecycleAggregate; id: number; onChanged?: () => void; }
 
 const LifecycleActions: React.FC<Props> = ({ aggregate, id, onChanged }) => {
   const [anchor, setAnchor] = React.useState<HTMLElement | null>(null);
+  // The transition waiting on a captured outcome (lead lost / abandoned before any quotation).
+  const [pendingLoss, setPendingLoss] = React.useState<LifecycleTransitionOption | null>(null);
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
   const stateQuery = useQuery({
@@ -17,14 +20,16 @@ const LifecycleActions: React.FC<Props> = ({ aggregate, id, onChanged }) => {
     queryFn: () => lifecycleService.getState(aggregate, id),
   });
   const mutation = useMutation({
-    mutationFn: async (option: LifecycleTransitionOption) => {
+    mutationFn: async ({ option, capture }: { option: LifecycleTransitionOption; capture?: LeadOutcomeCapture }) => {
       const state = stateQuery.data!;
+      if (capture) return lifecycleService.transition(aggregate, id, state, option, capture.reasonCode, capture.reasonNotes);
       const reason = option.requiresReason ? window.prompt(`Reason code for ${option.label}`)?.trim() : undefined;
       if (option.requiresReason && !reason) throw new Error('A reason code is required.');
       return lifecycleService.transition(aggregate, id, state, option, reason);
     },
     onSuccess: async () => {
       enqueueSnackbar('Lifecycle updated', { variant: 'success' });
+      setPendingLoss(null);
       await queryClient.invalidateQueries({ queryKey: ['lifecycle', aggregate, id] });
       onChanged?.();
     },
@@ -34,6 +39,12 @@ const LifecycleActions: React.FC<Props> = ({ aggregate, id, onChanged }) => {
     ),
   });
   const state = stateQuery.data;
+  const select = (option: LifecycleTransitionOption) => {
+    setAnchor(null);
+    // A lead ending before a quotation must record WHY, from the governed picklist.
+    if (isLeadLoss(aggregate, option.statusCode)) setPendingLoss(option);
+    else mutation.mutate({ option });
+  };
   return <>
     <Tooltip title={state ? `Current state: ${state.currentStatusCode}` : 'Lifecycle'}>
       <span>
@@ -45,10 +56,17 @@ const LifecycleActions: React.FC<Props> = ({ aggregate, id, onChanged }) => {
       </span>
     </Tooltip>
     <Menu anchorEl={anchor} open={Boolean(anchor)} onClose={() => setAnchor(null)}>
-      {state?.allowedTransitions.filter(option => aggregate !== 'leads' || option.statusCode !== 'CONVERTED_TO_RFQ').map((option) => <MenuItem key={option.statusCode} onClick={() => { setAnchor(null); mutation.mutate(option); }}>
+      {state?.allowedTransitions.filter(option => aggregate !== 'leads' || option.statusCode !== 'CONVERTED_TO_RFQ').map((option) => <MenuItem key={option.statusCode} onClick={() => select(option)}>
         Move to {option.label}
       </MenuItem>)}
     </Menu>
+    <LeadOutcomeDialog
+      open={Boolean(pendingLoss)}
+      targetLabel={pendingLoss?.label ?? ''}
+      saving={mutation.isPending}
+      onCancel={() => setPendingLoss(null)}
+      onConfirm={(capture) => mutation.mutate({ option: pendingLoss!, capture })}
+    />
   </>;
 };
 

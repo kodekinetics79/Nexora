@@ -1236,7 +1236,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 await tx.CommitAsync(ct);
                 return new PurchaseOrderResult(replay.Id, replay.PurchaseOrderNumber, replay.Status, true);
             }
-            await RequireRfqAsync(command.BusinessUnitId, command.RfqId, ct);
+            var rfq = await RequireRfqAsync(command.BusinessUnitId, command.RfqId, ct);
             var supplier = await RequireSupplierAsync(command.BusinessUnitId, command.SupplierId, ct);
             var supplierBlockers = SupplierRfqBlockingReasons(supplier);
             if (supplierBlockers.Count > 0)
@@ -1292,6 +1292,9 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 TotalValue = awards.Sum(x => x.LandedUnitCost!.Value * x.Quantity!.Value), ExpectedOn = command.ExpectedOn,
                 IdempotencyKey = command.IdempotencyKey.Trim(), RequestHash = hash, CreatedOn = now, CreatedBy = command.Actor.Trim()
             };
+            // Inside the same serializable transaction as the INSERT, so a purchase order can never
+            // be committed without the master reference it is supposed to quote.
+            await CarryCommercialCaseAsync(po, rfq, ct);
             _db.SupplierPurchaseOrders.Add(po);
             await _db.SaveChangesAsync(ct);
             po.PurchaseOrderNumber = $"PO-{now:yyyy}-{po.Id:D10}";
@@ -2160,6 +2163,68 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
     private async Task<Rfq> RequireRfqAsync(long businessUnitId, long rfqId, CancellationToken ct)
         => await _db.Rfqs.SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == rfqId, ct)
             ?? throw new ProcurementValidationException("RFQ was not found in the authenticated tenant.");
+
+    /// <summary>A resolved master reference: the case row, and the serial printed against it.</summary>
+    private sealed record CaseReference(long? CommercialCaseId, string? NexoraSerial);
+
+    /// <summary>
+    /// Puts the commercial case on a supplier purchase order as it is built, so the document can
+    /// state its own master reference instead of forcing a join back up the chain every time a
+    /// buyer, a supplier or an auditor asks which case it belongs to.
+    ///
+    /// <para>The RFQ is asked first because every customer-demand purchase order is raised against
+    /// one, and the RFQ inherited the case from the lead at conversion. Only when the RFQ predates
+    /// case allocation does the customer chain the order already carries get asked, in the order
+    /// the case travels down it: client PO, then sales order, then quotation.</para>
+    ///
+    /// <para>A STOCK order is skipped outright, and an unresolved chain leaves the reference null.
+    /// A replenishment order has no case, and a case invented for a document that cannot prove one
+    /// would be quoted back at us as though it were real.</para>
+    /// </summary>
+    private async Task CarryCommercialCaseAsync(SupplierPurchaseOrder po, Rfq rfq, CancellationToken ct)
+    {
+        if (po.DemandSource == SupplierPurchaseOrderDemandSources.Stock)
+            return;
+
+        if (rfq.CommercialCaseId.HasValue || !string.IsNullOrWhiteSpace(rfq.NexoraSerial))
+        {
+            po.InheritCommercialIdentity(rfq.BusinessUnitId, rfq.CommercialCaseId, rfq.NexoraSerial);
+            return;
+        }
+
+        var chain = await ResolveCustomerChainCaseAsync(po, ct);
+        if (chain is not null)
+            po.InheritCommercialIdentity(po.BusinessUnitId, chain.CommercialCaseId, chain.NexoraSerial);
+    }
+
+    /// <summary>
+    /// Reads the case from the customer document the purchase order names. Every lookup is scoped
+    /// to the purchase order's own business unit, so a customer key that has drifted to another
+    /// tenant resolves to nothing rather than to that tenant's master reference.
+    /// </summary>
+    private async Task<CaseReference?> ResolveCustomerChainCaseAsync(
+        SupplierPurchaseOrder po, CancellationToken ct)
+    {
+        if (po.CustomerPurchaseOrderId is { } customerPurchaseOrderId)
+            return await _db.CustomerPurchaseOrders.AsNoTracking()
+                .Where(x => x.BusinessUnitId == po.BusinessUnitId && x.Id == customerPurchaseOrderId)
+                .Select(x => new CaseReference(x.CommercialCaseId, x.CommercialCase.MasterReference))
+                .SingleOrDefaultAsync(ct);
+
+        if (po.CustomerOrderId is { } customerOrderId)
+            return await _db.Orders.AsNoTracking()
+                .Where(x => x.BusinessUnitId == po.BusinessUnitId && x.Id == customerOrderId)
+                .Select(x => new CaseReference(x.CommercialCaseId, x.NexoraSerial))
+                .SingleOrDefaultAsync(ct);
+
+        if (po.QuoteId is { } quoteId)
+            return await _db.Quotes.AsNoTracking()
+                .Where(x => x.BusinessUnitId == po.BusinessUnitId && x.Id == quoteId)
+                .Select(x => new CaseReference(x.CommercialCaseId, x.NexoraSerial))
+                .SingleOrDefaultAsync(ct);
+
+        return null;
+    }
 
     private async Task<Supplier> RequireSupplierAsync(long businessUnitId, long supplierId, CancellationToken ct)
     {

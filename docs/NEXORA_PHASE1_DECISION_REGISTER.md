@@ -122,6 +122,56 @@ Two classes of item appear here:
   urgent ones: every day they stay open, more code is written on top of an unratified
   assumption.
 
+### R7 · Quote validity is the user's, and changes are reasoned and logged — supersedes E11
+
+**Decision:** the user sets the validity/expiry on a quote. If they change it afterwards they give
+a reason, and that reason is **logged and visible**, because a buyer revising a closing date for
+budget or any other reason is normal and the customer needs to see what happened and why.
+
+**Consequence:** this replaces the engineering proposal to gate auto-expiry by lead source, and it
+is the better answer — it generalises instead of special-casing tenders. Automatic expiry still
+runs against the *current* validity, so it stops fighting the user rather than being switched off.
+
+**Why it matters:** FR-QTM-07 as written expires a quote on our own validity date. Tender bid
+validity is set by the BUYER — commonly 90–120 days and extendable on request — so a rule that
+expires on our date would mark live Etimad bids Expired while evaluation was still running, and
+the pipeline would vanish from the dashboard the pilot is judged on.
+
+**Engineering note:** the change must be an auditable event, not a silent field update. A reason
+nobody can read later is not a reason.
+
+### R8 · The cost model stays simple: landed price, margin, tax — supersedes E25, E26, E27
+
+**Decision:** the customer sets the price in Nexora and that is treated as the full and final sale
+price. The cost model is deliberately shallow: **(1) landed price, (2) margin, (3) tax**, plus at
+most one or two further variables if genuinely needed. Additionally, **open an integration option
+to import product prices from the client's existing ERP**.
+
+**Explicitly NOT built:** a customs-duty rate engine driven by HS code, Incoterm cost derivation,
+SASO/SABER as a computed cost component. Engineering had recommended these; the product owner
+overruled, and the reasoning is sound and worth preserving:
+
+> *"making it more complex could be easier for you but we have to think about maintenance as well
+> that will be done by human engineers — the more complex the harder for them"*
+
+A sophisticated model the maintaining engineers cannot reason about is worse than a shallow one
+they can. Because the entered price is authoritative rather than computed, duty is already inside
+it and modelling duty separately would double-count or contradict it.
+
+**Consequence:** `DutyCost` staying at zero is no longer a defect — it is consistent with a model
+where the price is stated, not derived. If that ever changes, this decision must be revisited
+first.
+
+### R9 · Bid bonds and manufacturer authorisation letters are OUT of scope
+
+**Decision:** surface/highlight them to the customer if useful, but Nexora does **not** process
+them. No bond register, no bank-guarantee facility tracking, no agency-letter workflow.
+
+**Recorded risk, accepted:** these decide bid *eligibility* — a missed or short-dated bid bond is
+automatic disqualification regardless of price, and a KSA utility tender typically demands an OEM
+authorisation letter naming the tender. Tech Connect keeps that process outside Nexora. Written
+down so nobody later mistakes the absence for an oversight.
+
 ---
 
 ## D-series — carried from the BRD

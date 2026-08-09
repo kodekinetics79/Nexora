@@ -146,6 +146,39 @@ public sealed class RfqDateParserTests
     public void A_closing_date_is_also_rendered_in_the_umm_al_qura_calendar(string gregorian, string expectedHijri)
         => Assert.Equal(expectedHijri, RfqDateParser.ToHijri(RfqDateParser.Parse(gregorian)));
 
+    // Reading a Hijri date IN was the half that was missing. A Saudi tender pack states
+    // "15/03/1447", every component parses, and the plausible-year guard then discarded it — so
+    // the deadline vanished in silence on the most common Etimad intake path.
+
+    [Theory]
+    [InlineData("15/03/1447", "1447-03-15")]
+    [InlineData("1447-03-15", "1447-03-15")]
+    [InlineData("01/09/1447", "1447-09-01")]
+    public void A_hijri_closing_date_is_read_and_stored_as_its_gregorian_equivalent(string raw, string expectedHijri)
+    {
+        var parsed = RfqDateParser.Parse(raw);
+
+        Assert.NotNull(parsed);
+        // Stored Gregorian — one calendar stays authoritative — and it round-trips back to the
+        // buyer's own form, which is what proves the conversion rather than a coincidence.
+        Assert.True(parsed!.Value.Year is >= 2000 and <= 2100);
+        Assert.Equal(expectedHijri, RfqDateParser.ToHijri(parsed));
+    }
+
+    [Fact]
+    public void An_impossible_hijri_date_is_refused_rather_than_coerced()
+    {
+        Assert.Null(RfqDateParser.Parse("31/13/1447"));   // month 13
+        Assert.Null(RfqDateParser.Parse("31/12/1447"));   // no Hijri month has 31 days
+    }
+
+    [Fact]
+    public void A_gregorian_date_is_never_mistaken_for_a_hijri_one()
+    {
+        // 2026 is outside the Hijri band, so the conversion path must not touch it.
+        Assert.Equal(new DateTime(2026, 3, 15), RfqDateParser.Parse("15/03/2026"));
+    }
+
     [Fact]
     public void No_date_means_no_hijri_date()
         => Assert.Null(RfqDateParser.ToHijri(null));
