@@ -277,6 +277,7 @@ leave open.**
 | E44 | **Master-data changes are not before/after audited.** The audit infrastructure supports before/after values, but the Customer, Supplier and Product controllers — the BRD's actual master data — write no audit events at all. | Confirm the master-data entity list requiring before/after capture (FR-MDM-05). |
 | E45 | **OCR performance target is contradicted in configuration.** The BRD sets a 60-second extraction target; the configured model client timeout is 180 seconds. | Approve a measured baseline and target, or the criterion is untestable (relates to D10). |
 | E46 | **No cutover tooling exists** — no 2-year history migration tooling, no master-data validation harness, no parallel-run capability. | Confirm these are a separately scoped and funded Gate 10 workstream, not assumed present. |
+| E47 | **Historical quotation bulk-load is now structurally refused, and this is deliberate.** Closing the spine means `QuotationUploaderService` requires a customer RFQ that exists in Nexora and carries a commercial case. FR-PQH-01/02 requires two years of quotation history at cutover, and none of those historical quotations has a Nexora RFQ behind it, so every such row is refused today. Call path: `POST /api/QuotationUploader/upload`. **No exemption was added on purpose** — a migration back-door that skips the case is precisely how the spine rots, and it would reintroduce the case-less documents this gate spent its effort eliminating. | Gate 10 needs a governed history-import path that lands the RFQ and the quotation **together** as one transaction, inheriting one case. Confirm this is scoped and funded as part of the cutover workstream. Raised now rather than discovered at cutover. |
 
 ### Scope control
 
@@ -284,6 +285,29 @@ leave open.**
 |---|---|---|
 | E36 | **~63k LOC of hand-written subsystems have no BRD v3.0 requirement** — a SaaS control plane, subscription billing, general ledger, bank reconciliation, treasury, AR/collections/dunning, AI copilot and several "intelligence" engines. Roughly **64% of hand-written backend subsystem code sits outside the Phase 1 ceiling**, and the finance engine alone is far larger than the shipment/delivery/traceability spine the BRD actually commits to. | Per BRD §10, out-of-scope features are **preserved but frozen or hidden**. Approve the freeze list, confirm no further investment, and decide whether the 22 Receivables/Collections/Banking/GL permission modules are hidden from tenant role matrices for the pilot. |
 | E37 | **AI/copilot surfaces are excluded by the BRD** ("AI-predictive next-best-action recommendations" is explicitly out of scope) yet are shipped, routed and permission-gated — and have colonised the SLA engine, where a copilot-approval escalation is built while four of five BRD triggers are not. | Remove, feature-flag off for pilot, or formally amend the BRD to admit them? It is an audit finding either way. |
+
+---
+
+## Gate 4 engineering decisions (taken under standing delegation, 2026-08-09)
+
+Taken by the CTO under the owner's standing instruction to own technical calls. Recorded here so
+they are not re-litigated, and so a reviewer can see what was chosen **and what was rejected**.
+
+| ID | Decision | Rationale |
+|---|---|---|
+| R10 | **Only an ACCEPTED supplier acknowledgement advances status to ACKNOWLEDGED.** A counter or a rejection stamps the acknowledgement fields but leaves `Status` alone. | A counter is the supplier asking for different terms; a rejection is a refusal. Neither is agreement. Showing either as "acknowledged" would tell a buyer their order is confirmed when it is not — and that is a promise the sales side then makes to the customer. |
+| R11 | **A counter must name a revised lead time or a committed ship date; a rejection must name a reason.** | Otherwise the acknowledgement's only real effect is to silence the escalation sweep, which converts a control into a mute button. |
+| R12 | **A non-positive SLA policy value means "not configured", not "zero tolerance".** | `TimeSpan.FromHours(0)` makes every dispatched order overdue the moment it is sent. The failure mode is a mass escalation on first sweep, after which recipients filter the channel and every real alert is lost with it. |
+| R13 | **Allowed-status sets live next to the status constants, not inline in each method.** `OpenForReceipt` and `Cancellable` are shared. | Adding `ACKNOWLEDGED` silently broke goods receipt and cancellation, because each guard carried its own hand-written `or` chain. Centralising makes the next status a visible decision instead of a missed clause. |
+| R14 | **The supplier acknowledgement escalation clock starts at dispatch, not internal approval.** | An order approved Monday and sent Thursday was charging the supplier three days it never had, which makes the metric indefensible in a supplier conversation. |
+
+| R15 | **Recoverable supplier input VAT is not a cost and is excluded from landed cost.** Freight, duty and other charges stay in. Governed by one per-BU switch, `CommercialMatchingPolicy.SupplierInputTaxRecoverable`, defaulting to TRUE. | A VAT-registered KSA business reclaims input VAT. Carrying it in landed cost did not merely add it — customer price is `landed / (1 − margin)`, so the VAT was **marked up by the margin** and then output VAT was charged on top of that. On a worked example the quoted net price was exactly 1.15× correct: the firm was quoting ~15% high into competitive tenders while reporting 20% margin on a true 30.4%. Under-pricing loses money; over-pricing loses the tender and nobody ever learns why. |
+| R16 | **`CK_supplier_purchase_order_lines_Costs` drops `LandedUnitCost >= UnitCost`, keeping only positivity.** | Landed cost subtracts the supplier discount, so a discounted line legitimately lands below list price. The constraint asserted an invariant commerce does not obey. Clamping in the service instead was rejected: it would silently distort the cost figure every downstream price is built from, which is worse than the insert failing loudly. |
+
+**Rejected in this gate, deliberately:** auto-advancing a countered order to ACKNOWLEDGED once the
+buyer accepts the counter (needs a governed accept-the-counter action, not an implicit transition);
+and allowing cancellation of an IN_PRODUCTION or SHIPPED order (that is a commercial negotiation,
+not a status change).
 
 ---
 

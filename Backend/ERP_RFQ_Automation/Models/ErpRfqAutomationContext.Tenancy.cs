@@ -214,6 +214,45 @@ public partial class ErpRfqAutomationContext
         // unrecognized customer-document columns, stored as jsonb.
         modelBuilder.Entity<LeadItem>().Property(e => e.ExtraFields).HasColumnType("jsonb");
 
+        // AA-01 · tenant-defined custom fields. ONE jsonb value bag per owning row (see
+        // Models/CustomFieldBagPartials.cs for why it is a bag and not per-tenant DDL).
+        // The column is named "CustomFields" on the table; the CLR property carries the
+        // Json suffix so it reads honestly at the call site.
+        modelBuilder.Entity<Customer>().Property(e => e.CustomFieldsJson)
+            .HasColumnName("CustomFields").HasColumnType("jsonb");
+        modelBuilder.Entity<Supplier>().Property(e => e.CustomFieldsJson)
+            .HasColumnName("CustomFields").HasColumnType("jsonb");
+        modelBuilder.Entity<LeadItem>().Property(e => e.CustomFieldsJson)
+            .HasColumnName("CustomFields").HasColumnType("jsonb");
+
+        // AA-01 · per-user, per-business-unit, per-view column layout.
+        //
+        // The query filter below is load-bearing beyond reads: it enrols this table in
+        // PostgreSqlProductionDialectTests, which FAILS unless a matching
+        // nexora_tenant_isolation RLS policy exists. That policy is the integration
+        // owner's to write — see the schema delta in the AA-01 handover.
+        modelBuilder.Entity<ERP_RFQ_Automation.ListViews.ColumnPreference>(entity =>
+        {
+            entity.ToTable("UserColumnPreferences");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.ViewKey).HasMaxLength(100).IsRequired();
+            entity.Property(e => e.UpdatedBy).HasMaxLength(200).IsRequired();
+            entity.Property(e => e.ColumnsJson).HasColumnName("Columns").HasColumnType("jsonb").IsRequired();
+
+            // One layout per (tenant, user, view). The unique index is what makes an
+            // upsert safe under concurrent saves from two browser tabs.
+            entity.HasIndex(e => new { e.BusinessUnitId, e.UserId, e.ViewKey })
+                .IsUnique()
+                .HasDatabaseName("UX_UserColumnPreferences_BU_User_View");
+
+            entity.HasOne<BusinessUnit>().WithMany()
+                .HasForeignKey(e => e.BusinessUnitId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne<User>().WithMany()
+                .HasForeignKey(e => e.UserId).OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        });
+
         // WP-A3 duplicate flag (partial properties in Lead.Duplicate.cs). Columns are
         // added by a lead-generated migration; see Deduplication/DEDUP-WIRING.md.
         modelBuilder.Entity<Lead>().Property(e => e.DuplicateStatus).HasMaxLength(20);
@@ -255,6 +294,9 @@ public partial class ErpRfqAutomationContext
         // R5 price-provenance attestation — must follow the Quote alternate key it
         // references. See Models/ErpRfqAutomationContext.PriceAttestation.cs.
         ConfigurePriceAttestationModel(modelBuilder);
+        // R7 reasoned quote-validity extensions — same ordering constraint, same reason.
+        // See Models/ErpRfqAutomationContext.QuoteValidity.cs.
+        ConfigureQuoteValidityModel(modelBuilder);
         modelBuilder.Entity<ERP_RFQ_Automation.Inventory.StockReservation>()
             .HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CustomerIdentifier>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);

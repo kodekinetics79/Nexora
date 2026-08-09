@@ -1382,6 +1382,17 @@ public partial class ErpRfqAutomationContext : DbContext
         {
             entity.HasKey(e => e.Id).HasName("PK__Shipment__3214EC2732EE97FF");
 
+            // The commercial case is a read key: CommercialCaseQueryService selects shipments that
+            // DECLARE the case rather than walking order → shipment, so this index carries the
+            // case-detail page. The foreign key makes a wrong case id impossible rather than merely
+            // visible. Nullable, because legacy shipments raised before the case existed have none.
+            entity.HasOne<CommercialCase>()
+                .WithMany()
+                .HasForeignKey(e => new { e.BusinessUnitId, e.CommercialCaseId })
+                .HasPrincipalKey(e => new { e.BusinessUnitId, e.Id })
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasIndex(e => new { e.BusinessUnitId, e.CommercialCaseId });
+
             entity.Property(e => e.Id).HasColumnName("ID");
             entity.Property(e => e.ActualDeliveryDate);
             entity.Property(e => e.BusinessUnitId).HasColumnName("BusinessUnitID");

@@ -14,7 +14,9 @@ spine for adjacent work is exactly what produced ~63,000 lines of code answering
 
 **Approved:** 2026-08-09 by Zack, product owner.
 **Scheduled:** after Gate 3 closes, before Gate 4 begins.
-**Status:** not started.
+**Status:** built and wired on `customers.list`, `leads.list` and `suppliers.list`. **The one grid
+he most likely pictured — the RFQ line grid (`lead.items`) — is still API-only.** See "What is
+still owed" below.
 
 ### What he asked for
 
@@ -62,3 +64,49 @@ One shared column-preference component, persisted per user, applied to the four 
 carry commercial decisions: leads, RFQ lines, quote lines, customer PO lines. Plus connecting the
 orphaned custom-fields backend so a tenant can define its own fields rather than only inheriting
 whatever a document happened to contain.
+
+### What was built (2026-08-09)
+
+Per-user column preferences: visible set and order, scoped to `(business unit, user, view)`, with
+defaults declared in code rather than seeded. A stale or unknown column key is dropped on read and
+pruned on write, and a corrupt payload degrades to the code default — views evolve, and a stored
+preference must never be able to break someone's grid. User identity comes only from the token, so
+no request can read or write another user's preferences.
+
+Custom fields use one `jsonb` bag per record plus the tenant-scoped definition table. **No
+per-tenant DDL** — that would have wrecked both the migration story and row-level security. The
+build connected the pre-existing orphaned `custom_field_definitions` subsystem rather than growing
+a second one, which is what the section above anticipated. Custom fields appear in the same picker,
+badged, and hidden by default so one tenant defining a field never rearranges anyone else's grid.
+
+A field's key is immutable once created, enforced at `SaveChanges` rather than by a disabled input,
+because renaming it orphans every value already stored under it. Retiring preserves values and
+merely stops offering the field. Changing a populated field's data type is refused outright rather
+than silently coercing.
+
+### What is still owed
+
+- **`lead.items` — the RFQ line grid — has no UI.** It is in the catalog and reachable through the
+  API, but no grid consumes it. This is the grid the request was actually about: "additional fields
+  … in the lead". Until it is wired, the highest-value half of AA-01 is not delivered.
+- The three enrichment candidates listed above — inventory context, commercial memory, extra
+  document columns — are **not** yet offered as columns. Reordering is done; the thing worth
+  reordering is not.
+- `Timestamp`, `Json` and `Reference` field types are storable and validated but absent from the
+  admin picker, so a tenant cannot actually create one.
+- Custom-field columns are not sortable or filterable — no server-side `jsonb` predicate is wired.
+
+### Capability deliberately given up, and why it is recorded here
+
+Retiring the legacy EAV write path in favour of the `jsonb` bag was a deliberate call: two
+unsynchronised stores for one concept diverge, and only the timing is in question. It cost four
+behaviours that now exist nowhere — conditional rules enforced **on write** (they are still
+reported on read, so a field the rules mark read-only can still be written), per-value optimistic
+concurrency, idempotency-key replay, and **per-value change history**.
+
+The audit loss is the one that matters, and it is deliberately *not* being fixed in isolation.
+Custom fields on a Customer are now editable with no before/after trail — but so are that
+customer's ordinary fields, because **E44** already records that the Customer, Supplier and Product
+controllers write no audit events at all. Fixing custom-field auditing alone would produce the odd
+result that a tenant-defined field is better audited than the customer's own credit limit. The
+right fix is E44 as a whole, and it is awaiting a decision.

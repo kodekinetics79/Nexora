@@ -24,6 +24,7 @@ public sealed class ProcurementAuthenticatedHttpTests(Release01BHttpApplication 
         { HttpMethod.Post.Method, "/api/procurement/awards" },
         { HttpMethod.Get.Method, "/api/procurement/purchase-orders" },
         { HttpMethod.Post.Method, "/api/procurement/purchase-orders" },
+        { HttpMethod.Post.Method, "/api/procurement/purchase-orders/1/approve" },
         { HttpMethod.Post.Method, "/api/procurement/purchase-orders/1/issue" },
         { HttpMethod.Post.Method, "/api/procurement/goods-receipts" },
         { HttpMethod.Get.Method, "/api/procurement-integrations/status" },
@@ -181,11 +182,26 @@ public sealed class ProcurementAuthenticatedHttpTests(Release01BHttpApplication 
             Assert.Equal(Release01BHttpApplication.TenantAProcurementRfqId, row.GetProperty("rfqId").GetInt64());
         }
 
+        // FR-SPO-01. The award above was approved by this client's user; segregation of duties
+        // refuses the same user approving the purchase order, so the buyer who approves it is a
+        // different authenticated user on the same role and tenant.
+        using var selfApproval = await SendJsonAsync(client, HttpMethod.Post,
+            $"/api/procurement/purchase-orders/{purchaseOrderId}/approve", new { ExpectedVersion = 1 },
+            "self-approve");
+        await AssertStatusAsync(selfApproval, HttpStatusCode.BadRequest);
+
+        using var secondBuyer = Client(Release01BHttpApplication.AllowedRole,
+            Release01BHttpApplication.TenantA, userId: 83_002);
+        using var approve = await SendJsonAsync(secondBuyer, HttpMethod.Post,
+            $"/api/procurement/purchase-orders/{purchaseOrderId}/approve", new { ExpectedVersion = 1 },
+            "approve");
+        await AssertStatusAsync(approve, HttpStatusCode.OK);
+
         var deliveredOn = DateTime.UtcNow;
         using var issue = await SendJsonAsync(client, HttpMethod.Post,
             $"/api/procurement/purchase-orders/{purchaseOrderId}/issue", new
             {
-                ExpectedVersion = 1,
+                ExpectedVersion = 2,
                 DeliveryEvidenceReference = $"provider-receipt:http-{purchaseOrderId}",
                 DeliveryEvidenceSha256 = new string('a', 64),
                 DeliveredOn = deliveredOn
@@ -215,11 +231,11 @@ public sealed class ProcurementAuthenticatedHttpTests(Release01BHttpApplication 
         Assert.Equal(Release01BHttpApplication.TenantA, ownership.ReceiptTenantId);
     }
 
-    private HttpClient Client(long roleId, long? tenantId)
+    private HttpClient Client(long roleId, long? tenantId, long userId = 83_001)
     {
         var client = app.CreateClient();
         client.DefaultRequestHeaders.Authorization =
-            new AuthenticationHeaderValue("Bearer", app.Token(roleId, tenantId));
+            new AuthenticationHeaderValue("Bearer", app.Token(roleId, tenantId, userId));
         return client;
     }
 

@@ -3,6 +3,7 @@ using System;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace ERP_RFQ_Automation.Migrations
 {
     [DbContext(typeof(ErpRfqAutomationContext))]
-    partial class ErpRfqAutomationContextModelSnapshot : ModelSnapshot
+    [Migration("20260809191750_Gate4SupplierPoLifecycle")]
+    partial class Gate4SupplierPoLifecycle
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -7989,11 +7992,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<DateTime>("CreatedOn")
                         .HasColumnType("timestamp without time zone");
 
-                    b.Property<int>("DisplayOrder")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(0);
-
                     b.Property<string>("EntityType")
                         .IsRequired()
                         .HasMaxLength(80)
@@ -11587,49 +11585,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.ToTable("LeadRevisionImpacts", (string)null);
                 });
 
-            modelBuilder.Entity("ERP_RFQ_Automation.ListViews.ColumnPreference", b =>
-                {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
-
-                    b.Property<long>("BusinessUnitId")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("ColumnsJson")
-                        .IsRequired()
-                        .HasColumnType("jsonb")
-                        .HasColumnName("Columns");
-
-                    b.Property<string>("UpdatedBy")
-                        .IsRequired()
-                        .HasMaxLength(200)
-                        .HasColumnType("character varying(200)");
-
-                    b.Property<DateTime>("UpdatedOn")
-                        .HasColumnType("timestamp without time zone");
-
-                    b.Property<long>("UserId")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("ViewKey")
-                        .IsRequired()
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("UserId");
-
-                    b.HasIndex("BusinessUnitId", "UserId", "ViewKey")
-                        .IsUnique()
-                        .HasDatabaseName("UX_UserColumnPreferences_BU_User_View");
-
-                    b.ToTable("UserColumnPreferences", (string)null);
-                });
-
             modelBuilder.Entity("ERP_RFQ_Automation.Metrics.MetricEvent", b =>
                 {
                     b.Property<long>("Id")
@@ -12048,10 +12003,6 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .HasColumnType("timestamp without time zone");
-
-                    b.Property<string>("CustomFieldsJson")
-                        .HasColumnType("jsonb")
-                        .HasColumnName("CustomFields");
 
                     b.Property<string>("DocId")
                         .HasMaxLength(10)
@@ -12986,10 +12937,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<string>("Currency")
                         .HasMaxLength(10)
                         .HasColumnType("character varying(10)");
-
-                    b.Property<string>("CustomFieldsJson")
-                        .HasColumnType("jsonb")
-                        .HasColumnName("CustomFields");
 
                     b.Property<string>("CustomerAccountPortalId")
                         .HasMaxLength(100)
@@ -14045,9 +13992,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<DateTime?>("ValidUntil")
                         .HasColumnType("timestamp without time zone");
 
-                    b.Property<DateTime?>("ValidityExtendedOn")
-                        .HasColumnType("timestamp without time zone");
-
                     b.HasKey("Id")
                         .HasName("PK__Quotes__3214EC27B0FC1337");
 
@@ -14063,10 +14007,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsUnique()
                         .HasDatabaseName("UX_Quotes_BU_RevisionOfQuoteId")
                         .HasFilter("\"RevisionOfQuoteId\" IS NOT NULL");
-
-                    b.HasIndex("BusinessUnitId", "ValidityExtendedOn")
-                        .HasDatabaseName("IX_Quotes_BU_ValidityExtendedOn")
-                        .HasFilter("\"ValidityExtendedOn\" IS NOT NULL");
 
                     b.HasIndex(new[] { "BusinessUnitId", "CommercialCaseId" }, "IX_Quotes_BusinessUnitID_CommercialCaseID");
 
@@ -14227,66 +14167,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.ToTable("QuoteItems", t =>
                         {
                             t.HasCheckConstraint("CK_QuoteItems_Quantity_Positive", "\"Quantity\" > 0");
-                        });
-                });
-
-            modelBuilder.Entity("ERP_RFQ_Automation.Models.QuoteValidityExtension", b =>
-                {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
-
-                    b.Property<long>("BusinessUnitId")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("ExtendedBy")
-                        .IsRequired()
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
-
-                    b.Property<long?>("ExtendedByUserId")
-                        .HasColumnType("bigint");
-
-                    b.Property<DateTime>("ExtendedOn")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
-                        .HasDefaultValueSql("now()");
-
-                    b.Property<string>("IdempotencyKey")
-                        .IsRequired()
-                        .HasMaxLength(160)
-                        .HasColumnType("character varying(160)");
-
-                    b.Property<DateTime>("NewValidUntil")
-                        .HasColumnType("timestamp without time zone");
-
-                    b.Property<DateTime?>("PreviousValidUntil")
-                        .HasColumnType("timestamp without time zone");
-
-                    b.Property<long>("QuoteId")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("Reason")
-                        .IsRequired()
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
-                    b.HasKey("Id");
-
-                    b.HasAlternateKey("BusinessUnitId", "Id");
-
-                    b.HasIndex("BusinessUnitId", "IdempotencyKey")
-                        .IsUnique()
-                        .HasDatabaseName("UX_QuoteValidityExtensions_BU_IdempotencyKey");
-
-                    b.HasIndex("BusinessUnitId", "QuoteId", "ExtendedOn")
-                        .HasDatabaseName("IX_QuoteValidityExtensions_BU_Quote_ExtendedOn");
-
-                    b.ToTable("QuoteValidityExtensions", null, t =>
-                        {
-                            t.HasCheckConstraint("CK_QuoteValidityExtensions_Reason", "trim(\"Reason\") <> ''");
                         });
                 });
 
@@ -15088,11 +14968,11 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasKey("Id")
                         .HasName("PK__Shipment__3214EC2732EE97FF");
 
+                    b.HasIndex("BusinessUnitId");
+
                     b.HasIndex("OrderId");
 
                     b.HasIndex("StatusId");
-
-                    b.HasIndex("BusinessUnitId", "CommercialCaseId");
 
                     b.ToTable("Shipments");
                 });
@@ -15254,10 +15134,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long?>("CurrencyId")
                         .HasColumnType("bigint")
                         .HasColumnName("CurrencyID");
-
-                    b.Property<string>("CustomFieldsJson")
-                        .HasColumnType("jsonb")
-                        .HasColumnName("CustomFields");
 
                     b.Property<string>("DocId")
                         .HasMaxLength(10)
@@ -16100,11 +15976,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasPrecision(9, 4)
                         .HasColumnType("numeric(9,4)")
                         .HasDefaultValue(0m);
-
-                    b.Property<bool>("SupplierInputTaxRecoverable")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("boolean")
-                        .HasDefaultValue(true);
 
                     b.Property<long>("Version")
                         .IsConcurrencyToken()
@@ -19689,8 +19560,6 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("BusinessUnitId", "CommercialCaseId");
-
                     b.HasIndex("BusinessUnitId", "CurrencyId");
 
                     b.HasIndex("BusinessUnitId", "IdempotencyKey")
@@ -19729,12 +19598,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<string>("CountryOfOrigin")
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)");
+                        .HasColumnType("text");
 
                     b.Property<string>("HsCode")
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
+                        .HasColumnType("text");
 
                     b.Property<long?>("IncomingInventoryId")
                         .HasColumnType("bigint");
@@ -19810,7 +19677,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.ToTable("supplier_purchase_order_lines", null, t =>
                         {
-                            t.HasCheckConstraint("CK_supplier_purchase_order_lines_Costs", "\"UnitCost\" >= 0 AND \"LandedUnitCost\" > 0");
+                            t.HasCheckConstraint("CK_supplier_purchase_order_lines_Costs", "\"UnitCost\" >= 0 AND \"LandedUnitCost\" >= \"UnitCost\"");
 
                             t.HasCheckConstraint("CK_supplier_purchase_order_lines_Quantities", "\"OrderedQuantity\" > 0 AND \"ReceivedQuantity\" >= 0 AND \"ReceivedQuantity\" <= \"OrderedQuantity\"");
                         });
@@ -19831,10 +19698,6 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<int>("AttemptCount")
                         .HasColumnType("integer");
-
-                    b.Property<string>("AttestedPriceFingerprint")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
 
                     b.Property<DateTime>("AvailableOn")
                         .HasColumnType("timestamp without time zone");
@@ -22966,21 +22829,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsRequired();
                 });
 
-            modelBuilder.Entity("ERP_RFQ_Automation.ListViews.ColumnPreference", b =>
-                {
-                    b.HasOne("ERP_RFQ_Automation.Models.BusinessUnit", null)
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("ERP_RFQ_Automation.Models.User", null)
-                        .WithMany()
-                        .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-                });
-
             modelBuilder.Entity("ERP_RFQ_Automation.Models.CommercialCase", b =>
                 {
                     b.HasOne("ERP_RFQ_Automation.Models.BusinessUnit", "BusinessUnit")
@@ -23528,16 +23376,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Navigation("Rfqitem");
                 });
 
-            modelBuilder.Entity("ERP_RFQ_Automation.Models.QuoteValidityExtension", b =>
-                {
-                    b.HasOne("ERP_RFQ_Automation.Models.Quote", null)
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "QuoteId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-                });
-
             modelBuilder.Entity("ERP_RFQ_Automation.Models.Rfq", b =>
                 {
                     b.HasOne("ERP_RFQ_Automation.Models.BusinessUnit", "BusinessUnit")
@@ -23770,12 +23608,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasForeignKey("StatusId")
                         .IsRequired()
                         .HasConstraintName("FK_Shipments_Status");
-
-                    b.HasOne("ERP_RFQ_Automation.Models.CommercialCase", null)
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "CommercialCaseId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict);
 
                     b.Navigation("BusinessUnit");
 
@@ -24645,12 +24477,6 @@ namespace ERP_RFQ_Automation.Migrations
 
             modelBuilder.Entity("ERP_RFQ_Automation.Procurement.SupplierPurchaseOrder", b =>
                 {
-                    b.HasOne("ERP_RFQ_Automation.Models.CommercialCase", null)
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "CommercialCaseId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict);
-
                     b.HasOne("ERP_RFQ_Automation.Models.Currency", null)
                         .WithMany()
                         .HasForeignKey("BusinessUnitId", "CurrencyId")

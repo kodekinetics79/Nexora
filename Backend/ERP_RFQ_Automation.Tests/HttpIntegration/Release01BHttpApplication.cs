@@ -224,10 +224,19 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         await using var db = Context();
         var service = new ProcurementApplicationService(db);
         var deliveredOn = DateTime.UtcNow;
-        var result = await service.IssuePurchaseOrderAsync(new IssuePurchaseOrderCommand(
+        // FR-SPO-01. Release is downstream of approval, so the HTTP support fixture approves first.
+        var approval = await service.ApprovePurchaseOrderAsync(new ApprovePurchaseOrderCommand(
             TenantA,
             purchaseOrderId,
             1,
+            77,
+            $"http-approve-support-{purchaseOrderId}",
+            "release-01b-http-tests",
+            $"http-approve-support-{purchaseOrderId}"));
+        var result = await service.IssuePurchaseOrderAsync(new IssuePurchaseOrderCommand(
+            TenantA,
+            purchaseOrderId,
+            approval.Version,
             $"provider-receipt:http-test-{purchaseOrderId}",
             $"http-issue-support-{purchaseOrderId}",
             "release-01b-http-tests",

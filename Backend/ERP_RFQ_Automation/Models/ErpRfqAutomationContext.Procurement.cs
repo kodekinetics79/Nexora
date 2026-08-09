@@ -275,8 +275,33 @@ public partial class ErpRfqAutomationContext
         {
             entity.ToTable("supplier_purchase_orders");
             entity.HasCheckConstraint("CK_supplier_purchase_orders_TotalValue", "\"TotalValue\" >= 0");
+            // The eight states FR-SPO-04 names, plus the legacy ISSUED that existing rows carry
+            // and the two additions a real order needs. This constraint is the reason the status
+            // set could not simply be widened in code: Postgres would have rejected every new
+            // transition. It is invisible in the SQLite lane, which runs with check constraints
+            // disabled, so a green suite would have shipped an order that could not move.
             entity.HasCheckConstraint("CK_supplier_purchase_orders_Status",
-                "\"Status\" IN ('DRAFT','ISSUED','PARTIALLY_RECEIVED','RECEIVED','CANCELLED')");
+                "\"Status\" IN ('DRAFT','APPROVED','SENT','ACKNOWLEDGED','IN_PRODUCTION','SHIPPED'," +
+                "'ISSUED','PARTIALLY_RECEIVED','RECEIVED','CLOSED','CANCELLED')");
+            // An acknowledgement is one of three answers or absent; a counter-offered lead time
+            // that is zero or negative is not a lead time.
+            entity.HasCheckConstraint("CK_supplier_purchase_orders_Acknowledgement",
+                "\"AcknowledgementStatus\" IS NULL OR \"AcknowledgementStatus\" IN ('ACCEPTED','REJECTED','COUNTERED')");
+            entity.HasCheckConstraint("CK_supplier_purchase_orders_RevisedLeadTime",
+                "\"RevisedLeadTimeDays\" IS NULL OR \"RevisedLeadTimeDays\" > 0");
+            // The three approval columns are one fact and must be written together. Application
+            // code is already the sole writer and sets all three in one transaction; this makes a
+            // half-approved row impossible rather than merely unlikely.
+            entity.HasCheckConstraint("CK_supplier_purchase_orders_Approval",
+                "(\"ApprovedByUserId\" IS NULL AND \"ApprovedBy\" IS NULL AND \"ApprovedOn\" IS NULL) " +
+                "OR (\"ApprovedByUserId\" IS NOT NULL AND \"ApprovedBy\" IS NOT NULL AND \"ApprovedOn\" IS NOT NULL)");
+            entity.Property(x => x.ApprovedBy).HasMaxLength(255);
+            entity.Property(x => x.AcknowledgedBy).HasMaxLength(255);
+            entity.Property(x => x.AcknowledgementStatus).HasMaxLength(16);
+            entity.Property(x => x.AcknowledgementNote).HasMaxLength(1000);
+            entity.Property(x => x.Incoterm).HasMaxLength(40);
+            entity.Property(x => x.PortOfLoading).HasMaxLength(120);
+            entity.Property(x => x.PortOfDischarge).HasMaxLength(120);
             entity.HasKey(x => x.Id);
             entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
             entity.Property(x => x.PurchaseOrderNumber).HasMaxLength(80).IsRequired();
@@ -287,6 +312,16 @@ public partial class ErpRfqAutomationContext
             entity.Property(x => x.Version).HasDefaultValue(1).IsConcurrencyToken();
             entity.Property(x => x.CreatedBy).HasMaxLength(255).IsRequired();
             entity.Property(x => x.ModifiedBy).HasMaxLength(255);
+            // FR-SPO-05. The commercial case is a read key, not decoration: CommercialCaseQueryService
+            // selects supplier orders that DECLARE the case rather than deriving them through the RFQ,
+            // so this index carries the case-detail page. The foreign key is what makes a wrong case id
+            // impossible rather than merely visible; it stays nullable because a STOCK replenishment
+            // order legitimately has no customer case behind it.
+            entity.HasIndex(x => new { x.BusinessUnitId, x.CommercialCaseId });
+            entity.HasOne<CommercialCase>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.CommercialCaseId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id })
+                .OnDelete(DeleteBehavior.Restrict);
             entity.HasIndex(x => new { x.BusinessUnitId, x.PurchaseOrderNumber }).IsUnique();
             entity.HasIndex(x => new { x.BusinessUnitId, x.IdempotencyKey }).IsUnique();
             entity.HasOne<Rfq>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.RfqId })
@@ -303,11 +338,21 @@ public partial class ErpRfqAutomationContext
             entity.ToTable("supplier_purchase_order_lines");
             entity.HasCheckConstraint("CK_supplier_purchase_order_lines_Quantities",
                 "\"OrderedQuantity\" > 0 AND \"ReceivedQuantity\" >= 0 AND \"ReceivedQuantity\" <= \"OrderedQuantity\"");
+            // Landed cost subtracts the supplier's discount, so a discounted line legitimately
+            // lands BELOW its own list price. The old form asserted "LandedUnitCost >= UnitCost",
+            // an invariant commerce does not obey, and it became easier to violate once
+            // recoverable input VAT stopped inflating landed cost (R15/R16). What is genuinely
+            // invariant is positivity, which is also what the service enforces before it writes.
             entity.HasCheckConstraint("CK_supplier_purchase_order_lines_Costs",
-                "\"UnitCost\" >= 0 AND \"LandedUnitCost\" >= \"UnitCost\"");
+                "\"UnitCost\" >= 0 AND \"LandedUnitCost\" > 0");
             entity.HasKey(x => x.Id);
             entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
             entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id, x.ProductId, x.WarehouseId });
+            // Bounded like every other string on this table. These shipped as unbounded `text`
+            // while the application already enforced 20 and 100; the column now agrees with the
+            // rule instead of trusting the only caller to keep applying it.
+            entity.Property(x => x.HsCode).HasMaxLength(20);
+            entity.Property(x => x.CountryOfOrigin).HasMaxLength(100);
             entity.Property(x => x.OrderedQuantity).HasPrecision(18, 4);
             entity.Property(x => x.ReceivedQuantity).HasPrecision(18, 4);
             entity.Property(x => x.UnitCost).HasPrecision(18, 4);
