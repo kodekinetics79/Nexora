@@ -1,4 +1,5 @@
 using System.Data;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -207,6 +208,40 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
                 && ranked.Score >= ConfidentRevisionThreshold)
                 return await CreateRevisionAsync(ranked.Lead, candidate, intake, fingerprint, scope,
                     ["Same tenant and customer, an amended form of the same customer RFQ reference, and near-identical commercial content."],
+                    tx, ownsTransaction, ct);
+
+            // FR-RFQ-05, stated by the requirement in exactly these words: "when a closing-date
+            // amendment is received, version the existing RFQ rather than create a duplicate."
+            //
+            // The arm above only fires when the customer changed their reference STRING. A tender
+            // amendment normally does not: the same reference and the same lines come back with a
+            // moved deadline, and the arm above misses it. When the sender is resolved on both
+            // sides that case is already caught much earlier by the scope-plus-reference arm; what
+            // reached here — and became a human queue item — is the amendment whose own customer
+            // identity is UNRESOLVED, the manually uploaded amendment PDF carrying no address at
+            // all. Its reference is still the buyer's own identity statement, and it corroborates.
+            //
+            // Every guard that protects FR-RFQ-06 is kept:
+            //  * a CONTRADICTING customer scope is refused outright, so a different buyer can
+            //    never auto-link however well the lines and the reference agree — that stays the
+            //    "two contacts, one reference" decision a human owns;
+            //  * the reference must positively corroborate, so an absent or conflicting reference
+            //    still reaches the review queue;
+            //  * ReferenceAmends keeps the direction rule: the amendment may carry the same or an
+            //    extended reference, never a superseded one, so the canonical record is not rolled
+            //    back to older commercial values;
+            //  * sameness of the commercial content is decided by the SAME similarity machinery
+            //    and the SAME bar as the arm above, so a genuine second inquiry whose lines differ
+            //    materially is not swallowed.
+            // Only the deadline may differ, in EITHER direction: tenders are both extended and
+            // pulled forward, and neither is more of an amendment than the other.
+            if (ranked.Scope != MatchEvidence.Contradicting
+                && ranked.Reference == MatchEvidence.Corroborating
+                && ranked.ReferenceAmends
+                && ranked.Score >= ConfidentRevisionThreshold
+                && ClosingDateAmended(candidate.BidClosingDate, ranked.Lead.BidClosingDate))
+                return await CreateRevisionAsync(ranked.Lead, candidate, intake, fingerprint, scope,
+                    [$"Closing-date amendment: the same customer RFQ reference and unchanged line items, with the bid closing date moved from {ClosingDateText(ranked.Lead.BidClosingDate)} to {ClosingDateText(candidate.BidClosingDate)}."],
                     tx, ownsTransaction, ct);
 
             var occurrence = NewOccurrence(candidate.BusinessUnitId, intake, fingerprint, scope,
@@ -1231,6 +1266,35 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         shorter.Length >= 4 && longer.Length > shorter.Length
         && longer.StartsWith(shorter, StringComparison.Ordinal)
         && char.IsLetter(longer[shorter.Length]);
+
+    /// <summary>
+    /// The incoming document states a DIFFERENT bid closing date from the canonical lead.
+    ///
+    /// <para>Both sides must state one. A deadline appearing where the previous extraction found
+    /// none is a better reading of the same document, not an amendment of the deadline, and a
+    /// deadline disappearing is a worse one — neither should auto-link on the strength of a date.
+    /// Direction is deliberately not consulted: a tender is extended as often as it is pulled
+    /// forward, and both are amendments.</para>
+    /// </summary>
+    private static bool ClosingDateAmended(DateTime? incoming, DateTime? canonical) =>
+        incoming.HasValue && canonical.HasValue
+        && ClosingInstant(incoming.Value) != ClosingInstant(canonical.Value);
+
+    /// <summary>
+    /// Compares two closing dates as instants without inventing a timezone. A value read back
+    /// from the store carries <see cref="DateTimeKind.Unspecified"/> while a freshly extracted one
+    /// is often <see cref="DateTimeKind.Utc"/>; <c>ToUniversalTime</c> shifts only the former by
+    /// the host's offset, which would report one identical deadline as two on any machine not
+    /// running in UTC.
+    /// </summary>
+    private static DateTime ClosingInstant(DateTime value) =>
+        value.Kind == DateTimeKind.Unspecified ? value : value.ToUniversalTime();
+
+    /// <summary>The reviewer-facing rendering of a closing date named in a decision reason.</summary>
+    private static string ClosingDateText(DateTime? value) =>
+        value.HasValue
+            ? ClosingInstant(value.Value).ToString("yyyy-MM-dd HH:mm 'UTC'", CultureInfo.InvariantCulture)
+            : "none";
 
     private static string Diff(object previous, object current) => JsonSerializer.Serialize(new { previous, current });
     private static string ProposedSnapshot(string differencesJson)
