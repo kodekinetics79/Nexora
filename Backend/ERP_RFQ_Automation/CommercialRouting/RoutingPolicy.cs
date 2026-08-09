@@ -108,7 +108,12 @@ public sealed record RoutingRequest(
     IReadOnlyCollection<RoutingUserAvailability> UserAvailability,
     IReadOnlyDictionary<OwnershipScope, string?> ScopeKeys,
     AssignmentScope AssignmentScope = AssignmentScope.LeadOnly,
-    string? RequestHash = null);
+    string? RequestHash = null,
+    // Provenance for every scope the router considered, including the ones it could NOT derive.
+    // Audit-only: ScopeKeys above still decides what matches, so supplying this changes no
+    // routing outcome. It exists so a rule that never fires can be told apart from a rule whose
+    // scope has no source on this RFQ at all — see ScopeKeyDerivation.
+    IReadOnlyCollection<ScopeKeyDerivation>? ScopeKeyDerivations = null);
 
 public sealed record RoutingResult(
     LeadRoutingDecision Decision,
