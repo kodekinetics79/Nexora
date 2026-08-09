@@ -162,6 +162,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
           { key: 'leads-review', label: 'Needs Review', path: '/procurement/extraction/review', moduleName: 'Leads', activePrefixes: ['/procurement/extraction/review'] },
           { key: 'leads-bulk', label: 'Bulk Uploads', path: '/procurement/leads/manual-upload', moduleName: 'Leads', activePrefixes: ['/procurement/leads/ingestion'] },
           { key: 'leads-inbound-mail', label: 'Inbound Mail', path: '/procurement/leads/inbound-mail', moduleName: 'Leads' },
+          { key: 'leads-watched-folders', label: 'Watched Folders', path: '/procurement/leads/watched-folders', moduleName: 'Leads' },
           { key: 'leads-duplicates', label: 'Duplicates', path: '/procurement/leads/duplicates', moduleName: 'Leads' },
           { key: 'leads-revisions', label: 'Revisions', path: '/procurement/leads/all?view=revisions', moduleName: 'Leads' },
           { key: 'leads-matches', label: 'Possible Matches', path: '/procurement/leads/possible-matches', moduleName: 'Leads' },
@@ -274,6 +275,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
           { key: 'quote-format', label: t('quote_format'), path: '/setup/quote-format', moduleName: 'Quote Configuration' },
           { key: 'price-structure', label: 'Price Structure', path: '/setup/price-structure', moduleName: 'UOM' },
           { key: 'sla', label: 'Deadlines & Alerts', path: '/setup/sla', moduleName: 'UOM' },
+          { key: 'routing-rules', label: 'RFQ Routing Rules', path: '/setup/routing-rules', moduleName: 'Customers' },
           { key: 'mailboxes', label: 'Email Inboxes', path: '/setup/mailboxes', moduleName: 'Email & SMTP' },
           { key: 'business-unit', label: t('business_unit'), path: '/setup/business-unit', moduleName: 'Business Units' },
         ]

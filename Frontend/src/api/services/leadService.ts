@@ -256,6 +256,32 @@ export interface PaginatedResponse<T> {
   pageSize: number;
 }
 
+/**
+ * One run of the watched-folder sweep.
+ *
+ * Mirrors `FolderProcessingReport` in Backend/ERP_RFQ_Automation/Services/FolderService.cs,
+ * returned by POST /api/Email/process-all-folder-leads. Counts are per RUN across all three
+ * watched folders, not per folder — the backend does not break them down.
+ *
+ * - `enqueued`   documents accepted into the extraction queue for the first time
+ * - `duplicates` documents whose content had already been ingested (no new inquiry)
+ * - `rejected`   documents quarantined (unsupported type, empty, oversized, symlink,
+ *                or three failed staging attempts)
+ * - `failed`     documents left in place to be retried on the next sweep
+ */
+export interface FolderSweepReportDTO {
+  batchId: string;
+  enqueued: number;
+  duplicates: number;
+  rejected: number;
+  failed: number;
+}
+
+/** POST /api/Email/upload-leads-folder — the server acknowledges the write, nothing more. */
+export interface FolderUploadResultDTO {
+  message?: string;
+}
+
 export type LeadOccurrenceClassification =
   | 'Pending'
   | 'New'
@@ -638,15 +664,32 @@ const leadService = {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
   },
-  uploadToFolder: async (formData: FormData, folderType: string): Promise<any> => {
-    const r = await axiosInstance.post(`/api/Email/upload-leads-folder?folderType=${folderType}`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    });
+  /**
+   * Places documents into one of this business unit's watched folders on the server
+   * (`Tenants/{businessUnitId}/Watched/{folderType}` under the configured storage root),
+   * for operators who cannot reach that filesystem themselves.
+   *
+   * POST /api/Email/upload-leads-folder?folderType=Shared|SEC|Aramco
+   * (EmailController.UploadLeadsToFolder, requires Leads:Create). The files are only
+   * WRITTEN here — nothing is ingested until the folder is swept.
+   */
+  uploadToFolder: async (formData: FormData, folderType: string): Promise<FolderUploadResultDTO> => {
+    const r = await axiosInstance.post<FolderUploadResultDTO>(
+      `/api/Email/upload-leads-folder?folderType=${encodeURIComponent(folderType)}`,
+      formData,
+      { headers: { 'Content-Type': 'multipart/form-data' } },
+    );
     return r.data;
   },
 
-  processAllFolderLeads: async (): Promise<any> => {
-    const r = await axiosInstance.post('/api/Email/process-all-folder-leads');
+  /**
+   * Runs the watched-folder sweep on demand — the same sweep
+   * (FolderService.ProcessAllFoldersAsync) the background service runs on its own cycle.
+   * POST /api/Email/process-all-folder-leads (EmailController.ProcessAllFolderLeads,
+   * requires Leads:Create), returns 202 with the real per-run counts.
+   */
+  processAllFolderLeads: async (): Promise<FolderSweepReportDTO> => {
+    const r = await axiosInstance.post<FolderSweepReportDTO>('/api/Email/process-all-folder-leads');
     return r.data;
   },
 

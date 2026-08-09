@@ -86,6 +86,7 @@ const STATIC_ROUTE_TITLES: Readonly<Record<string, string>> = {
   '/setup/business-unit': 'Business Units',
   '/setup/price-structure': 'Price Structure',
   '/setup/sla': 'Deadlines & Alerts',
+  '/setup/routing-rules': 'RFQ Routing Rules',
 
   // Security
   '/security/users': 'Users',
@@ -120,6 +121,7 @@ const STATIC_ROUTE_TITLES: Readonly<Record<string, string>> = {
   '/procurement/leads/possible-matches': 'Possible Matches',
   '/procurement/leads/duplicates': 'Duplicate Uploads',
   '/procurement/leads/inbound-mail': 'Inbound Mail',
+  '/procurement/leads/watched-folders': 'Watched Folders',
   '/commercial-cases': 'Commercial Case Workspace',
 
   // Platform Owner console (see platform/PlatformRoutes.tsx)

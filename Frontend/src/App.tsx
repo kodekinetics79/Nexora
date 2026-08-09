@@ -40,6 +40,7 @@ const LeadsPage = lazy(() => import('./pages/Leads/LeadsPage'));
 const OutstandingLeadsPage = lazy(() => import('./pages/Leads/OutstandingLeadsPage'));
 const AssignedLeadsPage = lazy(() => import('./pages/Leads/AssignedLeadsPage'));
 const ManualUploadLeadsPage = lazy(() => import('./pages/Leads/ManualUploadLeadsPage'));
+const WatchedFoldersPage = lazy(() => import('./pages/Leads/WatchedFoldersPage'));
 const LeadIngestionBatchPage = lazy(() => import('./pages/Leads/LeadIngestionBatchPage'));
 const PossibleMatchesPage = lazy(() => import('./pages/Leads/PossibleMatchesPage'));
 const DuplicateUploadsPage = lazy(() => import('./pages/Leads/DuplicateUploadsPage'));
@@ -81,6 +82,7 @@ const ShipmentInvoicePage = lazy(() => import('./pages/Sales/Shipments/ShipmentI
 const PriceStructurePage = lazy(() => import('./pages/Setup/PriceStructure/PriceStructurePage'));
 const SlaSettingsPage = lazy(() => import('./pages/Setup/Sla/SlaSettingsPage'));
 const MailboxPage = lazy(() => import('./pages/Setup/Mailbox/MailboxPage'));
+const RoutingRulesPage = lazy(() => import('./pages/Setup/RoutingRules/RoutingRulesPage'));
 const SalesTodayPage = lazy(() => import('./pages/SalesManagement/SalesTodayPage'));
 const TeamOverviewPage = lazy(() => import('./pages/SalesManagement/TeamOverviewPage'));
 const RepDirectoryPage = lazy(() => import('./pages/SalesManagement/RepDirectoryPage'));
@@ -265,6 +267,10 @@ function App() {
           screen already uses — rather than the generic setup module, because these rows hold
           stored credentials and decide where customer-facing mail is sent from. */}
       <Route path="/setup/mailboxes" element={<MainLayout><PermissionGuard moduleName="Email & SMTP"><MailboxPage /></PermissionGuard></MainLayout>} />
+      {/* RFQ routing rules (FR-RFQ-07). Guarded by "Customers" because that is the module the
+          underlying commercial-routing endpoints check for both reading a customer's routing
+          profile and creating ownership/identifier rows. */}
+      <Route path="/setup/routing-rules" element={<MainLayout><PermissionGuard moduleName="Customers"><RoutingRulesPage /></PermissionGuard></MainLayout>} />
 
       {/* Security Routes */}
       <Route path="/security/users" element={<MainLayout><PermissionGuard moduleName="Users"><UsersPage /></PermissionGuard></MainLayout>} />
@@ -308,8 +314,13 @@ function App() {
       <Route path="/procurement/leads/possible-matches" element={<MainLayout><PermissionGuard moduleName="Leads"><PossibleMatchesPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/leads/duplicates" element={<MainLayout><PermissionGuard moduleName="Leads"><DuplicateUploadsPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/leads/inbound-mail" element={<MainLayout><PermissionGuard moduleName="Leads"><InboundMailTriagePage /></PermissionGuard></MainLayout>} />
-      {/* Customer 1 / Customer 2 folder-upload prototype removed from intake. Redirect legacy links to manual upload. */}
-      <Route path="/procurement/leads/folder-upload" element={<Navigate to="/procurement/leads/manual-upload" replace />} />
+      {/*
+        The watched-folder intake channel (FolderService, swept by EmailBackgroundService). The old
+        route redirected to manual upload, which left a channel that really runs on the server with
+        no operator surface at all.
+      */}
+      <Route path="/procurement/leads/watched-folders" element={<MainLayout><PermissionGuard moduleName="Leads"><WatchedFoldersPage /></PermissionGuard></MainLayout>} />
+      <Route path="/procurement/leads/folder-upload" element={<Navigate to="/procurement/leads/watched-folders" replace />} />
       <Route path="/procurement/leads/view/:id" element={<MainLayout><PermissionGuard moduleName="Leads"><LeadDetailPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/leads/:id/convert" element={<MainLayout><PermissionGuard moduleName="Leads"><LeadConvertPage /></PermissionGuard></MainLayout>} />
       <Route path="/commercial-cases/:id?" element={<MainLayout><PermissionGuard moduleName="Leads"><CommercialCaseWorkspacePage /></PermissionGuard></MainLayout>} />
@@ -319,7 +330,8 @@ function App() {
       <Route path="/leads/outstanding" element={<Navigate to="/procurement/leads/outstanding" replace />} />
       <Route path="/leads/assigned" element={<Navigate to="/procurement/leads/assigned" replace />} />
       <Route path="/leads/manual-upload" element={<Navigate to="/procurement/leads/manual-upload" replace />} />
-      <Route path="/leads/folder-upload" element={<Navigate to="/procurement/leads/manual-upload" replace />} />
+      <Route path="/leads/folder-upload" element={<Navigate to="/procurement/leads/watched-folders" replace />} />
+      <Route path="/leads/watched-folders" element={<Navigate to="/procurement/leads/watched-folders" replace />} />
       <Route path="/leads/view/:id" element={<MainLayout><PermissionGuard moduleName="Leads"><LeadDetailPage /></PermissionGuard></MainLayout>} />
       <Route path="/leads" element={<Navigate to="/procurement/leads/all" replace />} />
 
