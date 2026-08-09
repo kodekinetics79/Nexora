@@ -19,9 +19,21 @@ import { jwtDecode } from 'jwt-decode';
 // Dedicated storage keys — kept SEPARATE from the tenant token (`token`).
 const TOKEN_KEY = 'nexora_platform_token';
 const USER_KEY = 'nexora_platform_user';
+const CHANNEL_NAME = 'nexora-platform-session-v1';
+
+type SessionMessage =
+  | { type: 'session-request'; source: string; nonce: string }
+  | { type: 'session-response'; source: string; target: string; nonce: string; token: string; user: PlatformSessionUser }
+  | { type: 'session-updated'; source: string; token: string; user: PlatformSessionUser }
+  | { type: 'session-cleared'; source: string };
 
 let cachedUserRaw: string | null = null;
 let cachedUser: PlatformSessionUser | null = null;
+const tabId = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+  ? crypto.randomUUID()
+  : `${Date.now()}-${Math.random()}`;
+let channel: BroadcastChannel | null = null;
+let pendingNonce: string | null = null;
 
 export interface PlatformSessionUser {
   id?: string;
@@ -92,6 +104,11 @@ export const getPlatformAuthedSnapshot = (): boolean => getPlatformToken() !== n
 // --- writes -----------------------------------------------------------------
 
 export const setPlatformSession = (token: string, user: PlatformSessionUser): void => {
+  persistPlatformSession(token, user);
+  channel?.postMessage({ type: 'session-updated', source: tabId, token, user } satisfies SessionMessage);
+};
+
+const persistPlatformSession = (token: string, user: PlatformSessionUser): void => {
   const userRaw = JSON.stringify(user);
   sessionStorage.setItem(TOKEN_KEY, token);
   sessionStorage.setItem(USER_KEY, userRaw);
@@ -101,12 +118,74 @@ export const setPlatformSession = (token: string, user: PlatformSessionUser): vo
 };
 
 export const clearPlatformSession = (): void => {
+  clearPersistedPlatformSession();
+  channel?.postMessage({ type: 'session-cleared', source: tabId } satisfies SessionMessage);
+};
+
+const clearPersistedPlatformSession = (): void => {
   sessionStorage.removeItem(TOKEN_KEY);
   sessionStorage.removeItem(USER_KEY);
   cachedUserRaw = null;
   cachedUser = null;
   emit();
 };
+
+// BroadcastChannel is same-origin by browser contract. It lets a newly-opened tab
+// request the current platform session without weakening storage to localStorage.
+// A targeted, single-use nonce prevents an unrelated/stale response from being
+// accepted. The server-side PlatformSession ledger remains authoritative: every
+// transferred token is still live-validated on its next API request.
+const startCrossTabBridge = (): void => {
+  if (typeof window === 'undefined' || typeof BroadcastChannel === 'undefined') return;
+
+  channel = new BroadcastChannel(CHANNEL_NAME);
+  channel.addEventListener('message', (event: MessageEvent<unknown>) => {
+    const message = event.data as Partial<SessionMessage> | null;
+    if (!message || typeof message !== 'object' || message.source === tabId) return;
+
+    if (message.type === 'session-request'
+      && typeof message.source === 'string'
+      && typeof message.nonce === 'string') {
+      const token = getPlatformToken();
+      const user = getPlatformUser();
+      if (token && user) {
+        channel?.postMessage({
+          type: 'session-response', source: tabId, target: message.source,
+          nonce: message.nonce, token, user,
+        } satisfies SessionMessage);
+      }
+      return;
+    }
+
+    if (message.type === 'session-response'
+      && message.target === tabId
+      && message.nonce === pendingNonce
+      && typeof message.token === 'string'
+      && message.user && typeof message.user === 'object') {
+      pendingNonce = null;
+      persistPlatformSession(message.token, message.user as PlatformSessionUser);
+      return;
+    }
+
+    if (message.type === 'session-updated'
+      && typeof message.token === 'string'
+      && message.user && typeof message.user === 'object') {
+      persistPlatformSession(message.token, message.user as PlatformSessionUser);
+      return;
+    }
+
+    if (message.type === 'session-cleared') clearPersistedPlatformSession();
+  });
+
+  if (!sessionStorage.getItem(TOKEN_KEY)) {
+    pendingNonce = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random()}`;
+    channel.postMessage({ type: 'session-request', source: tabId, nonce: pendingNonce } satisfies SessionMessage);
+  }
+};
+
+startCrossTabBridge();
 
 // --- login response → session user -----------------------------------------
 

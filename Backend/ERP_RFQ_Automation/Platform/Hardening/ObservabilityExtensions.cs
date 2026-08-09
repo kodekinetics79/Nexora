@@ -124,6 +124,27 @@ public static class ObservabilityExtensions
     }
 
     /// <summary>
+    /// Prevents the built-in metrics endpoint from becoming an anonymous production
+    /// disclosure boundary. Development may intentionally run an open local scrape,
+    /// but production must either configure the scrape key, use OTLP (which disables
+    /// the fallback endpoint), or explicitly disable Prometheus.
+    /// </summary>
+    public static void EnsureSecureProductionSelection(ObservabilitySelection selection)
+    {
+        ArgumentNullException.ThrowIfNull(selection);
+
+        if (string.Equals(selection.Environment, "Production", StringComparison.OrdinalIgnoreCase)
+            && selection.PrometheusEnabled
+            && !selection.PrometheusKeyConfigured)
+        {
+            throw new InvalidOperationException(
+                $"Production Prometheus scraping is enabled without authentication. Set "
+                + $"{PrometheusScrapeKeyEnvironmentVariable}, configure a valid OTLP endpoint, "
+                + $"or explicitly disable {PrometheusScrapeOptions.SectionName}:Enabled.");
+        }
+    }
+
+    /// <summary>
     /// States the observability posture explicitly at boot, in the same style as the
     /// malware-scanner selection in Program.cs. Silent no-op observability is exactly what
     /// let every instrument sit at zero unnoticed, so the "nothing is exported" case is an
@@ -195,6 +216,7 @@ public static class ObservabilityExtensions
         this IServiceCollection services, IConfiguration configuration)
     {
         var selection = SelectExporter(configuration);
+        EnsureSecureProductionSelection(selection);
 
         // The decision is stated at boot, before anything can depend on it, exactly as the
         // malware-scanner selection is. A short-lived console logger is used because the

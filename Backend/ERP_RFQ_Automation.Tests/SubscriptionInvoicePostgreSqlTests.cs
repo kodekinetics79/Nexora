@@ -35,6 +35,9 @@ public sealed class SubscriptionInvoicePostgreSqlTests(PostgreSqlTestDatabase da
                 TenantId = tenant.Id, RateCardId = card.Id,
                 PeriodStartUtc = new DateTime(2026, 7, 1), PeriodEndUtc = new DateTime(2026, 8, 1),
                 Status = BillingStatementStatus.Draft, Currency = "USD", TotalAmount = 100m,
+                ReadinessStatus = BillingReadinessStatus.Ready,
+                ReadinessManifestJson = "{\"ready\":true}",
+                ReadinessManifestSha256 = "b342fc286d0216cc212e0d7ba234894e2e7283ddf14f959adf0fe7fd5924308a",
                 ComputedAtUtc = DateTime.UtcNow, ComputedBy = "maker@example.test",
                 FinalizedAtUtc = DateTime.UtcNow, FinalizedBy = "checker@example.test",
                 Lines = [new BillingStatementLine
@@ -50,7 +53,9 @@ public sealed class SubscriptionInvoicePostgreSqlTests(PostgreSqlTestDatabase da
             statementId = statement.Id;
         }
 
-        var request = new CreateSubscriptionInvoice(statementId, 15m, "standard VAT", "Nexora LLC", "TAX-1");
+        // This test isolates invoice concurrency/immutability. Taxable invoices now require a
+        // separately approved jurisdiction rule and are covered by the revenue-control PG lane.
+        var request = new CreateSubscriptionInvoice(statementId, 0m, "not taxable", "Nexora LLC", "TAX-1");
         var first = Create(request);
         var second = Create(request);
         var invoices = await Task.WhenAll(first, second);

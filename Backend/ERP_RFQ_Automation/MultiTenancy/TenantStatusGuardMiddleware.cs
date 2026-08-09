@@ -5,7 +5,7 @@ namespace ERP_RFQ_Automation.MultiTenancy;
 
 /// <summary>
 /// Denies every authenticated tenant-plane request (businessUnitId claim present,
-/// path outside /api/platform) whose owning platform Tenant is Suspended or Archived
+/// path outside /api/platform) whose owning platform Tenant is PastDue, Suspended or Archived
 /// (403 problem+json), mirroring <see cref="TenantClaimGuardMiddleware"/>. Status is
 /// resolved through the ~60s-cached <see cref="ITenantAccessService"/>, so the hot
 /// path performs no database query. Legacy BusinessUnits with no Tenant row fail

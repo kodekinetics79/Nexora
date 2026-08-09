@@ -2082,6 +2082,9 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long>("SubscriptionInvoiceId")
                         .HasColumnType("bigint");
 
+                    b.Property<long?>("SubscriptionRevenueActionId")
+                        .HasColumnType("bigint");
+
                     b.Property<long>("TenantId")
                         .HasColumnType("bigint");
 
@@ -2095,13 +2098,14 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsUnique()
                         .HasDatabaseName("UX_AccountingOutbox_IdempotencyKey");
 
+                    b.HasIndex("SubscriptionRevenueActionId");
+
                     b.HasIndex("Status", "AvailableAtUtc");
 
                     b.HasIndex("SubscriptionInvoiceId", "MessageType")
-                        .IsUnique()
-                        .HasDatabaseName("UX_AccountingOutbox_Invoice_MessageType");
+                        .HasDatabaseName("IX_AccountingOutbox_Invoice_MessageType");
 
-                    b.HasIndex("TenantId", "SubscriptionInvoiceId");
+                    b.HasIndex("TenantId", "SubscriptionInvoiceId", "SubscriptionRevenueActionId");
 
                     b.ToTable("AccountingOutbox", "platform");
                 });
@@ -2142,6 +2146,27 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<long>("RateCardId")
                         .HasColumnType("bigint");
+
+                    b.Property<string>("ReadinessManifestJson")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("jsonb")
+                        .HasDefaultValue("{}");
+
+                    b.Property<string>("ReadinessManifestSha256")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .HasDefaultValue("0000000000000000000000000000000000000000000000000000000000000000")
+                        .IsFixedLength();
+
+                    b.Property<string>("ReadinessStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasDefaultValue("Blocked");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -2229,6 +2254,172 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasDatabaseName("IX_BillingStatementLines_Statement");
 
                     b.ToTable("BillingStatementLines", "platform");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Billing.Metering.TenantMeterSourcePolicy", b =>
+                {
+                    b.Property<long>("TenantId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("MeterKey")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("ApprovalReason")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<DateTime?>("ApprovedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ApprovedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<DateTime?>("CutoverAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Mode")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<DateTime?>("ProposedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ProposedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<DateTime?>("ProposedEffectiveAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L);
+
+                    b.HasKey("TenantId", "MeterKey");
+
+                    b.ToTable("TenantMeterSourcePolicies", "platform");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Billing.Metering.UsageCoverageSegment", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<decimal>("AllowanceAppliedTotal")
+                        .HasPrecision(20, 6)
+                        .HasColumnType("numeric(20,6)");
+
+                    b.Property<string>("ApprovalReason")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<DateTime>("ApprovedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ApprovedBy")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("AuthoritativeSource")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("Completeness")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<DateTime>("CompletenessWatermarkUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int?>("CounterpartEventCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("CounterpartEvidenceSha256")
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .IsFixedLength();
+
+                    b.Property<decimal?>("CounterpartQuantityTotal")
+                        .HasPrecision(20, 6)
+                        .HasColumnType("numeric(20,6)");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<DateTime?>("CutoverAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("EndUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("EventCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("EvidenceSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .IsFixedLength();
+
+                    b.Property<string>("MeterKey")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<decimal>("OverageQuantityTotal")
+                        .HasPrecision(20, 6)
+                        .HasColumnType("numeric(20,6)");
+
+                    b.Property<decimal>("QuantityTotal")
+                        .HasPrecision(20, 6)
+                        .HasColumnType("numeric(20,6)");
+
+                    b.Property<string>("RateLineageJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("RateLineageSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .IsFixedLength();
+
+                    b.Property<decimal>("RatedAmountTotal")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("numeric(18,6)");
+
+                    b.Property<string>("ReconciliationStatus")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<DateTime>("StartUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long>("TenantId")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "MeterKey", "StartUtc", "EndUtc")
+                        .IsUnique()
+                        .HasDatabaseName("UX_UsageCoverageSegments_Tenant_Meter_Range");
+
+                    b.ToTable("UsageCoverageSegments", "platform");
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Billing.Metering.UsageEvent", b =>
@@ -2367,6 +2558,109 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("TenantId", "EventType", "OccurredAtUtc");
 
                     b.ToTable("UsageEvents", "platform");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Billing.Metering.UsageEventRating", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<decimal>("AllowanceApplied")
+                        .HasPrecision(20, 6)
+                        .HasColumnType("numeric(20,6)");
+
+                    b.Property<int>("AttemptNumber")
+                        .HasColumnType("integer");
+
+                    b.Property<long?>("ContractId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<string>("EvidenceSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .IsFixedLength();
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<DateTime>("OccurredAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<decimal>("OverageQuantity")
+                        .HasPrecision(20, 6)
+                        .HasColumnType("numeric(20,6)");
+
+                    b.Property<long?>("PlanId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("RateCardId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("RateCardLineId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("RateCardVersion")
+                        .HasColumnType("bigint");
+
+                    b.Property<decimal?>("RatedAmount")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("numeric(18,6)");
+
+                    b.Property<DateTime>("RatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("RatedBy")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("ReasonCode")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<long>("TenantId")
+                        .HasColumnType("bigint");
+
+                    b.Property<decimal?>("UnitPrice")
+                        .HasPrecision(18, 8)
+                        .HasColumnType("numeric(18,8)");
+
+                    b.Property<Guid>("UsageEventId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PlanId");
+
+                    b.HasIndex("RateCardId");
+
+                    b.HasIndex("RateCardLineId");
+
+                    b.HasIndex("TenantId", "IdempotencyKey")
+                        .IsUnique()
+                        .HasDatabaseName("UX_UsageEventRatings_Tenant_Idempotency");
+
+                    b.HasIndex("TenantId", "UsageEventId", "AttemptNumber")
+                        .IsUnique()
+                        .HasDatabaseName("UX_UsageEventRatings_Event_Attempt");
+
+                    b.ToTable("UsageEventRatings", "platform");
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Billing.Metering.UsageMinuteAggregate", b =>
@@ -2615,6 +2909,14 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasPrecision(14, 2)
                         .HasColumnType("numeric(14,2)");
 
+                    b.Property<decimal>("RefundedAmount")
+                        .HasPrecision(14, 2)
+                        .HasColumnType("numeric(14,2)");
+
+                    b.Property<decimal>("ReversedPaymentAmount")
+                        .HasPrecision(14, 2)
+                        .HasColumnType("numeric(14,2)");
+
                     b.Property<string>("SellerSnapshotJson")
                         .IsRequired()
                         .HasColumnType("jsonb");
@@ -2642,9 +2944,30 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasPrecision(14, 2)
                         .HasColumnType("numeric(14,2)");
 
+                    b.Property<DateTime?>("TaxDeterminedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("TaxEvidenceJson")
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("TaxEvidenceSha256")
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .IsFixedLength();
+
+                    b.Property<string>("TaxJurisdictionCode")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
                     b.Property<decimal>("TaxRatePercent")
                         .HasPrecision(7, 4)
                         .HasColumnType("numeric(7,4)");
+
+                    b.Property<long?>("TaxRuleId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("TaxRuleVersion")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("TaxTreatment")
                         .IsRequired()
@@ -2664,6 +2987,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint")
                         .HasDefaultValue(1L);
 
+                    b.Property<decimal>("WrittenOffAmount")
+                        .HasPrecision(14, 2)
+                        .HasColumnType("numeric(14,2)");
+
                     b.HasKey("Id");
 
                     b.HasIndex("BillingStatementId")
@@ -2671,6 +2998,8 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasIndex("InvoiceNumber")
                         .IsUnique();
+
+                    b.HasIndex("TaxRuleId", "TaxRuleVersion");
 
                     b.HasIndex("TenantId", "Status", "DueAtUtc");
 
@@ -2716,6 +3045,174 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("SubscriptionInvoiceId");
 
                     b.ToTable("SubscriptionPayments", "platform");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Billing.SubscriptionRevenueAction", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<decimal>("Amount")
+                        .HasPrecision(14, 2)
+                        .HasColumnType("numeric(14,2)");
+
+                    b.Property<DateTime?>("ApprovedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long?>("ApprovedByPlatformUserId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime?>("CompletedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<string>("EvidenceSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .IsFixedLength();
+
+                    b.Property<string>("ExternalReference")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<DateTime>("ProposedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long?>("ProposedByPlatformUserId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<long>("SubscriptionInvoiceId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("TenantId")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ApprovedByPlatformUserId");
+
+                    b.HasIndex("IdempotencyKey")
+                        .IsUnique();
+
+                    b.HasIndex("ProposedByPlatformUserId");
+
+                    b.HasIndex("TenantId", "SubscriptionInvoiceId", "Kind", "Status");
+
+                    b.ToTable("SubscriptionRevenueActions", "platform");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Billing.SubscriptionTaxRule", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime?>("ApprovedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long?>("ApprovedByPlatformUserId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("BuyerCountryCode")
+                        .IsRequired()
+                        .HasMaxLength(2)
+                        .HasColumnType("character varying(2)");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<DateTime>("EffectiveFromUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("EffectiveToUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("EvidenceSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .IsFixedLength();
+
+                    b.Property<string>("JurisdictionCode")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("LegalAuthorityReference")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<DateTime>("ProposedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long>("ProposedByPlatformUserId")
+                        .HasColumnType("bigint");
+
+                    b.Property<decimal>("RatePercent")
+                        .HasPrecision(7, 4)
+                        .HasColumnType("numeric(7,4)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("Treatment")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L);
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ApprovedByPlatformUserId");
+
+                    b.HasIndex("ProposedByPlatformUserId");
+
+                    b.HasIndex("Status", "BuyerCountryCode", "Currency");
+
+                    b.HasIndex("JurisdictionCode", "BuyerCountryCode", "Currency", "EffectiveFromUtc")
+                        .IsUnique();
+
+                    b.ToTable("SubscriptionTaxRules", "platform");
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Boq.BoqAssembly", b =>
@@ -20224,6 +20721,12 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasPrincipalKey("TenantId", "Id")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Billing.SubscriptionRevenueAction", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId", "SubscriptionInvoiceId", "SubscriptionRevenueActionId")
+                        .HasPrincipalKey("TenantId", "SubscriptionInvoiceId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Billing.BillingStatement", b =>
@@ -20252,6 +20755,24 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Navigation("Statement");
                 });
 
+            modelBuilder.Entity("ERP_RFQ_Automation.Billing.Metering.TenantMeterSourcePolicy", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Platform.Models.Tenant", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Billing.Metering.UsageCoverageSegment", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Platform.Models.Tenant", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("ERP_RFQ_Automation.Billing.Metering.UsageEvent", b =>
                 {
                     b.HasOne("ERP_RFQ_Automation.Billing.RateCard", null)
@@ -20275,6 +20796,31 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasForeignKey("TenantId", "AdjustsUsageEventId")
                         .HasPrincipalKey("TenantId", "UsageEventId")
                         .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Billing.Metering.UsageEventRating", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Platform.Models.Plan", null)
+                        .WithMany()
+                        .HasForeignKey("PlanId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.Billing.RateCard", null)
+                        .WithMany()
+                        .HasForeignKey("RateCardId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.Billing.RateCardLine", null)
+                        .WithMany()
+                        .HasForeignKey("RateCardLineId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.Billing.Metering.UsageEvent", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId", "UsageEventId")
+                        .HasPrincipalKey("TenantId", "UsageEventId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Billing.Metering.UsageMinuteAggregate", b =>
@@ -20321,6 +20867,12 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasForeignKey("TenantId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Billing.SubscriptionTaxRule", null)
+                        .WithMany()
+                        .HasForeignKey("TaxRuleId", "TaxRuleVersion")
+                        .HasPrincipalKey("Id", "Version")
+                        .OnDelete(DeleteBehavior.Restrict);
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Billing.SubscriptionPayment", b =>
@@ -20332,6 +20884,42 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsRequired();
 
                     b.Navigation("Invoice");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Billing.SubscriptionRevenueAction", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Platform.Models.PlatformUser", null)
+                        .WithMany()
+                        .HasForeignKey("ApprovedByPlatformUserId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.Platform.Models.PlatformUser", null)
+                        .WithMany()
+                        .HasForeignKey("ProposedByPlatformUserId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.Billing.SubscriptionInvoice", "Invoice")
+                        .WithMany("RevenueActions")
+                        .HasForeignKey("TenantId", "SubscriptionInvoiceId")
+                        .HasPrincipalKey("TenantId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Invoice");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Billing.SubscriptionTaxRule", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Platform.Models.PlatformUser", null)
+                        .WithMany()
+                        .HasForeignKey("ApprovedByPlatformUserId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.Platform.Models.PlatformUser", null)
+                        .WithMany()
+                        .HasForeignKey("ProposedByPlatformUserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Boq.BoqAssemblyComponent", b =>
@@ -23916,6 +24504,8 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Navigation("Credits");
 
                     b.Navigation("Payments");
+
+                    b.Navigation("RevenueActions");
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Boq.BoqAssembly", b =>

@@ -1,5 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Platform.Auth;
 using ERP_RFQ_Automation.Platform.Services;
@@ -15,13 +16,14 @@ namespace ERP_RFQ_Automation.Billing.Controllers;
 public sealed class PlatformSubscriptionInvoicesController(
     ErpRfqAutomationContext db,
     SubscriptionInvoiceService invoices,
+    SubscriptionRevenueControlService revenue,
     IPlatformAuditService audit) : ControllerBase
 {
     [HttpGet]
     public async Task<IActionResult> List([FromQuery] long? tenantId, CancellationToken ct)
     {
         var query = db.Set<SubscriptionInvoice>().AsNoTracking()
-            .Include(i => i.Credits).Include(i => i.Payments).AsQueryable();
+            .Include(i => i.Credits).Include(i => i.Payments).Include(i => i.RevenueActions).AsQueryable();
         if (tenantId is long id) query = query.Where(i => i.TenantId == id);
         return Ok((await query.OrderByDescending(i => i.IssuedAtUtc).Take(500).ToListAsync(ct)).Select(ToDto));
     }
@@ -35,13 +37,57 @@ public sealed class PlatformSubscriptionInvoicesController(
             {
                 var value = await invoices.CreateDraftAsync(new CreateSubscriptionInvoice(
                     request.StatementId, request.TaxRatePercent, request.TaxTreatment,
-                    request.SellerLegalName, request.SellerTaxNumber), Actor(), ct);
+                    request.SellerLegalName, request.SellerTaxNumber, request.TaxJurisdictionCode), Actor(), ct);
                 await audit.WriteAsync(User, "billing.invoice.create", nameof(SubscriptionInvoice),
                     value.Id.ToString(), new { value.TenantId, value.BillingStatementId, value.TotalAmount },
                     value.TenantId, HttpContext, ct);
                 return value;
             }, ct);
             return Ok(ToDto(invoice));
+        }
+        catch (BillingNotFoundException ex) { return NotFound(new { error = ex.Message }); }
+        catch (BillingConflictException ex) { return Conflict(new { error = ex.Message }); }
+    }
+
+    [HttpPost("{id:long}/revenue-actions")]
+    [Authorize(Policy = PlatformPolicies.Owner)]
+    [Authorize(Policy = PlatformPolicies.Mfa)]
+    public async Task<IActionResult> ProposeRevenueAction(long id, [FromBody] RevenueActionRequest request, CancellationToken ct)
+    {
+        try
+        {
+            var action = await InAuditedTransactionAsync(async () =>
+            {
+                var value = await revenue.ProposeAsync(id, new ProposeRevenueAction(request.Kind,
+                    request.Amount, request.Currency, request.Reason, request.EvidenceSha256,
+                    request.ExternalReference, IdempotencyKey()), ActorId(), ct);
+                await audit.WriteAsync(User, "billing.invoice.revenue-action.propose",
+                    nameof(SubscriptionRevenueAction), value.Id.ToString(),
+                    new { invoiceId = id, value.Kind, value.Amount, value.Status }, value.TenantId, HttpContext, ct);
+                return value;
+            }, ct);
+            return Ok(RevenueActionDto(action));
+        }
+        catch (BillingNotFoundException ex) { return NotFound(new { error = ex.Message }); }
+        catch (BillingConflictException ex) { return Conflict(new { error = ex.Message }); }
+    }
+
+    [HttpPost("revenue-actions/{actionId:long}/approve")]
+    [Authorize(Policy = PlatformPolicies.Owner)]
+    [Authorize(Policy = PlatformPolicies.Mfa)]
+    public async Task<IActionResult> ApproveRevenueAction(long actionId, CancellationToken ct)
+    {
+        try
+        {
+            var action = await InAuditedTransactionAsync(async () =>
+            {
+                var value = await revenue.ApproveAsync(actionId, ActorId(), ct);
+                await audit.WriteAsync(User, "billing.invoice.revenue-action.approve",
+                    nameof(SubscriptionRevenueAction), value.Id.ToString(),
+                    new { value.SubscriptionInvoiceId, value.Kind, value.Amount, value.Status }, value.TenantId, HttpContext, ct);
+                return value;
+            }, ct);
+            return Ok(RevenueActionDto(action));
         }
         catch (BillingNotFoundException ex) { return NotFound(new { error = ex.Message }); }
         catch (BillingConflictException ex) { return Conflict(new { error = ex.Message }); }
@@ -85,7 +131,11 @@ public sealed class PlatformSubscriptionInvoicesController(
                     actAsTenantId: tenantId, httpContext: HttpContext, ct: ct);
                 return value;
             }, ct);
-            return Ok(credit);
+            return Ok(new
+            {
+                id = credit.Id.ToString(), subscriptionInvoiceId = credit.SubscriptionInvoiceId.ToString(),
+                credit.CreditNumber, credit.Amount, credit.Reason, credit.CreatedBy, credit.CreatedAtUtc
+            });
         }
         catch (BillingNotFoundException ex) { return NotFound(new { error = ex.Message }); }
         catch (BillingConflictException ex) { return Conflict(new { error = ex.Message }); }
@@ -106,7 +156,12 @@ public sealed class PlatformSubscriptionInvoicesController(
                     actAsTenantId: tenantId, httpContext: HttpContext, ct: ct);
                 return value;
             }, ct);
-            return Ok(payment);
+            return Ok(new
+            {
+                id = payment.Id.ToString(), subscriptionInvoiceId = payment.SubscriptionInvoiceId.ToString(),
+                payment.ExternalReference, payment.Amount, payment.ReceivedAtUtc,
+                payment.RecordedBy, payment.RecordedAtUtc
+            });
         }
         catch (BillingNotFoundException ex) { return NotFound(new { error = ex.Message }); }
         catch (BillingConflictException ex) { return Conflict(new { error = ex.Message }); }
@@ -115,6 +170,10 @@ public sealed class PlatformSubscriptionInvoicesController(
     private string Actor() => User.FindFirst("email")?.Value
                               ?? User.FindFirst(JwtRegisteredClaimNames.Sub)?.Value
                               ?? throw new UnauthorizedAccessException("A valid platform actor is required.");
+
+    private long ActorId() => long.TryParse(User.FindFirst("sub")?.Value
+            ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value, out var id) && id > 0
+        ? id : throw new UnauthorizedAccessException("A stable platform actor is required.");
 
     private Task<long> TenantIdAsync(long invoiceId, CancellationToken ct) =>
         db.Set<SubscriptionInvoice>().AsNoTracking()
@@ -147,27 +206,49 @@ public sealed class PlatformSubscriptionInvoicesController(
     {
         id = i.Id.ToString(), tenantId = i.TenantId.ToString(), statementId = i.BillingStatementId.ToString(),
         i.InvoiceNumber, status = i.Status.ToString(), i.Currency, i.Subtotal, i.TaxRatePercent,
-        i.TaxAmount, i.TotalAmount, i.CreditedAmount, i.PaidAmount,
-        outstandingAmount = i.TotalAmount - i.CreditedAmount - i.PaidAmount,
+        i.TaxAmount, i.TotalAmount, i.CreditedAmount, i.PaidAmount, i.RefundedAmount,
+        i.ReversedPaymentAmount, i.WrittenOffAmount,
+        outstandingAmount = Math.Max(0m, i.TotalAmount - i.CreditedAmount
+            - (i.PaidAmount - i.RefundedAmount - i.ReversedPaymentAmount) - i.WrittenOffAmount),
         i.IssuedAtUtc, i.DueAtUtc, i.TaxTreatment, i.SourceEvidenceSha256,
+        i.TaxJurisdictionCode, taxRuleId = i.TaxRuleId?.ToString(), i.TaxRuleVersion,
+        i.TaxEvidenceSha256, i.TaxDeterminedAtUtc,
         i.CreatedBy, i.CreatedAtUtc, i.FinalizedBy, i.FinalizedAtUtc, i.Version,
         credits = i.Credits.Select(c => new { id = c.Id.ToString(), c.CreditNumber, c.Amount, c.Reason, c.CreatedBy, c.CreatedAtUtc }),
-        payments = i.Payments.Select(p => new { id = p.Id.ToString(), p.ExternalReference, p.Amount, p.ReceivedAtUtc, p.RecordedBy })
+        payments = i.Payments.Select(p => new { id = p.Id.ToString(), p.ExternalReference, p.Amount, p.ReceivedAtUtc, p.RecordedBy }),
+        revenueActions = i.RevenueActions.OrderByDescending(x => x.ProposedAtUtc).Select(RevenueActionDto)
+    };
+
+    private static object RevenueActionDto(SubscriptionRevenueAction x) => new
+    {
+        id = x.Id.ToString(), invoiceId = x.SubscriptionInvoiceId.ToString(), x.Kind, x.Status,
+        x.Amount, x.Currency, x.Reason, x.EvidenceSha256, x.ExternalReference,
+        x.ProposedByPlatformUserId, x.ProposedAtUtc, x.ApprovedByPlatformUserId,
+        x.ApprovedAtUtc, x.CompletedAtUtc
     };
 }
 
 public sealed record CreateInvoiceRequest(
     long StatementId,
-    [property: Range(0, 100)] decimal TaxRatePercent,
-    [property: Required, StringLength(128)] string TaxTreatment,
-    [property: Required, StringLength(256)] string SellerLegalName,
-    [property: Required, StringLength(64)] string SellerTaxNumber);
+    [Range(0, 100)] decimal TaxRatePercent,
+    [Required, StringLength(128)] string TaxTreatment,
+    [Required, StringLength(256)] string SellerLegalName,
+    [Required, StringLength(64)] string SellerTaxNumber,
+    [Required, StringLength(64)] string TaxJurisdictionCode);
+
+public sealed record RevenueActionRequest(
+    SubscriptionRevenueActionKind Kind,
+    [Range(typeof(decimal), "0", "999999999999.99")] decimal Amount,
+    [Required, StringLength(3, MinimumLength = 3)] string Currency,
+    [Required, StringLength(1000, MinimumLength = 10)] string Reason,
+    [Required, StringLength(64, MinimumLength = 64)] string EvidenceSha256,
+    [StringLength(256)] string? ExternalReference);
 
 public sealed record CreditInvoiceRequest(
-    [property: Range(typeof(decimal), "0.01", "999999999999.99")] decimal Amount,
-    [property: Required, StringLength(1000, MinimumLength = 5)] string Reason);
+    [Range(typeof(decimal), "0.01", "999999999999.99")] decimal Amount,
+    [Required, StringLength(1000, MinimumLength = 5)] string Reason);
 
 public sealed record RecordInvoicePaymentRequest(
-    [property: Range(typeof(decimal), "0.01", "999999999999.99")] decimal Amount,
-    [property: Required, StringLength(128)] string ExternalReference,
+    [Range(typeof(decimal), "0.01", "999999999999.99")] decimal Amount,
+    [Required, StringLength(128)] string ExternalReference,
     DateTime ReceivedAtUtc);

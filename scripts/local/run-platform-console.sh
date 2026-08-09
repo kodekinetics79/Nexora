@@ -37,6 +37,8 @@ FRONTEND_URL="http://127.0.0.1:${FRONTEND_PORT}"
 # refuses anything shorter rather than silently creating a weak account.
 OWNER_EMAIL="${NEXORA_OWNER_EMAIL:-owner@nexora.local}"
 OWNER_PASSWORD="${NEXORA_OWNER_PASSWORD:-LocalOwner!2026}"
+CHECKER_EMAIL="${NEXORA_CHECKER_EMAIL:-checker@nexora.local}"
+CHECKER_PASSWORD="${NEXORA_CHECKER_PASSWORD:-LocalChecker!2026}"
 
 log()  { printf '\033[1;36m[nexora]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[nexora]\033[0m %s\n' "$*"; }
@@ -130,6 +132,7 @@ log "Starting the API on $BACKEND_URL (applying ~200 migrations on first run)."
   CommercialFinance__ContactVerificationSecret="$APP_SECRET" \
   CommercialFinance__DunningProviderWebhookSecret="$APP_SECRET" \
   CommercialFinance__AuditActorSecret="$APP_SECRET" \
+  Observability__Prometheus__ScrapeKey="$APP_SECRET" \
   Platform__BootstrapOwnerEmail="$OWNER_EMAIL" \
   Platform__BootstrapOwnerPassword="$OWNER_PASSWORD" \
   Notifications__AppBaseUrl="$FRONTEND_URL" \
@@ -200,6 +203,40 @@ PY
   unset MFA_SECRET MFA_CODE RECOVERY_CODE CHALLENGE_ID
 fi
 
+# Paid billing and cutover approval are maker/checker operations. Seed a second,
+# independently authenticated disposable Owner through the real audited IAM API,
+# then enroll its own authenticator. The two secrets are never interchangeable.
+log "Creating the independent disposable billing checker."
+curl -fsS -o /dev/null -X POST "$BACKEND_URL/api/platform/users" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$CHECKER_EMAIL\",\"password\":\"$CHECKER_PASSWORD\",\"role\":\"Owner\",\"displayName\":\"Local Billing Checker\"}" \
+  || die "Independent checker creation failed — see $RUN_DIR/backend.log"
+CHECKER_TOKEN="$(curl -fsS -X POST "$BACKEND_URL/api/platform/auth/login" \
+  -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$CHECKER_EMAIL\",\"password\":\"$CHECKER_PASSWORD\"}" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')" \
+  || die "Independent checker login failed — see $RUN_DIR/backend.log"
+CHECKER_MFA_SECRET="$(curl -fsS -X POST "$BACKEND_URL/api/platform/auth/mfa/enrollment" \
+  -H "Authorization: Bearer $CHECKER_TOKEN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["secret"])')"
+umask 077
+printf '%s' "$CHECKER_MFA_SECRET" >"$RUN_DIR/platform-checker-mfa-secret"
+chmod 600 "$RUN_DIR/platform-checker-mfa-secret"
+CHECKER_MFA_CODE="$(python3 - "$CHECKER_MFA_SECRET" <<'PY'
+import base64, hashlib, hmac, struct, sys, time
+secret = base64.b32decode(sys.argv[1] + '=' * ((8 - len(sys.argv[1]) % 8) % 8))
+step = int(time.time()) // 30
+digest = hmac.new(secret, struct.pack('>Q', step), hashlib.sha1).digest()
+offset = digest[-1] & 15
+value = (struct.unpack('>I', digest[offset:offset + 4])[0] & 0x7fffffff) % 1000000
+print(f'{value:06d}')
+PY
+)"
+curl -fsS -o /dev/null -X POST "$BACKEND_URL/api/platform/auth/mfa/enrollment/confirm" \
+  -H "Authorization: Bearer $CHECKER_TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"totpCode\":\"$CHECKER_MFA_CODE\"}" \
+  || die "Independent checker MFA enrollment failed — see $RUN_DIR/backend.log"
+unset CHECKER_TOKEN CHECKER_MFA_SECRET CHECKER_MFA_CODE
+
 PLAN_FEATURES='{\"module.rfq\":true,\"module.quotes\":true,\"module.orders\":true,\"module.procurement\":true,\"module.inventory\":true,\"capability.ai\":true,\"capability.ocr\":true,\"capability.api\":false,\"capability.email-intake\":true,\"capability.supplier-search\":true,\"capability.integrations\":true,\"capability.exports\":true,\"capability.automation\":false,\"capability.sso\":false,\"capability.scim\":false,\"capability.dedicated-resources\":false}'
 create_plan() {  # code name weight concurrent docs seats priceUsd
   if curl -fsS -o /dev/null -X POST "$BACKEND_URL/api/platform/plans" \
@@ -219,8 +256,8 @@ create_plan starter    "Starter"    1  2   1000  5   499
 create_plan growth     "Growth"     5  6   10000 25  1999
 create_plan enterprise "Enterprise" 10 20  100000 250 7999
 
-# Deliberately priced on every meter the statement engine knows about, so a provisioned
-# tenant has somewhere real to pin and the revenue-risk warnings can be seen resolving.
+# Price only the closed catalogue's BILLING_CERTIFIED meters. Page/OCR/storage
+# remain observable or blocked until their source and reconciliation contracts are certified.
 # datetime.timezone.utc rather than datetime.UTC: the alias only exists on Python 3.11+, and
 # this script has to run on whatever interpreter the machine ships with.
 EFFECTIVE_FROM="$(python3 -c 'import datetime;print((datetime.datetime.now(datetime.timezone.utc).replace(day=1)-datetime.timedelta(days=365)).strftime("%Y-%m-%dT00:00:00Z"))')"
@@ -230,8 +267,7 @@ if curl -fsS -o /dev/null -X POST "$BACKEND_URL/api/platform/billing/rate-cards"
        \"effectiveToUtc\":null,\"isActive\":true,\"lines\":[
         {\"meterKey\":\"documents\",\"includedQuantity\":1000,\"unitPrice\":0.25,\"unit\":\"document\",\"tierNote\":null},
         {\"meterKey\":\"ai.tokens.external\",\"includedQuantity\":500000,\"unitPrice\":0.02,\"unit\":\"1K tokens\",\"tierNote\":null},
-        {\"meterKey\":\"seats\",\"includedQuantity\":5,\"unitPrice\":25,\"unit\":\"seat\",\"tierNote\":null},
-        {\"meterKey\":\"storage.gb\",\"includedQuantity\":10,\"unitPrice\":0.10,\"unit\":\"GiB\",\"tierNote\":null}]}"
+        {\"meterKey\":\"seats\",\"includedQuantity\":5,\"unitPrice\":25,\"unit\":\"seat\",\"tierNote\":null}]}"
 then
   log "  rate card: standard-2026 (USD)"
 else
@@ -261,6 +297,9 @@ cat <<BANNER
    Email              ${OWNER_EMAIL}
    Password           ${OWNER_PASSWORD}
    MFA seed file      ${RUN_DIR}/platform-owner-mfa-secret (mode 600; never printed)
+   Checker email      ${CHECKER_EMAIL}
+   Checker password   ${CHECKER_PASSWORD}
+   Checker MFA file   ${RUN_DIR}/platform-checker-mfa-secret (mode 600; never printed)
   ────────────────────────────────────────────────────────────────
 
    Click "Provision Tenant" for the four-step wizard.

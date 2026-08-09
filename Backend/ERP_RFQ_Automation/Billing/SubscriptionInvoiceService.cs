@@ -14,11 +14,13 @@ public sealed record CreateSubscriptionInvoice(
     decimal TaxRatePercent,
     string TaxTreatment,
     string SellerLegalName,
-    string SellerTaxNumber);
+    string SellerTaxNumber,
+    string? TaxJurisdictionCode = null);
 
 public sealed class SubscriptionInvoiceService(
     ErpRfqAutomationContext db,
-    AccountingOutboxService? accountingOutbox = null)
+    AccountingOutboxService? accountingOutbox = null,
+    SubscriptionTaxService? taxService = null)
 {
     public async Task<SubscriptionInvoice> CreateDraftAsync(
         CreateSubscriptionInvoice request, string actor, CancellationToken ct = default)
@@ -48,7 +50,10 @@ public sealed class SubscriptionInvoiceService(
         {
             if (existing.TaxRatePercent != request.TaxRatePercent
                 || !string.Equals(existing.TaxTreatment, request.TaxTreatment.Trim(), StringComparison.Ordinal)
-                || !string.Equals(existing.SellerSnapshotJson, sellerSnapshot, StringComparison.Ordinal))
+                || !string.Equals(existing.SellerSnapshotJson, sellerSnapshot, StringComparison.Ordinal)
+                || taxService is not null && (!string.Equals(existing.TaxJurisdictionCode,
+                    request.TaxJurisdictionCode?.Trim(), StringComparison.OrdinalIgnoreCase)
+                    || existing.TaxRuleId is null || string.IsNullOrWhiteSpace(existing.TaxEvidenceSha256)))
                 throw new BillingConflictException(
                     "This billing statement already has an invoice with different tax or seller terms.");
             return existing;
@@ -59,6 +64,16 @@ public sealed class SubscriptionInvoiceService(
             ?? throw new BillingNotFoundException($"Billing statement {request.StatementId} does not exist.");
         if (statement.Status != BillingStatementStatus.Final)
             throw new BillingConflictException("Only a Final billing statement can produce an invoice.");
+        if (statement.ReadinessStatus != BillingReadinessStatus.Ready
+            || string.IsNullOrWhiteSpace(statement.ReadinessManifestJson)
+            || statement.ReadinessManifestSha256?.Length != 64)
+            throw new BillingConflictException(
+                "The Final billing statement has no successful frozen billing-readiness manifest.");
+        var readinessHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+            Metering.UsageBillingReadinessService.CanonicalizeJson(statement.ReadinessManifestJson)))).ToLowerInvariant();
+        if (!CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(readinessHash),
+                Encoding.ASCII.GetBytes(statement.ReadinessManifestSha256)))
+            throw new BillingConflictException("The Final statement billing-readiness manifest hash does not match.");
         var lineTotal = statement.Lines.Sum(line => line.Amount);
         if (lineTotal != statement.TotalAmount)
             throw new BillingConflictException(
@@ -79,6 +94,9 @@ public sealed class SubscriptionInvoiceService(
             statement.RateCardId,
             statement.Currency,
             statement.TotalAmount,
+            statement.ReadinessStatus,
+            statement.ReadinessManifestJson,
+            statement.ReadinessManifestSha256,
             statement.FinalizedAtUtc,
             statement.FinalizedBy,
             lines = statement.Lines.OrderBy(l => l.MeterKey).ThenBy(l => l.Id).Select(l => new
@@ -88,7 +106,19 @@ public sealed class SubscriptionInvoiceService(
             })
         }));
         var now = DateTime.UtcNow;
-        var tax = decimal.Round(statement.TotalAmount * request.TaxRatePercent / 100m, 2,
+        SubscriptionTaxDetermination? determination = null;
+        if (taxService is not null)
+        {
+            determination = await taxService.DetermineAsync(
+                tenant, statement.Currency, request.TaxJurisdictionCode, statement.PeriodEndUtc, ct);
+            if (request.TaxRatePercent != determination.RatePercent
+                || !string.Equals(request.TaxTreatment.Trim(), determination.Treatment, StringComparison.Ordinal))
+                throw new BillingConflictException(
+                    "Operator-supplied tax terms do not match the approved server-side jurisdiction rule.");
+        }
+        var taxRate = determination?.RatePercent ?? request.TaxRatePercent;
+        var taxTreatment = determination?.Treatment ?? request.TaxTreatment.Trim();
+        var tax = decimal.Round(statement.TotalAmount * taxRate / 100m, 2,
             MidpointRounding.AwayFromZero);
         var invoice = new SubscriptionInvoice
         {
@@ -97,7 +127,7 @@ public sealed class SubscriptionInvoiceService(
             InvoiceNumber = $"DRAFT-{Guid.NewGuid():N}",
             Currency = statement.Currency,
             Subtotal = statement.TotalAmount,
-            TaxRatePercent = request.TaxRatePercent,
+            TaxRatePercent = taxRate,
             TaxAmount = tax,
             TotalAmount = statement.TotalAmount + tax,
             IssuedAtUtc = now,
@@ -109,7 +139,13 @@ public sealed class SubscriptionInvoiceService(
                 tenant.BillingAddress, tenant.BillingContactName, tenant.BillingContactEmail,
                 tenant.PurchaseOrderReference
             }),
-            TaxTreatment = request.TaxTreatment.Trim(),
+            TaxTreatment = taxTreatment,
+            TaxJurisdictionCode = determination?.JurisdictionCode,
+            TaxRuleId = determination?.RuleId,
+            TaxRuleVersion = determination?.RuleVersion,
+            TaxEvidenceJson = determination?.EvidenceJson,
+            TaxEvidenceSha256 = determination?.EvidenceSha256,
+            TaxDeterminedAtUtc = determination?.DeterminedAtUtc,
             SourceEvidenceJson = evidence,
             SourceEvidenceSha256 = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(evidence))).ToLowerInvariant(),
             CreatedBy = actor,
@@ -190,8 +226,8 @@ public sealed class SubscriptionInvoiceService(
             ?? throw new BillingNotFoundException($"Subscription invoice {id} does not exist.");
         if (invoice.Status is SubscriptionInvoiceStatus.Draft or SubscriptionInvoiceStatus.Void)
             throw new BillingConflictException("Only a posted invoice can receive a credit note.");
-        if (amount <= 0 || invoice.CreditedAmount + amount > invoice.TotalAmount - invoice.PaidAmount)
-            throw new BillingConflictException("Credit amount exceeds the invoice's remaining balance.");
+        if (amount <= 0 || invoice.CreditedAmount + amount > invoice.TotalAmount)
+            throw new BillingConflictException("Credit amount exceeds the legal invoice total.");
         var credit = new SubscriptionCreditNote
         {
             SubscriptionInvoiceId = id,
@@ -237,7 +273,9 @@ public sealed class SubscriptionInvoiceService(
             ?? throw new BillingNotFoundException($"Subscription invoice {id} does not exist.");
         if (invoice.Status is SubscriptionInvoiceStatus.Draft or SubscriptionInvoiceStatus.Void)
             throw new BillingConflictException("Only a posted invoice can receive payment.");
-        var outstanding = invoice.TotalAmount - invoice.CreditedAmount - invoice.PaidAmount;
+        var outstanding = Math.Max(0m, invoice.TotalAmount - invoice.CreditedAmount
+            - (invoice.PaidAmount - invoice.RefundedAmount - invoice.ReversedPaymentAmount)
+            - invoice.WrittenOffAmount);
         if (amount > outstanding)
             throw new BillingConflictException("Payment amount exceeds the invoice's outstanding balance.");
 
@@ -251,7 +289,8 @@ public sealed class SubscriptionInvoiceService(
             RecordedAtUtc = DateTime.UtcNow
         };
         invoice.PaidAmount += amount;
-        invoice.Status = invoice.PaidAmount + invoice.CreditedAmount == invoice.TotalAmount
+        invoice.Status = invoice.PaidAmount - invoice.RefundedAmount - invoice.ReversedPaymentAmount
+                         + invoice.CreditedAmount + invoice.WrittenOffAmount >= invoice.TotalAmount
             ? SubscriptionInvoiceStatus.Paid
             : SubscriptionInvoiceStatus.PartiallyPaid;
         invoice.Version++;

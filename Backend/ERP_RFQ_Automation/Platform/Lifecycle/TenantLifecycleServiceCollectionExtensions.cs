@@ -1,5 +1,7 @@
 namespace ERP_RFQ_Automation.Platform.Lifecycle;
 
+using Microsoft.Extensions.DependencyInjection.Extensions;
+
 /// <summary>
 /// Single entry point for the tenant offboarding module. One call from Program.cs, matching the
 /// shape <c>AddTenantOnboarding</c> / <c>AddPlatformEntitlements</c> use — creation is registered
@@ -12,6 +14,10 @@ public static class TenantLifecycleServiceCollectionExtensions
     {
         services.Configure<TenantLifecycleOptions>(
             configuration.GetSection(TenantLifecycleOptions.SectionName));
+        // Production always receives the trusted system clock. Test hosts may register an
+        // advanceable TimeProvider before this module is added; TryAdd preserves that isolated
+        // replacement without creating a production endpoint or configuration switch.
+        services.TryAddSingleton(TimeProvider.System);
 
         // All scoped: every one of them writes through the request-scoped
         // ErpRfqAutomationContext, which is what lets the bookkeeping join the caller's
@@ -21,6 +27,7 @@ public static class TenantLifecycleServiceCollectionExtensions
         services.AddScoped<TenantPurgeExecutor>();
         services.AddScoped<TenantPersonalDataEraser>();
         services.AddScoped<TenantDataExportService>();
+        services.AddScoped<ITenantOffboardingReadinessService, TenantOffboardingReadinessService>();
         services.AddScoped<TenantOffboardingService>();
         services.AddScoped<TenantLegalHoldService>();
 

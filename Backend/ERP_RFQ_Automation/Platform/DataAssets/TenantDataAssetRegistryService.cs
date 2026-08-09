@@ -216,7 +216,7 @@ public sealed class TenantDataAssetRegistryService(
         var offboarding = await context.Set<TenantOffboarding>().AsNoTracking()
             .SingleOrDefaultAsync(x => x.TenantId == tenantId, ct);
         var blockers = new List<string>();
-        if (tenant.Status is TenantStatus.Archived or TenantStatus.Suspended)
+        if (tenant.Status is TenantStatus.Archived or TenantStatus.Suspended or TenantStatus.PastDue)
             blockers.Add($"Tenant lifecycle status {tenant.Status} is not activation-eligible.");
         if (offboarding?.Stage is TenantOffboardingStage.PendingDeletion or TenantOffboardingStage.Purged
             || offboarding?.PurgeStartedOn is not null)

@@ -76,6 +76,8 @@ public sealed class DocumentExtractionInput
     public ExtractionProcessingPath ProcessingPath { get; init; } = ExtractionProcessingPath.NativeParser;
     public ExtractionOcrStatus OcrStatus { get; init; } = ExtractionOcrStatus.NotRequired;
     public int OcrPageCount { get; init; }
+    public int PageCount { get; init; } = 1;
+    public bool PageCountAuthoritative { get; init; }
     public bool OcrTruncated { get; init; }
 
     /// <summary>Header/context text extracted once (buyer, RFQ no, dates, terms).</summary>
@@ -128,6 +130,8 @@ public sealed class ChunkedExtractionOutcome
     public ExtractionProcessingPath ProcessingPath { get; init; } = ExtractionProcessingPath.NativeParser;
     public ExtractionOcrStatus OcrStatus { get; init; } = ExtractionOcrStatus.NotRequired;
     public int OcrPageCount { get; init; }
+    public int PageCount { get; init; } = 1;
+    public bool PageCountAuthoritative { get; init; }
     public bool OcrTruncated { get; init; }
 
     /// <summary>
@@ -393,6 +397,8 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                 ProcessingPath = EffectivePath(input, _llm.ProviderClass),
                 OcrStatus = input.OcrStatus,
                 OcrPageCount = input.OcrPageCount,
+                PageCount = input.PageCount,
+                PageCountAuthoritative = input.PageCountAuthoritative,
                 OcrTruncated = input.OcrTruncated
             };
         }
@@ -606,6 +612,8 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             ProcessingPath = EffectivePath(input, _llm.ProviderClass),
             OcrStatus = input.OcrStatus,
             OcrPageCount = input.OcrPageCount,
+            PageCount = input.PageCount,
+            PageCountAuthoritative = input.PageCountAuthoritative,
             OcrTruncated = input.OcrTruncated
         };
     }
@@ -862,6 +870,8 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             ProcessingPath = input?.ProcessingPath ?? ExtractionProcessingPath.NativeParser,
             OcrStatus = input?.OcrStatus ?? ExtractionOcrStatus.NotRequired,
             OcrPageCount = input?.OcrPageCount ?? 0,
+            PageCount = input?.PageCount ?? 0,
+            PageCountAuthoritative = input?.PageCountAuthoritative ?? false,
             OcrTruncated = input?.OcrTruncated ?? false
         };
     }

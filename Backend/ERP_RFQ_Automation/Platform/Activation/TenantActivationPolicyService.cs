@@ -250,7 +250,7 @@ public sealed class TenantActivationPolicyService(
         return uri.Scheme == "urn" || !string.IsNullOrWhiteSpace(uri.Host);
     }
     private static string CommercialState(Tenant t, bool pastDue) => t.Status == TenantStatus.Archived ? "TERMINATED" :
-        pastDue ? "PAST_DUE" : t.BillingMode == TenantBillingMode.Trial ? "TRIAL" :
+        t.Status == TenantStatus.PastDue || pastDue ? "PAST_DUE" : t.BillingMode == TenantBillingMode.Trial ? "TRIAL" :
         t.Status == TenantStatus.Active ? "ACTIVE" : "PROSPECT";
     private static string DataState(TenantOffboarding? state) => state switch
     {
@@ -262,7 +262,8 @@ public sealed class TenantActivationPolicyService(
     };
     private static string AccessState(Tenant t) => t.Status switch
     {
-        TenantStatus.Active => "ENABLED", TenantStatus.Suspended => "SUSPENDED",
+        TenantStatus.Active => "ENABLED", TenantStatus.PastDue => "RESTRICTED_PAST_DUE",
+        TenantStatus.Suspended => "SUSPENDED",
         TenantStatus.Archived => "CLOSED", _ => "RESTRICTED"
     };
 }

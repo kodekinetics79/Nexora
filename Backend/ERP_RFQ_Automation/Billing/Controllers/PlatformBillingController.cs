@@ -3,6 +3,7 @@ using ERP_RFQ_Automation.Platform.Auth;
 using ERP_RFQ_Automation.Platform.Entitlements;
 using ERP_RFQ_Automation.Platform.Models;
 using ERP_RFQ_Automation.Platform.Services;
+using ERP_RFQ_Automation.Billing.Metering;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -45,6 +46,7 @@ public class PlatformBillingController : ControllerBase
     private readonly IPlatformAuditService _audit;
     private readonly ILogger<PlatformBillingController> _logger;
     private readonly ITenantAccessService? _tenantAccess;
+    private readonly UsageBillingReadinessService _billingReadiness;
 
     public PlatformBillingController(
         ErpRfqAutomationContext context,
@@ -58,6 +60,7 @@ public class PlatformBillingController : ControllerBase
         _audit = audit;
         _logger = logger;
         _tenantAccess = tenantAccess;
+        _billingReadiness = new UsageBillingReadinessService(context);
     }
 
     // GET /api/platform/billing/usage/{tenantId}?period=YYYY-MM
@@ -76,6 +79,110 @@ public class PlatformBillingController : ControllerBase
         {
             return NotFound(new { error = ex.Message });
         }
+    }
+
+    // GET /api/platform/billing/readiness/{tenantId}?period=YYYY-MM
+    [HttpGet("readiness/{tenantId:long}")]
+    public async Task<ActionResult<BillingReadinessResult>> GetBillingReadiness(
+        long tenantId, [FromQuery] string? period, CancellationToken ct)
+    {
+        if (!BillingPeriod.TryParse(period, out var billingPeriod))
+            return BadRequest(new { error = "Query parameter 'period' is required in YYYY-MM format." });
+        var tenant = await _context.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
+            .SingleOrDefaultAsync(x => x.Id == tenantId, ct);
+        if (tenant is null) return NotFound(new { error = $"Tenant {tenantId} does not exist." });
+        var meterKeys = tenant.RateCardId is long rateCardId
+            ? await _context.Set<RateCardLine>().AsNoTracking().Where(x => x.RateCardId == rateCardId)
+                .Select(x => x.MeterKey).ToListAsync(ct)
+            : [];
+        meterKeys.Add(BillingMeterKeys.BaseSubscription);
+        var usage = await _billing.GetUsageAsync(tenantId, billingPeriod, ct);
+        var resolved = await _billingReadiness.ResolveAsync(tenantId, billingPeriod, usage.Meters, meterKeys, ct);
+        return Ok(resolved.Readiness);
+    }
+
+    [HttpGet("meter-catalog")]
+    public ActionResult<object> GetMeterCatalog() => Ok(UsageMeterCatalog.Definitions
+        .OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => new
+        {
+            eventType = x.Key,
+            x.Value.BillingMeterKey,
+            x.Value.Unit,
+            certification = x.Value.Certification.ToString()
+        }));
+
+    [HttpPost("usage-events/{usageEventId:guid}/rating-corrections")]
+    [Authorize(Policy = PlatformPolicies.Billing)]
+    [Authorize(Policy = PlatformPolicies.Owner)]
+    [Authorize(Policy = PlatformPolicies.Mfa)]
+    public async Task<IActionResult> CorrectUsageRating(Guid usageEventId,
+        [FromBody] CorrectUsageRatingRequest request, CancellationToken ct)
+    {
+        try
+        {
+            var rating = await _billingReadiness.CorrectRatingAsync(
+                new CorrectUsageRatingCommand(usageEventId, request.IdempotencyKey, request.Reason), Actor(),
+                (value, innerCt) => _audit.WriteAsync(User, "billing.usage.rating.correct",
+                    nameof(UsageEventRating), value.Id.ToString(),
+                    new { value.TenantId, value.UsageEventId, value.AttemptNumber, value.Status,
+                        value.ReasonCode, correctionReason = request.Reason.Trim(), value.RateCardId,
+                        value.RateCardLineId, value.RateCardVersion },
+                    actAsTenantId: value.TenantId, httpContext: HttpContext, ct: innerCt), ct);
+            return Ok(new { rating.Id, rating.TenantId, rating.UsageEventId, rating.AttemptNumber,
+                status = rating.Status.ToString(), rating.ReasonCode, rating.RateCardId,
+                rating.RateCardLineId, rating.RateCardVersion, rating.Currency, rating.AllowanceApplied,
+                rating.OverageQuantity, rating.UnitPrice, rating.RatedAmount, rating.RatedAtUtc, rating.RatedBy });
+        }
+        catch (UsageMeteringException ex) { return Conflict(new { error = ex.Message }); }
+    }
+
+    [HttpPost("tenants/{tenantId:long}/document-coverage/proposals")]
+    [Authorize(Policy = PlatformPolicies.Billing)]
+    [Authorize(Policy = PlatformPolicies.Owner)]
+    [Authorize(Policy = PlatformPolicies.Mfa)]
+    public async Task<IActionResult> ProposeDocumentCoverage(long tenantId,
+        [FromBody] DocumentCoverageProposalRequest request, CancellationToken ct)
+    {
+        if (!BillingPeriod.TryParse(request.Period, out var period))
+            return BadRequest(new { error = "period must use YYYY-MM." });
+        try
+        {
+            var policy = await _billingReadiness.ProposeDocumentCoverageAsync(
+                new ProposeDocumentCoverageCommand(tenantId, period, request.MidPeriodCutoverUtc, request.Reason), Actor(),
+                (value, innerCt) => _audit.WriteAsync(User, "billing.coverage.propose",
+                    nameof(TenantMeterSourcePolicy), $"{value.TenantId}:{value.MeterKey}",
+                    new { value.TenantId, value.MeterKey, value.Mode, value.ProposedEffectiveAtUtc, value.Version },
+                    actAsTenantId: value.TenantId, httpContext: HttpContext, ct: innerCt), ct);
+            return Ok(new { policy.TenantId, policy.MeterKey, mode = policy.Mode.ToString(),
+                policy.ProposedEffectiveAtUtc, policy.ProposedBy, policy.ProposedAtUtc, policy.Version });
+        }
+        catch (UsageMeteringException ex) { return Conflict(new { error = ex.Message }); }
+    }
+
+    [HttpPost("tenants/{tenantId:long}/document-coverage/approve")]
+    [Authorize(Policy = PlatformPolicies.Billing)]
+    [Authorize(Policy = PlatformPolicies.Owner)]
+    [Authorize(Policy = PlatformPolicies.Mfa)]
+    public async Task<IActionResult> ApproveDocumentCoverage(long tenantId,
+        [FromBody] DocumentCoverageApprovalRequest request, CancellationToken ct)
+    {
+        if (!BillingPeriod.TryParse(request.Period, out var period))
+            return BadRequest(new { error = "period must use YYYY-MM." });
+        try
+        {
+            var segments = await _billingReadiness.ApproveDocumentCoverageAsync(tenantId, period, Actor(), request.Reason,
+                (values, innerCt) => _audit.WriteAsync(User, "billing.coverage.approve",
+                    nameof(UsageCoverageSegment), $"{tenantId}:{period.Key}",
+                    new { tenantId, period = period.Key, segmentIds = values.Select(x => x.Id),
+                        quantity = values.Sum(x => x.QuantityTotal), amount = values.Sum(x => x.RatedAmountTotal) },
+                    actAsTenantId: tenantId, httpContext: HttpContext, ct: innerCt), ct);
+            return Ok(segments.Select(x => new { x.Id, x.TenantId, x.MeterKey, x.StartUtc, x.EndUtc,
+                source = x.AuthoritativeSource.ToString(), completeness = x.Completeness.ToString(),
+                x.EventCount, x.QuantityTotal, x.AllowanceAppliedTotal, x.OverageQuantityTotal,
+                x.RatedAmountTotal, x.Currency, reconciliation = x.ReconciliationStatus.ToString(),
+                x.EvidenceSha256, x.RateLineageSha256 }));
+        }
+        catch (UsageMeteringException ex) { return Conflict(new { error = ex.Message }); }
     }
 
     // GET /api/platform/billing/rate-cards
@@ -705,6 +812,10 @@ public class PlatformBillingController : ControllerBase
             return "Every line requires a MeterKey and a Unit.";
         if (lines.Any(l => l.IncludedQuantity < 0 || l.UnitPrice < 0))
             return "IncludedQuantity and UnitPrice must be non-negative.";
+        var uncertified = lines.Select(l => l.MeterKey.Trim()).FirstOrDefault(key =>
+            UsageMeterCatalog.BillingCertification(key) != MeterCertificationStatus.BillingCertified);
+        if (uncertified is not null)
+            return $"Meter '{uncertified}' is not BILLING_CERTIFIED and cannot be placed on a rate card.";
         if (lines.Select(l => l.MeterKey.Trim()).Distinct(StringComparer.Ordinal).Count() != lines.Count)
             return "MeterKey must be unique per rate card.";
         return null;
@@ -749,6 +860,9 @@ public sealed record UpdateRateCardRequest(
     bool IsActive, IReadOnlyList<RateCardLineRequest> Lines);
 
 public sealed record ComputeStatementRequest(long TenantId, string Period, long? RateCardId);
+public sealed record CorrectUsageRatingRequest(string IdempotencyKey, string Reason);
+public sealed record DocumentCoverageProposalRequest(string Period, DateTime? MidPeriodCutoverUtc, string Reason);
+public sealed record DocumentCoverageApprovalRequest(string Period, string Reason);
 
 public sealed record RateCardLineDto(
     long Id, string MeterKey, decimal IncludedQuantity, decimal UnitPrice, string Unit, string? TierNote);

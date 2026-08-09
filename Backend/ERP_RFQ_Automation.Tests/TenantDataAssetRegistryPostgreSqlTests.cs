@@ -95,6 +95,8 @@ public sealed class TenantDataAssetRegistryPostgreSqlTests
             await context.Database.ExecuteSqlRawAsync(
                 "DELETE FROM platform.\"TenantDataAssets\" WHERE \"TenantId\" = {0}", TenantId);
             await context.Database.ExecuteSqlRawAsync(
+                "DELETE FROM platform.\"TenantMeterSourcePolicies\" WHERE \"TenantId\" = {0}", TenantId);
+            await context.Database.ExecuteSqlRawAsync(
                 "DELETE FROM platform.\"Tenants\" WHERE \"Id\" = {0}", TenantId);
         }
     }

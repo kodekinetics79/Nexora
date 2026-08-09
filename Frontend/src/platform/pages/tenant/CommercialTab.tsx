@@ -51,6 +51,7 @@ import {
 import { BILLING_MODES } from '../../types';
 import type { BillingMode, Tenant, TenantBillingProfile } from '../../types';
 import SubscriptionInvoicesSection from './SubscriptionInvoicesSection';
+import BillingGovernanceSection from './BillingGovernanceSection';
 
 const fmtMoney = (amount: number, currency: string) =>
   new Intl.NumberFormat('en-US', { style: 'currency', currency, maximumFractionDigits: 2 }).format(amount);
@@ -88,6 +89,7 @@ export default function CommercialTab({ tenant }: { tenant: Tenant }) {
   const [period, setPeriod] = useState(currentPeriod());
   const [finalizeId, setFinalizeId] = useState<string | null>(null);
   const [reviewId, setReviewId] = useState<string | null>(null);
+  const [pastDueAction, setPastDueAction] = useState<'mark' | 'resolve' | null>(null);
 
   // The whole billing controller is Owner|BillingAdmin. A SupportAdmin or ReadOnlyOps
   // operator gets no request at all rather than a 403 on page load.
@@ -194,6 +196,18 @@ export default function CommercialTab({ tenant }: { tenant: Tenant }) {
     onError: fail('Finalize was refused'),
   });
 
+  const pastDueMutation = useMutation({
+    mutationFn: (reason: string) => pastDueAction === 'resolve'
+      ? platformApi.resolveTenantPastDue(tenant.id, reason)
+      : platformApi.markTenantPastDue(tenant.id, reason),
+    onSuccess: (updated) => {
+      enqueueSnackbar(updated.status === 'past_due' ? 'Tenant marked Past Due' : 'Past Due restriction resolved', { variant: 'success' });
+      setPastDueAction(null);
+      invalidate();
+    },
+    onError: fail('The account-standing change was refused'),
+  });
+
   if (!permissions.canAdministerBilling) {
     return (
       <Alert severity="info" sx={{ borderRadius: 2 }}>
@@ -222,6 +236,24 @@ export default function CommercialTab({ tenant }: { tenant: Tenant }) {
 
   return (
     <Stack spacing={2.5}>
+      {tenant.status === 'past_due' && (
+        <Alert severity="error" sx={{ borderRadius: 2 }}>
+          <AlertTitle sx={{ fontWeight: 800 }}>Past Due · tenant access restricted</AlertTitle>
+          Billing continues, but tenant-plane work is denied until Billing resolves the account standing.
+          {tenant.statusReason ? ` Recorded reason: ${tenant.statusReason}` : ''}
+        </Alert>
+      )}
+
+      {(tenant.status === 'active' || tenant.status === 'past_due') && (
+        <Box><Button
+          color={tenant.status === 'past_due' ? 'success' : 'warning'}
+          variant="outlined"
+          onClick={() => setPastDueAction(tenant.status === 'past_due' ? 'resolve' : 'mark')}
+          sx={{ fontWeight: 700 }}
+        >
+          {tenant.status === 'past_due' ? 'Resolve Past Due' : 'Mark Past Due'}
+        </Button></Box>
+      )}
       {risk.commercialConfigurationRequired && (
         <Alert severity="error" sx={{ borderRadius: 2 }}>
           <AlertTitle sx={{ fontWeight: 800 }}>Commercial configuration required</AlertTitle>
@@ -500,6 +532,8 @@ export default function CommercialTab({ tenant }: { tenant: Tenant }) {
 
       <SubscriptionInvoicesSection tenant={tenant} statements={profile.statements} />
 
+      <BillingGovernanceSection tenant={tenant} period={period} />
+
       {/* Statement review — the lines an operator has to read BEFORE finalize, because
           after finalize there is nothing to do about them. */}
       <Dialog open={Boolean(reviewId)} onClose={() => setReviewId(null)} fullWidth maxWidth="lg">
@@ -737,6 +771,19 @@ export default function CommercialTab({ tenant }: { tenant: Tenant }) {
           </Button>
         </DialogActions>
       </Dialog>
+
+      <ReasonDialog
+        open={pastDueAction !== null}
+        title={pastDueAction === 'resolve' ? 'Resolve Past Due' : 'Mark tenant Past Due'}
+        confirmLabel={pastDueAction === 'resolve' ? 'Restore account standing' : 'Restrict access'}
+        confirmColor={pastDueAction === 'resolve' ? 'success' : 'warning'}
+        description={pastDueAction === 'resolve'
+          ? 'Returns the tenant to Active only if the server activation policy is ready. Record the payment or account evidence supporting this decision.'
+          : 'Restricts tenant-plane access while billing remains active. Record the receivable or collections evidence supporting this decision.'}
+        busy={pastDueMutation.isPending}
+        onClose={() => setPastDueAction(null)}
+        onConfirm={(reason) => pastDueMutation.mutate(reason)}
+      />
 
       <ReasonDialog
         open={planOpen}

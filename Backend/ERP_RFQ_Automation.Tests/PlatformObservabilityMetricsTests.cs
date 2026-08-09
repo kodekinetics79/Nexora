@@ -425,6 +425,32 @@ public class PlatformObservabilityMetricsTests
     }
 
     [Fact]
+    public void AddPlatformObservability_ProductionScrapeWithoutKey_FailsClosed()
+    {
+        var services = new ServiceCollection();
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            services.AddPlatformObservability(Config(
+                ("Observability:Environment", "Production"))));
+
+        Assert.Contains(ObservabilityExtensions.PrometheusScrapeKeyEnvironmentVariable,
+            exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddPlatformObservability_DevelopmentScrapeWithoutKey_RemainsAvailableLocally()
+    {
+        var services = new ServiceCollection();
+        services.AddPlatformObservability(Config(
+            ("Observability:Environment", "Development")));
+
+        using var provider = services.BuildServiceProvider();
+        var selection = provider.GetRequiredService<ObservabilitySelection>();
+        Assert.True(selection.PrometheusEnabled);
+        Assert.False(selection.PrometheusKeyConfigured);
+        Assert.NotNull(provider.GetService<NexoraPrometheusCollector>());
+    }
+
+    [Fact]
     public void SelectExporter_ValidOtlpEndpoint_UsesOtlpAndLeavesTheScrapeEndpointOff()
     {
         var selection = ObservabilityExtensions.SelectExporter(Config(
@@ -484,10 +510,10 @@ public class PlatformObservabilityMetricsTests
     }
 
     [Fact]
-    public void LogSelection_UnauthenticatedScrapeEndpoint_WarnsThatItExposesTenantData()
+    public void LogSelection_DevelopmentUnauthenticatedScrapeEndpoint_WarnsThatItExposesTenantData()
     {
         var selection = ObservabilityExtensions.SelectExporter(Config(
-            ("Observability:Environment", "Production")));
+            ("Observability:Environment", "Development")));
 
         var logger = new RecordingLogger();
         ObservabilityExtensions.LogSelection(logger, selection);

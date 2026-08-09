@@ -23,6 +23,7 @@ public sealed class AccountingOutboxMessage
     public Guid Id { get; set; }
     public long TenantId { get; set; }
     public long SubscriptionInvoiceId { get; set; }
+    public long? SubscriptionRevenueActionId { get; set; }
     public string MessageType { get; set; } = null!;
     public string IdempotencyKey { get; set; } = null!;
     public string PayloadJson { get; set; } = null!;

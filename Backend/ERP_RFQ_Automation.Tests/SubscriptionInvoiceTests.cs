@@ -8,6 +8,32 @@ namespace ERP_RFQ_Automation.Tests;
 public sealed class SubscriptionInvoiceTests
 {
     [Fact]
+    public async Task Invoice_creation_fails_closed_without_a_ready_frozen_manifest()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(null);
+        var tenant = new Tenant { Id = 501, Name = "Blocked", LegalName = "Blocked LLC", Slug = "blocked",
+            BillingContactEmail = "ap@blocked.example" };
+        var card = new RateCard { Id = 502, Code = "blocked-card", EffectiveFromUtc = DateTime.UtcNow.AddYears(-1) };
+        var statement = new BillingStatement
+        {
+            Id = 503, TenantId = tenant.Id, RateCardId = card.Id, Status = BillingStatementStatus.Final,
+            Currency = "USD", PeriodStartUtc = DateTime.UtcNow.AddMonths(-2),
+            PeriodEndUtc = DateTime.UtcNow.AddMonths(-1), ComputedAtUtc = DateTime.UtcNow,
+            ComputedBy = "maker", TotalAmount = 0, ReadinessStatus = BillingReadinessStatus.Blocked
+        };
+        context.AddRange(tenant, card, statement);
+        await context.SaveChangesAsync();
+
+        var error = await Assert.ThrowsAsync<BillingConflictException>(() =>
+            new SubscriptionInvoiceService(context).CreateDraftAsync(
+                new CreateSubscriptionInvoice(statement.Id, 0, "not taxable", "Nexora", "TAX-1"), "maker"));
+
+        Assert.Contains("billing-readiness manifest", error.Message);
+        Assert.Empty(await context.Set<SubscriptionInvoice>().ToListAsync());
+    }
+
+    [Fact]
     public async Task Final_statement_to_invoice_credit_payment_preserves_frozen_evidence_and_ar()
     {
         using var db = new TestDb();
@@ -29,6 +55,8 @@ public sealed class SubscriptionInvoiceTests
             PeriodStartUtc = new DateTime(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc),
             PeriodEndUtc = new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc),
             Status = BillingStatementStatus.Final, Currency = "USD", TotalAmount = 100m,
+            ReadinessStatus = BillingReadinessStatus.Ready, ReadinessManifestJson = "{}",
+            ReadinessManifestSha256 = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             ComputedAtUtc = DateTime.UtcNow, ComputedBy = "maker@example.com",
             FinalizedAtUtc = DateTime.UtcNow, FinalizedBy = "owner@example.com",
             Lines = [new BillingStatementLine
@@ -86,6 +114,8 @@ public sealed class SubscriptionInvoiceTests
             Id = 3, TenantId = 1, RateCardId = 2, Currency = "USD", Status = BillingStatementStatus.Final,
             PeriodStartUtc = DateTime.UtcNow.Date.AddDays(-31), PeriodEndUtc = DateTime.UtcNow.Date,
             TotalAmount = 10, ComputedAtUtc = DateTime.UtcNow, ComputedBy = "maker",
+            ReadinessStatus = BillingReadinessStatus.Ready, ReadinessManifestJson = "{}",
+            ReadinessManifestSha256 = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             FinalizedAtUtc = DateTime.UtcNow, FinalizedBy = "checker",
             Lines = [new BillingStatementLine
             {
@@ -123,6 +153,8 @@ public sealed class SubscriptionInvoiceTests
         {
             Id = 103, TenantId = tenant.Id, RateCardId = card.Id, Currency = "USD",
             Status = BillingStatementStatus.Final, TotalAmount = 100,
+            ReadinessStatus = BillingReadinessStatus.Ready, ReadinessManifestJson = "{}",
+            ReadinessManifestSha256 = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             PeriodStartUtc = DateTime.UtcNow.Date.AddDays(-31), PeriodEndUtc = DateTime.UtcNow.Date,
             ComputedAtUtc = DateTime.UtcNow, ComputedBy = "maker",
             FinalizedAtUtc = DateTime.UtcNow, FinalizedBy = "checker",

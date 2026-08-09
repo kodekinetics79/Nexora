@@ -184,6 +184,7 @@ builder.Services.AddScoped<ExtractionDeadLetterService>();
 // Platform-Owner control-plane services (ADR-0005)
 builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Auth.IPlatformAuthService, ERP_RFQ_Automation.Platform.Auth.PlatformAuthService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Services.IPlatformAuditService, ERP_RFQ_Automation.Platform.Services.PlatformAuditService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Operations.PlatformDeadLetterRecoveryService>();
 // Scoped because it seeds through the SAME request-scoped DbContext and transaction as the
 // provisioning that calls it — that shared instance is what makes the baseline commit or roll
 // back with the tenant it belongs to, rather than surviving a failed provision as orphan rows.
@@ -552,7 +553,10 @@ builder.Services.AddScoped<IExtractionDocumentReader, ProductionDocumentReader>(
 builder.Services.AddHostedService<ExtractionWorker>();
 // ING-05: unified ingestion gateway — the ONE door to the durable queue used by the
 // modern upload endpoint, the email poller, the folder watcher and manual upload
-// (each door still honours Ingestion:UseUnifiedQueue, default true).
+// Development may opt into a legacy diagnostic path; production fails startup if the
+// durable gateway is disabled, because that path has no evidence or usage ledger.
+UnifiedDocumentIngestionGuard.Enforce(builder.Environment.IsProduction(),
+    builder.Configuration.GetValue("Ingestion:UseUnifiedQueue", true));
 builder.Services.AddScoped<IDocumentIngestion, DocumentIngestionService>();
 builder.Services.AddScoped<ISecurityScanRecoveryService, SecurityScanRecoveryService>();
 
@@ -833,6 +837,10 @@ app.Use(async (ctx, next) =>
 // SEC-H6: must run before ANY middleware that reads the client IP or scheme — in
 // particular UsePlatformObservability and UseRateLimiter further down.
 app.UseForwardedHeaders();
+// The platform network boundary consumes only the trusted, normalized RemoteIpAddress
+// produced above. It never parses X-Forwarded-For itself, so an untrusted direct caller
+// cannot spoof an allow-listed address. Production must explicitly choose AllowList or Any.
+app.UseMiddleware<PlatformNetworkAccessMiddleware>();
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())

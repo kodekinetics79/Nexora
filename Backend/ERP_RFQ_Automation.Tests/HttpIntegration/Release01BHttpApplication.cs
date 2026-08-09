@@ -124,6 +124,10 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         builder.UseSetting("CommercialFinance:ContactVerificationSecret", TestSecret);
         builder.UseSetting("CommercialFinance:DunningProviderWebhookSecret", TestSecret);
         builder.UseSetting("CommercialFinance:AuditActorSecret", TestSecret);
+        // This authenticated HTTP fixture is not an observability test and deliberately has no
+        // scraper. Non-Development hosts must make that posture explicit after the production
+        // anonymous-metrics fail-closed boundary was introduced.
+        builder.UseSetting("Observability:Prometheus:Enabled", "false");
         // The environment here is "Testing", not "Development", so the API fails closed
         // without a mailbox-credential protection key — exactly as a real deploy would.
         builder.UseSetting(

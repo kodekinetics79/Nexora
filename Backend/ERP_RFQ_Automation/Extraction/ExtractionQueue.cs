@@ -108,12 +108,13 @@ plan_caps AS (
     GROUP BY t.""PrimaryBusinessUnitId""
 ),
 blocked_tenants AS (
-    -- P2-A8: Suspended/Archived tenants' queued jobs must not be claimed. Legacy BUs
+    -- A Provisioning tenant has not passed authoritative activation and may not consume resources.
+    -- Past-due, suspended, or archived tenants' queued jobs likewise must not be claimed. Legacy BUs
     -- without a platform.Tenants row are unaffected (fail open per LEDGER contract).
     SELECT t.""PrimaryBusinessUnitId"" AS buid
     FROM platform.""Tenants"" t
     WHERE t.""PrimaryBusinessUnitId"" IS NOT NULL
-      AND t.""Status"" IN ('Suspended','Archived')
+      AND t.""Status"" IN ('Provisioning','PastDue','Suspended','Archived')
 ),
 inflight AS (
     SELECT ""BusinessUnitId"" AS buid, COUNT(*) AS cnt

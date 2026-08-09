@@ -872,28 +872,45 @@ public class TenantsController : ControllerBase
     [Authorize(Policy = PlatformPolicies.TenantAdmin)]
     public Task<ActionResult<TenantSummaryDto>> Suspend(
         long id, [FromBody] TenantStatusChangeRequest request, CancellationToken ct) =>
-        ChangeStatus(id, TenantStatus.Active, TenantStatus.Suspended, request?.Reason, "tenant.suspend", "suspended", ct);
+        ChangeStatus(id, [TenantStatus.Active, TenantStatus.PastDue], TenantStatus.Suspended,
+            request?.Reason, "tenant.suspend", "suspended", ct);
 
     // POST /api/platform/tenants/{id}/resume
     [HttpPost("{id:long}/resume")]
     [Authorize(Policy = PlatformPolicies.TenantAdmin)]
     public Task<ActionResult<TenantSummaryDto>> Resume(
         long id, [FromBody] TenantStatusChangeRequest request, CancellationToken ct) =>
-        ChangeStatus(id, TenantStatus.Suspended, TenantStatus.Active, request?.Reason, "tenant.resume", "resumed", ct);
+        ChangeStatus(id, [TenantStatus.Suspended], TenantStatus.Active, request?.Reason, "tenant.resume", "resumed", ct);
 
     // POST /api/platform/tenants/{id}/archive  (Suspended -> Archived)
     [HttpPost("{id:long}/archive")]
     [Authorize(Policy = PlatformPolicies.TenantAdmin)]
     public Task<ActionResult<TenantSummaryDto>> Archive(
         long id, [FromBody] TenantStatusChangeRequest request, CancellationToken ct) =>
-        ChangeStatus(id, TenantStatus.Suspended, TenantStatus.Archived, request?.Reason, "tenant.archive", "archived", ct);
+        ChangeStatus(id, [TenantStatus.Suspended], TenantStatus.Archived, request?.Reason, "tenant.archive", "archived", ct);
 
     // POST /api/platform/tenants/{id}/restore  (Archived -> Suspended)
     [HttpPost("{id:long}/restore")]
     [Authorize(Policy = PlatformPolicies.TenantAdmin)]
     public Task<ActionResult<TenantSummaryDto>> Restore(
         long id, [FromBody] TenantStatusChangeRequest request, CancellationToken ct) =>
-        ChangeStatus(id, TenantStatus.Archived, TenantStatus.Suspended, request?.Reason, "tenant.restore", "restored", ct);
+        ChangeStatus(id, [TenantStatus.Archived], TenantStatus.Suspended, request?.Reason, "tenant.restore", "restored", ct);
+
+    // POST /api/platform/tenants/{id}/mark-past-due (Active -> PastDue)
+    [HttpPost("{id:long}/mark-past-due")]
+    [Authorize(Policy = PlatformPolicies.Billing)]
+    public Task<ActionResult<TenantSummaryDto>> MarkPastDue(
+        long id, [FromBody] TenantStatusChangeRequest request, CancellationToken ct) =>
+        ChangeStatus(id, [TenantStatus.Active], TenantStatus.PastDue,
+            request?.Reason, "tenant.past-due", "marked past due", ct);
+
+    // POST /api/platform/tenants/{id}/resolve-past-due (PastDue -> Active)
+    [HttpPost("{id:long}/resolve-past-due")]
+    [Authorize(Policy = PlatformPolicies.Billing)]
+    public Task<ActionResult<TenantSummaryDto>> ResolvePastDue(
+        long id, [FromBody] TenantStatusChangeRequest request, CancellationToken ct) =>
+        ChangeStatus(id, [TenantStatus.PastDue], TenantStatus.Active,
+            request?.Reason, "tenant.past-due.resolve", "returned to current standing", ct);
 
     // PUT /api/platform/tenants/{id}/plan
     // Sec9: plan assignment is a BILLING operation (Owner | BillingAdmin), not a
@@ -960,7 +977,7 @@ public class TenantsController : ControllerBase
     }
 
     private async Task<ActionResult<TenantSummaryDto>> ChangeStatus(
-        long id, TenantStatus requiredCurrent, TenantStatus target, string? reason,
+        long id, TenantStatus[] requiredCurrent, TenantStatus target, string? reason,
         string action, string operationVerb, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(reason))
@@ -983,9 +1000,9 @@ public class TenantsController : ControllerBase
                     throw new TenantNotFoundException();
 
                 // Validated lifecycle graph: Active <-> Suspended <-> Archived.
-                if (tenant.Status != requiredCurrent)
+                if (!requiredCurrent.Contains(tenant.Status))
                     throw new InvalidTenantStatusTransitionException(
-                        tenant.Status, requiredCurrent.ToString(), operationVerb);
+                        tenant.Status, string.Join(" or ", requiredCurrent), operationVerb);
 
                 if (target == TenantStatus.Active && _activationPolicy is not null)
                 {

@@ -172,6 +172,61 @@ public sealed class PlatformSessionSecurityTests
     }
 
     [Fact]
+    public async Task Different_owner_can_reset_lost_mfa_and_atomically_revoke_target_sessions()
+    {
+        using var db = new TestDb();
+        await SeedUser(db, "acting-owner@example.test", PlatformRole.Owner, "owner-password-123", ActingOwnerId);
+        var targetId = await SeedUser(db, "locked-owner@example.test", PlatformRole.Owner, "target-password-123");
+        var token = await Login(db, "locked-owner@example.test", "target-password-123");
+        await using (var seed = db.ContextFor(null))
+        {
+            seed.Set<PlatformMfaCredential>().Add(new PlatformMfaCredential
+            {
+                PlatformUserId = targetId, TotpSecret = PlatformTotp.GenerateSecret(),
+                EnabledAtUtc = DateTime.UtcNow, UpdatedAtUtc = DateTime.UtcNow
+            });
+            seed.Set<PlatformMfaRecoveryCode>().Add(new PlatformMfaRecoveryCode
+            {
+                PlatformUserId = targetId, CodeHash = new string('A', 64), CreatedAtUtc = DateTime.UtcNow
+            });
+            seed.Set<PlatformMfaChallenge>().Add(new PlatformMfaChallenge
+            {
+                Id = Guid.NewGuid(), PlatformUserId = targetId, CreatedAtUtc = DateTime.UtcNow,
+                ExpiresAtUtc = DateTime.UtcNow.AddMinutes(5)
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await using (var reset = db.ContextFor(null))
+        {
+            var result = await Controller(reset).ResetMfa(targetId, CancellationToken.None);
+            Assert.IsType<NoContentResult>(result);
+        }
+
+        await using var verification = db.ContextFor(null);
+        Assert.False(await verification.Set<PlatformMfaCredential>().AnyAsync(value => value.PlatformUserId == targetId));
+        Assert.False(await verification.Set<PlatformMfaRecoveryCode>().AnyAsync(value => value.PlatformUserId == targetId));
+        Assert.False(await verification.Set<PlatformMfaChallenge>().AnyAsync(value => value.PlatformUserId == targetId));
+        var session = await verification.Set<PlatformSession>().SingleAsync(value => value.PlatformUserId == targetId);
+        Assert.Equal("platform-mfa-recovery-reset", session.RevocationReason);
+        Assert.False(await new PlatformSessionValidator(verification).IsCurrentAsync(Principal(token)));
+        Assert.Contains(await verification.Set<PlatformAuditLog>().ToListAsync(),
+            audit => audit.Action == "platform-user.mfa.reset" && audit.TargetId == targetId.ToString());
+    }
+
+    [Fact]
+    public async Task Owner_cannot_self_reset_mfa()
+    {
+        using var db = new TestDb();
+        await SeedUser(db, "acting-owner@example.test", PlatformRole.Owner, "owner-password-123", ActingOwnerId);
+        await using var context = db.ContextFor(null);
+
+        var result = await Controller(context).ResetMfa(ActingOwnerId, CancellationToken.None);
+
+        Assert.IsType<ConflictObjectResult>(result);
+    }
+
+    [Fact]
     public void Platform_bearer_scheme_wires_request_time_session_validation_without_changing_schemes()
     {
         var services = new ServiceCollection();

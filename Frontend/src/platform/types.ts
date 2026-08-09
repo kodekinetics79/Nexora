@@ -16,6 +16,7 @@ export type PlanTier = string;
 export type TenantStatus =
   | 'active'
   | 'trial'
+  | 'past_due'
   | 'suspended'
   | 'provisioning'
   | 'archived';
@@ -137,6 +138,74 @@ export interface Tenant extends TenantCompanyProfile, TenantCommercialTerms {
   status: TenantStatus;
   statusReason: string | null;
   createdAt: string | null; // ISO
+}
+
+export interface BillingMeterCatalogEntry {
+  eventType: string;
+  billingMeterKey: string;
+  unit: string;
+  certification: 'BillingCertified' | 'Blocked' | 'NotImplemented';
+}
+
+export interface BillingReadinessFailure {
+  code: string;
+  meterKey: string;
+  detail: string;
+}
+
+export interface BillingReadiness {
+  ready: boolean;
+  failures: BillingReadinessFailure[];
+  manifestJson: string;
+  manifestSha256: string;
+}
+
+export interface UsageRatingCorrection {
+  id: string;
+  tenantId: string;
+  usageEventId: string;
+  attemptNumber: number;
+  status: string;
+  reasonCode: string | null;
+  rateCardId: string | null;
+  rateCardLineId: string | null;
+  rateCardVersion: number | null;
+  currency: string;
+  allowanceApplied: number;
+  overageQuantity: number;
+  unitPrice: number | null;
+  ratedAmount: number | null;
+  ratedAtUtc: string;
+  ratedBy: string;
+}
+
+export interface DocumentCoveragePolicy {
+  tenantId: string;
+  meterKey: string;
+  mode: string;
+  proposedEffectiveAtUtc: string;
+  proposedBy: string;
+  proposedAtUtc: string;
+  version: number;
+}
+
+export interface DocumentCoverageSegment {
+  id: string;
+  tenantId: string;
+  meterKey: string;
+  startUtc: string;
+  endUtc: string;
+  source: string;
+  completeness: string;
+  eventCount: number;
+  quantityTotal: number;
+  allowanceAppliedTotal: number;
+  overageQuantityTotal: number;
+  ratedAmountTotal: number;
+  currency: string;
+  reconciliation: string;
+  evidenceSha256: string;
+  rateLineageSha256: string;
 }
 
 export interface TenantDataAsset {
@@ -363,6 +432,23 @@ export interface ExtractionJob {
   latencyMs: number | null;
   /** Present when status is `failed` or `dead_letter`. */
   error: string | null;
+}
+
+export type PlatformDeadLetterQueue = 'extraction' | 'supplier-rfq' | 'quote-delivery';
+
+export interface RecoverPlatformDeadLetterInput {
+  queue: PlatformDeadLetterQueue;
+  itemId: string;
+  reason: string;
+  idempotencyKey: string;
+}
+
+export interface RecoverPlatformDeadLetterResult {
+  queue: PlatformDeadLetterQueue;
+  itemId: string;
+  tenantId: string;
+  status: string;
+  idempotentReplay: boolean;
 }
 
 // --- Audit ------------------------------------------------------------------
@@ -889,6 +975,24 @@ export interface SubscriptionPayment {
   recordedBy: string;
 }
 
+export type SubscriptionRevenueActionKind = 'Void' | 'Refund' | 'PaymentReversal' | 'WriteOff' | 'Dunning';
+export interface SubscriptionRevenueAction {
+  id: string;
+  invoiceId: string;
+  kind: SubscriptionRevenueActionKind;
+  status: 'Proposed' | 'Approved' | 'Completed' | 'Failed';
+  amount: number;
+  currency: string;
+  reason: string;
+  evidenceSha256: string;
+  externalReference: string | null;
+  proposedByPlatformUserId: number | null;
+  proposedAtUtc: string;
+  approvedByPlatformUserId: number | null;
+  approvedAtUtc: string | null;
+  completedAtUtc: string | null;
+}
+
 export interface SubscriptionInvoice {
   id: string;
   tenantId: string;
@@ -902,10 +1006,18 @@ export interface SubscriptionInvoice {
   totalAmount: number;
   creditedAmount: number;
   paidAmount: number;
+  refundedAmount: number;
+  reversedPaymentAmount: number;
+  writtenOffAmount: number;
   outstandingAmount: number;
   issuedAtUtc: string;
   dueAtUtc: string;
   taxTreatment: string;
+  taxJurisdictionCode: string | null;
+  taxRuleId: string | null;
+  taxRuleVersion: number | null;
+  taxEvidenceSha256: string | null;
+  taxDeterminedAtUtc: string | null;
   sourceEvidenceSha256: string;
   createdBy: string;
   createdAtUtc: string;
@@ -914,6 +1026,7 @@ export interface SubscriptionInvoice {
   version: number;
   credits: SubscriptionCreditNote[];
   payments: SubscriptionPayment[];
+  revenueActions: SubscriptionRevenueAction[];
 }
 
 export interface CreateSubscriptionInvoiceInput {
@@ -922,6 +1035,7 @@ export interface CreateSubscriptionInvoiceInput {
   taxTreatment: string;
   sellerLegalName: string;
   sellerTaxNumber: string;
+  taxJurisdictionCode: string;
 }
 
 export interface TenantAiPolicy {

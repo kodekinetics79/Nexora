@@ -25,6 +25,7 @@ import {
   CheckCircleOutlined as ReactivateIcon,
   LockResetOutlined as PasswordIcon,
   ManageAccountsOutlined as RoleIcon,
+  PhonelinkLockOutlined as MfaIcon,
 } from '@mui/icons-material';
 import { useSnackbar } from 'notistack';
 import { platformApi } from '../api/client';
@@ -46,6 +47,7 @@ type DialogState =
   | { kind: 'create' }
   | { kind: 'role'; user: PlatformOperator }
   | { kind: 'password'; user: PlatformOperator }
+  | { kind: 'mfa'; user: PlatformOperator }
   | { kind: 'deactivate'; user: PlatformOperator }
   | null;
 
@@ -134,6 +136,16 @@ export default function PlatformUsersPage() {
       enqueueSnackbar(platformErrorMessage(error, 'Password reset failed'), { variant: 'error' }),
   });
 
+  const mfaResetMutation = useMutation({
+    mutationFn: (user: PlatformOperator) => platformApi.resetPlatformUserMfa(user.id),
+    onSuccess: () => {
+      enqueueSnackbar('MFA reset. All target sessions were revoked; re-enrollment is required.', { variant: 'success' });
+      setDialog(null);
+    },
+    onError: (error) =>
+      enqueueSnackbar(platformErrorMessage(error, 'MFA reset failed'), { variant: 'error' }),
+  });
+
   const columns: GridColDef<PlatformOperator>[] = [
     {
       field: 'email',
@@ -182,7 +194,7 @@ export default function PlatformUsersPage() {
     {
       field: 'actions',
       headerName: 'Actions',
-      width: 160,
+      width: 200,
       sortable: false,
       filterable: false,
       renderCell: (p) => (
@@ -209,6 +221,11 @@ export default function PlatformUsersPage() {
               }}
             >
               <PasswordIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="Reset lost MFA">
+            <IconButton size="small" onClick={() => setDialog({ kind: 'mfa', user: p.row })}>
+              <MfaIcon fontSize="small" />
             </IconButton>
           </Tooltip>
           <Tooltip title={p.row.isActive ? 'Deactivate' : 'Reactivate'}>
@@ -397,6 +414,32 @@ export default function PlatformUsersPage() {
             sx={{ fontWeight: 700 }}
           >
             {passwordMutation.isPending ? 'Resetting…' : 'Reset password'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Break-glass MFA recovery dialog */}
+      <Dialog open={dialog?.kind === 'mfa'} onClose={() => setDialog(null)} maxWidth="xs" fullWidth>
+        <DialogTitle sx={{ fontWeight: 800 }}>Reset lost MFA</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            {dialog?.kind === 'mfa' && (
+              <>Reset MFA for <strong>{dialog.user.email}</strong>? All of their platform sessions,
+                recovery codes and outstanding challenges will be revoked. They must enroll MFA again.
+                A different Owner must perform this recovery.</>
+            )}
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button onClick={() => setDialog(null)} color="inherit">Cancel</Button>
+          <Button
+            variant="contained"
+            color="error"
+            onClick={() => dialog?.kind === 'mfa' && mfaResetMutation.mutate(dialog.user)}
+            disabled={mfaResetMutation.isPending}
+            sx={{ fontWeight: 700 }}
+          >
+            {mfaResetMutation.isPending ? 'Resetting…' : 'Reset MFA and revoke sessions'}
           </Button>
         </DialogActions>
       </Dialog>

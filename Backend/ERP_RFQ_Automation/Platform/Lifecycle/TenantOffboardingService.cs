@@ -42,8 +42,10 @@ public sealed class TenantOffboardingService(
     TenantDataExportService export,
     IOptions<TenantLifecycleOptions> options,
     ILogger<TenantOffboardingService> logger,
+    ITenantOffboardingReadinessService readiness,
     ITenantAccessService? tenantAccess = null,
-    Support.ISupportTicketRedactionService? supportRedaction = null)
+    Support.ISupportTicketRedactionService? supportRedaction = null,
+    TimeProvider? timeProvider = null)
 {
     /// <summary>
     /// The floor a reason must clear on the operations that destroy something or commit to
@@ -72,6 +74,8 @@ public sealed class TenantOffboardingService(
     private static readonly string[] ReanimatingActions = ["tenant.restore", "tenant.resume"];
 
     private TenantLifecycleOptions Options => options.Value;
+    private readonly TimeProvider _time = timeProvider ?? TimeProvider.System;
+    private DateTime UtcNow => _time.GetUtcNow().UtcDateTime;
 
     // ---------------------------------------------------------------------------------- read
 
@@ -107,7 +111,7 @@ public sealed class TenantOffboardingService(
     /// </summary>
     public async Task<IReadOnlyList<PendingTenantDeletionDto>> ListPendingDeletionsAsync(CancellationToken ct)
     {
-        var now = DateTime.UtcNow;
+        var now = UtcNow;
 
         var pending = await (
             from record in context.Set<TenantOffboarding>().AsNoTracking()
@@ -152,9 +156,9 @@ public sealed class TenantOffboardingService(
         RequireConfirmation(confirmation, tenant);
         var businessUnitId = RequirePrimaryBusinessUnit(tenant);
 
-        var requestedOn = DateTime.UtcNow;
+        var requestedOn = UtcNow;
         var document = await export.ExportAsync(tenant, businessUnitId, ActorEmail(actor), ct);
-        var completedOn = DateTime.UtcNow;
+        var completedOn = UtcNow;
 
         var sectionsJson = JsonSerializer.Serialize(document.Sections.Select(s => new
         {
@@ -238,6 +242,8 @@ public sealed class TenantOffboardingService(
                 + $"deletion (current: {tenant.Status}). Suspend and archive it first — that path is "
                 + "reversible and this one leads somewhere that is not.");
 
+        await RequireReadinessAsync(tenant, TenantOffboardingReadinessPhase.Schedule, ct);
+
         await InTransactionAsync(async () =>
         {
             var record = await LoadOrCreateRecordAsync(tenant.Id, ct);
@@ -245,7 +251,7 @@ public sealed class TenantOffboardingService(
                 throw TenantOffboardingRefusedException.Conflict(
                     $"Deletion cannot be scheduled from stage {record.Stage}.");
 
-            var scheduledOn = DateTime.UtcNow;
+            var scheduledOn = UtcNow;
             var previous = record.Stage;
             record.Stage = TenantOffboardingStage.PendingDeletion;
             record.RetentionDays = retentionDays;
@@ -309,7 +315,7 @@ public sealed class TenantOffboardingService(
             record.PurgeEligibleOn = null;
             record.DeletionReason = null;
             record.DeletionScheduledBy = null;
-            record.ModifiedOn = DateTime.UtcNow;
+            record.ModifiedOn = UtcNow;
             await context.SaveChangesAsync(ct);
 
             await WriteLifecycleEventAsync(tenant, previous, record.Stage,
@@ -369,10 +375,14 @@ public sealed class TenantOffboardingService(
                 + "and is being served. Cancel the scheduled deletion; a live tenant is never purged, "
                 + "however long its retention window has been running.");
 
+        // Scheduling was evidence-gated too, but financial reconciliation can be reopened during
+        // the retention window. Re-evaluate at the irreversible boundary before recording intent.
+        await RequireReadinessAsync(tenant, TenantOffboardingReadinessPhase.Purge, ct);
+
         // The retention clock. Enforced HERE, in the service, and not merely by a disabled button:
         // the window is the only control standing between a decision and an irreversible act, and
         // a control that a different caller can skip is not one.
-        var now = DateTime.UtcNow;
+        var now = UtcNow;
         if (record.PurgeEligibleOn is not DateTime eligibleOn)
             throw TenantOffboardingRefusedException.Conflict(
                 "This tenant carries no purge eligibility date, so the retention window cannot be "
@@ -559,7 +569,7 @@ public sealed class TenantOffboardingService(
             ?? throw new InvalidOperationException("The fenced purge produced no durable outcome.");
 
         // ---- 3. completion -------------------------------------------------------------------
-        var completedOn = DateTime.UtcNow;
+        var completedOn = UtcNow;
         Support.SupportTicketRedactionResult support = new(0, 0);
         await InTransactionAsync(async () =>
         {
@@ -635,8 +645,9 @@ public sealed class TenantOffboardingService(
     // ------------------------------------------------------------------------------- erasure
 
     /// <summary>
-    /// Erases the personal data and leaves the commercial records. Independent of the deletion
-    /// path in both directions — see <see cref="TenantOffboardingDisclosure.ErasureIsNotDeletion"/>.
+    /// Erases personal data while leaving commercial and preserved legal/financial evidence.
+    /// Erasure does not schedule deletion, but its persisted proof is required by the readiness
+    /// gate before a scheduled deletion may advance to destructive purge.
     /// </summary>
     public async Task<TenantErasureResultDto> ErasePersonalDataAsync(
         long tenantId, ConfirmTenantDestructionRequest request, ClaimsPrincipal actor,
@@ -660,7 +671,7 @@ public sealed class TenantOffboardingService(
             // This UPDATE takes the same row lock as legal-hold placement and the owner purge
             // transaction. The hold predicate is therefore stable until erasure commits.
             await context.Set<TenantOffboarding>().Where(r => r.TenantId == tenant.Id)
-                .ExecuteUpdateAsync(setters => setters.SetProperty(r => r.ModifiedOn, DateTime.UtcNow), ct);
+                .ExecuteUpdateAsync(setters => setters.SetProperty(r => r.ModifiedOn, UtcNow), ct);
             await context.Entry(record).ReloadAsync(ct);
             if (await context.Set<TenantLegalHold>().AnyAsync(
                     h => h.TenantId == tenant.Id && h.ReleasedOn == null, ct))
@@ -673,7 +684,7 @@ public sealed class TenantOffboardingService(
                     + "nothing left to erase.");
 
             targets = await eraser.EraseAsync(tenant, tenant.PrimaryBusinessUnitId, ct);
-            var erasedOn = DateTime.UtcNow;
+            var erasedOn = UtcNow;
 
             record.PersonalDataErasedOn = erasedOn;
             record.PersonalDataErasedBy = ActorEmail(actor);
@@ -715,6 +726,17 @@ public sealed class TenantOffboardingService(
 
     // ------------------------------------------------------------------------------- helpers
 
+    private async Task RequireReadinessAsync(
+        Tenant tenant, TenantOffboardingReadinessPhase phase, CancellationToken ct)
+    {
+        var result = await readiness.AssessAsync(tenant, phase, ct);
+        if (result.Ready) return;
+
+        var detail = string.Join(" ", result.Failures.Select(x => $"[{x.Code}] {x.Detail}"));
+        throw TenantOffboardingRefusedException.Conflict(
+            "Tenant offboarding readiness is blocked. " + detail);
+    }
+
     /// <summary>
     /// Runs one unit of bookkeeping inside the retriable execution strategy the context is
     /// configured with. The ChangeTracker is deliberately NOT cleared here, unlike in
@@ -751,7 +773,7 @@ public sealed class TenantOffboardingService(
             ActorPlatformUserId = ActorId(actor),
             ActorEmail = ActorEmail(actor),
             Detail = detail is null ? null : JsonSerializer.Serialize(detail),
-            OccurredOn = DateTime.UtcNow
+            OccurredOn = UtcNow
         });
         await context.SaveChangesAsync(ct);
     }
@@ -776,7 +798,7 @@ public sealed class TenantOffboardingService(
         var record = await LoadRecordAsync(tenantId, tracked: true, ct);
         if (record is not null) return record;
 
-        record = new TenantOffboarding { TenantId = tenantId, CreatedOn = DateTime.UtcNow };
+        record = new TenantOffboarding { TenantId = tenantId, CreatedOn = UtcNow };
         context.Set<TenantOffboarding>().Add(record);
         await context.SaveChangesAsync(ct);
         return record;
@@ -837,7 +859,7 @@ public sealed class TenantOffboardingService(
         Tenant tenant, TenantOffboarding? record,
         IReadOnlyList<TenantLifecycleEventDto> history, IReadOnlyList<TenantExportReceiptDto> exports)
     {
-        var now = DateTime.UtcNow;
+        var now = UtcNow;
         var stage = record?.Stage ?? TenantOffboardingStage.NotScheduled;
         var eligible = IsEligible(record?.PurgeEligibleOn, now);
 

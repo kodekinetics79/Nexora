@@ -250,6 +250,38 @@ public class PlatformUsersController : ControllerBase
         return Ok(ToDto(user));
     }
 
+    // POST /api/platform/users/{id}/mfa/reset
+    // Break-glass recovery requires a different MFA-authenticated Owner (the controller
+    // policy). The target's sessions and outstanding challenges are invalidated in the
+    // same transaction as the credential reset and audit occurrence.
+    [HttpPost("{id:long}/mfa/reset")]
+    public async Task<IActionResult> ResetMfa(long id, CancellationToken ct)
+    {
+        var actorId = CurrentActorId();
+        if (actorId == id)
+            return Conflict(new { error = "A different platform Owner must reset your MFA." });
+        if (!await _context.Set<PlatformUser>().AnyAsync(user => user.Id == id, ct))
+            return NotFound();
+
+        await ExecuteAuditedAsync(async () =>
+        {
+            var current = await _context.Set<PlatformUser>().SingleAsync(user => user.Id == id, ct);
+            RotateSessionGeneration(current);
+            await _context.Set<PlatformMfaRecoveryCode>()
+                .Where(code => code.PlatformUserId == id).ExecuteDeleteAsync(ct);
+            await _context.Set<PlatformMfaChallenge>()
+                .Where(challenge => challenge.PlatformUserId == id).ExecuteDeleteAsync(ct);
+            await _context.Set<PlatformMfaCredential>()
+                .Where(credential => credential.PlatformUserId == id).ExecuteDeleteAsync(ct);
+            await _context.SaveChangesAsync(ct);
+            await RevokeAllSessionsAsync(id, "platform-mfa-recovery-reset", ct);
+            await _audit.WriteAsync(User, "platform-user.mfa.reset", nameof(PlatformUser), id.ToString(),
+                new { current.Email, requiresReEnrollment = true }, httpContext: HttpContext, ct: ct);
+        }, ct);
+
+        return NoContent();
+    }
+
     private long CurrentActorId()
     {
         var sub = User.FindFirst("sub")?.Value

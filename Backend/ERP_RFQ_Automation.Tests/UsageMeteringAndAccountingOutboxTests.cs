@@ -17,11 +17,12 @@ public sealed class UsageMeteringAndAccountingOutboxTests
         await SeedTenantAsync(db, 91);
         var service = new UsageMeteringService(db);
         var occurred = new DateTime(2026, 8, 8, 12, 34, 45, DateTimeKind.Utc);
-        var original = Request(Guid.NewGuid(), 91, "documents", 10, "document", occurred, "usage-1", allowance: 4, price: 2);
+        var original = Request(Guid.NewGuid(), 91, "documents", 10, "document", occurred, "usage-1", price: 2);
 
         var first = await service.RecordAsync(original);
         var replay = await service.RecordAsync(original);
         Assert.Equal(first.UsageEventId, replay.UsageEventId);
+        Assert.Equal(4, first.AllowanceApplied);
         Assert.Equal(6, first.OverageQuantity);
         Assert.Equal(12, first.RatedAmount);
 
@@ -41,6 +42,30 @@ public sealed class UsageMeteringAndAccountingOutboxTests
             "usage-over-correction", adjusts: first.UsageEventId, price: 2)));
     }
 
+    [Fact]
+    public async Task Allowance_is_server_allocated_once_per_tenant_meter_period()
+    {
+        using var database = new TestDb();
+        await using var db = database.ContextFor(null);
+        await SeedTenantAsync(db, 91);
+        var service = new UsageMeteringService(db);
+        var occurred = new DateTime(2026, 8, 8, 12, 0, 0, DateTimeKind.Utc);
+
+        var first = await service.RecordAsync(Request(Guid.NewGuid(), 91, "documents", 3, "document",
+            occurred, "allowance-first", price: 2));
+        var second = await service.RecordAsync(Request(Guid.NewGuid(), 91, "documents", 3, "document",
+            occurred.AddMinutes(1), "allowance-second", price: 2));
+
+        Assert.Equal(3, first.AllowanceApplied);
+        Assert.Equal(0, first.RatedAmount);
+        Assert.Equal(1, second.AllowanceApplied);
+        Assert.Equal(2, second.OverageQuantity);
+        Assert.Equal(4, second.RatedAmount);
+        await Assert.ThrowsAsync<UsageMeteringException>(() => service.RecordAsync(Request(
+            Guid.NewGuid(), 91, "documents", 1, "document", occurred.AddMinutes(2),
+            "caller-allowance", allowance: 1, price: 2)));
+    }
+
     [Theory]
     [InlineData("pages.processed", "page")]
     [InlineData("pages.ocr", "page")]
@@ -57,6 +82,22 @@ public sealed class UsageMeteringAndAccountingOutboxTests
     }
 
     [Fact]
+    public async Task Base_subscription_cannot_be_fabricated_as_a_usage_event()
+    {
+        using var database = new TestDb();
+        await using var db = database.ContextFor(null);
+        await SeedTenantAsync(db, 93);
+
+        var error = await Assert.ThrowsAsync<UsageMeteringException>(() =>
+            new UsageMeteringService(db).RecordAsync(Request(
+                Guid.NewGuid(), 93, "base.subscription", 1, "subscription",
+                DateTime.UtcNow.AddMinutes(-1), "fake-subscription")));
+
+        Assert.Contains("derived from the effective plan", error.Message);
+        Assert.Empty(await db.Set<UsageEvent>().ToListAsync());
+    }
+
+    [Fact]
     public async Task Finalization_and_outbox_insert_commit_together_then_acknowledgement_proves_export()
     {
         using var database = new TestDb();
@@ -67,6 +108,9 @@ public sealed class UsageMeteringAndAccountingOutboxTests
         {
             Id = 403, TenantId = tenant.Id, RateCardId = card.Id, Currency = "USD", TotalAmount = 25,
             Status = BillingStatementStatus.Final, PeriodStartUtc = DateTime.UtcNow.AddMonths(-1), PeriodEndUtc = DateTime.UtcNow,
+            ReadinessStatus = BillingReadinessStatus.Ready,
+            ReadinessManifestJson = "{\"ready\":true}",
+            ReadinessManifestSha256 = "b342fc286d0216cc212e0d7ba234894e2e7283ddf14f959adf0fe7fd5924308a",
             ComputedAtUtc = DateTime.UtcNow, ComputedBy = "maker", FinalizedAtUtc = DateTime.UtcNow, FinalizedBy = "checker",
             Lines = [new BillingStatementLine { MeterKey = "documents", Description = "Documents", MeteredQuantity = 5, BillableQuantity = 5, UnitPrice = 5, Amount = 25 }]
         };

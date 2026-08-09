@@ -38,8 +38,13 @@ public sealed record TenantAccessSnapshot(
 {
     public bool HasTenant => TenantId.HasValue;
 
-    /// <summary>Suspended and Archived tenants are denied login + tenant-plane API use.</summary>
-    public bool IsAccessDenied => Status is TenantStatus.Suspended or TenantStatus.Archived;
+    /// <summary>
+    /// Provisioning tenants have not passed the authoritative activation policy and therefore
+    /// cannot receive a tenant token, call tenant APIs, or consume worker resources. Past-due,
+    /// Suspended and Archived tenants are likewise restricted.
+    /// </summary>
+    public bool IsAccessDenied => Status is TenantStatus.Provisioning or TenantStatus.PastDue
+        or TenantStatus.Suspended or TenantStatus.Archived;
 
     /// <summary>
     /// How the tenant is charged. Init-only rather than positional so existing snapshot
@@ -105,7 +110,7 @@ public sealed record TenantAccessSnapshot(
 /// - legacy BU without a platform Tenant row → fail OPEN (no tenant, no limits);
 /// - resolution infrastructure failure (missing grant/table on a reduced model) →
 ///   fail OPEN, logged, briefly cached;
-/// - Suspended/Archived tenant → callers must deny.
+/// - PastDue/Suspended/Archived tenant → callers must deny.
 /// </summary>
 public interface ITenantAccessService
 {

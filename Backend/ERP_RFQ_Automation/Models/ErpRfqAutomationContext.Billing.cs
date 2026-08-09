@@ -73,6 +73,11 @@ public static class BillingModelConfiguration
             e.Property(x => x.Currency).IsRequired().HasMaxLength(3);
             e.Property(x => x.Status).HasConversion<string>().HasMaxLength(16).IsRequired();
             e.Property(x => x.TotalAmount).HasPrecision(14, 2);
+            e.Property(x => x.ReadinessStatus).HasConversion<string>().HasMaxLength(16).IsRequired()
+                .HasDefaultValue(BillingReadinessStatus.Blocked);
+            e.Property(x => x.ReadinessManifestJson).HasColumnType("jsonb").IsRequired().HasDefaultValue("{}");
+            e.Property(x => x.ReadinessManifestSha256).HasMaxLength(64).IsFixedLength().IsRequired()
+                .HasDefaultValue(new string('0', 64));
             e.Property(x => x.ComputedBy).IsRequired().HasMaxLength(256);
             e.Property(x => x.FinalizedBy).HasMaxLength(256);
             e.Property(x => x.Version).HasDefaultValue(1L).IsConcurrencyToken();
@@ -132,9 +137,16 @@ public static class BillingModelConfiguration
             e.Property(x => x.TotalAmount).HasPrecision(14, 2);
             e.Property(x => x.CreditedAmount).HasPrecision(14, 2);
             e.Property(x => x.PaidAmount).HasPrecision(14, 2);
+            e.Property(x => x.RefundedAmount).HasPrecision(14, 2);
+            e.Property(x => x.ReversedPaymentAmount).HasPrecision(14, 2);
+            e.Property(x => x.WrittenOffAmount).HasPrecision(14, 2);
             e.Property(x => x.SellerSnapshotJson).HasColumnType("jsonb").IsRequired();
             e.Property(x => x.BuyerSnapshotJson).HasColumnType("jsonb").IsRequired();
             e.Property(x => x.TaxTreatment).HasMaxLength(128).IsRequired();
+            e.Property(x => x.TaxJurisdictionCode).HasMaxLength(64);
+            e.Property(x => x.TaxEvidenceJson).HasColumnType("jsonb");
+            e.Property(x => x.TaxEvidenceSha256).HasMaxLength(64).IsFixedLength();
+            e.Property(x => x.TaxDeterminedAtUtc).HasColumnType("timestamp with time zone");
             e.Property(x => x.SourceEvidenceJson).HasColumnType("jsonb").IsRequired();
             e.Property(x => x.SourceEvidenceSha256).HasMaxLength(64).IsFixedLength().IsRequired();
             e.Property(x => x.CreatedBy).HasMaxLength(256).IsRequired();
@@ -147,6 +159,10 @@ public static class BillingModelConfiguration
             e.HasOne<BillingStatement>().WithMany().HasForeignKey(x => x.BillingStatementId)
                 .OnDelete(DeleteBehavior.Restrict);
             e.HasOne<ERP_RFQ_Automation.Platform.Models.Tenant>().WithMany().HasForeignKey(x => x.TenantId)
+                .OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<SubscriptionTaxRule>().WithMany()
+                .HasForeignKey(x => new { x.TaxRuleId, x.TaxRuleVersion })
+                .HasPrincipalKey(x => new { x.Id, x.Version })
                 .OnDelete(DeleteBehavior.Restrict);
         });
 
@@ -175,6 +191,59 @@ public static class BillingModelConfiguration
             e.HasIndex(x => x.ExternalReference).IsUnique();
             e.HasOne(x => x.Invoice).WithMany(x => x.Payments)
                 .HasForeignKey(x => x.SubscriptionInvoiceId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<SubscriptionTaxRule>(e =>
+        {
+            e.ToTable("SubscriptionTaxRules", "platform");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.JurisdictionCode).HasMaxLength(64).IsRequired();
+            e.Property(x => x.BuyerCountryCode).HasMaxLength(2).IsRequired();
+            e.Property(x => x.Currency).HasMaxLength(3).IsRequired();
+            e.Property(x => x.Treatment).HasMaxLength(128).IsRequired();
+            e.Property(x => x.RatePercent).HasPrecision(7, 4);
+            e.Property(x => x.LegalAuthorityReference).HasMaxLength(1000).IsRequired();
+            e.Property(x => x.EvidenceSha256).HasMaxLength(64).IsFixedLength().IsRequired();
+            e.Property(x => x.Status).HasConversion<string>().HasMaxLength(16).IsRequired();
+            e.Property(x => x.EffectiveFromUtc).HasColumnType("timestamp with time zone");
+            e.Property(x => x.EffectiveToUtc).HasColumnType("timestamp with time zone");
+            e.Property(x => x.ProposedAtUtc).HasColumnType("timestamp with time zone");
+            e.Property(x => x.ApprovedAtUtc).HasColumnType("timestamp with time zone");
+            e.Property(x => x.Version).HasDefaultValue(1L).IsConcurrencyToken();
+            e.HasAlternateKey(x => new { x.Id, x.Version });
+            e.HasIndex(x => new { x.JurisdictionCode, x.BuyerCountryCode, x.Currency, x.EffectiveFromUtc }).IsUnique();
+            e.HasIndex(x => new { x.Status, x.BuyerCountryCode, x.Currency });
+            e.HasOne<ERP_RFQ_Automation.Platform.Models.PlatformUser>().WithMany()
+                .HasForeignKey(x => x.ProposedByPlatformUserId).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<ERP_RFQ_Automation.Platform.Models.PlatformUser>().WithMany()
+                .HasForeignKey(x => x.ApprovedByPlatformUserId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<SubscriptionRevenueAction>(e =>
+        {
+            e.ToTable("SubscriptionRevenueActions", "platform");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Kind).HasConversion<string>().HasMaxLength(16).IsRequired();
+            e.Property(x => x.Status).HasConversion<string>().HasMaxLength(16).IsRequired();
+            e.Property(x => x.IdempotencyKey).HasMaxLength(128).IsRequired();
+            e.Property(x => x.Amount).HasPrecision(14, 2);
+            e.Property(x => x.Currency).HasMaxLength(3).IsRequired();
+            e.Property(x => x.Reason).HasMaxLength(1000).IsRequired();
+            e.Property(x => x.EvidenceSha256).HasMaxLength(64).IsFixedLength().IsRequired();
+            e.Property(x => x.ExternalReference).HasMaxLength(256);
+            e.Property(x => x.ProposedAtUtc).HasColumnType("timestamp with time zone");
+            e.Property(x => x.ApprovedAtUtc).HasColumnType("timestamp with time zone");
+            e.Property(x => x.CompletedAtUtc).HasColumnType("timestamp with time zone");
+            e.HasIndex(x => x.IdempotencyKey).IsUnique();
+            e.HasAlternateKey(x => new { x.TenantId, x.SubscriptionInvoiceId, x.Id });
+            e.HasIndex(x => new { x.TenantId, x.SubscriptionInvoiceId, x.Kind, x.Status });
+            e.HasOne(x => x.Invoice).WithMany(x => x.RevenueActions)
+                .HasForeignKey(x => new { x.TenantId, x.SubscriptionInvoiceId })
+                .HasPrincipalKey(x => new { x.TenantId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<ERP_RFQ_Automation.Platform.Models.PlatformUser>().WithMany()
+                .HasForeignKey(x => x.ProposedByPlatformUserId).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<ERP_RFQ_Automation.Platform.Models.PlatformUser>().WithMany()
+                .HasForeignKey(x => x.ApprovedByPlatformUserId).OnDelete(DeleteBehavior.Restrict);
         });
     }
 }

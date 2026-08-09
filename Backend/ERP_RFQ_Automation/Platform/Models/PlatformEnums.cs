@@ -32,6 +32,12 @@ public enum TenantStatus
     /// <summary>Live and serviceable.</summary>
     Active = 1,
 
+    /// <summary>
+    /// Commercially delinquent. Tenant-plane access and background consumption are restricted,
+    /// but the tenant remains billable and no deletion/offboarding state is created implicitly.
+    /// </summary>
+    PastDue = 4,
+
     /// <summary>Access blocked (non-payment / abuse); data retained.</summary>
     Suspended = 2,
 

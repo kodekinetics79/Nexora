@@ -189,6 +189,52 @@ public sealed class PlatformTenantLifecycleAdminTests
     }
 
     [Fact]
+    public async Task Past_due_restricts_access_without_creating_offboarding_state_and_can_be_resolved()
+    {
+        using var db = new TestDb();
+        var tenantId = await SeedTenant(db, "past-due-tenant", TenantStatus.Active);
+        await using var context = db.ContextFor(null);
+        var controller = Controller(context);
+
+        var marked = await controller.MarkPastDue(tenantId,
+            new TenantStatusChangeRequest { Reason = "Invoice remains unpaid after the contractual grace period." },
+            CancellationToken.None);
+        var markedDto = Assert.IsType<TenantSummaryDto>(Assert.IsType<OkObjectResult>(marked.Result).Value);
+        Assert.Equal(nameof(TenantStatus.PastDue), markedDto.Status);
+        Assert.True(new ERP_RFQ_Automation.Platform.Entitlements.TenantAccessSnapshot(
+            42, tenantId, TenantStatus.PastDue, null).IsAccessDenied);
+        Assert.Empty(await context.Set<TenantOffboarding>().ToListAsync());
+
+        var resolved = await controller.ResolvePastDue(tenantId,
+            new TenantStatusChangeRequest { Reason = "Payment cleared and commercial hold released." },
+            CancellationToken.None);
+        var resolvedDto = Assert.IsType<TenantSummaryDto>(Assert.IsType<OkObjectResult>(resolved.Result).Value);
+        Assert.Equal(nameof(TenantStatus.Active), resolvedDto.Status);
+        Assert.Equal(["tenant.past-due", "tenant.past-due.resolve"],
+            await context.Set<PlatformAuditLog>().OrderBy(x => x.Id).Select(x => x.Action).ToListAsync());
+        Assert.Empty(await context.Set<TenantOffboarding>().ToListAsync());
+    }
+
+    [Fact]
+    public async Task A_past_due_tenant_can_be_suspended_but_not_archived_directly()
+    {
+        using var db = new TestDb();
+        var tenantId = await SeedTenant(db, "past-due-suspend", TenantStatus.PastDue);
+        await using var context = db.ContextFor(null);
+        var controller = Controller(context);
+
+        var archive = await controller.Archive(tenantId,
+            new TenantStatusChangeRequest { Reason = "Direct archive is forbidden." }, CancellationToken.None);
+        Assert.IsType<ConflictObjectResult>(archive.Result);
+
+        var suspended = await controller.Suspend(tenantId,
+            new TenantStatusChangeRequest { Reason = "Termination workflow approved suspension." },
+            CancellationToken.None);
+        var dto = Assert.IsType<TenantSummaryDto>(Assert.IsType<OkObjectResult>(suspended.Result).Value);
+        Assert.Equal(nameof(TenantStatus.Suspended), dto.Status);
+    }
+
+    [Fact]
     public async Task ChangePlan_assigns_an_active_plan_and_audits()
     {
         using var db = new TestDb();
@@ -309,12 +355,39 @@ public sealed class PlatformTenantLifecycleAdminTests
             new ReleaseTenantLegalHoldRequest
             {
                 Reason = "Counsel confirmed the preservation duty has ended."
-            }, actor, null, CancellationToken.None);
+            }, PlatformActor(8, "checker@example.test"), null, CancellationToken.None);
 
         Assert.False(released.IsActive);
         Assert.NotNull(released.ReleasedOn);
         await using var verify = db.ContextFor(null);
         Assert.Equal(2, await verify.Set<PlatformAuditLog>().CountAsync());
+    }
+
+    [Fact]
+    public async Task Legal_hold_placer_cannot_release_their_own_hold()
+    {
+        using var db = new TestDb();
+        var tenantId = await SeedTenant(db, "legal-hold-separation", TenantStatus.Archived);
+        await using var context = db.ContextFor(null);
+        var service = LegalHolds(context);
+        var actor = PlatformActor();
+        var hold = await service.PlaceAsync(tenantId, new PlaceTenantLegalHoldRequest
+        {
+            Scope = "AllTenantData",
+            Authority = "Litigation counsel",
+            Reason = "Preserve all records for pending litigation.",
+            EvidenceReference = "case://NEX-2026-2042"
+        }, actor, null, CancellationToken.None);
+
+        var refusal = await Assert.ThrowsAsync<TenantOffboardingRefusedException>(() =>
+            service.ReleaseAsync(tenantId, hold.Id, new ReleaseTenantLegalHoldRequest
+            {
+                Reason = "The placing actor must not approve their own release."
+            }, actor, null, CancellationToken.None));
+
+        Assert.Equal(409, refusal.SuggestedStatusCode);
+        Assert.Contains("different platform Owner", refusal.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True((await service.ListAsync(tenantId, CancellationToken.None)).Single().IsActive);
     }
 
     [Fact]
@@ -405,10 +478,10 @@ public sealed class PlatformTenantLifecycleAdminTests
     private static TenantLegalHoldService LegalHolds(ErpRfqAutomationContext context) =>
         new(context, new PlatformAuditService(context, NullLogger<PlatformAuditService>.Instance));
 
-    private static ClaimsPrincipal PlatformActor() => new(new ClaimsIdentity(
+    private static ClaimsPrincipal PlatformActor(long id = 7, string email = "operator@example.test") => new(new ClaimsIdentity(
     [
-        new Claim("sub", "7"),
-        new Claim("email", "operator@example.test"), new Claim("platformRole", "Owner")
+        new Claim("sub", id.ToString()),
+        new Claim("email", email), new Claim("platformRole", "Owner")
     ], "Platform"));
 
     private static async Task<long> SeedTenant(TestDb db, string slug, TenantStatus status)

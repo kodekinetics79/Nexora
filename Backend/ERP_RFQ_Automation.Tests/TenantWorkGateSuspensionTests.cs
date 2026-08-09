@@ -39,7 +39,8 @@ public sealed class TenantWorkGateSuspensionTests
 
     [Theory]
     [InlineData(TenantStatus.Active, true)]
-    [InlineData(TenantStatus.Provisioning, true)]
+    [InlineData(TenantStatus.Provisioning, false)]
+    [InlineData(TenantStatus.PastDue, false)]
     [InlineData(TenantStatus.Suspended, false)]
     [InlineData(TenantStatus.Archived, false)]
     public async Task The_gate_admits_exactly_what_the_request_path_admits(TenantStatus status, bool expected)

@@ -10,6 +10,36 @@ public sealed class AccountingOutboxException(string message) : InvalidOperation
 
 public sealed class AccountingOutboxService(ErpRfqAutomationContext db)
 {
+    public async Task<AccountingOutboxMessage> EnqueueRevenueActionAsync(
+        SubscriptionInvoice invoice, SubscriptionRevenueAction action, CancellationToken ct = default)
+    {
+        if (action.Status != SubscriptionRevenueActionStatus.Completed)
+            throw new AccountingOutboxException("Only a completed revenue action can enter the accounting outbox.");
+        var type = $"subscription-invoice.{action.Kind.ToString().ToLowerInvariant()}";
+        var key = $"{type}:{action.Id}";
+        var existing = await db.Set<AccountingOutboxMessage>().AsNoTracking()
+            .SingleOrDefaultAsync(x => x.IdempotencyKey == key, ct);
+        if (existing is not null) return existing;
+        var payload = JsonSerializer.Serialize(new
+        {
+            schemaVersion = 1, actionId = action.Id.ToString(), invoiceId = invoice.Id.ToString(),
+            invoice.TenantId, invoice.InvoiceNumber, action.Kind, action.Amount, action.Currency,
+            action.Reason, action.EvidenceSha256, action.ExternalReference,
+            action.ProposedByPlatformUserId, action.ProposedAtUtc,
+            action.ApprovedByPlatformUserId, action.ApprovedAtUtc, action.CompletedAtUtc
+        });
+        var now = DateTime.UtcNow;
+        var message = new AccountingOutboxMessage
+        {
+            Id = Guid.NewGuid(), TenantId = invoice.TenantId, SubscriptionInvoiceId = invoice.Id,
+            SubscriptionRevenueActionId = action.Id, MessageType = type, IdempotencyKey = key,
+            PayloadJson = payload, PayloadSha256 = Sha256(payload), Status = AccountingOutboxStatus.Pending,
+            ReconciliationStatus = AccountingReconciliationStatus.NotSent,
+            CreatedAtUtc = now, AvailableAtUtc = now
+        };
+        db.Add(message); return message;
+    }
+
     public async Task<AccountingOutboxMessage> EnqueueInvoiceExportAsync(
         SubscriptionInvoice invoice, CancellationToken ct = default)
     {

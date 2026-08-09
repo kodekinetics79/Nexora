@@ -33,6 +33,8 @@ import type {
   BillingStatementSummary,
   CreateSubscriptionInvoiceInput,
   SubscriptionInvoice,
+  SubscriptionRevenueAction,
+  SubscriptionRevenueActionKind,
   Tenant,
 } from '../../types';
 
@@ -64,9 +66,18 @@ const blankCreate = (): CreateSubscriptionInvoiceInput => ({
   taxTreatment: '',
   sellerLegalName: '',
   sellerTaxNumber: '',
+  taxJurisdictionCode: '',
 });
 
 type MoneyAction = { invoice: SubscriptionInvoice; amount: string; detail: string };
+type RevenueActionDraft = {
+  invoice: SubscriptionInvoice;
+  kind: Exclude<SubscriptionRevenueActionKind, 'Dunning'>;
+  amount: string;
+  reason: string;
+  evidenceSha256: string;
+  externalReference: string;
+};
 
 export default function SubscriptionInvoicesSection({
   tenant,
@@ -84,6 +95,7 @@ export default function SubscriptionInvoicesSection({
   const [finalize, setFinalize] = useState<SubscriptionInvoice | null>(null);
   const [credit, setCredit] = useState<MoneyAction | null>(null);
   const [payment, setPayment] = useState<MoneyAction | null>(null);
+  const [revenueAction, setRevenueAction] = useState<RevenueActionDraft | null>(null);
 
   const query = useQuery({
     queryKey: platformKeys.subscriptionInvoices(tenant.id),
@@ -142,6 +154,30 @@ export default function SubscriptionInvoicesSection({
     },
     onError: fail('The payment was refused'),
   });
+  const revenueActionMutation = useMutation({
+    mutationFn: (action: RevenueActionDraft) => platformApi.proposeSubscriptionRevenueAction(action.invoice.id, {
+      kind: action.kind,
+      amount: Number(action.amount),
+      currency: action.invoice.currency,
+      reason: action.reason.trim(),
+      evidenceSha256: action.evidenceSha256.trim().toLowerCase(),
+      externalReference: action.externalReference.trim() || null,
+    }),
+    onSuccess: () => {
+      enqueueSnackbar('Revenue action proposed for independent Owner approval', { variant: 'success' });
+      setRevenueAction(null);
+      invalidate();
+    },
+    onError: fail('The revenue action was refused'),
+  });
+  const approveRevenueActionMutation = useMutation({
+    mutationFn: (action: SubscriptionRevenueAction) => platformApi.approveSubscriptionRevenueAction(action.id),
+    onSuccess: () => {
+      enqueueSnackbar('Revenue action approved and queued for accounting export', { variant: 'success' });
+      invalidate();
+    },
+    onError: fail('Revenue action approval was refused'),
+  });
 
   const invoices = query.data ?? [];
   const invoiceStatementIds = useMemo(() => new Set(invoices.map((item) => item.statementId)), [invoices]);
@@ -158,7 +194,9 @@ export default function SubscriptionInvoicesSection({
     create.sellerLegalName.trim().length > 0 &&
     create.sellerLegalName.trim().length <= 256 &&
     create.sellerTaxNumber.trim().length > 0 &&
-    create.sellerTaxNumber.trim().length <= 64;
+    create.sellerTaxNumber.trim().length <= 64 &&
+    create.taxJurisdictionCode.trim().length > 0 &&
+    create.taxJurisdictionCode.trim().length <= 64;
 
   if (query.isLoading) return <LoadingState label="Reading subscription invoices…" minHeight={180} />;
   if (query.isError) {
@@ -259,6 +297,24 @@ export default function SubscriptionInvoicesSection({
                               Issue credit
                             </Button>
                           )}
+                          {posted && invoice.status !== 'Void' && permissions.isOwner && (
+                            <Button size="small" onClick={() => setRevenueAction({
+                              invoice, kind: 'WriteOff', amount: '', reason: '', evidenceSha256: '', externalReference: '',
+                            })}>
+                              AR action
+                            </Button>
+                          )}
+                          {invoice.revenueActions.filter((action) => action.status === 'Proposed').map((action) => (
+                            <Button
+                              key={action.id}
+                              size="small"
+                              color="success"
+                              disabled={!permissions.isOwner || approveRevenueActionMutation.isPending}
+                              onClick={() => approveRevenueActionMutation.mutate(action)}
+                            >
+                              Approve {action.kind}
+                            </Button>
+                          ))}
                           {invoice.status === 'Draft' && permissions.isOwner && sameMaker && (
                             <Typography variant="caption" color="warning.main" sx={{ maxWidth: 190 }}>
                               Another Owner with MFA must check and finalize this invoice.
@@ -279,7 +335,7 @@ export default function SubscriptionInvoicesSection({
         <DialogTitle sx={{ fontWeight: 800 }}>Create subscription invoice</DialogTitle>
         <DialogContent dividers>
           <Stack spacing={2} sx={{ mt: 0.5 }}>
-            <Alert severity="info">Only a Final statement can become an invoice. Seller and tax details are snapshotted permanently.</Alert>
+            <Alert severity="info">Only a Final statement can become an invoice. Tax must match one approved maker/checker jurisdiction rule and is snapshotted permanently.</Alert>
             <TextField
               select required label="Final statement" value={create.statementId}
               onChange={(event) => setCreate({ ...create, statementId: event.target.value })}
@@ -299,6 +355,12 @@ export default function SubscriptionInvoicesSection({
               required label="Seller tax number" value={create.sellerTaxNumber}
               slotProps={{ htmlInput: { maxLength: 64 } }}
               onChange={(event) => setCreate({ ...create, sellerTaxNumber: event.target.value })}
+            />
+            <TextField
+              required label="Tax jurisdiction code" value={create.taxJurisdictionCode}
+              slotProps={{ htmlInput: { maxLength: 64 } }}
+              helperText="Exact approved rule code, for example GB-VAT. Unsupported or ambiguous jurisdictions fail closed."
+              onChange={(event) => setCreate({ ...create, taxJurisdictionCode: event.target.value })}
             />
             <TextField
               required label="Tax treatment" value={create.taxTreatment}
@@ -358,7 +420,82 @@ export default function SubscriptionInvoicesSection({
         onChange={setPayment}
         onConfirm={(action) => paymentMutation.mutate(action)}
       />
+      <RevenueActionDialog
+        action={revenueAction}
+        busy={revenueActionMutation.isPending}
+        onChange={setRevenueAction}
+        onConfirm={(action) => revenueActionMutation.mutate(action)}
+      />
     </>
+  );
+}
+
+function RevenueActionDialog({
+  action,
+  busy,
+  onChange,
+  onConfirm,
+}: {
+  action: RevenueActionDraft | null;
+  busy: boolean;
+  onChange: (action: RevenueActionDraft | null) => void;
+  onConfirm: (action: RevenueActionDraft) => void;
+}) {
+  const amount = Number(action?.amount ?? 0);
+  const evidenceValid = /^[a-fA-F0-9]{64}$/.test(action?.evidenceSha256.trim() ?? '');
+  const availableCash = action
+    ? Math.max(0, action.invoice.paidAmount - action.invoice.refundedAmount - action.invoice.reversedPaymentAmount)
+    : 0;
+  const maxAmount = !action ? 0
+    : action.kind === 'Void'
+      ? action.invoice.paidAmount === 0 && action.invoice.creditedAmount === 0 && action.invoice.writtenOffAmount === 0
+        ? action.invoice.totalAmount : 0
+      : action.kind === 'Refund' || action.kind === 'PaymentReversal' ? availableCash
+        : action.invoice.outstandingAmount;
+  const valid = Boolean(action && amount > 0 && amount <= maxAmount && action.reason.trim().length >= 10 && evidenceValid);
+  return (
+    <Dialog open={Boolean(action)} onClose={() => onChange(null)} fullWidth maxWidth="sm">
+      <DialogTitle sx={{ fontWeight: 800 }}>Propose revenue action</DialogTitle>
+      <DialogContent dividers>
+        {action && (
+          <Stack spacing={2} sx={{ mt: 0.5 }}>
+            <Alert severity="warning">
+              Void, refund, and write-off require approval by a different Owner with MFA. The legal invoice remains immutable.
+            </Alert>
+            <Typography variant="body2">{action.invoice.invoiceNumber} · available limit {money(maxAmount, action.invoice.currency)}</Typography>
+            <TextField select required label="Action" value={action.kind}
+              onChange={(event) => onChange({ ...action, kind: event.target.value as RevenueActionDraft['kind'], amount: '' })}>
+              <MenuItem value="Void">Void</MenuItem>
+              <MenuItem value="Refund">Refund</MenuItem>
+              <MenuItem value="PaymentReversal">Payment reversal</MenuItem>
+              <MenuItem value="WriteOff">Write-off</MenuItem>
+            </TextField>
+            <TextField required type="number" label="Amount" value={action.amount}
+              slotProps={{ htmlInput: { min: 0.01, max: maxAmount, step: 0.01 } }}
+              error={action.amount !== '' && (amount <= 0 || amount > maxAmount)}
+              helperText={`Cannot exceed ${money(maxAmount, action.invoice.currency)} for this action.`}
+              onChange={(event) => onChange({ ...action, amount: event.target.value })} />
+            <TextField required multiline minRows={2} label="Reason" value={action.reason}
+              helperText="At least 10 characters; retained in the append-only action record."
+              onChange={(event) => onChange({ ...action, reason: event.target.value })} />
+            <TextField required label="Evidence SHA-256" value={action.evidenceSha256}
+              error={action.evidenceSha256.length > 0 && !evidenceValid}
+              slotProps={{ htmlInput: { maxLength: 64 } }}
+              helperText="Exactly 64 hexadecimal characters identifying retained evidence."
+              onChange={(event) => onChange({ ...action, evidenceSha256: event.target.value })} />
+            <TextField label="External reference" value={action.externalReference}
+              slotProps={{ htmlInput: { maxLength: 256 } }}
+              onChange={(event) => onChange({ ...action, externalReference: event.target.value })} />
+          </Stack>
+        )}
+      </DialogContent>
+      <DialogActions>
+        <Button color="inherit" onClick={() => onChange(null)}>Cancel</Button>
+        <Button variant="contained" disabled={!valid || busy} onClick={() => action && onConfirm(action)}>
+          {busy ? 'Proposing…' : 'Propose for approval'}
+        </Button>
+      </DialogActions>
+    </Dialog>
   );
 }
 

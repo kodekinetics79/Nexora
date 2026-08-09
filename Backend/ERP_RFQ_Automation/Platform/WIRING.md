@@ -147,14 +147,14 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Services.IPlatformAuditSe
 Controllers are discovered automatically (they are `[ApiController]` in the same
 assembly) — no manual registration.
 
-## 5. Configuration keys — `appsettings*.json`
+## 5. Configuration keys — deployment secrets and environment
 
 The platform scheme reads these (all optional; safe fallbacks shown):
 
 ```jsonc
 "Jwt": {
   // existing tenant keys: Key, Issuer ("KodeKinetics"), Audience ("RFQ"), ExpiryMinutes
-  "PlatformKey": "<distinct 32+ byte signing key>", // RECOMMENDED; falls back to Jwt:Key
+  "PlatformKey": "<distinct 32+ byte signing key>", // REQUIRED outside Development/Testing
   "PlatformIssuer": "KodeKinetics",                  // falls back to Jwt:Issuer
   "PlatformAudience": "nexora-platform",             // default if omitted
   "PlatformExpiryMinutes": 30,                       // default 30
@@ -162,8 +162,25 @@ The platform scheme reads these (all optional; safe fallbacks shown):
 }
 ```
 
-> Using a **distinct `Jwt:PlatformKey`** is recommended (defense in depth) but not
-> required for the boundary — the audience check alone already isolates the planes.
+Outside Development/Testing, `Jwt:PlatformKey` is required and must differ from
+`Jwt:Key`; startup fails otherwise.
+
+Production must also make an explicit network-access choice. Paid-pilot deployments
+should use `AllowList` and supply each approved office/VPN/operator network:
+
+```jsonc
+"PlatformAccess": {
+  "NetworkMode": "AllowList",
+  "AllowedCidrs": [ "203.0.113.0/24", "2001:db8:42::/48" ]
+}
+```
+
+`NetworkMode=Any` is an explicit exception for environments without a private/VPN
+operator boundary. Missing mode in Production, an empty allow-list, or any malformed
+CIDR fails closed. The gate reads only `Connection.RemoteIpAddress` after
+`UseForwardedHeaders`; configure `ForwardedHeaders:KnownProxies` or `KnownNetworks`
+for the actual Render proxy boundary. It never trusts raw `X-Forwarded-For`.
+
 > The impersonation token is deliberately a **tenant** token (signed with `Jwt:Key`,
 > audience `Jwt:Audience`) so it is accepted by the default scheme and scoped by the
 > tenant query filters; it carries `impersonated=true`, `act_sub`, and no `roleId`

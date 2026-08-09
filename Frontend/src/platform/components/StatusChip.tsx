@@ -43,13 +43,14 @@ export function SoftChip({ label, tone, dot = true }: { label: string; tone: Ton
 const TENANT_TONE: Record<TenantStatus, Tone> = {
   active: 'success',
   trial: 'info',
+  past_due: 'warning',
   suspended: 'error',
   provisioning: 'warning',
   archived: 'neutral',
 };
 
 export const TenantStatusChip = ({ status }: { status: TenantStatus }) => (
-  <SoftChip label={status} tone={TENANT_TONE[status]} />
+  <SoftChip label={status === 'past_due' ? 'Past due' : status} tone={TENANT_TONE[status]} />
 );
 
 const HEALTH_TONE: Record<HealthStatus, Tone> = {

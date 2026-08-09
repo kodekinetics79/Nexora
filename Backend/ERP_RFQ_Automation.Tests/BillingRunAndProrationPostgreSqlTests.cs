@@ -749,6 +749,11 @@ public sealed class BillingRunAndProrationPostgreSqlTests
             DELETE FROM platform."BillingStatements"
              WHERE "TenantId" IN ({TenantId}, {SecondTenantId}) AND "Status" <> 'Final';
             DELETE FROM public."ExtractionJobs" WHERE "BusinessUnitId" = {BusinessUnitId};
+            DELETE FROM platform."TenantMeterSourcePolicies"
+             WHERE "TenantId" IN ({TenantId}, {SecondTenantId})
+               AND NOT EXISTS (
+                   SELECT 1 FROM platform."BillingStatements"
+                    WHERE "TenantId" IN ({TenantId}, {SecondTenantId}));
             DELETE FROM platform."Tenants"
              WHERE "Id" IN ({TenantId}, {SecondTenantId})
                AND NOT EXISTS (

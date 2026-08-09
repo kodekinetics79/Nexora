@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { SnackbarProvider } from 'notistack';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { platformApi } from '../../api/client';
@@ -69,7 +69,7 @@ describe('DataStorageTab', () => {
     vi.spyOn(platformApi, 'getTenantActivationDataDecision').mockResolvedValue(blocked);
     renderTab();
     expect(await screen.findByText('Authoritative tenant activation')).toBeVisible();
-    expect(screen.getByText('security.privileged-mfa-policy')).toBeVisible();
+    expect(screen.getAllByText('security.privileged-mfa-policy')).toHaveLength(2);
     expect(screen.getByRole('button', { name: 'Activate tenant' })).toBeDisabled();
     expect(screen.getByText(/server transition changes tenant state/i)).toBeVisible();
   });
@@ -84,15 +84,16 @@ describe('DataStorageTab', () => {
     });
     renderTab();
     fireEvent.click(await screen.findByRole('button', { name: 'Record evidence' }));
-    const submit = screen.getByRole('button', { name: 'Record immutable evidence' });
+    const evidenceDialog = within(await screen.findByRole('dialog', { name: 'Record activation control evidence' }));
+    const submit = evidenceDialog.getByRole('button', { name: 'Record immutable evidence' });
     expect(submit).toBeDisabled();
-    fireEvent.change(screen.getByLabelText('Evidence URL'), { target: { value: 'not-a-url' } });
-    fireEvent.change(screen.getByLabelText('Evidence SHA-256'), { target: { value: 'bad' } });
-    fireEvent.change(screen.getByLabelText('Approval reason'), { target: { value: 'Independent policy review completed' } });
+    fireEvent.change(await evidenceDialog.findByLabelText(/Evidence URL/), { target: { value: 'not-a-url' } });
+    fireEvent.change(evidenceDialog.getByLabelText(/Evidence SHA-256/), { target: { value: 'bad' } });
+    fireEvent.change(evidenceDialog.getByLabelText(/Approval reason/), { target: { value: 'Independent policy review completed' } });
     expect(submit).toBeDisabled();
 
-    fireEvent.change(screen.getByLabelText('Evidence URL'), { target: { value: 'https://evidence.example/mfa/9' } });
-    fireEvent.change(screen.getByLabelText('Evidence SHA-256'), { target: { value: 'a'.repeat(64) } });
+    fireEvent.change(evidenceDialog.getByLabelText(/Evidence URL/), { target: { value: 'https://evidence.example/mfa/9' } });
+    fireEvent.change(evidenceDialog.getByLabelText(/Evidence SHA-256/), { target: { value: 'a'.repeat(64) } });
     fireEvent.click(submit);
     await waitFor(() => expect(recordEvidence).toHaveBeenCalledWith('9', 'security.privileged-mfa-policy',
       expect.objectContaining({ disposition: 'approved', evidenceSha256: 'a'.repeat(64) })));
@@ -126,14 +127,15 @@ describe('DataStorageTab', () => {
     });
     renderTab();
     fireEvent.click(await screen.findByRole('button', { name: 'Record recovery evidence' }));
-    const submit = screen.getAllByRole('button', { name: 'Record immutable evidence' }).at(-1)!;
+    const recoveryDialog = within(await screen.findByRole('dialog', { name: 'Record recovery evidence' }));
+    const submit = recoveryDialog.getByRole('button', { name: 'Record immutable evidence' });
     expect(submit).toBeDisabled();
-    fireEvent.change(screen.getByLabelText('Opaque backup-set reference'), { target: { value: 'backup-set-20260808' } });
-    fireEvent.change(screen.getByLabelText('Recovery point'), { target: { value: '2026-08-08T10:00' } });
-    fireEvent.change(screen.getByLabelText('Retention expiry'), { target: { value: '2026-09-08T10:00' } });
-    fireEvent.change(screen.getByLabelText('Opaque evidence reference'), { target: { value: 'evidence-backup-20260808' } });
-    fireEvent.change(screen.getByLabelText('Evidence SHA-256'), { target: { value: 'b'.repeat(64) } });
-    fireEvent.change(screen.getByLabelText('Evidence reason'), { target: { value: 'Provider backup inventory checked' } });
+    fireEvent.change(await recoveryDialog.findByLabelText(/Opaque backup-set reference/), { target: { value: 'backup-set-20260808' } });
+    fireEvent.change(recoveryDialog.getByLabelText(/Recovery point/), { target: { value: '2026-08-08T10:00' } });
+    fireEvent.change(recoveryDialog.getByLabelText(/Retention expiry/), { target: { value: '2026-09-08T10:00' } });
+    fireEvent.change(recoveryDialog.getByLabelText(/Opaque evidence reference/), { target: { value: 'evidence-backup-20260808' } });
+    fireEvent.change(recoveryDialog.getByLabelText(/Evidence SHA-256/), { target: { value: 'b'.repeat(64) } });
+    fireEvent.change(recoveryDialog.getByLabelText(/Evidence reason/), { target: { value: 'Provider backup inventory checked' } });
     fireEvent.click(submit);
     await waitFor(() => expect(recordRecovery).toHaveBeenCalledWith('9', expect.objectContaining({
       tenantDataAssetId: 21, evidenceType: 'BackupSetObserved',

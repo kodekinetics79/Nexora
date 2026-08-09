@@ -218,6 +218,7 @@ public sealed class PlatformSupportPostgreSqlTests
                 DELETE FROM platform."SupportTicketNotes"
                 WHERE "SupportTicketId" IN (SELECT "Id" FROM platform."SupportTickets" WHERE "TenantId" = {tenantId});
                 DELETE FROM platform."SupportTickets" WHERE "TenantId" = {tenantId};
+                DELETE FROM platform."TenantMeterSourcePolicies" WHERE "TenantId" = {tenantId};
                 DELETE FROM platform."Tenants" WHERE "Id" = {tenantId};
                 """);
         }

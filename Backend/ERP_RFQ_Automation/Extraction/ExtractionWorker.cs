@@ -1130,7 +1130,7 @@ public sealed class LeadPersister : ILeadPersister
         }
         if (source.Corpus.Status == CorpusStatus.Processing)
             source.Corpus.RequireReview();
-        run.Complete(outcome.OcrPageCount, 0, 0, outcome.ExtractedItemCount, 0, 0);
+        run.Complete(outcome.PageCount, 0, 0, outcome.ExtractedItemCount, 0, 0);
         await _context.SaveChangesAsync(ct);
     }
 
@@ -1215,11 +1215,30 @@ public sealed class LeadPersister : ILeadPersister
                     ? await _context.Set<ERP_RFQ_Automation.Billing.RateCard>().AsNoTracking()
                         .Where(x => x.Id == rateCardId).Select(x => x.Currency).SingleOrDefaultAsync(ct)
                     : null;
+                var documentKey = $"extraction-job:{job.Id}:succeeded";
                 await _usageMetering.RecordAsync(new RecordUsageEvent(
-                    Guid.NewGuid(), platformTenant.Id, "documents", 1m, "document",
+                    UsageEventIdentity.FromIdempotencyKey(platformTenant.Id, documentKey), platformTenant.Id, "documents", 1m, "document",
                     DateTime.SpecifyKind(job.CreatedOn, DateTimeKind.Utc), "ExtractionJob", job.Id.ToString(CultureInfo.InvariantCulture),
                     "ExtractionWorker", workerId, null, null, job.BatchId.ToString("N"),
-                    $"extraction-job:{job.Id}:succeeded", 0m, currency ?? "USD", job.ContentHash), ct);
+                    documentKey, 0m, currency ?? "USD", job.ContentHash), ct);
+                if (outcome.PageCountAuthoritative && outcome.PageCount > 0)
+                {
+                    var pageKey = $"extraction-job:{job.Id}:pages";
+                    await _usageMetering.RecordAsync(new RecordUsageEvent(
+                        UsageEventIdentity.FromIdempotencyKey(platformTenant.Id, pageKey), platformTenant.Id, "pages.processed", outcome.PageCount, "page",
+                        DateTime.SpecifyKind(job.CreatedOn, DateTimeKind.Utc), "ExtractionRun", job.Id.ToString(CultureInfo.InvariantCulture),
+                        "ExtractionWorker", workerId, null, null, job.BatchId.ToString("N"),
+                        pageKey, 0m, currency ?? "USD", job.ContentHash), ct);
+                }
+                if (outcome.OcrPageCount > 0)
+                {
+                    var ocrKey = $"extraction-job:{job.Id}:ocr-pages";
+                    await _usageMetering.RecordAsync(new RecordUsageEvent(
+                        UsageEventIdentity.FromIdempotencyKey(platformTenant.Id, ocrKey), platformTenant.Id, "pages.ocr", outcome.OcrPageCount, "page",
+                        DateTime.SpecifyKind(job.CreatedOn, DateTimeKind.Utc), "ExtractionRun", job.Id.ToString(CultureInfo.InvariantCulture),
+                        "ExtractionWorker", workerId, null, null, job.BatchId.ToString("N"),
+                        ocrKey, 0m, currency ?? "USD", job.ContentHash), ct);
+                }
             }
         }
         if (!await queue.CompleteAsync(job.Id, workerId, leaseAttempt, leadId > 0 ? leadId : null, ct))

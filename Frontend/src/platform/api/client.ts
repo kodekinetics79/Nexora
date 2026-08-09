@@ -8,6 +8,10 @@ import type {
   AiProviderTrustView,
   AuthorizeAiProviderInput,
   BillingMode,
+  BillingMeterCatalogEntry,
+  BillingReadiness,
+  DocumentCoveragePolicy,
+  DocumentCoverageSegment,
   BillingStatement,
   BillingStatementSummary,
   CreatePlatformOperatorInput,
@@ -39,6 +43,8 @@ import type {
   ProvisionTenantRequestBody,
   ProvisionTenantResult,
   QueueStats,
+  RecoverPlatformDeadLetterInput,
+  RecoverPlatformDeadLetterResult,
   RateCard,
   RevenueRiskReport,
   SavePlatformEmailSettingsInput,
@@ -51,6 +57,8 @@ import type {
   SupportTicketTimeline,
   SubscriptionCreditNote,
   SubscriptionInvoice,
+  SubscriptionRevenueAction,
+  SubscriptionRevenueActionKind,
   SubscriptionPayment,
   TenantActivationDataDecision,
   TenantActivationDecision,
@@ -76,6 +84,7 @@ import type {
   TestOutboundEmailResult,
   UpdateRateCardInput,
   UpdateTenantAiPolicyInput,
+  UsageRatingCorrection,
   RegisterTenantDataAssetInput,
   VerifyTenantDataAssetInput,
   RecordActivationControlEvidenceInput,
@@ -139,6 +148,8 @@ export interface PlatformApi {
   getOverview(): Promise<OverviewMetrics>;
   listTenants(): Promise<Tenant[]>;
   getTenant(id: string): Promise<Tenant>;
+  markTenantPastDue(id: string, reason: string): Promise<Tenant>;
+  resolveTenantPastDue(id: string, reason: string): Promise<Tenant>;
   listTenantDataAssets(tenantId: string): Promise<TenantDataAsset[]>;
   getTenantActivationDataDecision(tenantId: string): Promise<TenantActivationDataDecision>;
   registerTenantDataAsset(tenantId: string, input: RegisterTenantDataAssetInput): Promise<TenantDataAsset>;
@@ -172,6 +183,10 @@ export interface PlatformApi {
   revokeImpersonation(jti: string): Promise<ImpersonationSession>;
   getQueueStats(): Promise<QueueStats>;
   listJobs(query?: JobQuery): Promise<ExtractionJob[]>;
+  recoverPlatformDeadLetter(
+    tenantId: string,
+    input: RecoverPlatformDeadLetterInput,
+  ): Promise<RecoverPlatformDeadLetterResult>;
   listPlans(): Promise<Plan[]>;
   createPlan(input: UpsertPlanInput): Promise<Plan>;
   updatePlan(id: string, input: UpsertPlanInput): Promise<Plan>;
@@ -181,7 +196,18 @@ export interface PlatformApi {
   deactivatePlatformUser(id: string): Promise<PlatformOperator>;
   reactivatePlatformUser(id: string): Promise<PlatformOperator>;
   resetPlatformUserPassword(id: string, newPassword: string): Promise<PlatformOperator>;
+  resetPlatformUserMfa(id: string): Promise<void>;
   getBillingUsage(tenantId: string, period: string): Promise<TenantUsageReadout>;
+  listBillingMeterCatalog(): Promise<BillingMeterCatalogEntry[]>;
+  getBillingReadiness(tenantId: string, period: string): Promise<BillingReadiness>;
+  correctUsageRating(usageEventId: string, idempotencyKey: string, reason: string): Promise<UsageRatingCorrection>;
+  proposeDocumentCoverage(
+    tenantId: string,
+    period: string,
+    midPeriodCutoverUtc: string | null,
+    reason: string,
+  ): Promise<DocumentCoveragePolicy>;
+  approveDocumentCoverage(tenantId: string, period: string, reason: string): Promise<DocumentCoverageSegment[]>;
   listRateCards(): Promise<RateCard[]>;
   createRateCard(input: CreateRateCardInput): Promise<RateCard>;
   updateRateCard(id: string, input: UpdateRateCardInput): Promise<RateCard>;
@@ -256,6 +282,11 @@ export interface PlatformApi {
     externalReference: string,
     receivedAtUtc: string,
   ): Promise<SubscriptionPayment>;
+  proposeSubscriptionRevenueAction(id: string, body: {
+    kind: SubscriptionRevenueActionKind; amount: number; currency: string; reason: string;
+    evidenceSha256: string; externalReference: string | null;
+  }): Promise<SubscriptionRevenueAction>;
+  approveSubscriptionRevenueAction(actionId: string): Promise<SubscriptionRevenueAction>;
   setTenantRateCard(
     tenantId: string,
     body: { rateCardId: string | null; reason: string },
@@ -409,6 +440,7 @@ type BackendCost = Omit<TenantCostReport, 'tenantId' | 'businessUnitId'> & {
 
 const normalizeTenantStatus = (status?: string | null): Tenant['status'] => {
   const normalized = (status ?? 'provisioning').toLowerCase();
+  if (normalized === 'pastdue' || normalized === 'past_due') return 'past_due';
   if (normalized === 'active' || normalized === 'trial' || normalized === 'suspended' || normalized === 'archived') return normalized;
   return 'provisioning';
 };
@@ -737,6 +769,11 @@ const normalizeSubscriptionInvoice = (wire: WireRecord): SubscriptionInvoice => 
     ...(payment as unknown as SubscriptionPayment),
     id: asId(payment.id as string | number),
   })),
+  revenueActions: ((wire.revenueActions as WireRecord[]) ?? []).map((action) => ({
+    ...(action as unknown as SubscriptionRevenueAction),
+    id: asId(action.id as string | number),
+    invoiceId: asId(action.invoiceId as string | number),
+  })),
 });
 
 const normalizeTicketSummary = (wire: WireRecord): SupportTicketSummary => ({
@@ -830,6 +867,10 @@ const httpPlatformApi: PlatformApi = {
     (await platformHttp.get<BackendTenant[]>('/api/platform/tenants')).data.map(normalizeTenant),
   getTenant: async (id) =>
     normalizeTenant((await platformHttp.get<BackendTenant>(`/api/platform/tenants/${id}`)).data),
+  markTenantPastDue: async (id, reason) =>
+    normalizeTenant((await platformHttp.post<BackendTenant>(`/api/platform/tenants/${id}/mark-past-due`, { reason })).data),
+  resolveTenantPastDue: async (id, reason) =>
+    normalizeTenant((await platformHttp.post<BackendTenant>(`/api/platform/tenants/${id}/resolve-past-due`, { reason })).data),
   listTenantDataAssets: async (tenantId) =>
     (await platformHttp.get<WireRecord[]>(`/api/platform/tenants/${tenantId}/data-assets`))
       .data.map(normalizeTenantDataAsset),
@@ -932,6 +973,12 @@ const httpPlatformApi: PlatformApi = {
   getQueueStats: async () => (await platformHttp.get<QueueStats>('/api/platform/pipeline/queue')).data,
   listJobs: async (query) =>
     (await platformHttp.get<ExtractionJob[]>('/api/platform/pipeline/jobs', { params: query })).data,
+  recoverPlatformDeadLetter: async (tenantId, input) => {
+    const result = (await platformHttp.post<RecoverPlatformDeadLetterResult>(
+      `/api/platform/tenants/${tenantId}/dead-letters/recover`, input,
+    )).data;
+    return { ...result, itemId: String(result.itemId), tenantId: String(result.tenantId) };
+  },
   listPlans: async () =>
     (await platformHttp.get<BackendPlan[]>('/api/platform/plans')).data.map(normalizePlan),
   createPlan: async (input) =>
@@ -950,6 +997,9 @@ const httpPlatformApi: PlatformApi = {
     normalizeOperator((await platformHttp.post<BackendOperator>(`/api/platform/users/${id}/reactivate`)).data),
   resetPlatformUserPassword: async (id, newPassword) =>
     normalizeOperator((await platformHttp.post<BackendOperator>(`/api/platform/users/${id}/password`, { newPassword })).data),
+  resetPlatformUserMfa: async (id) => {
+    await platformHttp.post(`/api/platform/users/${id}/mfa/reset`);
+  },
   getBillingUsage: async (tenantId, period) => {
     const usage = (await platformHttp.get<BackendUsage>(`/api/platform/billing/usage/${tenantId}`, { params: { period } })).data;
     return {
@@ -958,6 +1008,41 @@ const httpPlatformApi: PlatformApi = {
       businessUnitId: usage.businessUnitId == null ? null : String(usage.businessUnitId),
     };
   },
+  listBillingMeterCatalog: async () =>
+    (await platformHttp.get<BillingMeterCatalogEntry[]>('/api/platform/billing/meter-catalog')).data,
+  getBillingReadiness: async (tenantId, period) =>
+    (await platformHttp.get<BillingReadiness>(`/api/platform/billing/readiness/${tenantId}`, {
+      params: { period },
+    })).data,
+  correctUsageRating: async (usageEventId, idempotencyKey, reason) => {
+    const wire = (await platformHttp.post<WireRecord>(
+      `/api/platform/billing/usage-events/${usageEventId}/rating-corrections`,
+      { idempotencyKey, reason },
+    )).data;
+    return {
+      ...(wire as unknown as UsageRatingCorrection),
+      id: asId(wire.id as string | number),
+      tenantId: asId(wire.tenantId as string | number),
+      rateCardId: asIdOrNull(wire.rateCardId as string | number | null),
+      rateCardLineId: asIdOrNull(wire.rateCardLineId as string | number | null),
+    };
+  },
+  proposeDocumentCoverage: async (tenantId, period, midPeriodCutoverUtc, reason) => {
+    const wire = (await platformHttp.post<WireRecord>(
+      `/api/platform/billing/tenants/${tenantId}/document-coverage/proposals`,
+      { period, midPeriodCutoverUtc, reason },
+    )).data;
+    return { ...(wire as unknown as DocumentCoveragePolicy), tenantId: asId(wire.tenantId as string | number) };
+  },
+  approveDocumentCoverage: async (tenantId, period, reason) =>
+    (await platformHttp.post<WireRecord[]>(
+      `/api/platform/billing/tenants/${tenantId}/document-coverage/approve`,
+      { period, reason },
+    )).data.map((wire) => ({
+      ...(wire as unknown as DocumentCoverageSegment),
+      id: asId(wire.id as string | number),
+      tenantId: asId(wire.tenantId as string | number),
+    })),
   listRateCards: async () =>
     (await platformHttp.get<BackendRateCard[]>('/api/platform/billing/rate-cards')).data.map(normalizeRateCard),
   createRateCard: async (input) =>
@@ -1241,6 +1326,19 @@ const httpPlatformApi: PlatformApi = {
       receivedAtUtc,
     })).data;
     return { ...(payment as unknown as SubscriptionPayment), id: asId(payment.id as string | number) };
+  },
+  proposeSubscriptionRevenueAction: async (id, body) => {
+    const action = (await platformHttp.post<WireRecord>(
+      `/api/platform/billing/invoices/${id}/revenue-actions`, body,
+      { headers: { 'Idempotency-Key': crypto.randomUUID() } },
+    )).data;
+    return { ...(action as unknown as SubscriptionRevenueAction), id: asId(action.id as string | number), invoiceId: asId(action.invoiceId as string | number) };
+  },
+  approveSubscriptionRevenueAction: async (actionId) => {
+    const action = (await platformHttp.post<WireRecord>(
+      `/api/platform/billing/invoices/revenue-actions/${actionId}/approve`,
+    )).data;
+    return { ...(action as unknown as SubscriptionRevenueAction), id: asId(action.id as string | number), invoiceId: asId(action.invoiceId as string | number) };
   },
   setTenantRateCard: async (tenantId, body) =>
     normalizeBillingProfile(

@@ -16,6 +16,16 @@ using Microsoft.Extensions.Options;
 
 namespace ERP_RFQ_Automation.Extraction;
 
+public static class UnifiedDocumentIngestionGuard
+{
+    public static void Enforce(bool isProduction, bool useUnifiedQueue)
+    {
+        if (isProduction && !useUnifiedQueue)
+            throw new InvalidOperationException(
+                "Production requires Ingestion:UseUnifiedQueue=true so every extraction door uses the durable evidence ledger and canonical metering path.");
+    }
+}
+
 /// <summary>Result of ingesting one document through the unified gateway.</summary>
 public sealed class IngestedDocument
 {

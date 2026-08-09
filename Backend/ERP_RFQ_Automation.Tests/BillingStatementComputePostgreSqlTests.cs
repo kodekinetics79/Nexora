@@ -87,7 +87,7 @@ public sealed class BillingStatementComputePostgreSqlTests
     /// </summary>
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task Compute_prices_every_meter_end_to_end_then_finalize_locks_the_statement()
+    public async Task Compute_prices_only_certified_meters_end_to_end_then_finalize_locks_the_statement()
     {
         var period = ClosedPeriod();
         var seed = await SeedAsync(period);
@@ -127,7 +127,7 @@ public sealed class BillingStatementComputePostgreSqlTests
                     .Include(s => s.Lines)
                     .SingleAsync(s => s.Id == statementId);
 
-                Assert.Equal(6, persisted.Lines.Count);
+                Assert.Equal(3, persisted.Lines.Count);
                 Assert.Equal(ExpectedTotal, persisted.TotalAmount);
                 Assert.Equal("USD", persisted.Currency);
                 Assert.Equal(period.StartUtc, persisted.PeriodStartUtc);
@@ -135,37 +135,14 @@ public sealed class BillingStatementComputePostgreSqlTests
 
                 Assert.Equal(100.00m, Line(persisted, BillingMeterKeys.BaseSubscription).Amount);
                 Assert.Equal(3.00m, Line(persisted, BillingMeterKeys.Documents).Amount);        // 2 x 1.50
-                Assert.Equal(0.50m, Line(persisted, BillingMeterKeys.PagesProcessed).Amount);   // 5 x 0.10
-                Assert.Equal(0.10m, Line(persisted, BillingMeterKeys.PagesOcr).Amount);         // 2 x 0.05
                 Assert.Equal(0.18m, Line(persisted, BillingMeterKeys.AiTokensExternal).Amount); // 175 x 0.001 = 0.175 -> 0.18
-                Assert.Equal(0.75m, Line(persisted, BillingMeterKeys.StorageGb).Amount);        // 3 GiB x 0.25
 
                 // Meters are additive: seats are metered (3 above) but the card
                 // carries no seats line, so nothing is charged for them.
                 Assert.DoesNotContain(persisted.Lines, l => l.MeterKey == BillingMeterKeys.Seats);
 
-                // F1 proper: the notes survived the real INSERT at full length.
-                // The page/storage lines are the ones whose old concatenated
-                // SourceNote ran to ~900 / ~576 characters against varchar(400).
-                foreach (var meterKey in new[]
-                         {
-                             BillingMeterKeys.PagesProcessed, BillingMeterKeys.PagesOcr, BillingMeterKeys.StorageGb
-                         })
-                {
-                    var line = Line(persisted, meterKey);
-                    Assert.NotNull(line.SourceNote);
-                    Assert.NotNull(line.CoverageNote);
-                    Assert.True(line.SourceNote!.Length + line.CoverageNote!.Length > 400,
-                        $"{meterKey}: the pre-fix concatenated note was only {line.SourceNote.Length + line.CoverageNote.Length} " +
-                        "characters, so this test no longer covers the varchar(400) overflow.");
-                    Assert.Equal(
-                        meterKey == BillingMeterKeys.StorageGb
-                            ? BillingStatementService.StorageCoverageNote
-                            : BillingStatementService.PageSignalCoverageNote,
-                        line.CoverageNote);
-                    // Provenance stays provenance: the caveat is a column, not a suffix.
-                    Assert.DoesNotContain("NOT BILLING-READY", line.SourceNote);
-                }
+                Assert.DoesNotContain(persisted.Lines, l => l.MeterKey is
+                    BillingMeterKeys.PagesProcessed or BillingMeterKeys.PagesOcr or BillingMeterKeys.StorageGb);
 
                 // Complete-signal meters carry no caveat at all.
                 Assert.Null(Line(persisted, BillingMeterKeys.Documents).CoverageNote);
@@ -224,7 +201,7 @@ public sealed class BillingStatementComputePostgreSqlTests
                 var row = Assert.Single(rows); // duplicate-charge protection held
                 Assert.Equal(BillingStatementStatus.Final, row.Status);
                 Assert.Equal(ExpectedTotal, row.TotalAmount);
-                Assert.Equal(6, row.Lines.Count);
+                Assert.Equal(3, row.Lines.Count);
             }
         }
         finally
@@ -236,9 +213,9 @@ public sealed class BillingStatementComputePostgreSqlTests
     // =============================================================== expectations
 
     /// <summary>
-    /// 100.00 base + 3.00 documents + 0.50 pages + 0.10 OCR + 0.18 tokens + 0.75 storage.
+    /// 100.00 base + 3.00 documents + 0.18 external tokens. Page/OCR/storage remain unpriced.
     /// </summary>
-    private const decimal ExpectedTotal = 104.53m;
+    private const decimal ExpectedTotal = 103.18m;
 
     // ==================================================================== support
 
@@ -318,10 +295,7 @@ public sealed class BillingStatementComputePostgreSqlTests
             Lines =
             {
                 new RateCardLine { MeterKey = BillingMeterKeys.Documents, IncludedQuantity = 0m, UnitPrice = 1.50m, Unit = "document" },
-                new RateCardLine { MeterKey = BillingMeterKeys.PagesProcessed, IncludedQuantity = 0m, UnitPrice = 0.10m, Unit = "page" },
-                new RateCardLine { MeterKey = BillingMeterKeys.PagesOcr, IncludedQuantity = 0m, UnitPrice = 0.05m, Unit = "page" },
                 new RateCardLine { MeterKey = BillingMeterKeys.AiTokensExternal, IncludedQuantity = 0m, UnitPrice = 0.001m, Unit = "1K tokens" },
-                new RateCardLine { MeterKey = BillingMeterKeys.StorageGb, IncludedQuantity = 0m, UnitPrice = 0.25m, Unit = "GB" }
             }
         };
         context.Add(tenant);

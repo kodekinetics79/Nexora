@@ -1,9 +1,11 @@
 import { useMemo, useState } from 'react';
 import Stack from '../components/Flex';
 import { useSearchParams } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useSnackbar } from 'notistack';
 import {
   Box,
+  Button,
   Chip,
   Grid,
   IconButton,
@@ -21,6 +23,7 @@ import {
   Layers as QueueIcon,
   ReportGmailerrorred as DeadLetterIcon,
   Refresh as RefreshIcon,
+  Replay as ReplayIcon,
   Speed as LatencyIcon,
   TaskAlt as ProcessedIcon,
 } from '@mui/icons-material';
@@ -32,11 +35,22 @@ import StatTile from '../components/StatTile';
 import { JobStatusChip } from '../components/StatusChip';
 import { EmptyState, ErrorState, TilesSkeleton } from '../components/States';
 import { fmtDateTime, fmtLatency, fmtNumber, fmtPercent } from '../components/format';
+import ReasonDialog from '../components/ReasonDialog';
+import { usePlatformPermissions } from '../auth/usePlatformPermissions';
+import { platformErrorMessage } from '../api/apiError';
+
+const newRecoveryKey = (jobId: string) =>
+  `platform-dlq-${jobId}-${globalThis.crypto.randomUUID()}`;
 
 export default function PipelinePage() {
+  const queryClient = useQueryClient();
+  const { enqueueSnackbar } = useSnackbar();
+  const permissions = usePlatformPermissions();
   const [searchParams, setSearchParams] = useSearchParams();
   const tenantParam = searchParams.get('tenant') ?? 'all';
   const [tab, setTab] = useState(0); // 0 = all jobs, 1 = dead-letter
+  const [recovering, setRecovering] = useState<ExtractionJob | null>(null);
+  const [recoveryKey, setRecoveryKey] = useState('');
 
   const { data: stats, isLoading: statsLoading } = useQuery({
     queryKey: platformKeys.queue(),
@@ -53,6 +67,29 @@ export default function PipelinePage() {
   const { data: jobs, isLoading: jobsLoading, isError, refetch } = useQuery({
     queryKey: platformKeys.jobs(jobsQuery),
     queryFn: () => platformApi.listJobs(jobsQuery),
+  });
+
+  const recoverMutation = useMutation({
+    mutationFn: ({ job, reason, idempotencyKey }: {
+      job: ExtractionJob; reason: string; idempotencyKey: string;
+    }) => platformApi.recoverPlatformDeadLetter(job.tenantId, {
+      queue: 'extraction', itemId: job.id, reason, idempotencyKey,
+    }),
+    onSuccess: async (result) => {
+      setRecovering(null);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: platformKeys.queue() }),
+        queryClient.invalidateQueries({ queryKey: [...platformKeys.all, 'jobs'] }),
+        queryClient.invalidateQueries({ queryKey: [...platformKeys.all, 'audit'] }),
+      ]);
+      enqueueSnackbar(
+        `${result.queue} item ${result.itemId} queued for governed retry. Audit evidence refreshed.`,
+        { variant: 'success' },
+      );
+    },
+    onError: (error) => enqueueSnackbar(
+      platformErrorMessage(error, 'Dead-letter recovery was refused'), { variant: 'error' },
+    ),
   });
 
   const setTenant = (value: string) => {
@@ -88,8 +125,23 @@ export default function PipelinePage() {
           </Typography>
         </Tooltip>
       ) : <Typography variant="caption" color="text.secondary">—</Typography> },
+      ...(permissions.isOwner ? [{
+        field: 'actions', headerName: 'Action', width: 125, sortable: false, filterable: false,
+        renderCell: (p: { row: ExtractionJob }) => p.row.status === 'dead_letter' && p.row.tenantId ? (
+          <Button
+            size="small"
+            startIcon={<ReplayIcon />}
+            onClick={() => {
+              setRecovering(p.row);
+              setRecoveryKey(newRecoveryKey(p.row.id));
+            }}
+          >
+            Recover
+          </Button>
+        ) : null,
+      }] : []),
     ],
-    [],
+    [permissions.isOwner],
   );
 
   return (
@@ -185,6 +237,42 @@ export default function PipelinePage() {
           )}
         </Box>
       </Paper>
+
+      <ReasonDialog
+        open={Boolean(recovering)}
+        title="Recover dead-letter item"
+        confirmLabel="Queue governed retry"
+        confirmColor="warning"
+        busy={recoverMutation.isPending}
+        onClose={() => setRecovering(null)}
+        onConfirm={(reason) => recovering && recoverMutation.mutate({
+          job: recovering, reason, idempotencyKey: recoveryKey.trim(),
+        })}
+        description={recovering ? (
+          <>
+            Confirm the exact durable intent below. Recovery re-verifies its immutable source and
+            malware status; it does not replace the payload or claim successful processing.
+          </>
+        ) : null}
+        extra={recovering ? (
+          <Stack spacing={1.5}>
+            <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 2 }}>
+              <Typography variant="body2"><strong>Tenant:</strong> {recovering.tenantName} ({recovering.tenantId})</Typography>
+              <Typography variant="body2"><strong>Queue:</strong> extraction</Typography>
+              <Typography variant="body2"><strong>Item:</strong> {recovering.id}</Typography>
+            </Paper>
+            <TextField
+              required
+              fullWidth
+              label="Idempotency key"
+              value={recoveryKey}
+              onChange={(event) => setRecoveryKey(event.target.value)}
+              helperText="Reuse this exact key only when retrying the same operator command."
+            />
+          </Stack>
+        ) : null}
+        extraProblem={recoveryKey.trim().length === 0 ? 'An idempotency key is required.' : null}
+      />
     </Box>
   );
 }

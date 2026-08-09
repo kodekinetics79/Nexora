@@ -12,6 +12,7 @@ public static class NexoraProblems
     public const string Base = "https://nexora.invalid/problems/";
 
     public const string TenantSuspended = Base + "tenant-suspended";
+    public const string TenantNotActivated = Base + "tenant-not-activated";
     public const string FeatureNotEntitled = Base + "feature-not-entitled";
     public const string DocumentQuotaExceeded = Base + "document-quota-exceeded";
     public const string SeatLimitExceeded = Base + "seat-limit-exceeded";
@@ -57,16 +58,27 @@ public sealed class FeatureEntitlementDeniedException : EntitlementDeniedExcepti
     public EntitlementDecision Decision { get; }
 }
 
-/// <summary>Login / tenant-plane access denied because the owning platform Tenant is Suspended or Archived.</summary>
+/// <summary>
+/// Login / tenant-plane access denied because the owning platform Tenant has not been activated
+/// or is commercially/lifecycle restricted.
+/// </summary>
 public sealed class TenantAccessDeniedException : EntitlementDeniedException
 {
     public const string Type = NexoraProblems.TenantSuspended;
 
     public TenantAccessDeniedException(long businessUnitId, TenantStatus? status)
-        : base("This organization's access has been " +
-               (status == TenantStatus.Archived ? "archived" : "suspended") +
-               ". Contact your administrator.",
-            StatusCodes.Status403Forbidden, Type)
+        : base(status switch
+            {
+                TenantStatus.Provisioning =>
+                    "This organization's workspace is still provisioning and has not passed authoritative activation. Contact your administrator.",
+                TenantStatus.PastDue =>
+                    "This organization's access is restricted because the account is past due. Contact your administrator.",
+                TenantStatus.Archived =>
+                    "This organization's access has been archived. Contact your administrator.",
+                _ => "This organization's access has been suspended. Contact your administrator."
+            },
+            StatusCodes.Status403Forbidden,
+            status == TenantStatus.Provisioning ? NexoraProblems.TenantNotActivated : Type)
     {
         BusinessUnitId = businessUnitId;
         Status = status;

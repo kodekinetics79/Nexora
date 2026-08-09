@@ -18,7 +18,7 @@ public sealed class PlatformBillingMakerCheckerMigrationPostgreSqlTests(
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task Populated_upgrade_backfills_legacy_maker_and_statement_remains_governably_finalizable()
+    public async Task Populated_upgrade_backfills_legacy_maker_then_latest_readiness_blocks_unsafe_finalization()
     {
         var databaseName = $"nexora_platform_billing_upgrade_{Guid.NewGuid():N}";
         var connection = new NpgsqlConnectionStringBuilder(database.ConnectionString) { Database = databaseName };
@@ -49,11 +49,12 @@ public sealed class PlatformBillingMakerCheckerMigrationPostgreSqlTests(
                 """).SingleAsync();
             Assert.Equal("system:legacy", backfilled);
 
+            await migrator.MigrateAsync();
+            context.ChangeTracker.Clear();
             var service = new BillingStatementService(context, NullLogger<BillingStatementService>.Instance);
-            var finalized = await service.FinalizeAsync(998003, "owner-reviewer@nexora.test");
-            Assert.Equal(BillingStatementStatus.Final, finalized.Status);
-            Assert.Equal("system:legacy", finalized.ComputedBy);
-            Assert.Equal("owner-reviewer@nexora.test", finalized.FinalizedBy);
+            var refusal = await Assert.ThrowsAsync<BillingConflictException>(() =>
+                service.FinalizeAsync(998003, "owner-reviewer@nexora.test"));
+            Assert.Contains("readiness", refusal.Message, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {

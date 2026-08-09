@@ -117,10 +117,12 @@ public sealed class TenantLifecyclePostgreSqlTests
     {
         var tenant = await SeedTenantAsync(businessUnitId, slug);
         await using var db = Context();
-        await Service(db).ScheduleDeletionAsync(tenant.Id,
+        var clock = new TenantLifecycleHarness.MutableTimeProvider(DateTimeOffset.UtcNow.AddDays(-31));
+        await TenantLifecycleHarness.Service(db, _database.ConnectionString, timeProvider: clock)
+            .ScheduleDeletionAsync(tenant.Id,
             new ScheduleTenantDeletionRequest { Reason = OffboardingReason },
             TenantLifecycleHarness.Operator(), null, CancellationToken.None);
-        await TenantLifecycleHarness.ElapseRetentionWindowAsync(db, tenant.Id);
+        TenantLifecycleHarness.ElapseRetentionWindow(clock);
         return tenant;
     }
 
@@ -289,10 +291,17 @@ public sealed class TenantLifecyclePostgreSqlTests
         {
             var holds = new TenantLegalHoldService(
                 release, new PlatformAuditService(release, NullLogger<PlatformAuditService>.Instance));
+            var sameActorRefusal = await Assert.ThrowsAsync<TenantOffboardingRefusedException>(() =>
+                holds.ReleaseAsync(tenant.Id, holdId, new ReleaseTenantLegalHoldRequest
+                {
+                    Reason = "The placing actor cannot approve the preservation release."
+                }, actor, null, CancellationToken.None));
+            Assert.Equal(409, sameActorRefusal.SuggestedStatusCode);
+
             await holds.ReleaseAsync(tenant.Id, holdId, new ReleaseTenantLegalHoldRequest
             {
                 Reason = "Counsel confirmed the preservation obligation has ended."
-            }, actor, null, CancellationToken.None);
+            }, TenantLifecycleHarness.Operator("legal-checker@nexora.test", 18), null, CancellationToken.None);
         }
 
         await using var purgeDb = Context();
@@ -468,11 +477,10 @@ public sealed class TenantLifecyclePostgreSqlTests
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task Erasure_and_deletion_are_independently_achievable()
+    public async Task Erasure_remains_distinct_but_is_proven_before_destructive_deletion()
     {
-        // Two tenants, two different obligations honoured, neither depending on the other: one is
-        // erased and keeps every commercial record; the other is destroyed having never been
-        // erased. This is the whole reason they are separate operations.
+        // Erasure remains a distinct operation that preserves commercial evidence, while the
+        // tenant headed for purge must carry persisted erasure proof before destruction.
         const long erasedUnit = 88_301, purgedUnit = 88_302;
         var erasedTenant = await SeedTenantAsync(erasedUnit, "erasure-only");
         var purgedTenant = await SchedulePurgeableAsync(purgedUnit, "deletion-only");
@@ -483,6 +491,9 @@ public sealed class TenantLifecyclePostgreSqlTests
 
         var erasure = await service.ErasePersonalDataAsync(erasedTenant.Id,
             new ConfirmTenantDestructionRequest { Reason = ErasureReason, Confirmation = erasedTenant.Name },
+            actor, null, CancellationToken.None);
+        await service.ErasePersonalDataAsync(purgedTenant.Id,
+            new ConfirmTenantDestructionRequest { Reason = ErasureReason, Confirmation = purgedTenant.Name },
             actor, null, CancellationToken.None);
         var purged = await service.PurgeAsync(purgedTenant.Id,
             new ConfirmTenantDestructionRequest { Reason = OffboardingReason, Confirmation = purgedTenant.Name },
@@ -512,13 +523,47 @@ public sealed class TenantLifecyclePostgreSqlTests
             (await verify.Set<TenantOffboarding>().AsNoTracking()
                 .SingleAsync(r => r.TenantId == erasedTenant.Id)).Stage);
 
-        // Purged without ever being erased: the records are gone and the erasure columns are still
-        // null, so "deleted" was never silently reported as "erased".
+        // Purge destroys tenant rows but preserves the independently recorded erasure proof.
         Assert.Equal(0, await TenantRowsAsync("Leads", purgedUnit));
         var purgedRecord = await verify.Set<TenantOffboarding>().AsNoTracking()
             .SingleAsync(r => r.TenantId == purgedTenant.Id);
         Assert.Equal(TenantOffboardingStage.Purged, purgedRecord.Stage);
-        Assert.Null(purgedRecord.PersonalDataErasedOn);
+        Assert.NotNull(purgedRecord.PersonalDataErasedOn);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task PostgreSql_purge_readiness_requires_and_observes_persisted_erasure_proof()
+    {
+        var tenant = await SeedTenantAsync(88_303, "pg-erasure-proof");
+        await using (var before = Context())
+        {
+            var persisted = await before.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
+                .SingleAsync(x => x.Id == tenant.Id);
+            var verdict = await new TenantOffboardingReadinessService(before)
+                .AssessAsync(persisted, TenantOffboardingReadinessPhase.Purge);
+            Assert.Contains(verdict.Failures,
+                x => x.Code == TenantOffboardingReadinessCodes.PersonalDataErasureMissing);
+        }
+
+        await using (var erase = Context())
+            await Service(erase).ErasePersonalDataAsync(tenant.Id,
+                new ConfirmTenantDestructionRequest
+                {
+                    Reason = ErasureReason,
+                    Confirmation = tenant.Name
+                },
+                TenantLifecycleHarness.Operator(), null, CancellationToken.None);
+
+        await using var after = Context();
+        var reloaded = await after.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
+            .SingleAsync(x => x.Id == tenant.Id);
+        var afterVerdict = await new TenantOffboardingReadinessService(after)
+            .AssessAsync(reloaded, TenantOffboardingReadinessPhase.Purge);
+        Assert.DoesNotContain(afterVerdict.Failures,
+            x => x.Code == TenantOffboardingReadinessCodes.PersonalDataErasureMissing);
+        Assert.NotNull((await after.Set<TenantOffboarding>().AsNoTracking()
+            .SingleAsync(x => x.TenantId == tenant.Id)).PersonalDataErasedOn);
     }
 
     // ----------------------------------------------------------------------------- helpers

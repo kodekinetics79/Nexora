@@ -4,6 +4,7 @@ using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Platform.Auth;
 using ERP_RFQ_Automation.Platform.Models;
+using ERP_RFQ_Automation.Platform.Operations;
 using ERP_RFQ_Automation.Platform.Services;
 using ERP_RFQ_Automation.Platform.Support;
 using Microsoft.AspNetCore.Authorization;
@@ -18,7 +19,8 @@ namespace ERP_RFQ_Automation.Platform.Controllers;
 public class PlatformOperationsController(
     ErpRfqAutomationContext context,
     IPlatformAuditService audit,
-    IAuthorizationService authorization) : ControllerBase
+    IAuthorizationService authorization,
+    PlatformDeadLetterRecoveryService? deadLetterRecovery = null) : ControllerBase
 {
     [HttpGet("pipeline/queue")]
     public async Task<IActionResult> Queue(CancellationToken ct)
@@ -152,6 +154,27 @@ public class PlatformOperationsController(
                         : "Processing failed; diagnostic details are restricted."
             };
         }));
+    }
+
+    [HttpPost("tenants/{tenantId:long}/dead-letters/recover")]
+    [Authorize(Policy = PlatformPolicies.Owner)]
+    [Authorize(Policy = PlatformPolicies.Mfa)]
+    public async Task<IActionResult> RecoverDeadLetter(
+        long tenantId, [FromBody] RecoverPlatformDeadLetterCommand command, CancellationToken ct)
+    {
+        if (deadLetterRecovery is null)
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new { error = "Dead-letter recovery is unavailable." });
+        try
+        {
+            return Ok(await deadLetterRecovery.RecoverAsync(tenantId, command, User, HttpContext, ct));
+        }
+        catch (KeyNotFoundException exception) { return NotFound(new { error = exception.Message }); }
+        catch (ArgumentException exception) { return BadRequest(new { error = exception.Message }); }
+        catch (DeadLetterDependencyUnavailableException exception)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new { error = exception.Message });
+        }
+        catch (InvalidOperationException exception) { return Conflict(new { error = exception.Message }); }
     }
 
     [HttpGet("plans")]
@@ -324,6 +347,7 @@ public class PlatformOperationsController(
             .Where(t => tenantIds.Contains(t.Id)).ToDictionaryAsync(t => t.Id, ct);
         var disclosure = await PlatformAuditDisclosure.ResolveAsync(
             authorization, User, rows.Select(r => r.Action), ct);
+        var mayReadOperatorPii = (await authorization.AuthorizeAsync(User, PlatformPolicies.Owner)).Succeeded;
 
         return Ok(rows.Select(row =>
         {
@@ -336,13 +360,13 @@ public class PlatformOperationsController(
                 actor = actor?.DisplayName ?? actor?.Email ?? (row.ActorPlatformUserId == PlatformAuditService.SystemActorId
                     ? "system"
                     : $"Platform user {row.ActorPlatformUserId}"),
-                actorEmail = actor?.Email ?? string.Empty,
+                actorEmail = mayReadOperatorPii ? actor?.Email ?? string.Empty : string.Empty,
                 row.Action,
                 targetType = row.TargetType ?? string.Empty,
                 targetId = row.TargetId ?? string.Empty,
                 tenantId = row.ActAsTenantId?.ToString(),
                 tenantName = tenant?.Name,
-                ipAddress = row.Ip ?? string.Empty,
+                ipAddress = mayReadOperatorPii ? row.Ip ?? string.Empty : string.Empty,
                 result = row.Result,
                 detail = disclosure.MayDisclose(row.Action) ? row.Metadata : null,
                 metadataDisclosed = disclosure.MayDisclose(row.Action),
@@ -350,6 +374,25 @@ public class PlatformOperationsController(
             };
         }));
     }
+
+    /// <summary>
+    /// Durable policy decision for historical audit identifiers. Security occurrences stay
+    /// append-only; raw operator email/IP is Owner-restricted and action metadata remains behind
+    /// its existing least-privilege disclosure gate. Customer erasure must never rewrite evidence
+    /// about the operator who performed a privileged action.
+    /// </summary>
+    [HttpGet("audit/pii-policy")]
+    [Authorize(Policy = PlatformPolicies.Owner)]
+    public IActionResult AuditPiiPolicy() => Ok(new
+    {
+        policyCode = "RETAIN_RESTRICT_MINIMIZE_V1",
+        decision = "retain_restricted_security_evidence",
+        historicalRowsRewritten = false,
+        directOperatorEmailAndIpPolicy = "owner_only",
+        metadataPolicy = "action_specific_least_privilege",
+        tenantErasurePolicy = "customer_identity_erasure_does_not_rewrite_operator_security_evidence",
+        rationale = "Rewriting append-only audit occurrences would permit breach concealment; disclosure is minimized instead."
+    });
 
     private static string MapStatus(ExtractionStatus status) => status switch
     {

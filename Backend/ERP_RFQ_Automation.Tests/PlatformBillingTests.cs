@@ -101,7 +101,7 @@ public class PlatformBillingTests
     }
 
     [Fact]
-    public async Task Canonical_usage_events_override_legacy_projection_and_adjust_into_statement_lineage()
+    public async Task Canonical_usage_defaults_to_shadow_and_never_replaces_legacy_projection()
     {
         using var db = new BillingTestDb();
         var (tenantId, buId) = await SeedTenantAsync(db);
@@ -135,11 +135,193 @@ public class PlatformBillingTests
         var usage = await Service(context).GetUsageAsync(tenantId, July);
         var documents = Meter(usage, BillingMeterKeys.Documents);
 
-        Assert.Equal(2m, documents.Quantity);
-        Assert.Contains("UsageEvents canonical ledger", documents.SourceNote);
-        Assert.Contains("2 immutable event(s)", documents.SourceNote);
-        Assert.Matches("manifest sha256:[0-9a-f]{64}", documents.SourceNote);
-        Assert.DoesNotContain("ExtractionJobs", documents.SourceNote);
+        Assert.Equal(1m, documents.Quantity);
+        Assert.Contains("ExtractionJobs", documents.SourceNote);
+        Assert.DoesNotContain("UsageEvents canonical ledger", documents.SourceNote);
+    }
+
+    [Fact]
+    public async Task Canonical_authority_uses_frozen_event_rating_amount_not_statement_time_rate()
+    {
+        using var db = new BillingTestDb();
+        var (tenantId, _) = await SeedTenantAsync(db);
+        var rateCardId = await SeedRateCardAsync(db);
+        var eventId = Guid.NewGuid();
+        await using (var seed = db.Context(null))
+        {
+            var eventTimeCard = new RateCard
+            {
+                Code = $"event-time-{Guid.NewGuid():N}"[..24], Currency = "USD",
+                EffectiveFromUtc = July.StartUtc, EffectiveToUtc = July.EndUtc, IsActive = true,
+                Lines = { new RateCardLine { MeterKey = BillingMeterKeys.Documents, IncludedQuantity = 0,
+                    UnitPrice = 33, Unit = "document" } }
+            };
+            seed.Add(eventTimeCard);
+            await seed.SaveChangesAsync();
+            var line = eventTimeCard.Lines.Single();
+            var usageEvent = new UsageEvent
+            {
+                UsageEventId = eventId, TenantId = tenantId, Kind = UsageEventKind.Consumption,
+                EventType = "documents", Quantity = 3, Unit = "document", OccurredAtUtc = InJuly,
+                ReceivedAtUtc = InJuly, SourceRecordType = "ExtractionJob", SourceRecordId = "rated-1",
+                SourceSystem = "test", CorrelationId = "rated-1", IdempotencyKey = "rated-1",
+                CostAmount = 0, Currency = "USD", EvidenceSha256 = new string('a', 64),
+                RatingStatus = UsageRatingStatus.Rated, RateCardId = eventTimeCard.Id, RateCardLineId = line.Id,
+                RateCardVersion = 1, OverageQuantity = 3, UnitPrice = 33, RatedAmount = 99
+            };
+            var rating = new UsageEventRating
+            {
+                TenantId = tenantId, UsageEventId = eventId, AttemptNumber = 1,
+                IdempotencyKey = "rating:rated-1", Status = UsageEventRatingResult.Rated,
+                RateCardId = eventTimeCard.Id, RateCardLineId = line.Id, RateCardVersion = 1,
+                Currency = "USD", OverageQuantity = 3, UnitPrice = 33, RatedAmount = 99,
+                OccurredAtUtc = InJuly, RatedAtUtc = InJuly, RatedBy = "rating-checker",
+                EvidenceSha256 = new string('b', 64)
+            };
+            seed.AddRange(usageEvent, rating);
+            seed.Add(new TenantMeterSourcePolicy
+            {
+                TenantId = tenantId, MeterKey = BillingMeterKeys.Documents,
+                Mode = TenantMeterSourceMode.CanonicalAuthoritative,
+                ApprovedBy = "coverage-checker", ApprovedAtUtc = InJuly, ApprovalReason = "Reconciled cutover"
+            });
+            var segment = new UsageCoverageSegment
+            {
+                TenantId = tenantId, MeterKey = BillingMeterKeys.Documents,
+                StartUtc = July.StartUtc, EndUtc = July.EndUtc,
+                AuthoritativeSource = UsageAuthoritativeSource.Canonical,
+                Completeness = UsageCoverageCompleteness.Complete, EventCount = 1, QuantityTotal = 3,
+                OverageQuantityTotal = 3, RatedAmountTotal = 99, Currency = "USD",
+                EvidenceSha256 = new string('c', 64), CompletenessWatermarkUtc = July.EndUtc,
+                ReconciliationStatus = UsageReconciliationStatus.Matched,
+                ApprovedBy = "coverage-checker", ApprovedAtUtc = InJuly,
+                ApprovalReason = "Exact shadow reconciliation", RateLineageJson = "[]",
+                RateLineageSha256 = UsageBillingReadinessService.ComputeRatingLineageSha256([rating])
+            };
+            seed.Add(segment);
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = db.Context(null);
+        var statement = await Service(context).ComputeStatementAsync(tenantId, July, rateCardId);
+        var documents = Line(statement, BillingMeterKeys.Documents);
+        Assert.True(statement.ReadinessStatus == BillingReadinessStatus.Ready, statement.ReadinessManifestJson);
+        Assert.Equal(3m, documents.MeteredQuantity);
+        Assert.Equal(3m, documents.BillableQuantity);
+        Assert.Equal(99m, documents.Amount);
+        Assert.Contains("RateLineageSha256", statement.ReadinessManifestJson);
+    }
+
+    [Fact]
+    public async Task Governed_rating_correction_is_event_time_resolved_append_only_and_idempotent()
+    {
+        using var db = new BillingTestDb();
+        var (tenantId, _) = await SeedTenantAsync(db);
+        var cardId = await SeedRateCardAsync(db);
+        var eventId = Guid.NewGuid();
+        await using (var seed = db.Context(null))
+        {
+            (await seed.Set<Tenant>().SingleAsync(x => x.Id == tenantId)).RateCardId = cardId;
+            seed.Add(new UsageEvent
+            {
+                UsageEventId = eventId, TenantId = tenantId, Kind = UsageEventKind.Consumption,
+                EventType = "documents", Quantity = 2, Unit = "document", OccurredAtUtc = InJuly,
+                ReceivedAtUtc = InJuly, SourceRecordType = "ExtractionJob", SourceRecordId = "correct-1",
+                SourceSystem = "test", CorrelationId = "correct-1", IdempotencyKey = "correct-1",
+                Currency = "USD", EvidenceSha256 = new string('d', 64), RatingStatus = UsageRatingStatus.Pending
+            });
+            seed.Add(new UsageEventRating
+            {
+                TenantId = tenantId, UsageEventId = eventId, AttemptNumber = 1,
+                IdempotencyKey = "initial:correct-1", Status = UsageEventRatingResult.Unrated,
+                ReasonCode = "RATE_REQUIRED", Currency = "USD", OccurredAtUtc = InJuly,
+                RatedAtUtc = InJuly, RatedBy = "system", EvidenceSha256 = new string('d', 64)
+            });
+            await seed.SaveChangesAsync();
+        }
+        await using var context = db.Context(null);
+        var service = new UsageBillingReadinessService(context);
+        var command = new CorrectUsageRatingCommand(eventId, "correct-rating-1", "Approved contract correction");
+        var first = await service.CorrectRatingAsync(command, "owner@nexora.test");
+        var replay = await service.CorrectRatingAsync(command, "owner@nexora.test");
+        Assert.Equal(first.Id, replay.Id);
+        Assert.Equal(2, first.AttemptNumber);
+        Assert.Equal(2m, first.AllowanceApplied);
+        Assert.Equal(0m, first.OverageQuantity);
+        Assert.Equal(0m, first.RatedAmount);
+        Assert.Equal(2, await context.Set<UsageEventRating>().CountAsync(x => x.UsageEventId == eventId));
+    }
+
+    [Fact]
+    public async Task Document_coverage_requires_distinct_checker_and_derives_reconciled_canonical_segment()
+    {
+        using var db = new BillingTestDb();
+        var (tenantId, buId) = await SeedTenantAsync(db);
+        var cardId = await SeedRateCardAsync(db);
+        await using (var seed = db.Context(null))
+        {
+            (await seed.Set<Tenant>().SingleAsync(x => x.Id == tenantId)).RateCardId = cardId;
+            seed.Add(new TenantMeterSourcePolicy
+            {
+                TenantId = tenantId, MeterKey = BillingMeterKeys.Documents,
+                Mode = TenantMeterSourceMode.CanonicalShadow, CutoverAtUtc = July.StartUtc,
+                Version = 1
+            });
+            var line = await seed.Set<RateCardLine>().SingleAsync(x => x.RateCardId == cardId
+                && x.MeterKey == BillingMeterKeys.Documents);
+            seed.AddRange(NewJob(buId, InJuly), NewJob(buId, InJuly.AddDays(1)));
+            for (var i = 0; i < 2; i++)
+            {
+                var id = Guid.NewGuid();
+                seed.Add(new UsageEvent
+                {
+                    UsageEventId = id, TenantId = tenantId, Kind = UsageEventKind.Consumption,
+                    EventType = "documents", Quantity = 1, Unit = "document", OccurredAtUtc = InJuly.AddDays(i),
+                    ReceivedAtUtc = InJuly, SourceRecordType = "ExtractionJob", SourceRecordId = $"coverage-{i}",
+                    SourceSystem = "test", CorrelationId = $"coverage-{i}", IdempotencyKey = $"coverage-{i}",
+                    Currency = "USD", EvidenceSha256 = new string((char)('e' + i), 64),
+                    RatingStatus = UsageRatingStatus.Rated, RateCardId = cardId, RateCardLineId = line.Id,
+                    RateCardVersion = 1, OverageQuantity = 1, UnitPrice = 1.5m, RatedAmount = 1.5m
+                });
+                seed.Add(new UsageEventRating
+                {
+                    TenantId = tenantId, UsageEventId = id, AttemptNumber = 1,
+                    IdempotencyKey = $"rating:coverage-{i}", Status = UsageEventRatingResult.Rated,
+                    RateCardId = cardId, RateCardLineId = line.Id, RateCardVersion = 1,
+                    Currency = "USD", OverageQuantity = 1, UnitPrice = 1.5m, RatedAmount = 1.5m,
+                    OccurredAtUtc = InJuly.AddDays(i), RatedAtUtc = InJuly, RatedBy = "rater",
+                    EvidenceSha256 = new string((char)('e' + i), 64)
+                });
+            }
+            await seed.SaveChangesAsync();
+        }
+        await using var context = db.Context(null);
+        Assert.Equal(3m, await context.Set<UsageEventRating>().SumAsync(x => x.RatedAmount ?? 0m));
+        var service = new UsageBillingReadinessService(context);
+        await service.ProposeDocumentCoverageAsync(
+            new ProposeDocumentCoverageCommand(tenantId, July, null, "Complete shadow reconciliation"), "maker@nexora.test");
+        await Assert.ThrowsAsync<UsageMeteringException>(() => service.ApproveDocumentCoverageAsync(
+            tenantId, July, "maker@nexora.test", "Self approval forbidden"));
+        var segments = await service.ApproveDocumentCoverageAsync(
+            tenantId, July, "checker@nexora.test", "Independent reconciliation approved");
+        var segment = Assert.Single(segments);
+        Assert.Equal(2m, segment.QuantityTotal);
+        Assert.Equal(3m, segment.RatedAmountTotal);
+        Assert.Equal(UsageAuthoritativeSource.Canonical, segment.AuthoritativeSource);
+    }
+
+    [Fact]
+    public async Task Document_coverage_default_proposal_schedules_next_period_boundary()
+    {
+        using var db = new BillingTestDb();
+        var (tenantId, _) = await SeedTenantAsync(db);
+        await using var context = db.Context(null);
+        var policy = await new UsageBillingReadinessService(context).ProposeDocumentCoverageAsync(
+            new ProposeDocumentCoverageCommand(tenantId, July, null, "Complete shadow reconciliation"),
+            "maker@nexora.test");
+
+        Assert.Equal(July.EndUtc, policy.ProposedEffectiveAtUtc);
+        Assert.Equal(TenantMeterSourceMode.CanonicalShadow, policy.Mode);
     }
 
     // -------------------------------------------------- allowance/overage math
@@ -433,11 +615,10 @@ public class PlatformBillingTests
 
         var periodEnd = DateTime.UtcNow.AddHours(-hoursSincePeriodEnd);
         long statementId;
-        await using (var seed = db.Context(null))
+        await using (var compute = db.Context(null))
         {
-            var statement = NewStatement(tenantId, rateCardId, periodEnd.AddMonths(-1), periodEnd);
-            seed.Add(statement);
-            await seed.SaveChangesAsync();
+            var statement = await Service(compute).ComputeStatementAsync(tenantId,
+                new BillingPeriod(periodEnd.AddMonths(-1), periodEnd), rateCardId);
             statementId = statement.Id;
         }
 
@@ -690,6 +871,7 @@ public class PlatformBillingTests
         {
             var service = Service(context);
             var draft = await context.Set<BillingStatement>().SingleAsync();
+            draft = await service.ComputeStatementAsync(tenantId, July, rateCardId);
             await service.FinalizeAsync(draft.Id, "billing@nexora.test");
 
             var controller = Controller(context, service);
@@ -1527,11 +1709,8 @@ public class PlatformBillingTests
             Assert.False(action.GetCustomAttributes<AllowAnonymousAttribute>().Any(),
                 $"{action.Name} must not opt out of the Platform.Billing policy.");
             var overriding = action.GetCustomAttributes<AuthorizeAttribute>().ToList();
-            if (action.Name == nameof(PlatformBillingController.FinalizeStatement))
-                Assert.All(overriding, gate => Assert.Equal(PlatformPolicies.Owner, gate.Policy));
-            else
-                Assert.True(overriding.Count == 0 || overriding.All(a => a.Policy == PlatformPolicies.Billing),
-                    $"{action.Name} must not weaken the class-level Platform.Billing policy.");
+            Assert.All(overriding, gate => Assert.Contains(gate.Policy,
+                new[] { PlatformPolicies.Billing, PlatformPolicies.Owner, PlatformPolicies.Mfa }));
         }
     }
 

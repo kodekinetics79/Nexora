@@ -23,7 +23,7 @@ namespace ERP_RFQ_Automation.Platform.Lifecycle;
 /// differently is the one nobody notices.</para>
 ///
 /// <para><b>Deliberately the same predicate as everywhere else.</b>
-/// <see cref="TenantAccessSnapshot.IsAccessDenied"/> — Suspended or Archived. Not a second opinion
+/// <see cref="TenantAccessSnapshot.IsAccessDenied"/> — Provisioning, PastDue, Suspended or Archived. Not a second opinion
 /// about what suspension means: a background path blocking a different set of tenants from the
 /// request path produces a tenant that can use the API and whose jobs never run, or the reverse.
 /// Offboarding tenants need no further clause because they stay <see cref="TenantStatus.Archived"/>

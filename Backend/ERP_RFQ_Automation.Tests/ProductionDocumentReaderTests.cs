@@ -73,6 +73,7 @@ public sealed class ProductionDocumentReaderTests
         Assert.Equal("RFQ 42\nPart Number\tQuantity\nABC-100\t25\nDelivery: urgent", result.HeaderText);
         Assert.Contains("Part Number\tQuantity", result.LineItemRegions);
         Assert.Contains("ABC-100\t25", result.LineItemRegions);
+        Assert.False(result.PageCountAuthoritative);
     }
 
     [Fact]
@@ -130,6 +131,8 @@ public sealed class ProductionDocumentReaderTests
         var result = await reader.ReadAsync(CreateJob("rfq.tiff", "tiff"));
 
         Assert.Equal(2, result.OcrPageCount);
+        Assert.Equal(2, result.PageCount);
+        Assert.True(result.PageCountAuthoritative);
         Assert.False(result.OcrTruncated);
         Assert.Equal(ExtractionProcessingPath.LocalOcr, result.ProcessingPath);
         Assert.Contains("RFQ 42 first page commercial text", result.HeaderText);

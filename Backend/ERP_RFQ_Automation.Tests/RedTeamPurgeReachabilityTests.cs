@@ -183,10 +183,11 @@ public sealed class RedTeamPurgeReachabilityTests
             db, "redteam-resurrected", TenantStatus.Archived, BusinessUnitId);
 
         await using var context = db.ContextFor(null);
-        await TenantLifecycleHarness.Service(context).ScheduleDeletionAsync(
+        var clock = new TenantLifecycleHarness.MutableTimeProvider(DateTimeOffset.UtcNow.AddDays(-31));
+        await TenantLifecycleHarness.Service(context, timeProvider: clock).ScheduleDeletionAsync(
             tenant.Id, new ScheduleTenantDeletionRequest { Reason = ScheduleReason },
             TenantLifecycleHarness.Operator(), null, CancellationToken.None);
-        await TenantLifecycleHarness.ElapseRetentionWindowAsync(context, tenant.Id);
+        TenantLifecycleHarness.ElapseRetentionWindow(clock);
 
         return tenant;
     }

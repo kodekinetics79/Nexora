@@ -141,6 +141,11 @@ public static class PlatformTenantDataMap
             "External payment and collection evidence for preserved subscription invoices.",
             ReachedThrough: new PlatformTenantParent("SubscriptionInvoiceId", "SubscriptionInvoices", "Id")),
 
+        new("SubscriptionRevenueActions", TenantDataClass.OperatorRecord,
+            "Append-only void, refund, reversal, write-off and dunning evidence for preserved "
+            + "subscription invoices; retaining it is required to reconcile statutory AR totals.",
+            TenantColumn: "TenantId"),
+
         new("TenantOffboardings", TenantDataClass.OperatorRecord,
             "The record that the purge completed, written after it runs. It cannot be destroyed "
             + "by the operation it records.",
@@ -177,6 +182,18 @@ public static class PlatformTenantDataMap
             "The operator's near-real-time projection of the immutable usage ledger. It is kept "
             + "with the source usage events so historical statements remain reconcilable.",
             TenantColumn: "TenantId"),
+
+        new("TenantMeterSourcePolicies", TenantDataClass.OperatorRecord,
+            "The approved meter cutover authority. It is retained so preserved statements can "
+            + "prove which ledger governed each tenant and meter.", TenantColumn: "TenantId"),
+
+        new("UsageCoverageSegments", TenantDataClass.OperatorRecord,
+            "Immutable source-coverage and reconciliation evidence used to prevent gaps, overlap "
+            + "and duplicate subscription charges.", TenantColumn: "TenantId"),
+
+        new("UsageEventRatings", TenantDataClass.OperatorRecord,
+            "Append-only event-time rating decisions and correction attempts required to "
+            + "reconcile retained statements and invoices.", TenantColumn: "TenantId"),
 
         new("AccountingOutbox", TenantDataClass.OperatorRecord,
             "Delivery, acknowledgement and external reconciliation evidence for preserved "

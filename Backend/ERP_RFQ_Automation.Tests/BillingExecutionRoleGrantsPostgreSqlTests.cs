@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.Billing;
+using ERP_RFQ_Automation.Billing.Metering;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Platform.Entitlements;
@@ -121,6 +122,32 @@ public sealed class BillingExecutionRoleGrantsPostgreSqlTests
             Assert.NotNull(access.Plan);
             Assert.Equal("grants-plan", access.Plan!.Code);
             Assert.Equal(2, access.Plan.MaxSeats);
+        }
+        finally
+        {
+            await CleanupAsync();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Provisioning_status_is_resolved_and_denied_under_the_real_identity_role_contract()
+    {
+        await SeedAsync();
+        try
+        {
+            await using (var owner = _database.ContextFor(null))
+            {
+                await owner.Set<Tenant>().IgnoreQueryFilters().Where(x => x.Id == TenantId)
+                    .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.Status, TenantStatus.Provisioning));
+            }
+
+            await using var context = _database.TenantContextWithRls(BusinessUnitId);
+            var access = await AccessService(context).GetAccessAsync(BusinessUnitId);
+
+            Assert.True(access.HasTenant);
+            Assert.Equal(TenantStatus.Provisioning, access.Status);
+            Assert.True(access.IsAccessDenied);
         }
         finally
         {
@@ -663,6 +690,7 @@ public sealed class BillingExecutionRoleGrantsPostgreSqlTests
             .Where(l => context.Set<BillingStatement>().Any(s => s.Id == l.BillingStatementId && s.TenantId == TenantId))
             .ExecuteDeleteAsync();
         await context.Set<BillingStatement>().Where(s => s.TenantId == TenantId).ExecuteDeleteAsync();
+        await context.Set<TenantMeterSourcePolicy>().Where(p => p.TenantId == TenantId).ExecuteDeleteAsync();
         await context.Set<Tenant>().IgnoreQueryFilters().Where(t => t.Id == TenantId).ExecuteDeleteAsync();
         await context.Set<Plan>().Where(p => p.Id == PlanId).ExecuteDeleteAsync();
         await context.Set<RateCardLine>().Where(l => l.RateCardId == RateCardId).ExecuteDeleteAsync();

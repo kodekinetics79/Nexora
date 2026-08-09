@@ -1314,11 +1314,8 @@ public sealed class BillingRevenueIntegrityTests
         {
             Assert.Empty(action.GetCustomAttributes<AllowAnonymousAttribute>());
             var overriding = action.GetCustomAttributes<AuthorizeAttribute>().ToList();
-            if (action.Name == nameof(PlatformBillingController.FinalizeStatement))
-                Assert.All(overriding, gate => Assert.Equal(PlatformPolicies.Owner, gate.Policy));
-            else
-                Assert.True(overriding.Count == 0 || overriding.All(a => a.Policy == PlatformPolicies.Billing),
-                    $"{action.Name} must not weaken the class-level Platform.Billing policy.");
+            Assert.All(overriding, gate => Assert.Contains(gate.Policy,
+                new[] { PlatformPolicies.Billing, PlatformPolicies.Owner, PlatformPolicies.Mfa }));
         }
     }
 

@@ -318,6 +318,8 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             ProcessingPath = read.ProcessingPath,
             OcrStatus = read.OcrStatus,
             OcrPageCount = read.OcrPageCount,
+            PageCount = read.PageCount,
+            PageCountAuthoritative = read.PageCountAuthoritative,
             OcrTruncated = read.OcrTruncated,
             IsStructured = false,
             HeaderText = header,
@@ -707,7 +709,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
                 "PDF text layer accepted as native content: {Characters} characters over {Pages} page(s) "
                 + "({Density:0.#} per page, threshold {Threshold}).",
                 nativeCharacters, pageCount, density, threshold);
-            return Native(pdfText);
+            return Native(pdfText, Math.Max(1, pageCount));
         }
 
         _log.LogInformation(
@@ -731,6 +733,8 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
                 ocr.FailedPageCount > 0 ? ExtractionOcrStatus.Partial : ExtractionOcrStatus.Completed,
                 ocr.PageCount, ocr.Truncated)
             {
+                PageCount = Math.Max(pageCount, ocr.PageCount),
+                PageCountAuthoritative = pageCount > 0 || ocr.PageCount > 0,
                 Note = ocr.Truncated
                     ? $"This PDF is a scan. Text was recovered by OCR from the first {ocr.PageCount} page(s) only; "
                       + "later pages were not read. OCR text is lower confidence than a native text layer."
@@ -746,6 +750,8 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             return new DocumentReadResult(pdfText, ExtractionProcessingPath.NativeParser,
                 ExtractionOcrStatus.Failed, ocr.PageCount, ocr.Truncated)
             {
+                PageCount = Math.Max(pageCount, ocr.PageCount),
+                PageCountAuthoritative = pageCount > 0 || ocr.PageCount > 0,
                 Note = $"This PDF carries only {nativeCharacters} characters of text across "
                        + $"{Math.Max(pageCount, 1)} page(s), which is the pattern of a SCANNED document "
                        + "with a stamp or footer rather than a document with real text. Optical "
@@ -758,6 +764,8 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         return new DocumentReadResult(string.Empty, ExtractionProcessingPath.LocalOcr,
             ExtractionOcrStatus.Failed, ocr.PageCount, ocr.Truncated)
         {
+            PageCount = Math.Max(pageCount, ocr.PageCount),
+            PageCountAuthoritative = pageCount > 0 || ocr.PageCount > 0,
             Note = "Nexora could not read any text from this PDF. It is either a scan that optical "
                    + "character recognition could not process, or the file is damaged. Ask the sender "
                    + "for a text-based PDF, or for the original document."
@@ -842,14 +850,15 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
                 using var page = engine.Process(img);
                 var text = page.GetText();
                 return new DocumentReadResult(text ?? string.Empty, ExtractionProcessingPath.LocalOcr,
-                    IsNearEmpty(text) ? ExtractionOcrStatus.Failed : ExtractionOcrStatus.Completed, 1, false);
+                    IsNearEmpty(text) ? ExtractionOcrStatus.Failed : ExtractionOcrStatus.Completed, 1, false)
+                    { PageCount = 1, PageCountAuthoritative = true };
             }
         }
         catch (Exception ex)
         {
             _log.LogWarning(ex, "Image OCR failed.");
             return new DocumentReadResult(string.Empty, ExtractionProcessingPath.LocalOcr,
-                ExtractionOcrStatus.Failed, 0, false);
+                ExtractionOcrStatus.Failed, 0, false) { PageCount = 1, PageCountAuthoritative = true };
         }
     }
 
@@ -909,7 +918,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         {
             _log.LogWarning(ex, "Multi-page TIFF OCR failed.");
             return new DocumentReadResult(string.Empty, ExtractionProcessingPath.LocalOcr,
-                ExtractionOcrStatus.Failed, 0, false);
+                ExtractionOcrStatus.Failed, 0, false) { PageCount = 1, PageCountAuthoritative = false };
         }
         finally
         {
@@ -936,7 +945,8 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
                 ? ExtractionOcrStatus.Partial
                 : ExtractionOcrStatus.Completed;
         return new DocumentReadResult(value, ExtractionProcessingPath.LocalOcr,
-            status, pageCount, false);
+            status, pageCount, false)
+            { PageCount = Math.Max(1, pageCount), PageCountAuthoritative = pageCount > 0 };
     }
 
     // ---- spreadsheets -> structured rows (with unstructured fallback) ----
@@ -1073,9 +1083,10 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
 
     private static bool IsNearEmpty(string? s) => CountNonWhitespace(s) < NearEmptyThreshold;
 
-    private static DocumentReadResult Native(string? text) => new(
+    private static DocumentReadResult Native(string? text, int pageCount = 0) => new(
         text ?? string.Empty, ExtractionProcessingPath.NativeParser,
-        ExtractionOcrStatus.NotRequired, 0, false);
+        ExtractionOcrStatus.NotRequired, 0, false)
+        { PageCount = Math.Max(1, pageCount), PageCountAuthoritative = pageCount > 0 };
 
     private sealed record DocumentReadResult(
         string Text,
@@ -1084,6 +1095,8 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         int OcrPageCount,
         bool OcrTruncated)
     {
+        public int PageCount { get; init; } = 1;
+        public bool PageCountAuthoritative { get; init; }
         /// <summary>User-safe sentence explaining anything the reader did not take, or why it
         /// took the path it did. Surfaced through <c>DocumentExtractionInput.StructuredFallbackNote</c>.</summary>
         public string? Note { get; init; }

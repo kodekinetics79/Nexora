@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type APIResponse, type Page } from '@playwright/test';
 import { createHmac } from 'node:crypto';
 import { requireEnv } from './support/environment';
 
@@ -6,8 +6,8 @@ const apiURL = process.env.E2E_API_URL ?? '';
 const journeyId = Date.now().toString(36);
 const journeyTenant = {
   name: process.env.E2E_VISIBLE_TENANT_NAME ?? `Visible Certification ${journeyId}`,
-  email: `admin-${journeyId}@visible-certification.example`,
-  password: 'Visible-Certification-2026!',
+  email: process.env.E2E_VISIBLE_TENANT_EMAIL ?? `admin-${journeyId}@visible-certification.example`,
+  password: process.env.E2E_VISIBLE_TENANT_PASSWORD ?? 'Visible-Certification-2026!',
 };
 
 const platformTabs = [
@@ -41,30 +41,32 @@ const currentTotp = (secret: string, now = Date.now()): string => {
 
 // Treat the process-start step as already spent: a prior interrupted certification process may
 // have submitted it, and the server correctly remembers that replay fence.
-let lastSubmittedTotpStep = Math.floor(Date.now() / 30_000);
+const lastSubmittedTotpStep = new Map<string, number>();
 
 const nextUnusedTotp = async (page: Page, secret: string): Promise<string> => {
   let now = Date.now();
   let step = Math.floor(now / 30_000);
-  if (step <= lastSubmittedTotpStep) {
+  const lastStep = lastSubmittedTotpStep.get(secret) ?? Math.floor(Date.now() / 30_000);
+  if (step <= lastStep) {
     // The server intentionally fences replay of a TOTP time step across sessions. Serial
     // Playwright tests create fresh browser contexts faster than the 30-second window, so wait
     // visibly for the next genuine code instead of weakening the replay control or using mocks.
-    await page.waitForTimeout(((lastSubmittedTotpStep + 1) * 30_000) - now + 500);
+    await page.waitForTimeout(((lastStep + 1) * 30_000) - now + 500);
     now = Date.now();
     step = Math.floor(now / 30_000);
   }
-  lastSubmittedTotpStep = step;
+  lastSubmittedTotpStep.set(secret, step);
   return currentTotp(secret, now);
 };
 
-async function signInAsPlatformAdmin(page: Page): Promise<void> {
-  const credentials = requireEnv(
-    'Visible Google Chrome Platform Admin certification',
-    'E2E_PLATFORM_ADMIN_EMAIL',
-    'E2E_PLATFORM_ADMIN_PASSWORD',
-    'E2E_PLATFORM_ADMIN_TOTP_SECRET',
-  );
+async function signInAsPlatformAdmin(page: Page, actor: 'maker' | 'checker' = 'maker'): Promise<void> {
+  const credentials = actor === 'maker' ? (() => {
+    const value = requireEnv('Visible Google Chrome Platform Admin certification', 'E2E_PLATFORM_ADMIN_EMAIL', 'E2E_PLATFORM_ADMIN_PASSWORD', 'E2E_PLATFORM_ADMIN_TOTP_SECRET');
+    return { email: value.E2E_PLATFORM_ADMIN_EMAIL, password: value.E2E_PLATFORM_ADMIN_PASSWORD, secret: value.E2E_PLATFORM_ADMIN_TOTP_SECRET };
+  })() : (() => {
+    const value = requireEnv('Visible Google Chrome Platform checker certification', 'E2E_PLATFORM_CHECKER_EMAIL', 'E2E_PLATFORM_CHECKER_PASSWORD', 'E2E_PLATFORM_CHECKER_TOTP_SECRET');
+    return { email: value.E2E_PLATFORM_CHECKER_EMAIL, password: value.E2E_PLATFORM_CHECKER_PASSWORD, secret: value.E2E_PLATFORM_CHECKER_TOTP_SECRET };
+  })();
 
   await page.goto('/platform/login');
   await page.evaluate(() => sessionStorage.clear());
@@ -73,17 +75,17 @@ async function signInAsPlatformAdmin(page: Page): Promise<void> {
 
   const email = page.getByRole('textbox', { name: 'Email' });
   await email.click();
-  await email.pressSequentially(credentials.E2E_PLATFORM_ADMIN_EMAIL);
+  await email.pressSequentially(credentials.email);
   const password = page.getByLabel('Password');
   await password.click();
-  await password.pressSequentially(credentials.E2E_PLATFORM_ADMIN_PASSWORD);
+  await password.pressSequentially(credentials.password);
   await page.getByRole('button', { name: 'Enter Control Plane' }).click();
 
   const verification = page.getByLabel('6-digit authenticator code');
   const overview = page.getByRole('heading', { name: 'Platform Overview' });
   await expect(verification.or(overview)).toBeVisible({ timeout: 20_000 });
   if (await verification.isVisible()) {
-    await verification.fill(await nextUnusedTotp(page, credentials.E2E_PLATFORM_ADMIN_TOTP_SECRET));
+    await verification.fill(await nextUnusedTotp(page, credentials.secret));
     await page.getByRole('button', { name: 'Verify and enter' }).click();
   }
 
@@ -128,6 +130,20 @@ async function confirmReason(page: Page, dialogTitle: string, reason: string, ac
   await dialog.getByRole('button', { name: action, exact: true }).click();
 }
 
+async function platformBearer(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const token = sessionStorage.getItem('nexora_platform_token');
+    if (!token) throw new Error('The authenticated platform session did not contain a bearer token.');
+    return token;
+  });
+}
+
+async function expectApiOk(response: APIResponse, action: string) {
+  if (!response.ok()) {
+    throw new Error(`${action} failed with HTTP ${response.status()}: ${await response.text()}`);
+  }
+}
+
 test.describe.serial('visible Google Chrome Platform Admin certification', () => {
   test('real control plane opens every operator tab without browser or server failures', async ({ page, request }) => {
     expect(
@@ -149,6 +165,53 @@ test.describe.serial('visible Google Chrome Platform Admin certification', () =>
     }
 
     assertNoFailures();
+  });
+
+  test('shares a live platform session across Chrome tabs and propagates server-authoritative logout', async ({ page }) => {
+    test.setTimeout(120_000);
+    const assertFirstTabHasNoFailures = observeBrowserAndApiFailures(page);
+    await signInAsPlatformAdmin(page);
+    const issuedToken = await platformBearer(page);
+
+    // Platform tokens remain tab-session scoped at rest. The second real Chrome tab has
+    // empty sessionStorage and asks the already authenticated same-origin tab for the live
+    // session through the nonce-targeted BroadcastChannel handshake.
+    const secondTab = await page.context().newPage();
+    await secondTab.addInitScript(() => {
+      (window as Window & { __initialPlatformToken?: string | null }).__initialPlatformToken =
+        sessionStorage.getItem('nexora_platform_token');
+    });
+    const assertSecondTabHasNoFailures = observeBrowserAndApiFailures(secondTab);
+    await secondTab.goto('/platform/overview');
+    expect(await secondTab.evaluate(() =>
+      (window as Window & { __initialPlatformToken?: string | null }).__initialPlatformToken),
+    'A newly-opened Chrome tab must begin without a persisted platform bearer.').toBeNull();
+    await expect(secondTab.getByRole('heading', { name: 'Platform Overview' })).toBeVisible({ timeout: 20_000 });
+    await expect.poll(() => secondTab.evaluate(() => sessionStorage.getItem('nexora_platform_token')))
+      .toBe(issuedToken);
+
+    for (const tab of [page, secondTab]) {
+      expect(await tab.evaluate(() => localStorage.getItem('nexora_platform_token')),
+        'The platform bearer must never be persisted in localStorage.').toBeNull();
+    }
+
+    // Logout is performed through the real UI. The first tab revokes the database-backed
+    // session and broadcasts only the local clear occurrence; the second tab must return to
+    // the login screen. Replaying the captured token against the real API must independently
+    // fail, proving the browser bridge cannot bypass server revocation authority.
+    await page.getByRole('button', { name: 'Sign out of platform console' }).click();
+    await expect(page.getByRole('heading', { name: 'Platform Console' })).toBeVisible({ timeout: 20_000 });
+    await expect(secondTab.getByRole('heading', { name: 'Platform Console' })).toBeVisible({ timeout: 20_000 });
+    await expect.poll(() => secondTab.evaluate(() => sessionStorage.getItem('nexora_platform_token'))).toBeNull();
+
+    const revoked = await page.request.get(new URL('/api/platform/tenants', apiURL).toString(), {
+      headers: { Authorization: `Bearer ${issuedToken}` },
+    });
+    expect(revoked.status(), 'A platform JWT replayed after UI logout must be rejected by the session ledger.').toBe(401);
+
+    await secondTab.close();
+    assertFirstTabHasNoFailures();
+    assertSecondTabHasNoFailures();
   });
 
   test('saves, resumes, edits, and reloads a first-field provisioning draft', async ({ page }) => {
@@ -230,6 +293,157 @@ test.describe.serial('visible Google Chrome Platform Admin certification', () =>
     assertNoFailures();
   });
 
+  test('rejects incomplete cutover then certifies statement, invoice, and full payment with two MFA Owners', async ({ page }) => {
+    test.setTimeout(360_000);
+    const assertNoFailures = observeBrowserAndApiFailures(page);
+    const now = new Date();
+    const period = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1))
+      .toISOString().slice(0, 7);
+    const api = (path: string) => new URL(path, apiURL).toString();
+
+    await signInAsPlatformAdmin(page, 'maker');
+    await page.getByRole('link', { name: 'Tenants', exact: true }).click();
+    await fillVisible(page.getByLabel('Search tenants'), journeyTenant.name);
+    await page.getByRole('row').filter({ hasText: journeyTenant.name })
+      .getByText(journeyTenant.name, { exact: true }).click();
+    const tenantId = new URL(page.url()).pathname.split('/').at(-1);
+    expect(tenantId, 'The tenant-detail URL must carry the authoritative tenant id.').toBeTruthy();
+
+    let token = await platformBearer(page);
+    const headers = () => ({ Authorization: `Bearer ${token}` });
+    const termsResponse = await page.request.put(
+      api(`/api/platform/billing/tenants/${tenantId}/commercial-terms`),
+      {
+        headers: headers(),
+        data: {
+          billingMode: 'Billable', billingModeReason: null, trialEndsOn: null,
+          billingStartsOn: `${period}-01T00:00:00.000Z`,
+        },
+      },
+    );
+    await expectApiOk(termsResponse, 'Closed-period billing-start correction');
+    const rateCardResponse = await page.request.post(api('/api/platform/billing/rate-cards'), {
+      headers: headers(),
+      data: {
+        code: `visible-certified-${journeyId}`,
+        currency: 'USD',
+        effectiveFromUtc: '2020-01-01T00:00:00.000Z',
+        effectiveToUtc: null,
+        isActive: true,
+        lines: [
+          { meterKey: 'documents', includedQuantity: 0, unitPrice: 1, unit: 'document', tierNote: null },
+          { meterKey: 'ai.tokens.external', includedQuantity: 0, unitPrice: 0.01, unit: '1K tokens', tierNote: null },
+          { meterKey: 'seats', includedQuantity: 0, unitPrice: 1, unit: 'seat', tierNote: null },
+        ],
+      },
+    });
+    await expectApiOk(rateCardResponse, 'Certified rate-card creation');
+    const rateCard = await rateCardResponse.json() as { id: number | string };
+    const pinResponse = await page.request.put(api(`/api/platform/billing/tenants/${tenantId}/rate-card`), {
+      headers: headers(), data: { rateCardId: Number(rateCard.id), reason: 'Visible paid-journey certification' },
+    });
+    await expectApiOk(pinResponse, 'Tenant rate-card pin');
+    const proposalResponse = await page.request.post(
+      api(`/api/platform/billing/tenants/${tenantId}/document-coverage/proposals`),
+      { headers: headers(), data: { period, midPeriodCutoverUtc: null, reason: 'Visible coverage certification proposal' } },
+    );
+    await expectApiOk(proposalResponse, 'Document-coverage proposal');
+    const taxJurisdictionCode = `US-VISIBLE-${journeyId}`;
+    const taxRuleResponse = await page.request.post(api('/api/platform/billing/tax-rules'), {
+      headers: headers(),
+      data: {
+        jurisdictionCode: taxJurisdictionCode, buyerCountryCode: 'US', currency: 'USD',
+        treatment: 'Certification zero-rated', ratePercent: 0,
+        legalAuthorityReference: `Isolated visible-browser certification rule ${journeyId}; not production tax advice`,
+        evidenceSha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        effectiveFromUtc: '2020-01-01T00:00:00.000Z', effectiveToUtc: null,
+      },
+    });
+    await expectApiOk(taxRuleResponse, 'Tax-rule maker proposal');
+    const taxRule = await taxRuleResponse.json() as { id: number | string };
+
+    await signInAsPlatformAdmin(page, 'checker');
+    token = await platformBearer(page);
+    const taxApprovalResponse = await page.request.post(
+      api(`/api/platform/billing/tax-rules/${taxRule.id}/approve`), { headers: headers() });
+    await expectApiOk(taxApprovalResponse, 'Independent tax-rule approval');
+    const approvalResponse = await page.request.post(
+      api(`/api/platform/billing/tenants/${tenantId}/document-coverage/approve`),
+      { headers: headers(), data: { period, reason: 'Independent visible coverage approval' } },
+    );
+    expect(approvalResponse.status(), 'A cutover with no canonical event evidence must fail closed.').toBe(409);
+    expect(await approvalResponse.text()).toContain('Every canonical document event');
+
+    await signInAsPlatformAdmin(page, 'maker');
+    await page.goto(`/platform/tenants/${tenantId}?tab=commercial`);
+    await page.getByLabel('Period').fill(period);
+    await expect(page.getByText('Ready to finalize', { exact: true })).toBeVisible({ timeout: 20_000 });
+
+    const computeResponse = page.waitForResponse((response) =>
+      response.url().endsWith('/api/platform/billing/statements/compute') && response.request().method() === 'POST');
+    await page.getByRole('button', { name: 'Compute', exact: true }).click();
+    const computed = await computeResponse;
+    expect(computed.ok(), `Statement compute failed with HTTP ${computed.status()}.`).toBeTruthy();
+    const statement = await computed.json() as { id: number | string; period: string };
+    await expect(page.getByRole('dialog', { name: 'Statement review' })).toBeVisible();
+    await page.getByRole('dialog', { name: 'Statement review' }).getByRole('button', { name: 'Close' }).click();
+
+    await signInAsPlatformAdmin(page, 'checker');
+    await page.goto(`/platform/tenants/${tenantId}?tab=commercial`);
+    const statementRow = page.getByRole('row').filter({ hasText: statement.period });
+    await statementRow.getByRole('button', { name: 'Finalize', exact: true }).click();
+    const finalizeStatement = page.waitForResponse((response) =>
+      response.url().endsWith(`/api/platform/billing/statements/${statement.id}/finalize`));
+    await page.getByRole('dialog', { name: 'Finalize this statement' })
+      .getByRole('button', { name: 'Finalize permanently' }).click();
+    await expectApiOk(await finalizeStatement, 'Independent statement finalization');
+
+    await signInAsPlatformAdmin(page, 'maker');
+    await page.goto(`/platform/tenants/${tenantId}?tab=commercial`);
+    await page.getByRole('button', { name: 'Create invoice' }).click();
+    const invoiceDialog = page.getByRole('dialog', { name: 'Create subscription invoice' });
+    await invoiceDialog.getByLabel('Final statement').click();
+    await page.getByRole('option', { name: new RegExp(statement.period) }).click();
+    await fillVisible(invoiceDialog.getByLabel('Seller legal name'), 'Nexora Visible Certification');
+    await fillVisible(invoiceDialog.getByLabel('Seller tax number'), 'US-VISIBLE-2026');
+    await fillVisible(invoiceDialog.getByLabel('Tax jurisdiction code'), taxJurisdictionCode);
+    await fillVisible(invoiceDialog.getByLabel('Tax treatment'), 'Certification zero-rated');
+    const createInvoice = page.waitForResponse((response) =>
+      response.url().endsWith('/api/platform/billing/invoices') && response.request().method() === 'POST');
+    await invoiceDialog.getByRole('button', { name: 'Create draft' }).click();
+    const invoiceResponse = await createInvoice;
+    expect(invoiceResponse.ok(), `Invoice creation failed with HTTP ${invoiceResponse.status()}.`).toBeTruthy();
+    const invoice = await invoiceResponse.json() as { id: number | string; invoiceNumber: string; totalAmount: number };
+
+    await signInAsPlatformAdmin(page, 'checker');
+    await page.goto(`/platform/tenants/${tenantId}?tab=commercial`);
+    const invoiceRow = page.getByRole('row').filter({ hasText: invoice.invoiceNumber });
+    await invoiceRow.getByRole('button', { name: 'Finalize', exact: true }).click();
+    const finalizeInvoice = page.waitForResponse((response) =>
+      response.url().endsWith(`/api/platform/billing/invoices/${invoice.id}/finalize`));
+    await page.getByRole('dialog', { name: 'Finalize invoice' })
+      .getByRole('button', { name: 'Finalize invoice' }).click();
+    const finalizedInvoiceResponse = await finalizeInvoice;
+    await expectApiOk(finalizedInvoiceResponse, 'Independent invoice finalization');
+    const finalizedInvoice = await finalizedInvoiceResponse.json() as {
+      id: number | string; invoiceNumber: string; totalAmount: number;
+    };
+
+    await signInAsPlatformAdmin(page, 'maker');
+    await page.goto(`/platform/tenants/${tenantId}?tab=commercial`);
+    const paidRow = page.getByRole('row').filter({ hasText: finalizedInvoice.invoiceNumber });
+    await paidRow.getByRole('button', { name: 'Record payment' }).click();
+    const paymentDialog = page.getByRole('dialog', { name: 'Record payment' });
+    await fillVisible(paymentDialog.getByLabel('Amount'), String(finalizedInvoice.totalAmount));
+    await fillVisible(paymentDialog.getByLabel('External payment reference'), `VISIBLE-${journeyId}`);
+    const paymentResponse = page.waitForResponse((response) =>
+      response.url().endsWith(`/api/platform/billing/invoices/${invoice.id}/payments`));
+    await paymentDialog.getByRole('button', { name: 'Post' }).click();
+    expect((await paymentResponse).ok(), 'Full payment posting must succeed.').toBeTruthy();
+    await expect(paidRow.getByText('Paid', { exact: true })).toBeVisible();
+    assertNoFailures();
+  });
+
   test('blocks lifecycle before authoritative activation and exports tenant data', async ({ page }) => {
     const assertNoFailures = observeBrowserAndApiFailures(page);
     await signInAsPlatformAdmin(page);
@@ -262,16 +476,28 @@ test.describe.serial('visible Google Chrome Platform Admin certification', () =>
     assertNoFailures();
   });
 
-  test('shows the selected tenant plan entitlements from the real catalogue', async ({ page }) => {
+  test('changes plan and shows the new server-owned entitlements from the real catalogue', async ({ page }) => {
     const assertNoFailures = observeBrowserAndApiFailures(page);
     await signInAsPlatformAdmin(page);
     await page.getByRole('link', { name: 'Tenants', exact: true }).click();
     await fillVisible(page.getByLabel('Search tenants'), journeyTenant.name);
     await page.getByRole('row').filter({ hasText: journeyTenant.name }).getByText(journeyTenant.name, { exact: true }).click();
+    await page.getByRole('tab', { name: 'Commercial' }).click();
+    await page.getByRole('button', { name: 'Change plan' }).click();
+    const changePlan = page.getByRole('dialog', { name: 'Change plan' });
+    await changePlan.getByRole('combobox', { name: 'Plan' }).click();
+    await page.getByRole('option', { name: 'Enterprise (enterprise)', exact: true }).click();
+    await fillVisible(changePlan.getByLabel('Reason'), 'Visible certification plan upgrade');
+    const planChangeResponse = page.waitForResponse((response) =>
+      response.url().endsWith('/plan') && response.request().method() === 'PUT');
+    await changePlan.getByRole('button', { name: 'Assign plan' }).click();
+    await expectApiOk(await planChangeResponse, 'Tenant plan change');
+
     const plansResponse = page.waitForResponse((response) =>
       response.url().endsWith('/api/platform/plans') && response.request().method() === 'GET');
     await page.getByRole('tab', { name: 'Entitlements' }).click();
     expect((await plansResponse).ok(), 'The real plan catalogue must be readable.').toBeTruthy();
+    await expect(page.getByRole('heading', { name: 'Enterprise entitlements' })).toBeVisible();
     await expect(page.getByText('Concurrent extractions')).toBeVisible();
     await expect(page.getByText('Documents per month')).toBeVisible();
     await expect(page.getByText('Seats', { exact: true })).toBeVisible();
@@ -279,12 +505,14 @@ test.describe.serial('visible Google Chrome Platform Admin certification', () =>
     assertNoFailures();
   });
 
-  test('reads activation, PostgreSQL, recovery, and deletion decisions without fabricating evidence', async ({ page }) => {
+  test('fails closed on tenant login and activation while required control evidence is absent', async ({ page }) => {
     const assertNoFailures = observeBrowserAndApiFailures(page);
     await signInAsPlatformAdmin(page);
     await page.getByRole('link', { name: 'Tenants', exact: true }).click();
     await fillVisible(page.getByLabel('Search tenants'), journeyTenant.name);
     await page.getByRole('row').filter({ hasText: journeyTenant.name }).getByText(journeyTenant.name, { exact: true }).click();
+    const tenantId = new URL(page.url()).pathname.split('/').filter(Boolean).at(-1);
+    expect(tenantId, 'The selected tenant URL must expose its durable identifier.').toMatch(/^\d+$/);
 
     const assetsResponse = page.waitForResponse((response) =>
       response.url().endsWith('/data-assets') && response.request().method() === 'GET');
@@ -314,10 +542,29 @@ test.describe.serial('visible Google Chrome Platform Admin certification', () =>
     await expect(page.getByText('Certification boundary')).toBeVisible();
     await expect(page.getByText(/unknown.*blocker|registered boundaries.*known to Nexora/i)).toBeVisible();
     await expect(page.getByText(/console never claims it performed a backup or restore/i)).toBeVisible();
+
+    // A password-path founding admin is persisted during provisioning. It must still receive no
+    // tenant token until this policy passes; this was a real activation-bypass defect.
+    const tenantLogin = await page.request.post(new URL('/api/Auth/Login', apiURL).toString(), {
+      data: { email: journeyTenant.email, password: journeyTenant.password },
+    });
+    expect(tenantLogin.status(), 'An unactivated tenant administrator must be denied a token.').toBe(403);
+    expect(await tenantLogin.text()).toMatch(/still provisioning.*authoritative activation/i);
+
+    const activation = await page.request.post(
+      new URL(`/api/platform/tenants/${tenantId}/activation`, apiURL).toString(),
+      { headers: { Authorization: `Bearer ${await platformBearer(page)}` } },
+    );
+    expect(activation.status(), 'Activation without truthful control artifacts must fail closed.').toBe(409);
+    const activationBody = await activation.text();
+    expect(activationBody).toContain('security.privileged-mfa-policy');
+    expect(activationBody).toContain('data.residency-isolation');
+    expect(activationBody).toContain('integrations.mandatory');
     assertNoFailures();
   });
 
   test('places and releases a legal hold while destructive actions remain unavailable', async ({ page }) => {
+    test.setTimeout(120_000);
     const assertNoFailures = observeBrowserAndApiFailures(page);
     await signInAsPlatformAdmin(page);
     await page.getByRole('link', { name: 'Tenants', exact: true }).click();
@@ -346,7 +593,7 @@ test.describe.serial('visible Google Chrome Platform Admin certification', () =>
 
     // The UI fails closed, while this browser-context call proves the server independently
     // refuses the same destructive operation. It uses the real platform session and API.
-    const token = await page.evaluate(() => sessionStorage.getItem('nexora_platform_token'));
+    let token = await page.evaluate(() => sessionStorage.getItem('nexora_platform_token'));
     expect(token, 'The platform browser session must retain its access token.').toBeTruthy();
     const denial = await page.request.post(
       new URL(`/api/platform/tenants/${tenantId}/offboarding/erase-personal-data`, apiURL).toString(),
@@ -361,7 +608,11 @@ test.describe.serial('visible Google Chrome Platform Admin certification', () =>
     expect(denial.status(), 'The server must independently refuse erasure.').toBe(409);
     expect(await denial.text()).toMatch(/cannot be erased while the tenant is Provisioning/i);
 
-    await holdAlert.getByRole('button', { name: 'Release hold' }).click();
+    await signInAsPlatformAdmin(page, 'checker');
+    await page.goto(`/platform/tenants/${tenantId}?tab=lifecycle`);
+    token = await page.evaluate(() => sessionStorage.getItem('nexora_platform_token'));
+    const checkerHoldAlert = page.getByRole('alert').filter({ hasText: 'Legal hold active' });
+    await checkerHoldAlert.getByRole('button', { name: 'Release hold' }).click();
     const releaseResponse = page.waitForResponse((response) =>
       response.url().includes(`/api/platform/tenants/${tenantId}/legal-holds/`)
       && response.url().endsWith('/release')
@@ -435,6 +686,38 @@ test.describe.serial('visible Google Chrome Platform Admin certification', () =>
     await confirmReason(page, 'Revoke provider authorization', 'Certification cleanup and immediate fence', 'Revoke authorization');
     expect((await revokeResponse).ok(), 'Provider revocation must succeed.').toBeTruthy();
     await expect(providerRow).toContainText('Revoked');
+    assertNoFailures();
+  });
+
+  test('recovers one explicitly authorized real platform dead-letter through visible Chrome', async ({ page }) => {
+    const tenantId = process.env.E2E_PLATFORM_DLQ_TENANT_ID;
+    const itemId = process.env.E2E_PLATFORM_DLQ_ITEM_ID;
+    test.skip(!tenantId || !itemId,
+      'Requires an isolated real dead-letter fixture via E2E_PLATFORM_DLQ_TENANT_ID and E2E_PLATFORM_DLQ_ITEM_ID.');
+    const assertNoFailures = observeBrowserAndApiFailures(page);
+    await signInAsPlatformAdmin(page);
+    await page.goto(`/platform/pipeline?tenant=${tenantId}`);
+    await page.getByRole('tab', { name: /Dead-Letter/ }).click();
+
+    const row = page.getByRole('row').filter({ hasText: itemId! });
+    await expect(row).toHaveCount(1);
+    await row.getByRole('button', { name: 'Recover' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Recover dead-letter item' });
+    await expect(dialog).toContainText(`Tenant:`);
+    await expect(dialog).toContainText(`(${tenantId})`);
+    await expect(dialog).toContainText('Queue: extraction');
+    await expect(dialog).toContainText(`Item: ${itemId}`);
+    await expect(dialog.getByLabel('Idempotency key')).toHaveValue(new RegExp(`^platform-dlq-${itemId}-`));
+    await dialog.getByLabel('Reason').fill(
+      'Visible Chrome recovery after immutable evidence and dependency verification.',
+    );
+    const recovery = page.waitForResponse((response) =>
+      response.url().endsWith(`/api/platform/tenants/${tenantId}/dead-letters/recover`)
+      && response.request().method() === 'POST');
+    await dialog.getByRole('button', { name: 'Queue governed retry' }).click();
+    expect((await recovery).status()).toBe(200);
+    await expect(page.getByText(/queued for governed retry.*Audit evidence refreshed/i)).toBeVisible();
+    await expect(row).toHaveCount(0);
     assertNoFailures();
   });
 });

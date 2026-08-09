@@ -18,6 +18,9 @@ export const platformKeys = {
     [...platformKeys.all, 'billing', 'usage', tenantId, period] as const,
   billingCost: (tenantId: string, period: string) =>
     [...platformKeys.all, 'billing', 'cost', tenantId, period] as const,
+  billingMeterCatalog: () => [...platformKeys.all, 'billing', 'meter-catalog'] as const,
+  billingReadiness: (tenantId: string, period: string) =>
+    [...platformKeys.all, 'billing', 'readiness', tenantId, period] as const,
   rateCards: () => [...platformKeys.all, 'billing', 'rate-cards'] as const,
   statements: (filter?: unknown) => [...platformKeys.all, 'billing', 'statements', filter ?? null] as const,
   statement: (id: string) => [...platformKeys.all, 'billing', 'statement', id] as const,

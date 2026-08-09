@@ -32,11 +32,16 @@ public static class AccountingOutboxModelConfiguration
             entity.HasIndex(x => x.IdempotencyKey).IsUnique()
                 .HasDatabaseName("UX_AccountingOutbox_IdempotencyKey");
             entity.HasIndex(x => new { x.Status, x.AvailableAtUtc });
-            entity.HasIndex(x => new { x.SubscriptionInvoiceId, x.MessageType }).IsUnique()
-                .HasDatabaseName("UX_AccountingOutbox_Invoice_MessageType");
+            entity.HasIndex(x => new { x.SubscriptionInvoiceId, x.MessageType })
+                .HasDatabaseName("IX_AccountingOutbox_Invoice_MessageType");
+            entity.HasIndex(x => x.SubscriptionRevenueActionId);
             entity.HasOne<SubscriptionInvoice>().WithMany()
                 .HasForeignKey(x => new { x.TenantId, x.SubscriptionInvoiceId })
                 .HasPrincipalKey(x => new { x.TenantId, x.Id })
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<SubscriptionRevenueAction>().WithMany()
+                .HasForeignKey(x => new { x.TenantId, x.SubscriptionInvoiceId, x.SubscriptionRevenueActionId })
+                .HasPrincipalKey(x => new { x.TenantId, x.SubscriptionInvoiceId, x.Id })
                 .OnDelete(DeleteBehavior.Restrict);
         });
     }

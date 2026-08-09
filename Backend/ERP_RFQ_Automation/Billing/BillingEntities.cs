@@ -320,6 +320,8 @@ public enum BillingStatementStatus
     Final
 }
 
+public enum BillingReadinessStatus { Blocked, Ready }
+
 /// <summary>
 /// A tenant's charge summary for one billing period. UNIQUE (TenantId,
 /// PeriodStartUtc) is the duplicate-charge guard; Draft statements are
@@ -344,6 +346,11 @@ public class BillingStatement
     public BillingStatementStatus Status { get; set; } = BillingStatementStatus.Draft;
 
     public decimal TotalAmount { get; set; }
+
+    /// <summary>Frozen source-coverage and rating verdict from the last Draft computation.</summary>
+    public BillingReadinessStatus ReadinessStatus { get; set; } = BillingReadinessStatus.Blocked;
+    public string ReadinessManifestJson { get; set; } = "{}";
+    public string ReadinessManifestSha256 { get; set; } = new string('0', 64);
 
     public DateTime ComputedAtUtc { get; set; }
 

@@ -1,6 +1,4 @@
 using System.Globalization;
-using System.Security.Cryptography;
-using System.Text;
 using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.Billing.Metering;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
@@ -63,6 +61,15 @@ public sealed record MeterReading(string MeterKey, decimal Quantity, string Unit
     /// column, never concatenated into the line's provenance note.
     /// </summary>
     public string? CoverageNote { get; init; }
+
+    /// <summary>
+    /// Present only for governed coverage. These values were rated at event/segment time
+    /// and must not be recalculated with the statement-time rate card.
+    /// </summary>
+    public decimal? AuthoritativeAllowanceApplied { get; init; }
+    public decimal? AuthoritativeOverageQuantity { get; init; }
+    public decimal? AuthoritativeRatedAmount { get; init; }
+    public string? RateLineageManifestJson { get; init; }
 }
 
 /// <summary>Live usage for a tenant over one period, straight from the source ledgers.</summary>
@@ -357,11 +364,14 @@ public class BillingStatementService : IBillingStatementService
 
     private readonly ErpRfqAutomationContext _context;
     private readonly ILogger<BillingStatementService> _logger;
+    private readonly UsageBillingReadinessService _readiness;
 
-    public BillingStatementService(ErpRfqAutomationContext context, ILogger<BillingStatementService> logger)
+    public BillingStatementService(ErpRfqAutomationContext context, ILogger<BillingStatementService> logger,
+        UsageBillingReadinessService? readiness = null)
     {
         _context = context;
         _logger = logger;
+        _readiness = readiness ?? new UsageBillingReadinessService(context);
     }
 
     public Task<TenantUsageReadout> GetUsageAsync(
@@ -541,45 +551,16 @@ public class BillingStatementService : IBillingStatementService
                 : StorageCoverageNote
         });
 
-        // Wave 6 canonical bridge: where immutable UsageEvents exist for a contractual
-        // meter they are authoritative over the legacy operational projection above.
-        // Adjustment rows participate in the same SUM, so corrections flow through to a
-        // recomputed Draft without mutating source usage. A deterministic manifest hash of
-        // the contributing event ids is frozen into BillingStatementLine.SourceNote and then
-        // into the invoice source snapshot, providing event -> statement -> invoice lineage.
-        var canonicalEvents = await _context.Set<UsageEvent>().IgnoreQueryFilters().AsNoTracking()
-            .Where(x => x.TenantId == tenantId
-                        && x.OccurredAtUtc >= meterFrom && x.OccurredAtUtc < period.EndUtc
-                        && x.RatingStatus != UsageRatingStatus.BlockedUncertifiedMeter)
-            .Select(x => new { x.UsageEventId, x.EventType, x.Unit, x.Quantity })
-            .ToListAsync(ct);
-        foreach (var group in canonicalEvents
-                     .Where(x => x.EventType != "base.subscription")
-                     .GroupBy(x => new { MeterKey = CanonicalMeterKey(x.EventType), x.Unit }))
-        {
-            var ids = group.Select(x => x.UsageEventId).Order().Select(x => x.ToString("N"));
-            var manifest = Convert.ToHexString(SHA256.HashData(
-                Encoding.UTF8.GetBytes(string.Join("\n", ids)))).ToLowerInvariant();
-            var reading = new MeterReading(group.Key.MeterKey, group.Sum(x => x.Quantity), group.Key.Unit,
-                $"UsageEvents canonical ledger {period.Key}; {group.Count()} immutable event(s); manifest sha256:{manifest} (tenant {tenantId})");
-            var existingIndex = meters.FindIndex(x => x.MeterKey == group.Key.MeterKey);
-            if (existingIndex >= 0) meters[existingIndex] = reading;
-            else meters.Add(reading);
-        }
-
-        return new TenantUsageReadout(tenantId, businessUnitId, period.Key, period.StartUtc, period.EndUtc, meters)
+        // Canonical capture is shadow-only by default. It replaces an operational
+        // projection only through complete, reconciled and explicitly approved
+        // coverage; the mere existence of a UsageEvent never changes billing.
+        var governed = await _readiness.ResolveAsync(tenantId, period, meters,
+            new[] { BillingMeterKeys.Documents, BillingMeterKeys.AiTokensExternal, BillingMeterKeys.Seats }, ct);
+        return new TenantUsageReadout(tenantId, businessUnitId, period.Key, period.StartUtc, period.EndUtc, governed.Meters)
         {
             MeteredFromUtc = meterFrom
         };
     }
-
-    private static string CanonicalMeterKey(string eventType) => eventType switch
-    {
-        "ai.tokens" => BillingMeterKeys.AiTokensExternal,
-        "storage.gb-hours" => BillingMeterKeys.StorageGb,
-        "users" => BillingMeterKeys.Seats,
-        _ => eventType
-    };
 
     public async Task<BillingStatement> ComputeStatementAsync(
         long tenantId, BillingPeriod period, long? rateCardId = null, CancellationToken ct = default,
@@ -629,6 +610,9 @@ public class BillingStatementService : IBillingStatementService
         // The flow meters are metered from the first chargeable instant, so a prorated
         // period never prices work the tenant did before its billing start date.
         var usage = await GetUsageAsync(tenantId, period, policy.ChargeableFromUtc, ct);
+        var governed = await _readiness.ResolveAsync(tenantId, period, usage.Meters,
+            rateCard.Lines.Select(x => x.MeterKey).Append(BillingMeterKeys.BaseSubscription).ToArray(), ct);
+        usage = usage with { Meters = governed.Meters };
         var lines = BuildLines(rateCard, tenant.Plan, usage, policy);
         var total = BillingMath.Round2(lines.Sum(l => l.Amount));
 
@@ -678,6 +662,9 @@ public class BillingStatementService : IBillingStatementService
                         Currency = rateCard.Currency,
                         Status = BillingStatementStatus.Draft,
                         TotalAmount = total,
+                        ReadinessStatus = governed.Readiness.Ready ? BillingReadinessStatus.Ready : BillingReadinessStatus.Blocked,
+                        ReadinessManifestJson = governed.Readiness.ManifestJson,
+                        ReadinessManifestSha256 = governed.Readiness.ManifestSha256,
                         ComputedAtUtc = DateTime.UtcNow,
                         ComputedBy = computedBy
                     };
@@ -698,6 +685,9 @@ public class BillingStatementService : IBillingStatementService
                     statement.Currency = rateCard.Currency;
                     statement.PeriodEndUtc = period.EndUtc;
                     statement.TotalAmount = total;
+                    statement.ReadinessStatus = governed.Readiness.Ready ? BillingReadinessStatus.Ready : BillingReadinessStatus.Blocked;
+                    statement.ReadinessManifestJson = governed.Readiness.ManifestJson;
+                    statement.ReadinessManifestSha256 = governed.Readiness.ManifestSha256;
                     statement.ComputedAtUtc = DateTime.UtcNow;
                     statement.ComputedBy = computedBy;
                     statement.Version++;
@@ -780,6 +770,25 @@ public class BillingStatementService : IBillingStatementService
                     "settle lag that lets late AI reconciliation and dead-letter re-drives land. " +
                     $"Earliest finalize time: {earliestFinalizeUtc:yyyy-MM-dd HH:mm}Z. " +
                     "The Draft stays recomputable until then.");
+
+            var statementRateCard = await _context.Set<RateCard>().AsNoTracking().Include(x => x.Lines)
+                .SingleOrDefaultAsync(x => x.Id == statement.RateCardId, ct)
+                ?? throw new BillingConflictException($"Billing statement {statementId} references a missing rate card.");
+            var statementPeriod = new BillingPeriod(statement.PeriodStartUtc, statement.PeriodEndUtc);
+            var currentUsage = await GetUsageAsync(statement.TenantId, statementPeriod, ct);
+            var currentReadiness = await _readiness.ResolveAsync(statement.TenantId, statementPeriod,
+                currentUsage.Meters,
+                statementRateCard.Lines.Select(x => x.MeterKey).Append(BillingMeterKeys.BaseSubscription).ToArray(), ct);
+            if (!currentReadiness.Readiness.Ready)
+                throw new BillingConflictException("Billing readiness failed: " +
+                    string.Join("; ", currentReadiness.Readiness.Failures.Select(x =>
+                        $"{x.Code}:{x.MeterKey}:{x.Detail}")));
+            if (statement.ReadinessStatus != BillingReadinessStatus.Ready
+                || !string.Equals(statement.ReadinessManifestSha256,
+                    currentReadiness.Readiness.ManifestSha256, StringComparison.Ordinal))
+                throw new BillingConflictException(
+                    $"{BillingReadinessCodes.StaleReadiness}: usage coverage or rating changed after Draft computation; " +
+                    "recompute before finalization.");
 
             statement.Status = BillingStatementStatus.Final;
             statement.FinalizedAtUtc = DateTime.UtcNow;
@@ -1109,9 +1118,16 @@ public class BillingStatementService : IBillingStatementService
         {
             meterByKey.TryGetValue(cardLine.MeterKey, out var meter);
             var metered = meter?.Quantity ?? 0m;
-            var included = cardLine.IncludedQuantity;
-            var billable = Math.Max(0m, metered - included);
-            var listAmount = BillingMath.Round2(billable / PricedUnitDivisor(cardLine.MeterKey) * cardLine.UnitPrice);
+            var governedRating = meter?.AuthoritativeRatedAmount is not null;
+            var included = meter?.AuthoritativeAllowanceApplied ?? cardLine.IncludedQuantity;
+            var billable = meter?.AuthoritativeOverageQuantity ?? Math.Max(0m, metered - included);
+            var listAmount = governedRating
+                ? BillingMath.Round2(meter!.AuthoritativeRatedAmount!.Value)
+                : BillingMath.Round2(billable / PricedUnitDivisor(cardLine.MeterKey) * cardLine.UnitPrice);
+            var displayedUnitPrice = governedRating && billable != 0m
+                ? decimal.Round(listAmount * PricedUnitDivisor(cardLine.MeterKey) / billable, 6,
+                    MidpointRounding.AwayFromZero)
+                : cardLine.UnitPrice;
             if (!policy.Charging)
                 waivedTotal += listAmount;
 
@@ -1123,7 +1139,7 @@ public class BillingStatementService : IBillingStatementService
                 MeteredQuantity = metered,
                 IncludedQuantity = included,
                 BillableQuantity = billable,
-                UnitPrice = cardLine.UnitPrice,
+                UnitPrice = displayedUnitPrice,
                 Amount = policy.Charging ? listAmount : 0m,
                 // Traceability: SourceNote carries provenance (source ledger +
                 // period + BU) and nothing else. The meter's coverage caveat

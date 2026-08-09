@@ -11,6 +11,8 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
@@ -104,7 +106,9 @@ public static class TenantLifecycleHarness
         ErpRfqAutomationContext context,
         string? ownerConnectionString = null,
         TenantLifecycleOptions? options = null,
-        ITenantAccessService? tenantAccess = null)
+        ITenantAccessService? tenantAccess = null,
+        TimeProvider? timeProvider = null,
+        ITenantOffboardingReadinessService? readiness = null)
     {
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
@@ -120,7 +124,9 @@ public static class TenantLifecycleHarness
             new TenantDataExportService(context, configuration, NullLogger<TenantDataExportService>.Instance),
             Options.Create(options ?? new TenantLifecycleOptions()),
             NullLogger<TenantOffboardingService>.Instance,
-            tenantAccess);
+            readiness ?? AlwaysReadyOffboarding.Instance,
+            tenantAccess,
+            timeProvider: timeProvider);
     }
 
     /// <summary>An authenticated platform operator. The <c>sub</c> claim must be positive or
@@ -153,19 +159,39 @@ public static class TenantLifecycleHarness
     }
 
     /// <summary>
-    /// Moves a scheduled deletion's eligibility into the past, which is the only way to test the
-    /// far side of a retention window whose floor is deliberately seven days.
-    ///
-    /// <para>It writes the column directly rather than going through the service, on purpose:
-    /// there is no API that shortens a window, and a test helper that invented one would be
-    /// testing a capability the product refuses to have.</para>
+    /// Advances the isolated application's clock beyond the minimum retention window. The stored
+    /// schedule is never edited, so tests exercise the same predicate production uses.
     /// </summary>
-    public static async Task ElapseRetentionWindowAsync(
-        ErpRfqAutomationContext context, long tenantId, CancellationToken ct = default)
+    public static void ElapseRetentionWindow(MutableTimeProvider clock) =>
+        clock.Advance(TimeSpan.FromDays(31));
+
+    /// <summary>Installs an isolated mutable clock in a WebApplicationFactory test host.</summary>
+    public static MutableTimeProvider RegisterMutableClock(
+        IServiceCollection services, DateTimeOffset? initial = null)
     {
-        var record = await context.Set<TenantOffboarding>().FirstAsync(r => r.TenantId == tenantId, ct);
-        record.PurgeEligibleOn = DateTime.UtcNow.AddMinutes(-1);
-        await context.SaveChangesAsync(ct);
+        var clock = new MutableTimeProvider(initial);
+        services.RemoveAll<TimeProvider>();
+        services.AddSingleton<TimeProvider>(clock);
+        return clock;
+    }
+
+    public sealed class MutableTimeProvider(DateTimeOffset? initial = null) : TimeProvider
+    {
+        private DateTimeOffset _utcNow = initial ?? DateTimeOffset.UtcNow;
+        public override DateTimeOffset GetUtcNow() => _utcNow;
+        public void Advance(TimeSpan amount)
+        {
+            if (amount <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(amount));
+            _utcNow = _utcNow.Add(amount);
+        }
+    }
+
+    private sealed class AlwaysReadyOffboarding : ITenantOffboardingReadinessService
+    {
+        public static readonly AlwaysReadyOffboarding Instance = new();
+        public Task<TenantOffboardingReadinessResult> AssessAsync(
+            Tenant tenant, TenantOffboardingReadinessPhase phase, CancellationToken ct = default) =>
+            Task.FromResult(new TenantOffboardingReadinessResult(true, []));
     }
 }
 

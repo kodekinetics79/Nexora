@@ -28,8 +28,21 @@ public static class BillingServiceExtensions
 
         services.AddScoped<IBillingStatementService, BillingStatementService>();
         services.AddScoped<SubscriptionInvoiceService>();
+        services.AddScoped<SubscriptionTaxService>();
+        services.AddScoped<SubscriptionRevenueControlService>();
         services.AddScoped<UsageMeteringService>();
+        services.AddScoped<EvidenceStorageAccrualService>();
+        services.AddScoped<UsageBillingReadinessService>();
         services.AddScoped<AccountingOutboxService>();
+        services.AddHttpClient(nameof(HttpAccountingExportConnector), client =>
+            client.Timeout = TimeSpan.FromSeconds(30));
+        services.AddSingleton<IAccountingExportConnector, HttpAccountingExportConnector>();
+        services.AddOptions<AccountingExportOptions>()
+            .Bind(configuration.GetSection(AccountingExportOptions.SectionName));
+        services.AddHostedService<AccountingOutboxDispatcher>();
+        services.AddOptions<SubscriptionDunningOptions>()
+            .Bind(configuration.GetSection(SubscriptionDunningOptions.SectionName));
+        services.AddHostedService<SubscriptionDunningWorker>();
         services.AddOptions<BillingRunOptions>()
             .Bind(configuration.GetSection(BillingRunOptions.SectionName))
             .ValidateOnStart();

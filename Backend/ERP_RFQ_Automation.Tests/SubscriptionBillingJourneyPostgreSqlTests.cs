@@ -48,6 +48,9 @@ public sealed class SubscriptionBillingJourneyPostgreSqlTests(PostgreSqlTestData
                 PeriodStartUtc = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc),
                 PeriodEndUtc = new DateTime(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc),
                 Status = BillingStatementStatus.Draft,
+                ReadinessStatus = BillingReadinessStatus.Ready,
+                ReadinessManifestJson = "{\"ready\":true}",
+                ReadinessManifestSha256 = "b342fc286d0216cc212e0d7ba234894e2e7283ddf14f959adf0fe7fd5924308a",
                 Currency = "USD",
                 TotalAmount = 100m,
                 ComputedAtUtc = DateTime.UtcNow,
@@ -76,9 +79,11 @@ public sealed class SubscriptionBillingJourneyPostgreSqlTests(PostgreSqlTestData
         await using (var create = database.ContextFor(null))
         {
             var service = new SubscriptionInvoiceService(create);
+            // Tax jurisdiction/rule evidence is independently certified by the final revenue-control
+            // PG lane. This journey isolates append-only credit/payment AR reconciliation.
             var invoice = await service.CreateDraftAsync(
                 new CreateSubscriptionInvoice(
-                    statementId, 15m, "standard VAT", "Nexora LLC", "NEXORA-TAX-1"),
+                    statementId, 0m, "not taxable", "Nexora LLC", "NEXORA-TAX-1"),
                 "invoice-maker@example.test");
             invoice = await service.FinalizeAsync(invoice.Id, "invoice-checker@example.test");
             invoiceId = invoice.Id;
@@ -101,10 +106,10 @@ public sealed class SubscriptionBillingJourneyPostgreSqlTests(PostgreSqlTestData
             .Include(invoice => invoice.Payments)
             .SingleAsync(invoice => invoice.Id == invoiceId);
 
-        Assert.Equal(115m, persisted.TotalAmount);
+        Assert.Equal(100m, persisted.TotalAmount);
         Assert.Equal(15m, persisted.CreditedAmount);
         Assert.Equal(40m, persisted.PaidAmount);
-        Assert.Equal(60m, persisted.TotalAmount - persisted.CreditedAmount - persisted.PaidAmount);
+        Assert.Equal(45m, persisted.TotalAmount - persisted.CreditedAmount - persisted.PaidAmount);
         Assert.Equal(SubscriptionInvoiceStatus.PartiallyPaid, persisted.Status);
         Assert.Equal(evidenceHash, persisted.SourceEvidenceSha256);
         Assert.Single(persisted.Credits);

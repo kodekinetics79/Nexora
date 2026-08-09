@@ -1,11 +1,18 @@
 namespace ERP_RFQ_Automation.Billing.Metering;
 
+using System.Security.Cryptography;
+using System.Text;
+
 public enum UsageRatingStatus
 {
     Pending,
     Ready,
     BlockedUncertifiedMeter,
-    Rated
+    Rated,
+    RatedZeroWithReason,
+    ExcludedWithReason,
+    Unrated,
+    RatingFailed
 }
 
 public enum UsageEventKind
@@ -61,6 +68,17 @@ public sealed class UsageMinuteAggregate
     public DateTime RefreshedAtUtc { get; set; }
 }
 
+public enum MeterCertificationStatus
+{
+    BillingCertified,
+    ObservabilityOnly,
+    NotImplemented,
+    Blocked
+}
+
+public sealed record UsageMeterDefinition(
+    string EventType, string BillingMeterKey, string Unit, MeterCertificationStatus Certification);
+
 public sealed record RecordUsageEvent(
     Guid UsageEventId,
     long TenantId,
@@ -86,21 +104,62 @@ public sealed record RecordUsageEvent(
     decimal AllowanceApplied = 0,
     decimal? UnitPrice = null);
 
+/// <summary>
+/// Stable identity for a server-derived occurrence. A producer must be able to repeat the
+/// same durable completion after an ambiguous commit without manufacturing a second UUID.
+/// </summary>
+public static class UsageEventIdentity
+{
+    public static Guid FromIdempotencyKey(long tenantId, string idempotencyKey)
+    {
+        if (tenantId <= 0) throw new ArgumentOutOfRangeException(nameof(tenantId));
+        if (string.IsNullOrWhiteSpace(idempotencyKey))
+            throw new ArgumentException("A usage idempotency key is required.", nameof(idempotencyKey));
+        var digest = SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"nexora:usage:v1:{tenantId}:{idempotencyKey.Trim()}"));
+        return new Guid(digest.AsSpan(0, 16));
+    }
+}
+
 public static class UsageMeterCatalog
 {
-    public static readonly IReadOnlyDictionary<string, string> Units =
-        new Dictionary<string, string>(StringComparer.Ordinal)
+    public static readonly IReadOnlyDictionary<string, UsageMeterDefinition> Definitions =
+        new Dictionary<string, UsageMeterDefinition>(StringComparer.Ordinal)
         {
-            ["processing.minutes"] = "minute", ["documents"] = "document",
-            ["pages.processed"] = "page", ["rfqs"] = "rfq", ["quotes"] = "quote",
-            ["orders"] = "order", ["emails"] = "email", ["pages.ocr"] = "page",
-            ["ai.tokens"] = "token", ["api.calls"] = "call", ["storage.gb-hours"] = "gb-hour",
-            ["supplier.searches"] = "search", ["automation.runs"] = "run",
-            ["base.subscription"] = "subscription", ["users"] = "user",
-            ["dedicated.infrastructure"] = "instance"
+            ["processing.minutes"] = D("processing.minutes", "minute", MeterCertificationStatus.NotImplemented),
+            ["documents"] = D("documents", "document", MeterCertificationStatus.BillingCertified),
+            ["pages.processed"] = D("pages.processed", "page", MeterCertificationStatus.Blocked),
+            ["rfqs"] = D("rfqs", "rfq", MeterCertificationStatus.NotImplemented),
+            ["quotes"] = D("quotes", "quote", MeterCertificationStatus.NotImplemented),
+            ["orders"] = D("orders", "order", MeterCertificationStatus.NotImplemented),
+            ["emails"] = D("emails", "email", MeterCertificationStatus.NotImplemented),
+            ["pages.ocr"] = D("pages.ocr", "page", MeterCertificationStatus.Blocked),
+            ["ai.tokens"] = D(ERP_RFQ_Automation.Billing.BillingMeterKeys.AiTokensExternal, "token", MeterCertificationStatus.BillingCertified),
+            ["api.calls"] = D("api.calls", "call", MeterCertificationStatus.NotImplemented),
+            ["storage.gb-hours"] = D(ERP_RFQ_Automation.Billing.BillingMeterKeys.StorageGb, "gb-hour", MeterCertificationStatus.Blocked),
+            ["supplier.searches"] = D("supplier.searches", "search", MeterCertificationStatus.NotImplemented),
+            ["automation.runs"] = D("automation.runs", "run", MeterCertificationStatus.NotImplemented),
+            ["base.subscription"] = D(ERP_RFQ_Automation.Billing.BillingMeterKeys.BaseSubscription, "subscription", MeterCertificationStatus.BillingCertified),
+            ["users"] = D(ERP_RFQ_Automation.Billing.BillingMeterKeys.Seats, "user", MeterCertificationStatus.BillingCertified),
+            ["dedicated.infrastructure"] = D("dedicated.infrastructure", "instance", MeterCertificationStatus.NotImplemented)
         };
 
-    // These meters cannot become invoiceable until their instrumentation is certified.
-    public static bool IsBillingCertified(string eventType) => eventType is not
-        ("pages.processed" or "pages.ocr" or "storage.gb-hours");
+    public static IReadOnlyDictionary<string, string> Units { get; } = Definitions
+        .ToDictionary(x => x.Key, x => x.Value.Unit, StringComparer.Ordinal);
+
+    public static bool IsBillingCertified(string eventType)
+        => Definitions.TryGetValue(eventType, out var definition)
+           && definition.Certification == MeterCertificationStatus.BillingCertified;
+
+    public static UsageMeterDefinition? ForEvent(string eventType)
+        => Definitions.TryGetValue(eventType, out var definition)
+            ? definition with { EventType = eventType }
+            : null;
+
+    public static MeterCertificationStatus BillingCertification(string meterKey)
+        => Definitions.Values.Where(x => x.BillingMeterKey == meterKey)
+            .Select(x => x.Certification).DefaultIfEmpty(MeterCertificationStatus.NotImplemented).First();
+
+    private static UsageMeterDefinition D(string meterKey, string unit, MeterCertificationStatus status)
+        => new("", meterKey, unit, status);
 }

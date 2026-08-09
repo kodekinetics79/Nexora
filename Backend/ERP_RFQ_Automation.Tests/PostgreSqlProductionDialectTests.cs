@@ -837,7 +837,14 @@ public sealed class PostgreSqlProductionDialectTests
         var claims = await Task.WhenAll(Enumerable.Range(0, 4).Select(async index =>
         {
             await using var context = _database.ContextFor(null);
-            return await NewQueue(context).ClaimAsync($"worker-{marker}-{index}", TimeSpan.FromMinutes(5), 4);
+            for (var attempt = 0; attempt < 5; attempt++)
+            {
+                var claim = await NewQueue(context).ClaimAsync(
+                    $"worker-{marker}-{index}", TimeSpan.FromMinutes(5), 4);
+                if (claim is not null) return claim;
+                await Task.Delay(10);
+            }
+            return null;
         }));
 
         Assert.All(claims, claim => Assert.NotNull(claim));

@@ -98,9 +98,13 @@ public sealed class TenantLegalHoldService(
             if (hold.ReleasedOn is not null)
                 throw TenantOffboardingRefusedException.Conflict(
                     $"Legal hold {holdId} was already released on {hold.ReleasedOn:yyyy-MM-dd HH:mm} UTC.");
+            var releasingActorId = ActorId(actor);
+            if (hold.PlacedByPlatformUserId == releasingActorId)
+                throw TenantOffboardingRefusedException.Conflict(
+                    "A legal hold must be released by a different platform Owner from the actor who placed it.");
 
             hold.ReleasedOn = DateTime.UtcNow;
-            hold.ReleasedByPlatformUserId = ActorId(actor);
+            hold.ReleasedByPlatformUserId = releasingActorId;
             hold.ReleasedBy = ActorEmail(actor);
             hold.ReleaseReason = reason;
             await context.SaveChangesAsync(ct);

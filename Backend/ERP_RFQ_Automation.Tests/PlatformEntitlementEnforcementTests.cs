@@ -111,6 +111,24 @@ public sealed class PlatformEntitlementEnforcementTests
     // ---- 1. Tenant status: login -----------------------------------------
 
     [Fact]
+    public async Task Login_ProvisioningTenant_IsDeniedUntilAuthoritativeActivation()
+    {
+        using var db = new TestDb();
+        using var seed = db.ContextFor(null);
+        SeedTenant(seed, 1, Bu, TenantStatus.Provisioning);
+        SeedUser(seed, 10, Bu, "provisioning@example.com");
+        seed.SaveChanges();
+
+        using var ctx = db.ContextFor(null);
+        var ex = await Assert.ThrowsAsync<TenantAccessDeniedException>(() =>
+            AuthRepo(ctx).LoginAsync(new LoginRequestDTO
+                { Email = "provisioning@example.com", Password = "pass-123" }));
+        Assert.Equal(TenantStatus.Provisioning, ex.Status);
+        Assert.Contains("provisioning", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(NexoraProblems.TenantNotActivated, ex.ProblemType);
+    }
+
+    [Fact]
     public async Task Login_SuspendedTenant_IsDeniedWith403TypedException()
     {
         using var db = new TestDb();
@@ -140,6 +158,21 @@ public sealed class PlatformEntitlementEnforcementTests
         using var ctx = db.ContextFor(null);
         await Assert.ThrowsAsync<TenantAccessDeniedException>(
             () => AuthRepo(ctx).LoginAsync(new LoginRequestDTO { Email = "archived@example.com", Password = "pass-123" }));
+    }
+
+    [Fact]
+    public async Task Login_PastDueTenant_IsDeniedWithCommercialReason()
+    {
+        using var db = new TestDb();
+        using var seed = db.ContextFor(null);
+        SeedTenant(seed, 1, Bu, TenantStatus.PastDue);
+        SeedUser(seed, 10, Bu, "pastdue@example.com");
+        seed.SaveChanges();
+
+        using var ctx = db.ContextFor(null);
+        var ex = await Assert.ThrowsAsync<TenantAccessDeniedException>(() =>
+            AuthRepo(ctx).LoginAsync(new LoginRequestDTO { Email = "pastdue@example.com", Password = "pass-123" }));
+        Assert.Contains("past due", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -206,6 +239,19 @@ public sealed class PlatformEntitlementEnforcementTests
         => new(Bu, status is null ? null : 1, status, plan);
 
     [Fact]
+    public async Task StatusGuard_ProvisioningTenant_Returns403AndBlocksTenantApi()
+    {
+        var nextCalled = false;
+        var middleware = new TenantStatusGuardMiddleware(_ => { nextCalled = true; return Task.CompletedTask; });
+        var context = GuardContext(new FixedAccess(Snapshot(TenantStatus.Provisioning)), Bu.ToString());
+
+        await middleware.InvokeAsync(context);
+
+        Assert.False(nextCalled);
+        Assert.Equal(StatusCodes.Status403Forbidden, context.Response.StatusCode);
+    }
+
+    [Fact]
     public async Task StatusGuard_SuspendedTenant_Returns403AndBlocksPipeline()
     {
         var nextCalled = false;
@@ -224,6 +270,19 @@ public sealed class PlatformEntitlementEnforcementTests
         var nextCalled = false;
         var middleware = new TenantStatusGuardMiddleware(_ => { nextCalled = true; return Task.CompletedTask; });
         var context = GuardContext(new FixedAccess(Snapshot(TenantStatus.Archived)), Bu.ToString());
+
+        await middleware.InvokeAsync(context);
+
+        Assert.False(nextCalled);
+        Assert.Equal(StatusCodes.Status403Forbidden, context.Response.StatusCode);
+    }
+
+    [Fact]
+    public async Task StatusGuard_PastDueTenant_Returns403()
+    {
+        var nextCalled = false;
+        var middleware = new TenantStatusGuardMiddleware(_ => { nextCalled = true; return Task.CompletedTask; });
+        var context = GuardContext(new FixedAccess(Snapshot(TenantStatus.PastDue)), Bu.ToString());
 
         await middleware.InvokeAsync(context);
 
@@ -663,13 +722,13 @@ public sealed class PlatformEntitlementEnforcementTests
     }
 
     [Fact]
-    public void ClaimSql_SkipsJobsOfSuspendedAndArchivedTenants_ButNotLegacyBusinessUnits()
+    public void ClaimSql_SkipsJobsOfUnactivatedAndRestrictedTenants_ButNotLegacyBusinessUnits()
     {
-        // P2-A8: Suspended/Archived tenants' queued jobs are excluded from the claim
+        // Provisioning/PastDue/Suspended/Archived tenants' queued jobs are excluded from the claim
         // candidates via a LEFT JOIN on platform.Tenants status (bt.buid IS NULL keeps
         // legacy BUs without a Tenant row claimable — contracted fail-open).
         var sql = ClaimSql();
-        Assert.Contains(@"""Status"" IN ('Suspended','Archived')", sql);
+        Assert.Contains(@"""Status"" IN ('Provisioning','PastDue','Suspended','Archived')", sql);
         Assert.Contains(@"LEFT JOIN blocked_tenants bt ON bt.buid = j.""BusinessUnitId""", sql);
         Assert.Contains("bt.buid IS NULL", sql);
     }

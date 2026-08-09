@@ -150,7 +150,7 @@ namespace ERP_RFQ_Automation.Repositories
                 throw new UnauthorizedAccessException("User account is not active.");
             }
 
-            // Tenant-status enforcement (P0): a Suspended/Archived platform Tenant must
+            // Tenant-status enforcement (P0): a PastDue/Suspended/Archived platform Tenant must
             // never receive a token, even with valid credentials. Runs AFTER password
             // verification so nothing about tenant existence leaks to guessers, and
             // fails OPEN for legacy business units without a platform Tenant row.

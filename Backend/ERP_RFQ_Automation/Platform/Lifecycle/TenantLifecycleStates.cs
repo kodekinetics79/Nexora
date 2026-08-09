@@ -9,8 +9,9 @@ namespace ERP_RFQ_Automation.Platform.Lifecycle;
 /// <para><b>Why this is a separate axis and not four more <see cref="TenantStatus"/> values.</b>
 /// <c>TenantStatus</c> answers one question and is read as the answer to that question all over
 /// the product: <i>may this tenant be served right now?</i> <c>TenantAccessSnapshot.IsAccessDenied</c>
-/// is <c>Status is Suspended or Archived</c>; <c>ExtractionQueue</c>'s <c>blocked_tenants</c> CTE is
-/// <c>"Status" IN ('Suspended','Archived')</c>; <c>BillingRunWorker</c> is <c>Status != Archived</c>.
+/// is <c>Status is Provisioning, PastDue, Suspended or Archived</c>; <c>ExtractionQueue</c>'s
+/// <c>blocked_tenants</c> CTE uses the same four values; <c>BillingRunWorker</c> is
+/// <c>Status != Archived</c>, so a restricted PastDue tenant remains billable.
 /// Adding <c>PendingDeletion</c> to that enum would have made every one of those tests
 /// <c>false</c> for a tenant scheduled for destruction — a customer on their way out would have
 /// regained API access, had their queued extraction jobs claimed and been invoiced again, and
@@ -52,7 +53,7 @@ public enum TenantOffboardingStage
 ///
 /// <para><b>The whole lifecycle, both axes.</b>
 /// <code>
-///   Provisioning -> Active &lt;-&gt; Suspended &lt;-&gt; Archived        (TenantStatus, TenantsController)
+///   Provisioning -> Active &lt;-&gt; PastDue -> Suspended &lt;-&gt; Archived (TenantStatus, TenantsController)
 ///                                                |
 ///                                                |  schedule-deletion (reason, retention days)
 ///                                                v

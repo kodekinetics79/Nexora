@@ -22,6 +22,7 @@ public sealed class TenantLifecycleStateMachineTests
 
     [Theory]
     [InlineData(TenantStatus.Active)]
+    [InlineData(TenantStatus.PastDue)]
     [InlineData(TenantStatus.Suspended)]
     [InlineData(TenantStatus.Provisioning)]
     public async Task Deletion_can_only_be_scheduled_for_an_archived_tenant(TenantStatus status)
@@ -247,12 +248,13 @@ public sealed class TenantLifecycleStateMachineTests
         using var db = new TenantLifecycleTestDb();
         var tenant = await TenantLifecycleHarness.SeedTenantAsync(db, "fresh", TenantStatus.Archived);
         await using var context = db.ContextFor(null);
-        var service = TenantLifecycleHarness.Service(context);
+        var clock = new TenantLifecycleHarness.MutableTimeProvider();
+        var service = TenantLifecycleHarness.Service(context, timeProvider: clock);
         var actor = TenantLifecycleHarness.Operator();
 
         await service.ScheduleDeletionAsync(tenant.Id,
             new ScheduleTenantDeletionRequest { Reason = GoodReason }, actor, null, CancellationToken.None);
-        await TenantLifecycleHarness.ElapseRetentionWindowAsync(context, tenant.Id);
+        TenantLifecycleHarness.ElapseRetentionWindow(clock);
         await service.CancelDeletionAsync(tenant.Id,
             new CancelTenantDeletionRequest { Reason = "Paused." }, actor, null, CancellationToken.None);
 
@@ -297,17 +299,57 @@ public sealed class TenantLifecycleStateMachineTests
     }
 
     [Fact]
+    public async Task Seven_day_boundary_uses_the_application_clock_without_rewriting_the_schedule()
+    {
+        using var db = new TenantLifecycleTestDb();
+        var tenant = await TenantLifecycleHarness.SeedTenantAsync(
+            db, "seven-day-boundary", TenantStatus.Archived, 4_405);
+        await using var context = db.ContextFor(null);
+        var clock = new TenantLifecycleHarness.MutableTimeProvider();
+        var service = TenantLifecycleHarness.Service(context, timeProvider: clock);
+        var actor = TenantLifecycleHarness.Operator();
+
+        await service.ScheduleDeletionAsync(tenant.Id,
+            new ScheduleTenantDeletionRequest { Reason = GoodReason, RetentionDays = 7 },
+            actor, null, CancellationToken.None);
+
+        clock.Advance(TimeSpan.FromDays(7) - TimeSpan.FromSeconds(1));
+        var early = await Assert.ThrowsAsync<TenantOffboardingRefusedException>(() =>
+            service.PurgeAsync(tenant.Id,
+                new ConfirmTenantDestructionRequest { Reason = GoodReason, Confirmation = tenant.Name },
+                actor, null, CancellationToken.None));
+        Assert.Contains("retention window", early.Message, StringComparison.OrdinalIgnoreCase);
+
+        await using (var beforeBoundary = db.ContextFor(null))
+            Assert.Null((await beforeBoundary.Set<TenantOffboarding>().SingleAsync()).PurgeStartedOn);
+
+        clock.Advance(TimeSpan.FromSeconds(1));
+        // Exact eligibility passes the clock guard and reaches the deliberately unreachable owner
+        // connection. The visible start/failure events prove the boundary passed without editing
+        // PurgeEligibleOn in storage.
+        await Assert.ThrowsAnyAsync<Exception>(() => service.PurgeAsync(tenant.Id,
+            new ConfirmTenantDestructionRequest { Reason = GoodReason, Confirmation = tenant.Name },
+            actor, null, CancellationToken.None));
+
+        await using var verify = db.ContextFor(null);
+        var actions = await verify.Set<TenantLifecycleEvent>().Select(x => x.Action).ToListAsync();
+        Assert.Contains(TenantLifecycleActions.PurgeStarted, actions);
+        Assert.Contains(TenantLifecycleActions.PurgeFailed, actions);
+    }
+
+    [Fact]
     public async Task A_purge_whose_confirmation_does_not_name_the_tenant_is_refused()
     {
         using var db = new TenantLifecycleTestDb();
         var tenant = await TenantLifecycleHarness.SeedTenantAsync(db, "wrong-word", TenantStatus.Archived, 4_402);
         await using var context = db.ContextFor(null);
-        var service = TenantLifecycleHarness.Service(context);
+        var clock = new TenantLifecycleHarness.MutableTimeProvider();
+        var service = TenantLifecycleHarness.Service(context, timeProvider: clock);
         var actor = TenantLifecycleHarness.Operator();
 
         await service.ScheduleDeletionAsync(tenant.Id,
             new ScheduleTenantDeletionRequest { Reason = GoodReason }, actor, null, CancellationToken.None);
-        await TenantLifecycleHarness.ElapseRetentionWindowAsync(context, tenant.Id);
+        TenantLifecycleHarness.ElapseRetentionWindow(clock);
 
         foreach (var attempt in new[] { "yes", "DELETE", tenant.Slug, tenant.Name.ToUpperInvariant() })
         {
@@ -356,12 +398,13 @@ public sealed class TenantLifecycleStateMachineTests
         using var db = new TenantLifecycleTestDb();
         var tenant = await TenantLifecycleHarness.SeedTenantAsync(db, "half", TenantStatus.Archived, 4_404);
         await using var context = db.ContextFor(null);
-        var service = TenantLifecycleHarness.Service(context);
+        var clock = new TenantLifecycleHarness.MutableTimeProvider();
+        var service = TenantLifecycleHarness.Service(context, timeProvider: clock);
         var actor = TenantLifecycleHarness.Operator();
 
         await service.ScheduleDeletionAsync(tenant.Id,
             new ScheduleTenantDeletionRequest { Reason = GoodReason }, actor, null, CancellationToken.None);
-        await TenantLifecycleHarness.ElapseRetentionWindowAsync(context, tenant.Id);
+        TenantLifecycleHarness.ElapseRetentionWindow(clock);
 
         // The owner connection the purge needs is unreachable here, which is exactly the shape of
         // a purge that dies mid-flight.
@@ -397,12 +440,13 @@ public sealed class TenantLifecycleStateMachineTests
         using var db = new TenantLifecycleTestDb();
         var tenant = await TenantLifecycleHarness.SeedTenantAsync(db, "race", TenantStatus.Archived, 4_440);
         await using var context = db.ContextFor(null);
-        var service = TenantLifecycleHarness.Service(context);
+        var clock = new TenantLifecycleHarness.MutableTimeProvider();
+        var service = TenantLifecycleHarness.Service(context, timeProvider: clock);
         var actor = TenantLifecycleHarness.Operator();
 
         await service.ScheduleDeletionAsync(tenant.Id,
             new ScheduleTenantDeletionRequest { Reason = GoodReason }, actor, null, CancellationToken.None);
-        await TenantLifecycleHarness.ElapseRetentionWindowAsync(context, tenant.Id);
+        TenantLifecycleHarness.ElapseRetentionWindow(clock);
 
         // The first attempt claims the lease and then dies in the destructive step, exactly as a
         // crashed process would — leaving the lease held.
@@ -418,13 +462,13 @@ public sealed class TenantLifecycleStateMachineTests
         await using (var inFlight = db.ContextFor(null))
         {
             var record = await inFlight.Set<TenantOffboarding>().SingleAsync();
-            record.PurgeStartedOn = DateTime.UtcNow;
+            record.PurgeStartedOn = clock.GetUtcNow().UtcDateTime;
             await inFlight.SaveChangesAsync();
         }
 
         await using var second = db.ContextFor(null);
         var refusal = await Assert.ThrowsAsync<TenantOffboardingRefusedException>(() =>
-            TenantLifecycleHarness.Service(second).PurgeAsync(tenant.Id,
+            TenantLifecycleHarness.Service(second, timeProvider: clock).PurgeAsync(tenant.Id,
                 new ConfirmTenantDestructionRequest { Reason = GoodReason, Confirmation = tenant.Name },
                 actor, null, CancellationToken.None));
 
@@ -445,17 +489,19 @@ public sealed class TenantLifecycleStateMachineTests
         using var db = new TenantLifecycleTestDb();
         var tenant = await TenantLifecycleHarness.SeedTenantAsync(db, "stale", TenantStatus.Archived, 4_441);
         await using var context = db.ContextFor(null);
-        var service = TenantLifecycleHarness.Service(context);
+        var clock = new TenantLifecycleHarness.MutableTimeProvider();
+        var service = TenantLifecycleHarness.Service(context, timeProvider: clock);
         var actor = TenantLifecycleHarness.Operator();
 
         await service.ScheduleDeletionAsync(tenant.Id,
             new ScheduleTenantDeletionRequest { Reason = GoodReason }, actor, null, CancellationToken.None);
-        await TenantLifecycleHarness.ElapseRetentionWindowAsync(context, tenant.Id);
+        TenantLifecycleHarness.ElapseRetentionWindow(clock);
 
         await using (var abandoned = db.ContextFor(null))
         {
             var record = await abandoned.Set<TenantOffboarding>().SingleAsync();
-            record.PurgeStartedOn = DateTime.UtcNow - TenantOffboardingService.PurgeLease.Add(TimeSpan.FromMinutes(1));
+            record.PurgeStartedOn = clock.GetUtcNow().UtcDateTime
+                                    - TenantOffboardingService.PurgeLease.Add(TimeSpan.FromMinutes(1));
             await abandoned.SaveChangesAsync();
         }
 
@@ -463,7 +509,7 @@ public sealed class TenantLifecycleStateMachineTests
         // Reaches the destructive step (and fails there for want of a database) rather than being
         // refused by the lease — which is the assertion.
         var thrown = await Record.ExceptionAsync(() =>
-            TenantLifecycleHarness.Service(retry).PurgeAsync(tenant.Id,
+            TenantLifecycleHarness.Service(retry, timeProvider: clock).PurgeAsync(tenant.Id,
                 new ConfirmTenantDestructionRequest { Reason = GoodReason, Confirmation = tenant.Name },
                 actor, null, CancellationToken.None));
 
@@ -484,12 +530,13 @@ public sealed class TenantLifecycleStateMachineTests
         using var db = new TenantLifecycleTestDb();
         var tenant = await TenantLifecycleHarness.SeedTenantAsync(db, $"restored-{restoredTo}", TenantStatus.Archived, 4_450);
         await using var context = db.ContextFor(null);
-        var service = TenantLifecycleHarness.Service(context);
+        var clock = new TenantLifecycleHarness.MutableTimeProvider();
+        var service = TenantLifecycleHarness.Service(context, timeProvider: clock);
         var actor = TenantLifecycleHarness.Operator();
 
         await service.ScheduleDeletionAsync(tenant.Id,
             new ScheduleTenantDeletionRequest { Reason = GoodReason }, actor, null, CancellationToken.None);
-        await TenantLifecycleHarness.ElapseRetentionWindowAsync(context, tenant.Id);
+        TenantLifecycleHarness.ElapseRetentionWindow(clock);
 
         await using (var restore = db.ContextFor(null))
         {
@@ -499,7 +546,7 @@ public sealed class TenantLifecycleStateMachineTests
         }
 
         await using var verify = db.ContextFor(null);
-        var reloaded = TenantLifecycleHarness.Service(verify);
+        var reloaded = TenantLifecycleHarness.Service(verify, timeProvider: clock);
 
         var status = await reloaded.GetStatusAsync(tenant.Id, CancellationToken.None);
         Assert.Equal(nameof(TenantOffboardingStage.PendingDeletion), status.Stage);
@@ -526,7 +573,8 @@ public sealed class TenantLifecycleStateMachineTests
         using var db = new TenantLifecycleTestDb();
         var tenant = await TenantLifecycleHarness.SeedTenantAsync(db, "revived", TenantStatus.Archived, 4_451);
         await using var context = db.ContextFor(null);
-        var service = TenantLifecycleHarness.Service(context);
+        var clock = new TenantLifecycleHarness.MutableTimeProvider();
+        var service = TenantLifecycleHarness.Service(context, timeProvider: clock);
         var actor = TenantLifecycleHarness.Operator();
 
         await service.ScheduleDeletionAsync(tenant.Id,
@@ -546,11 +594,11 @@ public sealed class TenantLifecycleStateMachineTests
             });
             await revived.SaveChangesAsync();
         }
-        await TenantLifecycleHarness.ElapseRetentionWindowAsync(context, tenant.Id);
+        TenantLifecycleHarness.ElapseRetentionWindow(clock);
 
         await using var verify = db.ContextFor(null);
         var refusal = await Assert.ThrowsAsync<TenantOffboardingRefusedException>(() =>
-            TenantLifecycleHarness.Service(verify).PurgeAsync(tenant.Id,
+            TenantLifecycleHarness.Service(verify, timeProvider: clock).PurgeAsync(tenant.Id,
                 new ConfirmTenantDestructionRequest { Reason = GoodReason, Confirmation = tenant.Name },
                 actor, null, CancellationToken.None));
 
@@ -568,7 +616,8 @@ public sealed class TenantLifecycleStateMachineTests
         using var db = new TenantLifecycleTestDb();
         var tenant = await TenantLifecycleHarness.SeedTenantAsync(db, "resched", TenantStatus.Archived, 4_452);
         await using var context = db.ContextFor(null);
-        var service = TenantLifecycleHarness.Service(context);
+        var clock = new TenantLifecycleHarness.MutableTimeProvider();
+        var service = TenantLifecycleHarness.Service(context, timeProvider: clock);
         var actor = TenantLifecycleHarness.Operator();
 
         await service.ScheduleDeletionAsync(tenant.Id,
@@ -586,15 +635,16 @@ public sealed class TenantLifecycleStateMachineTests
 
         await service.CancelDeletionAsync(tenant.Id,
             new CancelTenantDeletionRequest { Reason = "Customer returned." }, actor, null, CancellationToken.None);
+        clock.Advance(TimeSpan.FromMinutes(1));
         await service.ScheduleDeletionAsync(tenant.Id,
             new ScheduleTenantDeletionRequest { Reason = "Second offboarding; renewal lapsed again." },
             actor, null, CancellationToken.None);
-        await TenantLifecycleHarness.ElapseRetentionWindowAsync(context, tenant.Id);
+        TenantLifecycleHarness.ElapseRetentionWindow(clock);
 
         await using var verify = db.ContextFor(null);
         // Reaches the destructive step rather than being refused: the guard is satisfied.
         var thrown = await Record.ExceptionAsync(() =>
-            TenantLifecycleHarness.Service(verify).PurgeAsync(tenant.Id,
+            TenantLifecycleHarness.Service(verify, timeProvider: clock).PurgeAsync(tenant.Id,
                 new ConfirmTenantDestructionRequest { Reason = GoodReason, Confirmation = tenant.Name },
                 actor, null, CancellationToken.None));
 
@@ -606,6 +656,7 @@ public sealed class TenantLifecycleStateMachineTests
 
     [Theory]
     [InlineData(TenantStatus.Active)]
+    [InlineData(TenantStatus.PastDue)]
     [InlineData(TenantStatus.Provisioning)]
     public async Task Personal_data_cannot_be_erased_while_the_tenant_is_still_being_served(TenantStatus status)
     {
@@ -673,11 +724,10 @@ public sealed class TenantLifecycleStateMachineTests
     }
 
     [Fact]
-    public async Task Erasure_and_deletion_are_independently_reachable()
+    public async Task Erasure_does_not_schedule_deletion_and_scheduling_does_not_mark_erasure_complete()
     {
-        // Neither operation is a precondition of the other. A tenant can be erased with no
-        // deletion in sight, and a tenant already inside its retention window can be erased
-        // without that touching the clock.
+        // The operations remain distinct: erasure does not schedule deletion, and scheduling does
+        // not fabricate erasure proof. The readiness gate composes them only at final purge.
         using var db = new TenantLifecycleTestDb();
         var erasedOnly = await TenantLifecycleHarness.SeedTenantAsync(
             db, "erased-only", TenantStatus.Suspended, 4_420);
