@@ -21,8 +21,14 @@ public interface ICustomFieldApplicationService
     Task<CustomFieldDefinitionResponse> RetireDefinitionAsync(
         long businessUnitId, long definitionId, RetireCustomFieldDefinitionCommand command,
         string actor, CancellationToken ct);
+    Task<CustomFieldDefinitionResponse> ReactivateDefinitionAsync(
+        long businessUnitId, long definitionId, CancellationToken ct);
+    Task<IReadOnlyList<CustomFieldDefinitionResponse>> ReorderDefinitionsAsync(
+        long businessUnitId, ReorderCustomFieldsCommand command, CancellationToken ct);
     Task<CustomFieldEntitySchemaResponse> GetEntitySchemaAsync(
         long businessUnitId, string entityType, long entityId, bool managerOrAdmin, CancellationToken ct);
+
+    /// <summary>RETIRED — always throws <see cref="CustomFieldWritePathRetiredException"/>.</summary>
     Task<CustomFieldValueResponse> UpsertValueAsync(
         long businessUnitId, string entityType, long entityId, string stableKey,
         UpsertCustomFieldValueCommand command, string actor, bool managerOrAdmin, CancellationToken ct);
@@ -51,7 +57,8 @@ public sealed class CustomFieldApplicationService : ICustomFieldApplicationServi
             query = query.Where(x => x.EntityType == canonical);
         }
 
-        return (await query.OrderBy(x => x.EntityType).ThenBy(x => x.StableKey).ToListAsync(ct))
+        return (await query.OrderBy(x => x.EntityType).ThenBy(x => x.DisplayOrder)
+                .ThenBy(x => x.StableKey).ToListAsync(ct))
             .Select(ToResponse).ToArray();
     }
 
@@ -86,6 +93,7 @@ public sealed class CustomFieldApplicationService : ICustomFieldApplicationServi
             {
                 var definition = CustomFieldDefinition.Create(
                     businessUnitId, entityType, stableKey, actor, DateTime.UtcNow);
+                definition.SetDisplayOrder(command.DisplayOrder);
                 var version = definition.AddVersion(command.Version, actor, DateTime.UtcNow);
                 await PopulateVersionAsync(businessUnitId, entityType, version, command.Options, command.Rules,
                     command.DependencyDefinitionIds, ct);
@@ -136,6 +144,8 @@ public sealed class CustomFieldApplicationService : ICustomFieldApplicationServi
                 if (definition.Versions.Count >= MaximumVersionsPerDefinition)
                     throw new CustomFieldConflictException(
                         $"A custom field cannot have more than {MaximumVersionsPerDefinition} versions.");
+
+                await EnsureDataTypeChangeIsSafeAsync(businessUnitId, definition, command.Version.DataType, ct);
 
                 var version = definition.AddVersion(command.Version, actor, DateTime.UtcNow);
                 await PopulateVersionAsync(businessUnitId, definition.EntityType, version, command.Options, command.Rules,
@@ -226,6 +236,106 @@ public sealed class CustomFieldApplicationService : ICustomFieldApplicationServi
         }
     }
 
+    /// <summary>
+    /// AA-01 · reactivation. Brings a retired field back at its last active version so a
+    /// manager can undo a withdrawal without inventing a second field with a near-identical
+    /// key (which would fragment the data for good).
+    /// </summary>
+    public async Task<CustomFieldDefinitionResponse> ReactivateDefinitionAsync(
+        long businessUnitId, long definitionId, CancellationToken ct)
+    {
+        EnsureTenant(businessUnitId);
+        try
+        {
+            return await InTransactionAsync(async () =>
+            {
+                var definition = await DefinitionGraph().SingleOrDefaultAsync(
+                    x => x.BusinessUnitId == businessUnitId && x.Id == definitionId, ct)
+                    ?? throw new CustomFieldNotFoundException($"Custom-field definition {definitionId} was not found.");
+                definition.Reactivate();
+                await _db.SaveChangesAsync(ct);
+                return ToResponse(definition);
+            }, ct);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            _db.ChangeTracker.Clear();
+            throw new CustomFieldConflictException(
+                "Custom-field definition changed since it was loaded. Refresh and retry.");
+        }
+    }
+
+    /// <summary>
+    /// AA-01 · repositions a whole entity's custom fields in one call.
+    ///
+    /// A batch rather than one call per arrow click, and unversioned, so dragging the admin
+    /// list into shape does not consume the 20-version-per-field budget that exists to keep
+    /// LABEL and TYPE history intact.
+    /// </summary>
+    public async Task<IReadOnlyList<CustomFieldDefinitionResponse>> ReorderDefinitionsAsync(
+        long businessUnitId, ReorderCustomFieldsCommand command, CancellationToken ct)
+    {
+        EnsureTenant(businessUnitId);
+        ArgumentNullException.ThrowIfNull(command);
+        var entityType = CanonicalEntityType(command.EntityType);
+
+        try
+        {
+            return await InTransactionAsync(async () =>
+            {
+                var definitions = await DefinitionGraph()
+                    .Where(x => x.BusinessUnitId == businessUnitId && x.EntityType == entityType)
+                    .ToListAsync(ct);
+                var byId = definitions.ToDictionary(x => x.Id);
+
+                foreach (var entry in command.Order ?? [])
+                {
+                    // An id this tenant does not own simply is not in the map — a reorder can
+                    // never be used to probe for, or touch, another tenant's definitions.
+                    if (!byId.TryGetValue(entry.DefinitionId, out var definition)) continue;
+                    if (definition.Status == CustomFieldDefinitionStatus.Retired) continue;
+                    definition.SetDisplayOrder(entry.DisplayOrder);
+                }
+
+                await _db.SaveChangesAsync(ct);
+                return (IReadOnlyList<CustomFieldDefinitionResponse>)definitions
+                    .OrderBy(x => x.DisplayOrder).ThenBy(x => x.StableKey)
+                    .Select(ToResponse).ToArray();
+            }, ct);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            _db.ChangeTracker.Clear();
+            throw new CustomFieldConflictException(
+                "Custom-field definitions changed since they were loaded. Refresh and retry.");
+        }
+    }
+
+    /// <summary>
+    /// Refuses a data-type change on a field that already holds values.
+    ///
+    /// Silent coercion is the failure mode being prevented: a Text field holding "1,200 SAR"
+    /// re-declared as Decimal would either throw on every subsequent read or quietly become
+    /// unreadable. Neither is acceptable for data a customer typed. The field must be retired
+    /// and replaced, which keeps the old values readable under the old declaration.
+    /// </summary>
+    private async Task EnsureDataTypeChangeIsSafeAsync(
+        long businessUnitId, CustomFieldDefinition definition, CustomFieldDataType requestedType, CancellationToken ct)
+    {
+        var current = definition.ActiveVersionNumber.HasValue
+            ? definition.Versions.SingleOrDefault(x => x.VersionNumber == definition.ActiveVersionNumber.Value)
+            : null;
+        if (current is null || current.DataType == requestedType) return;
+
+        if (await CustomFieldBagService.AnyStoredValueAsync(
+                _db, businessUnitId, definition.EntityType, definition.Id, definition.StableKey, ct))
+            throw new CustomFieldConflictException(
+                $"'{definition.StableKey}' already holds values, so its type cannot change from " +
+                $"{current.DataType} to {requestedType}. Existing values would stop matching their own " +
+                "declaration and Nexora will not silently convert them. Retire this field and create a " +
+                "replacement instead — retiring keeps every value already captured readable.");
+    }
+
     public async Task<CustomFieldEntitySchemaResponse> GetEntitySchemaAsync(
         long businessUnitId, string entityType, long entityId, bool managerOrAdmin, CancellationToken ct)
     {
@@ -263,110 +373,35 @@ public sealed class CustomFieldApplicationService : ICustomFieldApplicationServi
         }).ToArray());
     }
 
-    public async Task<CustomFieldValueResponse> UpsertValueAsync(
+    /// <summary>
+    /// RETIRED WRITE PATH — fails closed.
+    ///
+    /// AA-01 ratified ONE storage shape for custom-field values: a single jsonb bag on the
+    /// owning row, validated against the tenant's field definitions. This method wrote the
+    /// separate EAV <c>custom_field_values</c> table. Two unsynchronised stores for one
+    /// concept diverge; the only question is when. The bag is the survivor.
+    ///
+    /// The method is kept and fails loudly rather than being deleted so that any caller —
+    /// including an integration written against the old route — gets a message naming the
+    /// replacement instead of a 404 that reads like a deployment problem.
+    ///
+    /// The READ path (<see cref="GetEntitySchemaAsync"/>) is untouched: rows already in
+    /// <c>custom_field_values</c> stay readable. The table itself is not dropped here.
+    ///
+    /// Behaviour NOT carried over to the bag path, stated plainly rather than implied:
+    /// per-value optimistic concurrency, idempotency keys, and
+    /// <c>custom_field_value_history</c> audit rows. Conditional show/hide/require rules
+    /// (<see cref="ConditionalRuleEvaluator"/>) are likewise not evaluated on bag writes.
+    /// Sensitive-field (manager/admin) gating IS carried over — see
+    /// <see cref="CustomFieldBagService"/>.
+    /// </summary>
+    public Task<CustomFieldValueResponse> UpsertValueAsync(
         long businessUnitId, string entityType, long entityId, string stableKey,
-        UpsertCustomFieldValueCommand command, string actor, bool managerOrAdmin, CancellationToken ct)
-    {
-        EnsureTenant(businessUnitId);
-        actor = CustomFieldDefinition.Require(actor, nameof(actor), 200);
-        var canonical = CanonicalEntityType(entityType);
-        stableKey = CustomFieldGovernance.NormalizeAndValidateStableKey(stableKey);
-        ValidateMutationMetadata(command);
-        var requestHash = HashRequest(command);
-
-        await EnsureEntityExistsAsync(businessUnitId, canonical, entityId, ct);
-        var authorizedDefinition = await DefinitionGraph().AsNoTracking().SingleOrDefaultAsync(x =>
-            x.BusinessUnitId == businessUnitId && x.EntityType == canonical && x.StableKey == stableKey &&
-            x.Status == CustomFieldDefinitionStatus.Active, ct)
-            ?? throw new CustomFieldNotFoundException($"Active custom field '{stableKey}' was not found for {canonical}.");
-        var authorizedVersion = ActiveVersion(authorizedDefinition);
-        if (!managerOrAdmin && authorizedVersion.EditAccess == CustomFieldAccessLevel.ManagerOrAdmin)
-            throw new CustomFieldConflictException($"Custom field '{stableKey}' requires manager/admin access.");
-        var authorizedRuleState = await GetRuleStateAsync(
-            businessUnitId, canonical, entityId, authorizedDefinition, ct);
-        EnforceRuleState(stableKey, command.Value, authorizedRuleState);
-        await ValidateReferenceAsync(businessUnitId, command.Value, ct);
-        var replay = await ReplayAsync(
-            businessUnitId, command.IdempotencyKey, canonical, entityId, authorizedDefinition.Id,
-            actor, requestHash, ct);
-        if (replay != null) return replay;
-
-        try
-        {
-            return await InTransactionAsync(async () =>
-            {
-                await EnsureEntityExistsAsync(businessUnitId, canonical, entityId, ct);
-                var definition = await DefinitionGraph().SingleOrDefaultAsync(x =>
-                x.BusinessUnitId == businessUnitId && x.EntityType == canonical && x.StableKey == stableKey &&
-                x.Status == CustomFieldDefinitionStatus.Active, ct)
-                ?? throw new CustomFieldNotFoundException($"Active custom field '{stableKey}' was not found for {canonical}.");
-            var version = ActiveVersion(definition);
-            if (!managerOrAdmin && version.EditAccess == CustomFieldAccessLevel.ManagerOrAdmin)
-                throw new CustomFieldConflictException($"Custom field '{stableKey}' requires manager/admin access.");
-            var ruleState = await GetRuleStateAsync(businessUnitId, canonical, entityId, definition, ct);
-            EnforceRuleState(stableKey, command.Value, ruleState);
-            await ValidateReferenceAsync(businessUnitId, command.Value, ct);
-
-            var record = await _db.Set<CustomFieldRecord>().SingleOrDefaultAsync(x =>
-                x.BusinessUnitId == businessUnitId && x.EntityType == canonical && x.EntityId == entityId, ct);
-            if (record == null)
-            {
-                record = CustomFieldRecord.Create(businessUnitId, canonical, entityId, DateTime.UtcNow);
-                _db.Add(record);
-                await _db.SaveChangesAsync(ct);
-            }
-
-            var value = await _db.Set<CustomFieldValue>().SingleOrDefaultAsync(x =>
-                x.BusinessUnitId == businessUnitId && x.RecordId == record.Id && x.DefinitionId == definition.Id, ct);
-            CustomFieldValueResponse? before = null;
-            string changeType;
-            if (value == null)
-            {
-                if (command.ExpectedVersion.HasValue)
-                    throw new CustomFieldConflictException("The custom-field value does not exist; expectedVersion must be omitted.");
-                value = CustomFieldValue.Create(businessUnitId, record.Id, definition.Id, version,
-                    command.Value, actor, DateTime.UtcNow);
-                _db.Add(value);
-                await _db.SaveChangesAsync(ct);
-                changeType = "Created";
-            }
-            else
-            {
-                if (!command.ExpectedVersion.HasValue)
-                    throw new CustomFieldConflictException("expectedVersion is required when updating a custom-field value.");
-                if (value.Version != command.ExpectedVersion.Value)
-                    throw new CustomFieldConflictException(
-                        "Custom-field value changed since it was loaded. Refresh and retry.");
-                before = ToResponse(value, definition.StableKey);
-                value.Update(version, command.Value, actor, DateTime.UtcNow, command.ExpectedVersion.Value);
-                changeType = "Updated";
-            }
-
-            var after = ToResponse(value, definition.StableKey);
-            _db.Add(CustomFieldValueHistory.Create(
-                businessUnitId, value.Id, changeType,
-                before == null ? null : JsonSerializer.Serialize(before, JsonOptions),
-                JsonSerializer.Serialize(after, JsonOptions), actor, DateTime.UtcNow,
-                command.CorrelationId, command.IdempotencyKey, requestHash, command.Reason));
-                await _db.SaveChangesAsync(ct);
-                return after;
-            }, ct);
-        }
-        catch (DbUpdateConcurrencyException)
-        {
-            throw new CustomFieldConflictException(
-                "Custom-field value changed since it was loaded. Refresh and retry.");
-        }
-        catch (DbUpdateException)
-        {
-            _db.ChangeTracker.Clear();
-            var concurrentReplay = await ReplayAsync(
-                businessUnitId, command.IdempotencyKey, canonical, entityId, authorizedDefinition.Id,
-                actor, requestHash, ct);
-            if (concurrentReplay != null) return concurrentReplay;
-            throw;
-        }
-    }
+        UpsertCustomFieldValueCommand command, string actor, bool managerOrAdmin, CancellationToken ct) =>
+        throw new CustomFieldWritePathRetiredException(
+            "This custom-field value write path has been retired. Custom-field values are stored in the " +
+            "jsonb bag on the record itself. Use PUT /api/custom-fields/records/{entityType}/{entityId} " +
+            "instead. Values already written here remain readable.");
 
     private async Task PopulateVersionAsync(
         long businessUnitId, string entityType, CustomFieldVersion version,
@@ -455,12 +490,6 @@ public sealed class CustomFieldApplicationService : ICustomFieldApplicationServi
         CustomFieldDependencyGraph.EnsureAcyclic(edges);
     }
 
-    private async Task ValidateReferenceAsync(long businessUnitId, CustomFieldValueInput input, CancellationToken ct)
-    {
-        if (!input.ReferenceId.HasValue) return;
-        var referenceType = CanonicalEntityType(input.ReferenceType!);
-        await EnsureEntityExistsAsync(businessUnitId, referenceType, input.ReferenceId.Value, ct);
-    }
 
     private async Task EnsureEntityExistsAsync(
         long businessUnitId, string entityType, long entityId, CancellationToken ct)
@@ -482,77 +511,14 @@ public sealed class CustomFieldApplicationService : ICustomFieldApplicationServi
         if (!exists) throw new CustomFieldNotFoundException($"{entityType} {entityId} was not found in this tenant.");
     }
 
-    private async Task<CustomFieldValueResponse?> ReplayAsync(
-        long businessUnitId, string idempotencyKey, string entityType, long entityId,
-        long definitionId, string actor, string requestHash, CancellationToken ct)
-    {
-        var history = await (
-            from item in _db.Set<CustomFieldValueHistory>().AsNoTracking()
-            join value in _db.Set<CustomFieldValue>().AsNoTracking()
-                on item.CustomFieldValueId equals value.Id
-            join record in _db.Set<CustomFieldRecord>().AsNoTracking()
-                on value.RecordId equals record.Id
-            where item.BusinessUnitId == businessUnitId && item.IdempotencyKey == idempotencyKey
-            select new
-            {
-                item.AfterJson,
-                item.ChangedBy,
-                item.RequestHash,
-                value.DefinitionId,
-                record.EntityType,
-                record.EntityId
-            }).SingleOrDefaultAsync(ct);
-        if (history == null) return null;
-        if (history.DefinitionId != definitionId || history.EntityType != entityType || history.EntityId != entityId)
-            throw new CustomFieldConflictException(
-                "The idempotency key was already used for a different custom-field operation.");
-        if (!string.Equals(history.ChangedBy, actor, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(history.RequestHash, requestHash, StringComparison.Ordinal))
-            throw new CustomFieldConflictException(
-                "The idempotency key was already used by a different actor or request payload.");
-        return history.AfterJson == null
-            ? null
-            : JsonSerializer.Deserialize<CustomFieldValueResponse>(history.AfterJson, JsonOptions)
-              ?? throw new CustomFieldDomainException("Stored custom-field history is invalid.");
-    }
 
     private IQueryable<CustomFieldDefinition> DefinitionGraph() => _db.Set<CustomFieldDefinition>()
         .Include(x => x.Versions).ThenInclude(x => x.Options)
         .Include(x => x.Versions).ThenInclude(x => x.Rules)
         .Include(x => x.Versions).ThenInclude(x => x.Dependencies);
 
-    private async Task<CustomFieldRuleState> GetRuleStateAsync(
-        long businessUnitId, string entityType, long entityId,
-        CustomFieldDefinition target, CancellationToken ct)
-    {
-        var definitions = await DefinitionGraph().AsNoTracking().Where(x =>
-            x.BusinessUnitId == businessUnitId && x.EntityType == entityType &&
-            x.Status == CustomFieldDefinitionStatus.Active).ToListAsync(ct);
-        var ids = definitions.Select(x => x.Id).ToArray();
-        var values = await _db.Set<CustomFieldValue>().AsNoTracking().Where(x =>
-            x.BusinessUnitId == businessUnitId && ids.Contains(x.DefinitionId) &&
-            x.Record.EntityType == entityType && x.Record.EntityId == entityId).ToListAsync(ct);
-        var byDefinition = values.ToDictionary(x => x.DefinitionId);
-        var byKey = definitions.Where(x => byDefinition.ContainsKey(x.Id)).ToDictionary(
-            x => x.StableKey, x => ToInput(byDefinition[x.Id]), StringComparer.OrdinalIgnoreCase);
-        return ConditionalRuleEvaluator.Evaluate(ActiveVersion(target), byKey);
-    }
 
-    private static void EnforceRuleState(
-        string stableKey, CustomFieldValueInput input, CustomFieldRuleState state)
-    {
-        if (!state.IsVisible)
-            throw new CustomFieldConflictException($"Custom field '{stableKey}' is not currently visible.");
-        if (state.IsReadOnly)
-            throw new CustomFieldConflictException($"Custom field '{stableKey}' is currently read-only.");
-        if (state.IsRequired && IsEmpty(input))
-            throw new CustomFieldDomainException($"Custom field '{stableKey}' is required in the current context.");
-    }
 
-    private static bool IsEmpty(CustomFieldValueInput input) =>
-        input.Text == null && !input.Integer.HasValue && !input.Decimal.HasValue &&
-        !input.Boolean.HasValue && !input.Date.HasValue && !input.Timestamp.HasValue &&
-        input.Json == null && !input.ReferenceId.HasValue;
 
     private static CustomFieldValueInput ToInput(CustomFieldValue value) => new(
         value.TextValue, value.IntegerValue, value.DecimalValue, value.BooleanValue,
@@ -579,7 +545,7 @@ public sealed class CustomFieldApplicationService : ICustomFieldApplicationServi
         definition.Id, definition.EntityType, definition.StableKey, definition.Status,
         definition.ActiveVersionNumber, definition.Versions.OrderBy(x => x.VersionNumber).Select(ToResponse).ToArray(),
         definition.CreatedOn, definition.CreatedBy, definition.RetiredOn, definition.RetiredBy,
-        definition.RetirementReason, definition.Version);
+        definition.RetirementReason, definition.Version, definition.DisplayOrder);
 
     private static CustomFieldVersionResponse ToResponse(CustomFieldVersion version) => new(
         version.VersionNumber, version.Label, version.HelpText, version.DataType, version.IsRequired,
@@ -603,6 +569,9 @@ public sealed class CustomFieldApplicationService : ICustomFieldApplicationServi
         {
             "commercialcase" or "commercial_case" => "CommercialCase",
             "lead" => "Lead",
+            // AA-01: the lead/RFQ LINE, distinct from the lead header. This is the grid the
+            // product owner was pointing at when he asked for configurable columns.
+            "leaditem" or "lead_item" or "leadline" => "LeadItem",
             "rfq" => "Rfq",
             "quote" or "quotation" => "Quote",
             "order" => "Order",
@@ -614,28 +583,7 @@ public sealed class CustomFieldApplicationService : ICustomFieldApplicationServi
         };
     }
 
-    private static void ValidateMutationMetadata(UpsertCustomFieldValueCommand command)
-    {
-        CustomFieldDefinition.Require(command.IdempotencyKey, nameof(command.IdempotencyKey), 160);
-        if (command.IdempotencyKey.StartsWith("legacy:", StringComparison.OrdinalIgnoreCase))
-            throw new CustomFieldDomainException("The legacy idempotency-key prefix is reserved.");
-        CustomFieldDefinition.Require(command.CorrelationId, nameof(command.CorrelationId), 100);
-        if (command.Reason?.Length > 1000)
-            throw new CustomFieldDomainException("Reason cannot exceed 1000 characters.");
-        if (command.ExpectedVersion is <= 0)
-            throw new CustomFieldDomainException("expectedVersion must be positive when supplied.");
-    }
 
-    private static string HashRequest(UpsertCustomFieldValueCommand command)
-    {
-        var canonical = JsonSerializer.Serialize(new
-        {
-            command.Value,
-            command.ExpectedVersion,
-            command.Reason
-        }, JsonOptions);
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
-    }
 
     private static void EnsureTenant(long businessUnitId)
     {

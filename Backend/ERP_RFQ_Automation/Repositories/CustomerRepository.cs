@@ -91,7 +91,10 @@ namespace ERP_RFQ_Automation.Repositories
                 CreatedOn = x.Customer.CreatedOn,
                 ModifiedBy = x.Customer.ModifiedBy,
                 ModifiedOn = x.Customer.ModifiedOn,
-                ConcurrencyToken = x.Customer.ConcurrencyToken
+                ConcurrencyToken = x.Customer.ConcurrencyToken,
+                // AA-01: tenant-defined custom field values travel with the list row so a
+                // custom-field column renders from data already on the page.
+                CustomFields = x.Customer.CustomFieldsJson
             }).ToListAsync();
 
             return (customers, totalCount);

@@ -26,6 +26,12 @@ export interface CustomerDTO {
   modifiedBy?: string;
   modifiedOn?: string;
   concurrencyToken: string;
+  /**
+   * AA-01 · raw jsonb bag of tenant-defined custom field values, keyed by stable key.
+   * Read through `readCustomFieldValue` — never parsed inline, because the column is open
+   * jsonb and a malformed payload must render blank rather than break the grid.
+   */
+  customFields?: string | null;
 }
 
 export interface PaginatedCustomerResponse {

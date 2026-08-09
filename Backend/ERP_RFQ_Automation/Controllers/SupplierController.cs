@@ -266,6 +266,7 @@ namespace ERP_RFQ_Automation.Controllers
                 Buid = supplier.Buid,
                 BusinessUnitName = supplier.Bu != null ? supplier.Bu.BusinessUnitName : null,
                 IsActive = supplier.IsActive,
+                CustomFields = supplier.CustomFieldsJson,
                 GovernanceStatus = supplier.GovernanceStatus,
                 VerificationStatus = supplier.VerificationStatus,
                 ComplianceStatus = supplier.ComplianceStatus,

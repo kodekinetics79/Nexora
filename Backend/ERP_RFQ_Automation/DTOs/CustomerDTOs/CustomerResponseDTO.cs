@@ -28,5 +28,13 @@
         public Guid ConcurrencyToken { get; set; }
 
         public string? DocId { get; set; }
+
+        /// <summary>
+        /// AA-01 · tenant-defined custom field values for this customer, as the raw jsonb
+        /// object keyed by custom-field stable key. Carried on the list payload so the grid
+        /// can render a custom-field column without a second round trip per row. Null when
+        /// the tenant has defined no custom fields or this record has no values.
+        /// </summary>
+        public string? CustomFields { get; set; }
     }
 }

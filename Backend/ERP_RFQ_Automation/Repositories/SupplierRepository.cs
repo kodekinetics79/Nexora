@@ -109,6 +109,7 @@ namespace ERP_RFQ_Automation.Repositories
                 Buid = x.Supplier.Buid,
                 BusinessUnitName = x.BusinessUnitName,
                 IsActive = x.Supplier.IsActive,
+                CustomFields = x.Supplier.CustomFieldsJson,
                 GovernanceStatus = x.Supplier.GovernanceStatus,
                 VerificationStatus = x.Supplier.VerificationStatus,
                 ComplianceStatus = x.Supplier.ComplianceStatus,

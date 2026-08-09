@@ -26,6 +26,9 @@ import cityService from '../../api/services/cityService';
 import { useAuth } from '../../context/AuthContext';
 import SearchField from '../../components/common/SearchField';
 import UploadExportToolbar from '../../components/common/UploadExportToolbar';
+import ColumnPreferences from '../../components/common/ColumnPreferences';
+import CustomFieldValuesEditor from '../../components/common/CustomFieldValuesEditor';
+import useColumnPreferences from '../../hooks/useColumnPreferences';
 import { useSnackbar } from 'notistack';
 
 // ─── Empty forms ───────────────────────────────────────────────────────────
@@ -125,6 +128,8 @@ const CustomersPage: React.FC = () => {
   const canDelete = hasPermission('Customers', 'delete');
 
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
+  // AA-01 · per-user column layout for this grid, plus tenant-defined Customer fields.
+  const columnPreferences = useColumnPreferences('customers.list');
   const [search, setSearch] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [selectedRecord, setSelectedRecord] = useState<CustomerDTO | null>(null);
@@ -373,7 +378,12 @@ const CustomersPage: React.FC = () => {
     { field: 'contactEmail', headerName: t('email'), flex: 1.2, minWidth: 180 },
     { field: 'billingCity', headerName: t('city'), width: 120, renderCell: (p) => p.value ?? '—' },
     { field: 'billingCountry', headerName: t('country'), width: 120, renderCell: (p) => p.value ?? '—' },
+    // AA-01: already in the payload, previously discarded by this grid. Off by default,
+    // one tick away for anyone who ships to a different address than they bill.
+    { field: 'shippingCity', headerName: 'Shipping city', width: 130, renderCell: (p) => p.value ?? '—' },
+    { field: 'shippingCountry', headerName: 'Shipping country', width: 140, renderCell: (p) => p.value ?? '—' },
     { field: 'isActive', headerName: t('status'), width: 100, renderCell: (p) => <Chip label={p.value ? 'Active' : 'Inactive'} color={p.value ? 'success' : 'error'} size="small" variant="outlined" /> },
+    { field: 'createdOn', headerName: 'Created', width: 120, renderCell: (p) => (p.value ? new Date(String(p.value)).toLocaleDateString() : '—') },
     { 
       field: 'actions', 
       headerName: t('actions'), 
@@ -394,6 +404,10 @@ const CustomersPage: React.FC = () => {
       )
     },
   ];
+
+  // AA-01: this user's saved layout, plus a column for every custom field the tenant has
+  // defined on Customer. `customFields` is the raw jsonb bag carried on each list row.
+  const orderedColumns = columnPreferences.arrangeColumns(columns);
 
   return (
     <Box sx={{ width: '100%', px: 1, py: 1 }}>
@@ -419,6 +433,8 @@ const CustomersPage: React.FC = () => {
       {/* Search */}
       <Paper sx={{ p: 1, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', backgroundColor: 'background.paper', borderRadius: 2 }}>
         <SearchField value={search} onChange={setSearch} placeholder="Search customers..." />
+        <Box sx={{ flexGrow: 1 }} />
+        <ColumnPreferences preferences={columnPreferences} />
       </Paper>
 
       {requestedCustomerQuery.isError && (
@@ -435,7 +451,7 @@ const CustomersPage: React.FC = () => {
 
       {/* Grid */}
       <Paper sx={{ height: 'calc(100vh - 220px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
-        <DataGrid aria-label="Customers" rows={customerListQuery.isError ? [] : data?.items ?? []} columns={columns} rowCount={customerListQuery.isError ? 0 : data?.totalCount ?? 0} loading={isLoading} pageSizeOptions={[10, 25, 50]} paginationModel={paginationModel} paginationMode="server" onPaginationModelChange={setPaginationModel} getRowId={(r) => r.id} disableRowSelectionOnClick />
+        <DataGrid aria-label="Customers" rows={customerListQuery.isError ? [] : data?.items ?? []} columns={orderedColumns} rowCount={customerListQuery.isError ? 0 : data?.totalCount ?? 0} loading={isLoading} pageSizeOptions={[10, 25, 50]} paginationModel={paginationModel} paginationMode="server" onPaginationModelChange={setPaginationModel} getRowId={(r) => r.id} disableRowSelectionOnClick columnVisibilityModel={columnPreferences.columnVisibilityModel} onColumnVisibilityModelChange={columnPreferences.onColumnVisibilityModelChange} />
       </Paper>
 
       {/* ── Dialog ─────────────────────────────────────────────────────────── */}
@@ -736,6 +752,14 @@ const CustomersPage: React.FC = () => {
               <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>No contacts yet. Click "Add Contact" to add one.</Typography>
             </Box>
           )}
+
+          {/* AA-01 · fields this tenant defined on Customer. Renders nothing when none exist,
+              and only once the record is persisted — a value bag needs a row to hang on. */}
+          <CustomFieldValuesEditor
+            entityType="Customer"
+            entityId={selectedRecord?.id ?? null}
+            canEdit={canEdit}
+          />
 
         </DialogContent>
 

@@ -6,12 +6,12 @@ import {
   Box, Typography, Paper, Button, Chip, IconButton,
   Tooltip, Stack, TextField, MenuItem, CircularProgress,
   Alert,
-  Link, Menu, ListItemIcon, ListItemText, Popover, FormGroup,
-  FormControlLabel, Checkbox, Divider, ToggleButton, ToggleButtonGroup,
+  Link, Menu, ListItemIcon, ListItemText,
+  ToggleButton, ToggleButtonGroup,
   Skeleton,
 } from '@mui/material';
 import {
-  DataGrid, type GridColDef, type GridPaginationModel, type GridColumnVisibilityModel,
+  DataGrid, type GridColDef, type GridPaginationModel,
 } from '@mui/x-data-grid';
 import {
   Visibility as ViewIcon,
@@ -19,8 +19,9 @@ import {
   Email as EmailIcon,
   AutoAwesome as SparkleIcon,
   MoreVert as MoreIcon,
-  ViewColumn as ColumnsIcon,
 } from '@mui/icons-material';
+import useColumnPreferences from '../../hooks/useColumnPreferences';
+import ColumnPreferences from '../../components/common/ColumnPreferences';
 import leadService, { type LeadResponseDTO } from '../../api/services/leadService';
 import decisionService, { type LeadDecisionSummary } from '../../api/services/decisionService';
 import LateIngestedBadge from './LateIngestedBadge';
@@ -33,12 +34,16 @@ import { useAuth } from '../../context/AuthContext';
 import { presentableErrorMessage } from '../../utils/apiErrors';
 
 // ---------------------------------------------------------------------------
-// Per-user view preferences (column visibility + density), persisted locally.
-// Key shape: `<base>:user-<id>` when a user id can be read from the stored
-// userData blob, otherwise `<base>:global`.
+// Column visibility and order are AA-01 server-side per-user preferences now
+// (useColumnPreferences + ColumnPreferences). The old localStorage column model
+// was per-browser, order-less and invisible to the server, so a user who moved
+// machines lost their layout and no tenant-defined field could ever appear in
+// it. Defaults for this grid live in the server catalog under `leads.list`.
+//
+// Density stays local: it is a rendering comfort setting with no server
+// contract, and there is nothing to compose it with.
 // ---------------------------------------------------------------------------
 
-const COLUMNS_KEY_BASE = 'nexora.leadsPage.columnVisibility';
 const DENSITY_KEY_BASE = 'nexora.leadsPage.density';
 
 const userScopedKey = (base: string): string => {
@@ -55,58 +60,6 @@ const userScopedKey = (base: string): string => {
     // Corrupted userData — fall back to a global preference key.
   }
   return `${base}:global`;
-};
-
-// Curated default column set. "actions" is always on and cannot be hidden.
-const DEFAULT_COLUMN_VISIBILITY: GridColumnVisibilityModel = {
-  nexoraSerial: true,
-  rfqno: true,
-  // Which CLIENT the enquiry came from. Sits before `buyer` and is on by
-  // default: the buying organisation is the primary identity on a lead.
-  client: true,
-  buyer: true,
-  recDate: true,
-  ingestedAtUtc: true,
-  bidClosingDate: true,
-  itemCount: true,
-  leadSource: true,
-  status: true,
-  decision: true,
-  estimatedValue: false,
-  actions: true,
-};
-
-const HIDEABLE_COLUMNS: ReadonlyArray<{ field: string; label: string }> = [
-  { field: 'nexoraSerial', label: 'Nexora Serial' },
-  { field: 'rfqno', label: 'RFQ #' },
-  { field: 'client', label: 'Client' },
-  { field: 'buyer', label: 'Buyer contact' },
-  { field: 'recDate', label: 'Received' },
-  { field: 'ingestedAtUtc', label: 'Nexora Ingestion Date' },
-  { field: 'bidClosingDate', label: 'Deadline' },
-  { field: 'itemCount', label: 'Items' },
-  { field: 'leadSource', label: 'Source' },
-  { field: 'status', label: 'Status' },
-  { field: 'decision', label: 'Decision' },
-  { field: 'estimatedValue', label: 'Estimated value' },
-];
-
-const loadColumnVisibility = (): GridColumnVisibilityModel => {
-  try {
-    const raw = localStorage.getItem(userScopedKey(COLUMNS_KEY_BASE));
-    if (raw) {
-      const parsed: unknown = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        // `aiconfidence` is stripped rather than merged: the column no longer
-        // exists, and a stale preference must not resurrect a fabricated score.
-        const { aiconfidence: _removed, ...stored } = parsed as GridColumnVisibilityModel & { aiconfidence?: boolean };
-        return { ...DEFAULT_COLUMN_VISIBILITY, ...stored, actions: true };
-      }
-    }
-  } catch {
-    // Unreadable preference — use the curated defaults.
-  }
-  return { ...DEFAULT_COLUMN_VISIBILITY };
 };
 
 type DensityChoice = 'comfortable' | 'compact';
@@ -222,20 +175,10 @@ const LeadsPage: React.FC = () => {
   const [resolveLead, setResolveLead] = useState<LeadResponseDTO | null>(null);
   const canEditLeads = hasPermission('Leads', 'edit');
 
-  // View preferences (persisted per user)
-  const [columnVisibility, setColumnVisibility] = useState<GridColumnVisibilityModel>(loadColumnVisibility);
+  // AA-01: which columns, in which order, for THIS user — resolved server-side and
+  // shared with every other grid that opts in.
+  const columnPreferences = useColumnPreferences('leads.list');
   const [density, setDensity] = useState<DensityChoice>(loadDensity);
-  const [columnsAnchor, setColumnsAnchor] = useState<HTMLElement | null>(null);
-
-  const applyColumnVisibility = (model: GridColumnVisibilityModel) => {
-    const next: GridColumnVisibilityModel = { ...model, actions: true };
-    setColumnVisibility(next);
-    try {
-      localStorage.setItem(userScopedKey(COLUMNS_KEY_BASE), JSON.stringify(next));
-    } catch {
-      // Storage unavailable — preference just won't persist.
-    }
-  };
 
   const applyDensity = (value: DensityChoice) => {
     setDensity(value);
@@ -606,6 +549,10 @@ const LeadsPage: React.FC = () => {
     },
   ];
 
+  // Reordered to this user's saved layout. Falls back to the declared order above when the
+  // preference call has not resolved or failed.
+  const orderedColumns = columnPreferences.arrangeColumns(columns);
+
   const totalCount = data?.totalCount ?? 0;
 
   return (
@@ -654,14 +601,19 @@ const LeadsPage: React.FC = () => {
             {totalCount} {totalCount === 1 ? 'lead' : 'leads'}
           </Typography>
         )}
-        <Button
+        <ColumnPreferences preferences={columnPreferences} />
+        <ToggleButtonGroup
           size="small"
-          startIcon={<ColumnsIcon />}
-          onClick={(e) => setColumnsAnchor(e.currentTarget)}
-          sx={{ fontWeight: 600, color: 'text.secondary', whiteSpace: 'nowrap' }}
+          exclusive
+          value={density}
+          onChange={(_e, value: DensityChoice | null) => {
+            if (value) applyDensity(value);
+          }}
+          aria-label="Row density"
         >
-          Columns
-        </Button>
+          <ToggleButton value="comfortable" aria-label="Comfortable rows">Comfortable</ToggleButton>
+          <ToggleButton value="compact" aria-label="Compact rows">Compact</ToggleButton>
+        </ToggleButtonGroup>
       </Paper>
 
       {/* Grid */}
@@ -678,7 +630,7 @@ const LeadsPage: React.FC = () => {
         ) : (
           <DataGrid
             rows={data?.items ?? []}
-            columns={columns}
+            columns={orderedColumns}
             rowCount={totalCount}
             loading={isLoading}
             pageSizeOptions={[10, 25, 50]}
@@ -688,8 +640,8 @@ const LeadsPage: React.FC = () => {
             disableRowSelectionOnClick
             getRowId={(r) => r.id}
             density={density}
-            columnVisibilityModel={columnVisibility}
-            onColumnVisibilityModelChange={applyColumnVisibility}
+            columnVisibilityModel={columnPreferences.columnVisibilityModel}
+            onColumnVisibilityModelChange={columnPreferences.onColumnVisibilityModelChange}
           />
         )}
       </Paper>
@@ -718,55 +670,6 @@ const LeadsPage: React.FC = () => {
         </MenuItem>
       </Menu>
 
-      {/* Columns & density popover */}
-      <Popover
-        open={Boolean(columnsAnchor)}
-        anchorEl={columnsAnchor}
-        onClose={() => setColumnsAnchor(null)}
-        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
-        transformOrigin={{ vertical: 'top', horizontal: 'right' }}
-      >
-        <Box sx={{ p: 2, width: 240 }}>
-          <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
-            Show columns
-          </Typography>
-          <FormGroup>
-            {HIDEABLE_COLUMNS.map((c) => (
-              <FormControlLabel
-                key={c.field}
-                control={
-                  <Checkbox
-                    size="small"
-                    checked={columnVisibility[c.field] !== false}
-                    onChange={(e) => applyColumnVisibility({ ...columnVisibility, [c.field]: e.target.checked })}
-                  />
-                }
-                label={<Typography variant="body2">{c.label}</Typography>}
-              />
-            ))}
-            <FormControlLabel
-              control={<Checkbox size="small" checked disabled />}
-              label={<Typography variant="body2" sx={{ color: 'text.disabled' }}>Actions (always shown)</Typography>}
-            />
-          </FormGroup>
-          <Divider sx={{ my: 1.5 }} />
-          <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
-            Density
-          </Typography>
-          <ToggleButtonGroup
-            size="small"
-            exclusive
-            fullWidth
-            value={density}
-            onChange={(_e, value: DensityChoice | null) => {
-              if (value) applyDensity(value);
-            }}
-          >
-            <ToggleButton value="comfortable">Comfortable</ToggleButton>
-            <ToggleButton value="compact">Compact</ToggleButton>
-          </ToggleButtonGroup>
-        </Box>
-      </Popover>
 
     </Box>
   );

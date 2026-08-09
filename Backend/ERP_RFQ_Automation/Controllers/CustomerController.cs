@@ -337,7 +337,9 @@ namespace ERP_RFQ_Automation.Controllers
                 CreatedOn = customer.CreatedOn,
                 ModifiedBy = customer.ModifiedBy,
                 ModifiedOn = customer.ModifiedOn,
-                ConcurrencyToken = customer.ConcurrencyToken
+                ConcurrencyToken = customer.ConcurrencyToken,
+                // AA-01: tenant-defined custom field values, as stored jsonb.
+                CustomFields = customer.CustomFieldsJson
             };
         }
     }

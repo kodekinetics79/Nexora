@@ -276,6 +276,8 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
           { key: 'price-structure', label: 'Price Structure', path: '/setup/price-structure', moduleName: 'UOM' },
           { key: 'sla', label: 'Deadlines & Alerts', path: '/setup/sla', moduleName: 'UOM' },
           { key: 'routing-rules', label: 'RFQ Routing Rules', path: '/setup/routing-rules', moduleName: 'Customers' },
+          // AA-01: discoverable next to the other master-data screens, not buried.
+          { key: 'custom-fields', label: 'Custom Fields', path: '/setup/custom-fields', moduleName: 'UOM' },
           { key: 'mailboxes', label: 'Email Inboxes', path: '/setup/mailboxes', moduleName: 'Email & SMTP' },
           { key: 'business-unit', label: t('business_unit'), path: '/setup/business-unit', moduleName: 'Business Units' },
         ]

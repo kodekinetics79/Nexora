@@ -14,6 +14,8 @@ public static class CustomFieldModelBuilderExtensions
             entity.Property(x => x.EntityType).HasMaxLength(80).IsRequired();
             entity.Property(x => x.StableKey).HasMaxLength(63).IsRequired();
             entity.Property(x => x.Status).HasConversion<string>().HasMaxLength(20);
+            // AA-01: position in the tenant's field list and in the column picker.
+            entity.Property(x => x.DisplayOrder).HasDefaultValue(0);
             entity.Property(x => x.CreatedBy).HasMaxLength(200).IsRequired();
             entity.Property(x => x.Version).IsConcurrencyToken();
             entity.Property(x => x.RetiredBy).HasMaxLength(200);

@@ -83,6 +83,7 @@ const PriceStructurePage = lazy(() => import('./pages/Setup/PriceStructure/Price
 const SlaSettingsPage = lazy(() => import('./pages/Setup/Sla/SlaSettingsPage'));
 const MailboxPage = lazy(() => import('./pages/Setup/Mailbox/MailboxPage'));
 const RoutingRulesPage = lazy(() => import('./pages/Setup/RoutingRules/RoutingRulesPage'));
+const CustomFieldsPage = lazy(() => import('./pages/Setup/CustomFields/CustomFieldsPage'));
 const SalesTodayPage = lazy(() => import('./pages/SalesManagement/SalesTodayPage'));
 const TeamOverviewPage = lazy(() => import('./pages/SalesManagement/TeamOverviewPage'));
 const RepDirectoryPage = lazy(() => import('./pages/SalesManagement/RepDirectoryPage'));
@@ -271,6 +272,10 @@ function App() {
           underlying commercial-routing endpoints check for both reading a customer's routing
           profile and creating ownership/identifier rows. */}
       <Route path="/setup/routing-rules" element={<MainLayout><PermissionGuard moduleName="Customers"><RoutingRulesPage /></PermissionGuard></MainLayout>} />
+      {/* AA-01 · tenant-defined custom fields. Guarded by the generic setup module ("UOM"),
+          matching /setup/master and /setup/sla; the API additionally requires a manager role
+          and edit permission on the module the field attaches to. */}
+      <Route path="/setup/custom-fields" element={<MainLayout><PermissionGuard moduleName="UOM"><CustomFieldsPage /></PermissionGuard></MainLayout>} />
 
       {/* Security Routes */}
       <Route path="/security/users" element={<MainLayout><PermissionGuard moduleName="Users"><UsersPage /></PermissionGuard></MainLayout>} />
