@@ -124,6 +124,12 @@ services:
         sync: false
       - key: Cors__AllowedOrigins__0
         value: https://nexora1-ai.vercel.app
+      # WEB-TESTING POSTURE. Platform JWT, MFA and live-session validation remain mandatory,
+      # but client/VPN CIDRs and the trusted edge proxy contract have not yet been supplied.
+      # Change to AllowList and configure PlatformAccess__AllowedCidrs plus the trusted
+      # ForwardedHeaders ranges before production security sign-off.
+      - key: PlatformAccess__NetworkMode
+        value: Any
       # -----------------------------------------------------------------------
       # OBSERVABILITY. Read before changing anything here.
       #
@@ -151,6 +157,10 @@ services:
       #
       # - key: Observability__Prometheus__ScrapeKey
       #   sync: false
+      # Until a protected scraper or OTLP collector is supplied, fail closed by not exposing
+      # tenant-bearing queue metrics at all. The application refuses anonymous Production scrape.
+      - key: Observability__Prometheus__Enabled
+        value: "false"
       #
       # TO SEND TO A COLLECTOR INSTEAD (Grafana Cloud / Honeycomb / an OTel
       # collector sidecar), uncomment exactly this — an absolute URI including
