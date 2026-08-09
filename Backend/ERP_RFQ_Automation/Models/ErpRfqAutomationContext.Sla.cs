@@ -31,6 +31,12 @@ public partial class ErpRfqAutomationContext
         {
             e.ToTable("SlaPolicies");
             e.HasKey(x => x.Id);
+            // FR-QTM-07: the knob formerly called QuoteAutoExpireDays is now the GRACE
+            // allowance added to the validity date (default 0, was 14). The property was
+            // renamed for honesty; the COLUMN keeps its legacy name so the rename costs
+            // no migration. QuoteNoResponseExpiryDays (the 90-day submission rule) is a
+            // genuinely new column.
+            e.Property(x => x.QuoteExpiryGraceDays).HasColumnName("QuoteAutoExpireDays");
             e.Property(x => x.CreatedOn).HasDefaultValueSql("now()");
             e.Property(x => x.UpdatedOn).HasDefaultValueSql("now()");
             e.HasIndex(x => x.BusinessUnitId).IsUnique().HasDatabaseName("UX_SlaPolicies_BU");

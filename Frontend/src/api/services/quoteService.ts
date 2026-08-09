@@ -64,6 +64,42 @@ export interface QuoteSendOutcome {
   /** Plain-language hold info when held ("Quote #…: N line(s) below floor by up to X%"). */
   message?: string;
   approvalId?: string;
+  /**
+   * R5: nothing was sent because the price source is unconfirmed, or a price changed after
+   * it was last confirmed. The rep must confirm again before the quote can go out.
+   */
+  priceAttestationRequired?: boolean;
+}
+
+// ==== Price-provenance attestation (Decision Register R5) ====
+
+/** Where a quoted price came from. These are the only two the server accepts. */
+export type PriceAttestationSource = 'SALES_MANAGER' | 'SUPPLIER_QUOTE';
+
+export interface QuotePriceAttestationLine {
+  quoteItemId: number;
+  rfqItemId?: number | null;
+  itemDescription?: string | null;
+  quantity: number;
+  unitPrice: number;
+}
+
+/** Whether this quote may be sent, and what was last confirmed. */
+export interface QuotePriceAttestationStatus {
+  quoteId: number;
+  satisfied: boolean;
+  /** Why the send would be refused; null when satisfied. */
+  reason?: string | null;
+  source?: PriceAttestationSource | null;
+  sourceReference?: string | null;
+  confirmedBy?: string | null;
+  confirmedOn?: string | null;
+  /** A confirmation exists but a price changed since, so it no longer covers the quote. */
+  supersededByPriceChange: boolean;
+  currencyId?: number | null;
+  currencyCode?: string | null;
+  currentLines: QuotePriceAttestationLine[];
+  attestedLines: QuotePriceAttestationLine[];
 }
 
 export interface QuoteRevisionInfoDTO {
@@ -126,9 +162,10 @@ const quoteService = {
   },
 
   /**
-   * Sends the quote email. WP-B3: a 409 with queuedForApproval means nothing was
-   * sent — the send is parked in the Approvals inbox (below-floor pricing) — and
-   * is surfaced as `{ held: true }` rather than an error.
+   * Sends the quote email. Two 409s mean "nothing was sent", not "it failed":
+   *  - WP-B3 `queuedForApproval` — parked in the Approvals inbox (below-floor pricing);
+   *  - R5 `priceAttestationRequired` — the price source needs confirming (again).
+   * Both are surfaced as outcomes rather than thrown errors.
    */
   sendEmail: async (id: number, recipientEmail: string): Promise<QuoteSendOutcome> => {
     try {
@@ -136,14 +173,40 @@ const quoteService = {
       return { held: false };
     } catch (error: any) {
       const data = error?.response?.data;
+      // Only a string may become user-facing copy — an object here would render as
+      // "[object Object]" at the call site.
+      const asText = (...values: unknown[]) =>
+        values.find((value): value is string => typeof value === 'string' && value.trim().length > 0);
+
+      if (error?.response?.status === 409 && data?.priceAttestationRequired) {
+        return { held: false, priceAttestationRequired: true, message: asText(data.message) };
+      }
       if (error?.response?.status === 409 && data?.queuedForApproval) {
-        // Only a string may become user-facing copy — an object here would render as
-        // "[object Object]" at the call site.
-        const summary = [data.summary, data.message].find((value) => typeof value === 'string' && value.trim());
-        return { held: true, message: summary, approvalId: data.approvalId };
+        return { held: true, message: asText(data.summary, data.message), approvalId: data.approvalId };
       }
       throw error;
     }
+  },
+
+  // ==== Price-provenance attestation (R5) ====
+
+  /** Whether the quote may be sent, and the prices a fresh confirmation would cover. */
+  getPriceAttestation: async (id: number): Promise<QuotePriceAttestationStatus> => {
+    const { data } = await axiosInstance.get(`/api/Quote/${id}/price-attestation`);
+    return data;
+  },
+
+  /** Records the rep's confirmation over the quote's current prices. */
+  confirmPriceAttestation: async (
+    id: number,
+    source: PriceAttestationSource,
+    sourceReference: string,
+  ): Promise<QuotePriceAttestationStatus> => {
+    const { data } = await axiosInstance.post(`/api/Quote/${id}/price-attestation`, {
+      source,
+      sourceReference,
+    });
+    return data;
   },
 
   // ==== Revisions-lite (WP-B4) ====

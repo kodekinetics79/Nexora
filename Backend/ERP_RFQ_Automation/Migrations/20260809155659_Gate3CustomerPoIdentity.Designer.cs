@@ -3,6 +3,7 @@ using System;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace ERP_RFQ_Automation.Migrations
 {
     [DbContext(typeof(ErpRfqAutomationContext))]
-    partial class ErpRfqAutomationContextModelSnapshot : ModelSnapshot
+    [Migration("20260809155659_Gate3CustomerPoIdentity")]
+    partial class Gate3CustomerPoIdentity
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -10457,108 +10460,6 @@ namespace ERP_RFQ_Automation.Migrations
                         });
                 });
 
-            modelBuilder.Entity("ERP_RFQ_Automation.Intelligence.Pricing.QuotePriceAttestation", b =>
-                {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
-
-                    b.Property<long>("BusinessUnitId")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("ConfirmedBy")
-                        .IsRequired()
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
-
-                    b.Property<long?>("ConfirmedByUserId")
-                        .HasColumnType("bigint");
-
-                    b.Property<DateTime>("ConfirmedOn")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
-                        .HasDefaultValueSql("now()");
-
-                    b.Property<long?>("CurrencyId")
-                        .HasColumnType("bigint");
-
-                    b.Property<int>("LineCount")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("LineFingerprint")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<long>("QuoteId")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("Source")
-                        .IsRequired()
-                        .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
-
-                    b.Property<string>("SourceReference")
-                        .IsRequired()
-                        .HasMaxLength(200)
-                        .HasColumnType("character varying(200)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("BusinessUnitId", "QuoteId", "ConfirmedOn")
-                        .HasDatabaseName("IX_QuotePriceAttestations_BU_Quote_ConfirmedOn");
-
-                    b.ToTable("QuotePriceAttestations", null, t =>
-                        {
-                            t.HasCheckConstraint("CK_QuotePriceAttestations_LineCount", "\"LineCount\" >= 0");
-
-                            t.HasCheckConstraint("CK_QuotePriceAttestations_Source", "\"Source\" IN ('SALES_MANAGER','SUPPLIER_QUOTE')");
-                        });
-                });
-
-            modelBuilder.Entity("ERP_RFQ_Automation.Intelligence.Pricing.QuotePriceAttestationLine", b =>
-                {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
-
-                    b.Property<long>("AttestationId")
-                        .HasColumnType("bigint");
-
-                    b.Property<long>("BusinessUnitId")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("ItemDescription")
-                        .HasMaxLength(1000)
-                        .HasColumnType("character varying(1000)");
-
-                    b.Property<decimal>("Quantity")
-                        .HasColumnType("decimal(18, 6)");
-
-                    b.Property<long>("QuoteItemId")
-                        .HasColumnType("bigint");
-
-                    b.Property<long?>("RfqItemId")
-                        .HasColumnType("bigint");
-
-                    b.Property<decimal>("UnitPrice")
-                        .HasColumnType("decimal(18, 6)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("AttestationId", "QuoteItemId")
-                        .IsUnique()
-                        .HasDatabaseName("UX_QuotePriceAttestationLines_Attestation_QuoteItem");
-
-                    b.HasIndex("BusinessUnitId", "AttestationId");
-
-                    b.ToTable("QuotePriceAttestationLines", (string)null);
-                });
-
             modelBuilder.Entity("ERP_RFQ_Automation.Inventory.Commercial.IncomingInventory", b =>
                 {
                     b.Property<long>("Id")
@@ -19828,11 +19729,7 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<int>("DeadlineBufferHours")
                         .HasColumnType("integer");
 
-                    b.Property<int>("QuoteExpiryGraceDays")
-                        .HasColumnType("integer")
-                        .HasColumnName("QuoteAutoExpireDays");
-
-                    b.Property<int>("QuoteNoResponseExpiryDays")
+                    b.Property<int>("QuoteAutoExpireDays")
                         .HasColumnType("integer");
 
                     b.Property<int>("StaleQuoteDays")
@@ -22383,28 +22280,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .OnDelete(DeleteBehavior.Restrict);
                 });
 
-            modelBuilder.Entity("ERP_RFQ_Automation.Intelligence.Pricing.QuotePriceAttestation", b =>
-                {
-                    b.HasOne("ERP_RFQ_Automation.Models.Quote", null)
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "QuoteId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-                });
-
-            modelBuilder.Entity("ERP_RFQ_Automation.Intelligence.Pricing.QuotePriceAttestationLine", b =>
-                {
-                    b.HasOne("ERP_RFQ_Automation.Intelligence.Pricing.QuotePriceAttestation", "Attestation")
-                        .WithMany("Lines")
-                        .HasForeignKey("BusinessUnitId", "AttestationId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Attestation");
-                });
-
             modelBuilder.Entity("ERP_RFQ_Automation.Inventory.Commercial.IncomingInventory", b =>
                 {
                     b.HasOne("ERP_RFQ_Automation.Models.Inventory", null)
@@ -24832,11 +24707,6 @@ namespace ERP_RFQ_Automation.Migrations
             modelBuilder.Entity("ERP_RFQ_Automation.GeneralLedger.LedgerAccount", b =>
                 {
                     b.Navigation("JournalLines");
-                });
-
-            modelBuilder.Entity("ERP_RFQ_Automation.Intelligence.Pricing.QuotePriceAttestation", b =>
-                {
-                    b.Navigation("Lines");
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.LeadIdentity.LeadIngestionBatch", b =>

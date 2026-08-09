@@ -35,7 +35,8 @@ namespace ERP_RFQ_Automation.Sla;
 /// Per business unit with any activity it checks:
 ///  1. Lead bid-closing deadlines  -> warn / critical / overdue alerts
 ///  2. Accepted-but-unassigned lead aging -> manager alert
-///  3. SENT quotes past their auto-expiry window -> IQuoteOutcomeService.ExpireAsync
+///  3. SENT quotes past their validity date, OR 90 days past submission with no
+///     customer response (FR-QTM-07) -> IQuoteOutcomeService.ExpireAsync
 ///  4. SENT quotes gone quiet (stale) -> per-owner daily digest
 ///  5. Copilot approvals pending too long -> manager escalation
 ///
@@ -336,7 +337,52 @@ public sealed class SlaSweepWorker : BackgroundService
         }
     }
 
-    // ---------------- 3. quote auto-expiry ----------------
+    // ---------------- 3. quote auto-expiry (FR-QTM-07) ----------------
+
+    /// <summary>
+    /// FR-QTM-07 auto-expiry candidates for one tenant: SENT quotes hit by EITHER trigger.
+    ///
+    /// <para>TRIGGER 1 — the validity date has passed (plus the tenant's grace allowance,
+    /// which is 0 by default). This used to read <c>coalesce(ValidUntil, SentOn) + 14
+    /// days</c>, so a quote survived a full fortnight PAST the date it told the customer
+    /// it was good until.</para>
+    ///
+    /// <para>TRIGGER 2 — <c>QuoteNoResponseExpiryDays</c> (90) have elapsed since
+    /// submission and NO customer response is recorded. This rule did not exist at all:
+    /// <c>StaleQuoteDays</c> only ever sent a nudge email. It is what expires a quote that
+    /// was sent without a validity date, which trigger 1 can never see.</para>
+    ///
+    /// <para>A quote whose customer HAS responded is out of scope for trigger 2 — the
+    /// requirement's "when no customer response is recorded" is a precondition of that
+    /// trigger, not of the validity rule. Trigger 1 stays unconditional: an expired
+    /// validity date is expired whatever the customer said.</para>
+    ///
+    /// <para>Sentinel validity dates (year &lt; 2000, the extraction pipeline's "unknown"
+    /// convention, mirrored from <see cref="OpenLeadDeadlineCandidates"/>) are ignored by
+    /// trigger 1 so an unparsed date cannot expire a live quote on the spot; such quotes
+    /// still fall to trigger 2.</para>
+    ///
+    /// Exposed as a queryable so both trigger boundaries are testable without a worker host.
+    /// </summary>
+    internal static IQueryable<Quote> ExpiryCandidates(
+        ErpRfqAutomationContext db, long businessUnitId, List<long> sentStatusIds,
+        SlaPolicy policy, DateTime now)
+    {
+        // Hoisted so EF parameterises the day counts instead of re-reading the policy
+        // object inside the expression tree.
+        var graceDays = policy.QuoteExpiryGraceDays;
+        var noResponseDays = policy.QuoteNoResponseExpiryDays;
+
+        return db.Quotes.AsNoTracking()
+            .Where(q => q.BusinessUnitId == businessUnitId
+                        && q.StatusId != null && sentStatusIds.Contains(q.StatusId.Value)
+                        && ((q.ValidUntil != null
+                             && q.ValidUntil >= EarliestCommercialDeadline
+                             && q.ValidUntil.Value.AddDays(graceDays) < now)
+                            || (q.SentOn != null
+                                && q.RespondedOn == null
+                                && q.SentOn.Value.AddDays(noResponseDays) < now)));
+    }
 
     private async Task SweepQuoteAutoExpiryAsync(
         ErpRfqAutomationContext db, IQuoteOutcomeService outcomes, long bu, SlaPolicy policy, CancellationToken ct)
@@ -344,11 +390,10 @@ public sealed class SlaSweepWorker : BackgroundService
         var now = DateTime.UtcNow;
         var sentStatusIds = await GetStatusIdsAsync(db, "SENT", ct);
 
-        var candidates = await db.Quotes.AsNoTracking()
-            .Where(q => q.BusinessUnitId == bu
-                        && q.StatusId != null && sentStatusIds.Contains(q.StatusId.Value)
-                        && (q.ValidUntil ?? q.SentOn) != null
-                        && (q.ValidUntil ?? q.SentOn)!.Value.AddDays(policy.QuoteAutoExpireDays) < now)
+        // ONE candidate set for BOTH triggers, and therefore ONE claim per quote below:
+        // a quote that trips both rules in the same sweep is still expired exactly once,
+        // and a quote already expired by an earlier sweep is never re-claimed.
+        var candidates = await ExpiryCandidates(db, bu, sentStatusIds, policy, now)
             .Select(q => q.Id)
             .ToListAsync(ct);
 

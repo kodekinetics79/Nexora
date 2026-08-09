@@ -45,7 +45,8 @@ splice: `ConfigureSlaModel(modelBuilder);` was added to
 | WarnDaysBeforeClose | integer | default 3 |
 | CriticalDaysBeforeClose | integer | default 1 |
 | StaleQuoteDays | integer | default 7 |
-| QuoteAutoExpireDays | integer | default 14 |
+| QuoteAutoExpireDays | integer | default **0** — mapped to `SlaPolicy.QuoteExpiryGraceDays` (FR-QTM-07 grace days AFTER the validity date; column name kept to avoid a rename migration) |
+| QuoteNoResponseExpiryDays | integer | default 90 — FR-QTM-07 days after submission with no customer response (**new column; migration owned by the lead**) |
 | ApprovalEscalationHours | integer | default 4 |
 | DeadlineBufferHours | integer | default 12 (reserved, not yet consumed by the sweep) |
 | CreatedOn | timestamp | server default `now()` |
@@ -157,9 +158,17 @@ no-ops; every query is explicitly BU-scoped with `IgnoreQueryFilters()`.
    *Choice:* recorded as EntityType `lead-unassigned` + level `warn` (kept the
    standard level vocabulary; the distinct EntityType prevents collision with
    the deadline `warn` for the same lead).
-3. **Quote auto-expire** — SENT and `coalesce(ValidUntil, SentOn) +
-   QuoteAutoExpireDays < now` → `IQuoteOutcomeService.ExpireAsync(id, "AUTO_EXPIRED")`
-   + SlaEvent (`quote`, `expired`).
+3. **Quote auto-expire (FR-QTM-07)** — SENT and EITHER
+   `ValidUntil + QuoteExpiryGraceDays < now` (grace 0 by default, so the day the
+   validity date passes) OR `SentOn + QuoteNoResponseExpiryDays < now` with
+   `RespondedOn` null (90 days of silence from submission, which also catches
+   quotes sent with no validity date at all) → one
+   `IQuoteOutcomeService.ExpireAsync(id, "AUTO_EXPIRED")` + one SlaEvent
+   (`quote`, `expired`). *Choice:* both triggers share the single `expired` claim,
+   so a quote tripping both is expired exactly once and re-sweeps never re-stamp it.
+   The validity trigger is unconditional; only the 90-day trigger requires that no
+   customer response is recorded. Sentinel `ValidUntil` values (year < 2000) are
+   ignored by the validity trigger and fall to the 90-day one.
 4. **Stale quotes** — SENT, `SentOn + StaleQuoteDays < now`, `RespondedOn` null.
    Per-owner daily digest (one email listing all their stale quotes).
    *Choice:* daily dedup is **per owner per UTC day** via SlaEvent

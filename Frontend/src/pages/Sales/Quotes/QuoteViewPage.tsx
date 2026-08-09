@@ -17,8 +17,9 @@ import {
   MarkEmailRead as RespondedIcon,
   ContentCopy as ReviseIcon
 } from '@mui/icons-material';
-import quoteService from '../../../api/services/quoteService';
+import quoteService, { type PriceAttestationSource } from '../../../api/services/quoteService';
 import QuoteOutcomeDialog from './QuoteOutcomeDialog';
+import PriceConfirmationDialog from './PriceConfirmationDialog';
 import EmailPromptDialog from '../../../components/common/EmailPromptDialog';
 import { CustomerAwardDialog, type CustomerAwardQuote } from './customer-awards';
 import { useAuth } from '../../../context/AuthContext';
@@ -89,11 +90,24 @@ const QuoteViewPage: React.FC = () => {
   });
 
   // WP-B3: quote-send with below-floor hold awareness.
+  // R5: the send is gated on a price-provenance confirmation. The recipient is chosen
+  // first, then the rep confirms the prices and where they came from; only then is the
+  // send attempted. The server refuses an unconfirmed send regardless of this flow.
   const [emailOpen, setEmailOpen] = React.useState(false);
+  const [priceConfirmOpen, setPriceConfirmOpen] = React.useState(false);
+  const [pendingRecipient, setPendingRecipient] = React.useState('');
   const [holdInfo, setHoldInfo] = React.useState<string | null>(null);
   const sendMutation = useMutation({
     mutationFn: (recipientEmail: string) => quoteService.sendEmail(Number(id), recipientEmail),
     onSuccess: (result) => {
+      if (result.priceAttestationRequired) {
+        // The prices changed between the confirmation and the send — confirm again.
+        toast.error(result.message || 'The prices changed. Confirm the price source again before sending.', { duration: 8000 });
+        queryClient.invalidateQueries({ queryKey: ['quote-price-attestation', Number(id)] });
+        setPriceConfirmOpen(true);
+        return;
+      }
+      setPriceConfirmOpen(false);
       setEmailOpen(false);
       if (result.held) {
         setHoldInfo(result.message || null);
@@ -104,6 +118,20 @@ const QuoteViewPage: React.FC = () => {
       }
     },
     onError: () => toast.error('Failed to send the quote email')
+  });
+
+  // R5: record the confirmation, then send. Both steps must succeed for the quote to go out.
+  const confirmPriceMutation = useMutation({
+    mutationFn: ({ source, reference }: { source: PriceAttestationSource; reference: string }) =>
+      quoteService.confirmPriceAttestation(Number(id), source, reference),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['quote-price-attestation', Number(id)] });
+      sendMutation.mutate(pendingRecipient);
+    },
+    onError: (error: any) => {
+      const message = error?.response?.data?.message || 'The price confirmation could not be recorded.';
+      toast.error(message, { duration: 6000 });
+    }
   });
 
   // WP-A4: outcome capture + "customer responded" stamp.
@@ -485,7 +513,22 @@ const QuoteViewPage: React.FC = () => {
         businessUnitId={businessUnitId}
         customerId={quote.customerId ?? null}
         onCancel={() => setEmailOpen(false)}
-        onConfirm={(email) => sendMutation.mutate(email)}
+        onConfirm={(email) => {
+          // R5: choosing the recipient no longer sends. The prices are confirmed first.
+          setPendingRecipient(email);
+          setEmailOpen(false);
+          setPriceConfirmOpen(true);
+        }}
+      />
+
+      <PriceConfirmationDialog
+        open={priceConfirmOpen}
+        quoteId={Number(id)}
+        quoteNo={quote.quoteNo}
+        recipientEmail={pendingRecipient}
+        submitting={confirmPriceMutation.isPending || sendMutation.isPending}
+        onCancel={() => setPriceConfirmOpen(false)}
+        onConfirm={(source, reference) => confirmPriceMutation.mutate({ source, reference })}
       />
     </Box>
   );

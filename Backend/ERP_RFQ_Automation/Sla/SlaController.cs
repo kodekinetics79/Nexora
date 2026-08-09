@@ -29,7 +29,21 @@ public sealed class SlaController : ControllerBase
         public int? WarnDaysBeforeClose { get; set; }
         public int? CriticalDaysBeforeClose { get; set; }
         public int? StaleQuoteDays { get; set; }
+
+        /// <summary>
+        /// Legacy wire name for <see cref="QuoteExpiryGraceDays"/>. The Setup UI still
+        /// posts it ("Sent quotes past their validity by this many days are closed as
+        /// Expired"), which is exactly what the grace allowance now means, so it keeps
+        /// working; <see cref="QuoteExpiryGraceDays"/> wins if both are supplied.
+        /// </summary>
         public int? QuoteAutoExpireDays { get; set; }
+
+        /// <summary>FR-QTM-07 trigger 1: grace days after the validity date. 0 = expire on the date.</summary>
+        public int? QuoteExpiryGraceDays { get; set; }
+
+        /// <summary>FR-QTM-07 trigger 2: days after submission with no customer response.</summary>
+        public int? QuoteNoResponseExpiryDays { get; set; }
+
         public int? ApprovalEscalationHours { get; set; }
         public int? DeadlineBufferHours { get; set; }
     }
@@ -70,7 +84,13 @@ public sealed class SlaController : ControllerBase
         if (dto.WarnDaysBeforeClose.HasValue) policy.WarnDaysBeforeClose = Clamp(dto.WarnDaysBeforeClose.Value, 0, 90);
         if (dto.CriticalDaysBeforeClose.HasValue) policy.CriticalDaysBeforeClose = Clamp(dto.CriticalDaysBeforeClose.Value, 0, 90);
         if (dto.StaleQuoteDays.HasValue) policy.StaleQuoteDays = Clamp(dto.StaleQuoteDays.Value, 1, 365);
-        if (dto.QuoteAutoExpireDays.HasValue) policy.QuoteAutoExpireDays = Clamp(dto.QuoteAutoExpireDays.Value, 1, 365);
+        // FR-QTM-07: the floor is 0, not 1 — "zero grace" (expire on the validity date)
+        // is the requirement's default and was previously not expressible at all.
+        if (dto.QuoteAutoExpireDays.HasValue) policy.QuoteExpiryGraceDays = Clamp(dto.QuoteAutoExpireDays.Value, 0, 365);
+        if (dto.QuoteExpiryGraceDays.HasValue) policy.QuoteExpiryGraceDays = Clamp(dto.QuoteExpiryGraceDays.Value, 0, 365);
+        // Floor of 1: a 0-day no-response window would expire every quote the moment it
+        // was sent. Tenants who want the rule off set it to the 365-day ceiling.
+        if (dto.QuoteNoResponseExpiryDays.HasValue) policy.QuoteNoResponseExpiryDays = Clamp(dto.QuoteNoResponseExpiryDays.Value, 1, 365);
         if (dto.ApprovalEscalationHours.HasValue) policy.ApprovalEscalationHours = Clamp(dto.ApprovalEscalationHours.Value, 1, 24 * 30);
         if (dto.DeadlineBufferHours.HasValue) policy.DeadlineBufferHours = Clamp(dto.DeadlineBufferHours.Value, 0, 24 * 30);
 
@@ -94,7 +114,9 @@ public sealed class SlaController : ControllerBase
         warnDaysBeforeClose = p.WarnDaysBeforeClose,
         criticalDaysBeforeClose = p.CriticalDaysBeforeClose,
         staleQuoteDays = p.StaleQuoteDays,
-        quoteAutoExpireDays = p.QuoteAutoExpireDays,
+        quoteAutoExpireDays = p.QuoteExpiryGraceDays,   // legacy name, kept for the existing Setup page
+        quoteExpiryGraceDays = p.QuoteExpiryGraceDays,
+        quoteNoResponseExpiryDays = p.QuoteNoResponseExpiryDays,
         approvalEscalationHours = p.ApprovalEscalationHours,
         deadlineBufferHours = p.DeadlineBufferHours
     };

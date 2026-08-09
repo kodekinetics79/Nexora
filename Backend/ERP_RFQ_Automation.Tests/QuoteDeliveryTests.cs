@@ -22,6 +22,7 @@ public sealed class QuoteDeliveryTests
         SeedQuote(context);
         var email = new RecordingEmailService();
         var service = new QuoteService(context, email, null!);
+        await Attest(context, 95_011, Tenant);
 
         var queued = await service.SendQuoteEmailAsync(95_011, Tenant, "buyer@nexora.invalid");
         var replay = await service.SendQuoteEmailAsync(95_011, Tenant, "buyer@nexora.invalid");
@@ -76,6 +77,7 @@ public sealed class QuoteDeliveryTests
         await using var context = db.ContextFor(Tenant);
         SeedQuote(context);
         var service = new QuoteService(context, new RecordingEmailService(), null!);
+        await Attest(context, 95_011, Tenant);
 
         await service.SendQuoteEmailAsync(95_011, Tenant, "buyer@nexora.invalid");
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
@@ -220,6 +222,17 @@ public sealed class QuoteDeliveryTests
         Assert.All(rows, row => Assert.StartsWith("DeliveryOutcomeUncertain", row.LastErrorCode!));
         Assert.All(rows, row => Assert.Equal(1, row.AttemptCount));
     }
+
+    /// <summary>
+    /// R5: every send now requires a recorded price-provenance attestation covering the
+    /// quote's current prices. These delivery tests are about the delivery ledger, not the
+    /// gate, so they satisfy it explicitly. QuotePriceAttestationTests owns the gate itself.
+    /// </summary>
+    private static Task Attest(ErpRfqAutomationContext context, long quoteId, long tenant) =>
+        new ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationService(context).AttestAsync(
+            quoteId, tenant,
+            ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationSources.SupplierQuote,
+            "SQ-TEST", null, "tests", default);
 
     private static void SeedQuote(ErpRfqAutomationContext context)
     {

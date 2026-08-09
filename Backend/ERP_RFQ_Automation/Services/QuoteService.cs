@@ -1022,6 +1022,23 @@ namespace ERP_RFQ_Automation.Services
                 .FirstOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId)
                 ?? throw new KeyNotFoundException("Quote not found");
 
+            // R5 PRICE-PROVENANCE GATE — the pre-release control. Every send, first issue or
+            // revision, must be covered by a recorded confirmation of where the prices came
+            // from (sales manager / supplier quote) whose snapshot still matches the quote's
+            // current line prices. This runs BEFORE the below-floor check for two reasons:
+            //   * it is the gate; a quote with no confirmation must not even reach the point
+            //     of creating an approval hold, and
+            //   * it closes the below-floor guard's fail-open hole — a line whose floor
+            //     cannot be established (any first-time item) never blocks there, so before
+            //     this gate a brand-new item left the building with nothing recorded at all.
+            // Deliberately NOT bypassable through QuoteSendOptions: BypassFloorHold releases
+            // the below-floor hold only. Constructed directly (the FxConversionService
+            // precedent in BelowFloorGuard) so no constructor overload can omit the gate.
+            var attestation = await new ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationService(_context)
+                .EvaluateAsync(quoteId, businessUnitId, CancellationToken.None);
+            if (!attestation.Satisfied)
+                return QuoteSendResult.AwaitingPriceAttestation(attestation.Reason!);
+
             // WP-B3 below-floor gate: recompute floors for the quote's RFQ and hold
             // the ENTIRE send when any current line price is under its floor. The
             // approve_below_floor_quote tool re-enters here with BypassFloorHold=true

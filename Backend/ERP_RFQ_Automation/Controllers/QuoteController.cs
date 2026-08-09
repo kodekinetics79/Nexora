@@ -27,6 +27,7 @@ namespace ERP_RFQ_Automation.Controllers
         private readonly IQuoteOutcomeService _outcomeService;
         private readonly ILifecycleApplicationService _lifecycle;
         private readonly ErpRfqAutomationContext _context;
+        private readonly ERP_RFQ_Automation.Intelligence.Pricing.IPriceAttestationService _attestations;
         private readonly ILogger<QuoteController>? _logger;
 
         public QuoteController(
@@ -35,6 +36,7 @@ namespace ERP_RFQ_Automation.Controllers
             IQuoteOutcomeService outcomeService,
             ILifecycleApplicationService lifecycle,
             ErpRfqAutomationContext context,
+            ERP_RFQ_Automation.Intelligence.Pricing.IPriceAttestationService attestations,
             ILogger<QuoteController>? logger = null)
         {
             _repository = repository;
@@ -42,6 +44,7 @@ namespace ERP_RFQ_Automation.Controllers
             _outcomeService = outcomeService;
             _lifecycle = lifecycle;
             _context = context;
+            _attestations = attestations;
             _logger = logger;
         }
 
@@ -280,6 +283,17 @@ namespace ERP_RFQ_Automation.Controllers
                     RequestedBy = ActorEmail()
                 });
 
+                // R5: nothing was sent — the price source is unconfirmed, or a price changed
+                // after it was confirmed. The client re-opens the confirmation dialog.
+                if (result.BlockedPendingPriceAttestation)
+                {
+                    return Conflict(new
+                    {
+                        priceAttestationRequired = true,
+                        message = result.PriceAttestationReason
+                    });
+                }
+
                 if (result.Held)
                 {
                     return Conflict(new
@@ -487,6 +501,111 @@ namespace ERP_RFQ_Automation.Controllers
 
             var reasons = await _outcomeService.GetOutcomeReasonsAsync(businessUnitId);
             return Ok(reasons);
+        }
+
+        // ================================================================
+        // R5 price-provenance attestation (Decision Register R5).
+        // The rep confirms where the prices came from BEFORE the quote is emailed;
+        // SendEmail above refuses any quote whose current prices are not covered.
+        // ================================================================
+
+        /// <summary>
+        /// Whether this quote may be sent, what was last confirmed, and the prices a fresh
+        /// confirmation would cover. Drives the confirm-before-send dialog.
+        /// </summary>
+        [HttpGet("{id}/price-attestation")]
+        [RequireModulePermission("Quotations", PermissionAction.View)]
+        public async Task<ActionResult<QuotePriceAttestationStatusDTO>> GetPriceAttestation(
+            long id, CancellationToken ct)
+        {
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId <= 0) return BadRequest(new { message = "Business Unit ID is required." });
+            try
+            {
+                var state = await _attestations.EvaluateAsync(id, businessUnitId, ct);
+                return Ok(await BuildAttestationStatusAsync(id, businessUnitId, state, ct));
+            }
+            catch (KeyNotFoundException) { return NotFound(); }
+            catch (Exception ex) { return Unexpected(ex, "price-attestation-read"); }
+        }
+
+        /// <summary>
+        /// Records the rep's confirmation over the quote's CURRENT prices. Any later price
+        /// change voids it and this must be called again.
+        /// </summary>
+        [HttpPost("{id}/price-attestation")]
+        [RequireModulePermission("Quotations", PermissionAction.Edit)]
+        public async Task<ActionResult<QuotePriceAttestationStatusDTO>> ConfirmPriceAttestation(
+            long id, [FromBody] QuotePriceAttestationRequest request, CancellationToken ct)
+        {
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId <= 0) return BadRequest(new { message = "Business Unit ID is required." });
+            if (request is null) return BadRequest(new { message = "A price source and reference are required." });
+            try
+            {
+                await _attestations.AttestAsync(
+                    id, businessUnitId, request.Source, request.SourceReference,
+                    ActorUserId(), ActorEmail(), ct);
+
+                var state = await _attestations.EvaluateAsync(id, businessUnitId, ct);
+                return Ok(await BuildAttestationStatusAsync(id, businessUnitId, state, ct));
+            }
+            catch (KeyNotFoundException) { return NotFound(); }
+            catch (ArgumentException ex) { return BadRequest(new { message = ex.Message }); }
+            catch (Exception ex) { return Unexpected(ex, "price-attestation-confirm"); }
+        }
+
+        private async Task<QuotePriceAttestationStatusDTO> BuildAttestationStatusAsync(
+            long quoteId, long businessUnitId,
+            ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationState state,
+            CancellationToken ct)
+        {
+            var currencyId = await _context.Quotes.AsNoTracking()
+                .Where(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId)
+                .Select(q => q.CurrencyId)
+                .FirstOrDefaultAsync(ct);
+            var currencyCode = currencyId is null ? null : await _context.Currencies.AsNoTracking()
+                .Where(c => c.Id == currencyId.Value && c.BusinessUnitId == businessUnitId)
+                .Select(c => c.Code)
+                .FirstOrDefaultAsync(ct);
+
+            var attestedLines = state.Latest is null
+                ? new List<QuotePriceAttestationLineDTO>()
+                : await _context.QuotePriceAttestationLines.AsNoTracking()
+                    .Where(l => l.BusinessUnitId == businessUnitId && l.AttestationId == state.Latest.Id)
+                    .OrderBy(l => l.QuoteItemId)
+                    .Select(l => new QuotePriceAttestationLineDTO
+                    {
+                        QuoteItemId = l.QuoteItemId,
+                        RfqItemId = l.RfqItemId,
+                        ItemDescription = l.ItemDescription,
+                        Quantity = l.Quantity,
+                        UnitPrice = l.UnitPrice
+                    })
+                    .ToListAsync(ct);
+
+            return new QuotePriceAttestationStatusDTO
+            {
+                QuoteId = quoteId,
+                Satisfied = state.Satisfied,
+                Reason = state.Reason,
+                Source = state.Latest?.Source,
+                SourceReference = state.Latest?.SourceReference,
+                ConfirmedBy = state.Latest?.ConfirmedBy,
+                ConfirmedOn = state.Latest?.ConfirmedOn,
+                SupersededByPriceChange = state.Latest is not null && !state.Satisfied,
+                CurrencyId = currencyId,
+                CurrencyCode = currencyCode,
+                CurrentLines = state.CurrentLines.Select(l => new QuotePriceAttestationLineDTO
+                {
+                    QuoteItemId = l.QuoteItemId,
+                    RfqItemId = l.RfqItemId,
+                    ItemDescription = l.ItemDescription,
+                    Quantity = l.Quantity,
+                    UnitPrice = l.UnitPrice
+                }).ToList(),
+                AttestedLines = attestedLines
+            };
         }
 
         private string ActorEmail() =>

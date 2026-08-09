@@ -153,6 +153,13 @@ public sealed class ApproveBelowFloorQuoteTool : IAgentTool
         if (result.Held) // defensive: cannot happen with BypassFloorHold
             return AgentToolResult.Fail("The send was unexpectedly re-held; please retry.");
 
+        // R5: the manager's approval releases the below-floor hold, not the price-provenance
+        // gate. If a price was edited between the rep's confirmation and this approval, the
+        // attestation no longer covers the quote and nothing is sent.
+        if (result.BlockedPendingPriceAttestation)
+            return AgentToolResult.Fail(result.PriceAttestationReason
+                ?? "The price source has not been confirmed for this quote, so it was not sent.");
+
         return AgentToolResult.Ok(new
         {
             holdType = "send_quote",
