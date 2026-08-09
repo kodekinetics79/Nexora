@@ -37,6 +37,9 @@ public partial class ErpRfqAutomationContext
             // no migration. QuoteNoResponseExpiryDays (the 90-day submission rule) is a
             // genuinely new column.
             e.Property(x => x.QuoteExpiryGraceDays).HasColumnName("QuoteAutoExpireDays");
+            // FR-SPO-07 knobs. Plain integer columns, no special mapping — they are listed
+            // here only so the migration owner can see the whole SlaPolicy surface in one
+            // place (SLA-WIRING.md §2 carries the DDL).
             e.Property(x => x.CreatedOn).HasDefaultValueSql("now()");
             e.Property(x => x.UpdatedOn).HasDefaultValueSql("now()");
             e.HasIndex(x => x.BusinessUnitId).IsUnique().HasDatabaseName("UX_SlaPolicies_BU");

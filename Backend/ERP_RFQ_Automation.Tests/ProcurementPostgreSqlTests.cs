@@ -81,9 +81,13 @@ public sealed class ProcurementPostgreSqlTests(PostgreSqlTestDatabase database)
                 ProcurementTestData.Currency + offset, ProcurementTestData.Warehouse + offset,
                 DateOnly.FromDateTime(DateTime.UtcNow.AddDays(10)), [award.Id],
                 "restore-po", "qa", "restore-po")));
+            // FR-SPO-01. Approval by a second buyer (the award approver above is user 42) is now
+            // the precondition for release, so the restore fixture walks the real gate.
+            var restoreApproval = await ExecuteIsolated(service => service.ApprovePurchaseOrderAsync(new(
+                tenant, draft.Id, 1, 77, "restore-approve", "qa", "restore-approve")));
             var issued = await ExecuteIsolated(service => service.IssuePurchaseOrderAsync(new(
-                tenant, draft.Id, 1, "provider-receipt:restore", "restore-issue", "qa", "restore-issue",
-                new string('a', 64), DateTime.UtcNow)));
+                tenant, draft.Id, restoreApproval.Version, "provider-receipt:restore", "restore-issue", "qa",
+                "restore-issue", new string('a', 64), DateTime.UtcNow)));
             long purchaseOrderLineId;
             await using (var scoped = _database.ContextForConnectionString(isolatedBuilder.ConnectionString, tenant))
             {
@@ -92,7 +96,7 @@ public sealed class ProcurementPostgreSqlTests(PostgreSqlTestDatabase database)
             }
             await ExecuteIsolated(service => service.PostGoodsReceiptAsync(new(
                 tenant, issued.Id, ProcurementTestData.Warehouse + offset, "RESTORE-GR", DateTime.UtcNow,
-                2, [new PostGoodsReceiptLine(purchaseOrderLineId, 5m)], "restore-gr", "qa", "restore-gr")));
+                issued.Version, [new PostGoodsReceiptLine(purchaseOrderLineId, 5m)], "restore-gr", "qa", "restore-gr")));
 
             await using (var mark = _database.ContextForConnectionString(isolatedBuilder.ConnectionString, null))
             {
@@ -534,8 +538,8 @@ public sealed class ProcurementPostgreSqlTests(PostgreSqlTestDatabase database)
         var poB = await CreatePurchaseOrderAsync(tenantB, offsetB, "pg-rls-b", 2m);
         var lineA = await PurchaseOrderLineIdAsync(tenantA, poA.Id);
         var lineB = await PurchaseOrderLineIdAsync(tenantB, poB.Id);
-        await PostReceiptAsync(Receipt(tenantA, offsetA, poA.Id, lineA, 1m, 2, "pg-rls-gr-a", "GR-RLS-A"));
-        await PostReceiptAsync(Receipt(tenantB, offsetB, poB.Id, lineB, 1m, 2, "pg-rls-gr-b", "GR-RLS-B"));
+        await PostReceiptAsync(Receipt(tenantA, offsetA, poA.Id, lineA, 1m, poA.Version, "pg-rls-gr-a", "GR-RLS-A"));
+        await PostReceiptAsync(Receipt(tenantB, offsetB, poB.Id, lineB, 1m, poB.Version, "pg-rls-gr-b", "GR-RLS-B"));
 
         var tenantTables = new[]
         {
@@ -612,8 +616,8 @@ public sealed class ProcurementPostgreSqlTests(PostgreSqlTestDatabase database)
         var racePo = await CreatePurchaseOrderAsync(raceTenant, raceOffset, "pg-race", 8m);
         Assert.Equal($"PO-{DateTime.UtcNow:yyyy}-{racePo.Id:D10}", racePo.Number);
         var raceLineId = await PurchaseOrderLineIdAsync(raceTenant, racePo.Id);
-        var first = Receipt(raceTenant, raceOffset, racePo.Id, raceLineId, 8m, 2, "pg-race-a", "GR-RACE-A");
-        var second = Receipt(raceTenant, raceOffset, racePo.Id, raceLineId, 8m, 2, "pg-race-b", "GR-RACE-B");
+        var first = Receipt(raceTenant, raceOffset, racePo.Id, raceLineId, 8m, racePo.Version, "pg-race-a", "GR-RACE-A");
+        var second = Receipt(raceTenant, raceOffset, racePo.Id, raceLineId, 8m, racePo.Version, "pg-race-b", "GR-RACE-B");
 
         var outcomes = await Task.WhenAll(CaptureReceiptAsync(first), CaptureReceiptAsync(second));
         var winner = Assert.Single(outcomes, x => x.Result is not null);
@@ -630,7 +634,7 @@ public sealed class ProcurementPostgreSqlTests(PostgreSqlTestDatabase database)
         const long rollbackOffset = 80_000;
         var rollbackPo = await CreatePurchaseOrderAsync(rollbackTenant, rollbackOffset, "pg-rollback", 8m);
         var rollbackLineId = await PurchaseOrderLineIdAsync(rollbackTenant, rollbackPo.Id);
-        var over = Receipt(rollbackTenant, rollbackOffset, rollbackPo.Id, rollbackLineId, 9m, 2,
+        var over = Receipt(rollbackTenant, rollbackOffset, rollbackPo.Id, rollbackLineId, 9m, rollbackPo.Version,
             "pg-over", "GR-OVER");
         await Assert.ThrowsAsync<ProcurementValidationException>(() => PostReceiptAsync(over));
         await AssertReconciliationAsync(rollbackTenant, rollbackOffset, 0, 0m, ProcurementTestData.InitialOnHand);
@@ -671,9 +675,13 @@ public sealed class ProcurementPostgreSqlTests(PostgreSqlTestDatabase database)
             ProcurementTestData.Currency + offset, ProcurementTestData.Warehouse + offset,
             DateOnly.FromDateTime(DateTime.UtcNow.AddDays(10)), [award.Id],
             $"{key}-po", "qa", $"corr-{key}-po")));
+        // The award above is approved by user 42; the purchase order is approved by user 77, so
+        // the segregation-of-duties default is satisfied rather than switched off.
+        var approval = await Execute(tenant, service => service.ApprovePurchaseOrderAsync(new(
+            tenant, draft.Id, 1, 77, $"{key}-approve", "qa", $"corr-{key}-approve")));
         return await Execute(tenant, service => service.IssuePurchaseOrderAsync(new(
-            tenant, draft.Id, 1, $"provider-receipt:{key}", $"{key}-issue", "qa", $"corr-{key}-issue",
-            new string('a', 64), DateTime.UtcNow)));
+            tenant, draft.Id, approval.Version, $"provider-receipt:{key}", $"{key}-issue", "qa",
+            $"corr-{key}-issue", new string('a', 64), DateTime.UtcNow)));
     }
 
     private async Task<T> Execute<T>(long tenant, Func<ProcurementApplicationService, Task<T>> operation)

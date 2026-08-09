@@ -8,6 +8,7 @@ using ERP_RFQ_Automation.Agent.Models;
 using ERP_RFQ_Automation.HealthChecks;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.MultiTenancy;
+using ERP_RFQ_Automation.Procurement;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -39,6 +40,8 @@ namespace ERP_RFQ_Automation.Sla;
 ///     customer response (FR-QTM-07) -> IQuoteOutcomeService.ExpireAsync
 ///  4. SENT quotes gone quiet (stale) -> per-owner daily digest
 ///  5. Copilot approvals pending too long -> manager escalation
+///  6. Supplier orders approaching their committed ship date (FR-SPO-07) -> buyer reminder
+///  7. Supplier orders sent but never acknowledged (FR-SPO-07) -> supervisor escalation
 ///
 /// Send-once semantics are enforced by the DATABASE: every alert INSERTs its
 /// <see cref="SlaEvent"/> claim BEFORE the email goes out, against the unique
@@ -158,7 +161,13 @@ public sealed class SlaSweepWorker : BackgroundService
             .Select(l => l.BusinessUnitId).Distinct().ToListAsync(ct);
         var quoteBus = await db.Quotes.AsNoTracking().IgnoreQueryFilters()
             .Select(q => q.BusinessUnitId).Distinct().ToListAsync(ct);
-        var businessUnits = leadBus.Union(quoteBus).OrderBy(id => id).ToList();
+        // FR-SPO-07: procurement is an activity source in its own right. Without this a
+        // tenant whose supplier orders were raised against RFQs that never became Leads or
+        // Quotes would be enumerated as "no activity", and its ship-date reminders and
+        // acknowledgement escalations would never run at all.
+        var procurementBus = await db.SupplierPurchaseOrders.AsNoTracking().IgnoreQueryFilters()
+            .Select(o => o.BusinessUnitId).Distinct().ToListAsync(ct);
+        var businessUnits = leadBus.Union(quoteBus).Union(procurementBus).OrderBy(id => id).ToList();
 
         // Resolved from THIS scope rather than injected: the worker is a singleton and the gate is
         // scoped, so a constructor dependency would fail startup scope validation.
@@ -196,6 +205,8 @@ public sealed class SlaSweepWorker : BackgroundService
         await SweepQuoteAutoExpiryAsync(db, outcomes, bu, policy, ct);
         await SweepStaleQuotesAsync(db, notifications, bu, policy, ct);
         await SweepPendingApprovalsAsync(db, notifications, bu, policy, ct);
+        await SweepSupplierShipDatesAsync(db, notifications, bu, policy, ct);
+        await SweepSupplierAcknowledgementsAsync(db, notifications, bu, policy, ct);
     }
 
     // ---------------- 1. lead deadlines ----------------
@@ -362,6 +373,17 @@ public sealed class SlaSweepWorker : BackgroundService
     /// trigger 1 so an unparsed date cannot expire a live quote on the spot; such quotes
     /// still fall to trigger 2.</para>
     ///
+    /// <para>DECISION REGISTER R7 — an explicitly EXTENDED validity suppresses trigger 2 for as
+    /// long as the extended date is still in the future. R7 rules that validity is the user's
+    /// and that "automatic expiry still runs against the <i>current</i> validity, so it stops
+    /// fighting the user". Gulf tender bid validity is set by the buyer, routinely 90–120 days
+    /// and extendable on request: without this clause a rep who reasoned and recorded a hold to
+    /// day 120 would still have the bid auto-expired underneath them on day 90, and the live
+    /// Etimad pipeline would vanish from the dashboard. Trigger 1 is unaffected and still
+    /// expires the quote the moment the EXTENDED date passes, so nothing becomes immortal — and
+    /// a validity that was merely set at draft time and never explicitly extended is NOT
+    /// covered, so the 90-day silence rule keeps its original reach.</para>
+    ///
     /// Exposed as a queryable so both trigger boundaries are testable without a worker host.
     /// </summary>
     internal static IQueryable<Quote> ExpiryCandidates(
@@ -381,7 +403,11 @@ public sealed class SlaSweepWorker : BackgroundService
                              && q.ValidUntil.Value.AddDays(graceDays) < now)
                             || (q.SentOn != null
                                 && q.RespondedOn == null
-                                && q.SentOn.Value.AddDays(noResponseDays) < now)));
+                                && q.SentOn.Value.AddDays(noResponseDays) < now
+                                && !(q.ValidityExtendedOn != null
+                                     && q.ValidUntil != null
+                                     && q.ValidUntil >= EarliestCommercialDeadline
+                                     && q.ValidUntil.Value.AddDays(graceDays) >= now))));
     }
 
     private async Task SweepQuoteAutoExpiryAsync(
@@ -634,6 +660,257 @@ public sealed class SlaSweepWorker : BackgroundService
         return manager is null || string.IsNullOrWhiteSpace(manager.Email)
             ? new List<Recipient>()
             : new List<Recipient> { new(manager.Id, manager.Email, manager.FirstName) };
+    }
+
+    // ---------------- 6/7. supplier order chasing (FR-SPO-07) ----------------
+    //
+    // Both candidate sets are isolated as static IQueryables, like ExpiryCandidates above,
+    // so each boundary is testable without standing up a worker host — and so a schema move
+    // touches two queries rather than the claim/notify/business-day logic below.
+
+    /// <summary>Statuses at which a shipment reminder is pointless — the goods have moved,
+    /// or the order is dead. Everything else still has a ship date worth chasing.</summary>
+    private static readonly string[] ShipmentSettledStatuses =
+    {
+        SupplierPurchaseOrderStatuses.Shipped,
+        SupplierPurchaseOrderStatuses.PartiallyReceived,
+        SupplierPurchaseOrderStatuses.Received,
+        SupplierPurchaseOrderStatuses.Closed,
+        SupplierPurchaseOrderStatuses.Cancelled
+    };
+
+    /// <summary>Statuses meaning "this order is with the supplier, awaiting their answer".
+    /// ISSUED is included because it is the legacy word that conflated Approved and Sent
+    /// (see <see cref="SupplierPurchaseOrderStatuses"/>); excluding it would silently exempt
+    /// every order raised before the vocabulary was split.</summary>
+    private static readonly string[] WithSupplierStatuses =
+    {
+        SupplierPurchaseOrderStatuses.Sent,
+        SupplierPurchaseOrderStatuses.Issued
+    };
+
+    /// <summary>
+    /// FR-SPO-07 reminder candidates: supplier orders whose committed ship date falls in
+    /// [today, horizon], where horizon is the date <c>SupplierShipDateReminderDays</c>
+    /// WORKING days out (<see cref="BusinessCalendar.AddBusinessDays"/>). Expressing the
+    /// window as a pre-computed date keeps the business-day rule out of SQL while still
+    /// letting the database do the filtering on an indexable range.
+    ///
+    /// <para>"Before it passes" is the <c>&gt;= today</c> term: this sweep is a heads-up, not
+    /// a lateness alert. An order whose ship date has already gone by is a different
+    /// requirement (delivery performance) and is deliberately not claimed here — claiming it
+    /// would burn the send-once key and silently suppress the real overdue alert when one is
+    /// built.</para>
+    ///
+    /// <para>Shipped/received/closed/cancelled orders are excluded because there is nothing
+    /// left to chase, and so are REJECTED acknowledgements: a supplier who refused the order
+    /// is not going to ship it, and reminding the buyer about a date the supplier has already
+    /// disowned trains people to ignore the mailbox. A NULL acknowledgement still gets the
+    /// reminder — an unanswered order carrying a committed date is exactly the case worth
+    /// chasing.</para>
+    /// </summary>
+    internal static IQueryable<SupplierPurchaseOrder> ShipDateReminderCandidates(
+        ErpRfqAutomationContext db, long businessUnitId, DateOnly today, DateOnly horizon)
+        => db.SupplierPurchaseOrders.AsNoTracking()
+            .Where(o => o.BusinessUnitId == businessUnitId
+                        && o.CommittedShipDate != null
+                        && o.CommittedShipDate >= today
+                        && o.CommittedShipDate <= horizon
+                        && !ShipmentSettledStatuses.Contains(o.Status)
+                        && (o.AcknowledgementStatus == null
+                            || o.AcknowledgementStatus != SupplierAcknowledgementStatuses.Rejected));
+
+    private async Task SweepSupplierShipDatesAsync(
+        ErpRfqAutomationContext db, ISlaNotifications notifications, long bu, SlaPolicy policy, CancellationToken ct)
+    {
+        // Non-positive means the tenant has not configured a reminder lead time. Zero would still
+        // match orders shipping today, which is a reminder nobody can act on.
+        if (policy.SupplierShipDateReminderDays <= 0) return;
+
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        var horizon = BusinessCalendar.AddBusinessDays(today, policy.SupplierShipDateReminderDays);
+
+        var orders = await ShipDateReminderCandidates(db, bu, today, horizon)
+            .Select(o => new
+            {
+                o.Id, o.PurchaseOrderNumber, o.CommittedShipDate,
+                o.ApprovedByUserId, o.ApprovedBy, o.CreatedBy, o.ModifiedBy
+            })
+            .ToListAsync(ct);
+        if (orders.Count == 0) return;
+
+        var buUsers = await GetBusinessUnitUsersAsync(db, bu, ct);
+        var unresolved = 0;
+
+        foreach (var order in orders)
+        {
+            var buyer = ResolveBuyer(buUsers, order.ApprovedByUserId, order.ApprovedBy, order.CreatedBy, order.ModifiedBy);
+            if (buyer is null) { unresolved++; continue; }
+
+            var shipDate = order.CommittedShipDate!.Value;
+
+            // The claim key carries the SHIP DATE, not just the order id. One reminder per
+            // (order, committed date): a second sweep on the same date is blocked by the
+            // unique (BusinessUnitId, DedupKey) index, but a supplier who counters with a NEW
+            // date produces a new key and therefore a fresh reminder — which is the whole
+            // point, since the date the buyer was warned about no longer holds.
+            var claim = await TryClaimEventAsync(db, bu, "supplier-order-ship", order.Id, "warn",
+                shipDate.ToDateTime(TimeOnly.MinValue), ct);
+            if (claim is null) continue;
+
+            var label = $"Purchase order {order.PurchaseOrderNumber}";
+            var workingDays = BusinessCalendar.BusinessDaysUntil(today, shipDate);
+            var whenPhrase = workingDays == 0
+                ? "today"
+                : $"in {workingDays} working day{(workingDays == 1 ? "" : "s")}";
+
+            await SendOrReleaseAsync(db, claim, ct, () =>
+                notifications.SendDeadlineAlertAsync(buyer.Email, buyer.FirstName, "warn", label,
+                    $"Supplier ships on {shipDate:dd MMM yyyy} — {label}",
+                    $"The supplier committed to ship {label} on {shipDate:dd MMM yyyy}, which is {whenPhrase} " +
+                    "(weekends excluded). Confirm the shipment is on track, or chase the supplier now while there is " +
+                    "still time to re-plan.",
+                    bu, ct));
+        }
+
+        if (unresolved > 0)
+            _log.LogWarning(
+                "BU {Bu}: {Count} supplier order(s) approaching their committed ship date have no resolvable buyer; reminder skipped for those.",
+                bu, unresolved);
+    }
+
+    /// <summary>
+    /// FR-SPO-07 escalation candidates: orders sitting with the supplier (SENT, or legacy
+    /// ISSUED) that carry no acknowledgement at all.
+    ///
+    /// <para>CLOCK START. <c>coalesce(SentToSupplierOn, ApprovedOn, CreatedOn)</c>. Dispatch is
+    /// what the supplier is late against, and <c>SentToSupplierOn</c> is stamped when the order
+    /// is issued, so it is the authoritative clock. It replaced an earlier
+    /// <c>coalesce(ApprovedOn, CreatedOn)</c> approximation that charged the supplier every day
+    /// the order sat approved but unsent — an order approved on Monday and dispatched on Thursday
+    /// was three days overdue before the supplier had seen it.</para>
+    ///
+    /// <para>The fallbacks remain for rows predating that column. <c>ModifiedOn</c> is
+    /// deliberately not among them: any later edit moves it, which would silently restart the
+    /// supplier's clock.</para>
+    ///
+    /// <para><paramref name="calendarCutoff"/> is <c>now − window</c> in plain calendar time.
+    /// Working time elapsed is never GREATER than calendar time elapsed, so this is a strict
+    /// superset of what the business-day rule can select; the exact Friday–Saturday-aware
+    /// test then runs per row. That keeps the weekend maths out of SQL without dragging the
+    /// whole table into memory.</para>
+    /// </summary>
+    internal static IQueryable<SupplierPurchaseOrder> AcknowledgementEscalationCandidates(
+        ErpRfqAutomationContext db, long businessUnitId, DateTime calendarCutoff)
+        => db.SupplierPurchaseOrders.AsNoTracking()
+            .Where(o => o.BusinessUnitId == businessUnitId
+                        && WithSupplierStatuses.Contains(o.Status)
+                        && o.AcknowledgementStatus == null
+                        && o.AcknowledgedOn == null
+                        && (o.SentToSupplierOn ?? o.ApprovedOn ?? o.CreatedOn) <= calendarCutoff);
+
+    private async Task SweepSupplierAcknowledgementsAsync(
+        ErpRfqAutomationContext db, ISlaNotifications notifications, long bu, SlaPolicy policy, CancellationToken ct)
+    {
+        // A non-positive window is "not configured", not "escalate instantly". The columns were
+        // added to existing SlaPolicy rows with a backfill, and a tenant can still key zero in;
+        // reading either as a zero-hour deadline would escalate every dispatched order on the
+        // first sweep, which is how an alerting channel gets muted permanently.
+        if (policy.SupplierAckEscalationHours <= 0) return;
+
+        var now = DateTime.UtcNow;
+        var window = TimeSpan.FromHours(policy.SupplierAckEscalationHours);
+
+        var orders = await AcknowledgementEscalationCandidates(db, bu, now - window)
+            .Select(o => new
+            {
+                o.Id, o.PurchaseOrderNumber, o.ApprovedByUserId, o.ApprovedBy,
+                // Dispatch, not internal approval, is what the supplier is late against.
+                SentOn = o.SentToSupplierOn ?? o.ApprovedOn ?? o.CreatedOn
+            })
+            .ToListAsync(ct);
+        if (orders.Count == 0) return;
+
+        List<Recipient>? fallbackRecipients = null; // lazy — only fetched when needed
+
+        foreach (var order in orders)
+        {
+            var sentOn = order.SentOn;
+
+            // The business-day gate. A calendar clock would fire this on a Friday or Saturday,
+            // into an office nobody is sitting in, and would charge the supplier a weekend they
+            // could not have worked.
+            var escalateAt = BusinessCalendar.AddBusinessTime(sentOn, window);
+            if (now < escalateAt) continue;
+
+            // Same escalation ladder as the copilot-approval sweep: the approver's own manager
+            // first (Users.ManagerId), then the tenant's managers/admins selected by RoleRank.
+            var recipients = await ResolveRequesterManagerAsync(db, bu, order.ApprovedByUserId, order.ApprovedBy, ct);
+            if (recipients.Count == 0)
+            {
+                fallbackRecipients ??= await GetManagersAndAdminsAsync(db, bu, ct);
+                recipients = fallbackRecipients;
+            }
+            if (recipients.Count == 0) continue; // nobody to tell — retry next sweep
+
+            var claim = await TryClaimEventAsync(db, bu, "supplier-order-ack", order.Id, "escalated", null, ct);
+            if (claim is null) continue;
+
+            var label = $"Purchase order {order.PurchaseOrderNumber}";
+            await SendOrReleaseAsync(db, claim, ct, async () =>
+            {
+                var anyDelivered = false;
+                foreach (var r in recipients)
+                {
+                    anyDelivered |= await notifications.SendDeadlineAlertAsync(r.Email, r.FirstName, "escalated", label,
+                        $"Supplier has not acknowledged an order — {label}",
+                        $"{label} went to the supplier on {sentOn:dd MMM yyyy HH:mm} UTC and there is still no " +
+                        $"acknowledgement after {policy.SupplierAckEscalationHours} working hour(s) (weekends excluded). " +
+                        "Nothing confirms the supplier has accepted this order, so neither the ship date nor the customer " +
+                        "promise behind it can be relied on. Please chase the supplier or reassign the order.",
+                        bu, ct);
+                }
+                return anyDelivered;
+            });
+        }
+    }
+
+    /// <summary>Active users of the tenant, for free-text owner matching.</summary>
+    private static async Task<List<BuyerCandidate>> GetBusinessUnitUsersAsync(
+        ErpRfqAutomationContext db, long bu, CancellationToken ct)
+        => await db.Users.AsNoTracking()
+            .Where(u => u.Buid == bu && u.IsActive != false)
+            .Select(u => new BuyerCandidate(u.Id, u.Email, u.FirstName, u.LastName))
+            .ToListAsync(ct);
+
+    private sealed record BuyerCandidate(long Id, string Email, string FirstName, string LastName);
+
+    /// <summary>
+    /// The buyer to remind: the recorded approver's user id first (the only exact key on the
+    /// order), then the free-text approver/creator/last-editor identities matched against BU
+    /// users by email or "First Last" — the same resolution the stale-quote digest uses,
+    /// because these columns are the same kind of free-text identity. Null when nobody
+    /// matches: a reminder with a guessed recipient is worse than no reminder.
+    /// </summary>
+    private static BuyerCandidate? ResolveBuyer(
+        List<BuyerCandidate> buUsers, long? approvedByUserId, params string?[] identities)
+    {
+        if (approvedByUserId is { } id)
+        {
+            var byId = buUsers.FirstOrDefault(u => u.Id == id);
+            if (byId is not null && !string.IsNullOrWhiteSpace(byId.Email)) return byId;
+        }
+
+        foreach (var identity in identities)
+        {
+            if (string.IsNullOrWhiteSpace(identity)) continue;
+            var match = buUsers.FirstOrDefault(u =>
+                string.Equals(u.Email, identity, StringComparison.OrdinalIgnoreCase)
+                || string.Equals($"{u.FirstName} {u.LastName}", identity, StringComparison.OrdinalIgnoreCase));
+            if (match is not null && !string.IsNullOrWhiteSpace(match.Email)) return match;
+        }
+
+        return null;
     }
 
     // ---------------- shared helpers ----------------

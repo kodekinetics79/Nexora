@@ -49,6 +49,18 @@ splice: `ConfigureSlaModel(modelBuilder);` was added to
 | QuoteNoResponseExpiryDays | integer | default 90 — FR-QTM-07 days after submission with no customer response (**new column; migration owned by the lead**) |
 | ApprovalEscalationHours | integer | default 4 |
 | DeadlineBufferHours | integer | default 12 (reserved, not yet consumed by the sweep) |
+| SupplierShipDateReminderDays | integer | default 3 — FR-SPO-07 WORKING days before a supplier order's committed ship date at which the buyer is reminded (**new column; migration owned by the lead**) |
+| SupplierAckEscalationHours | integer | default 48 — FR-SPO-07 WORKING hours an order may sit with the supplier unacknowledged before a supervisor is told (**new column; migration owned by the lead**) |
+
+The two FR-SPO-07 columns the lead's migration must add:
+
+```sql
+ALTER TABLE "SlaPolicies" ADD COLUMN "SupplierShipDateReminderDays" integer NOT NULL DEFAULT 3;
+ALTER TABLE "SlaPolicies" ADD COLUMN "SupplierAckEscalationHours"  integer NOT NULL DEFAULT 48;
+```
+
+Both are exposed on `PUT /api/sla/policy` (`supplierShipDateReminderDays` clamped 0–90,
+`supplierAckEscalationHours` clamped 1–720) and returned by `GET /api/sla/policy`.
 | CreatedOn | timestamp | server default `now()` |
 | UpdatedOn | timestamp | server default `now()` |
 
@@ -61,8 +73,8 @@ DB defaults.
 |---|---|---|
 | Id | bigint identity | PK |
 | BusinessUnitId | bigint | tenant filter |
-| EntityType | varchar(40) | `lead` \| `lead-unassigned` \| `quote` \| `quote-stale-digest` \| `approval` |
-| EntityId | bigint | lead/quote id; owner user id for digests; first 8 bytes of the approval Guid for approvals |
+| EntityType | varchar(40) | `lead` \| `lead-unassigned` \| `quote` \| `quote-stale-digest` \| `approval` \| `supplier-order-ship` \| `supplier-order-ack` |
+| EntityId | bigint | lead/quote id; owner user id for digests; first 8 bytes of the approval Guid for approvals; supplier purchase order id for the two FR-SPO-07 sweeps |
 | Level | varchar(20) | `warn` \| `critical` \| `overdue` \| `stale` \| `expired` \| `escalated` |
 | CreatedOn | timestamp | server default `now()` |
 

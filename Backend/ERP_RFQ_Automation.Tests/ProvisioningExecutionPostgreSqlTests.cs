@@ -27,6 +27,7 @@ namespace ERP_RFQ_Automation.Tests;
 /// it is creating, so there is nothing to scope it to. Asserted below rather than assumed.</para>
 /// </summary>
 [Collection(PostgreSqlIntegrationCollection.Name)]
+[Trait("Category", "PostgreSQL")]
 public sealed class ProvisioningExecutionPostgreSqlTests : IAsyncLifetime
 {
     private readonly PostgreSqlTestDatabase _database;

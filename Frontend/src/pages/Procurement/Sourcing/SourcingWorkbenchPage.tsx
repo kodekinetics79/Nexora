@@ -34,8 +34,10 @@ import {
 import {
   ArrowBack,
   AssignmentTurnedIn,
+  HowToReg,
   Inventory2,
   LocalShipping,
+  Public,
   Refresh,
   Replay,
   Send,
@@ -45,7 +47,11 @@ import {
 } from "@mui/icons-material";
 import { toast } from "react-hot-toast";
 import procurementService, {
+  INCOTERMS_2020,
+  type Incoterm,
+  type PurchaseOrderLineTradeTerms,
   type QuoteComparisonResult,
+  type SupplierAcknowledgementStatus,
   type SupplierOffer,
   type SupplierPurchaseOrder,
   type SupplierSolicitation,
@@ -65,10 +71,22 @@ const money = (value: number, currency = "USD") =>
   new Intl.NumberFormat(undefined, { style: "currency", currency }).format(
     value,
   );
+/**
+ * The refusal the server actually gave, in its own words.
+ *
+ * The procurement API answers with RFC 7807 ProblemDetails, where `title` is the generic category
+ * ("Invalid procurement request", "Procurement conflict") and `detail` carries the sentence that
+ * says what is wrong — "A revised lead time is a counter-offer. Record this answer as COUNTERED."
+ * Reading `title` first, as this did, showed every buyer the category and threw the reason away, so
+ * a refusal with a precise, actionable cause arrived on screen as an unactionable label. `detail`
+ * comes first for that reason; `title` survives only as the last resort before the caller's
+ * fallback.
+ */
 const errorMessage = (error: any, fallback: string) =>
+  error?.response?.data?.detail ||
   error?.response?.data?.message ||
-  error?.response?.data?.title ||
   error?.message ||
+  error?.response?.data?.title ||
   fallback;
 const localCalendarDate = (value: Date) =>
   `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
@@ -81,13 +99,32 @@ const localDateTimeInput = (value: Date) =>
     .toISOString()
     .slice(0, 16);
 const sha256Pattern = /^[a-fA-F0-9]{64}$/;
+/**
+ * A `YYYY-MM-DD` calendar date rendered in the buyer's locale WITHOUT going through
+ * `new Date(string)`, which parses a bare date as UTC midnight and can therefore display the
+ * previous day. A committed ship date that reads one day early is a commitment nobody made.
+ */
+const calendarDate = (value?: string | null) => {
+  if (!value) return null;
+  const [year, month, day] = value.slice(0, 10).split("-").map(Number);
+  return Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)
+    ? new Date(year, month - 1, day).toLocaleDateString()
+    : value;
+};
 
 const statusColor = (
   status: string,
 ): "default" | "success" | "warning" | "error" | "info" => {
   const normalized = status.replaceAll("_", "").toUpperCase();
   if (
-    ["SENT", "RESPONDED", "RECEIVED", "ISSUED", "APPROVED"].includes(normalized)
+    [
+      "SENT",
+      "RESPONDED",
+      "RECEIVED",
+      "ISSUED",
+      "APPROVED",
+      "ACKNOWLEDGED",
+    ].includes(normalized)
   )
     return "success";
   if (
@@ -102,6 +139,85 @@ const statusColor = (
     return "warning";
   return "default";
 };
+
+/**
+ * FR-SPO-03. A supplier's answer is not a status, and it must not be coloured like one.
+ *
+ * ACCEPTED is the only one that settles anything. COUNTERED and REJECTED both leave the order's
+ * status exactly where it was — by design, because neither is agreement — so both must read as
+ * work the buyer still owes: a counter needs a decision, a rejection needs re-sourcing. Showing
+ * either in a neutral colour would leave them indistinguishable from a normal in-flight order,
+ * which is precisely how a refused order sits untouched until the customer chases it.
+ */
+const acknowledgementColor = (
+  status: SupplierAcknowledgementStatus,
+): "success" | "warning" | "error" =>
+  status === "ACCEPTED" ? "success" : status === "COUNTERED" ? "warning" : "error";
+
+/**
+ * FR-SPO-03 read path. What the supplier actually said, on the order it was said about.
+ *
+ * Before this the answer was write-only: a buyer recorded a counter, the screen did not change
+ * because a counter deliberately leaves the status alone, and the revised lead time and the
+ * rejection reason — the entire reason for capturing an answer — existed only in the database.
+ */
+function SupplierAnswer({ order }: { order: SupplierPurchaseOrder }) {
+  if (!order.acknowledgementStatus) return null;
+  const answered = order.acknowledgementStatus;
+  const shipDate = calendarDate(order.committedShipDate);
+  return (
+    <Alert
+      severity={acknowledgementColor(answered)}
+      icon={false}
+      square
+      sx={{ borderRadius: 0 }}
+    >
+      <Typography variant="body2" sx={{ fontWeight: 700 }}>
+        {answered === "ACCEPTED"
+          ? "Supplier accepted this order"
+          : answered === "COUNTERED"
+            ? "Supplier countered — this order is not agreed yet"
+            : "Supplier rejected this order"}
+      </Typography>
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{ display: "block" }}
+      >
+        {/* The supplier's person, kept distinct from the Nexora user who keyed it in. */}
+        Answered by {order.acknowledgedBy || "an unnamed supplier contact"}
+        {order.acknowledgedOn
+          ? ` · recorded ${new Date(order.acknowledgedOn).toLocaleString()}`
+          : ""}
+      </Typography>
+      {(order.revisedLeadTimeDays || shipDate) && (
+        <Typography variant="body2" sx={{ mt: 0.5 }}>
+          {[
+            order.revisedLeadTimeDays
+              ? `Revised lead time: ${order.revisedLeadTimeDays} day${order.revisedLeadTimeDays === 1 ? "" : "s"}`
+              : null,
+            shipDate ? `Committed ship date: ${shipDate}` : null,
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+        </Typography>
+      )}
+      {order.acknowledgementNote && (
+        <Typography variant="body2" sx={{ mt: 0.5 }}>
+          {answered === "REJECTED" ? "Reason: " : "Supplier note: "}
+          {order.acknowledgementNote}
+        </Typography>
+      )}
+      {answered !== "ACCEPTED" && (
+        <Typography variant="caption" sx={{ display: "block", mt: 0.5 }}>
+          {answered === "COUNTERED"
+            ? "The order still reads as sent because a counter is not agreement. Accept the revised terms with the supplier, or cancel and re-source."
+            : "Nothing will arrive against this order. Cancel it and re-source the line, or the customer demand behind it stays uncovered."}
+        </Typography>
+      )}
+    </Alert>
+  );
+}
 
 /**
  * Only a solicitation whose delivery FAILED can be retried. The server refuses every other
@@ -146,7 +262,13 @@ function SourcingWorkbenchPage() {
   const [pricingSelection, setPricingSelection] = useState<{ awardId: number; quoteItemId: number; landedUnitCost: number; currencyCode: string } | null>(null);
   const [memoryLineId, setMemoryLineId] = useState<number | null>(null);
   const [poOpen, setPoOpen] = useState(false);
+  const [approveOrder, setApproveOrder] =
+    useState<SupplierPurchaseOrder | null>(null);
   const [issueOrder, setIssueOrder] =
+    useState<SupplierPurchaseOrder | null>(null);
+  const [acknowledgeOrder, setAcknowledgeOrder] =
+    useState<SupplierPurchaseOrder | null>(null);
+  const [tradeTermsOrder, setTradeTermsOrder] =
     useState<SupplierPurchaseOrder | null>(null);
   const [receiptOrder, setReceiptOrder] =
     useState<SupplierPurchaseOrder | null>(null);
@@ -773,14 +895,95 @@ function SourcingWorkbenchPage() {
                         label={order.status.replaceAll("_", " ")}
                         color={statusColor(order.status)}
                       />
+                      {/*
+                        FR-SPO-03. A countered or rejected order keeps the status it had — by
+                        design, because neither is agreement. That makes this chip the only signal
+                        on the card that the supplier has answered at all, so it sits beside the
+                        status rather than below the fold.
+                      */}
+                      {order.acknowledgementStatus && (
+                        <Chip
+                          size="small"
+                          variant="outlined"
+                          label={`Supplier ${order.acknowledgementStatus.toLowerCase()}`}
+                          color={acknowledgementColor(
+                            order.acknowledgementStatus,
+                          )}
+                        />
+                      )}
                     </Stack>
                     <Typography variant="body2" color="text.secondary">
                       {order.supplierName} ·{" "}
                       {money(order.totalValue, order.currencyCode)}
                     </Typography>
+                    {/*
+                      FR-SPO-01. Who authorised the spend, shown on the order rather than buried in
+                      an audit log — it is the fact a second buyer needs before releasing it.
+                    */}
+                    {order.approvedBy && (
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        sx={{ display: "block" }}
+                      >
+                        Approved by {order.approvedBy}
+                        {order.approvedOn
+                          ? ` · ${new Date(order.approvedOn).toLocaleString()}`
+                          : ""}
+                      </Typography>
+                    )}
+                    {/*
+                      FR-SPO-06. The shipping terms a customs broker asks for first. Shown on the
+                      card because an order whose Incoterm is blank cannot be cleared, and that is
+                      worth noticing before dispatch rather than at the border.
+                    */}
+                    {(order.incoterm ||
+                      order.portOfLoading ||
+                      order.portOfDischarge) && (
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        sx={{ display: "block" }}
+                      >
+                        {[
+                          order.incoterm,
+                          order.portOfLoading || order.portOfDischarge
+                            ? `${order.portOfLoading ?? "—"} → ${order.portOfDischarge ?? "—"}`
+                            : null,
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </Typography>
+                    )}
                   </Box>
-                  <Stack direction="row" spacing={1}>
+                  <Stack
+                    direction="row"
+                    spacing={1}
+                    sx={{ flexWrap: "wrap", rowGap: 1 }}
+                  >
                     {order.status === "DRAFT" && canIssuePo && (
+                      <Button
+                        startIcon={<HowToReg />}
+                        onClick={() => setApproveOrder(order)}
+                      >
+                        Approve PO
+                      </Button>
+                    )}
+                    {/*
+                      FR-SPO-06. Terms are editable exactly while the order is ours — DRAFT or
+                      APPROVED. After dispatch the server refuses, because the Incoterm the supplier
+                      holds and the Incoterm we hold must not diverge silently.
+                    */}
+                    {["DRAFT", "APPROVED"].includes(order.status) &&
+                      canIssuePo && (
+                        <Button
+                          startIcon={<Public />}
+                          onClick={() => setTradeTermsOrder(order)}
+                        >
+                          Trade terms
+                        </Button>
+                      )}
+                    {order.status === "APPROVED" && canIssuePo && (
                       <Button
                         startIcon={<Send />}
                         onClick={() => setIssueOrder(order)}
@@ -788,11 +991,37 @@ function SourcingWorkbenchPage() {
                         Issue PO
                       </Button>
                     )}
+                    {/*
+                      FR-SPO-03. Offered only on an order that has actually reached the supplier
+                      (SENT, or the legacy ISSUED that conflated approved with sent) AND does not
+                      already carry an answer. An order that has been answered is refused by the
+                      server with a 409, so leaving the button live was a dead end that told the
+                      buyer nothing until they had already clicked it.
+                    */}
+                    {["SENT", "ISSUED"].includes(order.status) &&
+                      !order.acknowledgementStatus &&
+                      canIssuePo && (
+                        <Button
+                          startIcon={<AssignmentTurnedIn />}
+                          onClick={() => setAcknowledgeOrder(order)}
+                        >
+                          Record supplier answer
+                        </Button>
+                      )}
                     <Button
                       startIcon={<LocalShipping />}
                       disabled={
                         !canReceive ||
-                        !["ISSUED", "PARTIALLY_RECEIVED"].includes(order.status)
+                        // Mirrors SupplierPurchaseOrderStatuses.OpenForReceipt. ACKNOWLEDGED and
+                        // the states beyond it were missing, so a supplier accepting the order was
+                        // the very act that hid the receipt button for it.
+                        ![
+                          "ISSUED",
+                          "ACKNOWLEDGED",
+                          "IN_PRODUCTION",
+                          "SHIPPED",
+                          "PARTIALLY_RECEIVED",
+                        ].includes(order.status)
                       }
                       onClick={() => setReceiptOrder(order)}
                     >
@@ -800,34 +1029,67 @@ function SourcingWorkbenchPage() {
                     </Button>
                   </Stack>
                 </Stack>
-                <Table size="small">
-                  <TableHead>
-                    <TableRow>
-                      <TableCell>Description</TableCell>
-                      <TableCell align="right">Ordered</TableCell>
-                      <TableCell align="right">Received</TableCell>
-                      <TableCell align="right">Open</TableCell>
-                      <TableCell align="right">Landed unit cost</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {order.lines.map((line) => (
-                      <TableRow key={line.id}>
-                        <TableCell>{line.description}</TableCell>
-                        <TableCell align="right">
-                          {line.orderedQuantity}
-                        </TableCell>
-                        <TableCell align="right">
-                          {line.receivedQuantity}
-                        </TableCell>
-                        <TableCell align="right">{line.openQuantity}</TableCell>
-                        <TableCell align="right">
-                          {money(line.landedUnitCost, order.currencyCode)}
-                        </TableCell>
+                <SupplierAnswer order={order} />
+                <Box sx={{ overflowX: "auto" }}>
+                  <Table size="small" sx={{ minWidth: 760 }}>
+                    <TableHead>
+                      <TableRow>
+                        <TableCell>Description</TableCell>
+                        <TableCell align="right">Ordered</TableCell>
+                        <TableCell align="right">Received</TableCell>
+                        <TableCell align="right">Open</TableCell>
+                        <TableCell align="right">Landed unit cost</TableCell>
+                        {/* FR-SPO-06. What the customs declaration is built from. */}
+                        <TableCell>HS code</TableCell>
+                        <TableCell>Country of origin</TableCell>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+                    </TableHead>
+                    <TableBody>
+                      {order.lines.map((line) => (
+                        <TableRow key={line.id}>
+                          <TableCell>{line.description}</TableCell>
+                          <TableCell align="right">
+                            {line.orderedQuantity}
+                          </TableCell>
+                          <TableCell align="right">
+                            {line.receivedQuantity}
+                          </TableCell>
+                          <TableCell align="right">
+                            {line.openQuantity}
+                          </TableCell>
+                          <TableCell align="right">
+                            {money(line.landedUnitCost, order.currencyCode)}
+                          </TableCell>
+                          {/*
+                            Missing customs data is shown as missing rather than as an empty cell,
+                            because "not captured" is the finding a buyer needs before the shipment
+                            reaches a border.
+                          */}
+                          <TableCell>
+                            {line.hsCode || (
+                              <Typography
+                                variant="caption"
+                                color="warning.main"
+                              >
+                                Not set
+                              </Typography>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            {line.countryOfOrigin || (
+                              <Typography
+                                variant="caption"
+                                color="warning.main"
+                              >
+                                Not set
+                              </Typography>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </Box>
               </Paper>
             ))
           )}
@@ -895,12 +1157,42 @@ function SourcingWorkbenchPage() {
           }}
         />
       )}
+      {approveOrder && (
+        <ApprovePurchaseOrderDialog
+          order={approveOrder}
+          onClose={() => setApproveOrder(null)}
+          onSaved={() => {
+            setApproveOrder(null);
+            refresh();
+          }}
+        />
+      )}
       {issueOrder && (
         <IssuePurchaseOrderDialog
           order={issueOrder}
           onClose={() => setIssueOrder(null)}
           onSaved={() => {
             setIssueOrder(null);
+            refresh();
+          }}
+        />
+      )}
+      {acknowledgeOrder && (
+        <AcknowledgePurchaseOrderDialog
+          order={acknowledgeOrder}
+          onClose={() => setAcknowledgeOrder(null)}
+          onSaved={() => {
+            setAcknowledgeOrder(null);
+            refresh();
+          }}
+        />
+      )}
+      {tradeTermsOrder && (
+        <TradeTermsDialog
+          order={tradeTermsOrder}
+          onClose={() => setTradeTermsOrder(null)}
+          onSaved={() => {
+            setTradeTermsOrder(null);
             refresh();
           }}
         />
@@ -1466,6 +1758,9 @@ function PurchaseOrderDialog({
   );
   const [warehouseId, setWarehouseId] = useState(0);
   const [expectedOn, setExpectedOn] = useState("");
+  const [incoterm, setIncoterm] = useState<string>("");
+  const [portOfLoading, setPortOfLoading] = useState("");
+  const [portOfDischarge, setPortOfDischarge] = useState("");
   const [idempotencyKey] = useState(() => commandKey(`po:${rfqId}`));
   const available = groups.find(([key]) => key === groupKey)?.[1] ?? [];
   const selected = available.filter((award: any) =>
@@ -1480,6 +1775,11 @@ function PurchaseOrderDialog({
         warehouseId,
         expectedOn,
         idempotencyKey,
+        // FR-SPO-06. Optional here — the broker's answer often arrives later, and the terms stay
+        // correctable until the order is dispatched.
+        incoterm: incoterm ? (incoterm as Incoterm) : undefined,
+        portOfLoading: portOfLoading.trim() || undefined,
+        portOfDischarge: portOfDischarge.trim() || undefined,
       }),
     onSuccess: (result) => {
       toast.success(`Supplier purchase order ${result.purchaseOrderNumber} created`);
@@ -1579,6 +1879,47 @@ function PurchaseOrderDialog({
                 ))}
             </Select>
           </FormControl>
+          {/*
+            FR-SPO-06. Shipping terms are optional at creation and correctable from the order card
+            until it is dispatched, so a buyer who does not have them yet is not blocked from
+            raising the order.
+          */}
+          <FormControl fullWidth>
+            <InputLabel id="create-po-incoterm-label">
+              Incoterm (optional)
+            </InputLabel>
+            <Select
+              labelId="create-po-incoterm-label"
+              label="Incoterm (optional)"
+              value={incoterm}
+              onChange={(event) => setIncoterm(event.target.value)}
+            >
+              <MenuItem value="">
+                <em>Not set</em>
+              </MenuItem>
+              {INCOTERMS_2020.map((code) => (
+                <MenuItem key={code} value={code}>
+                  {code}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+            <TextField
+              fullWidth
+              label="Port of loading (optional)"
+              value={portOfLoading}
+              onChange={(event) => setPortOfLoading(event.target.value)}
+              slotProps={{ htmlInput: { maxLength: 120 } }}
+            />
+            <TextField
+              fullWidth
+              label="Port of discharge (optional)"
+              value={portOfDischarge}
+              onChange={(event) => setPortOfDischarge(event.target.value)}
+              slotProps={{ htmlInput: { maxLength: 120 } }}
+            />
+          </Stack>
           <TextField
             required
             type="date"
@@ -1603,6 +1944,63 @@ function PurchaseOrderDialog({
           onClick={() => mutation.mutate()}
         >
           Create PO
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+/**
+ * FR-SPO-01. Approving a drafted supplier purchase order.
+ *
+ * There is no approver field: the server takes the approver from the authenticated principal, and
+ * refuses the approval outright if that user also approved the sourcing award behind these lines.
+ * The dialog says so up front, because the refusal is a policy decision the buyer should expect
+ * rather than an error to puzzle over.
+ */
+function ApprovePurchaseOrderDialog({ order, onClose, onSaved }: any) {
+  const [idempotencyKey] = useState(() => commandKey(`approve-po:${order.id}`));
+  const mutation = useMutation({
+    mutationFn: () =>
+      procurementService.approvePurchaseOrder(order.id, {
+        expectedVersion: order.version,
+        idempotencyKey,
+      }),
+    onSuccess: () => {
+      toast.success(
+        `Supplier purchase order ${order.purchaseOrderNumber} approved for release`,
+      );
+      onSaved();
+    },
+    onError: (error) =>
+      toast.error(errorMessage(error, "Could not approve the purchase order")),
+  });
+
+  return (
+    <Dialog open onClose={onClose} fullWidth maxWidth="sm">
+      <DialogTitle>Approve purchase order · {order.purchaseOrderNumber}</DialogTitle>
+      <DialogContent>
+        <Stack spacing={2} sx={{ mt: 1 }}>
+          <Alert severity="info">
+            Approval authorises {money(order.totalValue, order.currencyCode)} of
+            committed spend with {order.supplierName}. It is recorded against
+            your user and cannot be issued to the supplier until it is approved.
+          </Alert>
+          <Alert severity="warning">
+            Segregation of duties: if you approved the sourcing award behind
+            these lines, this approval will be refused and a second buyer must
+            grant it.
+          </Alert>
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button
+          variant="contained"
+          disabled={mutation.isPending}
+          onClick={() => mutation.mutate()}
+        >
+          Approve PO
         </Button>
       </DialogActions>
     </Dialog>
@@ -1695,6 +2093,438 @@ function IssuePurchaseOrderDialog({ order, onClose, onSaved }: any) {
           onClick={() => mutation.mutate()}
         >
           Issue PO
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+/**
+ * FR-SPO-03. Recording what the supplier said about an order that has been sent to them.
+ *
+ * Nexora has no supplier portal, so this is a buyer keying in a phone call or an email. The two
+ * identities on the record are deliberately separate: the supplier's person is typed in here, the
+ * Nexora user who recorded it is taken by the server from the session. The dialog labels the field
+ * as the supplier's person for exactly that reason — a buyer typing their own name would attribute
+ * the supplier's commitment to our own staff.
+ *
+ * Only ACCEPTED moves the order to ACKNOWLEDGED. A counter and a rejection are answers, not
+ * agreement, and the copy here says so rather than letting a buyer believe a countered order is
+ * settled.
+ */
+function AcknowledgePurchaseOrderDialog({ order, onClose, onSaved }: any) {
+  const [status, setStatus] =
+    useState<SupplierAcknowledgementStatus>("ACCEPTED");
+  const [acknowledgedBy, setAcknowledgedBy] = useState("");
+  const [revisedLeadTimeDays, setRevisedLeadTimeDays] = useState("");
+  const [committedShipDate, setCommittedShipDate] = useState("");
+  const [note, setNote] = useState("");
+  const [refusal, setRefusal] = useState<string | null>(null);
+  const [idempotencyKey] = useState(() =>
+    commandKey(`acknowledge-po:${order.id}`),
+  );
+
+  const isCounter = status === "COUNTERED";
+  const isRejection = status === "REJECTED";
+  // A revised lead time IS the counter — the server refuses one under any other answer. A ship
+  // date is different: accepting the order AND naming the day it ships is one coherent answer, and
+  // it is the answer that arms the ship-date reminder. Only a rejection has no schedule at all.
+  const showLeadTime = isCounter;
+  const showShipDate = !isRejection;
+  const leadTime = revisedLeadTimeDays.trim()
+    ? Number(revisedLeadTimeDays)
+    : null;
+  const leadTimeIsUsable =
+    leadTime === null || (Number.isInteger(leadTime) && leadTime > 0);
+  // Mirrors the server's preconditions exactly, so the button is only dead when the request would
+  // certainly be refused. Everything else is left to the server, whose message is shown verbatim.
+  // The lead-time rules are only applied to a counter, because a lead time typed and then
+  // abandoned by switching answer is not sent at all — disabling the button over a field the
+  // buyer can no longer see is a dead end with no visible cause.
+  const submittable =
+    acknowledgedBy.trim().length > 0 &&
+    (!isRejection || note.trim().length > 0) &&
+    (!isCounter ||
+      (leadTimeIsUsable &&
+        (leadTime !== null || committedShipDate.trim().length > 0)));
+
+  const mutation = useMutation({
+    mutationFn: () =>
+      procurementService.acknowledgePurchaseOrder(order.id, {
+        expectedVersion: order.version,
+        acknowledgementStatus: status,
+        acknowledgedBy: acknowledgedBy.trim(),
+        revisedLeadTimeDays: showLeadTime ? leadTime : null,
+        committedShipDate: showShipDate
+          ? committedShipDate.trim() || null
+          : null,
+        note: note.trim() || null,
+        idempotencyKey,
+      }),
+    onSuccess: (result) => {
+      toast.success(
+        result.acknowledgementStatus === "ACCEPTED"
+          ? `${order.purchaseOrderNumber} acknowledged by the supplier`
+          : `Supplier answer recorded on ${order.purchaseOrderNumber}: ${result.acknowledgementStatus.toLowerCase()}`,
+      );
+      onSaved();
+    },
+    onError: (error) => {
+      const message = errorMessage(
+        error,
+        "Could not record the supplier's answer.",
+      );
+      setRefusal(message);
+      toast.error(message);
+    },
+  });
+
+  return (
+    <Dialog open onClose={onClose} fullWidth maxWidth="sm">
+      <DialogTitle>
+        Record supplier answer · {order.purchaseOrderNumber}
+      </DialogTitle>
+      <DialogContent>
+        <Stack spacing={2} sx={{ mt: 1 }}>
+          <Alert severity="info">
+            {order.supplierName} has this order. Record what they answered. Only
+            an acceptance marks the order acknowledged — a counter or a
+            rejection is recorded against the order but still leaves you a
+            decision to make.
+          </Alert>
+          {refusal && (
+            <Alert severity="error" onClose={() => setRefusal(null)}>
+              {refusal}
+            </Alert>
+          )}
+          <FormControl fullWidth>
+            <InputLabel id="supplier-answer-label">
+              Supplier&apos;s answer
+            </InputLabel>
+            <Select
+              labelId="supplier-answer-label"
+              label="Supplier's answer"
+              value={status}
+              onChange={(event) => {
+                setStatus(event.target.value as SupplierAcknowledgementStatus);
+                setRefusal(null);
+              }}
+            >
+              <MenuItem value="ACCEPTED">
+                Accepted — the order stands as sent
+              </MenuItem>
+              <MenuItem value="COUNTERED">
+                Countered — accepted on different terms
+              </MenuItem>
+              <MenuItem value="REJECTED">
+                Rejected — the supplier will not supply
+              </MenuItem>
+            </Select>
+          </FormControl>
+          <TextField
+            fullWidth
+            required
+            label={`Supplier contact who answered (at ${order.supplierName})`}
+            value={acknowledgedBy}
+            onChange={(event) => setAcknowledgedBy(event.target.value)}
+            helperText="The person at the supplier who gave this answer — not your own name. Your user is recorded separately as the person who keyed it in."
+            slotProps={{ htmlInput: { maxLength: 255 } }}
+          />
+          {showLeadTime && (
+            <TextField
+              fullWidth
+              type="number"
+              label="Revised lead time (days)"
+              value={revisedLeadTimeDays}
+              onChange={(event) => setRevisedLeadTimeDays(event.target.value)}
+              error={revisedLeadTimeDays.trim().length > 0 && !leadTimeIsUsable}
+              helperText="Whole days, greater than zero. Give this or a committed ship date. A revised lead time is what makes this a counter, so it belongs to no other answer."
+              slotProps={{ htmlInput: { min: 1, step: 1 } }}
+            />
+          )}
+          {showShipDate && (
+            <TextField
+              fullWidth
+              type="date"
+              label={
+                isCounter
+                  ? "Committed ship date"
+                  : "Committed ship date (optional)"
+              }
+              value={committedShipDate}
+              onChange={(event) => setCommittedShipDate(event.target.value)}
+              helperText="The date the supplier commits to ship. This is the date the ship-date reminder chases, so recording it is what gets the buyer warned before it passes."
+              slotProps={{ inputLabel: { shrink: true } }}
+            />
+          )}
+          <TextField
+            fullWidth
+            multiline
+            minRows={2}
+            required={isRejection}
+            label={
+              isRejection
+                ? "Supplier's reason for rejecting"
+                : "Note (optional)"
+            }
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            helperText={
+              isRejection
+                ? "A rejection has to say why, or nobody downstream knows whether to re-source or re-price."
+                : "The supplier's own words, if there is anything worth carrying forward."
+            }
+            slotProps={{ htmlInput: { maxLength: 1000 } }}
+          />
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button
+          variant="contained"
+          disabled={!submittable || mutation.isPending}
+          onClick={() => {
+            setRefusal(null);
+            mutation.mutate();
+          }}
+        >
+          Record answer
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+/**
+ * FR-SPO-06. Correcting the shipping and customs terms of an order that has not yet been sent.
+ *
+ * The server treats an omitted field as LEAVE UNCHANGED, never as clear — a sparse correction is
+ * the normal case and a narrow edit must not be able to wipe the Incoterm the rest of the order
+ * depends on. This dialog therefore submits only fields the buyer actually changed, and says out
+ * loud that emptying a box will not blank the stored value, because silently ignoring an edit the
+ * buyer made is worse than refusing it.
+ */
+function TradeTermsDialog({ order, onClose, onSaved }: any) {
+  const [incoterm, setIncoterm] = useState<string>(order.incoterm ?? "");
+  const [portOfLoading, setPortOfLoading] = useState<string>(
+    order.portOfLoading ?? "",
+  );
+  const [portOfDischarge, setPortOfDischarge] = useState<string>(
+    order.portOfDischarge ?? "",
+  );
+  const [lineTerms, setLineTerms] = useState<
+    Record<number, { hsCode: string; countryOfOrigin: string }>
+  >(() =>
+    Object.fromEntries(
+      (order.lines ?? []).map((line: any) => [
+        line.id,
+        {
+          hsCode: line.hsCode ?? "",
+          countryOfOrigin: line.countryOfOrigin ?? "",
+        },
+      ]),
+    ),
+  );
+  const [refusal, setRefusal] = useState<string | null>(null);
+  const [idempotencyKey] = useState(() =>
+    commandKey(`trade-terms:${order.id}`),
+  );
+
+  const edited = (next: string, before?: string | null) =>
+    next.trim() !== (before ?? "").trim();
+  const blanked = (next: string, before?: string | null) =>
+    (before ?? "").trim().length > 0 && next.trim().length === 0;
+
+  const clearedFields = [
+    blanked(incoterm, order.incoterm) ? "Incoterm" : null,
+    blanked(portOfLoading, order.portOfLoading) ? "Port of loading" : null,
+    blanked(portOfDischarge, order.portOfDischarge) ? "Port of discharge" : null,
+    ...(order.lines ?? []).flatMap((line: any) => [
+      blanked(lineTerms[line.id]?.hsCode ?? "", line.hsCode)
+        ? `HS code on ${line.description}`
+        : null,
+      blanked(lineTerms[line.id]?.countryOfOrigin ?? "", line.countryOfOrigin)
+        ? `Country of origin on ${line.description}`
+        : null,
+    ]),
+  ].filter(Boolean) as string[];
+
+  const lineEdits: PurchaseOrderLineTradeTerms[] = (order.lines ?? [])
+    .map((line: any) => {
+      const next = lineTerms[line.id] ?? { hsCode: "", countryOfOrigin: "" };
+      const hsCode =
+        edited(next.hsCode, line.hsCode) && !blanked(next.hsCode, line.hsCode)
+          ? next.hsCode.trim()
+          : undefined;
+      const countryOfOrigin =
+        edited(next.countryOfOrigin, line.countryOfOrigin) &&
+        !blanked(next.countryOfOrigin, line.countryOfOrigin)
+          ? next.countryOfOrigin.trim()
+          : undefined;
+      return hsCode === undefined && countryOfOrigin === undefined
+        ? null
+        : { lineId: line.id, hsCode, countryOfOrigin };
+    })
+    .filter(Boolean) as PurchaseOrderLineTradeTerms[];
+
+  const sendIncoterm =
+    edited(incoterm, order.incoterm) && !blanked(incoterm, order.incoterm);
+  const sendPortOfLoading =
+    edited(portOfLoading, order.portOfLoading) &&
+    !blanked(portOfLoading, order.portOfLoading);
+  const sendPortOfDischarge =
+    edited(portOfDischarge, order.portOfDischarge) &&
+    !blanked(portOfDischarge, order.portOfDischarge);
+  const hasChanges =
+    sendIncoterm ||
+    sendPortOfLoading ||
+    sendPortOfDischarge ||
+    lineEdits.length > 0;
+
+  const mutation = useMutation({
+    mutationFn: () =>
+      procurementService.amendPurchaseOrderTradeTerms(order.id, {
+        expectedVersion: order.version,
+        incoterm: sendIncoterm ? (incoterm as Incoterm) : undefined,
+        portOfLoading: sendPortOfLoading ? portOfLoading.trim() : undefined,
+        portOfDischarge: sendPortOfDischarge
+          ? portOfDischarge.trim()
+          : undefined,
+        lines: lineEdits.length > 0 ? lineEdits : undefined,
+        idempotencyKey,
+      }),
+    onSuccess: () => {
+      toast.success(`Trade terms updated on ${order.purchaseOrderNumber}`);
+      onSaved();
+    },
+    onError: (error) => {
+      const message = errorMessage(error, "Could not update the trade terms.");
+      setRefusal(message);
+      toast.error(message);
+    },
+  });
+
+  return (
+    <Dialog open onClose={onClose} fullWidth maxWidth="md">
+      <DialogTitle>Trade terms · {order.purchaseOrderNumber}</DialogTitle>
+      <DialogContent>
+        <Stack spacing={2} sx={{ mt: 1 }}>
+          <Alert severity="info">
+            Incoterm, ports and per-line customs data travel with this order to
+            the customs broker. They can be corrected until the order is sent to{" "}
+            {order.supplierName}; after that the supplier holds a copy and
+            changing them is a re-issue, not an edit.
+          </Alert>
+          {refusal && (
+            <Alert severity="error" onClose={() => setRefusal(null)}>
+              {refusal}
+            </Alert>
+          )}
+          {clearedFields.length > 0 && (
+            <Alert severity="warning">
+              A term can be corrected but not blanked here:{" "}
+              {clearedFields.join(", ")} will keep the value already stored.
+              Cancel and re-raise the order to remove a term entirely.
+            </Alert>
+          )}
+          <FormControl fullWidth>
+            <InputLabel id="incoterm-label">Incoterm</InputLabel>
+            <Select
+              labelId="incoterm-label"
+              label="Incoterm"
+              value={incoterm}
+              onChange={(event) => {
+                setIncoterm(event.target.value);
+                setRefusal(null);
+              }}
+            >
+              <MenuItem value="">
+                <em>Not set</em>
+              </MenuItem>
+              {INCOTERMS_2020.map((code) => (
+                <MenuItem key={code} value={code}>
+                  {code}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+            <TextField
+              fullWidth
+              label="Port of loading"
+              value={portOfLoading}
+              onChange={(event) => setPortOfLoading(event.target.value)}
+              slotProps={{ htmlInput: { maxLength: 120 } }}
+            />
+            <TextField
+              fullWidth
+              label="Port of discharge"
+              value={portOfDischarge}
+              onChange={(event) => setPortOfDischarge(event.target.value)}
+              slotProps={{ htmlInput: { maxLength: 120 } }}
+            />
+          </Stack>
+          <Divider textAlign="left">
+            <Typography variant="caption" color="text.secondary">
+              Customs data per line
+            </Typography>
+          </Divider>
+          {(order.lines ?? []).map((line: any) => (
+            <Stack
+              key={line.id}
+              direction={{ xs: "column", sm: "row" }}
+              spacing={2}
+              sx={{ alignItems: { sm: "center" } }}
+            >
+              <Typography variant="body2" sx={{ flex: 1, minWidth: 0 }}>
+                {line.description}
+              </Typography>
+              <TextField
+                label="HS code"
+                value={lineTerms[line.id]?.hsCode ?? ""}
+                onChange={(event) =>
+                  setLineTerms((current) => ({
+                    ...current,
+                    [line.id]: {
+                      hsCode: event.target.value,
+                      countryOfOrigin:
+                        current[line.id]?.countryOfOrigin ?? "",
+                    },
+                  }))
+                }
+                slotProps={{ htmlInput: { maxLength: 20 } }}
+                sx={{ width: { xs: "100%", sm: 180 } }}
+              />
+              <TextField
+                label="Country of origin"
+                value={lineTerms[line.id]?.countryOfOrigin ?? ""}
+                onChange={(event) =>
+                  setLineTerms((current) => ({
+                    ...current,
+                    [line.id]: {
+                      hsCode: current[line.id]?.hsCode ?? "",
+                      countryOfOrigin: event.target.value,
+                    },
+                  }))
+                }
+                slotProps={{ htmlInput: { maxLength: 100 } }}
+                sx={{ width: { xs: "100%", sm: 220 } }}
+              />
+            </Stack>
+          ))}
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button
+          variant="contained"
+          disabled={!hasChanges || mutation.isPending}
+          onClick={() => {
+            setRefusal(null);
+            mutation.mutate();
+          }}
+        >
+          Save trade terms
         </Button>
       </DialogActions>
     </Dialog>

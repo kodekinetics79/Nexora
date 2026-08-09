@@ -139,6 +139,20 @@ public sealed class ProcurementController(
             return Created($"/api/procurement/purchase-orders/{result.Id}", result);
         });
 
+    /// <summary>
+    /// FR-SPO-01. Approves a draft supplier purchase order for release.
+    ///
+    /// <para>The approver identity comes from the authenticated principal, never from the request
+    /// body — a client that could name its own approver could name the award approver and defeat
+    /// the segregation-of-duties check by assertion.</para>
+    /// </summary>
+    [HttpPost("purchase-orders/{purchaseOrderId:long}/approve")]
+    [RequireModulePermission("Orders", PermissionAction.Edit)]
+    public Task<IActionResult> ApprovePurchaseOrder(long purchaseOrderId, [FromBody] ApproveSupplierPurchaseOrderRequest request)
+        => ExecuteAsync(async () => Ok(await service.ApprovePurchaseOrderAsync(new ApprovePurchaseOrderCommand(
+            TenantId(), purchaseOrderId, request.ExpectedVersion, UserId(),
+            IdempotencyKey(), Actor(), CorrelationId()), RequestAborted)));
+
     [HttpPost("purchase-orders/{purchaseOrderId:long}/issue")]
     [RequireModulePermission("Orders", PermissionAction.Edit)]
     public Task<IActionResult> IssuePurchaseOrder(long purchaseOrderId, [FromBody] IssueSupplierPurchaseOrderRequest request)
@@ -146,6 +160,40 @@ public sealed class ProcurementController(
             TenantId(), purchaseOrderId, request.ExpectedVersion, request.DeliveryEvidenceReference,
             IdempotencyKey(), Actor(), CorrelationId(), request.DeliveryEvidenceSha256,
             request.DeliveredOn), RequestAborted)));
+
+    /// <summary>
+    /// FR-SPO-06. Sets or corrects Incoterm, ports and per-line customs data before dispatch.
+    /// Omitted fields are left unchanged rather than cleared, so a one-line correction cannot wipe
+    /// the terms the rest of the order depends on.
+    /// </summary>
+    [HttpPost("purchase-orders/{purchaseOrderId:long}/trade-terms")]
+    [RequireModulePermission("Orders", PermissionAction.Edit)]
+    public Task<IActionResult> AmendPurchaseOrderTradeTerms(long purchaseOrderId,
+        [FromBody] AmendPurchaseOrderTradeTermsRequest request)
+        => ExecuteAsync(async () => Ok(await service.AmendPurchaseOrderTradeTermsAsync(
+            new AmendPurchaseOrderTradeTermsCommand(
+                TenantId(), purchaseOrderId, request.ExpectedVersion, IdempotencyKey(), Actor(),
+                CorrelationId(), request.Incoterm, request.PortOfLoading, request.PortOfDischarge,
+                request.Lines), RequestAborted)));
+
+    /// <summary>
+    /// FR-SPO-03. Records the supplier's answer — accepted, rejected, or countered with a revised
+    /// lead time or ship date.
+    ///
+    /// <para>Nexora has no supplier portal, so this is a buyer keying in what the supplier said.
+    /// The supplier contact is therefore taken from the body while the recording user is taken
+    /// from the authenticated principal; they are different people and the audit trail keeps them
+    /// apart.</para>
+    /// </summary>
+    [HttpPost("purchase-orders/{purchaseOrderId:long}/acknowledge")]
+    [RequireModulePermission("Orders", PermissionAction.Edit)]
+    public Task<IActionResult> AcknowledgePurchaseOrder(long purchaseOrderId,
+        [FromBody] AcknowledgeSupplierPurchaseOrderRequest request)
+        => ExecuteAsync(async () => Ok(await service.AcknowledgePurchaseOrderAsync(
+            new AcknowledgeSupplierPurchaseOrderCommand(
+                TenantId(), purchaseOrderId, request.ExpectedVersion, request.AcknowledgementStatus,
+                request.AcknowledgedBy, IdempotencyKey(), Actor(), CorrelationId(),
+                request.RevisedLeadTimeDays, request.CommittedShipDate, request.Note), RequestAborted)));
 
     /// <summary>
     /// Cancels a purchase order that will never be received. Until this route existed a stranded
@@ -320,6 +368,8 @@ public sealed record CreateSupplierPurchaseOrderRequest(
     DateOnly ExpectedOn,
     IReadOnlyCollection<long> AwardIds);
 
+public sealed record ApproveSupplierPurchaseOrderRequest(long ExpectedVersion);
+
 public sealed class IssueSupplierPurchaseOrderRequest
 {
     public long ExpectedVersion { get; init; }
@@ -331,6 +381,21 @@ public sealed class IssueSupplierPurchaseOrderRequest
 public sealed record CancelSupplierPurchaseOrderRequest(
     long ExpectedVersion,
     string Reason);
+
+public sealed record AmendPurchaseOrderTradeTermsRequest(
+    long ExpectedVersion,
+    string? Incoterm = null,
+    string? PortOfLoading = null,
+    string? PortOfDischarge = null,
+    IReadOnlyCollection<PurchaseOrderLineTradeTerms>? Lines = null);
+
+public sealed record AcknowledgeSupplierPurchaseOrderRequest(
+    long ExpectedVersion,
+    string AcknowledgementStatus,
+    string AcknowledgedBy,
+    int? RevisedLeadTimeDays = null,
+    DateOnly? CommittedShipDate = null,
+    string? Note = null);
 
 public sealed record PostGoodsReceiptRequest(
     long PurchaseOrderId,

@@ -399,5 +399,11 @@ public sealed class SourcingToolTests
             throw new NotSupportedException();
         public Task<GoodsReceiptResult> PostGoodsReceiptAsync(PostGoodsReceiptCommand command, CancellationToken ct = default) =>
             throw new NotSupportedException();
+        public Task<SupplierPurchaseOrderAcknowledgementResult> AcknowledgePurchaseOrderAsync(
+            AcknowledgeSupplierPurchaseOrderCommand command, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<PurchaseOrderTradeTermsResult> AmendPurchaseOrderTradeTermsAsync(
+            AmendPurchaseOrderTradeTermsCommand command, CancellationToken ct = default) =>
+            throw new NotSupportedException();
     }
 }

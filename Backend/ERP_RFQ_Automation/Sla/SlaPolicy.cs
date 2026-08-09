@@ -57,6 +57,27 @@ public sealed class SlaPolicy
     /// </summary>
     public int DeadlineBufferHours { get; set; } = 12;
 
+    /// <summary>
+    /// FR-SPO-07 reminder — WORKING days before a supplier order's committed ship date at
+    /// which the buyer is reminded, counted with a Friday–Saturday weekend
+    /// (<see cref="BusinessCalendar"/>). Default 3: enough notice to chase a supplier and
+    /// still re-plan, without a reminder so early nobody acts on it.
+    ///
+    /// <para>NEW COLUMN — needs a migration (owned by the lead), see SLA-WIRING.md §2.</para>
+    /// </summary>
+    public int SupplierShipDateReminderDays { get; set; } = 3;
+
+    /// <summary>
+    /// FR-SPO-07 escalation — WORKING hours an order may sit with the supplier unacknowledged
+    /// before a supervisor is told. Default 48: two working days is the shortest window that
+    /// does not escalate a normal overnight response, and counting it in working hours means
+    /// an order that reaches a supplier on Thursday evening escalates on Tuesday, not on
+    /// Saturday into a closed office.
+    ///
+    /// <para>NEW COLUMN — needs a migration (owned by the lead), see SLA-WIRING.md §2.</para>
+    /// </summary>
+    public int SupplierAckEscalationHours { get; set; } = 48;
+
     public DateTime CreatedOn { get; set; }
     public DateTime UpdatedOn { get; set; }
 
@@ -71,6 +92,8 @@ public sealed class SlaPolicy
         QuoteExpiryGraceDays = 0,
         QuoteNoResponseExpiryDays = 90,
         ApprovalEscalationHours = 4,
-        DeadlineBufferHours = 12
+        DeadlineBufferHours = 12,
+        SupplierShipDateReminderDays = 3,
+        SupplierAckEscalationHours = 48
     };
 }

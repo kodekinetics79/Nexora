@@ -46,6 +46,12 @@ public sealed class SlaController : ControllerBase
 
         public int? ApprovalEscalationHours { get; set; }
         public int? DeadlineBufferHours { get; set; }
+
+        /// <summary>FR-SPO-07: working days before a committed ship date to remind the buyer.</summary>
+        public int? SupplierShipDateReminderDays { get; set; }
+
+        /// <summary>FR-SPO-07: working hours without a supplier acknowledgement before escalating.</summary>
+        public int? SupplierAckEscalationHours { get; set; }
     }
 
     // -------- GET /api/sla/policy --------
@@ -93,6 +99,13 @@ public sealed class SlaController : ControllerBase
         if (dto.QuoteNoResponseExpiryDays.HasValue) policy.QuoteNoResponseExpiryDays = Clamp(dto.QuoteNoResponseExpiryDays.Value, 1, 365);
         if (dto.ApprovalEscalationHours.HasValue) policy.ApprovalEscalationHours = Clamp(dto.ApprovalEscalationHours.Value, 1, 24 * 30);
         if (dto.DeadlineBufferHours.HasValue) policy.DeadlineBufferHours = Clamp(dto.DeadlineBufferHours.Value, 0, 24 * 30);
+        // FR-SPO-07. Floor of 0 on the reminder means "the day it ships" is still expressible;
+        // the escalation floor is 1 because a 0-hour window would escalate every order the
+        // instant it left the building.
+        if (dto.SupplierShipDateReminderDays.HasValue)
+            policy.SupplierShipDateReminderDays = Clamp(dto.SupplierShipDateReminderDays.Value, 0, 90);
+        if (dto.SupplierAckEscalationHours.HasValue)
+            policy.SupplierAckEscalationHours = Clamp(dto.SupplierAckEscalationHours.Value, 1, 24 * 30);
 
         if (policy.CriticalDaysBeforeClose > policy.WarnDaysBeforeClose)
             return BadRequest("The critical alert must be at or after the first warning (critical days <= warn days).");
@@ -118,7 +131,9 @@ public sealed class SlaController : ControllerBase
         quoteExpiryGraceDays = p.QuoteExpiryGraceDays,
         quoteNoResponseExpiryDays = p.QuoteNoResponseExpiryDays,
         approvalEscalationHours = p.ApprovalEscalationHours,
-        deadlineBufferHours = p.DeadlineBufferHours
+        deadlineBufferHours = p.DeadlineBufferHours,
+        supplierShipDateReminderDays = p.SupplierShipDateReminderDays,
+        supplierAckEscalationHours = p.SupplierAckEscalationHours
     };
 
     private long? ResolveBusinessUnit()

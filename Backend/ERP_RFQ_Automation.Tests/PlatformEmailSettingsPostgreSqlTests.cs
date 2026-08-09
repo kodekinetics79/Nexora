@@ -21,6 +21,7 @@ namespace ERP_RFQ_Automation.Tests;
 /// the code actually issues before the migration is written.</para>
 /// </summary>
 [Collection(PostgreSqlIntegrationCollection.Name)]
+[Trait("Category", "PostgreSQL")]
 public class PlatformEmailSettingsPostgreSqlTests : IAsyncLifetime
 {
     private const string SmtpPassword = "pilot-smtp-password-9f3a";

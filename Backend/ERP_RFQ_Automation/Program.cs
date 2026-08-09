@@ -266,6 +266,10 @@ builder.Services.AddScoped<IRfqRepository, RfqRepository>();
 builder.Services.AddScoped<IQuoteRepository, QuoteRepository>();
 builder.Services.AddScoped<ISupplierPurchaseHistoryRepository, SupplierPurchaseHistoryRepository>();
 builder.Services.AddScoped<ISupplierQuotedItemRepository, SupplierQuotedItemRepository>();
+// FR-SPO-01. Bound from configuration so a one-buyer trading company can stand the control down
+// deliberately; unbound configuration leaves it enforced, which is the default in the options type.
+builder.Services.Configure<ERP_RFQ_Automation.Procurement.ProcurementApprovalOptions>(
+    builder.Configuration.GetSection(ERP_RFQ_Automation.Procurement.ProcurementApprovalOptions.SectionName));
 builder.Services.AddScoped<IProcurementApplicationService, ProcurementApplicationService>();
 builder.Services.AddScoped<IProcurementHandoffService, ProcurementHandoffService>();
 builder.Services.AddScoped<IProcurementIntegrationService, ProcurementIntegrationService>();
@@ -332,6 +336,10 @@ builder.Services.AddScoped<ILifecycleOutboxStore, LifecycleOutboxStore>();
 builder.Services.AddCommercialFinanceOutboxDispatcher(builder.Configuration);
 builder.Services.AddScoped<ICommercialRoutingApplicationService, CommercialRoutingApplicationService>();
 builder.Services.AddScoped<ICustomFieldApplicationService, CustomFieldApplicationService>();
+// AA-01 · tenant-defined custom fields (jsonb value bag) + per-user list-view columns.
+builder.Services.AddScoped<ICustomFieldBagService, CustomFieldBagService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.ListViews.IListViewPreferenceService,
+    ERP_RFQ_Automation.ListViews.ListViewPreferenceService>();
 builder.Services.AddSingleton<DeterministicRoutingEngine>();
 builder.Services.AddSingleton(new RoutingPolicy());
 // CLIENT ORGANISATION IDENTITY. The policy is a singleton so the thresholds behind every

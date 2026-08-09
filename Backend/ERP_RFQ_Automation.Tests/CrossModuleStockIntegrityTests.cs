@@ -501,7 +501,7 @@ public sealed class CrossModuleStockIntegrityTests
         var lineId = await fixture.PurchaseOrderLineIdAsync(purchaseOrder.Id);
 
         await fixture.Execute(service => service.PostGoodsReceiptAsync(
-            fixture.Receipt(purchaseOrder.Id, lineId, 3m, 2, "incoming-receipt-post", "GR-INCOMING")));
+            fixture.Receipt(purchaseOrder.Id, lineId, 3m, 3, "incoming-receipt-post", "GR-INCOMING")));
 
         await using var verify = fixture.Context();
         var incoming = Assert.Single(await verify.IncomingInventory.ToListAsync());
@@ -555,7 +555,7 @@ public sealed class CrossModuleStockIntegrityTests
         var purchaseOrder = await fixture.CreatePurchaseOrderAsync("issued-cancel", quantity: 8m);
 
         await fixture.Execute(service => service.CancelPurchaseOrderAsync(
-            fixture.Cancel(purchaseOrder.Id, "issued-cancel-command", "Supplier cannot deliver.", version: 2)));
+            fixture.Cancel(purchaseOrder.Id, "issued-cancel-command", "Supplier cannot deliver.", version: 3)));
 
         await using var verify = fixture.Context();
         var incoming = Assert.Single(await verify.IncomingInventory.ToListAsync());
@@ -571,11 +571,11 @@ public sealed class CrossModuleStockIntegrityTests
         var purchaseOrder = await fixture.CreatePurchaseOrderAsync("received-cancel", quantity: 8m);
         var lineId = await fixture.PurchaseOrderLineIdAsync(purchaseOrder.Id);
         await fixture.Execute(service => service.PostGoodsReceiptAsync(
-            fixture.Receipt(purchaseOrder.Id, lineId, 3m, 2, "received-cancel-receipt", "GR-CANCEL")));
+            fixture.Receipt(purchaseOrder.Id, lineId, 3m, 3, "received-cancel-receipt", "GR-CANCEL")));
 
         var exception = await Assert.ThrowsAsync<ProcurementConflictException>(() =>
             fixture.Execute(service => service.CancelPurchaseOrderAsync(
-                fixture.Cancel(purchaseOrder.Id, "received-cancel-command", "Too late.", version: 3))));
+                fixture.Cancel(purchaseOrder.Id, "received-cancel-command", "Too late.", version: 4))));
 
         Assert.Contains("received", exception.Message, StringComparison.OrdinalIgnoreCase);
     }

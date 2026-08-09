@@ -14,8 +14,13 @@ namespace ERP_RFQ_Automation.Sla;
 /// business unit, the worker INSERTs the claim first and only sends when the insert
 /// won. A losing instance gets a PostgreSQL 23505 and skips the send entirely.
 ///
-/// EntityType values: "lead", "lead-unassigned", "quote", "quote-stale-digest", "approval".
+/// EntityType values: "lead", "lead-unassigned", "quote", "quote-stale-digest", "approval",
+///                    "supplier-order-ship", "supplier-order-ack".
 /// Level values:      "warn", "critical", "overdue", "stale", "expired", "escalated".
+///
+/// The supplier ship-date reminder passes the COMMITTED SHIP DATE as the dayUtc component of
+/// <see cref="BuildDedupKey"/>, so it is "once per order per committed date" rather than
+/// "once ever" — a supplier who counters with a new date earns the buyer a fresh reminder.
 /// </summary>
 public sealed class SlaEvent
 {
