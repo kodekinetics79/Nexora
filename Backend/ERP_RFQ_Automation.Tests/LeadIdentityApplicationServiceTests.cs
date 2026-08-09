@@ -657,6 +657,80 @@ public sealed class LeadIdentityApplicationServiceTests
         return lead;
     }
 
+    // FR-RFQ-06: "Flag possible duplicates based on the same buyer, same item and overlapping
+    // dates for human review BEFORE a new record is created." The pair below is deliberately
+    // built so commercial-content similarity stays under the match threshold — the second
+    // extraction describes the same part with different wording and a different unit — which is
+    // exactly the case the similarity-only path used to let through as a brand new inquiry.
+    [Fact]
+    public async Task Same_buyer_overlapping_deadline_and_matching_part_is_held_for_review_before_any_lead_is_created()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(91);
+        Seed.BusinessUnit(context, 91); Seed.EmailConfig(context, 9101, 91); Seed.EmailIngest(context, 9201, 9101, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var first = Candidate(91, 9201, "TENDER-8801", "procurement@buyer.test", 10);
+        first.BidClosingDate = new DateTime(2026, 9, 1, 12, 0, 0, DateTimeKind.Utc);
+        var created = await service.ReconcileAsync(first, Intake("dup-first", "dup-hash-a", Guid.NewGuid(), "procurement@buyer.test"));
+        Assert.Equal(LeadOccurrenceClassification.New, created.Classification);
+
+        context.ChangeTracker.Clear();
+        var second = DifferentlyWordedSameParts(91, 9201, "procurement@buyer.test",
+            new DateTime(2026, 9, 2, 12, 0, 0, DateTimeKind.Utc));
+
+        var review = await service.ReconcileAsync(second, Intake("dup-second", "dup-hash-b", Guid.NewGuid(), "procurement@buyer.test"));
+
+        Assert.Equal(LeadOccurrenceClassification.PossibleMatchReviewRequired, review.Classification);
+        Assert.Equal(0, review.LeadId);
+        Assert.Equal(1, await context.Leads.CountAsync());
+        var match = Assert.Single(await context.Set<LeadMatchCandidate>()
+            .Where(x => x.OccurrenceId == review.OccurrenceId).ToListAsync());
+        Assert.Equal(created.LeadId, match.CandidateLeadId);
+        Assert.Contains(review.Reasons, r => r.Contains("Same buyer", StringComparison.OrdinalIgnoreCase));
+    }
+
+    // The date dimension has to carry weight, or the rule degrades into "same buyer ever bought
+    // this part", which would hold a legitimate repeat order for review every time.
+    [Fact]
+    public async Task Same_buyer_and_part_with_deadlines_far_apart_is_a_new_inquiry()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(92);
+        Seed.BusinessUnit(context, 92); Seed.EmailConfig(context, 9201, 92); Seed.EmailIngest(context, 9301, 9201, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var first = Candidate(92, 9301, "TENDER-9901", "procurement@repeat.test", 10);
+        first.BidClosingDate = new DateTime(2026, 9, 1, 12, 0, 0, DateTimeKind.Utc);
+        await service.ReconcileAsync(first, Intake("repeat-first", "repeat-hash-a", Guid.NewGuid(), "procurement@repeat.test"));
+
+        context.ChangeTracker.Clear();
+        var second = DifferentlyWordedSameParts(92, 9301, "procurement@repeat.test",
+            new DateTime(2026, 11, 20, 12, 0, 0, DateTimeKind.Utc));
+
+        var repeat = await service.ReconcileAsync(second, Intake("repeat-second", "repeat-hash-b", Guid.NewGuid(), "procurement@repeat.test"));
+
+        Assert.Equal(LeadOccurrenceClassification.New, repeat.Classification);
+        Assert.Equal(2, await context.Leads.CountAsync());
+    }
+
+    /// <summary>
+    /// Same manufacturer part as <see cref="Candidate"/>, described differently and in another
+    /// unit. Line identity hashes part + description + UoM, so this scores 0 on similarity while
+    /// the FR-RFQ-06 rule — which keys on the part number alone — still sees a match.
+    /// </summary>
+    private static Lead DifferentlyWordedSameParts(long bu, long ingestId, string email, DateTime closing)
+    {
+        var lead = new Lead { Rfqno = null, BuyersName = "Buyer", RecDate = DateTime.UtcNow,
+            LeadSource = "ManualUpload", CreatedBy = "test", CreatedDate = DateTime.UtcNow, BusinessUnitId = bu,
+            EmailIngestsId = ingestId, Clientemail = email, RequiresCommercialReview = true, BidClosingDate = closing };
+        lead.LeadItems.Add(new LeadItem { LineItemNo = "1", ManufacturerPartNumber = "PN-100",
+            ProductShortDescription = "Ball valve, two inch, flanged", Quantity = 10, UnitOfMeasure = "PCS" });
+        return lead;
+    }
+
     private static Lead Candidate(long bu, long ingestId, string? rfq, string? email, int quantity)
     {
         var lead = new Lead { Rfqno = rfq, BuyersName = email is null ? null : "Buyer", RecDate = DateTime.UtcNow,

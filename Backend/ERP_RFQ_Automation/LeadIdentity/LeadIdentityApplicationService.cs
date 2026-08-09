@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using ERP_RFQ_Automation.Deduplication;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Models;
@@ -156,12 +157,19 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         // axes. Ordering is by EVIDENCE first and similarity second: the lead whose customer and
         // reference corroborate is the one to offer a reviewer, even when a commodity line item
         // makes an unrelated lead score marginally higher.
-        var assessments = candidates
+        var scored = candidates
             .Select(x => new MatchAssessment(x, Similarity(candidate, x),
                 Evidence(scope, CustomerScope(x, null)),
                 ReferenceEvidence(normalizedRfq, CustomerReference(x)),
                 ReferenceAmends(normalizedRfq, CustomerReference(x)),
-                groupedLeadIds.Contains(x.Id)))
+                groupedLeadIds.Contains(x.Id),
+                DuplicateRules.DuplicateReason(candidate, x)))
+            .ToList();
+
+        // The revision arms below stay gated on commercial-content similarity alone. FR-RFQ-06
+        // duplicates are deliberately NOT admitted here: that rule can fire on buyer and dates
+        // with poor line overlap, and a low-similarity match must never auto-link as a revision.
+        var assessments = scored
             .Where(x => x.Score >= PossibleMatchThreshold)
             .OrderByDescending(x => x.EvidenceRank).ThenByDescending(x => x.Score)
             .ToList();
@@ -177,6 +185,17 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
                 ["Corroborated logical document group, customer identity, and commercial content."], tx, ownsTransaction, ct);
 
         var ranked = assessments.FirstOrDefault();
+
+        // FR-RFQ-06: same buyer, same item, overlapping dates — held for human review BEFORE any
+        // record is created. Content similarity may be well under the match threshold here (two
+        // extractions of one tender can disagree on wording), which is precisely why this arm
+        // exists rather than relying on the similarity score. A contradicted candidate is
+        // excluded: when the buyer's own reference says these are different inquiries, they are.
+        ranked ??= scored
+            .Where(x => x.BrdDuplicateReason is not null && !x.Contradicted)
+            .OrderBy(x => x.Lead.CreatedDate).ThenBy(x => x.Lead.Id)
+            .FirstOrDefault();
+
         if (ranked is not null && !ranked.Contradicted)
         {
             // An amendment whose reference gained a revision marker ("RFQ-4471" -> "RFQ-4471 Rev B")
@@ -192,7 +211,8 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
 
             var occurrence = NewOccurrence(candidate.BusinessUnitId, intake, fingerprint, scope,
                 LeadOccurrenceClassification.PossibleMatchReviewRequired, ranked.Score,
-                [ranked.Grouped
+                [ranked.BrdDuplicateReason is { } duplicateReason ? duplicateReason
+                    : ranked.Grouped
                     ? "Documents share a logical group and similar content, but canonical identity requires review."
                     : ranked.Reference == MatchEvidence.Corroborating
                         ? "The customer RFQ reference and commercial content match an existing inquiry, but customer identity is unresolved or differs."
@@ -1147,7 +1167,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
     private enum MatchEvidence { Contradicting, Absent, Corroborating }
 
     private sealed record MatchAssessment(Lead Lead, decimal Score, MatchEvidence Scope, MatchEvidence Reference,
-        bool ReferenceAmends, bool Grouped)
+        bool ReferenceAmends, bool Grouped, string? BrdDuplicateReason = null)
     {
         /// <summary>
         /// The identity evidence positively says "different inquiry". The customer's own RFQ
