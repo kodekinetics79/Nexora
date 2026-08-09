@@ -1,0 +1,18 @@
+# Nexora BRD v3.0 Conflict and Decision Log — Gate 0
+
+| ID | Ambiguity / contradiction | Repository evidence / impact | Gate 0 disposition | Decision required before |
+|---|---|---|---|---|
+| CD-01 | BRD is draft/unapproved/provisional, yet is called the Phase 1 ceiling. | Building to unresolved language creates churn and invalidates acceptance. | Flagged; no interpretation selected. | Gate 1 scope lock. |
+| CD-02 | Payment-collection scope is unclear: status capture versus full AR, allocation, dunning, refunds, write-offs and bank reconciliation. | Repository implements extensive finance functionality and workers beyond simple payment status. | Treat advanced finance as outside/unattributed; feature-flag for pilot. | Any finance activation. |
+| CD-03 | Sales Order ownership is unclear: Nexora-owned Sales/Customer Order, ERP-owned record, or synchronized mirror. | Both legacy manual Order creation and governed Customer PO/Award → Order conversion exist. | Do not choose silently; prefer no pilot claim until authority is approved. | COM acceptance and ERP integration. |
+| CD-04 | ZATCA versus ERP system-of-record is unresolved. | Governed receivable invoices exist, but no ZATCA/Fatoora generation, clearance/reporting or integration path was found. | Invoice capability is not ZATCA compliance. | Invoice pilot and production use. |
+| CD-05 | “Immutable documents” conflicts with retention deletion. | Source metadata/hash are immutable; retention can purge bytes, with statutory exclusions and legal holds. | Define whether immutability means metadata, bytes for a retention period, or permanent bytes. | FR-RFQ-08 and document lifecycle acceptance. |
+| CD-06 | Carrier integration subset is unspecified. | Shipment stores carrier/tracking/label fields; no DHL/FedEx/UPS/Aramex adapter or webhook was found. | Treat fields as manual data, not integration proof. | DLM pilot scope. |
+| CD-07 | Architecture recommendations may be descriptive rather than mandatory. | Active stack is ASP.NET Core 8, EF/Npgsql, PostgreSQL/Neon, React/Vite, Vercel/Render. | Do not rewrite a working stack to match reference technology names. | Any architecture change. |
+| CD-08 | NFRs lack measurable thresholds. | Tests demonstrate behavior, but no source thresholds for load, latency, uptime, RPO/RTO, accessibility or extraction accuracy were available. | Status remains unknown; no invented pass thresholds. | NFR acceptance plan. |
+| CD-09 | The named attachment is unavailable, while exact summaries are mandatory. | Only `FR-RFQ-01..08` wording appears in repository audits; no other functional IDs or Sections 10–12 text were found. | 73 functional rows and Section 10–12 decomposition are unknown. | Completion of Gate 0 baseline import. |
+| CD-10 | Arabic/Hijri expectations versus English-only pilot. | `i18n.ts` includes partial translations but intentionally locks `lng: 'en'`; repository decision docs previously excluded Arabic/Hijri extraction. | Do not claim multilingual/RTL support. | Localization acceptance. |
+| CD-11 | Invoice artifacts versus authoritative receivable documents. | Legacy order/shipment invoice display routes coexist with governed `CommercialFinance` receivable documents. | Choose and expose one authoritative pilot invoice path. | INV browser testing. |
+| CD-12 | Supplier PO authority versus procurement handoff to ERP. | Nexora can create/issue supplier POs and also synchronize procurement handoffs to an external target. | Decide whether internal PO is authoritative, draft, or mirror. | SPO activation. |
+
+No decision was made in this audit. Each item requires a named product/compliance owner, decision date, affected BRD IDs and acceptance change.
