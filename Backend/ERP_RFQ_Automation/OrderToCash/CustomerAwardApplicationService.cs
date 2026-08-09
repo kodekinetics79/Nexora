@@ -2,6 +2,7 @@ using System.Data;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using ERP_RFQ_Automation.Deduplication;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 
@@ -14,6 +15,10 @@ public interface ICustomerAwardApplicationService
         string? search, int limit, CancellationToken cancellationToken = default);
     Task<ClientPurchaseOrderMatchView> GetPurchaseOrderMatchAsync(long businessUnitId,
         long purchaseOrderId, CancellationToken cancellationToken = default);
+    Task<QuoteLineMatchProposalView> ProposeQuoteLineMatchesAsync(long businessUnitId,
+        ProposeQuoteLineMatchCommand command, CancellationToken cancellationToken = default);
+    Task<QuoteLineMatchProposalView> ProposePurchaseOrderMatchesAsync(long businessUnitId,
+        long purchaseOrderId, long? quoteId = null, CancellationToken cancellationToken = default);
     Task<CustomerPurchaseOrderView> CreatePurchaseOrderAsync(long businessUnitId, string idempotencyKey,
         string correlationId, CreateCustomerPurchaseOrderCommand command, string actor, CancellationToken cancellationToken = default);
     Task<CustomerAwardView> CreateAwardAsync(long businessUnitId, string idempotencyKey,
@@ -37,6 +42,11 @@ public sealed record CreateCustomerPurchaseOrderCommand(
     long ExpectedVersion,
     IReadOnlyList<CreateCustomerPurchaseOrderLineCommand> Lines);
 
+/// <summary>
+/// One line as the BUYER wrote it. Nothing on this record may be defaulted from our own quotation:
+/// the discrepancy engine compares this against the quote, so a value copied from the quote makes
+/// the comparison self-referential and "no discrepancy" structurally unavoidable.
+/// </summary>
 public sealed record CreateCustomerPurchaseOrderLineCommand(
     string ExternalLineReference,
     long? ProductId,
@@ -44,7 +54,10 @@ public sealed record CreateCustomerPurchaseOrderLineCommand(
     decimal OrderedQuantity,
     int? UomId,
     decimal? UnitPrice,
-    decimal? LineAmount);
+    decimal? LineAmount,
+    string? CustomerItemCode = null,
+    string? ManufacturerName = null,
+    string? ManufacturerPartNumber = null);
 
 public sealed record CreateCustomerAwardCommand(
     long CustomerPurchaseOrderId,
@@ -72,7 +85,10 @@ public sealed record CustomerPurchaseOrderLineView(
     int? UomId,
     decimal? UnitPrice,
     decimal? LineAmount,
-    long Version);
+    long Version,
+    string? CustomerItemCode = null,
+    string? ManufacturerName = null,
+    string? ManufacturerPartNumber = null);
 
 public sealed record CustomerPurchaseOrderView(
     long Id,
@@ -164,7 +180,36 @@ public sealed record ClientPurchaseOrderMatchLineView(
     decimal? QuotedUnitPrice,
     decimal? AcceptedQuantity,
     string MatchStatus,
-    IReadOnlyList<string> Differences);
+    IReadOnlyList<string> Differences,
+    string? CustomerItemCode = null,
+    string? ManufacturerName = null,
+    string? ManufacturerPartNumber = null);
+
+/// <summary>
+/// FR-COM-02. A request to match buyer lines against one candidate quotation. The lines may be a
+/// stored purchase order's, or an operator's in-progress entry that has not been saved yet — the
+/// matcher is the same either way, so a reviewer sees the same proposal before and after saving.
+/// </summary>
+public sealed record ProposeQuoteLineMatchCommand(
+    long QuoteId,
+    long CustomerId,
+    IReadOnlyList<ProposeQuoteLineMatchLineCommand> Lines);
+
+public sealed record ProposeQuoteLineMatchLineCommand(
+    string ExternalLineReference,
+    string? Description,
+    string? CustomerItemCode,
+    string? ManufacturerName,
+    string? ManufacturerPartNumber,
+    long? CustomerPurchaseOrderLineId = null);
+
+public sealed record QuoteLineMatchProposalView(
+    long QuoteId,
+    string QuoteNo,
+    long? CustomerId,
+    int ProposedCount,
+    int ReviewCount,
+    IReadOnlyList<PurchaseOrderLineMatchProposal> Lines);
 
 public sealed record ClientPurchaseOrderMatchView(
     ClientPurchaseOrderInboxRow Header,
@@ -240,6 +285,9 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
             .Include(x => x.CommercialCase)
             .Include(x => x.Lines).ThenInclude(x => x.AwardAllocations).ThenInclude(x => x.Award)
             .Include(x => x.Lines).ThenInclude(x => x.AwardAllocations).ThenInclude(x => x.QuoteItem)
+                .ThenInclude(x => x.Rfqitem)
+            .Include(x => x.Lines).ThenInclude(x => x.AwardAllocations).ThenInclude(x => x.QuoteItem)
+                .ThenInclude(x => x.Product)
             .Include(x => x.Awards).ThenInclude(x => x.Quote)
             .Where(x => x.BusinessUnitId == businessUnitId);
         if (!string.IsNullOrWhiteSpace(term))
@@ -270,11 +318,7 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
             {
                 var allocation = line.AwardAllocations.FirstOrDefault(x =>
                     x.Award.Status != CustomerAwardStatuses.Cancelled);
-                return allocation is null || !line.UnitPrice.HasValue
-                    || allocation.AwardedQuantity != line.OrderedQuantity
-                    || allocation.AwardedQuantity < allocation.QuoteItem.Quantity
-                    || (line.ProductId.HasValue && allocation.QuoteItem.ProductId != line.ProductId)
-                    || line.UnitPrice.Value != allocation.QuoteItem.UnitPrice;
+                return LineDifferences(line, allocation, allocation?.QuoteItem).Count > 0;
             });
             var outcome = award is null ? "POSSIBLE_MATCH_REVIEW"
                 : purchaseOrder.Status == CustomerPurchaseOrderStatuses.PartiallyAwarded ? "PARTIAL_AWARD"
@@ -295,7 +339,9 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
             .Include(x => x.Customer).Include(x => x.Currency).Include(x => x.CommercialCase)
             .Include(x => x.Lines).ThenInclude(x => x.Product)
             .Include(x => x.Lines).ThenInclude(x => x.AwardAllocations)
-                .ThenInclude(x => x.QuoteItem)
+                .ThenInclude(x => x.QuoteItem).ThenInclude(x => x.Rfqitem)
+            .Include(x => x.Lines).ThenInclude(x => x.AwardAllocations)
+                .ThenInclude(x => x.QuoteItem).ThenInclude(x => x.Product)
             .Include(x => x.Lines).ThenInclude(x => x.AwardAllocations)
                 .ThenInclude(x => x.Award).ThenInclude(x => x.Quote)
             .Include(x => x.Awards).ThenInclude(x => x.Quote)
@@ -312,18 +358,7 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
             var allocation = line.AwardAllocations.Where(x => x.Award.Status != CustomerAwardStatuses.Cancelled)
                 .OrderByDescending(x => x.Id).FirstOrDefault();
             var quoteLine = allocation?.QuoteItem;
-            var differences = new List<string>();
-            if (allocation is null) differences.Add("UNQUOTED_OR_UNMATCHED_LINE");
-            if (allocation is not null && allocation.AwardedQuantity != line.OrderedQuantity)
-                differences.Add("QUANTITY_DISCREPANCY");
-            if (quoteLine is not null && allocation is not null
-                && allocation.AwardedQuantity < quoteLine.Quantity)
-                differences.Add("PARTIAL_QUOTE_AWARD");
-            if (quoteLine is not null && line.ProductId.HasValue && quoteLine.ProductId != line.ProductId)
-                differences.Add("PART_DISCREPANCY");
-            if (!line.UnitPrice.HasValue) differences.Add("PO_PRICE_NOT_PROVIDED");
-            else if (quoteLine is not null && line.UnitPrice.Value != quoteLine.UnitPrice)
-                differences.Add("PRICE_DISCREPANCY");
+            var differences = LineDifferences(line, allocation, quoteLine);
             var status = allocation is null ? "REVIEW_REQUIRED"
                 : differences.Count == 0 ? "EXACT_MATCH"
                 : differences.Count == 1 && differences[0] == "QUANTITY_DISCREPANCY" ? "PARTIAL_MATCH"
@@ -331,7 +366,8 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
             return new ClientPurchaseOrderMatchLineView(line.Id, line.ExternalLineReference,
                 line.Description, line.OrderedQuantity, line.UnitPrice, quoteLine?.Id,
                 quoteLine?.ItemDescription, quoteLine?.Quantity, quoteLine?.UnitPrice,
-                allocation?.AwardedQuantity, status, differences);
+                allocation?.AwardedQuantity, status, differences,
+                line.CustomerItemCode, line.ManufacturerName, line.ManufacturerPartNumber);
         }).ToList();
         var discrepancyCount = lines.Count(x => x.Differences.Count > 0);
         var outcome = award is null ? "POSSIBLE_MATCH_REVIEW"
@@ -344,6 +380,134 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
         return new ClientPurchaseOrderMatchView(header, purchaseOrder.CustomerId, purchaseOrder.CurrencyId,
             purchaseOrder.Currency.Code, purchaseOrder.PoDate, purchaseOrder.Version, award?.Id,
             award?.AwardNumber, award?.Status, lines);
+    }
+
+    /// <summary>
+    /// FR-COM-02. Propose a quote line for each buyer line using item code, manufacturer and part
+    /// number. Read-only by construction: it opens no transaction, takes no idempotency key and
+    /// writes nothing, because a proposal is not a decision. Committing the pairing remains
+    /// <see cref="CreateAwardAsync"/>, which still requires the allocations as an explicit input.
+    /// </summary>
+    public async Task<QuoteLineMatchProposalView> ProposeQuoteLineMatchesAsync(long businessUnitId,
+        ProposeQuoteLineMatchCommand command, CancellationToken cancellationToken = default)
+    {
+        EnsureTenant(businessUnitId);
+        ArgumentNullException.ThrowIfNull(command);
+        if (command.QuoteId <= 0) throw new ArgumentException("A quotation is required to match against.");
+        if (command.Lines is null || command.Lines.Count == 0)
+            throw new ArgumentException("At least one customer PO line is required to match.");
+        if (command.Lines.Any(x => string.IsNullOrWhiteSpace(x.ExternalLineReference)))
+            throw new ArgumentException("Every customer PO line requires a reference.");
+        if (command.Lines.Count > 500) throw new ArgumentException("Too many customer PO lines to match at once.");
+
+        return await BuildProposalsAsync(businessUnitId, command.QuoteId, command.CustomerId,
+            command.Lines.Select(line => new PurchaseOrderLineKeys(line.ExternalLineReference.Trim(),
+                line.Description, line.CustomerItemCode, line.ManufacturerName, line.ManufacturerPartNumber,
+                line.CustomerPurchaseOrderLineId)).ToList(), cancellationToken);
+    }
+
+    /// <summary>The same proposal for a purchase order that is already stored.</summary>
+    public async Task<QuoteLineMatchProposalView> ProposePurchaseOrderMatchesAsync(long businessUnitId,
+        long purchaseOrderId, long? quoteId = null, CancellationToken cancellationToken = default)
+    {
+        EnsureTenant(businessUnitId);
+        var purchaseOrder = await _db.CustomerPurchaseOrders.AsNoTracking()
+            .Include(x => x.Lines)
+            .Include(x => x.Awards)
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == purchaseOrderId,
+                cancellationToken)
+            ?? throw new KeyNotFoundException("Client PO was not found in this tenant.");
+        var resolvedQuoteId = quoteId
+            ?? purchaseOrder.QuoteId
+            ?? purchaseOrder.Awards.Where(x => x.Status != CustomerAwardStatuses.Cancelled)
+                .OrderByDescending(x => x.Id).Select(x => (long?)x.QuoteId).FirstOrDefault()
+            ?? throw new ArgumentException(
+                "This customer PO is not linked to a quotation, so there is nothing to match it against.");
+
+        return await BuildProposalsAsync(businessUnitId, resolvedQuoteId, purchaseOrder.CustomerId,
+            purchaseOrder.Lines.OrderBy(x => x.Id).Select(line => new PurchaseOrderLineKeys(
+                line.ExternalLineReference, line.Description, line.CustomerItemCode, line.ManufacturerName,
+                line.ManufacturerPartNumber, line.Id)).ToList(), cancellationToken);
+    }
+
+    /// <summary>
+    /// Loads the quotation's own three keys and runs <see cref="CustomerPurchaseOrderLineMatcher"/>.
+    ///
+    /// <para>The quotation is fetched under the caller's tenant, so a quote belonging to another
+    /// business unit is simply not found, and its customer is asserted against the purchase order's,
+    /// so one customer's PO can never be matched to another customer's quotation.</para>
+    /// </summary>
+    private async Task<QuoteLineMatchProposalView> BuildProposalsAsync(long businessUnitId, long quoteId,
+        long customerId, IReadOnlyList<PurchaseOrderLineKeys> lines, CancellationToken cancellationToken)
+    {
+        var quote = await _db.Quotes.AsNoTracking()
+            .Include(x => x.QuoteItems).ThenInclude(x => x.Product)
+            .Include(x => x.QuoteItems).ThenInclude(x => x.Rfqitem)
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == quoteId, cancellationToken)
+            ?? throw new KeyNotFoundException("Quote was not found in this tenant.");
+        if (customerId > 0 && quote.CustomerId != customerId)
+            throw new ArgumentException("The quotation belongs to a different customer than the purchase order.");
+
+        var consumed = await ConfirmedQuoteQuantitiesAsync(businessUnitId, quoteId, null, cancellationToken);
+        var quoteLines = quote.QuoteItems.OrderBy(x => x.Id).Select(item => new QuoteLineKeys(
+            item.Id,
+            item.ItemDescription ?? item.Product?.Description ?? item.Product?.ProductName ?? $"Quote line {item.Id}",
+            item.Rfqitem?.ItemMaterialCode,
+            item.Rfqitem?.ManufacturerName,
+            item.Rfqitem?.ManufacturerPartNumber,
+            [item.Rfqitem?.AlternatePartNumber, item.Product?.PartNo, item.Product?.ModelNo],
+            item.Quantity,
+            Math.Max(0m, item.Quantity - consumed.GetValueOrDefault(item.Id)),
+            item.UnitPrice)).ToList();
+
+        var proposals = CustomerPurchaseOrderLineMatcher.Propose(lines, quoteLines);
+        return new QuoteLineMatchProposalView(quote.Id, quote.QuoteNo, quote.CustomerId,
+            proposals.Count(x => x.Status == QuoteLineMatchStatuses.Proposed),
+            proposals.Count(x => x.Status != QuoteLineMatchStatuses.Proposed),
+            proposals);
+    }
+
+    /// <summary>
+    /// FR-COM-04. Every way the buyer's line differs from what we quoted.
+    ///
+    /// <para>The comparison is only meaningful while the purchase-order side is captured from the
+    /// buyer's document. When those fields are defaulted from our own quote line the engine compares
+    /// the system against itself and "no discrepancy" becomes structurally unavoidable, which is why
+    /// nothing in the capture path may seed them.</para>
+    /// </summary>
+    private static List<string> LineDifferences(CustomerPurchaseOrderLine line,
+        CustomerAwardLineAllocation? allocation, QuoteItem? quoteLine)
+    {
+        var differences = new List<string>();
+        if (allocation is null) differences.Add("UNQUOTED_OR_UNMATCHED_LINE");
+        if (allocation is not null && allocation.AwardedQuantity != line.OrderedQuantity)
+            differences.Add("QUANTITY_DISCREPANCY");
+        if (quoteLine is not null && allocation is not null && allocation.AwardedQuantity < quoteLine.Quantity)
+            differences.Add("PARTIAL_QUOTE_AWARD");
+        if (quoteLine is not null && PartIdentityConflicts(line, quoteLine))
+            differences.Add("PART_DISCREPANCY");
+        if (!line.UnitPrice.HasValue) differences.Add("PO_PRICE_NOT_PROVIDED");
+        else if (quoteLine is not null && line.UnitPrice.Value != quoteLine.UnitPrice)
+            differences.Add("PRICE_DISCREPANCY");
+        return differences;
+    }
+
+    /// <summary>
+    /// True when the part the buyer ordered is demonstrably not the part we quoted — either a
+    /// different catalogue product, or a manufacturer part number that matches none of the part
+    /// numbers on the quoted line. Silence on the buyer's side is not a conflict.
+    /// </summary>
+    private static bool PartIdentityConflicts(CustomerPurchaseOrderLine line, QuoteItem quoteLine)
+    {
+        if (line.ProductId.HasValue && quoteLine.ProductId != line.ProductId) return true;
+        var buyerPart = DuplicateRules.Normalize(line.ManufacturerPartNumber);
+        if (buyerPart is null) return false;
+        var quotedParts = new[]
+        {
+            quoteLine.Rfqitem?.ManufacturerPartNumber, quoteLine.Rfqitem?.AlternatePartNumber,
+            quoteLine.Product?.PartNo, quoteLine.Product?.ModelNo
+        }.Select(DuplicateRules.Normalize).Where(part => part is not null).ToList();
+        return quotedParts.Count > 0 && !quotedParts.Contains(buyerPart);
     }
 
     public Task<CustomerPurchaseOrderView> CreatePurchaseOrderAsync(long businessUnitId, string idempotencyKey,
@@ -385,6 +549,11 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
                 CommercialCaseId = command.CommercialCaseId,
                 CustomerId = command.CustomerId,
                 CurrencyId = command.CurrencyId,
+                // FR-COM-02. What the buyer was answering, recorded on the order itself so the
+                // matcher can reach the quotation without going through an award that may not
+                // exist yet.
+                QuoteId = quote.Id,
+                RfqId = quote.Rfqid,
                 InternalNumber = await NextDocumentNumberAsync(businessUnitId, OrderToCashDocumentTypes.CustomerPurchaseOrder, now, ct),
                 ExternalPoNumber = command.ExternalPoNumber.Trim(),
                 NormalizedExternalPoNumber = normalizedPo,
@@ -404,6 +573,9 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
                     UomId = line.UomId,
                     UnitPrice = line.UnitPrice,
                     LineAmount = line.LineAmount,
+                    CustomerItemCode = Trimmed(line.CustomerItemCode),
+                    ManufacturerName = Trimmed(line.ManufacturerName),
+                    ManufacturerPartNumber = Trimmed(line.ManufacturerPartNumber),
                     Version = 1
                 }).ToList()
             };
@@ -650,7 +822,8 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
             var award = await _db.CustomerAwards
                 .Include(x => x.PurchaseOrder).ThenInclude(x => x.Lines)
                 .Include(x => x.Quote).ThenInclude(x => x.Rfq)
-                .Include(x => x.LineAllocations).ThenInclude(x => x.QuoteItem)
+                .Include(x => x.LineAllocations).ThenInclude(x => x.QuoteItem).ThenInclude(x => x.Rfqitem)
+                .Include(x => x.LineAllocations).ThenInclude(x => x.QuoteItem).ThenInclude(x => x.Product)
                 .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == awardId, ct)
                 ?? throw new KeyNotFoundException("Customer award was not found in this tenant.");
             EnsureVersion(award.Version, command.ExpectedVersion, "customer award");
@@ -698,7 +871,10 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
                     Discount = allocation.DiscountSnapshot,
                     TaxAmount = allocation.TaxSnapshot,
                     TotalAmount = allocation.TotalSnapshot,
-                    UomId = poLine.UomId,
+                    // The buyer's own unit when their PO states one, otherwise the unit we quoted in.
+                    // The PO line no longer inherits our unit at capture time, so without this
+                    // fallback an order raised from a PO that omitted the unit would carry none.
+                    UomId = poLine.UomId ?? allocation.QuoteItem.Rfqitem?.UomId ?? allocation.QuoteItem.Product?.UomId,
                     CustomerAwardLineAllocationId = allocation.Id,
                     CreatedBy = actor,
                     CreatedDate = now,
@@ -970,7 +1146,8 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
             purchaseOrder.InternalNumber, purchaseOrder.ExternalPoNumber, purchaseOrder.PoDate, purchaseOrder.ReceivedOn,
             purchaseOrder.Status, purchaseOrder.Version, purchaseOrder.Lines.OrderBy(x => x.Id).Select(x =>
                 new CustomerPurchaseOrderLineView(x.Id, purchaseOrder.Id, x.ExternalLineReference, x.ProductId,
-                    x.Description, x.OrderedQuantity, x.UomId, x.UnitPrice, x.LineAmount, x.Version)).ToList());
+                    x.Description, x.OrderedQuantity, x.UomId, x.UnitPrice, x.LineAmount, x.Version,
+                    x.CustomerItemCode, x.ManufacturerName, x.ManufacturerPartNumber)).ToList());
 
     private static CustomerAwardView MapAward(CustomerAward award)
         => new(award.Id, award.AwardNumber, award.CustomerPurchaseOrderId, award.QuoteId, award.CommercialCaseId,
@@ -996,6 +1173,10 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
     }
 
     private static decimal Money(decimal value) => decimal.Round(value, 2, MidpointRounding.AwayFromZero);
+
+    private static string? Trimmed(string? value)
+        => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
     private static string Hash<T>(T command) => Convert.ToHexString(
         SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(command, JsonOptions)))).ToLowerInvariant();
 

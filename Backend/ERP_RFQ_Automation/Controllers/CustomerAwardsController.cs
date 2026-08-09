@@ -24,6 +24,24 @@ public sealed class CustomerAwardsController(ICustomerAwardApplicationService se
         => ExecuteAsync(async () => Ok(await service.GetPurchaseOrderMatchAsync(TenantId(), purchaseOrderId,
             HttpContext.RequestAborted)));
 
+    /// <summary>
+    /// FR-COM-02. Proposes a quote line for each buyer PO line from item code, manufacturer and part
+    /// number. A read of the matching rule, not a command: it writes nothing, needs no idempotency
+    /// key, and every proposal still has to be confirmed through the award endpoints.
+    /// </summary>
+    [HttpPost("quote-line-matches")]
+    [RequireModulePermission("Customer Awards", PermissionAction.View)]
+    public Task<IActionResult> ProposeQuoteLineMatches([FromBody] ProposeQuoteLineMatchCommand command)
+        => ExecuteAsync(async () => Ok(await service.ProposeQuoteLineMatchesAsync(TenantId(), command,
+            HttpContext.RequestAborted)));
+
+    [HttpGet("purchase-orders/{purchaseOrderId:long}/quote-line-matches")]
+    [RequireModulePermission("Customer Awards", PermissionAction.View)]
+    public Task<IActionResult> ProposePurchaseOrderQuoteLineMatches(long purchaseOrderId,
+        [FromQuery] long? quoteId = null)
+        => ExecuteAsync(async () => Ok(await service.ProposePurchaseOrderMatchesAsync(TenantId(), purchaseOrderId,
+            quoteId, HttpContext.RequestAborted)));
+
     [HttpGet("quote/{quoteId:long}")]
     [RequireModulePermission("Customer Awards", PermissionAction.View)]
     public Task<IActionResult> GetByQuote(long quoteId)

@@ -294,6 +294,10 @@ builder.Services.AddScoped<ERP_RFQ_Automation.BankReconciliation.Services.IBankR
 builder.Services.AddScoped<ERP_RFQ_Automation.BankReconciliation.Services.IBankAdjustmentService, ERP_RFQ_Automation.BankReconciliation.Services.BankAdjustmentService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.GeneralLedger.IInternalSourceJournalPostingService, ERP_RFQ_Automation.GeneralLedger.InternalSourceJournalPostingService>();
 builder.Services.AddScoped<ICustomerAwardApplicationService, CustomerAwardApplicationService>();
+// FR-COM-01: reading an uploaded customer PO instead of re-keying it.
+builder.Services.AddScoped<
+    ERP_RFQ_Automation.OrderToCash.PurchaseOrderIntake.ICustomerPurchaseOrderDocumentService,
+    ERP_RFQ_Automation.OrderToCash.PurchaseOrderIntake.CustomerPurchaseOrderDocumentService>();
 builder.Services.AddScoped<IShipmentRepository, ShipmentRepository>();
 builder.Services.AddScoped<IQuoteConfigurationRepository, QuoteConfigurationRepository>();
 builder.Services.AddScoped<IDashboardRepository, DashboardRepository>();

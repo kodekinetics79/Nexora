@@ -101,16 +101,33 @@ namespace ERP_RFQ_Automation.Controllers
                     .AsNoTracking()
                     .SingleOrDefaultAsync(a => a.Id == attachmentId, ct);
 
-                if (attachment is null || !string.Equals(attachment.ParentType, "Lead", StringComparison.OrdinalIgnoreCase))
+                // Two parent types are served today. A customer purchase order is source evidence
+                // in exactly the way an RFQ document is — it is what a price discrepancy is
+                // resolved against — so refusing to serve it would leave the commercial record
+                // pointing at a document nobody can open.
+                var isLead = string.Equals(attachment?.ParentType, "Lead", StringComparison.OrdinalIgnoreCase);
+                var isCustomerPurchaseOrder = string.Equals(
+                    attachment?.ParentType, "CustomerPurchaseOrder", StringComparison.OrdinalIgnoreCase);
+
+                if (attachment is null || (!isLead && !isCustomerPurchaseOrder))
                     return NotFound();
 
-                var belongsToTenant = await _context.Leads
-                    .AsNoTracking()
-                    .AnyAsync(l => l.Id == attachment.ParentId && l.BusinessUnitId == businessUnitId, ct);
+                // Ownership is proved against the parent's OWN table. The explicit business-unit
+                // predicate is deliberate defence in depth even though both are query-filtered.
+                var belongsToTenant = isLead
+                    ? await _context.Leads
+                        .AsNoTracking()
+                        .AnyAsync(l => l.Id == attachment.ParentId && l.BusinessUnitId == businessUnitId, ct)
+                    : await _context.CustomerPurchaseOrders
+                        .AsNoTracking()
+                        .AnyAsync(po => po.Id == attachment.ParentId && po.BusinessUnitId == businessUnitId, ct);
                 if (!belongsToTenant)
                     return NotFound();
 
-                var sourceDocumentId = await _context.Set<LeadOccurrenceDocument>()
+                // The governed-evidence lookup below is keyed on a LEAD occurrence. Running it
+                // with a purchase-order id would join on an unrelated identifier, so a purchase
+                // order takes the raw-storage branch — still digest-verified on the way out.
+                var sourceDocumentId = !isLead ? (long?)null : await _context.Set<LeadOccurrenceDocument>()
                     .AsNoTracking()
                     .Where(link => link.BusinessUnitId == businessUnitId
                                    && link.Occurrence.LeadId == attachment.ParentId)

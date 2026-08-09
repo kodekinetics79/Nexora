@@ -22,6 +22,10 @@ export interface CustomerPurchaseOrderLine {
   unitPrice?: number | null;
   lineAmount?: number | null;
   version: number;
+  /** FR-COM-02 identity keys, as the buyer printed them. Never copied from our quotation. */
+  customerItemCode?: string | null;
+  manufacturerName?: string | null;
+  manufacturerPartNumber?: string | null;
 }
 
 export interface CustomerPurchaseOrder {
@@ -102,6 +106,56 @@ export interface ClientPurchaseOrderMatchLine {
   acceptedQuantity?: number | null;
   matchStatus: string;
   differences: string[];
+  customerItemCode?: string | null;
+  manufacturerName?: string | null;
+  manufacturerPartNumber?: string | null;
+}
+
+export type QuoteLineMatchStatus = 'PROPOSED' | 'AMBIGUOUS' | 'REVIEW_REQUIRED';
+export type QuoteLineMatchConfidence = 'EXACT' | 'HIGH' | 'MEDIUM' | 'LOW' | 'NONE';
+
+export interface QuoteLineMatchCandidate {
+  quoteItemId: number;
+  quoteDescription: string;
+  quotedQuantity: number;
+  remainingQuantity: number;
+  quotedUnitPrice: number;
+  matchedKey?: string | null;
+  confidence: QuoteLineMatchConfidence;
+  reason: string;
+}
+
+export interface PurchaseOrderLineMatchProposal {
+  customerPurchaseOrderLineId?: number | null;
+  externalLineReference: string;
+  status: QuoteLineMatchStatus;
+  proposedQuoteItemId?: number | null;
+  matchedKey?: string | null;
+  confidence: QuoteLineMatchConfidence;
+  reason: string;
+  candidates: QuoteLineMatchCandidate[];
+}
+
+export interface QuoteLineMatchProposal {
+  quoteId: number;
+  quoteNo: string;
+  customerId?: number | null;
+  proposedCount: number;
+  reviewCount: number;
+  lines: PurchaseOrderLineMatchProposal[];
+}
+
+export interface ProposeQuoteLineMatchCommand {
+  quoteId: number;
+  customerId: number;
+  lines: Array<{
+    externalLineReference: string;
+    description?: string | null;
+    customerItemCode?: string | null;
+    manufacturerName?: string | null;
+    manufacturerPartNumber?: string | null;
+    customerPurchaseOrderLineId?: number | null;
+  }>;
 }
 
 export interface ClientPurchaseOrderMatch {
@@ -159,7 +213,52 @@ export interface CreateCustomerPurchaseOrderCommand {
     uomId?: number | null;
     unitPrice?: number | null;
     lineAmount?: number | null;
+    customerItemCode?: string | null;
+    manufacturerName?: string | null;
+    manufacturerPartNumber?: string | null;
   }>;
+}
+
+/**
+ * FR-COM-01. One line as the BUYER stated it in their uploaded purchase order.
+ *
+ * Every value here came out of the customer's document. Nothing on this shape may ever be
+ * defaulted from our own quotation — that is what made the discrepancy check compare the system
+ * against itself. A value the document did not state, or stated unreadably, arrives as null with
+ * a reason in `reviewReasons`; it is never a substituted number.
+ */
+export interface CustomerPurchaseOrderDocumentLine {
+  lineNumber: number;
+  externalLineReference: string;
+  description?: string | null;
+  orderedQuantity?: number | null;
+  quantityText?: string | null;
+  unitOfMeasure?: string | null;
+  unitPrice?: number | null;
+  unitPriceText?: string | null;
+  lineAmount?: number | null;
+  customerItemCode?: string | null;
+  manufacturerName?: string | null;
+  manufacturerPartNumber?: string | null;
+  sourceAddress: string;
+  reviewReasons: string[];
+  requiresReview: boolean;
+}
+
+export interface CustomerPurchaseOrderDocumentExtraction {
+  sourceAttachmentId: number;
+  fileName: string;
+  contentSha256: string;
+  byteSize: number;
+  processingPath: string;
+  ocrStatus: string;
+  externalPoNumber?: string | null;
+  poDate?: string | null;
+  poDateText?: string | null;
+  poDateIsDayMonthAmbiguous: boolean;
+  lines: CustomerPurchaseOrderDocumentLine[];
+  reviewReasons: string[];
+  requiresReview: boolean;
 }
 
 export interface CreateCustomerAwardCommand {
@@ -224,15 +323,58 @@ const customerAwardService = {
   getByQuote: async (quoteId: number): Promise<QuoteAwardProjection> =>
     (await axiosInstance.get<QuoteAwardProjection>(`/api/customer-awards/quote/${quoteId}`)).data,
 
+  /**
+   * FR-COM-02. Asks the server to propose a quote line for each buyer line from item code,
+   * manufacturer and part number. Read-only: it commits nothing, so it carries no idempotency key
+   * and every proposal still has to be confirmed by the operator.
+   */
+  proposeQuoteLineMatches: async (command: ProposeQuoteLineMatchCommand): Promise<QuoteLineMatchProposal> =>
+    unwrap(await axiosInstance.post<QuoteLineMatchProposal>('/api/customer-awards/quote-line-matches', command)),
+
+  proposePurchaseOrderQuoteLineMatches: async (
+    purchaseOrderId: number,
+    quoteId?: number,
+  ): Promise<QuoteLineMatchProposal> =>
+    unwrap(await axiosInstance.get<QuoteLineMatchProposal>(
+      `/api/customer-awards/purchase-orders/${purchaseOrderId}/quote-line-matches`,
+      { params: { quoteId } },
+    )),
+
   createPurchaseOrder: async (
     command: CreateCustomerPurchaseOrderCommand,
     identity: CommandIdentity,
+    sourceAttachmentId?: number | null,
   ): Promise<CustomerPurchaseOrder> =>
-    (await axiosInstance.post<CustomerPurchaseOrder>(
-      '/api/customer-awards/purchase-orders',
-      command,
-      commandConfig(identity),
-    )).data,
+    // FR-COM-01. When the PO was read from an uploaded document the commercial record must point
+    // back at that document, so a reviewer resolving a price discrepancy has the buyer's own file
+    // to check the figure against. Same command, one extra evidence link.
+    (sourceAttachmentId
+      ? (await axiosInstance.post<CustomerPurchaseOrder>(
+        '/api/customer-awards/purchase-orders/from-document',
+        { sourceAttachmentId, purchaseOrder: command },
+        commandConfig(identity),
+      )).data
+      : (await axiosInstance.post<CustomerPurchaseOrder>(
+        '/api/customer-awards/purchase-orders',
+        command,
+        commandConfig(identity),
+      )).data),
+
+  /**
+   * Uploads a customer PO (native or scanned PDF, Word, Excel, CSV) through the governed intake
+   * door and returns what the document says, for a human to confirm. Nothing is committed here.
+   */
+  extractPurchaseOrderDocument: async (
+    file: File,
+  ): Promise<CustomerPurchaseOrderDocumentExtraction> => {
+    const form = new FormData();
+    form.append('file', file);
+    return (await axiosInstance.post<CustomerPurchaseOrderDocumentExtraction>(
+      '/api/customer-awards/purchase-orders/document-extractions',
+      form,
+      { headers: { 'Content-Type': 'multipart/form-data' } },
+    )).data;
+  },
 
   createAward: async (
     command: CreateCustomerAwardCommand,
